@@ -45,24 +45,42 @@ func TestShouldDeployFiltersBranch(t *testing.T) {
 
 func TestRequestFromWebhook(t *testing.T) {
 	req, err := RequestFromWebhook(WebhookEvent{RepoURL: "https://example.test/repo.git", Ref: "refs/heads/main", After: "abcdef1234567890", TriggeredBy: "github"}, config.DeploymentConfig{
+		ProjectID:    "proj-dev",
+		ServiceID:    "svc-api",
 		Branch:       "main",
 		ServiceName:  "api",
+		ServiceType:  "backend",
 		Namespace:    "default",
 		ManifestPath: "k8s/deploy.yaml",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Branch != "main" || req.ImageTag != "api:abcdef123456" || req.TriggeredBy != "github" {
+	if req.Branch != "main" || req.ImageTag != "proj-dev/api:abcdef123456" || req.TriggeredBy != "github" {
 		t.Fatalf("unexpected request: %+v", req)
 	}
 }
 
 func TestRequestValidateRejectsBadInputs(t *testing.T) {
 	base := testRequest()
-	base.Service = ""
+	base.ProjectID = ""
 	if err := base.Validate(); err == nil {
-		t.Fatal("expected missing service error")
+		t.Fatal("expected missing project error")
+	}
+	base = testRequest()
+	base.ProjectID = "../bad"
+	if err := base.Validate(); err == nil {
+		t.Fatal("expected bad project error")
+	}
+	base = testRequest()
+	base.ServiceID = ""
+	if err := base.Validate(); err == nil {
+		t.Fatal("expected missing service id error")
+	}
+	base = testRequest()
+	base.ServiceName = ""
+	if err := base.Validate(); err == nil {
+		t.Fatal("expected missing service name error")
 	}
 	base = testRequest()
 	base.RepoURL = ""
@@ -80,14 +98,16 @@ func TestRequestValidateRejectsBadInputs(t *testing.T) {
 		t.Fatal("expected missing manifest error")
 	}
 	base = testRequest()
-	base.Service = "bad/name"
+	base.ServiceName = "bad/name"
 	if err := base.Validate(); err == nil {
 		t.Fatal("expected bad service error")
 	}
 }
 
 func TestRequestFromContractFillsConfigDefaults(t *testing.T) {
-	req, err := RequestFromContract(&agentv1.DeployRequest{Service: "api", GitSHA: "abcdef1234567890"}, config.DeploymentConfig{
+	req, err := RequestFromContract(&agentv1.DeployRequest{ServiceName: "api", GitSHA: "abcdef1234567890"}, config.DeploymentConfig{
+		ProjectID:    "proj-dev",
+		ServiceID:    "svc-api",
 		RepoURL:      "https://example.test/repo.git",
 		Branch:       "main",
 		Namespace:    "prod",
@@ -97,7 +117,7 @@ func TestRequestFromContractFillsConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.ImageTag != "registry.local:5000/api:abcdef123456" || req.Namespace != "prod" {
+	if req.ImageTag != "registry.local:5000/proj-dev/api:abcdef123456" || req.Namespace != "prod" {
 		t.Fatalf("unexpected request: %+v", req)
 	}
 }

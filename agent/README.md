@@ -31,6 +31,6 @@ For local deployment smoke tests without Docker/K3s, keep `deployment.dry_run: t
 
 ## Phase 2 Deployment
 
-Agent exposes `opsi.agent.v1.DeploymentService.Deploy` over gRPC. The engine resolves missing CLI request fields from `deployment:` config, records each deployment in SQLite table `deployments` using WAL mode, builds under `/tmp/opsi-builds/{deploy_id}/`, and removes the build directory after success or failure.
+Agent exposes `opsi.agent.v1.DeploymentService.Deploy` over gRPC. The engine resolves missing CLI request fields from `deployment:` config, requires `project_id` + `service_id` + `service_name`, upserts service metadata in SQLite table `services`, records deployments in SQLite table `deployments` using WAL mode, builds under `/tmp/opsi-builds/{project_id}/{deploy_id}/`, and removes the build directory after success or failure.
 
-Progress phases are `queued`, `cloning`, `building`, `applying`, `watching`, `success`, `rollback`, and `failed`. Rollout failures call `kubectl rollout undo deployment/{service}` and store `rolled_back` or `failed_after_rollback`.
+Progress phases are `queued`, `cloning`, `building`, `applying`, `watching`, `success`, `rollback`, and `failed`. Progress events include project/service scope. Rollout failures call `kubectl rollout undo deployment/{service_name}` and store `rolled_back` or `failed_after_rollback`.

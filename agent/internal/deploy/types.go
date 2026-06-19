@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,6 +35,10 @@ const (
 )
 
 type Request struct {
+	ProjectID    string
+	ServiceID    string
+	ServiceName  string
+	ServiceType  string
 	Service      string
 	RepoURL      string
 	Branch       string
@@ -49,9 +54,11 @@ type Request struct {
 
 type Record struct {
 	DeployID    string
+	ProjectID   string
+	ServiceID   string
+	ServiceName string
 	StartedAt   time.Time
 	FinishedAt  time.Time
-	Service     string
 	GitSHA      string
 	ImageTag    string
 	Status      string
@@ -60,7 +67,45 @@ type Record struct {
 	TriggeredBy string
 }
 
+type ServiceRecord struct {
+	ID           string
+	ProjectID    string
+	Name         string
+	Type         string
+	Namespace    string
+	RepoURL      string
+	Branch       string
+	BuildContext string
+	Dockerfile   string
+	ManifestPath string
+	CurrentImage string
+	Health       string
+	UpdatedAt    time.Time
+}
+
+func ServiceRecordFromRequest(req Request) ServiceRecord {
+	return ServiceRecord{
+		ID:           req.ServiceID,
+		ProjectID:    req.ProjectID,
+		Name:         req.ServiceName,
+		Type:         firstNonEmpty(req.ServiceType, "custom"),
+		Namespace:    req.Namespace,
+		RepoURL:      req.RepoURL,
+		Branch:       req.Branch,
+		BuildContext: req.BuildContext,
+		Dockerfile:   req.Dockerfile,
+		ManifestPath: req.ManifestPath,
+		CurrentImage: req.ImageTag,
+		Health:       "deploying",
+		UpdatedAt:    time.Now().UTC(),
+	}
+}
+
 type WebhookEvent struct {
+	ProjectID   string
+	ServiceID   string
+	ServiceName string
+	ServiceType string
 	RepoURL     string
 	Ref         string
 	After       string
@@ -75,7 +120,10 @@ func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig)
 		return Request{}, errors.New("deploy request is required")
 	}
 	req := Request{
-		Service:      firstNonEmpty(in.Service, cfg.ServiceName),
+		ProjectID:    firstNonEmpty(in.ProjectID, cfg.ProjectID),
+		ServiceID:    firstNonEmpty(in.ServiceID, cfg.ServiceID),
+		ServiceName:  firstNonEmpty(in.ServiceName, cfg.ServiceName),
+		ServiceType:  firstNonEmpty(in.ServiceType, cfg.ServiceType, "custom"),
 		RepoURL:      firstNonEmpty(in.RepoURL, cfg.RepoURL),
 		Branch:       firstNonEmpty(in.Branch, cfg.Branch),
 		GitSHA:       in.GitSHA,
@@ -87,6 +135,7 @@ func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig)
 		ImageTag:     in.ImageTag,
 		TriggeredBy:  firstNonEmpty(in.TriggeredBy, "cli"),
 	}
+	req.Service = req.ServiceName
 	if req.BuildContext == "" {
 		req.BuildContext = "."
 	}
@@ -96,8 +145,8 @@ func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig)
 	if req.Namespace == "" {
 		req.Namespace = "default"
 	}
-	if req.ImageTag == "" && req.Service != "" && req.GitSHA != "" {
-		req.ImageTag = imageTag(req.Registry, req.Service, req.GitSHA)
+	if req.ImageTag == "" && req.ProjectID != "" && req.ServiceName != "" && req.GitSHA != "" {
+		req.ImageTag = imageTag(req.Registry, req.ProjectID, req.ServiceName, req.GitSHA)
 	}
 	return req, req.Validate()
 }
@@ -105,7 +154,10 @@ func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig)
 func RequestFromWebhook(event WebhookEvent, cfg config.DeploymentConfig) (Request, error) {
 	branch := firstNonEmpty(event.Branch, branchFromRef(event.Ref), cfg.Branch)
 	req := Request{
-		Service:      cfg.ServiceName,
+		ProjectID:    firstNonEmpty(event.ProjectID, cfg.ProjectID),
+		ServiceID:    firstNonEmpty(event.ServiceID, cfg.ServiceID),
+		ServiceName:  firstNonEmpty(event.ServiceName, cfg.ServiceName),
+		ServiceType:  firstNonEmpty(event.ServiceType, cfg.ServiceType, "custom"),
 		RepoURL:      firstNonEmpty(event.RepoURL, cfg.RepoURL),
 		Branch:       branch,
 		GitSHA:       event.After,
@@ -116,15 +168,28 @@ func RequestFromWebhook(event WebhookEvent, cfg config.DeploymentConfig) (Reques
 		Registry:     cfg.Registry,
 		TriggeredBy:  firstNonEmpty(event.TriggeredBy, "webhook"),
 	}
-	if req.ImageTag == "" && req.Service != "" && req.GitSHA != "" {
-		req.ImageTag = imageTag(req.Registry, req.Service, req.GitSHA)
+	req.Service = req.ServiceName
+	if req.ImageTag == "" && req.ProjectID != "" && req.ServiceName != "" && req.GitSHA != "" {
+		req.ImageTag = imageTag(req.Registry, req.ProjectID, req.ServiceName, req.GitSHA)
 	}
 	return req, req.Validate()
 }
 
 func (r Request) Validate() error {
-	if r.Service == "" {
-		return errors.New("service is required")
+	if r.ProjectID == "" {
+		return errors.New("project_id is required")
+	}
+	if !safeID(r.ProjectID) {
+		return errors.New("project_id must be a safe project identifier")
+	}
+	if r.ServiceID == "" {
+		return errors.New("service_id is required")
+	}
+	if !safeID(r.ServiceID) {
+		return errors.New("service_id must be a safe service identifier")
+	}
+	if r.ServiceName == "" {
+		return errors.New("service_name is required")
 	}
 	if r.RepoURL == "" {
 		return errors.New("repo_url is required")
@@ -135,8 +200,11 @@ func (r Request) Validate() error {
 	if r.ManifestPath == "" {
 		return errors.New("manifest_path is required")
 	}
-	if strings.Contains(r.Service, "/") || strings.Contains(r.Service, " ") {
-		return fmt.Errorf("service must be a Kubernetes deployment name")
+	if strings.Contains(r.ServiceName, "/") || strings.Contains(r.ServiceName, " ") {
+		return fmt.Errorf("service_name must be a Kubernetes deployment name")
+	}
+	if r.Service != "" && r.Service != r.ServiceName {
+		return fmt.Errorf("service must match service_name")
 	}
 	return nil
 }
@@ -163,16 +231,21 @@ func branchFromRef(ref string) string {
 	return strings.TrimPrefix(ref, "refs/heads/")
 }
 
-func imageTag(registry, service, sha string) string {
+func imageTag(registry, projectID, service, sha string) string {
 	short := sha
 	if len(short) > 12 {
 		short = short[:12]
 	}
-	name := service + ":" + short
+	name := projectID + "/" + service + ":" + short
 	if registry == "" {
 		return name
 	}
 	return strings.TrimRight(registry, "/") + "/" + name
+}
+
+func safeID(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && value == filepath.Clean(value) && !strings.ContainsAny(value, `/\\ `) && value != "." && value != ".."
 }
 
 func firstNonEmpty(values ...string) string {

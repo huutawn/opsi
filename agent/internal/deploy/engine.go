@@ -30,6 +30,9 @@ type ProgressFunc func(*ProgressEvent) error
 
 type ProgressEvent struct {
 	OperationID string
+	ProjectID   string
+	ServiceID   string
+	ServiceName string
 	Phase       string
 	Message     string
 	Percent     int32
@@ -74,10 +77,13 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 	if e.Store == nil || e.Git == nil || e.Builder == nil || e.K3s == nil {
 		return Record{}, errors.New("deployment engine is not fully configured")
 	}
-	if existing, err := e.Store.FindSuccessful(ctx, req.Service, req.GitSHA); err != nil {
+	if err := e.Store.UpsertService(ctx, ServiceRecordFromRequest(req)); err != nil {
+		return Record{}, err
+	}
+	if existing, err := e.Store.FindSuccessful(ctx, req.ProjectID, req.ServiceID, req.GitSHA); err != nil {
 		return Record{}, err
 	} else if existing != nil {
-		_ = emit(progress, existing.DeployID, PhaseSuccess, "deployment already succeeded for git sha", 100, nil)
+		_ = emit(progress, *existing, PhaseSuccess, "deployment already succeeded for git sha", 100, nil)
 		return *existing, nil
 	}
 
@@ -88,8 +94,10 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 	startedAt := time.Now().UTC()
 	record := Record{
 		DeployID:    deployID,
+		ProjectID:   req.ProjectID,
+		ServiceID:   req.ServiceID,
+		ServiceName: req.ServiceName,
 		StartedAt:   startedAt,
-		Service:     req.Service,
 		GitSHA:      req.GitSHA,
 		ImageTag:    req.ImageTag,
 		Status:      StatusQueued,
@@ -99,10 +107,10 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 		return Record{}, err
 	}
 
-	workDir := filepath.Join(e.BuildRoot, deployID)
+	workDir := filepath.Join(e.BuildRoot, req.ProjectID, deployID)
 	defer os.RemoveAll(workDir)
 
-	if err := emit(progress, deployID, PhaseQueued, "deployment queued", 0, nil); err != nil {
+	if err := emit(progress, record, PhaseQueued, "deployment queued", 0, nil); err != nil {
 		return record, err
 	}
 	record.Status = StatusRunning
@@ -111,7 +119,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 	if err := os.MkdirAll(workDir, 0o700); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
-	if err := emit(progress, deployID, PhaseCloning, "cloning source", 10, nil); err != nil {
+	if err := emit(progress, record, PhaseCloning, "cloning source", 10, nil); err != nil {
 		return record, err
 	}
 	if err := e.Git.Clone(ctx, req.RepoURL, req.Branch, req.GitSHA, workDir); err != nil {
@@ -119,14 +127,14 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 	}
 
 	buildPath := filepath.Join(workDir, req.BuildContext)
-	if err := emit(progress, deployID, PhaseBuilding, "building image", 35, nil); err != nil {
+	if err := emit(progress, record, PhaseBuilding, "building image", 35, nil); err != nil {
 		return record, err
 	}
 	if err := e.Builder.Build(ctx, buildPath, req.Dockerfile, req.ImageTag); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
 	if req.Registry != "" {
-		if err := emit(progress, deployID, PhaseBuilding, "pushing image", 55, nil); err != nil {
+		if err := emit(progress, record, PhaseBuilding, "pushing image", 55, nil); err != nil {
 			return record, err
 		}
 		if err := e.Builder.Push(ctx, req.ImageTag); err != nil {
@@ -135,19 +143,19 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 	}
 
 	manifestPath := filepath.Join(workDir, req.ManifestPath)
-	if err := emit(progress, deployID, PhaseApplying, "applying manifest", 70, nil); err != nil {
+	if err := emit(progress, record, PhaseApplying, "applying manifest", 70, nil); err != nil {
 		return record, err
 	}
 	if err := e.K3s.Apply(ctx, manifestPath, req.Namespace, req.ImageTag); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
 
-	if err := emit(progress, deployID, PhaseWatching, "watching rollout", 85, nil); err != nil {
+	if err := emit(progress, record, PhaseWatching, "watching rollout", 85, nil); err != nil {
 		return record, err
 	}
-	if err := e.K3s.WatchRollout(ctx, req.Service, req.Namespace, e.RolloutTimeout, e.PollInterval); err != nil {
-		_ = emit(progress, deployID, PhaseRollback, "rollout failed; rolling back", 90, err)
-		rollbackErr := e.K3s.Rollback(ctx, req.Service, req.Namespace)
+	if err := e.K3s.WatchRollout(ctx, req.ServiceName, req.Namespace, e.RolloutTimeout, e.PollInterval); err != nil {
+		_ = emit(progress, record, PhaseRollback, "rollout failed; rolling back", 90, err)
+		rollbackErr := e.K3s.Rollback(ctx, req.ServiceName, req.Namespace)
 		if rollbackErr != nil {
 			return e.fail(ctx, record, progress, PhaseFailed, StatusFailedAfterRollback, fmt.Errorf("rollout: %w; rollback: %w", err, rollbackErr))
 		}
@@ -160,7 +168,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 	if err := e.Store.Update(ctx, record); err != nil {
 		return record, err
 	}
-	return record, emit(progress, deployID, PhaseSuccess, "deployment succeeded", 100, nil)
+	return record, emit(progress, record, PhaseSuccess, "deployment succeeded", 100, nil)
 }
 
 func (e *Engine) fail(ctx context.Context, record Record, progress ProgressFunc, phase, status string, cause error) (Record, error) {
@@ -169,15 +177,15 @@ func (e *Engine) fail(ctx context.Context, record Record, progress ProgressFunc,
 	record.Duration = record.FinishedAt.Sub(record.StartedAt)
 	record.Error = cause.Error()
 	_ = e.Store.Update(ctx, record)
-	_ = emit(progress, record.DeployID, phase, cause.Error(), 100, cause)
+	_ = emit(progress, record, phase, cause.Error(), 100, cause)
 	return record, cause
 }
 
-func emit(progress ProgressFunc, deployID, phase, message string, percent int32, err error) error {
+func emit(progress ProgressFunc, record Record, phase, message string, percent int32, err error) error {
 	if progress == nil {
 		return nil
 	}
-	return progress(&ProgressEvent{OperationID: deployID, Phase: phase, Message: message, Percent: percent, Err: err})
+	return progress(&ProgressEvent{OperationID: record.DeployID, ProjectID: record.ProjectID, ServiceID: record.ServiceID, ServiceName: record.ServiceName, Phase: phase, Message: message, Percent: percent, Err: err})
 }
 
 func durationOrDefault(value, fallback time.Duration) time.Duration {

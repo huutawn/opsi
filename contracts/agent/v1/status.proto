@@ -35,20 +35,26 @@ message ProgressEvent {
   string message = 3;
   int32 percent = 4;
   ServiceError error = 5;
+  string project_id = 6;
+  string service_id = 7;
+  string service_name = 8;
 }
 
 message DeployRequest {
-  string service = 1;
-  string repo_url = 2;
-  string branch = 3;
-  string git_sha = 4;
-  string namespace = 5;
-  string build_context = 6;
-  string dockerfile = 7;
-  string manifest_path = 8;
-  string registry = 9;
-  string image_tag = 10;
-  string triggered_by = 11;
+  string project_id = 1;
+  string service_id = 2;
+  string service_name = 3;
+  string service_type = 4;
+  string repo_url = 5;
+  string branch = 6;
+  string git_sha = 7;
+  string namespace = 8;
+  string build_context = 9;
+  string dockerfile = 10;
+  string manifest_path = 11;
+  string registry = 12;
+  string image_tag = 13;
+  string triggered_by = 14;
 }
 
 enum ErrorCode {

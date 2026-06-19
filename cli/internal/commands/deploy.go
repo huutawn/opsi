@@ -35,7 +35,11 @@ func newDeployCommand(configPath *string) *cobra.Command {
 		},
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&req.Service, "service", "", "Kubernetes deployment/service name")
+	flags.StringVar(&req.ProjectID, "project-id", "", "Project scope for the deployment")
+	flags.StringVar(&req.ServiceID, "service-id", "", "Project service identifier")
+	flags.StringVar(&req.ServiceName, "service-name", "", "Kubernetes deployment/service name")
+	flags.StringVar(&req.ServiceName, "service", "", "Alias for --service-name")
+	flags.StringVar(&req.ServiceType, "service-type", "", "Service type: backend, frontend, database, storage, message_queue, worker, or custom")
 	flags.StringVar(&req.RepoURL, "repo-url", "", "Git repository URL")
 	flags.StringVar(&req.Branch, "branch", "", "Git branch")
 	flags.StringVar(&req.GitSHA, "git-sha", "", "Git commit SHA to deploy")

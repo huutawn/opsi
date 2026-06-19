@@ -51,10 +51,16 @@ type ProgressEvent struct {
 	Message     string        `json:"message"`
 	Percent     int32         `json:"percent"`
 	Error       *ServiceError `json:"error,omitempty"`
+	ProjectID   string        `json:"project_id,omitempty"`
+	ServiceID   string        `json:"service_id,omitempty"`
+	ServiceName string        `json:"service_name,omitempty"`
 }
 
 type DeployRequest struct {
-	Service      string `json:"service"`
+	ProjectID    string `json:"project_id"`
+	ServiceID    string `json:"service_id"`
+	ServiceName  string `json:"service_name"`
+	ServiceType  string `json:"service_type"`
 	RepoURL      string `json:"repo_url"`
 	Branch       string `json:"branch"`
 	GitSHA       string `json:"git_sha"`

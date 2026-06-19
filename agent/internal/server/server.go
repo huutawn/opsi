@@ -56,6 +56,9 @@ func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.De
 	_, err = s.engine.Deploy(stream.Context(), resolved, func(event *deploy.ProgressEvent) error {
 		out := &agentv1.ProgressEvent{
 			OperationID: event.OperationID,
+			ProjectID:   event.ProjectID,
+			ServiceID:   event.ServiceID,
+			ServiceName: event.ServiceName,
 			Phase:       event.Phase,
 			Message:     event.Message,
 			Percent:     event.Percent,

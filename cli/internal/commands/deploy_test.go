@@ -28,7 +28,7 @@ func TestDeployCommandStreamsProgress(t *testing.T) {
 	}})
 	buf := bytes.NewBuffer(nil)
 	cmd.SetOut(buf)
-	cmd.SetArgs([]string{"--config", configPath, "deploy", "--service", "api", "--repo-url", "https://example.test/repo.git", "--git-sha", "abc", "--manifest-path", "k8s/deploy.yaml"})
+	cmd.SetArgs([]string{"--config", configPath, "deploy", "--project-id", "proj-dev", "--service-id", "svc-api", "--service-name", "api", "--repo-url", "https://example.test/repo.git", "--git-sha", "abc", "--manifest-path", "k8s/deploy.yaml"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -41,10 +41,10 @@ func TestDeployCommandStreamsProgress(t *testing.T) {
 type commandDeploymentServer struct{}
 
 func (commandDeploymentServer) Deploy(req *agentv1.DeployRequest, stream agentv1.DeploymentService_DeployServer) error {
-	if req.Service != "api" || req.GitSHA != "abc" {
+	if req.ProjectID != "proj-dev" || req.ServiceID != "svc-api" || req.ServiceName != "api" || req.GitSHA != "abc" {
 		return nil
 	}
-	return stream.Send(&agentv1.ProgressEvent{OperationID: "dep_test", Phase: "success", Message: "ok", Percent: 100})
+	return stream.Send(&agentv1.ProgressEvent{OperationID: "dep_test", ProjectID: req.ProjectID, ServiceID: req.ServiceID, ServiceName: req.ServiceName, Phase: "success", Message: "ok", Percent: 100})
 }
 
 func startCommandDeploymentServer(t *testing.T) (string, func()) {

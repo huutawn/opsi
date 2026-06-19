@@ -26,7 +26,7 @@ func TestEngineDeploySuccessRecordsAndCleansBuildDir(t *testing.T) {
 	if record.Status != StatusSuccess || record.ImageTag == "" {
 		t.Fatalf("unexpected record: %+v", record)
 	}
-	if _, err := os.Stat(filepath.Join(buildRoot, record.DeployID)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(buildRoot, record.ProjectID, record.DeployID)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected build dir cleanup, stat err=%v", err)
 	}
 	if phases[len(phases)-1] != PhaseSuccess {
@@ -96,6 +96,10 @@ func openTestStore(t *testing.T) *SQLiteStore {
 
 func testRequest() Request {
 	return Request{
+		ProjectID:    "proj-dev",
+		ServiceID:    "svc-api",
+		ServiceName:  "api",
+		ServiceType:  "backend",
 		Service:      "api",
 		RepoURL:      "https://example.test/repo.git",
 		Branch:       "main",

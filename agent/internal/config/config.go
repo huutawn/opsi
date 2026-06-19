@@ -27,9 +27,12 @@ type TLSConfig struct {
 }
 
 type DeploymentConfig struct {
+	ProjectID      string `yaml:"project_id"`
+	ServiceID      string `yaml:"service_id"`
+	ServiceName    string `yaml:"service_name"`
+	ServiceType    string `yaml:"service_type"`
 	RepoURL        string `yaml:"repo_url"`
 	Branch         string `yaml:"branch"`
-	ServiceName    string `yaml:"service_name"`
 	Namespace      string `yaml:"namespace"`
 	BuildContext   string `yaml:"build_context"`
 	Dockerfile     string `yaml:"dockerfile"`
@@ -50,6 +53,10 @@ func Default() Config {
 		CloudEndpoint: "https://cloud.localhost",
 		SQLitePath:    "./opsi-agent.sqlite",
 		Deployment: DeploymentConfig{
+			ProjectID:      "dev-project",
+			ServiceID:      "example-app",
+			ServiceName:    "example-app",
+			ServiceType:    "backend",
 			Branch:         "main",
 			Namespace:      "default",
 			BuildContext:   ".",

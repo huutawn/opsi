@@ -13,10 +13,15 @@ import (
 
 type Client struct {
 	BaseURL    string
+	ProjectID  string
 	HTTPClient *http.Client
 }
 
 type WebhookEnvelope struct {
+	ProjectID   string `json:"project_id"`
+	ServiceID   string `json:"service_id"`
+	ServiceName string `json:"service_name"`
+	ServiceType string `json:"service_type"`
 	RepoURL     string `json:"repo_url"`
 	Ref         string `json:"ref"`
 	After       string `json:"after"`
@@ -41,6 +46,9 @@ func (c Client) PollWebhook(ctx context.Context, agentID string, wait time.Durat
 	endpoint.Path = "/v1/agents/" + url.PathEscape(agentID) + "/webhooks/next"
 	query := endpoint.Query()
 	query.Set("wait", wait.String())
+	if c.ProjectID != "" {
+		query.Set("project_id", c.ProjectID)
+	}
 	endpoint.RawQuery = query.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
@@ -63,6 +71,10 @@ func (c Client) PollWebhook(ctx context.Context, agentID string, wait time.Durat
 		return nil, err
 	}
 	return &deploy.WebhookEvent{
+		ProjectID:   envelope.ProjectID,
+		ServiceID:   envelope.ServiceID,
+		ServiceName: envelope.ServiceName,
+		ServiceType: envelope.ServiceType,
 		RepoURL:     envelope.RepoURL,
 		Ref:         envelope.Ref,
 		After:       envelope.After,

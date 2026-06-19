@@ -49,4 +49,4 @@ No runtime Cloud implementation exists yet. Add provider-specific build/test com
 
 Contract source: `../contracts/cloud/v1/webhook_relay.md`.
 
-Cloud receives GitHub push webhooks at `POST /v1/webhooks/github`, keeps the signed envelope for at most 24 hours, and exposes `GET /v1/agents/{agent_id}/webhooks/next?wait=30s` for Agent long-poll. Agent validates `X-Hub-Signature-256` locally with its configured `deployment.webhook_secret` before deployment.
+Cloud receives GitHub push webhooks at `POST /v1/webhooks/github`, maps repo/branch to `project_id` + `service_id`, keeps the signed envelope for at most 24 hours, and exposes `GET /v1/agents/{agent_id}/webhooks/next?project_id=...&wait=30s` for Agent long-poll. Agent validates `X-Hub-Signature-256` locally with its configured `deployment.webhook_secret` before deployment.
