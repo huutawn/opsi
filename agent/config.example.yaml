@@ -1,0 +1,24 @@
+node_id: dev-agent-1
+listen_addr: 127.0.0.1:9443
+health_addr: 127.0.0.1:9080
+cloud_endpoint: https://cloud.localhost
+sqlite_path: ./opsi-agent.sqlite
+deployment:
+  repo_url: https://github.com/example/app.git
+  branch: main
+  service_name: example-app
+  namespace: default
+  build_context: .
+  dockerfile: Dockerfile
+  manifest_path: k8s/deployment.yaml
+  registry: registry.local:5000
+  webhook_secret: dev-webhook-secret
+  dry_run: true
+  build_root: /tmp/opsi-builds
+  rollout_timeout: 10m
+  poll_interval: 5s
+tls:
+  ca_cert_path: ./certs/ca.crt
+  server_cert_path: ./certs/server.crt
+  server_key_path: ./certs/server.key
+  require_client_cert: true

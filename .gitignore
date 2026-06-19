@@ -1,0 +1,34 @@
+# Codex
+.codex
+
+# Go Binaries and Executables
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+opsi-agent
+opsi-cli
+opsi-cloud
+certs/
+*.sqlite
+*.sqlite-*
+.AGENTS
+.AGENTS/*
+# Test and Coverage
+*.test
+*.out
+*.coverprofile
+*.prof
+/coverage/
+
+# Go module vendor (optional but good to have if we don't commit it)
+# vendor/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store

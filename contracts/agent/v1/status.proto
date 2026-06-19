@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package opsi.agent.v1;
+
+option go_package = "github.com/opsi-dev/opsi/contracts/go/agentv1";
+
+service StatusService {
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+service DeploymentService {
+  rpc Deploy(DeployRequest) returns (stream ProgressEvent);
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  string version = 1;
+  int64 uptime_seconds = 2;
+  string node_id = 3;
+  string health = 4;
+  bool cloud_connected = 5;
+  int64 started_at_unix = 6;
+  repeated ServiceError errors = 7;
+}
+
+message ServiceError {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+message ProgressEvent {
+  string operation_id = 1;
+  string phase = 2;
+  string message = 3;
+  int32 percent = 4;
+  ServiceError error = 5;
+}
+
+message DeployRequest {
+  string service = 1;
+  string repo_url = 2;
+  string branch = 3;
+  string git_sha = 4;
+  string namespace = 5;
+  string build_context = 6;
+  string dockerfile = 7;
+  string manifest_path = 8;
+  string registry = 9;
+  string image_tag = 10;
+  string triggered_by = 11;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_AUTH_FAILED = 1;
+  ERROR_CODE_UNAVAILABLE = 2;
+  ERROR_CODE_INVALID_INPUT = 3;
+  ERROR_CODE_TIMEOUT = 4;
+  ERROR_CODE_PERMISSION_DENIED = 5;
+  ERROR_CODE_INTERNAL = 6;
+}

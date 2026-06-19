@@ -1,0 +1,60 @@
+package commands
+
+import (
+	"bytes"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/opsi-dev/opsi/cli/internal/keychain"
+	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
+	"google.golang.org/grpc"
+)
+
+func TestDeployCommandStreamsProgress(t *testing.T) {
+	addr, stop := startCommandDeploymentServer(t)
+	defer stop()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "cli.yaml")
+	if err := os.WriteFile(configPath, []byte("agent_addr: "+addr+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) {
+		return keychain.NewFakeStore(), nil
+	}})
+	buf := bytes.NewBuffer(nil)
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--config", configPath, "deploy", "--service", "api", "--repo-url", "https://example.test/repo.git", "--git-sha", "abc", "--manifest-path", "k8s/deploy.yaml"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"phase":"success"`) {
+		t.Fatalf("expected success progress, got %q", buf.String())
+	}
+}
+
+type commandDeploymentServer struct{}
+
+func (commandDeploymentServer) Deploy(req *agentv1.DeployRequest, stream agentv1.DeploymentService_DeployServer) error {
+	if req.Service != "api" || req.GitSHA != "abc" {
+		return nil
+	}
+	return stream.Send(&agentv1.ProgressEvent{OperationID: "dep_test", Phase: "success", Message: "ok", Percent: 100})
+}
+
+func startCommandDeploymentServer(t *testing.T) (string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	agentv1.RegisterDeploymentServiceServer(server, commandDeploymentServer{})
+	go func() { _ = server.Serve(listener) }()
+	return listener.Addr().String(), server.Stop
+}
