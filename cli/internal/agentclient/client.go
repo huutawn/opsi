@@ -63,6 +63,33 @@ func (c *Client) Deploy(ctx context.Context, req *agentv1.DeployRequest, onEvent
 	}
 }
 
+func (c *Client) Sync(ctx context.Context, req *agentv1.SyncRequest, onChunk func(*agentv1.SyncChunk) error) error {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	stream, err := agentv1.NewTelemetryServiceClient(conn).Sync(ctx, req)
+	if err != nil {
+		return err
+	}
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if onChunk != nil {
+			if err := onChunk(chunk); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	creds, err := transportCredentials(c.cfg)
 	if err != nil {

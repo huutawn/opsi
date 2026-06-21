@@ -20,6 +20,9 @@ deployment:
   build_root: /tmp/opsi-builds
   rollout_timeout: 10m
   poll_interval: 5s
+telemetry:
+  enabled: true
+  interval: 15s
 tls:
   ca_cert_path: ./certs/ca.crt
   server_cert_path: ./certs/server.crt

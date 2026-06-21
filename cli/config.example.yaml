@@ -1,4 +1,5 @@
 agent_addr: 127.0.0.1:9443
+sync_state_path: ""
 tls:
   ca_cert_path: ./certs/ca.crt
   client_cert_path: ./certs/client.crt

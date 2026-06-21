@@ -12,6 +12,10 @@ service DeploymentService {
   rpc Deploy(DeployRequest) returns (stream ProgressEvent);
 }
 
+service TelemetryService {
+  rpc Sync(SyncRequest) returns (stream SyncChunk);
+}
+
 message StatusRequest {}
 
 message StatusResponse {
@@ -55,6 +59,24 @@ message DeployRequest {
   string registry = 12;
   string image_tag = 13;
   string triggered_by = 14;
+}
+
+message SyncRequest {
+  string project_id = 1;
+  int64 last_received_unix = 2;
+  repeated string resource_ids = 3;
+  int32 max_chunk_bytes = 4;
+}
+
+message SyncChunk {
+  string project_id = 1;
+  int64 start_unix = 2;
+  int64 end_unix = 3;
+  int32 record_count = 4;
+  string compression = 5;
+  string checksum_sha256 = 6;
+  bytes payload = 7;
+  bool done = 8;
 }
 
 enum ErrorCode {

@@ -13,6 +13,7 @@ import (
 const (
 	StatusServiceName     = "opsi.agent.v1.StatusService"
 	DeploymentServiceName = "opsi.agent.v1.DeploymentService"
+	TelemetryServiceName  = "opsi.agent.v1.TelemetryService"
 	JSONCodecName         = "json"
 )
 
@@ -71,6 +72,24 @@ type DeployRequest struct {
 	Registry     string `json:"registry"`
 	ImageTag     string `json:"image_tag"`
 	TriggeredBy  string `json:"triggered_by"`
+}
+
+type SyncRequest struct {
+	ProjectID        string   `json:"project_id"`
+	LastReceivedUnix int64    `json:"last_received_unix"`
+	ResourceIDs      []string `json:"resource_ids,omitempty"`
+	MaxChunkBytes    int32    `json:"max_chunk_bytes,omitempty"`
+}
+
+type SyncChunk struct {
+	ProjectID      string `json:"project_id"`
+	StartUnix      int64  `json:"start_unix"`
+	EndUnix        int64  `json:"end_unix"`
+	RecordCount    int32  `json:"record_count"`
+	Compression    string `json:"compression"`
+	ChecksumSHA256 string `json:"checksum_sha256"`
+	Payload        []byte `json:"payload,omitempty"`
+	Done           bool   `json:"done"`
 }
 
 type JSONCodec struct{}
@@ -240,6 +259,100 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "Deploy",
 			Handler:       deploymentDeployHandler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "contracts/agent/v1/status.proto",
+}
+
+type TelemetryServiceServer interface {
+	Sync(*SyncRequest, TelemetryService_SyncServer) error
+}
+
+type UnimplementedTelemetryServiceServer struct{}
+
+func (UnimplementedTelemetryServiceServer) Sync(*SyncRequest, TelemetryService_SyncServer) error {
+	return status.Error(codes.Unimplemented, "method Sync not implemented")
+}
+
+type TelemetryService_SyncServer interface {
+	Send(*SyncChunk) error
+	grpc.ServerStream
+}
+
+func RegisterTelemetryServiceServer(server grpc.ServiceRegistrar, service TelemetryServiceServer) {
+	server.RegisterService(&TelemetryService_ServiceDesc, service)
+}
+
+type TelemetryServiceClient interface {
+	Sync(ctx context.Context, in *SyncRequest, opts ...grpc.CallOption) (TelemetryService_SyncClient, error)
+}
+
+type telemetryServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewTelemetryServiceClient(cc grpc.ClientConnInterface) TelemetryServiceClient {
+	return &telemetryServiceClient{cc: cc}
+}
+
+func (c *telemetryServiceClient) Sync(ctx context.Context, in *SyncRequest, opts ...grpc.CallOption) (TelemetryService_SyncClient, error) {
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	stream, err := c.cc.NewStream(ctx, &TelemetryService_ServiceDesc.Streams[0], "/"+TelemetryServiceName+"/Sync", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &telemetryServiceSyncClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type TelemetryService_SyncClient interface {
+	Recv() (*SyncChunk, error)
+	grpc.ClientStream
+}
+
+type telemetryServiceSyncClient struct {
+	grpc.ClientStream
+}
+
+func (x *telemetryServiceSyncClient) Recv() (*SyncChunk, error) {
+	m := new(SyncChunk)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func telemetrySyncHandler(service any, stream grpc.ServerStream) error {
+	in := new(SyncRequest)
+	if err := stream.RecvMsg(in); err != nil {
+		return err
+	}
+	return service.(TelemetryServiceServer).Sync(in, &telemetryServiceSyncServer{stream})
+}
+
+type telemetryServiceSyncServer struct {
+	grpc.ServerStream
+}
+
+func (x *telemetryServiceSyncServer) Send(m *SyncChunk) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+var TelemetryService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: TelemetryServiceName,
+	HandlerType: (*TelemetryServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Sync",
+			Handler:       telemetrySyncHandler,
 			ServerStreams: true,
 		},
 	},

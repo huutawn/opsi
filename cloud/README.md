@@ -1,6 +1,6 @@
 # Opsi Cloud
 
-Cloud is the stateless relay and identity boundary. Current code still has no provider runtime; Phase 2 adds the public webhook relay contract consumed by Agent long-poll clients.
+Cloud is the stateless relay and identity boundary. Current code includes the Phase 2 in-memory Webhook Relay runtime consumed by Agent long-poll clients; identity/PAT providers remain contract-only.
 
 ## Phase 1 Auth Contract
 
@@ -43,10 +43,16 @@ Response shape:
 
 ## Build/Test
 
-No runtime Cloud implementation exists yet. Add provider-specific build/test commands when Cloud code is introduced.
+```bash
+rtk go test ./...
+rtk go build ./cmd/opsi-cloud
+rtk go run ./cmd/opsi-cloud --config config.example.json --addr 127.0.0.1:9800
+```
 
 ## Phase 2 Webhook Relay Contract
 
 Contract source: `../contracts/cloud/v1/webhook_relay.md`.
 
 Cloud receives GitHub push webhooks at `POST /v1/webhooks/github`, maps repo/branch to `project_id` + `service_id`, keeps the signed envelope for at most 24 hours, and exposes `GET /v1/agents/{agent_id}/webhooks/next?project_id=...&wait=30s` for Agent long-poll. Agent validates `X-Hub-Signature-256` locally with its configured `deployment.webhook_secret` before deployment.
+
+The current runtime keeps relay envelopes in process memory and purges by TTL. It is suitable for local/dev validation of the Phase 2 contract; production Cloud still needs a durable queue/provider implementation with the same endpoint shape.

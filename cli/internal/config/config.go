@@ -9,8 +9,9 @@ import (
 )
 
 type Config struct {
-	AgentAddr string    `yaml:"agent_addr"`
-	TLS       TLSConfig `yaml:"tls"`
+	AgentAddr     string    `yaml:"agent_addr"`
+	SyncStatePath string    `yaml:"sync_state_path"`
+	TLS           TLSConfig `yaml:"tls"`
 }
 
 type TLSConfig struct {

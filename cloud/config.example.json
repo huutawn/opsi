@@ -1,0 +1,15 @@
+{
+  "ttl": "24h",
+  "routes": [
+    {
+      "project_id": "dev-project",
+      "service_id": "example-app",
+      "service_name": "example-app",
+      "service_type": "backend",
+      "repo_url": "https://github.com/example/app.git",
+      "repo_full_name": "example/app",
+      "branch": "main"
+    }
+  ]
+}
+

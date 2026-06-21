@@ -17,6 +17,7 @@ type Config struct {
 	SQLitePath    string           `yaml:"sqlite_path"`
 	TLS           TLSConfig        `yaml:"tls"`
 	Deployment    DeploymentConfig `yaml:"deployment"`
+	Telemetry     TelemetryConfig  `yaml:"telemetry"`
 }
 
 type TLSConfig struct {
@@ -45,6 +46,11 @@ type DeploymentConfig struct {
 	PollInterval   string `yaml:"poll_interval"`
 }
 
+type TelemetryConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Interval string `yaml:"interval"`
+}
+
 func Default() Config {
 	return Config{
 		NodeID:        "dev-agent",
@@ -64,6 +70,10 @@ func Default() Config {
 			BuildRoot:      "/tmp/opsi-builds",
 			RolloutTimeout: "10m",
 			PollInterval:   "5s",
+		},
+		Telemetry: TelemetryConfig{
+			Enabled:  true,
+			Interval: "15s",
 		},
 	}
 }
@@ -111,6 +121,11 @@ func (c Config) Validate() error {
 	if c.Deployment.RolloutTimeout != "" {
 		if _, err := time.ParseDuration(c.Deployment.RolloutTimeout); err != nil {
 			return fmt.Errorf("deployment.rollout_timeout: %w", err)
+		}
+	}
+	if c.Telemetry.Interval != "" {
+		if _, err := time.ParseDuration(c.Telemetry.Interval); err != nil {
+			return fmt.Errorf("telemetry.interval: %w", err)
 		}
 	}
 	return nil

@@ -11,6 +11,7 @@ import (
 
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 	"github.com/opsi-dev/opsi/agent/internal/tlsconfig"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
@@ -42,6 +43,50 @@ func (s *StatusService) Status(context.Context, *agentv1.StatusRequest) (*agentv
 type DeploymentService struct {
 	cfg    config.Config
 	engine *deploy.Engine
+}
+
+type TelemetryService struct {
+	store telemetry.Store
+}
+
+func NewTelemetryService(store telemetry.Store) *TelemetryService {
+	return &TelemetryService{store: store}
+}
+
+func (s *TelemetryService) Sync(req *agentv1.SyncRequest, stream agentv1.TelemetryService_SyncServer) error {
+	if req.ProjectID == "" {
+		return status.Error(codes.InvalidArgument, "project_id is required")
+	}
+	since := time.Unix(req.LastReceivedUnix, 0).UTC()
+	until := time.Now().UTC()
+	records, err := s.store.SyncRecords(stream.Context(), req.ProjectID, since, until, req.ResourceIDs)
+	if err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	chunks, err := telemetry.BuildChunks(stream.Context(), req.ProjectID, records, int(req.MaxChunkBytes))
+	if err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	for _, chunk := range chunks {
+		out := &agentv1.SyncChunk{
+			ProjectID:      chunk.ProjectID,
+			RecordCount:    int32(chunk.RecordCount),
+			Compression:    chunk.Compression,
+			ChecksumSHA256: chunk.ChecksumSHA256,
+			Payload:        chunk.Payload,
+			Done:           chunk.Done,
+		}
+		if !chunk.Start.IsZero() {
+			out.StartUnix = chunk.Start.Unix()
+		}
+		if !chunk.End.IsZero() {
+			out.EndUnix = chunk.End.Unix()
+		}
+		if err := stream.Send(out); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func NewDeploymentService(cfg config.Config, engine *deploy.Engine) *DeploymentService {
@@ -83,6 +128,12 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	}
 	defer store.Close()
 
+	telemetryStore, err := telemetry.OpenSQLiteStore(cfg.SQLitePath)
+	if err != nil {
+		return err
+	}
+	defer telemetryStore.Close()
+
 	engineCfg, err := deploymentEngineConfig(cfg)
 	if err != nil {
 		return err
@@ -115,13 +166,14 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	grpcServer := grpc.NewServer(grpcOptions...)
 	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg))
 	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine))
+	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore))
 
 	healthServer := &http.Server{
 		Handler:           healthHandler(version, startedAt, cfg),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go func() {
 		logger.Info("agent gRPC server listening", "addr", cfg.ListenAddr)
 		if err := grpcServer.Serve(grpcListener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
@@ -134,6 +186,31 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			errCh <- err
 		}
 	}()
+	if cfg.Telemetry.Enabled {
+		interval := 15 * time.Second
+		if cfg.Telemetry.Interval != "" {
+			parsed, err := time.ParseDuration(cfg.Telemetry.Interval)
+			if err != nil {
+				return err
+			}
+			interval = parsed
+		}
+		runner := telemetry.Runner{
+			Store: telemetryStore,
+			Collector: telemetry.RuntimeCollector{
+				ProjectID: cfg.Deployment.ProjectID,
+				NodeID:    cfg.NodeID,
+				ServiceID: cfg.Deployment.ServiceID,
+			},
+			Interval: interval,
+		}
+		go func() {
+			logger.Info("agent telemetry collector started", "interval", interval.String())
+			if err := runner.Run(ctx); err != nil {
+				errCh <- err
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
