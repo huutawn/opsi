@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/opsi-dev/opsi/agent/internal/secret"
 	_ "modernc.org/sqlite"
 )
 
@@ -166,6 +167,24 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, record.ProjectID, record.NodeID, record.ServiceID, record.PodID, record.Namespace, record.Level, record.Message, fingerprint, unread, observed.Unix())
 	if err != nil {
 		return fmt.Errorf("insert log: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) InsertAudit(ctx context.Context, record secret.AuditRecord) error {
+	created := record.CreatedAt
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
+	if record.MetadataJSON == "" {
+		record.MetadataJSON = "{}"
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO audit_log(id, project_id, actor, action, resource_type, resource_id, result, metadata_json, created_at_unix)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, record.ID, record.ProjectID, record.Actor, record.Action, record.ResourceType, record.ResourceID, record.Result, record.MetadataJSON, created.Unix())
+	if err != nil {
+		return fmt.Errorf("insert audit: %w", err)
 	}
 	return nil
 }

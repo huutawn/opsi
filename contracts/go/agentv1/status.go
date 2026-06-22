@@ -14,6 +14,7 @@ const (
 	StatusServiceName     = "opsi.agent.v1.StatusService"
 	DeploymentServiceName = "opsi.agent.v1.DeploymentService"
 	TelemetryServiceName  = "opsi.agent.v1.TelemetryService"
+	SecretServiceName     = "opsi.agent.v1.SecretService"
 	JSONCodecName         = "json"
 )
 
@@ -90,6 +91,40 @@ type SyncChunk struct {
 	ChecksumSHA256 string `json:"checksum_sha256"`
 	Payload        []byte `json:"payload,omitempty"`
 	Done           bool   `json:"done"`
+}
+
+type SetupTOTPRequest struct {
+	ProjectID string `json:"project_id"`
+	UserID    string `json:"user_id"`
+	Role      string `json:"role"`
+	PAT       string `json:"pat"`
+}
+
+type SetupTOTPResponse struct {
+	Secret string `json:"secret"`
+	URI    string `json:"uri"`
+}
+
+type SecretRequest struct {
+	ProjectID    string `json:"project_id"`
+	ServiceID    string `json:"service_id"`
+	Name         string `json:"name"`
+	Namespace    string `json:"namespace"`
+	UserID       string `json:"user_id"`
+	Role         string `json:"role"`
+	PAT          string `json:"pat"`
+	OTPCode      string `json:"otp_code"`
+	TOTPCode     string `json:"totp_code"`
+	OTPRequestID string `json:"otp_request_id"`
+}
+
+type SecretResponse struct {
+	ProjectID string `json:"project_id"`
+	ServiceID string `json:"service_id"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Username  string `json:"username"`
+	Password  string `json:"password,omitempty"`
 }
 
 type JSONCodec struct{}
@@ -356,5 +391,162 @@ var TelemetryService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
+	Metadata: "contracts/agent/v1/status.proto",
+}
+
+type SecretServiceServer interface {
+	SetupTOTP(context.Context, *SetupTOTPRequest) (*SetupTOTPResponse, error)
+	CreateSecret(context.Context, *SecretRequest) (*SecretResponse, error)
+	RevealSecret(context.Context, *SecretRequest) (*SecretResponse, error)
+	RotateSecret(context.Context, *SecretRequest) (*SecretResponse, error)
+}
+
+type UnimplementedSecretServiceServer struct{}
+
+func (UnimplementedSecretServiceServer) SetupTOTP(context.Context, *SetupTOTPRequest) (*SetupTOTPResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetupTOTP not implemented")
+}
+
+func (UnimplementedSecretServiceServer) CreateSecret(context.Context, *SecretRequest) (*SecretResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateSecret not implemented")
+}
+
+func (UnimplementedSecretServiceServer) RevealSecret(context.Context, *SecretRequest) (*SecretResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevealSecret not implemented")
+}
+
+func (UnimplementedSecretServiceServer) RotateSecret(context.Context, *SecretRequest) (*SecretResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotateSecret not implemented")
+}
+
+func RegisterSecretServiceServer(server grpc.ServiceRegistrar, service SecretServiceServer) {
+	server.RegisterService(&SecretService_ServiceDesc, service)
+}
+
+type SecretServiceClient interface {
+	SetupTOTP(ctx context.Context, in *SetupTOTPRequest, opts ...grpc.CallOption) (*SetupTOTPResponse, error)
+	CreateSecret(ctx context.Context, in *SecretRequest, opts ...grpc.CallOption) (*SecretResponse, error)
+	RevealSecret(ctx context.Context, in *SecretRequest, opts ...grpc.CallOption) (*SecretResponse, error)
+	RotateSecret(ctx context.Context, in *SecretRequest, opts ...grpc.CallOption) (*SecretResponse, error)
+}
+
+type secretServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewSecretServiceClient(cc grpc.ClientConnInterface) SecretServiceClient {
+	return &secretServiceClient{cc: cc}
+}
+
+func (c *secretServiceClient) SetupTOTP(ctx context.Context, in *SetupTOTPRequest, opts ...grpc.CallOption) (*SetupTOTPResponse, error) {
+	out := new(SetupTOTPResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+SecretServiceName+"/SetupTOTP", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *secretServiceClient) CreateSecret(ctx context.Context, in *SecretRequest, opts ...grpc.CallOption) (*SecretResponse, error) {
+	out := new(SecretResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+SecretServiceName+"/CreateSecret", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *secretServiceClient) RevealSecret(ctx context.Context, in *SecretRequest, opts ...grpc.CallOption) (*SecretResponse, error) {
+	out := new(SecretResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+SecretServiceName+"/RevealSecret", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *secretServiceClient) RotateSecret(ctx context.Context, in *SecretRequest, opts ...grpc.CallOption) (*SecretResponse, error) {
+	out := new(SecretResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+SecretServiceName+"/RotateSecret", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func setupTOTPHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(SetupTOTPRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(SecretServiceServer).SetupTOTP(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + SecretServiceName + "/SetupTOTP"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(SecretServiceServer).SetupTOTP(ctx, req.(*SetupTOTPRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func createSecretHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(SecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(SecretServiceServer).CreateSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + SecretServiceName + "/CreateSecret"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(SecretServiceServer).CreateSecret(ctx, req.(*SecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func revealSecretHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(SecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(SecretServiceServer).RevealSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + SecretServiceName + "/RevealSecret"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(SecretServiceServer).RevealSecret(ctx, req.(*SecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func rotateSecretHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(SecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(SecretServiceServer).RotateSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + SecretServiceName + "/RotateSecret"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(SecretServiceServer).RotateSecret(ctx, req.(*SecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+var SecretService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: SecretServiceName,
+	HandlerType: (*SecretServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{MethodName: "SetupTOTP", Handler: setupTOTPHandler},
+		{MethodName: "CreateSecret", Handler: createSecretHandler},
+		{MethodName: "RevealSecret", Handler: revealSecretHandler},
+		{MethodName: "RotateSecret", Handler: rotateSecretHandler},
+	},
+	Streams:  []grpc.StreamDesc{},
 	Metadata: "contracts/agent/v1/status.proto",
 }

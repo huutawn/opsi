@@ -14,7 +14,17 @@ import (
 
 const defaultMaxChunkBytes = 256 * 1024
 
+type ChunkOptions struct {
+	MaxBytes int
+	Yield    time.Duration
+}
+
 func BuildChunks(ctx context.Context, projectID string, records []SyncRecord, maxChunkBytes int) ([]Chunk, error) {
+	return BuildChunksWithOptions(ctx, projectID, records, ChunkOptions{MaxBytes: maxChunkBytes, Yield: time.Millisecond})
+}
+
+func BuildChunksWithOptions(ctx context.Context, projectID string, records []SyncRecord, options ChunkOptions) ([]Chunk, error) {
+	maxChunkBytes := options.MaxBytes
 	if maxChunkBytes <= 0 {
 		maxChunkBytes = defaultMaxChunkBytes
 	}
@@ -55,7 +65,9 @@ func BuildChunks(ctx context.Context, projectID string, records []SyncRecord, ma
 			Payload:        compressed,
 		})
 		start = end - 1
-		time.Sleep(1 * time.Millisecond)
+		if options.Yield > 0 {
+			time.Sleep(options.Yield)
+		}
 	}
 	if len(chunks) == 0 {
 		chunks = append(chunks, Chunk{ProjectID: projectID, Compression: "zstd", Done: true})

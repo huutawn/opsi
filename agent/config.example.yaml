@@ -23,6 +23,14 @@ deployment:
 telemetry:
   enabled: true
   interval: 15s
+  kubectl_path: kubectl
+  pod_log_tail: 50
+  pod_log_since: 1m
+secret:
+  namespace: default
+  kubectl_path: kubectl
+  encryption_at_rest_confirmed: false
+  cloud_otp_timeout: 10s
 tls:
   ca_cert_path: ./certs/ca.crt
   server_cert_path: ./certs/server.crt

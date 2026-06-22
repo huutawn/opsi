@@ -18,6 +18,7 @@ type Config struct {
 	TLS           TLSConfig        `yaml:"tls"`
 	Deployment    DeploymentConfig `yaml:"deployment"`
 	Telemetry     TelemetryConfig  `yaml:"telemetry"`
+	Secret        SecretConfig     `yaml:"secret"`
 }
 
 type TLSConfig struct {
@@ -47,8 +48,18 @@ type DeploymentConfig struct {
 }
 
 type TelemetryConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Interval string `yaml:"interval"`
+	Enabled     bool   `yaml:"enabled"`
+	Interval    string `yaml:"interval"`
+	KubectlPath string `yaml:"kubectl_path"`
+	PodLogTail  int    `yaml:"pod_log_tail"`
+	PodLogSince string `yaml:"pod_log_since"`
+}
+
+type SecretConfig struct {
+	Namespace                 string `yaml:"namespace"`
+	KubectlPath               string `yaml:"kubectl_path"`
+	EncryptionAtRestConfirmed bool   `yaml:"encryption_at_rest_confirmed"`
+	CloudOTPTimeout           string `yaml:"cloud_otp_timeout"`
 }
 
 func Default() Config {
@@ -72,8 +83,17 @@ func Default() Config {
 			PollInterval:   "5s",
 		},
 		Telemetry: TelemetryConfig{
-			Enabled:  true,
-			Interval: "15s",
+			Enabled:     true,
+			Interval:    "15s",
+			KubectlPath: "kubectl",
+			PodLogTail:  50,
+			PodLogSince: "1m",
+		},
+		Secret: SecretConfig{
+			Namespace:                 "default",
+			KubectlPath:               "kubectl",
+			EncryptionAtRestConfirmed: false,
+			CloudOTPTimeout:           "10s",
 		},
 	}
 }
@@ -126,6 +146,16 @@ func (c Config) Validate() error {
 	if c.Telemetry.Interval != "" {
 		if _, err := time.ParseDuration(c.Telemetry.Interval); err != nil {
 			return fmt.Errorf("telemetry.interval: %w", err)
+		}
+	}
+	if c.Telemetry.PodLogSince != "" {
+		if _, err := time.ParseDuration(c.Telemetry.PodLogSince); err != nil {
+			return fmt.Errorf("telemetry.pod_log_since: %w", err)
+		}
+	}
+	if c.Secret.CloudOTPTimeout != "" {
+		if _, err := time.ParseDuration(c.Secret.CloudOTPTimeout); err != nil {
+			return fmt.Errorf("secret.cloud_otp_timeout: %w", err)
 		}
 	}
 	return nil

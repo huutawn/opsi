@@ -90,6 +90,42 @@ func (c *Client) Sync(ctx context.Context, req *agentv1.SyncRequest, onChunk fun
 	}
 }
 
+func (c *Client) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewSecretServiceClient(conn).SetupTOTP(ctx, req)
+}
+
+func (c *Client) CreateSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewSecretServiceClient(conn).CreateSecret(ctx, req)
+}
+
+func (c *Client) RevealSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewSecretServiceClient(conn).RevealSecret(ctx, req)
+}
+
+func (c *Client) RotateSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewSecretServiceClient(conn).RotateSecret(ctx, req)
+}
+
 func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	creds, err := transportCredentials(c.cfg)
 	if err != nil {

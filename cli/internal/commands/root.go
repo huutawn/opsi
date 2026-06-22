@@ -33,6 +33,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.AddCommand(newStatusCommand(&configPath))
 	root.AddCommand(newDeployCommand(&configPath))
 	root.AddCommand(newSyncCommand(&configPath))
+	root.AddCommand(newSecretCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newLoginCommand(options.KeychainFactory))
 	root.AddCommand(newStartCommand())
 	root.AddCommand(&cobra.Command{

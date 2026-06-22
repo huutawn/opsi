@@ -11,6 +11,7 @@ import (
 
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 	"github.com/opsi-dev/opsi/agent/internal/tlsconfig"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
@@ -49,8 +50,49 @@ type TelemetryService struct {
 	store telemetry.Store
 }
 
+type SecretService struct {
+	cfg     config.Config
+	service *secret.Service
+}
+
 func NewTelemetryService(store telemetry.Store) *TelemetryService {
 	return &TelemetryService{store: store}
+}
+
+func NewSecretService(cfg config.Config, service *secret.Service) *SecretService {
+	return &SecretService{cfg: cfg, service: service}
+}
+
+func (s *SecretService) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
+	secretValue, uri, err := s.service.SetupTOTP(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT})
+	if err != nil {
+		return nil, mapSecretError(err)
+	}
+	return &agentv1.SetupTOTPResponse{Secret: secretValue, URI: uri}, nil
+}
+
+func (s *SecretService) CreateSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	value, err := s.service.Create(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg))
+	if err != nil {
+		return nil, mapSecretError(err)
+	}
+	return secretResponse(req, s.cfg, value, false), nil
+}
+
+func (s *SecretService) RevealSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	value, err := s.service.Reveal(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
+	if err != nil {
+		return nil, mapSecretError(err)
+	}
+	return secretResponse(req, s.cfg, value, true), nil
+}
+
+func (s *SecretService) RotateSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	value, err := s.service.Rotate(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
+	if err != nil {
+		return nil, mapSecretError(err)
+	}
+	return secretResponse(req, s.cfg, value, false), nil
 }
 
 func (s *TelemetryService) Sync(req *agentv1.SyncRequest, stream agentv1.TelemetryService_SyncServer) error {
@@ -167,6 +209,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg))
 	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore))
+	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore)))
 
 	healthServer := &http.Server{
 		Handler:           healthHandler(version, startedAt, cfg),
@@ -195,12 +238,28 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			}
 			interval = parsed
 		}
+		logSince := time.Minute
+		if cfg.Telemetry.PodLogSince != "" {
+			parsed, err := time.ParseDuration(cfg.Telemetry.PodLogSince)
+			if err != nil {
+				return err
+			}
+			logSince = parsed
+		}
+		fallback := telemetry.RuntimeCollector{
+			ProjectID: cfg.Deployment.ProjectID,
+			NodeID:    cfg.NodeID,
+			ServiceID: cfg.Deployment.ServiceID,
+		}
 		runner := telemetry.Runner{
 			Store: telemetryStore,
-			Collector: telemetry.RuntimeCollector{
-				ProjectID: cfg.Deployment.ProjectID,
-				NodeID:    cfg.NodeID,
-				ServiceID: cfg.Deployment.ServiceID,
+			Collector: telemetry.KubernetesCollector{
+				ProjectID:    cfg.Deployment.ProjectID,
+				NodeID:       cfg.NodeID,
+				KubectlPath:  cfg.Telemetry.KubectlPath,
+				LogTailLines: cfg.Telemetry.PodLogTail,
+				LogSince:     logSince,
+				Fallback:     fallback,
 			},
 			Interval: interval,
 		}
@@ -235,6 +294,68 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	}
 
 	return healthServer.Shutdown(shutdownCtx)
+}
+
+func secretService(cfg config.Config, audit secret.AuditSink) *secret.Service {
+	timeout := 10 * time.Second
+	if cfg.Secret.CloudOTPTimeout != "" {
+		if parsed, err := time.ParseDuration(cfg.Secret.CloudOTPTimeout); err == nil {
+			timeout = parsed
+		}
+	}
+	return &secret.Service{
+		Store:            secret.KubernetesSecretStore{KubectlPath: cfg.Secret.KubectlPath},
+		Audit:            audit,
+		OTP:              secret.HTTPOTPClient{Endpoint: cfg.CloudEndpoint},
+		Encryption:       secret.StaticEncryptionVerifier(cfg.Secret.EncryptionAtRestConfirmed),
+		CloudOTPTimeout:  timeout,
+		TOTPSecretByUser: map[string]string{},
+	}
+}
+
+func authFromSecretRequest(req *agentv1.SecretRequest) secret.AuthContext {
+	return secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT}
+}
+
+func refFromSecretRequest(req *agentv1.SecretRequest, cfg config.Config) secret.SecretRef {
+	return secret.SecretRef{ProjectID: req.ProjectID, ServiceID: req.ServiceID, Name: req.Name, Namespace: firstNonEmpty(req.Namespace, cfg.Secret.Namespace, cfg.Deployment.Namespace)}
+}
+
+func secretResponse(req *agentv1.SecretRequest, cfg config.Config, value secret.SecretValue, includePassword bool) *agentv1.SecretResponse {
+	resp := &agentv1.SecretResponse{ProjectID: req.ProjectID, ServiceID: req.ServiceID, Name: req.Name, Namespace: firstNonEmpty(req.Namespace, cfg.Secret.Namespace, cfg.Deployment.Namespace), Username: value.Username}
+	if includePassword {
+		resp.Password = value.Password
+	}
+	return resp
+}
+
+func mapSecretError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return status.Error(codes.DeadlineExceeded, err.Error())
+	}
+	message := err.Error()
+	switch {
+	case message == "permission denied":
+		return status.Error(codes.PermissionDenied, message)
+	case message == "second factor verification failed":
+		return status.Error(codes.PermissionDenied, message)
+	case message == "k3s encryption at rest is not confirmed":
+		return status.Error(codes.FailedPrecondition, message)
+	default:
+		return status.Error(codes.Internal, message)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func deploymentEngineConfig(cfg config.Config) (deploy.EngineConfig, error) {

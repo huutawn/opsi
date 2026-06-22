@@ -9,21 +9,26 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/otp"
 )
 
 type Server struct {
 	Queue  *Queue
 	Config Config
+	OTP    *otp.Service
 }
 
 func NewServer(cfg Config) *Server {
-	return &Server{Queue: NewQueue(), Config: cfg}
+	return &Server{Queue: NewQueue(), Config: cfg, OTP: otp.NewService()}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
+	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
+	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	return mux
 }
@@ -112,6 +117,56 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, env)
+}
+
+func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req otp.Request
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid otp request")
+		return
+	}
+	resp, err := s.OTP.RequestOTP(r.Context(), req)
+	if err != nil {
+		if err == otp.ErrRateLimited {
+			writeError(w, http.StatusTooManyRequests, err.Error())
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"request_id": resp.RequestID, "expires_at": resp.ExpiresAt, "code": resp.Code})
+}
+
+func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		RequestID string `json:"request_id"`
+		ProjectID string `json:"project_id"`
+		UserID    string `json:"user_id"`
+		Purpose   string `json:"purpose"`
+		Code      string `json:"code"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid otp verify request")
+		return
+	}
+	err := s.OTP.VerifyOTP(r.Context(), req.RequestID, req.ProjectID, req.UserID, req.Purpose, req.Code)
+	if err != nil {
+		statusCode := http.StatusUnauthorized
+		if err == otp.ErrExpired || err == otp.ErrUsed || err == otp.ErrNotFound {
+			statusCode = http.StatusGone
+		}
+		writeError(w, statusCode, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 func (s *Server) matchRoute(repoURL, fullName, branch string) (Route, bool) {
