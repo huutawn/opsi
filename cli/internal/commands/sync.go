@@ -11,11 +11,12 @@ import (
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
+	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"github.com/spf13/cobra"
 )
 
-func newSyncCommand(configPath *string) *cobra.Command {
+func newSyncCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
 	var projectID string
 	var sinceUnix int64
 	var maxChunkBytes int32
@@ -44,6 +45,9 @@ func newSyncCommand(configPath *string) *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 			defer cancel()
+			if pat := optionalPAT(factory); pat != "" {
+				ctx = agentclient.WithPAT(ctx, pat)
+			}
 
 			req := &agentv1.SyncRequest{ProjectID: projectID, LastReceivedUnix: sinceUnix, MaxChunkBytes: maxChunkBytes}
 			encoder := json.NewEncoder(cmd.OutOrStdout())

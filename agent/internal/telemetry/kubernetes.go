@@ -28,6 +28,8 @@ type KubernetesCollector struct {
 	Runner       CommandRunner
 	LogTailLines int
 	LogSince     time.Duration
+	Metrics      Collector
+	LogWatch     bool
 	Fallback     Collector
 	Now          func() time.Time
 }
@@ -40,8 +42,15 @@ func (c KubernetesCollector) Collect(ctx context.Context) ([]MetricRecord, []Log
 		}
 		return nil, nil, err
 	}
-	metrics, err := c.collectTop(ctx, pods)
-	if err != nil && len(metrics) == 0 && c.Fallback != nil {
+	var metrics []MetricRecord
+	var metricsErr error
+	if c.Metrics != nil {
+		metrics, _, metricsErr = c.Metrics.Collect(ctx)
+	}
+	if len(metrics) == 0 {
+		metrics, metricsErr = c.collectTop(ctx, pods)
+	}
+	if metricsErr != nil && len(metrics) == 0 && c.Fallback != nil {
 		fallbackMetrics, fallbackLogs, fallbackErr := c.Fallback.Collect(ctx)
 		if fallbackErr != nil {
 			return nil, nil, fallbackErr
@@ -134,7 +143,16 @@ func (c KubernetesCollector) collectLogs(ctx context.Context, pods map[string]po
 		if meta.ProjectID == "" || meta.PodID == "" || meta.Namespace == "" {
 			continue
 		}
-		out, err := c.run(ctx, "logs", "-n", meta.Namespace, meta.PodID, "--all-containers=true", "--tail", strconv.Itoa(tail), "--since", since.String(), "--timestamps")
+		args := []string{"logs", "-n", meta.Namespace, meta.PodID, "--all-containers=true", "--tail", strconv.Itoa(tail), "--since", since.String(), "--timestamps"}
+		logCtx := ctx
+		cancel := func() {}
+		if c.LogWatch {
+			sinceTime := c.now().Add(-since).Format(time.RFC3339)
+			args = []string{"logs", "-n", meta.Namespace, meta.PodID, "--all-containers=true", "--since-time", sinceTime, "--timestamps", "--follow"}
+			logCtx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		}
+		out, err := c.run(logCtx, args...)
+		cancel()
 		if err != nil {
 			continue
 		}

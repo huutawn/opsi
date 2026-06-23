@@ -1,5 +1,17 @@
 {
   "ttl": "24h",
+  "database_url": "",
+  "otp": {
+    "dev_echo": false,
+    "outbox_path": "./opsi-otp-outbox.log"
+  },
+  "smtp": {
+    "host": "",
+    "port": "587",
+    "username": "",
+    "password": "",
+    "from": "opsi@example.com"
+  },
   "routes": [
     {
       "project_id": "dev-project",
@@ -12,4 +24,3 @@
     }
   ]
 }
-

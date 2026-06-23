@@ -8,8 +8,24 @@ import (
 )
 
 type Config struct {
-	TTL    Duration `json:"ttl"`
-	Routes []Route  `json:"routes"`
+	TTL         Duration   `json:"ttl"`
+	DatabaseURL string     `json:"database_url"`
+	OTP         OTPConfig  `json:"otp"`
+	SMTP        SMTPConfig `json:"smtp"`
+	Routes      []Route    `json:"routes"`
+}
+
+type OTPConfig struct {
+	DevEcho    bool   `json:"dev_echo"`
+	OutboxPath string `json:"outbox_path"`
+}
+
+type SMTPConfig struct {
+	Host     string `json:"host"`
+	Port     string `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	From     string `json:"from"`
 }
 
 type Route struct {

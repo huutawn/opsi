@@ -3,6 +3,9 @@ listen_addr: 127.0.0.1:9443
 health_addr: 127.0.0.1:9080
 cloud_endpoint: https://cloud.localhost
 sqlite_path: ./opsi-agent.sqlite
+auth:
+  enabled: false
+  verify_cache_ttl: 15m
 deployment:
   project_id: dev-project
   service_id: example-app
@@ -14,7 +17,10 @@ deployment:
   build_context: .
   dockerfile: Dockerfile
   manifest_path: k8s/deployment.yaml
-  registry: registry.local:5000
+  registry: ""
+  builder_mode: containerd
+  nerdctl_path: nerdctl
+  containerd_namespace: k8s.io
   webhook_secret: dev-webhook-secret
   dry_run: true
   build_root: /tmp/opsi-builds
@@ -24,11 +30,16 @@ telemetry:
   enabled: true
   interval: 15s
   kubectl_path: kubectl
+  cadvisor_endpoint: ""
+  cadvisor_timeout: 5s
+  max_records_per_tick: 1000
   pod_log_tail: 50
   pod_log_since: 1m
 secret:
   namespace: default
   kubectl_path: kubectl
+  totp_namespace: default
+  rollout_restart_on_rotate: true
   encryption_at_rest_confirmed: false
   cloud_otp_timeout: 10s
 tls:

@@ -1,12 +1,12 @@
 # Opsi Cloud
 
-Cloud is the stateless relay and identity boundary. Current code includes the Phase 2 in-memory Webhook Relay runtime consumed by Agent long-poll clients; identity/PAT providers remain contract-only.
+Cloud is the relay and identity boundary. Current code includes the Phase 2 in-memory Webhook Relay runtime consumed by Agent long-poll clients, plus production-minimum PAT verify and OTP runtime backed by Postgres when `database_url` is configured.
 
 ## Phase 1 Auth Contract
 
 ### Login
 
-Future endpoint:
+Implemented endpoint:
 
 ```http
 POST /v1/auth/login
@@ -26,7 +26,8 @@ Request shape:
 
 ```json
 {
-  "token": "plain-token-presented-by-agent"
+  "token": "plain-token-presented-by-agent",
+  "project_id": "dev-project"
 }
 ```
 
@@ -40,6 +41,12 @@ Response shape:
   "revoked": false
 }
 ```
+
+PAT verification compares the presented token against bcrypt hashes in `personal_access_tokens` and returns the project role from `project_memberships`. Cloud still needs OAuth login and PAT issuance/revoke endpoints.
+
+### OTP Delivery
+
+`POST /v1/otp/request` and `POST /v1/otp/verify` are implemented. OTP codes are salted and hashed, expire after 5 minutes, verify once, and are rate-limited per user. Configure SMTP for email delivery, or `otp.outbox_path` for a local file outbox. Codes are not returned by the API unless `otp.dev_echo` is enabled.
 
 ## Build/Test
 

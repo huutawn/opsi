@@ -87,6 +87,90 @@ func TestServiceRejectsNonOwnerReveal(t *testing.T) {
 	}
 }
 
+func TestServiceUsesVerifiedRoleInsteadOfRequestRole(t *testing.T) {
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 20, 1, 0, 0, 0, time.UTC)
+	svc := &Service{Store: store, Auth: fakeAuth{role: RoleViewer, userID: "viewer"}, Audit: &auditSink{}, Encryption: StaticEncryptionVerifier(true), TOTPSecretByUser: map[string]string{"proj:viewer": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"}, Now: func() time.Time { return now }}
+	ref := SecretRef{ProjectID: "proj", ServiceID: "svc", Namespace: "default", Name: "db"}
+	if err := store.Put(context.Background(), ref, SecretValue{Username: "u", Password: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	code, err := GenerateTOTPCode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Reveal(context.Background(), AuthContext{ProjectID: "proj", UserID: "owner", Role: RoleOwner, PAT: "pat"}, ref, "", "", code)
+	if err == nil {
+		t.Fatal("expected verified Viewer role to be denied")
+	}
+}
+
+func TestServiceLoadsTOTPFromDurableStoreOnCacheMiss(t *testing.T) {
+	now := time.Date(2026, 6, 20, 1, 0, 0, 0, time.UTC)
+	totpSecret := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	store := NewMemoryStore()
+	svc := &Service{Store: store, TOTPStore: fakeTOTPStore{secret: totpSecret}, Audit: &auditSink{}, Encryption: StaticEncryptionVerifier(true), TOTPSecretByUser: map[string]string{}, Now: func() time.Time { return now }}
+	auth := AuthContext{ProjectID: "proj", UserID: "owner", Role: RoleOwner}
+	ref := SecretRef{ProjectID: "proj", ServiceID: "svc", Namespace: "default", Name: "db"}
+	if err := store.Put(context.Background(), ref, SecretValue{Username: "u", Password: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	code, err := GenerateTOTPCode(totpSecret, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Reveal(context.Background(), auth, ref, "", "", code); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceRotateTriggersRolloutRestart(t *testing.T) {
+	now := time.Date(2026, 6, 20, 1, 0, 0, 0, time.UTC)
+	totpSecret := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	restarter := &fakeRestarter{}
+	svc := &Service{Store: NewMemoryStore(), Audit: &auditSink{}, Encryption: StaticEncryptionVerifier(true), Restarter: restarter, TOTPSecretByUser: map[string]string{"proj:owner": totpSecret}, Now: func() time.Time { return now }}
+	auth := AuthContext{ProjectID: "proj", UserID: "owner", Role: RoleOwner}
+	ref := SecretRef{ProjectID: "proj", ServiceID: "svc", Namespace: "default", Name: "db"}
+	code, err := GenerateTOTPCode(totpSecret, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Rotate(context.Background(), auth, ref, "", "", code); err != nil {
+		t.Fatal(err)
+	}
+	if restarter.ref.ServiceID != "svc" || restarter.calls != 1 {
+		t.Fatalf("restart not called: %+v calls=%d", restarter.ref, restarter.calls)
+	}
+}
+
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+type fakeAuth struct {
+	role   Role
+	userID string
+}
+
+func (f fakeAuth) VerifyAuth(_ context.Context, auth AuthContext) (AuthContext, error) {
+	auth.Role = f.role
+	auth.UserID = f.userID
+	return auth, nil
+}
+
+type fakeTOTPStore struct{ secret string }
+
+func (s fakeTOTPStore) PutTOTP(context.Context, AuthContext, string) error { return nil }
+
+func (s fakeTOTPStore) GetTOTP(context.Context, AuthContext) (string, error) { return s.secret, nil }
+
+type fakeRestarter struct {
+	calls int
+	ref   SecretRef
+}
+
+func (r *fakeRestarter) Restart(_ context.Context, ref SecretRef) error {
+	r.calls++
+	r.ref = ref
+	return nil
+}

@@ -1,0 +1,22 @@
+[Unit]
+Description=Opsi Agent
+Documentation=https://github.com/opsi-dev/opsi
+After=network-online.target k3s.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/opt/opsi/agent/current/opsi-agent --config /etc/opsi/agent.yaml
+Restart=always
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+WorkingDirectory=/var/lib/opsi
+StateDirectory=opsi
+LogsDirectory=opsi
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

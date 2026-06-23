@@ -31,8 +31,8 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.PersistentFlags().StringVar(&configPath, "config", "", "path to CLI YAML config")
 
 	root.AddCommand(newStatusCommand(&configPath))
-	root.AddCommand(newDeployCommand(&configPath))
-	root.AddCommand(newSyncCommand(&configPath))
+	root.AddCommand(newDeployCommand(&configPath, options.KeychainFactory))
+	root.AddCommand(newSyncCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newSecretCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newLoginCommand(options.KeychainFactory))
 	root.AddCommand(newStartCommand())

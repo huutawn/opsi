@@ -40,11 +40,33 @@ func (ExecBuilder) Push(ctx context.Context, imageTag string) error {
 	return run(ctx, "docker", "push", imageTag)
 }
 
+type ContainerdBuilder struct {
+	NerdctlPath string
+	Namespace   string
+}
+
+func (b ContainerdBuilder) Build(ctx context.Context, workDir, dockerfile, imageTag string) error {
+	dockerfilePath := dockerfile
+	if !filepath.IsAbs(dockerfilePath) {
+		dockerfilePath = filepath.Join(workDir, dockerfile)
+	}
+	return runIn(ctx, workDir, firstNonEmpty(b.NerdctlPath, "nerdctl"), "--namespace", firstNonEmpty(b.Namespace, "k8s.io"), "build", "-f", dockerfilePath, "-t", imageTag, ".")
+}
+
+func (b ContainerdBuilder) Push(ctx context.Context, imageTag string) error {
+	return run(ctx, firstNonEmpty(b.NerdctlPath, "nerdctl"), "--namespace", firstNonEmpty(b.Namespace, "k8s.io"), "push", imageTag)
+}
+
 type KubectlAdapter struct{}
 
-func (KubectlAdapter) Apply(ctx context.Context, manifestPath, namespace, imageTag string) error {
-	_ = imageTag
-	return run(ctx, "kubectl", "apply", "-f", manifestPath, "-n", namespace)
+func (KubectlAdapter) Apply(ctx context.Context, manifestPath, namespace, serviceName, imageTag string) error {
+	if err := run(ctx, "kubectl", "apply", "-f", manifestPath, "-n", namespace); err != nil {
+		return err
+	}
+	if imageTag == "" || serviceName == "" {
+		return nil
+	}
+	return run(ctx, "kubectl", "set", "image", "deployment/"+serviceName, "*="+imageTag, "-n", namespace)
 }
 
 func (KubectlAdapter) WatchRollout(ctx context.Context, service, namespace string, timeout, _ time.Duration) error {
@@ -66,7 +88,7 @@ func (DryRunBuilder) Push(context.Context, string) error                  { retu
 
 type DryRunK3sAdapter struct{}
 
-func (DryRunK3sAdapter) Apply(context.Context, string, string, string) error { return nil }
+func (DryRunK3sAdapter) Apply(context.Context, string, string, string, string) error { return nil }
 func (DryRunK3sAdapter) WatchRollout(context.Context, string, string, time.Duration, time.Duration) error {
 	return nil
 }

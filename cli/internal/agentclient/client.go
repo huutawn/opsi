@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 type Client struct {
@@ -25,6 +26,13 @@ type Client struct {
 }
 
 func New(cfg config.Config) *Client { return &Client{cfg: cfg} }
+
+func WithPAT(ctx context.Context, pat string) context.Context {
+	if strings.TrimSpace(pat) == "" {
+		return ctx
+	}
+	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+pat)
+}
 
 func (c *Client) Status(ctx context.Context) (*agentv1.StatusResponse, error) {
 	conn, err := c.dial(ctx)

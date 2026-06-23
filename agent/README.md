@@ -27,7 +27,20 @@ Generate local development certificates first if TLS paths are enabled:
 rtk ../scripts/dev-certs.sh ./certs
 ```
 
-For local deployment smoke tests without Docker/K3s, keep `deployment.dry_run: true` in `config.example.yaml`. Real deployments use `git`, `docker buildx` or `docker build`, `docker push` when a registry is configured, and `kubectl rollout status/undo`.
+For local deployment smoke tests without containerd/K3s, keep `deployment.dry_run: true` in `config.example.yaml`. Production single-node K3s deployments use `git`, `nerdctl --namespace k8s.io build`, `kubectl apply`, `kubectl set image`, and `kubectl rollout status/undo`. Docker remains available with `deployment.builder_mode: docker` for compatibility or registry-oriented flows.
+
+## Systemd Runtime
+
+Production Agent is intended to run as a native systemd service, not as a Docker container. A unit template is available at `packaging/systemd/opsi-agent.service`. Expected layout:
+
+```text
+/opt/opsi/agent/releases/<version>/opsi-agent
+/opt/opsi/agent/current -> /opt/opsi/agent/releases/<version>
+/etc/opsi/agent.yaml
+/var/lib/opsi/
+```
+
+Rollback is a symlink switch back to a previous release followed by `systemctl restart opsi-agent`.
 
 ## Phase 2 Deployment
 

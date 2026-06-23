@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 )
 
@@ -17,20 +18,49 @@ type Server struct {
 	Queue  *Queue
 	Config Config
 	OTP    *otp.Service
+	Auth   *auth.Service
 }
 
 func NewServer(cfg Config) *Server {
-	return &Server{Queue: NewQueue(), Config: cfg, OTP: otp.NewService()}
+	service := otp.NewService()
+	service.DevEcho = cfg.OTP.DevEcho
+	return &Server{Queue: NewQueue(), Config: cfg, OTP: service}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
+	mux.HandleFunc("/v1/auth/pat/verify", s.handlePATVerify)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	return mux
+}
+
+func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.Auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth service is not configured")
+		return
+	}
+	var req struct {
+		Token     string `json:"token"`
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid pat verify request")
+		return
+	}
+	result, err := s.Auth.VerifyPAT(r.Context(), auth.VerifyRequest{Token: req.Token, ProjectID: req.ProjectID})
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

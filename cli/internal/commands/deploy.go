@@ -8,11 +8,12 @@ import (
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
+	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"github.com/spf13/cobra"
 )
 
-func newDeployCommand(configPath *string) *cobra.Command {
+func newDeployCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
 	var req agentv1.DeployRequest
 	cmd := &cobra.Command{
 		Use:   "deploy",
@@ -24,6 +25,9 @@ func newDeployCommand(configPath *string) *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Minute)
 			defer cancel()
+			if pat := optionalPAT(factory); pat != "" {
+				ctx = agentclient.WithPAT(ctx, pat)
+			}
 
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			return agentclient.New(cfg).Deploy(ctx, &req, func(event *agentv1.ProgressEvent) error {

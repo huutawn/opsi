@@ -21,7 +21,7 @@ type Builder interface {
 }
 
 type K3sAdapter interface {
-	Apply(ctx context.Context, manifestPath, namespace, imageTag string) error
+	Apply(ctx context.Context, manifestPath, namespace, serviceName, imageTag string) error
 	WatchRollout(ctx context.Context, service, namespace string, timeout, interval time.Duration) error
 	Rollback(ctx context.Context, service, namespace string) error
 }
@@ -146,7 +146,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 	if err := emit(progress, record, PhaseApplying, "applying manifest", 70, nil); err != nil {
 		return record, err
 	}
-	if err := e.K3s.Apply(ctx, manifestPath, req.Namespace, req.ImageTag); err != nil {
+	if err := e.K3s.Apply(ctx, manifestPath, req.Namespace, req.ServiceName, req.ImageTag); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
 

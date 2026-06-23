@@ -123,7 +123,7 @@ type fakeAdapters struct {
 func (f *fakeAdapters) Clone(context.Context, string, string, string, string) error { return nil }
 func (f *fakeAdapters) Build(context.Context, string, string, string) error         { return f.buildErr }
 func (f *fakeAdapters) Push(context.Context, string) error                          { return nil }
-func (f *fakeAdapters) Apply(context.Context, string, string, string) error         { return nil }
+func (f *fakeAdapters) Apply(context.Context, string, string, string, string) error { return nil }
 func (f *fakeAdapters) WatchRollout(context.Context, string, string, time.Duration, time.Duration) error {
 	return f.watchErr
 }

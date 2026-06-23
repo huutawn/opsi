@@ -50,3 +50,33 @@ func TestOTPRateLimit(t *testing.T) {
 		t.Fatalf("expected rate limit, got %v", err)
 	}
 }
+
+func TestOTPRequestSendsCodeWithoutEchoByDefault(t *testing.T) {
+	sender := &fakeSender{}
+	svc := NewService()
+	svc.Sender = sender
+	resp, err := svc.RequestOTP(context.Background(), Request{ProjectID: "proj", UserID: "user@example.com", Purpose: "secret.reveal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != "" {
+		t.Fatal("expected code to stay out of API response")
+	}
+	if sender.code == "" || sender.req.UserID != "user@example.com" {
+		t.Fatalf("sender not called: %+v", sender)
+	}
+	if err := svc.VerifyOTP(context.Background(), resp.RequestID, "proj", "user@example.com", "secret.reveal", sender.code); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type fakeSender struct {
+	req  Request
+	code string
+}
+
+func (s *fakeSender) SendOTP(_ context.Context, req Request, code string, _ time.Time) error {
+	s.req = req
+	s.code = code
+	return nil
+}

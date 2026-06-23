@@ -37,10 +37,22 @@ type Service struct {
 	now      func() time.Time
 	items    map[string]entry
 	attempts map[string][]time.Time
+	Store    Store
+	Sender   Sender
 	TTL      time.Duration
 	Limit    int
 	Window   time.Duration
 	DevEcho  bool
+}
+
+type Store interface {
+	Put(ctx context.Context, id string, item entry) error
+	Get(ctx context.Context, id string) (entry, error)
+	MarkUsed(ctx context.Context, id string, usedAt time.Time) error
+}
+
+type Sender interface {
+	SendOTP(ctx context.Context, req Request, code string, expiresAt time.Time) error
 }
 
 type entry struct {
@@ -55,7 +67,7 @@ func NewService() *Service {
 	return &Service{items: map[string]entry{}, attempts: map[string][]time.Time{}, TTL: 5 * time.Minute, Limit: 5, Window: 15 * time.Minute}
 }
 
-func (s *Service) RequestOTP(_ context.Context, req Request) (Response, error) {
+func (s *Service) RequestOTP(ctx context.Context, req Request) (Response, error) {
 	if req.ProjectID == "" || req.UserID == "" || req.Purpose == "" {
 		return Response{}, errors.New("project_id, user_id and purpose are required")
 	}
@@ -76,7 +88,19 @@ func (s *Service) RequestOTP(_ context.Context, req Request) (Response, error) {
 		ttl = 5 * time.Minute
 	}
 	expiresAt := now.Add(ttl)
-	s.items[id] = entry{Request: req, Salt: salt, Hash: hashCode(salt, code), ExpiresAt: expiresAt}
+	item := entry{Request: req, Salt: salt, Hash: hashCode(salt, code), ExpiresAt: expiresAt}
+	if s.Store != nil {
+		if err := s.Store.Put(ctx, id, item); err != nil {
+			return Response{}, err
+		}
+	} else {
+		s.items[id] = item
+	}
+	if s.Sender != nil {
+		if err := s.Sender.SendOTP(ctx, req, code, expiresAt); err != nil {
+			return Response{}, err
+		}
+	}
 	resp := Response{RequestID: id, ExpiresAt: expiresAt}
 	if s.DevEcho {
 		resp.Code = code
@@ -84,7 +108,10 @@ func (s *Service) RequestOTP(_ context.Context, req Request) (Response, error) {
 	return resp, nil
 }
 
-func (s *Service) VerifyOTP(_ context.Context, requestID, projectID, userID, purpose, code string) error {
+func (s *Service) VerifyOTP(ctx context.Context, requestID, projectID, userID, purpose, code string) error {
+	if s.Store != nil {
+		return s.verifyStoredOTP(ctx, requestID, projectID, userID, purpose, code)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, ok := s.items[requestID]
@@ -103,6 +130,26 @@ func (s *Service) VerifyOTP(_ context.Context, requestID, projectID, userID, pur
 	item.UsedAt = s.clock()
 	s.items[requestID] = item
 	return nil
+}
+
+func (s *Service) verifyStoredOTP(ctx context.Context, requestID, projectID, userID, purpose, code string) error {
+	item, err := s.Store.Get(ctx, requestID)
+	if err != nil {
+		return ErrNotFound
+	}
+	if item.ProjectID != projectID || item.UserID != userID || item.Purpose != purpose {
+		return ErrNotFound
+	}
+	if !item.UsedAt.IsZero() {
+		return ErrUsed
+	}
+	if !s.clock().Before(item.ExpiresAt) {
+		return ErrExpired
+	}
+	if hashCode(item.Salt, code) != item.Hash {
+		return ErrInvalidCode
+	}
+	return s.Store.MarkUsed(ctx, requestID, s.clock())
 }
 
 func (s *Service) allowLocked(userID string, now time.Time) bool {

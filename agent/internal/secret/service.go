@@ -37,15 +37,24 @@ func (v StaticEncryptionVerifier) Verify(context.Context) error {
 
 type Service struct {
 	Store            Store
+	TOTPStore        TOTPStore
+	Auth             AuthVerifier
 	Audit            AuditSink
 	OTP              OTPClient
 	Encryption       EncryptionVerifier
+	Restarter        RolloutRestarter
 	CloudOTPTimeout  time.Duration
 	TOTPSecretByUser map[string]string
 	Now              func() time.Time
 }
 
 func (s *Service) SetupTOTP(ctx context.Context, auth AuthContext) (string, string, error) {
+	verified, err := s.authorize(ctx, auth)
+	if err != nil {
+		_ = s.audit(ctx, auth, ActionTOTP, "totp", auth.UserID, "denied", map[string]string{"reason": "auth"})
+		return "", "", err
+	}
+	auth = verified
 	if auth.UserID == "" || auth.ProjectID == "" {
 		return "", "", errors.New("user_id and project_id are required")
 	}
@@ -58,11 +67,23 @@ func (s *Service) SetupTOTP(ctx context.Context, auth AuthContext) (string, stri
 		s.TOTPSecretByUser = map[string]string{}
 	}
 	s.TOTPSecretByUser[auth.ProjectID+":"+auth.UserID] = secret
+	if s.TOTPStore != nil {
+		if err := s.TOTPStore.PutTOTP(ctx, auth, secret); err != nil {
+			_ = s.audit(ctx, auth, ActionTOTP, "totp", auth.UserID, "failed", nil)
+			return "", "", err
+		}
+	}
 	_ = s.audit(ctx, auth, ActionTOTP, "totp", auth.UserID, "success", nil)
 	return secret, TOTPURI("Opsi", auth.ProjectID+":"+auth.UserID, secret), nil
 }
 
 func (s *Service) Create(ctx context.Context, auth AuthContext, ref SecretRef) (SecretValue, error) {
+	verified, err := s.authorize(ctx, auth)
+	if err != nil {
+		_ = s.audit(ctx, auth, ActionCreate, "secret", ref.Name, "denied", map[string]string{"reason": "auth"})
+		return SecretValue{}, err
+	}
+	auth = verified
 	if !CanCreate(auth.Role) {
 		_ = s.audit(ctx, auth, ActionCreate, "secret", ref.Name, "denied", map[string]string{"reason": "rbac"})
 		return SecretValue{}, errors.New("permission denied")
@@ -85,6 +106,12 @@ func (s *Service) Create(ctx context.Context, auth AuthContext, ref SecretRef) (
 }
 
 func (s *Service) Reveal(ctx context.Context, auth AuthContext, ref SecretRef, otpRequestID, otpCode, totpCode string) (SecretValue, error) {
+	verified, err := s.authorize(ctx, auth)
+	if err != nil {
+		_ = s.audit(ctx, auth, ActionReveal, "secret", ref.Name, "denied", map[string]string{"reason": "auth"})
+		return SecretValue{}, err
+	}
+	auth = verified
 	if !CanReveal(auth.Role) {
 		_ = s.audit(ctx, auth, ActionReveal, "secret", ref.Name, "denied", map[string]string{"reason": "rbac"})
 		return SecretValue{}, errors.New("permission denied")
@@ -103,6 +130,12 @@ func (s *Service) Reveal(ctx context.Context, auth AuthContext, ref SecretRef, o
 }
 
 func (s *Service) Rotate(ctx context.Context, auth AuthContext, ref SecretRef, otpRequestID, otpCode, totpCode string) (SecretValue, error) {
+	verified, err := s.authorize(ctx, auth)
+	if err != nil {
+		_ = s.audit(ctx, auth, ActionRotate, "secret", ref.Name, "denied", map[string]string{"reason": "auth"})
+		return SecretValue{}, err
+	}
+	auth = verified
 	if !CanRotate(auth.Role) {
 		_ = s.audit(ctx, auth, ActionRotate, "secret", ref.Name, "denied", map[string]string{"reason": "rbac"})
 		return SecretValue{}, errors.New("permission denied")
@@ -124,6 +157,12 @@ func (s *Service) Rotate(ctx context.Context, auth AuthContext, ref SecretRef, o
 		_ = s.audit(ctx, auth, ActionRotate, "secret", ref.Name, "failed", nil)
 		return SecretValue{}, err
 	}
+	if s.Restarter != nil {
+		if err := s.Restarter.Restart(ctx, ref); err != nil {
+			_ = s.audit(ctx, auth, ActionRotate, "secret", ref.Name, "failed", map[string]string{"reason": "rollout_restart"})
+			return SecretValue{}, err
+		}
+	}
 	_ = s.audit(ctx, auth, ActionRotate, "secret", ref.Name, "success", nil)
 	return value, nil
 }
@@ -141,10 +180,26 @@ func (s *Service) verifySecondFactor(ctx context.Context, auth AuthContext, ref 
 		}
 	}
 	secret := s.TOTPSecretByUser[auth.ProjectID+":"+auth.UserID]
+	if secret == "" && s.TOTPStore != nil {
+		if stored, err := s.TOTPStore.GetTOTP(ctx, auth); err == nil {
+			secret = stored
+			if s.TOTPSecretByUser == nil {
+				s.TOTPSecretByUser = map[string]string{}
+			}
+			s.TOTPSecretByUser[auth.ProjectID+":"+auth.UserID] = stored
+		}
+	}
 	if VerifyTOTP(secret, totpCode, s.now(), 1) {
 		return nil
 	}
 	return errors.New("second factor verification failed")
+}
+
+func (s *Service) authorize(ctx context.Context, auth AuthContext) (AuthContext, error) {
+	if s.Auth == nil {
+		return auth, nil
+	}
+	return s.Auth.VerifyAuth(ctx, auth)
 }
 
 func (s *Service) verifyEncryption(ctx context.Context) error {

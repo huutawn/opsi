@@ -20,6 +20,7 @@ func TestExecAdaptersCallExpectedCommands(t *testing.T) {
 if [ "$1" = "clone" ]; then last=""; for arg do last="$arg"; done; mkdir -p "$last"; fi
 `)
 	writeFakeCommand(t, dir, "docker", logPath, ``)
+	writeFakeCommand(t, dir, "nerdctl", logPath, ``)
 	writeFakeCommand(t, dir, "kubectl", logPath, ``)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -33,7 +34,13 @@ if [ "$1" = "clone" ]; then last=""; for arg do last="$arg"; done; mkdir -p "$la
 	if err := (ExecBuilder{}).Push(ctx, "api:abc"); err != nil {
 		t.Fatal(err)
 	}
-	if err := (KubectlAdapter{}).Apply(ctx, "k8s/deploy.yaml", "default", "api:abc"); err != nil {
+	if err := (ContainerdBuilder{}).Build(ctx, dir, "Dockerfile", "api:abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := (ContainerdBuilder{}).Push(ctx, "registry.local/proj/api:abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := (KubectlAdapter{}).Apply(ctx, "k8s/deploy.yaml", "default", "api", "api:abc"); err != nil {
 		t.Fatal(err)
 	}
 	if err := (KubectlAdapter{}).WatchRollout(ctx, "api", "default", time.Minute, time.Second); err != nil {
@@ -48,7 +55,7 @@ if [ "$1" = "clone" ]; then last=""; for arg do last="$arg"; done; mkdir -p "$la
 		t.Fatal(err)
 	}
 	log := string(data)
-	for _, want := range []string{"git clone", "git checkout abc", "docker buildx build", "docker push api:abc", "kubectl apply", "kubectl rollout status", "kubectl rollout undo"} {
+	for _, want := range []string{"git clone", "git checkout abc", "docker buildx build", "docker push api:abc", "nerdctl --namespace k8s.io build", "nerdctl --namespace k8s.io push registry.local/proj/api:abc", "kubectl apply", "kubectl set image deployment/api *=api:abc", "kubectl rollout status", "kubectl rollout undo"} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("missing %q in command log:\n%s", want, log)
 		}
@@ -66,7 +73,7 @@ func TestDryRunAdapters(t *testing.T) {
 	if err := (DryRunBuilder{}).Push(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := (DryRunK3sAdapter{}).Apply(ctx, "", "", ""); err != nil {
+	if err := (DryRunK3sAdapter{}).Apply(ctx, "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := (DryRunK3sAdapter{}).WatchRollout(ctx, "", "", time.Second, time.Millisecond); err != nil {
