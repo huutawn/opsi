@@ -71,6 +71,7 @@ type EngineConfig struct {
 }
 
 func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc) (Record, error) {
+	req = req.WithDefaults()
 	if err := req.Validate(); err != nil {
 		return Record{}, err
 	}
@@ -143,10 +144,14 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 	}
 
 	manifestPath := filepath.Join(workDir, req.ManifestPath)
+	renderedManifestPath := filepath.Join(workDir, ".opsi-rendered-manifest.yaml")
+	if err := renderManifestFile(manifestPath, renderedManifestPath, manifestOptions{ResourceRequestsJSON: req.ResourceRequestsJSON, ResourceLimitsJSON: req.ResourceLimitsJSON, TerminationGracePeriodSeconds: req.TerminationGracePeriodSeconds, IngressEnabled: req.IngressEnabled}); err != nil {
+		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
+	}
 	if err := emit(progress, record, PhaseApplying, "applying manifest", 70, nil); err != nil {
 		return record, err
 	}
-	if err := e.K3s.Apply(ctx, manifestPath, req.Namespace, req.ServiceName, req.ImageTag); err != nil {
+	if err := e.K3s.Apply(ctx, renderedManifestPath, req.Namespace, req.ServiceName, req.ImageTag); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
 
@@ -154,6 +159,12 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 		return record, err
 	}
 	if err := e.K3s.WatchRollout(ctx, req.ServiceName, req.Namespace, e.RolloutTimeout, e.PollInterval); err != nil {
+		decision := ClassifyFailure(err.Error(), false, 0)
+		record.RollbackSafe = decision.RollbackSafe
+		record.RollbackReason = decision.Reason
+		if !decision.RollbackSafe {
+			return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
+		}
 		_ = emit(progress, record, PhaseRollback, "rollout failed; rolling back", 90, err)
 		rollbackErr := e.K3s.Rollback(ctx, req.ServiceName, req.Namespace)
 		if rollbackErr != nil {

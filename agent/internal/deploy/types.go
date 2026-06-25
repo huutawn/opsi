@@ -5,9 +5,11 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,72 +34,92 @@ const (
 	StatusRolledBack          = "rolled_back"
 	StatusFailed              = "failed"
 	StatusFailedAfterRollback = "failed_after_rollback"
+
+	DefaultTerminationGracePeriodSeconds = 30
+	DefaultResourceRequestsJSON          = `{"cpu":"100m","memory":"128Mi"}`
+	DefaultResourceLimitsJSON            = `{"cpu":"500m","memory":"512Mi"}`
 )
 
 type Request struct {
-	ProjectID    string
-	ServiceID    string
-	ServiceName  string
-	ServiceType  string
-	Service      string
-	RepoURL      string
-	Branch       string
-	GitSHA       string
-	Namespace    string
-	BuildContext string
-	Dockerfile   string
-	ManifestPath string
-	Registry     string
-	ImageTag     string
-	TriggeredBy  string
+	ProjectID                     string
+	ServiceID                     string
+	ServiceName                   string
+	ServiceType                   string
+	Service                       string
+	RepoURL                       string
+	Branch                        string
+	GitSHA                        string
+	Namespace                     string
+	BuildContext                  string
+	Dockerfile                    string
+	ManifestPath                  string
+	WatchPaths                    []string
+	TerminationGracePeriodSeconds int
+	ResourceRequestsJSON          string
+	ResourceLimitsJSON            string
+	IngressEnabled                bool
+	Registry                      string
+	ImageTag                      string
+	TriggeredBy                   string
 }
 
 type Record struct {
-	DeployID    string
-	ProjectID   string
-	ServiceID   string
-	ServiceName string
-	StartedAt   time.Time
-	FinishedAt  time.Time
-	GitSHA      string
-	ImageTag    string
-	Status      string
-	Duration    time.Duration
-	Error       string
-	TriggeredBy string
+	DeployID       string
+	ProjectID      string
+	ServiceID      string
+	ServiceName    string
+	StartedAt      time.Time
+	FinishedAt     time.Time
+	GitSHA         string
+	ImageTag       string
+	Status         string
+	Duration       time.Duration
+	Error          string
+	TriggeredBy    string
+	MigrationRan   bool
+	RollbackSafe   bool
+	RollbackReason string
 }
 
 type ServiceRecord struct {
-	ID           string
-	ProjectID    string
-	Name         string
-	Type         string
-	Namespace    string
-	RepoURL      string
-	Branch       string
-	BuildContext string
-	Dockerfile   string
-	ManifestPath string
-	CurrentImage string
-	Health       string
-	UpdatedAt    time.Time
+	ID                            string
+	ProjectID                     string
+	Name                          string
+	Type                          string
+	Namespace                     string
+	RepoURL                       string
+	Branch                        string
+	BuildContext                  string
+	Dockerfile                    string
+	ManifestPath                  string
+	WatchPaths                    []string
+	TerminationGracePeriodSeconds int
+	ResourceRequestsJSON          string
+	ResourceLimitsJSON            string
+	CurrentImage                  string
+	Health                        string
+	UpdatedAt                     time.Time
 }
 
 func ServiceRecordFromRequest(req Request) ServiceRecord {
 	return ServiceRecord{
-		ID:           req.ServiceID,
-		ProjectID:    req.ProjectID,
-		Name:         req.ServiceName,
-		Type:         firstNonEmpty(req.ServiceType, "custom"),
-		Namespace:    req.Namespace,
-		RepoURL:      req.RepoURL,
-		Branch:       req.Branch,
-		BuildContext: req.BuildContext,
-		Dockerfile:   req.Dockerfile,
-		ManifestPath: req.ManifestPath,
-		CurrentImage: req.ImageTag,
-		Health:       "deploying",
-		UpdatedAt:    time.Now().UTC(),
+		ID:                            req.ServiceID,
+		ProjectID:                     req.ProjectID,
+		Name:                          req.ServiceName,
+		Type:                          firstNonEmpty(req.ServiceType, "custom"),
+		Namespace:                     req.Namespace,
+		RepoURL:                       req.RepoURL,
+		Branch:                        req.Branch,
+		BuildContext:                  req.BuildContext,
+		Dockerfile:                    req.Dockerfile,
+		ManifestPath:                  req.ManifestPath,
+		WatchPaths:                    req.WatchPaths,
+		TerminationGracePeriodSeconds: req.TerminationGracePeriodSeconds,
+		ResourceRequestsJSON:          req.ResourceRequestsJSON,
+		ResourceLimitsJSON:            req.ResourceLimitsJSON,
+		CurrentImage:                  req.ImageTag,
+		Health:                        "deploying",
+		UpdatedAt:                     time.Now().UTC(),
 	}
 }
 
@@ -113,6 +135,15 @@ type WebhookEvent struct {
 	TriggeredBy string
 	Body        []byte
 	Signature   string
+	Modified    []string
+}
+
+type githubPushPayload struct {
+	Commits []struct {
+		Modified []string `json:"modified"`
+		Added    []string `json:"added"`
+		Removed  []string `json:"removed"`
+	} `json:"commits"`
 }
 
 func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig) (Request, error) {
@@ -120,20 +151,25 @@ func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig)
 		return Request{}, errors.New("deploy request is required")
 	}
 	req := Request{
-		ProjectID:    firstNonEmpty(in.ProjectID, cfg.ProjectID),
-		ServiceID:    firstNonEmpty(in.ServiceID, cfg.ServiceID),
-		ServiceName:  firstNonEmpty(in.ServiceName, cfg.ServiceName),
-		ServiceType:  firstNonEmpty(in.ServiceType, cfg.ServiceType, "custom"),
-		RepoURL:      firstNonEmpty(in.RepoURL, cfg.RepoURL),
-		Branch:       firstNonEmpty(in.Branch, cfg.Branch),
-		GitSHA:       in.GitSHA,
-		Namespace:    firstNonEmpty(in.Namespace, cfg.Namespace),
-		BuildContext: firstNonEmpty(in.BuildContext, cfg.BuildContext),
-		Dockerfile:   firstNonEmpty(in.Dockerfile, cfg.Dockerfile),
-		ManifestPath: firstNonEmpty(in.ManifestPath, cfg.ManifestPath),
-		Registry:     firstNonEmpty(in.Registry, cfg.Registry),
-		ImageTag:     in.ImageTag,
-		TriggeredBy:  firstNonEmpty(in.TriggeredBy, "cli"),
+		ProjectID:                     firstNonEmpty(in.ProjectID, cfg.ProjectID),
+		ServiceID:                     firstNonEmpty(in.ServiceID, cfg.ServiceID),
+		ServiceName:                   firstNonEmpty(in.ServiceName, cfg.ServiceName),
+		ServiceType:                   firstNonEmpty(in.ServiceType, cfg.ServiceType, "custom"),
+		RepoURL:                       firstNonEmpty(in.RepoURL, cfg.RepoURL),
+		Branch:                        firstNonEmpty(in.Branch, cfg.Branch),
+		GitSHA:                        in.GitSHA,
+		Namespace:                     firstNonEmpty(in.Namespace, cfg.Namespace),
+		BuildContext:                  firstNonEmpty(in.BuildContext, cfg.BuildContext),
+		Dockerfile:                    firstNonEmpty(in.Dockerfile, cfg.Dockerfile),
+		ManifestPath:                  firstNonEmpty(in.ManifestPath, cfg.ManifestPath),
+		WatchPaths:                    firstNonEmptySlice(in.WatchPaths, cfg.WatchPaths),
+		TerminationGracePeriodSeconds: firstNonZeroInt(int(in.TerminationGracePeriodSeconds), cfg.TerminationGracePeriodSeconds, DefaultTerminationGracePeriodSeconds),
+		ResourceRequestsJSON:          firstNonEmpty(in.ResourceRequestsJSON, resourceJSON(cfg.ResourceRequests, DefaultResourceRequestsJSON)),
+		ResourceLimitsJSON:            firstNonEmpty(in.ResourceLimitsJSON, resourceJSON(cfg.ResourceLimits, DefaultResourceLimitsJSON)),
+		IngressEnabled:                in.IngressEnabled || cfg.IngressEnabled,
+		Registry:                      firstNonEmpty(in.Registry, cfg.Registry),
+		ImageTag:                      in.ImageTag,
+		TriggeredBy:                   firstNonEmpty(in.TriggeredBy, "cli"),
 	}
 	req.Service = req.ServiceName
 	if req.BuildContext == "" {
@@ -148,30 +184,37 @@ func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig)
 	if req.ImageTag == "" && req.ProjectID != "" && req.ServiceName != "" && req.GitSHA != "" {
 		req.ImageTag = imageTag(req.Registry, req.ProjectID, req.ServiceName, req.GitSHA)
 	}
+	req = req.WithDefaults()
 	return req, req.Validate()
 }
 
 func RequestFromWebhook(event WebhookEvent, cfg config.DeploymentConfig) (Request, error) {
 	branch := firstNonEmpty(event.Branch, branchFromRef(event.Ref), cfg.Branch)
 	req := Request{
-		ProjectID:    firstNonEmpty(event.ProjectID, cfg.ProjectID),
-		ServiceID:    firstNonEmpty(event.ServiceID, cfg.ServiceID),
-		ServiceName:  firstNonEmpty(event.ServiceName, cfg.ServiceName),
-		ServiceType:  firstNonEmpty(event.ServiceType, cfg.ServiceType, "custom"),
-		RepoURL:      firstNonEmpty(event.RepoURL, cfg.RepoURL),
-		Branch:       branch,
-		GitSHA:       event.After,
-		Namespace:    firstNonEmpty(cfg.Namespace, "default"),
-		BuildContext: firstNonEmpty(cfg.BuildContext, "."),
-		Dockerfile:   firstNonEmpty(cfg.Dockerfile, "Dockerfile"),
-		ManifestPath: cfg.ManifestPath,
-		Registry:     cfg.Registry,
-		TriggeredBy:  firstNonEmpty(event.TriggeredBy, "webhook"),
+		ProjectID:                     firstNonEmpty(event.ProjectID, cfg.ProjectID),
+		ServiceID:                     firstNonEmpty(event.ServiceID, cfg.ServiceID),
+		ServiceName:                   firstNonEmpty(event.ServiceName, cfg.ServiceName),
+		ServiceType:                   firstNonEmpty(event.ServiceType, cfg.ServiceType, "custom"),
+		RepoURL:                       firstNonEmpty(event.RepoURL, cfg.RepoURL),
+		Branch:                        branch,
+		GitSHA:                        event.After,
+		Namespace:                     firstNonEmpty(cfg.Namespace, "default"),
+		BuildContext:                  firstNonEmpty(cfg.BuildContext, "."),
+		Dockerfile:                    firstNonEmpty(cfg.Dockerfile, "Dockerfile"),
+		ManifestPath:                  cfg.ManifestPath,
+		WatchPaths:                    cfg.WatchPaths,
+		TerminationGracePeriodSeconds: firstNonZeroInt(cfg.TerminationGracePeriodSeconds, DefaultTerminationGracePeriodSeconds),
+		ResourceRequestsJSON:          resourceJSON(cfg.ResourceRequests, DefaultResourceRequestsJSON),
+		ResourceLimitsJSON:            resourceJSON(cfg.ResourceLimits, DefaultResourceLimitsJSON),
+		IngressEnabled:                cfg.IngressEnabled,
+		Registry:                      cfg.Registry,
+		TriggeredBy:                   firstNonEmpty(event.TriggeredBy, "webhook"),
 	}
 	req.Service = req.ServiceName
 	if req.ImageTag == "" && req.ProjectID != "" && req.ServiceName != "" && req.GitSHA != "" {
 		req.ImageTag = imageTag(req.Registry, req.ProjectID, req.ServiceName, req.GitSHA)
 	}
+	req = req.WithDefaults()
 	return req, req.Validate()
 }
 
@@ -209,9 +252,85 @@ func (r Request) Validate() error {
 	return nil
 }
 
+func (r Request) WithDefaults() Request {
+	if r.BuildContext == "" {
+		r.BuildContext = "."
+	}
+	if r.Dockerfile == "" {
+		r.Dockerfile = "Dockerfile"
+	}
+	if r.Namespace == "" {
+		r.Namespace = "default"
+	}
+	if r.TerminationGracePeriodSeconds == 0 {
+		r.TerminationGracePeriodSeconds = DefaultTerminationGracePeriodSeconds
+	}
+	if r.ResourceRequestsJSON == "" {
+		r.ResourceRequestsJSON = DefaultResourceRequestsJSON
+	}
+	if r.ResourceLimitsJSON == "" {
+		r.ResourceLimitsJSON = DefaultResourceLimitsJSON
+	}
+	return r
+}
+
 func ShouldDeploy(event WebhookEvent, cfg config.DeploymentConfig) bool {
 	branch := firstNonEmpty(event.Branch, branchFromRef(event.Ref))
-	return branch != "" && branch == cfg.Branch
+	if branch == "" || branch != cfg.Branch {
+		return false
+	}
+	return ChangedFilesMatchWatchPaths(event.ChangedFiles(), cfg.WatchPaths)
+}
+
+func (e WebhookEvent) ChangedFiles() []string {
+	if len(e.Modified) > 0 {
+		return e.Modified
+	}
+	var payload githubPushPayload
+	if len(e.Body) == 0 || json.Unmarshal(e.Body, &payload) != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var files []string
+	for _, commit := range payload.Commits {
+		for _, group := range [][]string{commit.Modified, commit.Added, commit.Removed} {
+			for _, file := range group {
+				if file == "" || seen[file] {
+					continue
+				}
+				seen[file] = true
+				files = append(files, file)
+			}
+		}
+	}
+	return files
+}
+
+func ChangedFilesMatchWatchPaths(files, watchPaths []string) bool {
+	if len(watchPaths) == 0 || len(files) == 0 {
+		return true
+	}
+	for _, file := range files {
+		for _, pattern := range watchPaths {
+			if globMatch(pattern, file) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func globMatch(pattern, file string) bool {
+	pattern = strings.TrimSpace(filepath.ToSlash(pattern))
+	file = filepath.ToSlash(file)
+	if pattern == "" {
+		return false
+	}
+	if strings.HasSuffix(pattern, "/**") {
+		return strings.HasPrefix(file, strings.TrimSuffix(pattern, "**"))
+	}
+	matched, err := path.Match(pattern, file)
+	return err == nil && matched
 }
 
 func VerifyGitHubSignature(secret string, body []byte, header string) bool {
@@ -255,6 +374,35 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonEmptySlice(values ...[]string) []string {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return nil
+}
+
+func firstNonZeroInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func resourceJSON(values map[string]string, fallback string) string {
+	if len(values) == 0 {
+		return fallback
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return fallback
+	}
+	return string(data)
 }
 
 func verifyMAC(secret string, body []byte, sig string, hash func() hash.Hash) bool {

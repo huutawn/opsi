@@ -234,7 +234,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() {
 		logger.Info("agent gRPC server listening", "addr", cfg.ListenAddr)
 		if err := grpcServer.Serve(grpcListener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
@@ -281,6 +281,9 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		}
 		runner := telemetry.Runner{
 			Store: telemetryStore,
+			Analyzer: &telemetry.Analyzer{
+				Store: telemetryStore,
+			},
 			Collector: telemetry.KubernetesCollector{
 				ProjectID:    cfg.Deployment.ProjectID,
 				NodeID:       cfg.NodeID,
@@ -300,6 +303,22 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 				errCh <- err
 			}
 		}()
+		if cfg.Deployment.PublicEndpoint != "" {
+			healthInterval := time.Minute
+			if cfg.Telemetry.ExternalHealthInterval != "" {
+				if parsed, err := time.ParseDuration(cfg.Telemetry.ExternalHealthInterval); err == nil {
+					healthInterval = parsed
+				}
+			}
+			checker := telemetry.SyntheticChecker{Store: telemetryStore}
+			target := telemetry.SyntheticTarget{ProjectID: cfg.Deployment.ProjectID, ServiceID: cfg.Deployment.ServiceID, NodeID: cfg.NodeID, PublicURL: cfg.Deployment.PublicEndpoint, InternalReady: true}
+			go func() {
+				logger.Info("agent external health checker started", "interval", healthInterval.String(), "url", cfg.Deployment.PublicEndpoint)
+				if err := checker.RunEvery(ctx, healthInterval, target); err != nil && !errors.Is(err, context.Canceled) {
+					errCh <- err
+				}
+			}()
+		}
 	}
 
 	select {

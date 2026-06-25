@@ -59,20 +59,25 @@ type ProgressEvent struct {
 }
 
 type DeployRequest struct {
-	ProjectID    string `json:"project_id"`
-	ServiceID    string `json:"service_id"`
-	ServiceName  string `json:"service_name"`
-	ServiceType  string `json:"service_type"`
-	RepoURL      string `json:"repo_url"`
-	Branch       string `json:"branch"`
-	GitSHA       string `json:"git_sha"`
-	Namespace    string `json:"namespace"`
-	BuildContext string `json:"build_context"`
-	Dockerfile   string `json:"dockerfile"`
-	ManifestPath string `json:"manifest_path"`
-	Registry     string `json:"registry"`
-	ImageTag     string `json:"image_tag"`
-	TriggeredBy  string `json:"triggered_by"`
+	ProjectID                     string   `json:"project_id"`
+	ServiceID                     string   `json:"service_id"`
+	ServiceName                   string   `json:"service_name"`
+	ServiceType                   string   `json:"service_type"`
+	RepoURL                       string   `json:"repo_url"`
+	Branch                        string   `json:"branch"`
+	GitSHA                        string   `json:"git_sha"`
+	Namespace                     string   `json:"namespace"`
+	BuildContext                  string   `json:"build_context"`
+	Dockerfile                    string   `json:"dockerfile"`
+	ManifestPath                  string   `json:"manifest_path"`
+	Registry                      string   `json:"registry"`
+	ImageTag                      string   `json:"image_tag"`
+	TriggeredBy                   string   `json:"triggered_by"`
+	WatchPaths                    []string `json:"watch_paths,omitempty"`
+	TerminationGracePeriodSeconds int32    `json:"termination_grace_period_seconds,omitempty"`
+	ResourceRequestsJSON          string   `json:"resource_requests_json,omitempty"`
+	ResourceLimitsJSON            string   `json:"resource_limits_json,omitempty"`
+	IngressEnabled                bool     `json:"ingress_enabled,omitempty"`
 }
 
 type SyncRequest struct {

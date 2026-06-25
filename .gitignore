@@ -36,3 +36,6 @@ certs/
 .serena
 AGENTS.md
 headroom_memory.db
+.agents
+.agent_archive
+docs

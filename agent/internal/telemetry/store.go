@@ -14,6 +14,10 @@ import (
 type Store interface {
 	InsertMetric(ctx context.Context, record MetricRecord) error
 	InsertLog(ctx context.Context, record LogRecord) error
+	InsertIncident(ctx context.Context, record IncidentRecord) error
+	FindOpenIncident(ctx context.Context, projectID, serviceID, anomalyType string, since time.Time) (*IncidentRecord, error)
+	InsertUptimeCheck(ctx context.Context, record UptimeCheckRecord) error
+	UptimePercent(ctx context.Context, projectID, serviceID string, since time.Time) (float64, error)
 	SyncRecords(ctx context.Context, projectID string, since time.Time, until time.Time, resourceIDs []string) ([]SyncRecord, error)
 	Retain(ctx context.Context, now time.Time) error
 	Close() error
@@ -103,11 +107,19 @@ CREATE TABLE IF NOT EXISTS incidents (
   node_id TEXT NOT NULL DEFAULT '',
   service_id TEXT NOT NULL DEFAULT '',
   pod_id TEXT NOT NULL DEFAULT '',
+  affected_services TEXT NOT NULL DEFAULT '',
+  affected_nodes TEXT NOT NULL DEFAULT '',
+  affected_pods TEXT NOT NULL DEFAULT '',
+  anomaly_type TEXT NOT NULL DEFAULT '',
   severity TEXT NOT NULL,
   status TEXT NOT NULL,
   context_json TEXT NOT NULL DEFAULT '{}',
   rca_json TEXT NOT NULL DEFAULT '{}',
+  rca_result TEXT NOT NULL DEFAULT '',
+  mitigation_actions_json TEXT NOT NULL DEFAULT '[]',
   created_at_unix INTEGER NOT NULL,
+  resolved_at_unix INTEGER NOT NULL DEFAULT 0,
+  mttr_seconds INTEGER NOT NULL DEFAULT 0,
   updated_at_unix INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS incidents_project_status_idx
@@ -120,17 +132,95 @@ CREATE TABLE IF NOT EXISTS audit_log (
   action TEXT NOT NULL,
   resource_type TEXT NOT NULL,
   resource_id TEXT NOT NULL,
+  ip_address TEXT NOT NULL DEFAULT '',
   result TEXT NOT NULL,
   metadata_json TEXT NOT NULL DEFAULT '{}',
   created_at_unix INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_log_project_created_idx
   ON audit_log(project_id, created_at_unix);
+
+CREATE TABLE IF NOT EXISTS uptime_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  service_id TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  success BOOLEAN NOT NULL,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  http_status INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS uptime_checks_project_service_timestamp_idx
+  ON uptime_checks(project_id, service_id, timestamp DESC);
 `)
 	if err != nil {
 		return fmt.Errorf("init telemetry schema: %w", err)
 	}
+	if err := s.ensureIncidentColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureAuditColumns(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *SQLiteStore) ensureIncidentColumns(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "incidents")
+	if err != nil {
+		return err
+	}
+	for name, ddl := range map[string]string{
+		"affected_services":       "ALTER TABLE incidents ADD COLUMN affected_services TEXT NOT NULL DEFAULT ''",
+		"affected_nodes":          "ALTER TABLE incidents ADD COLUMN affected_nodes TEXT NOT NULL DEFAULT ''",
+		"affected_pods":           "ALTER TABLE incidents ADD COLUMN affected_pods TEXT NOT NULL DEFAULT ''",
+		"anomaly_type":            "ALTER TABLE incidents ADD COLUMN anomaly_type TEXT NOT NULL DEFAULT ''",
+		"rca_result":              "ALTER TABLE incidents ADD COLUMN rca_result TEXT NOT NULL DEFAULT ''",
+		"mitigation_actions_json": "ALTER TABLE incidents ADD COLUMN mitigation_actions_json TEXT NOT NULL DEFAULT '[]'",
+		"resolved_at_unix":        "ALTER TABLE incidents ADD COLUMN resolved_at_unix INTEGER NOT NULL DEFAULT 0",
+		"mttr_seconds":            "ALTER TABLE incidents ADD COLUMN mttr_seconds INTEGER NOT NULL DEFAULT 0",
+	} {
+		if columns[name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, ddl); err != nil {
+			return fmt.Errorf("migrate incidents.%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ensureAuditColumns(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "audit_log")
+	if err != nil {
+		return err
+	}
+	if !columns["ip_address"] {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE audit_log ADD COLUMN ip_address TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("migrate audit_log.ip_address: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteStore) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func (s *SQLiteStore) InsertMetric(ctx context.Context, record MetricRecord) error {
@@ -171,6 +261,80 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	return nil
 }
 
+func (s *SQLiteStore) InsertIncident(ctx context.Context, record IncidentRecord) error {
+	created := record.CreatedAt
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
+	updated := record.UpdatedAt
+	if updated.IsZero() {
+		updated = created
+	}
+	if record.ContextJSON == "" {
+		record.ContextJSON = "{}"
+	}
+	if record.MitigationActions == "" {
+		record.MitigationActions = "[]"
+	}
+	resolved := int64(0)
+	if !record.ResolvedAt.IsZero() {
+		resolved = record.ResolvedAt.Unix()
+		if record.MTTRSeconds == 0 {
+			record.MTTRSeconds = int64(record.ResolvedAt.Sub(created).Seconds())
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO incidents(id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?)
+`, record.ID, record.ProjectID, record.NodeID, record.ServiceID, record.PodID, record.AffectedServices, record.AffectedNodes, record.AffectedPods, record.AnomalyType, record.Severity, record.Status, record.ContextJSON, record.RCAResult, record.MitigationActions, created.Unix(), resolved, record.MTTRSeconds, updated.Unix())
+	if err != nil {
+		return fmt.Errorf("insert incident: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) FindOpenIncident(ctx context.Context, projectID, serviceID, anomalyType string, since time.Time) (*IncidentRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix
+FROM incidents
+WHERE project_id = ? AND service_id = ? AND anomaly_type = ? AND status != 'resolved' AND created_at_unix >= ?
+ORDER BY created_at_unix DESC
+LIMIT 1
+`, projectID, serviceID, anomalyType, since.Unix())
+	return scanIncident(row)
+}
+
+func (s *SQLiteStore) InsertUptimeCheck(ctx context.Context, record UptimeCheckRecord) error {
+	timestamp := record.Timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO uptime_checks(project_id, service_id, timestamp, success, latency_ms, http_status)
+VALUES (?, ?, ?, ?, ?, ?)
+`, record.ProjectID, record.ServiceID, timestamp.Unix(), record.Success, record.LatencyMS, record.HTTPStatus)
+	if err != nil {
+		return fmt.Errorf("insert uptime check: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UptimePercent(ctx context.Context, projectID, serviceID string, since time.Time) (float64, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*), COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0)
+FROM uptime_checks
+WHERE project_id = ? AND service_id = ? AND timestamp >= ?
+`, projectID, serviceID, since.Unix())
+	var total, success int64
+	if err := row.Scan(&total, &success); err != nil {
+		return 0, err
+	}
+	if total == 0 {
+		return 0, nil
+	}
+	return float64(success) * 100 / float64(total), nil
+}
+
 func (s *SQLiteStore) InsertAudit(ctx context.Context, record secret.AuditRecord) error {
 	created := record.CreatedAt
 	if created.IsZero() {
@@ -180,9 +344,9 @@ func (s *SQLiteStore) InsertAudit(ctx context.Context, record secret.AuditRecord
 		record.MetadataJSON = "{}"
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO audit_log(id, project_id, actor, action, resource_type, resource_id, result, metadata_json, created_at_unix)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, record.ID, record.ProjectID, record.Actor, record.Action, record.ResourceType, record.ResourceID, record.Result, record.MetadataJSON, created.Unix())
+INSERT INTO audit_log(id, project_id, actor, action, resource_type, resource_id, ip_address, result, metadata_json, created_at_unix)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, record.ID, record.ProjectID, record.Actor, record.Action, record.ResourceType, record.ResourceID, record.IPAddress, record.Result, record.MetadataJSON, created.Unix())
 	if err != nil {
 		return fmt.Errorf("insert audit: %w", err)
 	}
@@ -217,8 +381,30 @@ func (s *SQLiteStore) SyncRecords(ctx context.Context, projectID string, since t
 		return nil, err
 	}
 	records = append(records, logs...)
+	incidents, err := s.incidentRecords(ctx, projectID, since, until, resources)
+	if err != nil {
+		return nil, err
+	}
+	records = append(records, incidents...)
 	sortSyncRecords(records)
 	return records, nil
+}
+
+func scanIncident(row interface{ Scan(dest ...any) error }) (*IncidentRecord, error) {
+	var rec IncidentRecord
+	var created, resolved, updated int64
+	if err := row.Scan(&rec.ID, &rec.ProjectID, &rec.NodeID, &rec.ServiceID, &rec.PodID, &rec.AffectedServices, &rec.AffectedNodes, &rec.AffectedPods, &rec.AnomalyType, &rec.Severity, &rec.Status, &rec.ContextJSON, &rec.RCAResult, &rec.MitigationActions, &created, &resolved, &rec.MTTRSeconds, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	rec.CreatedAt = time.Unix(created, 0).UTC()
+	if resolved > 0 {
+		rec.ResolvedAt = time.Unix(resolved, 0).UTC()
+	}
+	rec.UpdatedAt = time.Unix(updated, 0).UTC()
+	return &rec, nil
 }
 
 func (s *SQLiteStore) metricRecords(ctx context.Context, projectID string, since, until time.Time, resources map[string]bool) ([]SyncRecord, error) {
@@ -306,6 +492,32 @@ ORDER BY observed_at_unix ASC
 		}
 		logRecord := rec
 		records = append(records, SyncRecord{Kind: "log", Log: &logRecord, ObservedAt: rec.ObservedAt})
+	}
+	return records, rows.Err()
+}
+
+func (s *SQLiteStore) incidentRecords(ctx context.Context, projectID string, since, until time.Time, resources map[string]bool) ([]SyncRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix
+FROM incidents
+WHERE project_id = ? AND created_at_unix > ? AND created_at_unix <= ?
+ORDER BY created_at_unix ASC
+`, projectID, since.Unix(), until.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("query incidents: %w", err)
+	}
+	defer rows.Close()
+
+	var records []SyncRecord
+	for rows.Next() {
+		incident, err := scanIncident(rows)
+		if err != nil {
+			return nil, err
+		}
+		if incident == nil || !resourceAllowed(resources, incident.NodeID, incident.ServiceID, incident.PodID) {
+			continue
+		}
+		records = append(records, SyncRecord{Kind: "incident", Incident: incident, ObservedAt: incident.CreatedAt})
 	}
 	return records, rows.Err()
 }

@@ -46,6 +46,9 @@ func TestDefaultUsesContainerdBuilder(t *testing.T) {
 	if cfg.Deployment.BuilderMode != "containerd" || cfg.Deployment.ContainerdNS != "k8s.io" || cfg.Deployment.NerdctlPath != "nerdctl" {
 		t.Fatalf("unexpected builder defaults: %+v", cfg.Deployment)
 	}
+	if cfg.Deployment.TerminationGracePeriodSeconds != 30 || cfg.Deployment.ResourceRequests["cpu"] != "100m" || cfg.Deployment.ResourceLimits["memory"] != "512Mi" {
+		t.Fatalf("unexpected deployment safety defaults: %+v", cfg.Deployment)
+	}
 }
 
 func TestValidateRejectsUnknownBuilderMode(t *testing.T) {
@@ -53,5 +56,13 @@ func TestValidateRejectsUnknownBuilderMode(t *testing.T) {
 	cfg.Deployment.BuilderMode = "bad"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected builder mode validation error")
+	}
+}
+
+func TestValidateRejectsNegativeTerminationGrace(t *testing.T) {
+	cfg := Default()
+	cfg.Deployment.TerminationGracePeriodSeconds = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected termination grace validation error")
 	}
 }

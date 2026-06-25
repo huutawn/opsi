@@ -34,12 +34,41 @@ func TestVerifyGitHubSignature(t *testing.T) {
 }
 
 func TestShouldDeployFiltersBranch(t *testing.T) {
-	cfg := config.DeploymentConfig{Branch: "main"}
+	cfg := config.DeploymentConfig{Branch: "main", WatchPaths: []string{"apps/api/**", "packages/shared/**"}}
 	if !ShouldDeploy(WebhookEvent{Ref: "refs/heads/main"}, cfg) {
-		t.Fatal("expected main branch to deploy")
+		t.Fatal("expected main branch with no changed files to deploy")
 	}
 	if ShouldDeploy(WebhookEvent{Ref: "refs/heads/dev"}, cfg) {
 		t.Fatal("expected dev branch to be ignored")
+	}
+	if !ShouldDeploy(WebhookEvent{Ref: "refs/heads/main", Modified: []string{"apps/api/main.go"}}, cfg) {
+		t.Fatal("expected watched path to deploy")
+	}
+	if ShouldDeploy(WebhookEvent{Ref: "refs/heads/main", Modified: []string{"docs/readme.md"}}, cfg) {
+		t.Fatal("expected unrelated path to skip deploy")
+	}
+}
+
+func TestWebhookChangedFilesParsesGitHubPayload(t *testing.T) {
+	event := WebhookEvent{Body: []byte(`{"commits":[{"modified":["apps/api/main.go"],"added":["packages/shared/a.go"],"removed":["old.go"]}]}`)}
+	files := event.ChangedFiles()
+	if len(files) != 3 || files[0] != "apps/api/main.go" || files[1] != "packages/shared/a.go" || files[2] != "old.go" {
+		t.Fatalf("unexpected files: %+v", files)
+	}
+}
+
+func TestClassifyFailure(t *testing.T) {
+	if decision := ClassifyFailure("rollout timeout", false, 0); !decision.RollbackSafe || decision.FailType != FailTypeDeployTimeFail {
+		t.Fatalf("expected deploy-time rollback safe: %+v", decision)
+	}
+	if decision := ClassifyFailure("OOMKilled", false, 0); decision.RollbackSafe || decision.FailType != FailTypeResourceExhaustion {
+		t.Fatalf("expected resource exhaustion no rollback: %+v", decision)
+	}
+	if decision := ClassifyFailure("database connection refused", false, 0); decision.RollbackSafe || decision.FailType != FailTypeExternalDependency {
+		t.Fatalf("expected dependency no rollback: %+v", decision)
+	}
+	if decision := ClassifyFailure("crashloop", true, 6); decision.RollbackSafe || decision.FailType != FailTypeRuntimeCrash {
+		t.Fatalf("expected runtime no rollback: %+v", decision)
 	}
 }
 
@@ -119,5 +148,8 @@ func TestRequestFromContractFillsConfigDefaults(t *testing.T) {
 	}
 	if req.ImageTag != "registry.local:5000/proj-dev/api:abcdef123456" || req.Namespace != "prod" {
 		t.Fatalf("unexpected request: %+v", req)
+	}
+	if req.TerminationGracePeriodSeconds != DefaultTerminationGracePeriodSeconds || req.ResourceRequestsJSON != DefaultResourceRequestsJSON || req.ResourceLimitsJSON != DefaultResourceLimitsJSON {
+		t.Fatalf("missing safe defaults: %+v", req)
 	}
 }

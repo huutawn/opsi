@@ -40,6 +40,7 @@ type AuditRecord struct {
 	Action       string
 	ResourceType string
 	ResourceID   string
+	IPAddress    string
 	Result       string
 	MetadataJSON string
 	CreatedAt    time.Time

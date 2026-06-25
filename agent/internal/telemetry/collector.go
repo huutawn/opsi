@@ -84,6 +84,7 @@ func memAvailableBytes() (uint64, error) {
 type Runner struct {
 	Store             Store
 	Collector         Collector
+	Analyzer          *Analyzer
 	Interval          time.Duration
 	MaxRecordsPerTick int
 }
@@ -133,6 +134,11 @@ func (r Runner) collectOnce(ctx context.Context) error {
 	for _, metric := range metrics {
 		if err := r.Store.InsertMetric(ctx, metric); err != nil {
 			return err
+		}
+		if r.Analyzer != nil {
+			if _, err := r.Analyzer.ObserveMetric(ctx, metric); err != nil {
+				return err
+			}
 		}
 	}
 	for _, logRecord := range logs {

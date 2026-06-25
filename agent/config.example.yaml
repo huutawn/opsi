@@ -17,6 +17,17 @@ deployment:
   build_context: .
   dockerfile: Dockerfile
   manifest_path: k8s/deployment.yaml
+  public_endpoint: ""
+  watch_paths:
+    - "**"
+  termination_grace_period_seconds: 30
+  resource_requests:
+    cpu: 100m
+    memory: 128Mi
+  resource_limits:
+    cpu: 500m
+    memory: 512Mi
+  ingress_enabled: true
   registry: ""
   builder_mode: containerd
   nerdctl_path: nerdctl
@@ -35,6 +46,7 @@ telemetry:
   max_records_per_tick: 1000
   pod_log_tail: 50
   pod_log_since: 1m
+  external_health_interval: 60s
 secret:
   namespace: default
   kubectl_path: kubectl

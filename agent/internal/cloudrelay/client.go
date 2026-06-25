@@ -18,17 +18,18 @@ type Client struct {
 }
 
 type WebhookEnvelope struct {
-	ProjectID   string `json:"project_id"`
-	ServiceID   string `json:"service_id"`
-	ServiceName string `json:"service_name"`
-	ServiceType string `json:"service_type"`
-	RepoURL     string `json:"repo_url"`
-	Ref         string `json:"ref"`
-	After       string `json:"after"`
-	Branch      string `json:"branch"`
-	TriggeredBy string `json:"triggered_by"`
-	Body        string `json:"body"`
-	Signature   string `json:"signature"`
+	ProjectID   string   `json:"project_id"`
+	ServiceID   string   `json:"service_id"`
+	ServiceName string   `json:"service_name"`
+	ServiceType string   `json:"service_type"`
+	RepoURL     string   `json:"repo_url"`
+	Ref         string   `json:"ref"`
+	After       string   `json:"after"`
+	Branch      string   `json:"branch"`
+	TriggeredBy string   `json:"triggered_by"`
+	Body        string   `json:"body"`
+	Signature   string   `json:"signature"`
+	Modified    []string `json:"modified"`
 }
 
 func (c Client) PollWebhook(ctx context.Context, agentID string, wait time.Duration) (*deploy.WebhookEvent, error) {
@@ -82,5 +83,6 @@ func (c Client) PollWebhook(ctx context.Context, agentID string, wait time.Durat
 		TriggeredBy: envelope.TriggeredBy,
 		Body:        []byte(envelope.Body),
 		Signature:   envelope.Signature,
+		Modified:    envelope.Modified,
 	}, nil
 }

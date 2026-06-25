@@ -35,36 +35,43 @@ type AuthConfig struct {
 }
 
 type DeploymentConfig struct {
-	ProjectID      string `yaml:"project_id"`
-	ServiceID      string `yaml:"service_id"`
-	ServiceName    string `yaml:"service_name"`
-	ServiceType    string `yaml:"service_type"`
-	RepoURL        string `yaml:"repo_url"`
-	Branch         string `yaml:"branch"`
-	Namespace      string `yaml:"namespace"`
-	BuildContext   string `yaml:"build_context"`
-	Dockerfile     string `yaml:"dockerfile"`
-	ManifestPath   string `yaml:"manifest_path"`
-	Registry       string `yaml:"registry"`
-	BuilderMode    string `yaml:"builder_mode"`
-	NerdctlPath    string `yaml:"nerdctl_path"`
-	ContainerdNS   string `yaml:"containerd_namespace"`
-	WebhookSecret  string `yaml:"webhook_secret"`
-	DryRun         bool   `yaml:"dry_run"`
-	BuildRoot      string `yaml:"build_root"`
-	RolloutTimeout string `yaml:"rollout_timeout"`
-	PollInterval   string `yaml:"poll_interval"`
+	ProjectID                     string            `yaml:"project_id"`
+	ServiceID                     string            `yaml:"service_id"`
+	ServiceName                   string            `yaml:"service_name"`
+	ServiceType                   string            `yaml:"service_type"`
+	RepoURL                       string            `yaml:"repo_url"`
+	Branch                        string            `yaml:"branch"`
+	Namespace                     string            `yaml:"namespace"`
+	BuildContext                  string            `yaml:"build_context"`
+	Dockerfile                    string            `yaml:"dockerfile"`
+	ManifestPath                  string            `yaml:"manifest_path"`
+	PublicEndpoint                string            `yaml:"public_endpoint"`
+	WatchPaths                    []string          `yaml:"watch_paths"`
+	TerminationGracePeriodSeconds int               `yaml:"termination_grace_period_seconds"`
+	ResourceRequests              map[string]string `yaml:"resource_requests"`
+	ResourceLimits                map[string]string `yaml:"resource_limits"`
+	IngressEnabled                bool              `yaml:"ingress_enabled"`
+	Registry                      string            `yaml:"registry"`
+	BuilderMode                   string            `yaml:"builder_mode"`
+	NerdctlPath                   string            `yaml:"nerdctl_path"`
+	ContainerdNS                  string            `yaml:"containerd_namespace"`
+	WebhookSecret                 string            `yaml:"webhook_secret"`
+	DryRun                        bool              `yaml:"dry_run"`
+	BuildRoot                     string            `yaml:"build_root"`
+	RolloutTimeout                string            `yaml:"rollout_timeout"`
+	PollInterval                  string            `yaml:"poll_interval"`
 }
 
 type TelemetryConfig struct {
-	Enabled           bool   `yaml:"enabled"`
-	Interval          string `yaml:"interval"`
-	KubectlPath       string `yaml:"kubectl_path"`
-	CAdvisorEndpoint  string `yaml:"cadvisor_endpoint"`
-	CAdvisorTimeout   string `yaml:"cadvisor_timeout"`
-	MaxRecordsPerTick int    `yaml:"max_records_per_tick"`
-	PodLogTail        int    `yaml:"pod_log_tail"`
-	PodLogSince       string `yaml:"pod_log_since"`
+	Enabled                bool   `yaml:"enabled"`
+	Interval               string `yaml:"interval"`
+	KubectlPath            string `yaml:"kubectl_path"`
+	CAdvisorEndpoint       string `yaml:"cadvisor_endpoint"`
+	CAdvisorTimeout        string `yaml:"cadvisor_timeout"`
+	MaxRecordsPerTick      int    `yaml:"max_records_per_tick"`
+	PodLogTail             int    `yaml:"pod_log_tail"`
+	PodLogSince            string `yaml:"pod_log_since"`
+	ExternalHealthInterval string `yaml:"external_health_interval"`
 }
 
 type SecretConfig struct {
@@ -85,29 +92,36 @@ func Default() Config {
 		SQLitePath:    "./opsi-agent.sqlite",
 		Auth:          AuthConfig{Enabled: false, VerifyCacheTTL: "15m"},
 		Deployment: DeploymentConfig{
-			ProjectID:      "dev-project",
-			ServiceID:      "example-app",
-			ServiceName:    "example-app",
-			ServiceType:    "backend",
-			Branch:         "main",
-			Namespace:      "default",
-			BuildContext:   ".",
-			Dockerfile:     "Dockerfile",
-			BuilderMode:    "containerd",
-			NerdctlPath:    "nerdctl",
-			ContainerdNS:   "k8s.io",
-			BuildRoot:      "/tmp/opsi-builds",
-			RolloutTimeout: "10m",
-			PollInterval:   "5s",
+			ProjectID:                     "dev-project",
+			ServiceID:                     "example-app",
+			ServiceName:                   "example-app",
+			ServiceType:                   "backend",
+			Branch:                        "main",
+			Namespace:                     "default",
+			BuildContext:                  ".",
+			Dockerfile:                    "Dockerfile",
+			PublicEndpoint:                "",
+			WatchPaths:                    []string{"**"},
+			TerminationGracePeriodSeconds: 30,
+			ResourceRequests:              map[string]string{"cpu": "100m", "memory": "128Mi"},
+			ResourceLimits:                map[string]string{"cpu": "500m", "memory": "512Mi"},
+			IngressEnabled:                true,
+			BuilderMode:                   "containerd",
+			NerdctlPath:                   "nerdctl",
+			ContainerdNS:                  "k8s.io",
+			BuildRoot:                     "/tmp/opsi-builds",
+			RolloutTimeout:                "10m",
+			PollInterval:                  "5s",
 		},
 		Telemetry: TelemetryConfig{
-			Enabled:           true,
-			Interval:          "15s",
-			KubectlPath:       "kubectl",
-			CAdvisorTimeout:   "5s",
-			MaxRecordsPerTick: 1000,
-			PodLogTail:        50,
-			PodLogSince:       "1m",
+			Enabled:                true,
+			Interval:               "15s",
+			KubectlPath:            "kubectl",
+			CAdvisorTimeout:        "5s",
+			MaxRecordsPerTick:      1000,
+			PodLogTail:             50,
+			PodLogSince:            "1m",
+			ExternalHealthInterval: "60s",
 		},
 		Secret: SecretConfig{
 			Namespace:                 "default",
@@ -170,6 +184,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("deployment.rollout_timeout: %w", err)
 		}
 	}
+	if c.Deployment.TerminationGracePeriodSeconds < 0 {
+		return errors.New("deployment.termination_grace_period_seconds must be >= 0")
+	}
 	switch c.Deployment.BuilderMode {
 	case "", "containerd", "docker", "dry_run":
 	default:
@@ -188,6 +205,11 @@ func (c Config) Validate() error {
 	if c.Telemetry.PodLogSince != "" {
 		if _, err := time.ParseDuration(c.Telemetry.PodLogSince); err != nil {
 			return fmt.Errorf("telemetry.pod_log_since: %w", err)
+		}
+	}
+	if c.Telemetry.ExternalHealthInterval != "" {
+		if _, err := time.ParseDuration(c.Telemetry.ExternalHealthInterval); err != nil {
+			return fmt.Errorf("telemetry.external_health_interval: %w", err)
 		}
 	}
 	if c.Secret.CloudOTPTimeout != "" {

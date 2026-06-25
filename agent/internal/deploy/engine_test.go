@@ -51,7 +51,7 @@ func TestEngineDeployRollbackOnRolloutFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected rollout error")
 	}
-	if record.Status != StatusRolledBack || !fakes.rollbackCalled {
+	if record.Status != StatusRolledBack || !record.RollbackSafe || record.RollbackReason == "" || !fakes.rollbackCalled {
 		t.Fatalf("expected rollback, record=%+v rollback=%v", record, fakes.rollbackCalled)
 	}
 }
@@ -67,6 +67,9 @@ func TestEngineDeployBuildFailure(t *testing.T) {
 	}
 	if record.Status != StatusFailed || record.Error != "build failed" {
 		t.Fatalf("unexpected record: %+v", record)
+	}
+	if record.RollbackSafe || fakes.rollbackCalled {
+		t.Fatalf("build failure must not rollback: %+v", record)
 	}
 }
 
@@ -120,7 +123,23 @@ type fakeAdapters struct {
 	rollbackCalled bool
 }
 
-func (f *fakeAdapters) Clone(context.Context, string, string, string, string) error { return nil }
+func (f *fakeAdapters) Clone(_ context.Context, _, _, _, dest string) error {
+	path := filepath.Join(dest, "k8s")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(path, "deploy.yaml"), []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: api:old
+`), 0o600)
+}
 func (f *fakeAdapters) Build(context.Context, string, string, string) error         { return f.buildErr }
 func (f *fakeAdapters) Push(context.Context, string) error                          { return nil }
 func (f *fakeAdapters) Apply(context.Context, string, string, string, string) error { return nil }

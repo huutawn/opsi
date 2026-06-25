@@ -242,6 +242,7 @@ func (s *Service) audit(ctx context.Context, auth AuthContext, action, resourceT
 		Action:       action,
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
+		IPAddress:    auth.RemoteIP,
 		Result:       result,
 		MetadataJSON: metadataJSON,
 		CreatedAt:    s.now(),

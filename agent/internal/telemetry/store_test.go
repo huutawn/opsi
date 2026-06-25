@@ -23,16 +23,40 @@ func TestSQLiteStoreMigrationIsIdempotentAndSyncsRecords(t *testing.T) {
 	if err := store.InsertLog(context.Background(), LogRecord{ProjectID: "proj", NodeID: "node-1", ServiceID: "svc", Namespace: "default", Level: "error", Message: "pod 123 failed", Unread: true, ObservedAt: observed.Add(time.Second)}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.InsertIncident(context.Background(), IncidentRecord{ID: "inc-1", ProjectID: "proj", NodeID: "node-1", ServiceID: "svc", AnomalyType: "cpu_spike", Severity: "P2", Status: "detecting", ContextJSON: `{}`, CreatedAt: observed.Add(2 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
 
 	records, err := store.SyncRecords(context.Background(), "proj", observed.Add(-time.Second), observed.Add(time.Minute), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 || records[0].Kind != "metric" || records[1].Kind != "log" {
+	if len(records) != 3 || records[0].Kind != "metric" || records[1].Kind != "log" || records[2].Kind != "incident" {
 		t.Fatalf("unexpected records: %+v", records)
 	}
 	if records[1].Log.Fingerprint == "" {
 		t.Fatal("log fingerprint was not set")
+	}
+}
+
+func TestUptimeChecksStoreAndPercentage(t *testing.T) {
+	store, err := OpenSQLiteStore(t.TempDir() + "/telemetry.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+	for _, success := range []bool{true, false, true} {
+		if err := store.InsertUptimeCheck(context.Background(), UptimeCheckRecord{ProjectID: "proj", ServiceID: "svc", Timestamp: now, Success: success, LatencyMS: 12, HTTPStatus: 200}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	percent, err := store.UptimePercent(context.Background(), "proj", "svc", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if percent < 66 || percent > 67 {
+		t.Fatalf("unexpected uptime percent: %f", percent)
 	}
 }
 

@@ -66,6 +66,11 @@ message DeployRequest {
   string registry = 12;
   string image_tag = 13;
   string triggered_by = 14;
+  repeated string watch_paths = 15;
+  int32 termination_grace_period_seconds = 16;
+  string resource_requests_json = 17;
+  string resource_limits_json = 18;
+  bool ingress_enabled = 19;
 }
 
 message SyncRequest {

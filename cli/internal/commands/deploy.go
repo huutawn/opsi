@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
@@ -15,10 +16,26 @@ import (
 
 func newDeployCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
 	var req agentv1.DeployRequest
+	var resourceRequests []string
+	var resourceLimits []string
 	cmd := &cobra.Command{
 		Use:   "deploy",
 		Short: "Deploy a service through the Agent",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if len(resourceRequests) > 0 {
+				encoded, err := encodeResourceFlags(resourceRequests)
+				if err != nil {
+					return err
+				}
+				req.ResourceRequestsJSON = encoded
+			}
+			if len(resourceLimits) > 0 {
+				encoded, err := encodeResourceFlags(resourceLimits)
+				if err != nil {
+					return err
+				}
+				req.ResourceLimitsJSON = encoded
+			}
 			cfg, err := config.Load(*configPath)
 			if err != nil {
 				return err
@@ -51,8 +68,31 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 	flags.StringVar(&req.BuildContext, "build-context", "", "Docker build context path")
 	flags.StringVar(&req.Dockerfile, "dockerfile", "", "Dockerfile path")
 	flags.StringVar(&req.ManifestPath, "manifest-path", "", "Kubernetes manifest path")
+	flags.StringArrayVar(&req.WatchPaths, "watch-path", nil, "Glob path that triggers rebuild; repeatable")
+	flags.Int32Var(&req.TerminationGracePeriodSeconds, "termination-grace-period-seconds", 0, "Kubernetes terminationGracePeriodSeconds override")
+	flags.StringArrayVar(&resourceRequests, "resource-request", nil, "Resource request key=value, e.g. cpu=100m; repeatable")
+	flags.StringArrayVar(&resourceLimits, "resource-limit", nil, "Resource limit key=value, e.g. memory=512Mi; repeatable")
+	flags.StringVar(&req.ResourceRequestsJSON, "resource-requests-json", "", "Resource requests JSON override")
+	flags.StringVar(&req.ResourceLimitsJSON, "resource-limits-json", "", "Resource limits JSON override")
+	flags.BoolVar(&req.IngressEnabled, "ingress", false, "Inject Traefik-safe graceful shutdown defaults")
 	flags.StringVar(&req.Registry, "registry", "", "Target registry prefix")
 	flags.StringVar(&req.ImageTag, "image-tag", "", "Image tag override")
 	flags.StringVar(&req.TriggeredBy, "triggered-by", "cli", "Deployment actor")
 	return cmd
+}
+
+func encodeResourceFlags(values []string) (string, error) {
+	resources := map[string]string{}
+	for _, value := range values {
+		key, val, ok := strings.Cut(value, "=")
+		if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(val) == "" {
+			return "", fmt.Errorf("resource value must be key=value: %s", value)
+		}
+		resources[strings.TrimSpace(key)] = strings.TrimSpace(val)
+	}
+	data, err := json.Marshal(resources)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }

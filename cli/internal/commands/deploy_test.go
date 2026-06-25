@@ -28,7 +28,7 @@ func TestDeployCommandStreamsProgress(t *testing.T) {
 	}})
 	buf := bytes.NewBuffer(nil)
 	cmd.SetOut(buf)
-	cmd.SetArgs([]string{"--config", configPath, "deploy", "--project-id", "proj-dev", "--service-id", "svc-api", "--service-name", "api", "--repo-url", "https://example.test/repo.git", "--git-sha", "abc", "--manifest-path", "k8s/deploy.yaml"})
+	cmd.SetArgs([]string{"--config", configPath, "deploy", "--project-id", "proj-dev", "--service-id", "svc-api", "--service-name", "api", "--repo-url", "https://example.test/repo.git", "--git-sha", "abc", "--manifest-path", "k8s/deploy.yaml", "--watch-path", "apps/api/**", "--termination-grace-period-seconds", "45", "--resource-request", "cpu=100m", "--resource-limit", "memory=512Mi", "--ingress"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -42,6 +42,9 @@ type commandDeploymentServer struct{}
 
 func (commandDeploymentServer) Deploy(req *agentv1.DeployRequest, stream agentv1.DeploymentService_DeployServer) error {
 	if req.ProjectID != "proj-dev" || req.ServiceID != "svc-api" || req.ServiceName != "api" || req.GitSHA != "abc" {
+		return nil
+	}
+	if len(req.WatchPaths) != 1 || req.WatchPaths[0] != "apps/api/**" || req.TerminationGracePeriodSeconds != 45 || req.ResourceRequestsJSON != `{"cpu":"100m"}` || req.ResourceLimitsJSON != `{"memory":"512Mi"}` || !req.IngressEnabled {
 		return nil
 	}
 	return stream.Send(&agentv1.ProgressEvent{OperationID: "dep_test", ProjectID: req.ProjectID, ServiceID: req.ServiceID, ServiceName: req.ServiceName, Phase: "success", Message: "ok", Percent: 100})
