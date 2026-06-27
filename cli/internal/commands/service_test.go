@@ -37,6 +37,39 @@ func TestServiceCreateCommand(t *testing.T) {
 	}
 }
 
+func TestServiceRegisterAndDeleteCommands(t *testing.T) {
+	addr, stop := startCommandServiceManagerServer(t)
+	defer stop()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "cli.yaml")
+	if err := os.WriteFile(configPath, []byte("agent_addr: "+addr+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return keychain.NewFakeStore(), nil }})
+	buf := bytes.NewBuffer(nil)
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--config", configPath, "service", "register", "--project-id", "demo", "--name", "legacy-db", "--type", "postgres", "--host", "host.k3s.internal", "--set", "password=secret"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"mode":"external"`) {
+		t.Fatalf("unexpected register output: %q", buf.String())
+	}
+
+	cmd = NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return keychain.NewFakeStore(), nil }})
+	buf = bytes.NewBuffer(nil)
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--config", configPath, "service", "delete", "--project-id", "demo", "--name", "legacy-db", "--purge-data"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"deleted":true`) {
+		t.Fatalf("unexpected delete output: %q", buf.String())
+	}
+}
+
 type commandServiceManagerServer struct {
 	agentv1.UnimplementedServiceManagerServiceServer
 }
@@ -52,8 +85,19 @@ func (commandServiceManagerServer) CreateManagedService(_ context.Context, req *
 	return &agentv1.ManagedServiceResponse{ProjectID: req.ProjectID, ID: req.Name, Name: req.Name, Type: req.Type, Namespace: req.Namespace, Host: "cache.prod.svc.cluster.local", SecretName: "opsi-svc-cache"}, nil
 }
 
+func (commandServiceManagerServer) RegisterExternalService(_ context.Context, req *agentv1.RegisterExternalServiceRequest) (*agentv1.ManagedServiceResponse, error) {
+	if req.ProjectID != "demo" || req.Name != "legacy-db" || req.Host != "host.k3s.internal" || req.Overrides["password"] != "secret" {
+		return &agentv1.ManagedServiceResponse{}, nil
+	}
+	return &agentv1.ManagedServiceResponse{ProjectID: req.ProjectID, ID: req.Name, Name: req.Name, Type: "postgresql", Namespace: "default", Mode: "external", Host: "legacy-db.default.svc.cluster.local", SecretName: "opsi-svc-legacy-db"}, nil
+}
+
 func (commandServiceManagerServer) GetManagedService(_ context.Context, req *agentv1.GetManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {
 	return &agentv1.ManagedServiceResponse{ProjectID: req.ProjectID, ID: req.ID, Name: req.ID, SecretName: "opsi-svc-" + req.ID}, nil
+}
+
+func (commandServiceManagerServer) DeleteManagedService(_ context.Context, req *agentv1.DeleteManagedServiceRequest) (*agentv1.DeleteManagedServiceResponse, error) {
+	return &agentv1.DeleteManagedServiceResponse{ProjectID: req.ProjectID, ID: req.ID, Deleted: req.PurgeData}, nil
 }
 
 func startCommandServiceManagerServer(t *testing.T) (string, func()) {

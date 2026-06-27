@@ -10,11 +10,20 @@ import (
 type recordingApplier struct {
 	namespace string
 	manifest  string
+	deleted   string
 }
 
 func (r *recordingApplier) Apply(_ context.Context, namespace string, manifest []byte) error {
 	r.namespace = namespace
 	r.manifest = string(manifest)
+	return nil
+}
+
+func (r *recordingApplier) Delete(_ context.Context, namespace, projectID, serviceID string, purgeData bool) error {
+	r.deleted = namespace + "/" + projectID + "/" + serviceID
+	if purgeData {
+		r.deleted += "/purge"
+	}
 	return nil
 }
 
@@ -48,6 +57,40 @@ func TestManagerCreateManagedAppliesAndStores(t *testing.T) {
 	}
 	if got == nil || got.SecretName != "opsi-svc-cache" || got.Config["host"] != "cache.prod.svc.cluster.local" {
 		t.Fatalf("service not stored: %#v", got)
+	}
+}
+
+func TestManagerRegisterExternalAndDelete(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	applier := &recordingApplier{}
+	manager := Manager{Store: store, Applier: applier}
+
+	service, err := manager.RegisterExternal(context.Background(), RegisterExternalRequest{
+		ProjectID: "demo",
+		Name:      "legacy-db",
+		Type:      "postgres",
+		Host:      "host.k3s.internal",
+		Overrides: map[string]string{"password": "secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Mode != "external" || !strings.Contains(applier.manifest, "type: ExternalName") {
+		t.Fatalf("bad external registration: service=%#v manifest=%s", service, applier.manifest)
+	}
+	if err := manager.Delete(context.Background(), DeleteRequest{ProjectID: "demo", ID: "legacy-db", PurgeData: true}); err != nil {
+		t.Fatal(err)
+	}
+	if applier.deleted != "default/demo/legacy-db/purge" {
+		t.Fatalf("delete not called: %q", applier.deleted)
+	}
+	got, err := store.GetManagedService(context.Background(), "demo", "legacy-db")
+	if err != nil || got != nil {
+		t.Fatalf("service still stored: %#v %v", got, err)
 	}
 }
 

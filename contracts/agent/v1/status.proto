@@ -15,7 +15,9 @@ service DeploymentService {
 service ServiceManagerService {
   rpc ListCatalog(ListCatalogRequest) returns (ListCatalogResponse);
   rpc CreateManagedService(CreateManagedServiceRequest) returns (ManagedServiceResponse);
+  rpc RegisterExternalService(RegisterExternalServiceRequest) returns (ManagedServiceResponse);
   rpc GetManagedService(GetManagedServiceRequest) returns (ManagedServiceResponse);
+  rpc DeleteManagedService(DeleteManagedServiceRequest) returns (DeleteManagedServiceResponse);
 }
 
 service TelemetryService {
@@ -115,9 +117,31 @@ message CreateManagedServiceRequest {
   map<string, string> overrides = 5;
 }
 
+message RegisterExternalServiceRequest {
+  string project_id = 1;
+  string name = 2;
+  string type = 3;
+  string namespace = 4;
+  string host = 5;
+  string port = 6;
+  map<string, string> overrides = 7;
+}
+
 message GetManagedServiceRequest {
   string project_id = 1;
   string id = 2;
+}
+
+message DeleteManagedServiceRequest {
+  string project_id = 1;
+  string id = 2;
+  bool purge_data = 3;
+}
+
+message DeleteManagedServiceResponse {
+  string project_id = 1;
+  string id = 2;
+  bool deleted = 3;
 }
 
 message ManagedServiceResponse {

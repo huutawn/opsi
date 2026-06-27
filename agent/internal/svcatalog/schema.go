@@ -214,3 +214,11 @@ func SortedEnvKeys(values map[string]EnvTemplate) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+func EnvKeysForType(serviceType string) ([]string, bool) {
+	schema, ok := BuiltInCatalog().Get(serviceType)
+	if !ok {
+		return nil, false
+	}
+	return SortedEnvKeys(schema.EnvMapping), true
+}

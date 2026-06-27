@@ -46,9 +46,10 @@ func (s *StatusService) Status(context.Context, *agentv1.StatusRequest) (*agentv
 }
 
 type DeploymentService struct {
-	cfg    config.Config
-	engine *deploy.Engine
-	auth   secret.AuthVerifier
+	cfg          config.Config
+	engine       *deploy.Engine
+	auth         secret.AuthVerifier
+	serviceStore *svcatalog.Store
 }
 
 type TelemetryService struct {
@@ -125,6 +126,22 @@ func (s *ServiceManagerService) CreateManagedService(ctx context.Context, req *a
 	return managedServiceResponse(service), nil
 }
 
+func (s *ServiceManagerService) RegisterExternalService(ctx context.Context, req *agentv1.RegisterExternalServiceRequest) (*agentv1.ManagedServiceResponse, error) {
+	if req.ProjectID == "" {
+		return nil, status.Error(codes.InvalidArgument, "project_id is required")
+	}
+	if s.auth != nil {
+		if _, err := s.auth.VerifyAuth(ctx, secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(ctx)}); err != nil {
+			return nil, status.Error(codes.Unauthenticated, err.Error())
+		}
+	}
+	service, err := s.manager.RegisterExternal(ctx, svcatalog.RegisterExternalRequest{ProjectID: req.ProjectID, Name: req.Name, Type: req.Type, Namespace: req.Namespace, Host: req.Host, Port: req.Port, Overrides: req.Overrides})
+	if err != nil {
+		return nil, mapServiceCatalogError(err)
+	}
+	return managedServiceResponse(service), nil
+}
+
 func (s *ServiceManagerService) GetManagedService(ctx context.Context, req *agentv1.GetManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {
 	if req.ProjectID == "" || req.ID == "" {
 		return nil, status.Error(codes.InvalidArgument, "project_id and id are required")
@@ -142,6 +159,21 @@ func (s *ServiceManagerService) GetManagedService(ctx context.Context, req *agen
 		return nil, status.Error(codes.NotFound, "managed service not found")
 	}
 	return managedServiceResponse(service), nil
+}
+
+func (s *ServiceManagerService) DeleteManagedService(ctx context.Context, req *agentv1.DeleteManagedServiceRequest) (*agentv1.DeleteManagedServiceResponse, error) {
+	if req.ProjectID == "" || req.ID == "" {
+		return nil, status.Error(codes.InvalidArgument, "project_id and id are required")
+	}
+	if s.auth != nil {
+		if _, err := s.auth.VerifyAuth(ctx, secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(ctx)}); err != nil {
+			return nil, status.Error(codes.Unauthenticated, err.Error())
+		}
+	}
+	if err := s.manager.Delete(ctx, svcatalog.DeleteRequest{ProjectID: req.ProjectID, ID: req.ID, PurgeData: req.PurgeData}); err != nil {
+		return nil, mapServiceCatalogError(err)
+	}
+	return &agentv1.DeleteManagedServiceResponse{ProjectID: req.ProjectID, ID: req.ID, Deleted: true}, nil
 }
 
 func (s *IncidentService) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
@@ -247,8 +279,8 @@ func (s *TelemetryService) Sync(req *agentv1.SyncRequest, stream agentv1.Telemet
 	return nil
 }
 
-func NewDeploymentService(cfg config.Config, engine *deploy.Engine, auth secret.AuthVerifier) *DeploymentService {
-	return &DeploymentService{cfg: cfg, engine: engine, auth: auth}
+func NewDeploymentService(cfg config.Config, engine *deploy.Engine, auth secret.AuthVerifier, serviceStore *svcatalog.Store) *DeploymentService {
+	return &DeploymentService{cfg: cfg, engine: engine, auth: auth, serviceStore: serviceStore}
 }
 
 func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.DeploymentService_DeployServer) error {
@@ -260,6 +292,9 @@ func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.De
 		if _, err := s.auth.VerifyAuth(stream.Context(), secret.AuthContext{ProjectID: resolved.ProjectID, PAT: bearerToken(stream.Context())}); err != nil {
 			return status.Error(codes.Unauthenticated, err.Error())
 		}
+	}
+	if err := s.validateDependencies(stream.Context(), resolved); err != nil {
+		return err
 	}
 	_, err = s.engine.Deploy(stream.Context(), resolved, func(event *deploy.ProgressEvent) error {
 		out := &agentv1.ProgressEvent{
@@ -278,6 +313,39 @@ func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.De
 	})
 	if err != nil {
 		return status.Error(codes.Internal, err.Error())
+	}
+	return nil
+}
+
+func (s *DeploymentService) validateDependencies(ctx context.Context, req deploy.Request) error {
+	if len(req.DependsOn) == 0 {
+		return nil
+	}
+	if s.serviceStore == nil {
+		return status.Error(codes.FailedPrecondition, "service catalog store is not configured")
+	}
+	envOwner := map[string]string{}
+	for _, dep := range req.DependsOn {
+		service, err := s.serviceStore.GetManagedService(ctx, req.ProjectID, dep.Name)
+		if err != nil {
+			return status.Error(codes.Internal, err.Error())
+		}
+		if service == nil {
+			return status.Errorf(codes.FailedPrecondition, "dependency service %q is not registered", dep.Name)
+		}
+		keys, ok := svcatalog.EnvKeysForType(service.Type)
+		if !ok {
+			return status.Errorf(codes.FailedPrecondition, "dependency service %q has unknown type %q", dep.Name, service.Type)
+		}
+		for _, key := range keys {
+			if owner := envOwner[key]; owner != "" {
+				return status.Errorf(codes.FailedPrecondition, "dependency env collision on %s between %s and %s; use one dependency per generic env key until alias policy is enabled", key, owner, dep.Name)
+			}
+			envOwner[key] = dep.Name
+		}
+		if err := s.serviceStore.UpsertBinding(ctx, svcatalog.ServiceBinding{ProjectID: req.ProjectID, AppServiceID: req.ServiceID, DependencyServiceID: service.ID, Namespace: req.Namespace}); err != nil {
+			return status.Error(codes.Internal, err.Error())
+		}
 	}
 	return nil
 }
@@ -335,7 +403,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	grpcServer := grpc.NewServer(grpcOptions...)
 	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg))
 	authVerifier := authVerifier(cfg)
-	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine, authVerifier))
+	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine, authVerifier, serviceStore))
 	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
 	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore, authVerifier)))

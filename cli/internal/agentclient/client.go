@@ -152,6 +152,15 @@ func (c *Client) CreateManagedService(ctx context.Context, req *agentv1.CreateMa
 	return agentv1.NewServiceManagerServiceClient(conn).CreateManagedService(ctx, req)
 }
 
+func (c *Client) RegisterExternalService(ctx context.Context, req *agentv1.RegisterExternalServiceRequest) (*agentv1.ManagedServiceResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewServiceManagerServiceClient(conn).RegisterExternalService(ctx, req)
+}
+
 func (c *Client) GetManagedService(ctx context.Context, req *agentv1.GetManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
@@ -159,6 +168,15 @@ func (c *Client) GetManagedService(ctx context.Context, req *agentv1.GetManagedS
 	}
 	defer conn.Close()
 	return agentv1.NewServiceManagerServiceClient(conn).GetManagedService(ctx, req)
+}
+
+func (c *Client) DeleteManagedService(ctx context.Context, req *agentv1.DeleteManagedServiceRequest) (*agentv1.DeleteManagedServiceResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewServiceManagerServiceClient(conn).DeleteManagedService(ctx, req)
 }
 
 func (c *Client) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {

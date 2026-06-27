@@ -146,6 +146,18 @@ WHERE project_id = ? AND id = ?
 	return scanManagedService(row)
 }
 
+func (s *Store) DeleteManagedService(ctx context.Context, projectID, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM managed_services WHERE project_id = ? AND id = ?`, projectID, id)
+	if err != nil {
+		return fmt.Errorf("delete managed service: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM service_bindings WHERE project_id = ? AND dependency_service_id = ?`, projectID, id)
+	if err != nil {
+		return fmt.Errorf("delete service bindings: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) UpsertBinding(ctx context.Context, binding ServiceBinding) error {
 	now := binding.UpdatedAt
 	if now.IsZero() {

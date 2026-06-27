@@ -12,6 +12,10 @@ type ManifestApplier interface {
 	Apply(ctx context.Context, namespace string, manifest []byte) error
 }
 
+type ResourceDeleter interface {
+	Delete(ctx context.Context, namespace, projectID, serviceID string, purgeData bool) error
+}
+
 type KubectlApplier struct {
 	KubectlPath string
 	Runner      ApplyRunner
@@ -41,6 +45,24 @@ func (a KubectlApplier) Apply(ctx context.Context, namespace string, manifest []
 	return nil
 }
 
+func (a KubectlApplier) Delete(ctx context.Context, namespace, projectID, serviceID string, purgeData bool) error {
+	runner := a.Runner
+	if runner == nil {
+		runner = ExecApplyRunner{}
+	}
+	resources := "secret,configmap,service,statefulset,deployment,endpointslice"
+	if purgeData {
+		resources += ",pvc"
+	}
+	selector := "opsi.io/project-id=" + projectID + ",opsi.io/service-id=" + serviceID
+	out, err := runner.Run(ctx, nil, defaultString(a.KubectlPath, "kubectl"), "delete", resources, "-n", defaultString(namespace, "default"), "-l", selector, "--ignore-not-found=true")
+	if err != nil {
+		return fmt.Errorf("kubectl delete service catalog resources: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 type DryRunApplier struct{}
 
-func (DryRunApplier) Apply(context.Context, string, []byte) error { return nil }
+func (DryRunApplier) Apply(context.Context, string, []byte) error                { return nil }
+func (DryRunApplier) Delete(context.Context, string, string, string, bool) error { return nil }

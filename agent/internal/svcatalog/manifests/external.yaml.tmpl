@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Service.SecretName }}
+  namespace: {{ .Service.Namespace }}
+  labels:
+    opsi.io/managed: "true"
+    opsi.io/project-id: {{ .Service.ProjectID }}
+    opsi.io/service-id: {{ .Service.ID }}
+    opsi.io/service-name: {{ .Service.Name }}
+    opsi.io/service-type: {{ .Service.Type }}
+    opsi.io/service-mode: {{ .Service.Mode }}
+type: Opaque
+stringData:
+{{- range $key, $value := .Env }}
+  {{ $key }}: {{ printf "%q" $value }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Service.ConfigMapName }}
+  namespace: {{ .Service.Namespace }}
+  labels:
+    opsi.io/managed: "true"
+    opsi.io/project-id: {{ .Service.ProjectID }}
+    opsi.io/service-id: {{ .Service.ID }}
+    opsi.io/service-name: {{ .Service.Name }}
+    opsi.io/service-type: {{ .Service.Type }}
+    opsi.io/service-mode: {{ .Service.Mode }}
+data:
+  SERVICE_TYPE: {{ printf "%q" .Service.Type }}
+  SERVICE_HOST: {{ printf "%q" .Service.Host }}
+  SERVICE_PORT: {{ printf "%q" .Service.Port }}
+  EXTERNAL_HOST: {{ printf "%q" .TargetHost }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Service.Name }}
+  namespace: {{ .Service.Namespace }}
+  labels:
+    opsi.io/managed: "true"
+    opsi.io/project-id: {{ .Service.ProjectID }}
+    opsi.io/service-id: {{ .Service.ID }}
+    opsi.io/service-name: {{ .Service.Name }}
+    opsi.io/service-type: {{ .Service.Type }}
+    opsi.io/service-mode: {{ .Service.Mode }}
+spec:
+{{ if .TargetIP }}
+  ports:
+    - name: service
+      port: {{ .Service.Port }}
+      targetPort: {{ .Service.Port }}
+{{ else }}
+  type: ExternalName
+  externalName: {{ .TargetHost }}
+  ports:
+    - name: service
+      port: {{ .Service.Port }}
+      targetPort: {{ .Service.Port }}
+{{ end }}
+{{ if .TargetIP }}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: {{ .Service.Name }}-external
+  namespace: {{ .Service.Namespace }}
+  labels:
+    kubernetes.io/service-name: {{ .Service.Name }}
+    opsi.io/managed: "true"
+    opsi.io/project-id: {{ .Service.ProjectID }}
+    opsi.io/service-id: {{ .Service.ID }}
+    opsi.io/service-name: {{ .Service.Name }}
+    opsi.io/service-type: {{ .Service.Type }}
+    opsi.io/service-mode: {{ .Service.Mode }}
+addressType: IPv4
+ports:
+  - name: service
+    protocol: TCP
+    port: {{ .Service.Port }}
+endpoints:
+  - addresses:
+      - {{ printf "%q" .TargetHost }}
+{{ end }}

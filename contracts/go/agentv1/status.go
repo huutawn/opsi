@@ -118,9 +118,31 @@ type CreateManagedServiceRequest struct {
 	Overrides map[string]string `json:"overrides,omitempty"`
 }
 
+type RegisterExternalServiceRequest struct {
+	ProjectID string            `json:"project_id"`
+	Name      string            `json:"name"`
+	Type      string            `json:"type"`
+	Namespace string            `json:"namespace,omitempty"`
+	Host      string            `json:"host"`
+	Port      string            `json:"port,omitempty"`
+	Overrides map[string]string `json:"overrides,omitempty"`
+}
+
 type GetManagedServiceRequest struct {
 	ProjectID string `json:"project_id"`
 	ID        string `json:"id"`
+}
+
+type DeleteManagedServiceRequest struct {
+	ProjectID string `json:"project_id"`
+	ID        string `json:"id"`
+	PurgeData bool   `json:"purge_data,omitempty"`
+}
+
+type DeleteManagedServiceResponse struct {
+	ProjectID string `json:"project_id"`
+	ID        string `json:"id"`
+	Deleted   bool   `json:"deleted"`
 }
 
 type ManagedServiceResponse struct {
@@ -408,7 +430,9 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 type ServiceManagerServiceServer interface {
 	ListCatalog(context.Context, *ListCatalogRequest) (*ListCatalogResponse, error)
 	CreateManagedService(context.Context, *CreateManagedServiceRequest) (*ManagedServiceResponse, error)
+	RegisterExternalService(context.Context, *RegisterExternalServiceRequest) (*ManagedServiceResponse, error)
 	GetManagedService(context.Context, *GetManagedServiceRequest) (*ManagedServiceResponse, error)
+	DeleteManagedService(context.Context, *DeleteManagedServiceRequest) (*DeleteManagedServiceResponse, error)
 }
 
 type UnimplementedServiceManagerServiceServer struct{}
@@ -421,8 +445,16 @@ func (UnimplementedServiceManagerServiceServer) CreateManagedService(context.Con
 	return nil, status.Error(codes.Unimplemented, "method CreateManagedService not implemented")
 }
 
+func (UnimplementedServiceManagerServiceServer) RegisterExternalService(context.Context, *RegisterExternalServiceRequest) (*ManagedServiceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterExternalService not implemented")
+}
+
 func (UnimplementedServiceManagerServiceServer) GetManagedService(context.Context, *GetManagedServiceRequest) (*ManagedServiceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetManagedService not implemented")
+}
+
+func (UnimplementedServiceManagerServiceServer) DeleteManagedService(context.Context, *DeleteManagedServiceRequest) (*DeleteManagedServiceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteManagedService not implemented")
 }
 
 func RegisterServiceManagerServiceServer(server grpc.ServiceRegistrar, service ServiceManagerServiceServer) {
@@ -432,7 +464,9 @@ func RegisterServiceManagerServiceServer(server grpc.ServiceRegistrar, service S
 type ServiceManagerServiceClient interface {
 	ListCatalog(ctx context.Context, in *ListCatalogRequest, opts ...grpc.CallOption) (*ListCatalogResponse, error)
 	CreateManagedService(ctx context.Context, in *CreateManagedServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error)
+	RegisterExternalService(ctx context.Context, in *RegisterExternalServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error)
 	GetManagedService(ctx context.Context, in *GetManagedServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error)
+	DeleteManagedService(ctx context.Context, in *DeleteManagedServiceRequest, opts ...grpc.CallOption) (*DeleteManagedServiceResponse, error)
 }
 
 type serviceManagerServiceClient struct {
@@ -457,10 +491,24 @@ func (c *serviceManagerServiceClient) CreateManagedService(ctx context.Context, 
 	return out, err
 }
 
+func (c *serviceManagerServiceClient) RegisterExternalService(ctx context.Context, in *RegisterExternalServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error) {
+	out := new(ManagedServiceResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+ServiceManagerServiceName+"/RegisterExternalService", in, out, opts...)
+	return out, err
+}
+
 func (c *serviceManagerServiceClient) GetManagedService(ctx context.Context, in *GetManagedServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error) {
 	out := new(ManagedServiceResponse)
 	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
 	err := c.cc.Invoke(ctx, "/"+ServiceManagerServiceName+"/GetManagedService", in, out, opts...)
+	return out, err
+}
+
+func (c *serviceManagerServiceClient) DeleteManagedService(ctx context.Context, in *DeleteManagedServiceRequest, opts ...grpc.CallOption) (*DeleteManagedServiceResponse, error) {
+	out := new(DeleteManagedServiceResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+ServiceManagerServiceName+"/DeleteManagedService", in, out, opts...)
 	return out, err
 }
 
@@ -494,6 +542,21 @@ func createManagedServiceHandler(service any, ctx context.Context, dec func(any)
 	return interceptor(ctx, in, info, handler)
 }
 
+func registerExternalServiceHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(RegisterExternalServiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(ServiceManagerServiceServer).RegisterExternalService(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + ServiceManagerServiceName + "/RegisterExternalService"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(ServiceManagerServiceServer).RegisterExternalService(ctx, req.(*RegisterExternalServiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func getManagedServiceHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(GetManagedServiceRequest)
 	if err := dec(in); err != nil {
@@ -509,13 +572,30 @@ func getManagedServiceHandler(service any, ctx context.Context, dec func(any) er
 	return interceptor(ctx, in, info, handler)
 }
 
+func deleteManagedServiceHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(DeleteManagedServiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(ServiceManagerServiceServer).DeleteManagedService(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + ServiceManagerServiceName + "/DeleteManagedService"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(ServiceManagerServiceServer).DeleteManagedService(ctx, req.(*DeleteManagedServiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var ServiceManagerService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: ServiceManagerServiceName,
 	HandlerType: (*ServiceManagerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{MethodName: "ListCatalog", Handler: listCatalogHandler},
 		{MethodName: "CreateManagedService", Handler: createManagedServiceHandler},
+		{MethodName: "RegisterExternalService", Handler: registerExternalServiceHandler},
 		{MethodName: "GetManagedService", Handler: getManagedServiceHandler},
+		{MethodName: "DeleteManagedService", Handler: deleteManagedServiceHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "contracts/agent/v1/status.proto",

@@ -19,6 +19,9 @@ type serviceFlags struct {
 	name      string
 	typ       string
 	namespace string
+	host      string
+	port      string
+	purgeData bool
 	sets      []string
 }
 
@@ -27,7 +30,9 @@ func newServiceCommand(configPath *string, factory func() (keychain.Store, error
 	cmd := &cobra.Command{Use: "service", Short: "Manage infrastructure services"}
 	cmd.AddCommand(newServiceListCatalogCommand(configPath))
 	cmd.AddCommand(newServiceCreateCommand(configPath, factory, flags))
+	cmd.AddCommand(newServiceRegisterCommand(configPath, factory, flags))
 	cmd.AddCommand(newServiceStatusCommand(configPath, factory, flags))
+	cmd.AddCommand(newServiceDeleteCommand(configPath, factory, flags))
 	return cmd
 }
 
@@ -49,6 +54,43 @@ func newServiceListCatalogCommand(configPath *string) *cobra.Command {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
 		},
 	}
+}
+
+func newServiceRegisterCommand(configPath *string, factory func() (keychain.Store, error), flags *serviceFlags) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "register",
+		Short: "Register an external infrastructure service",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if flags.projectID == "" || flags.name == "" || flags.typ == "" || flags.host == "" {
+				return fmt.Errorf("project-id, name, type and host are required")
+			}
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+			overrides, err := parseSetFlags(flags.sets)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
+			defer cancel()
+			if pat := optionalPAT(factory); pat != "" {
+				ctx = agentclient.WithPAT(ctx, pat)
+			}
+			resp, err := agentclient.New(cfg).RegisterExternalService(ctx, &agentv1.RegisterExternalServiceRequest{ProjectID: flags.projectID, Name: flags.name, Type: flags.typ, Namespace: flags.namespace, Host: flags.host, Port: flags.port, Overrides: overrides})
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
+		},
+	}
+	addServiceProjectNameFlags(cmd, flags)
+	cmd.Flags().StringVar(&flags.typ, "type", "", "service type, e.g. postgres or redis")
+	cmd.Flags().StringVar(&flags.namespace, "namespace", "", "kubernetes namespace")
+	cmd.Flags().StringVar(&flags.host, "host", "", "external DNS name or IP")
+	cmd.Flags().StringVar(&flags.port, "port", "", "external service port")
+	cmd.Flags().StringArrayVar(&flags.sets, "set", nil, "config override key=value; repeatable")
+	return cmd
 }
 
 func newServiceCreateCommand(configPath *string, factory func() (keychain.Store, error), flags *serviceFlags) *cobra.Command {
@@ -111,6 +153,35 @@ func newServiceStatusCommand(configPath *string, factory func() (keychain.Store,
 		},
 	}
 	addServiceProjectNameFlags(cmd, flags)
+	return cmd
+}
+
+func newServiceDeleteCommand(configPath *string, factory func() (keychain.Store, error), flags *serviceFlags) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete service catalog resources; PVCs require --purge-data",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if flags.projectID == "" || flags.name == "" {
+				return fmt.Errorf("project-id and name are required")
+			}
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
+			defer cancel()
+			if pat := optionalPAT(factory); pat != "" {
+				ctx = agentclient.WithPAT(ctx, pat)
+			}
+			resp, err := agentclient.New(cfg).DeleteManagedService(ctx, &agentv1.DeleteManagedServiceRequest{ProjectID: flags.projectID, ID: flags.name, PurgeData: flags.purgeData})
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
+		},
+	}
+	addServiceProjectNameFlags(cmd, flags)
+	cmd.Flags().BoolVar(&flags.purgeData, "purge-data", false, "also delete persistent volume claims")
 	return cmd
 }
 
