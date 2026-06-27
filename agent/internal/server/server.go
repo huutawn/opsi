@@ -12,6 +12,7 @@ import (
 
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	"github.com/opsi-dev/opsi/agent/internal/incident"
 	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 	"github.com/opsi-dev/opsi/agent/internal/tlsconfig"
@@ -59,12 +60,47 @@ type SecretService struct {
 	service *secret.Service
 }
 
+type IncidentService struct {
+	service *incident.Service
+}
+
 func NewTelemetryService(store telemetry.Store, auth secret.AuthVerifier) *TelemetryService {
 	return &TelemetryService{store: store, auth: auth}
 }
 
 func NewSecretService(cfg config.Config, service *secret.Service) *SecretService {
 	return &SecretService{cfg: cfg, service: service}
+}
+
+func NewIncidentService(service *incident.Service) *IncidentService {
+	return &IncidentService{service: service}
+}
+
+func (s *IncidentService) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
+	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
+	rec, rca, err := s.service.Analyze(ctx, incident.AnalyzeRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	if err != nil {
+		return nil, mapIncidentError(err)
+	}
+	return incidentResponse(rec, rca), nil
+}
+
+func (s *IncidentService) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
+	rec, rca, err := s.service.Approve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, ActionID: req.ActionID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	if err != nil {
+		return nil, mapIncidentError(err)
+	}
+	return incidentResponse(rec, rca), nil
+}
+
+func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
+	rec, rca, err := s.service.Resolve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	if err != nil {
+		return nil, mapIncidentError(err)
+	}
+	return incidentResponse(rec, rca), nil
 }
 
 func (s *SecretService) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
@@ -228,6 +264,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine, authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
 	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore, authVerifier)))
+	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(cfg, telemetryStore, authVerifier)))
 
 	healthServer := &http.Server{
 		Handler:           healthHandler(version, startedAt, cfg),
@@ -439,6 +476,58 @@ func mapSecretError(err error) error {
 		return status.Error(codes.FailedPrecondition, message)
 	default:
 		return status.Error(codes.Internal, message)
+	}
+}
+
+func mapIncidentError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "PAT") || strings.Contains(message, "cloud auth"):
+		return status.Error(codes.Unauthenticated, message)
+	case message == "permission denied":
+		return status.Error(codes.PermissionDenied, message)
+	case strings.Contains(message, "not found"):
+		return status.Error(codes.NotFound, message)
+	case strings.Contains(message, "invalid") || strings.Contains(message, "required"):
+		return status.Error(codes.InvalidArgument, message)
+	default:
+		return status.Error(codes.Internal, message)
+	}
+}
+
+func incidentResponse(rec *telemetry.IncidentRecord, r incident.RCA) *agentv1.IncidentResponse {
+	resp := &agentv1.IncidentResponse{
+		IncidentID:            rec.ID,
+		ProjectID:             rec.ProjectID,
+		ServiceID:             rec.ServiceID,
+		Status:                rec.Status,
+		RootCause:             r.RootCause,
+		Confidence:            r.Confidence,
+		ContributingFactors:   r.ContributingFactors,
+		MitigationActionsJSON: rec.MitigationActions,
+		MTTRSeconds:           rec.MTTRSeconds,
+	}
+	if !rec.ResolvedAt.IsZero() {
+		resp.ResolvedAtUnix = rec.ResolvedAt.Unix()
+	}
+	for _, action := range r.RecommendedActions {
+		resp.RecommendedActions = append(resp.RecommendedActions, agentv1.RecommendedAction{ID: action.ID, Type: action.Type, Description: action.Description, RollbackSafe: action.RollbackSafe, Params: action.Params})
+	}
+	return resp
+}
+
+func incidentService(cfg config.Config, store telemetry.Store, auth secret.AuthVerifier) *incident.Service {
+	return &incident.Service{
+		Store:       store,
+		Audit:       store.(secret.AuditSink),
+		Auth:        auth,
+		Cloud:       incident.HTTPAnalyzerClient{Endpoint: cfg.CloudEndpoint},
+		KubectlPath: cfg.Telemetry.KubectlPath,
+		Namespace:   firstNonEmpty(cfg.Deployment.Namespace, cfg.Secret.Namespace),
+		DryRun:      cfg.Deployment.DryRun || cfg.Deployment.BuilderMode == "dry_run",
 	}
 }
 

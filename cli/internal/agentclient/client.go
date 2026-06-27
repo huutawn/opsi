@@ -134,6 +134,33 @@ func (c *Client) RotateSecret(ctx context.Context, req *agentv1.SecretRequest) (
 	return agentv1.NewSecretServiceClient(conn).RotateSecret(ctx, req)
 }
 
+func (c *Client) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewIncidentServiceClient(conn).AnalyzeIncident(ctx, req)
+}
+
+func (c *Client) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewIncidentServiceClient(conn).ApproveIncidentAction(ctx, req)
+}
+
+func (c *Client) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewIncidentServiceClient(conn).ResolveIncident(ctx, req)
+}
+
 func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	creds, err := transportCredentials(c.cfg)
 	if err != nil {

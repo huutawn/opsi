@@ -15,6 +15,10 @@ type Store interface {
 	InsertMetric(ctx context.Context, record MetricRecord) error
 	InsertLog(ctx context.Context, record LogRecord) error
 	InsertIncident(ctx context.Context, record IncidentRecord) error
+	GetIncident(ctx context.Context, projectID, incidentID string) (*IncidentRecord, error)
+	UpdateIncidentRCA(ctx context.Context, projectID, incidentID, status, rcaResult string, updated time.Time) (*IncidentRecord, error)
+	AppendIncidentAction(ctx context.Context, projectID, incidentID, status, mitigationActions string, updated time.Time) (*IncidentRecord, error)
+	ResolveIncident(ctx context.Context, projectID, incidentID string, resolved time.Time) (*IncidentRecord, error)
 	FindOpenIncident(ctx context.Context, projectID, serviceID, anomalyType string, since time.Time) (*IncidentRecord, error)
 	InsertUptimeCheck(ctx context.Context, record UptimeCheckRecord) error
 	UptimePercent(ctx context.Context, projectID, serviceID string, since time.Time) (float64, error)
@@ -291,6 +295,60 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?)
 		return fmt.Errorf("insert incident: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLiteStore) GetIncident(ctx context.Context, projectID, incidentID string) (*IncidentRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix
+FROM incidents
+WHERE project_id = ? AND id = ?
+`, projectID, incidentID)
+	return scanIncident(row)
+}
+
+func (s *SQLiteStore) UpdateIncidentRCA(ctx context.Context, projectID, incidentID, status, rcaResult string, updated time.Time) (*IncidentRecord, error) {
+	if updated.IsZero() {
+		updated = time.Now().UTC()
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE incidents
+SET status = ?, rca_result = ?, updated_at_unix = ?
+WHERE project_id = ? AND id = ?
+`, status, rcaResult, updated.Unix(), projectID, incidentID); err != nil {
+		return nil, fmt.Errorf("update incident rca: %w", err)
+	}
+	return s.GetIncident(ctx, projectID, incidentID)
+}
+
+func (s *SQLiteStore) AppendIncidentAction(ctx context.Context, projectID, incidentID, status, mitigationActions string, updated time.Time) (*IncidentRecord, error) {
+	if updated.IsZero() {
+		updated = time.Now().UTC()
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE incidents
+SET status = ?, mitigation_actions_json = ?, updated_at_unix = ?
+WHERE project_id = ? AND id = ?
+`, status, mitigationActions, updated.Unix(), projectID, incidentID); err != nil {
+		return nil, fmt.Errorf("append incident action: %w", err)
+	}
+	return s.GetIncident(ctx, projectID, incidentID)
+}
+
+func (s *SQLiteStore) ResolveIncident(ctx context.Context, projectID, incidentID string, resolved time.Time) (*IncidentRecord, error) {
+	if resolved.IsZero() {
+		resolved = time.Now().UTC()
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE incidents
+SET status = 'resolved',
+    resolved_at_unix = ?,
+    mttr_seconds = CASE WHEN created_at_unix > 0 THEN ? - created_at_unix ELSE 0 END,
+    updated_at_unix = ?
+WHERE project_id = ? AND id = ?
+`, resolved.Unix(), resolved.Unix(), resolved.Unix(), projectID, incidentID); err != nil {
+		return nil, fmt.Errorf("resolve incident: %w", err)
+	}
+	return s.GetIncident(ctx, projectID, incidentID)
 }
 
 func (s *SQLiteStore) FindOpenIncident(ctx context.Context, projectID, serviceID, anomalyType string, since time.Time) (*IncidentRecord, error) {

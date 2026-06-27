@@ -15,6 +15,7 @@ const (
 	DeploymentServiceName = "opsi.agent.v1.DeploymentService"
 	TelemetryServiceName  = "opsi.agent.v1.TelemetryService"
 	SecretServiceName     = "opsi.agent.v1.SecretService"
+	IncidentServiceName   = "opsi.agent.v1.IncidentService"
 	JSONCodecName         = "json"
 )
 
@@ -130,6 +131,45 @@ type SecretResponse struct {
 	Namespace string `json:"namespace"`
 	Username  string `json:"username"`
 	Password  string `json:"password,omitempty"`
+}
+
+type IncidentAnalyzeRequest struct {
+	ProjectID  string `json:"project_id"`
+	IncidentID string `json:"incident_id"`
+	UserID     string `json:"user_id"`
+	Role       string `json:"role"`
+	PAT        string `json:"pat"`
+}
+
+type IncidentActionRequest struct {
+	ProjectID  string `json:"project_id"`
+	IncidentID string `json:"incident_id"`
+	ActionID   string `json:"action_id"`
+	UserID     string `json:"user_id"`
+	Role       string `json:"role"`
+	PAT        string `json:"pat"`
+}
+
+type IncidentResponse struct {
+	IncidentID            string              `json:"incident_id"`
+	ProjectID             string              `json:"project_id"`
+	ServiceID             string              `json:"service_id,omitempty"`
+	Status                string              `json:"status"`
+	RootCause             string              `json:"root_cause,omitempty"`
+	Confidence            float64             `json:"confidence,omitempty"`
+	ContributingFactors   []string            `json:"contributing_factors,omitempty"`
+	RecommendedActions    []RecommendedAction `json:"recommended_actions,omitempty"`
+	MitigationActionsJSON string              `json:"mitigation_actions_json,omitempty"`
+	ResolvedAtUnix        int64               `json:"resolved_at_unix,omitempty"`
+	MTTRSeconds           int64               `json:"mttr_seconds,omitempty"`
+}
+
+type RecommendedAction struct {
+	ID           string            `json:"id"`
+	Type         string            `json:"type"`
+	Description  string            `json:"description"`
+	RollbackSafe bool              `json:"rollback_safe,omitempty"`
+	Params       map[string]string `json:"params,omitempty"`
 }
 
 type JSONCodec struct{}
@@ -551,6 +591,120 @@ var SecretService_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "CreateSecret", Handler: createSecretHandler},
 		{MethodName: "RevealSecret", Handler: revealSecretHandler},
 		{MethodName: "RotateSecret", Handler: rotateSecretHandler},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "contracts/agent/v1/status.proto",
+}
+
+type IncidentServiceServer interface {
+	AnalyzeIncident(context.Context, *IncidentAnalyzeRequest) (*IncidentResponse, error)
+	ApproveIncidentAction(context.Context, *IncidentActionRequest) (*IncidentResponse, error)
+	ResolveIncident(context.Context, *IncidentActionRequest) (*IncidentResponse, error)
+}
+
+type UnimplementedIncidentServiceServer struct{}
+
+func (UnimplementedIncidentServiceServer) AnalyzeIncident(context.Context, *IncidentAnalyzeRequest) (*IncidentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AnalyzeIncident not implemented")
+}
+
+func (UnimplementedIncidentServiceServer) ApproveIncidentAction(context.Context, *IncidentActionRequest) (*IncidentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApproveIncidentAction not implemented")
+}
+
+func (UnimplementedIncidentServiceServer) ResolveIncident(context.Context, *IncidentActionRequest) (*IncidentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveIncident not implemented")
+}
+
+func RegisterIncidentServiceServer(server grpc.ServiceRegistrar, service IncidentServiceServer) {
+	server.RegisterService(&IncidentService_ServiceDesc, service)
+}
+
+type IncidentServiceClient interface {
+	AnalyzeIncident(ctx context.Context, in *IncidentAnalyzeRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
+	ApproveIncidentAction(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
+	ResolveIncident(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
+}
+
+type incidentServiceClient struct{ cc grpc.ClientConnInterface }
+
+func NewIncidentServiceClient(cc grpc.ClientConnInterface) IncidentServiceClient {
+	return &incidentServiceClient{cc: cc}
+}
+
+func (c *incidentServiceClient) AnalyzeIncident(ctx context.Context, in *IncidentAnalyzeRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
+	out := new(IncidentResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/AnalyzeIncident", in, out, opts...)
+	return out, err
+}
+
+func (c *incidentServiceClient) ApproveIncidentAction(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
+	out := new(IncidentResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/ApproveIncidentAction", in, out, opts...)
+	return out, err
+}
+
+func (c *incidentServiceClient) ResolveIncident(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
+	out := new(IncidentResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/ResolveIncident", in, out, opts...)
+	return out, err
+}
+
+func analyzeIncidentHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentAnalyzeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(IncidentServiceServer).AnalyzeIncident(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/AnalyzeIncident"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(IncidentServiceServer).AnalyzeIncident(ctx, req.(*IncidentAnalyzeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func approveIncidentActionHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(IncidentServiceServer).ApproveIncidentAction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/ApproveIncidentAction"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(IncidentServiceServer).ApproveIncidentAction(ctx, req.(*IncidentActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func resolveIncidentHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(IncidentServiceServer).ResolveIncident(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/ResolveIncident"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(IncidentServiceServer).ResolveIncident(ctx, req.(*IncidentActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+var IncidentService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: IncidentServiceName,
+	HandlerType: (*IncidentServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{MethodName: "AnalyzeIncident", Handler: analyzeIncidentHandler},
+		{MethodName: "ApproveIncidentAction", Handler: approveIncidentActionHandler},
+		{MethodName: "ResolveIncident", Handler: resolveIncidentHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "contracts/agent/v1/status.proto",

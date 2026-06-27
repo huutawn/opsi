@@ -32,10 +32,48 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("/v1/auth/pat/verify", s.handlePATVerify)
+	mux.HandleFunc("/v1/ai/incidents/analyze", s.handleAnalyzeIncident)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	return mux
+}
+
+func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		SchemaVersion string `json:"schema_version"`
+		IncidentID    string `json:"incident_id"`
+		ProjectID     string `json:"project_id"`
+		ServiceID     string `json:"service_id"`
+		AnomalyType   string `json:"anomaly_type"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid incident context")
+		return
+	}
+	if req.SchemaVersion != "opsi.incident_context.v1" || req.IncidentID == "" || req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, "invalid incident context")
+		return
+	}
+	// ponytail: Gemini call skipped; add provider adapter when API key/config exists.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version": "opsi.rca.v1",
+		"incident_id":    req.IncidentID,
+		"root_cause":     "Cloud fixture RCA: " + firstNonEmpty(req.AnomalyType, "unknown anomaly"),
+		"confidence":     0.64,
+		"contributing_factors": []string{
+			"sanitized metric context",
+			"service-level anomaly",
+		},
+		"recommended_actions": []map[string]any{
+			{"id": "scale-replicas", "type": "scale_replicas", "description": "Scale service replicas", "rollback_safe": true, "params": map[string]string{"service_id": req.ServiceID, "replicas": "2"}},
+			{"id": "rate-limit-ingress", "type": "rate_limit_ingress", "description": "Apply ingress rate limit", "rollback_safe": true, "params": map[string]string{"service_id": req.ServiceID, "rps": "10"}},
+		},
+	})
 }
 
 func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
