@@ -131,6 +131,16 @@ func TestRequestValidateRejectsBadInputs(t *testing.T) {
 	if err := base.Validate(); err == nil {
 		t.Fatal("expected bad service error")
 	}
+	base = testRequest()
+	base.DependsOn = []ServiceDependency{{Name: "Bad_Name"}}
+	if err := base.Validate(); err == nil {
+		t.Fatal("expected bad dependency error")
+	}
+	base = testRequest()
+	base.DependsOn = []ServiceDependency{{Name: "mydb"}, {Name: "mydb"}}
+	if err := base.Validate(); err == nil {
+		t.Fatal("expected duplicate dependency error")
+	}
 }
 
 func TestRequestFromContractFillsConfigDefaults(t *testing.T) {

@@ -71,6 +71,13 @@ message DeployRequest {
   string resource_requests_json = 17;
   string resource_limits_json = 18;
   bool ingress_enabled = 19;
+  repeated ServiceDependency depends_on = 20;
+}
+
+message ServiceDependency {
+  string name = 1;
+  string env_prefix = 2;
+  bool expose_as_default = 3;
 }
 
 message SyncRequest {

@@ -18,6 +18,7 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 	var req agentv1.DeployRequest
 	var resourceRequests []string
 	var resourceLimits []string
+	var dependsOn []string
 	cmd := &cobra.Command{
 		Use:   "deploy",
 		Short: "Deploy a service through the Agent",
@@ -36,6 +37,7 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 				}
 				req.ResourceLimitsJSON = encoded
 			}
+			req.DependsOn = deployDependencies(dependsOn)
 			cfg, err := config.Load(*configPath)
 			if err != nil {
 				return err
@@ -69,6 +71,7 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 	flags.StringVar(&req.Dockerfile, "dockerfile", "", "Dockerfile path")
 	flags.StringVar(&req.ManifestPath, "manifest-path", "", "Kubernetes manifest path")
 	flags.StringArrayVar(&req.WatchPaths, "watch-path", nil, "Glob path that triggers rebuild; repeatable")
+	flags.StringArrayVar(&dependsOn, "depends-on", nil, "Managed service dependency name; repeatable")
 	flags.Int32Var(&req.TerminationGracePeriodSeconds, "termination-grace-period-seconds", 0, "Kubernetes terminationGracePeriodSeconds override")
 	flags.StringArrayVar(&resourceRequests, "resource-request", nil, "Resource request key=value, e.g. cpu=100m; repeatable")
 	flags.StringArrayVar(&resourceLimits, "resource-limit", nil, "Resource limit key=value, e.g. memory=512Mi; repeatable")
@@ -79,6 +82,21 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 	flags.StringVar(&req.ImageTag, "image-tag", "", "Image tag override")
 	flags.StringVar(&req.TriggeredBy, "triggered-by", "cli", "Deployment actor")
 	return cmd
+}
+
+func deployDependencies(values []string) []agentv1.ServiceDependency {
+	if len(values) == 0 {
+		return nil
+	}
+	deps := make([]agentv1.ServiceDependency, 0, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			continue
+		}
+		deps = append(deps, agentv1.ServiceDependency{Name: name})
+	}
+	return deps
 }
 
 func encodeResourceFlags(values []string) (string, error) {

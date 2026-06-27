@@ -2,10 +2,13 @@ package deploy
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,6 +18,7 @@ type manifestOptions struct {
 	ResourceLimitsJSON            string
 	TerminationGracePeriodSeconds int
 	IngressEnabled                bool
+	BindingSecrets                []string
 }
 
 func renderManifestFile(sourcePath, outputPath string, options manifestOptions) error {
@@ -80,6 +84,11 @@ func injectDeploymentDefaults(doc map[string]any, options manifestOptions) {
 	rolling["maxSurge"] = 1
 
 	template := ensureMap(spec, "template")
+	if len(options.BindingSecrets) > 0 {
+		metadata := ensureMap(template, "metadata")
+		annotations := ensureMap(metadata, "annotations")
+		annotations["opsi.io/bindings-checksum"] = bindingsChecksum(options.BindingSecrets)
+	}
 	podSpec := ensureMap(template, "spec")
 	if options.TerminationGracePeriodSeconds <= 0 {
 		options.TerminationGracePeriodSeconds = DefaultTerminationGracePeriodSeconds
@@ -103,7 +112,49 @@ func injectDeploymentDefaults(doc map[string]any, options manifestOptions) {
 			exec := ensureMap(preStop, "exec")
 			exec["command"] = []any{"sh", "-c", "sleep 10"}
 		}
+		appendBindingSecrets(container, options.BindingSecrets)
 	}
+}
+
+func appendBindingSecrets(container map[string]any, secrets []string) {
+	if len(secrets) == 0 {
+		return
+	}
+	envFrom, _ := container["envFrom"].([]any)
+	seen := map[string]bool{}
+	for _, raw := range envFrom {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ref, _ := item["secretRef"].(map[string]any)
+		if name, _ := ref["name"].(string); name != "" {
+			seen[name] = true
+		}
+	}
+	for _, secret := range secrets {
+		if seen[secret] {
+			continue
+		}
+		envFrom = append(envFrom, map[string]any{"secretRef": map[string]any{"name": secret}})
+	}
+	container["envFrom"] = envFrom
+}
+
+func bindingSecretNames(deps []ServiceDependency) []string {
+	if len(deps) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		names = append(names, "opsi-svc-"+dep.Name)
+	}
+	return names
+}
+
+func bindingsChecksum(secrets []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(secrets, "\n")))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func ensureMap(parent map[string]any, key string) map[string]any {

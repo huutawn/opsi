@@ -11,6 +11,7 @@ import (
 	"hash"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -61,6 +62,13 @@ type Request struct {
 	Registry                      string
 	ImageTag                      string
 	TriggeredBy                   string
+	DependsOn                     []ServiceDependency
+}
+
+type ServiceDependency struct {
+	Name            string
+	EnvPrefix       string
+	ExposeAsDefault bool
 }
 
 type Record struct {
@@ -170,6 +178,7 @@ func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig)
 		Registry:                      firstNonEmpty(in.Registry, cfg.Registry),
 		ImageTag:                      in.ImageTag,
 		TriggeredBy:                   firstNonEmpty(in.TriggeredBy, "cli"),
+		DependsOn:                     dependenciesFromContract(in.DependsOn),
 	}
 	req.Service = req.ServiceName
 	if req.BuildContext == "" {
@@ -248,6 +257,16 @@ func (r Request) Validate() error {
 	}
 	if r.Service != "" && r.Service != r.ServiceName {
 		return fmt.Errorf("service must match service_name")
+	}
+	seen := map[string]bool{}
+	for _, dep := range r.DependsOn {
+		if !safeKubernetesName(dep.Name) {
+			return fmt.Errorf("depends_on name %q must be a Kubernetes-safe service name", dep.Name)
+		}
+		if seen[dep.Name] {
+			return fmt.Errorf("depends_on contains duplicate service %q", dep.Name)
+		}
+		seen[dep.Name] = true
 	}
 	return nil
 }
@@ -365,6 +384,25 @@ func imageTag(registry, projectID, service, sha string) string {
 func safeID(value string) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && value == filepath.Clean(value) && !strings.ContainsAny(value, `/\\ `) && value != "." && value != ".."
+}
+
+func safeKubernetesName(value string) bool {
+	return regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`).MatchString(value) && len(value) <= 63
+}
+
+func dependenciesFromContract(in []agentv1.ServiceDependency) []ServiceDependency {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ServiceDependency, 0, len(in))
+	for _, dep := range in {
+		out = append(out, ServiceDependency{
+			Name:            strings.TrimSpace(dep.Name),
+			EnvPrefix:       strings.TrimSpace(dep.EnvPrefix),
+			ExposeAsDefault: dep.ExposeAsDefault,
+		})
+	}
+	return out
 }
 
 func firstNonEmpty(values ...string) string {

@@ -49,3 +49,29 @@ metadata:
 		t.Fatalf("unexpected mutation:\n%s", rendered)
 	}
 }
+
+func TestRenderManifestInjectsBindingSecrets(t *testing.T) {
+	rendered, err := renderManifest([]byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: api:old
+          envFrom:
+            - secretRef:
+                name: existing
+`), manifestOptions{BindingSecrets: []string{"opsi-svc-mydb", "opsi-svc-cache"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(rendered)
+	for _, want := range []string{"opsi.io/bindings-checksum: sha256:", "name: existing", "name: opsi-svc-mydb", "name: opsi-svc-cache"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in manifest:\n%s", want, out)
+		}
+	}
+}
