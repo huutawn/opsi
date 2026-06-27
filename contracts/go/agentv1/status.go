@@ -11,12 +11,13 @@ import (
 )
 
 const (
-	StatusServiceName     = "opsi.agent.v1.StatusService"
-	DeploymentServiceName = "opsi.agent.v1.DeploymentService"
-	TelemetryServiceName  = "opsi.agent.v1.TelemetryService"
-	SecretServiceName     = "opsi.agent.v1.SecretService"
-	IncidentServiceName   = "opsi.agent.v1.IncidentService"
-	JSONCodecName         = "json"
+	StatusServiceName         = "opsi.agent.v1.StatusService"
+	DeploymentServiceName     = "opsi.agent.v1.DeploymentService"
+	TelemetryServiceName      = "opsi.agent.v1.TelemetryService"
+	SecretServiceName         = "opsi.agent.v1.SecretService"
+	IncidentServiceName       = "opsi.agent.v1.IncidentService"
+	ServiceManagerServiceName = "opsi.agent.v1.ServiceManagerService"
+	JSONCodecName             = "json"
 )
 
 type ErrorCode string
@@ -86,6 +87,58 @@ type ServiceDependency struct {
 	Name            string `json:"name"`
 	EnvPrefix       string `json:"env_prefix,omitempty"`
 	ExposeAsDefault bool   `json:"expose_as_default,omitempty"`
+}
+
+type ListCatalogRequest struct{}
+
+type ListCatalogResponse struct {
+	Services []CatalogService `json:"services,omitempty"`
+}
+
+type CatalogService struct {
+	Type             string             `json:"type"`
+	DisplayName      string             `json:"display_name"`
+	ConfigKeys       []CatalogConfigKey `json:"config_keys,omitempty"`
+	SecretKeys       []string           `json:"secret_keys,omitempty"`
+	EnvVars          []string           `json:"env_vars,omitempty"`
+	ManagedSupported bool               `json:"managed_supported"`
+}
+
+type CatalogConfigKey struct {
+	Key      string `json:"key"`
+	Default  string `json:"default,omitempty"`
+	Required bool   `json:"required,omitempty"`
+}
+
+type CreateManagedServiceRequest struct {
+	ProjectID string            `json:"project_id"`
+	Name      string            `json:"name"`
+	Type      string            `json:"type"`
+	Namespace string            `json:"namespace,omitempty"`
+	Overrides map[string]string `json:"overrides,omitempty"`
+}
+
+type GetManagedServiceRequest struct {
+	ProjectID string `json:"project_id"`
+	ID        string `json:"id"`
+}
+
+type ManagedServiceResponse struct {
+	ID            string            `json:"id"`
+	ProjectID     string            `json:"project_id"`
+	Name          string            `json:"name"`
+	Type          string            `json:"type"`
+	Namespace     string            `json:"namespace"`
+	Mode          string            `json:"mode"`
+	Status        string            `json:"status"`
+	Host          string            `json:"host"`
+	Port          string            `json:"port"`
+	Version       string            `json:"version"`
+	Config        map[string]string `json:"config,omitempty"`
+	SecretName    string            `json:"secret_name"`
+	ConfigMapName string            `json:"configmap_name"`
+	CreatedAtUnix int64             `json:"created_at_unix,omitempty"`
+	UpdatedAtUnix int64             `json:"updated_at_unix,omitempty"`
 }
 
 type SyncRequest struct {
@@ -349,6 +402,122 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
+	Metadata: "contracts/agent/v1/status.proto",
+}
+
+type ServiceManagerServiceServer interface {
+	ListCatalog(context.Context, *ListCatalogRequest) (*ListCatalogResponse, error)
+	CreateManagedService(context.Context, *CreateManagedServiceRequest) (*ManagedServiceResponse, error)
+	GetManagedService(context.Context, *GetManagedServiceRequest) (*ManagedServiceResponse, error)
+}
+
+type UnimplementedServiceManagerServiceServer struct{}
+
+func (UnimplementedServiceManagerServiceServer) ListCatalog(context.Context, *ListCatalogRequest) (*ListCatalogResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListCatalog not implemented")
+}
+
+func (UnimplementedServiceManagerServiceServer) CreateManagedService(context.Context, *CreateManagedServiceRequest) (*ManagedServiceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateManagedService not implemented")
+}
+
+func (UnimplementedServiceManagerServiceServer) GetManagedService(context.Context, *GetManagedServiceRequest) (*ManagedServiceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetManagedService not implemented")
+}
+
+func RegisterServiceManagerServiceServer(server grpc.ServiceRegistrar, service ServiceManagerServiceServer) {
+	server.RegisterService(&ServiceManagerService_ServiceDesc, service)
+}
+
+type ServiceManagerServiceClient interface {
+	ListCatalog(ctx context.Context, in *ListCatalogRequest, opts ...grpc.CallOption) (*ListCatalogResponse, error)
+	CreateManagedService(ctx context.Context, in *CreateManagedServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error)
+	GetManagedService(ctx context.Context, in *GetManagedServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error)
+}
+
+type serviceManagerServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewServiceManagerServiceClient(cc grpc.ClientConnInterface) ServiceManagerServiceClient {
+	return &serviceManagerServiceClient{cc: cc}
+}
+
+func (c *serviceManagerServiceClient) ListCatalog(ctx context.Context, in *ListCatalogRequest, opts ...grpc.CallOption) (*ListCatalogResponse, error) {
+	out := new(ListCatalogResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+ServiceManagerServiceName+"/ListCatalog", in, out, opts...)
+	return out, err
+}
+
+func (c *serviceManagerServiceClient) CreateManagedService(ctx context.Context, in *CreateManagedServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error) {
+	out := new(ManagedServiceResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+ServiceManagerServiceName+"/CreateManagedService", in, out, opts...)
+	return out, err
+}
+
+func (c *serviceManagerServiceClient) GetManagedService(ctx context.Context, in *GetManagedServiceRequest, opts ...grpc.CallOption) (*ManagedServiceResponse, error) {
+	out := new(ManagedServiceResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+ServiceManagerServiceName+"/GetManagedService", in, out, opts...)
+	return out, err
+}
+
+func listCatalogHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(ListCatalogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(ServiceManagerServiceServer).ListCatalog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + ServiceManagerServiceName + "/ListCatalog"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(ServiceManagerServiceServer).ListCatalog(ctx, req.(*ListCatalogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func createManagedServiceHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(CreateManagedServiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(ServiceManagerServiceServer).CreateManagedService(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + ServiceManagerServiceName + "/CreateManagedService"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(ServiceManagerServiceServer).CreateManagedService(ctx, req.(*CreateManagedServiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func getManagedServiceHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(GetManagedServiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(ServiceManagerServiceServer).GetManagedService(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + ServiceManagerServiceName + "/GetManagedService"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(ServiceManagerServiceServer).GetManagedService(ctx, req.(*GetManagedServiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+var ServiceManagerService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: ServiceManagerServiceName,
+	HandlerType: (*ServiceManagerServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{MethodName: "ListCatalog", Handler: listCatalogHandler},
+		{MethodName: "CreateManagedService", Handler: createManagedServiceHandler},
+		{MethodName: "GetManagedService", Handler: getManagedServiceHandler},
+	},
+	Streams:  []grpc.StreamDesc{},
 	Metadata: "contracts/agent/v1/status.proto",
 }
 

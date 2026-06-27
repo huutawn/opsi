@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/big"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -203,4 +204,13 @@ func validatePort(port string) error {
 		return fmt.Errorf("config key %q must be a TCP port", "port")
 	}
 	return nil
+}
+
+func SortedEnvKeys(values map[string]EnvTemplate) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

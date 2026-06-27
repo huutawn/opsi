@@ -134,6 +134,33 @@ func (c *Client) RotateSecret(ctx context.Context, req *agentv1.SecretRequest) (
 	return agentv1.NewSecretServiceClient(conn).RotateSecret(ctx, req)
 }
 
+func (c *Client) ListCatalog(ctx context.Context) (*agentv1.ListCatalogResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewServiceManagerServiceClient(conn).ListCatalog(ctx, &agentv1.ListCatalogRequest{})
+}
+
+func (c *Client) CreateManagedService(ctx context.Context, req *agentv1.CreateManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewServiceManagerServiceClient(conn).CreateManagedService(ctx, req)
+}
+
+func (c *Client) GetManagedService(ctx context.Context, req *agentv1.GetManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewServiceManagerServiceClient(conn).GetManagedService(ctx, req)
+}
+
 func (c *Client) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {

@@ -12,6 +12,12 @@ service DeploymentService {
   rpc Deploy(DeployRequest) returns (stream ProgressEvent);
 }
 
+service ServiceManagerService {
+  rpc ListCatalog(ListCatalogRequest) returns (ListCatalogResponse);
+  rpc CreateManagedService(CreateManagedServiceRequest) returns (ManagedServiceResponse);
+  rpc GetManagedService(GetManagedServiceRequest) returns (ManagedServiceResponse);
+}
+
 service TelemetryService {
   rpc Sync(SyncRequest) returns (stream SyncChunk);
 }
@@ -78,6 +84,58 @@ message ServiceDependency {
   string name = 1;
   string env_prefix = 2;
   bool expose_as_default = 3;
+}
+
+message ListCatalogRequest {}
+
+message ListCatalogResponse {
+  repeated CatalogService services = 1;
+}
+
+message CatalogService {
+  string type = 1;
+  string display_name = 2;
+  repeated CatalogConfigKey config_keys = 3;
+  repeated string secret_keys = 4;
+  repeated string env_vars = 5;
+  bool managed_supported = 6;
+}
+
+message CatalogConfigKey {
+  string key = 1;
+  string default = 2;
+  bool required = 3;
+}
+
+message CreateManagedServiceRequest {
+  string project_id = 1;
+  string name = 2;
+  string type = 3;
+  string namespace = 4;
+  map<string, string> overrides = 5;
+}
+
+message GetManagedServiceRequest {
+  string project_id = 1;
+  string id = 2;
+}
+
+message ManagedServiceResponse {
+  string id = 1;
+  string project_id = 2;
+  string name = 3;
+  string type = 4;
+  string namespace = 5;
+  string mode = 6;
+  string status = 7;
+  string host = 8;
+  string port = 9;
+  string version = 10;
+  map<string, string> config = 11;
+  string secret_name = 12;
+  string configmap_name = 13;
+  int64 created_at_unix = 14;
+  int64 updated_at_unix = 15;
 }
 
 message SyncRequest {

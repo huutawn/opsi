@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Service.SecretName }}
+  namespace: {{ .Service.Namespace }}
+  labels:
+    opsi.io/managed: "true"
+    opsi.io/project-id: {{ .Service.ProjectID }}
+    opsi.io/service-id: {{ .Service.ID }}
+    opsi.io/service-name: {{ .Service.Name }}
+    opsi.io/service-type: {{ .Service.Type }}
+    opsi.io/service-mode: {{ .Service.Mode }}
+type: Opaque
+stringData:
+{{- range $key, $value := .Env }}
+  {{ $key }}: {{ printf "%q" $value }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Service.ConfigMapName }}
+  namespace: {{ .Service.Namespace }}
+  labels:
+    opsi.io/managed: "true"
+    opsi.io/project-id: {{ .Service.ProjectID }}
+    opsi.io/service-id: {{ .Service.ID }}
+    opsi.io/service-name: {{ .Service.Name }}
+    opsi.io/service-type: {{ .Service.Type }}
+    opsi.io/service-mode: {{ .Service.Mode }}
+data:
+  SERVICE_TYPE: {{ printf "%q" .Service.Type }}
+  SERVICE_VERSION: {{ printf "%q" .Service.Version }}
+  SERVICE_HOST: {{ printf "%q" .Service.Host }}
+  SERVICE_PORT: {{ printf "%q" .Service.Port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Service.Name }}
+  namespace: {{ .Service.Namespace }}
+  labels:
+    opsi.io/managed: "true"
+    opsi.io/project-id: {{ .Service.ProjectID }}
+    opsi.io/service-id: {{ .Service.ID }}
+    opsi.io/service-name: {{ .Service.Name }}
+    opsi.io/service-type: {{ .Service.Type }}
+    opsi.io/service-mode: {{ .Service.Mode }}
+spec:
+  ports:
+    - name: postgres
+      port: {{ .Service.Port }}
+      targetPort: {{ .Service.Port }}
+  selector:
+    app.kubernetes.io/name: {{ .Service.Name }}
+    opsi.io/project-id: {{ .Service.ProjectID }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Service.Name }}
+  namespace: {{ .Service.Namespace }}
+  labels:
+    opsi.io/managed: "true"
+    opsi.io/project-id: {{ .Service.ProjectID }}
+    opsi.io/service-id: {{ .Service.ID }}
+    opsi.io/service-name: {{ .Service.Name }}
+    opsi.io/service-type: {{ .Service.Type }}
+    opsi.io/service-mode: {{ .Service.Mode }}
+spec:
+  serviceName: {{ .Service.Name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Service.Name }}
+      opsi.io/project-id: {{ .Service.ProjectID }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Service.Name }}
+        opsi.io/managed: "true"
+        opsi.io/project-id: {{ .Service.ProjectID }}
+        opsi.io/service-id: {{ .Service.ID }}
+        opsi.io/service-name: {{ .Service.Name }}
+        opsi.io/service-type: {{ .Service.Type }}
+        opsi.io/service-mode: {{ .Service.Mode }}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:{{ index .Service.Config "version" }}
+          ports:
+            - containerPort: {{ .Service.Port }}
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Service.SecretName }}
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Service.SecretName }}
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Service.SecretName }}
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          opsi.io/project-id: {{ .Service.ProjectID }}
+          opsi.io/service-id: {{ .Service.ID }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ index .Service.Config "storage_size" }}

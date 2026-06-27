@@ -14,6 +14,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/incident"
 	"github.com/opsi-dev/opsi/agent/internal/secret"
+	"github.com/opsi-dev/opsi/agent/internal/svcatalog"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 	"github.com/opsi-dev/opsi/agent/internal/tlsconfig"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
@@ -64,6 +65,12 @@ type IncidentService struct {
 	service *incident.Service
 }
 
+type ServiceManagerService struct {
+	store   *svcatalog.Store
+	manager svcatalog.Manager
+	auth    secret.AuthVerifier
+}
+
 func NewTelemetryService(store telemetry.Store, auth secret.AuthVerifier) *TelemetryService {
 	return &TelemetryService{store: store, auth: auth}
 }
@@ -74,6 +81,67 @@ func NewSecretService(cfg config.Config, service *secret.Service) *SecretService
 
 func NewIncidentService(service *incident.Service) *IncidentService {
 	return &IncidentService{service: service}
+}
+
+func NewServiceManagerService(store *svcatalog.Store, manager svcatalog.Manager, auth secret.AuthVerifier) *ServiceManagerService {
+	return &ServiceManagerService{store: store, manager: manager, auth: auth}
+}
+
+func (s *ServiceManagerService) ListCatalog(context.Context, *agentv1.ListCatalogRequest) (*agentv1.ListCatalogResponse, error) {
+	catalog := svcatalog.BuiltInCatalog()
+	resp := &agentv1.ListCatalogResponse{}
+	for _, serviceType := range catalog.Types() {
+		schema, _ := catalog.Get(serviceType)
+		item := agentv1.CatalogService{
+			Type:             schema.Type,
+			DisplayName:      schema.DisplayName,
+			ManagedSupported: svcatalog.ManagedSupported(schema.Type),
+		}
+		for _, key := range schema.ConfigKeys {
+			item.ConfigKeys = append(item.ConfigKeys, agentv1.CatalogConfigKey{Key: key.Key, Default: key.Default, Required: key.Required})
+		}
+		for _, key := range schema.SecretKeys {
+			item.SecretKeys = append(item.SecretKeys, key.Key)
+		}
+		item.EnvVars = svcatalog.SortedEnvKeys(schema.EnvMapping)
+		resp.Services = append(resp.Services, item)
+	}
+	return resp, nil
+}
+
+func (s *ServiceManagerService) CreateManagedService(ctx context.Context, req *agentv1.CreateManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {
+	if req.ProjectID == "" {
+		return nil, status.Error(codes.InvalidArgument, "project_id is required")
+	}
+	if s.auth != nil {
+		if _, err := s.auth.VerifyAuth(ctx, secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(ctx)}); err != nil {
+			return nil, status.Error(codes.Unauthenticated, err.Error())
+		}
+	}
+	service, err := s.manager.CreateManaged(ctx, svcatalog.CreateManagedRequest{ProjectID: req.ProjectID, Name: req.Name, Type: req.Type, Namespace: req.Namespace, Overrides: req.Overrides})
+	if err != nil {
+		return nil, mapServiceCatalogError(err)
+	}
+	return managedServiceResponse(service), nil
+}
+
+func (s *ServiceManagerService) GetManagedService(ctx context.Context, req *agentv1.GetManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {
+	if req.ProjectID == "" || req.ID == "" {
+		return nil, status.Error(codes.InvalidArgument, "project_id and id are required")
+	}
+	if s.auth != nil {
+		if _, err := s.auth.VerifyAuth(ctx, secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(ctx)}); err != nil {
+			return nil, status.Error(codes.Unauthenticated, err.Error())
+		}
+	}
+	service, err := s.store.GetManagedService(ctx, req.ProjectID, req.ID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if service == nil {
+		return nil, status.Error(codes.NotFound, "managed service not found")
+	}
+	return managedServiceResponse(service), nil
 }
 
 func (s *IncidentService) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
@@ -229,6 +297,12 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	}
 	defer telemetryStore.Close()
 
+	serviceStore, err := svcatalog.OpenStore(cfg.SQLitePath)
+	if err != nil {
+		return err
+	}
+	defer serviceStore.Close()
+
 	engineCfg, err := deploymentEngineConfig(cfg)
 	if err != nil {
 		return err
@@ -262,6 +336,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg))
 	authVerifier := authVerifier(cfg)
 	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine, authVerifier))
+	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
 	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore, authVerifier)))
 	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(cfg, telemetryStore, authVerifier)))
@@ -528,6 +603,52 @@ func incidentService(cfg config.Config, store telemetry.Store, auth secret.AuthV
 		KubectlPath: cfg.Telemetry.KubectlPath,
 		Namespace:   firstNonEmpty(cfg.Deployment.Namespace, cfg.Secret.Namespace),
 		DryRun:      cfg.Deployment.DryRun || cfg.Deployment.BuilderMode == "dry_run",
+	}
+}
+
+func serviceManager(cfg config.Config, store *svcatalog.Store) svcatalog.Manager {
+	var applier svcatalog.ManifestApplier = svcatalog.KubectlApplier{KubectlPath: firstNonEmpty(cfg.Secret.KubectlPath, cfg.Telemetry.KubectlPath)}
+	if cfg.Deployment.DryRun || cfg.Deployment.BuilderMode == "dry_run" {
+		applier = svcatalog.DryRunApplier{}
+	}
+	return svcatalog.Manager{Store: store, Applier: applier}
+}
+
+func managedServiceResponse(service *svcatalog.ManagedService) *agentv1.ManagedServiceResponse {
+	resp := &agentv1.ManagedServiceResponse{
+		ID:            service.ID,
+		ProjectID:     service.ProjectID,
+		Name:          service.Name,
+		Type:          service.Type,
+		Namespace:     service.Namespace,
+		Mode:          service.Mode,
+		Status:        service.Status,
+		Host:          service.Host,
+		Port:          service.Port,
+		Version:       service.Version,
+		Config:        service.Config,
+		SecretName:    service.SecretName,
+		ConfigMapName: service.ConfigMapName,
+	}
+	if !service.CreatedAt.IsZero() {
+		resp.CreatedAtUnix = service.CreatedAt.Unix()
+	}
+	if !service.UpdatedAt.IsZero() {
+		resp.UpdatedAtUnix = service.UpdatedAt.Unix()
+	}
+	return resp
+}
+
+func mapServiceCatalogError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "required") || strings.Contains(message, "unknown") || strings.Contains(message, "not implemented") || strings.Contains(message, "must be"):
+		return status.Error(codes.InvalidArgument, message)
+	default:
+		return status.Error(codes.Internal, message)
 	}
 }
 
