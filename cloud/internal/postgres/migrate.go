@@ -173,6 +173,33 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		`CREATE INDEX IF NOT EXISTS bootstrap_events_session_created_idx ON bootstrap_events(session_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS bootstrap_credentials (
+			session_id TEXT PRIMARY KEY REFERENCES bootstrap_sessions(id) ON DELETE CASCADE,
+			ciphertext BYTEA NOT NULL,
+			nonce BYTEA NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			consumed_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS bootstrap_credentials_expires_idx ON bootstrap_credentials(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS bootstrap_registration_tokens (
+			session_id TEXT PRIMARY KEY REFERENCES bootstrap_sessions(id) ON DELETE CASCADE,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			token_hash TEXT NOT NULL UNIQUE,
+			token_ciphertext BYTEA NOT NULL,
+			token_nonce BYTEA NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			worker_consumed_at TIMESTAMPTZ,
+			exchanged_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS bootstrap_registration_tokens_project_idx ON bootstrap_registration_tokens(project_id, expires_at)`,
+		`CREATE TABLE IF NOT EXISTS rate_limits (
+			key TEXT PRIMARY KEY,
+			count INTEGER NOT NULL,
+			resets_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
 		`CREATE TABLE IF NOT EXISTS control_services (
 			id TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -233,6 +260,15 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		`CREATE INDEX IF NOT EXISTS cloud_audit_events_org_created_idx ON cloud_audit_events(org_id, created_at)`,
+		`CREATE OR REPLACE FUNCTION prevent_cloud_audit_mutation() RETURNS trigger AS $$
+		BEGIN
+			RAISE EXCEPTION 'cloud_audit_events is append-only';
+		END;
+		$$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS cloud_audit_events_no_update ON cloud_audit_events`,
+		`DROP TRIGGER IF EXISTS cloud_audit_events_no_delete ON cloud_audit_events`,
+		`CREATE TRIGGER cloud_audit_events_no_update BEFORE UPDATE ON cloud_audit_events FOR EACH ROW EXECUTE FUNCTION prevent_cloud_audit_mutation()`,
+		`CREATE TRIGGER cloud_audit_events_no_delete BEFORE DELETE ON cloud_audit_events FOR EACH ROW EXECUTE FUNCTION prevent_cloud_audit_mutation()`,
 		`CREATE TABLE IF NOT EXISTS idempotency_keys (
 			scope TEXT NOT NULL,
 			key TEXT NOT NULL,

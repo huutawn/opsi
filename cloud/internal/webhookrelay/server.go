@@ -1,7 +1,9 @@
 package webhookrelay
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,15 +23,27 @@ type Server struct {
 	OTP           *otp.Service
 	Auth          *auth.Service
 	Registry      registry.API
-	credentials   *CredentialStore
-	registrations *RegistrationTokenStore
-	limits        *rateLimiter
+	credentials   CredentialVault
+	registrations RegistrationVault
+	limits        RateLimiter
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
 	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter()}
+}
+
+func (s *Server) SetSecurityStores(credentials CredentialVault, registrations RegistrationVault, limits RateLimiter) {
+	if credentials != nil {
+		s.credentials = credentials
+	}
+	if registrations != nil {
+		s.registrations = registrations
+	}
+	if limits != nil {
+		s.limits = limits
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -205,12 +219,37 @@ func (s *Server) authorizeAgent(w http.ResponseWriter, r *http.Request, projectI
 		writeError(w, http.StatusBadRequest, "project_id and node id are required")
 		return registry.Agent{}, false
 	}
-	agent, err := s.Registry.VerifyAgent(projectID, nodeID, bearerToken(r))
+	token := bearerToken(r)
+	agent, err := s.Registry.VerifyAgent(projectID, nodeID, token)
 	if err != nil {
 		writeRegistryFailure(w, r, err)
 		return registry.Agent{}, false
 	}
+	if s.Config.RequireAgentSignatures && !validAgentSignature(r, token) {
+		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "AGENT_SIGNATURE_INVALID", Message: "agent request signature is invalid", RequestID: r.Header.Get("X-Request-ID")})
+		return registry.Agent{}, false
+	}
 	return agent, true
+}
+
+func validAgentSignature(r *http.Request, token string) bool {
+	ts := r.Header.Get("X-Agent-Timestamp")
+	sig := r.Header.Get("X-Agent-Signature")
+	if ts == "" || sig == "" {
+		return false
+	}
+	parsed, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	if parsed.Before(now.Add(-5*time.Minute)) || parsed.After(now.Add(5*time.Minute)) {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write([]byte(r.Method + "\n" + r.URL.RequestURI() + "\n" + ts))
+	expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(sig))
 }
 
 func nodeIDFromAgentPath(path string) string {

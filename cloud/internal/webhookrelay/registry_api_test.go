@@ -2,10 +2,14 @@ package webhookrelay
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 )
@@ -391,7 +395,7 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 }
 
 func TestAgentTokenGate(t *testing.T) {
-	server := NewServer(Config{})
+	server := NewServer(Config{RequireAgentSignatures: true})
 	hash, err := auth.HashPAT("agent-secret")
 	if err != nil {
 		t.Fatal(err)
@@ -421,9 +425,26 @@ func TestAgentTokenGate(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer agent-secret")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unsigned agent status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+node.ID+"/webhooks/next?project_id="+project.ID+"&wait=0s", nil)
+	req.Header.Set("Authorization", "Bearer agent-secret")
+	signAgentRequest(req, "agent-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("agent token status=%d body=%s", w.Code, w.Body.String())
 	}
+}
+
+func signAgentRequest(req *http.Request, token string) {
+	ts := time.Now().UTC().Format(time.RFC3339)
+	req.Header.Set("X-Agent-Timestamp", ts)
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write([]byte(req.Method + "\n" + req.URL.RequestURI() + "\n" + ts))
+	req.Header.Set("X-Agent-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 }
 
 func createProjectWithToken(t *testing.T, handler http.Handler, orgID, token, key string) string {

@@ -8,13 +8,16 @@ import (
 )
 
 type Config struct {
-	TTL                  Duration   `json:"ttl"`
-	DatabaseURL          string     `json:"database_url"`
-	OTP                  OTPConfig  `json:"otp"`
-	SMTP                 SMTPConfig `json:"smtp"`
-	Routes               []Route    `json:"routes"`
-	AgentTokens          []string   `json:"agent_tokens"`
-	BootstrapWorkerToken string     `json:"bootstrap_worker_token"`
+	TTL                    Duration   `json:"ttl"`
+	DatabaseURL            string     `json:"database_url"`
+	Production             bool       `json:"production"`
+	OTP                    OTPConfig  `json:"otp"`
+	SMTP                   SMTPConfig `json:"smtp"`
+	Routes                 []Route    `json:"routes"`
+	AgentTokens            []string   `json:"agent_tokens"`
+	BootstrapWorkerToken   string     `json:"bootstrap_worker_token"`
+	BootstrapSecretKey     string     `json:"bootstrap_secret_key"`
+	RequireAgentSignatures bool       `json:"require_agent_signatures"`
 }
 
 type OTPConfig struct {
@@ -59,6 +62,18 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if time.Duration(cfg.TTL) > 24*time.Hour {
 		return Config{}, fmt.Errorf("ttl must be <= 24h")
+	}
+	if cfg.Production {
+		if cfg.DatabaseURL == "" {
+			return Config{}, fmt.Errorf("production requires database_url")
+		}
+		if len(cfg.BootstrapWorkerToken) < 32 {
+			return Config{}, fmt.Errorf("production requires bootstrap_worker_token with at least 32 bytes")
+		}
+		if len(cfg.BootstrapSecretKey) < 32 {
+			return Config{}, fmt.Errorf("production requires bootstrap_secret_key with at least 32 bytes")
+		}
+		cfg.RequireAgentSignatures = true
 	}
 	return cfg, nil
 }

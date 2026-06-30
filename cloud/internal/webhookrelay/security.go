@@ -15,6 +15,13 @@ type BootstrapCredential struct {
 	Password   []byte
 }
 
+type CredentialVault interface {
+	Put(sessionID string, credential BootstrapCredential, ttl time.Duration)
+	Take(sessionID string) (BootstrapCredential, bool)
+	Delete(sessionID string)
+	Len() int
+}
+
 type credentialEnvelope struct {
 	value     BootstrapCredential
 	expiresAt time.Time
@@ -85,6 +92,13 @@ type BootstrapRegistration struct {
 	NodeID    string
 	Token     string
 	ExpiresAt time.Time
+}
+
+type RegistrationVault interface {
+	Put(sessionID, orgID, projectID, nodeID, token string, ttl time.Duration)
+	TakeForWorker(sessionID string) (BootstrapRegistration, bool)
+	Exchange(token string) (BootstrapRegistration, bool)
+	DeleteSession(sessionID string)
 }
 
 type RegistrationTokenStore struct {
@@ -173,6 +187,10 @@ type rateLimiter struct {
 	mu      sync.Mutex
 	now     func() time.Time
 	windows map[string]rateWindow
+}
+
+type RateLimiter interface {
+	Allow(key string, limit int, window time.Duration) bool
 }
 
 func newSecret(prefix string) string {
