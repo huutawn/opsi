@@ -125,11 +125,25 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			writeRegistryError(w, registry.APIError{Status: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "agent registration rate limit exceeded", RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
-		value, err := s.Registry.RegisterAgent(projectID, req.NodeID, req.PublicKeyFingerprint, req.Version, r.Header.Get("Idempotency-Key"), req.Capabilities)
+		agentToken := newSecret("agent")
+		hash, err := auth.HashPAT(agentToken)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		value, err := s.Registry.RegisterAgent(projectID, req.NodeID, req.PublicKeyFingerprint, hash, req.Version, r.Header.Get("Idempotency-Key"), req.Capabilities)
 		if err == nil {
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "AGENT_REGISTERED", "agent", value.ID, "success", map[string]any{"node_id": value.NodeID})
 		}
-		writeRegistryResult(w, r, value, err, http.StatusCreated)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		resp := map[string]any{"agent": value}
+		if value.CredentialHash == hash {
+			resp["agent_token"] = agentToken
+		}
+		writeJSON(w, http.StatusCreated, resp)
 		return
 	}
 	if len(parts) == 5 && parts[2] == "agents" && (parts[4] == "rotate" || parts[4] == "revoke") && r.Method == http.MethodPost {
@@ -142,16 +156,31 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		var value registry.Agent
 		var err error
 		action := "AGENT_CREDENTIAL_ROTATED"
+		agentToken := ""
 		if parts[4] == "revoke" {
 			value, err = s.Registry.RevokeAgent(projectID, parts[3])
 			action = "AGENT_REVOKED"
 		} else {
-			value, err = s.Registry.RotateAgent(projectID, parts[3])
+			agentToken = newSecret("agent")
+			hash, hashErr := auth.HashPAT(agentToken)
+			if hashErr != nil {
+				writeRegistryFailure(w, r, hashErr)
+				return
+			}
+			value, err = s.Registry.RotateAgent(projectID, parts[3], hash)
 		}
 		if err == nil {
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, action, "agent", value.ID, "success", nil)
 		}
-		writeRegistryResult(w, r, value, err, http.StatusOK)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		resp := map[string]any{"agent": value}
+		if agentToken != "" {
+			resp["agent_token"] = agentToken
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	if len(parts) == 3 && parts[2] == "bootstrap-sessions" && r.Method == http.MethodPost {
@@ -189,7 +218,9 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			if ttl <= 0 {
 				ttl = 30 * time.Minute
 			}
+			registrationToken := newSecret("areg")
 			s.credentials.Put(value.ID, credential, ttl)
+			s.registrations.Put(value.ID, value.OrgID, projectID, value.NodeID, registrationToken, ttl)
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "BOOTSTRAP_SESSION_CREATED", "bootstrap_session", value.ID, "success", map[string]any{"role": value.Role})
 		}
 		writeRegistryResult(w, r, value, err, http.StatusCreated)

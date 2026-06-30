@@ -11,7 +11,7 @@ import (
 )
 
 func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
-	server := NewServer(Config{})
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
 	handler := server.Handler()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Demo","slug":"demo","created_by":"user-1"}`)))
@@ -140,7 +140,7 @@ func TestRegistryAPIRBACCrossTenantAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := NewServer(Config{})
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
 	server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{
 		{UserID: "owner", OrgID: "org-1", Role: "Owner", Hash: ownerHash},
 		{UserID: "viewer", OrgID: "org-1", Role: "Viewer", Hash: viewerHash},
@@ -189,7 +189,7 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := NewServer(Config{})
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
 	server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{
 		{UserID: "owner", OrgID: "org-1", Role: "Owner", Hash: ownerHash},
 	}}}
@@ -248,58 +248,134 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&session); err != nil {
 		t.Fatal(err)
 	}
-	credential, ok := server.credentials.Take(session.ID)
-	if !ok || string(credential.Password) != "secret" {
-		t.Fatalf("credential missing from memory vault")
+
+	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/take", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth worker take status=%d body=%s", w.Code, w.Body.String())
 	}
-	if _, ok := server.credentials.Take(session.ID); ok {
-		t.Fatalf("credential vault did not read-once purge")
+	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/take", nil)
+	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("worker take status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("secret")) {
+		t.Fatalf("worker bundle missing password: %s", w.Body.String())
+	}
+	var bundle struct {
+		AgentRegistrationToken string `json:"agent_registration_token"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.AgentRegistrationToken == "" {
+		t.Fatal("missing agent registration token")
+	}
+	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/take", nil)
+	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusGone {
+		t.Fatalf("worker second take status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/nodes", bytes.NewReader([]byte(`{"name":"vps-owner","role":"server","status":"healthy"}`)))
-	req.Header.Set("Authorization", "Bearer owner_pat")
-	req.Header.Set("Idempotency-Key", "node-owner")
-	req.Header.Set("X-Request-ID", "req-node-owner")
+	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusCreated {
-		t.Fatalf("owner node status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("agent exchange status=%d body=%s", w.Code, w.Body.String())
 	}
-	var node struct {
-		ID string `json:"id"`
+	var agentResp struct {
+		Agent struct {
+			ID     string `json:"id"`
+			NodeID string `json:"node_id"`
+			Status string `json:"status"`
+		} `json:"agent"`
+		AgentToken string `json:"agent_token"`
 	}
-	if err := json.NewDecoder(w.Body).Decode(&node); err != nil {
+	if err := json.NewDecoder(w.Body).Decode(&agentResp); err != nil {
 		t.Fatal(err)
 	}
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/agents", bytes.NewReader([]byte(`{"node_id":"`+node.ID+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
-	req.Header.Set("Authorization", "Bearer owner_pat")
-	req.Header.Set("Idempotency-Key", "agent-owner")
-	req.Header.Set("X-Request-ID", "req-agent-owner")
+	if agentResp.Agent.ID == "" || agentResp.Agent.NodeID == "" || agentResp.AgentToken == "" || agentResp.Agent.Status != "active" {
+		t.Fatalf("unexpected agent exchange: %+v", agentResp)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("agent register status=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("agent token replay status=%d body=%s", w.Code, w.Body.String())
 	}
-	var agent struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentResp.Agent.NodeID+"/webhooks/next?project_id="+projectID+"&wait=0s", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized && w.Code != http.StatusForbidden {
+		t.Fatalf("agent poll without token status=%d body=%s", w.Code, w.Body.String())
 	}
-	if err := json.NewDecoder(w.Body).Decode(&agent); err != nil {
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentResp.Agent.NodeID+"/webhooks/next?project_id="+projectID+"&wait=0s", nil)
+	req.Header.Set("Authorization", "Bearer "+agentResp.AgentToken)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("agent poll status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/agents/"+agentResp.Agent.ID+"/rotate", nil)
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	req.Header.Set("Idempotency-Key", "agent-rotate")
+	req.Header.Set("X-Request-ID", "req-agent-rotate")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("agent rotate status=%d body=%s", w.Code, w.Body.String())
+	}
+	var rotateResp struct {
+		AgentToken string `json:"agent_token"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&rotateResp); err != nil {
 		t.Fatal(err)
 	}
-	if agent.ID == "" || agent.Status != "active" {
-		t.Fatalf("unexpected agent: %+v", agent)
+	if rotateResp.AgentToken == "" {
+		t.Fatal("missing rotated agent token")
 	}
-	for _, op := range []string{"rotate", "revoke"} {
-		req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/agents/"+agent.ID+"/"+op, nil)
-		req.Header.Set("Authorization", "Bearer owner_pat")
-		req.Header.Set("Idempotency-Key", "agent-"+op)
-		req.Header.Set("X-Request-ID", "req-agent-"+op)
-		w = httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("agent %s status=%d body=%s", op, w.Code, w.Body.String())
-		}
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentResp.Agent.NodeID+"/webhooks/next?project_id="+projectID+"&wait=0s", nil)
+	req.Header.Set("Authorization", "Bearer "+agentResp.AgentToken)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("old rotated token status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentResp.Agent.NodeID+"/webhooks/next?project_id="+projectID+"&wait=0s", nil)
+	req.Header.Set("Authorization", "Bearer "+rotateResp.AgentToken)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("rotated agent poll status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/agents/"+agentResp.Agent.ID+"/revoke", nil)
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	req.Header.Set("Idempotency-Key", "agent-revoke")
+	req.Header.Set("X-Request-ID", "req-agent-revoke")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("agent revoke status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentResp.Agent.NodeID+"/webhooks/next?project_id="+projectID+"&wait=0s", nil)
+	req.Header.Set("Authorization", "Bearer "+rotateResp.AgentToken)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("revoked agent poll status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/finish", bytes.NewReader([]byte(`{"project_id":"`+projectID+`","status":"succeeded","message":"password=secret token=abc"}`)))
+	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("bootstrap finish status=%d body=%s", w.Code, w.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/bootstrap-sessions/"+session.ID+"/events", nil)
@@ -309,23 +385,39 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("events status=%d body=%s", w.Code, w.Body.String())
 	}
-	if bytes.Contains(w.Body.Bytes(), []byte("secret")) {
-		t.Fatalf("bootstrap events leaked password: %s", w.Body.String())
+	if bytes.Contains(w.Body.Bytes(), []byte("secret")) || bytes.Contains(w.Body.Bytes(), []byte("token=abc")) {
+		t.Fatalf("bootstrap events leaked secret: %s", w.Body.String())
 	}
 }
 
 func TestAgentTokenGate(t *testing.T) {
-	server := NewServer(Config{AgentTokens: []string{"agent-secret"}})
+	server := NewServer(Config{})
+	hash, err := auth.HashPAT("agent-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := server.Registry.CreateProject("org-1", "Demo", "demo", "user-1", "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := server.Registry.UpsertNode(project.ID, "vps", "server", "healthy", "203.0.113.10", "", "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := server.Registry.RegisterAgent(project.ID, node.ID, "sha256:abc", hash, "v1", "agent", nil)
+	if err != nil || agent.ID == "" {
+		t.Fatalf("register agent err=%v agent=%+v", err, agent)
+	}
 	handler := server.Handler()
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/agents/node-1/webhooks/next?project_id=proj&wait=0s", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/agents/"+node.ID+"/webhooks/next?project_id="+project.ID+"&wait=0s", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized {
+	if w.Code != http.StatusUnauthorized && w.Code != http.StatusForbidden {
 		t.Fatalf("missing agent token status=%d", w.Code)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/agents/node-1/webhooks/next?project_id=proj&wait=0s", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+node.ID+"/webhooks/next?project_id="+project.ID+"&wait=0s", nil)
 	req.Header.Set("Authorization", "Bearer agent-secret")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)

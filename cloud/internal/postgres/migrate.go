@@ -122,6 +122,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			runtime_id TEXT NOT NULL REFERENCES runtimes(id) ON DELETE CASCADE,
 			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
 			public_key_fingerprint TEXT NOT NULL,
+			credential_hash TEXT,
 			version TEXT,
 			capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
 			status TEXT NOT NULL DEFAULT 'registering',
@@ -130,6 +131,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS credential_hash TEXT`,
 		`CREATE INDEX IF NOT EXISTS agents_project_status_idx ON agents(project_id, status)`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_sessions (
 			id TEXT PRIMARY KEY,

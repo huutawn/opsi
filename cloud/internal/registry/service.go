@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -96,6 +98,7 @@ type Agent struct {
 	RuntimeID            string         `json:"runtime_id"`
 	NodeID               string         `json:"node_id"`
 	PublicKeyFingerprint string         `json:"public_key_fingerprint"`
+	CredentialHash       string         `json:"-"`
 	Version              string         `json:"version,omitempty"`
 	Capabilities         map[string]any `json:"capabilities,omitempty"`
 	Status               string         `json:"status"`
@@ -216,10 +219,12 @@ type API interface {
 	ProjectReadiness(projectID string) (Readiness, error)
 	ListNodes(projectID string) ([]Node, error)
 	UpsertNode(projectID, name, role, status, publicHost, agentID, key string) (Node, error)
-	RegisterAgent(projectID, nodeID, fingerprint, version, key string, capabilities map[string]any) (Agent, error)
-	RotateAgent(projectID, agentID string) (Agent, error)
+	RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any) (Agent, error)
+	VerifyAgent(projectID, nodeID, token string) (Agent, error)
+	RotateAgent(projectID, agentID, credentialHash string) (Agent, error)
 	RevokeAgent(projectID, agentID string) (Agent, error)
 	CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error)
+	UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error)
 	GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error)
 	BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent, error)
 	CreateService(projectID, name, serviceType, sourceType, repoURL, image, key string) (ServiceRecord, error)
@@ -336,7 +341,7 @@ func (s *Service) UpsertNode(projectID, name, role, status, publicHost, agentID,
 	return node, nil
 }
 
-func (s *Service) RegisterAgent(projectID, nodeID, fingerprint, version, key string, capabilities map[string]any) (Agent, error) {
+func (s *Service) RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any) (Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if got, ok := s.idempotency["agent:"+projectID+":"+nodeID+":"+key].(Agent); ok {
@@ -349,8 +354,11 @@ func (s *Service) RegisterAgent(projectID, nodeID, fingerprint, version, key str
 	if fingerprint == "" {
 		return Agent{}, APIError{Status: 400, Code: "AGENT_FINGERPRINT_REQUIRED", Message: "agent public key fingerprint is required"}
 	}
+	if credentialHash == "" {
+		return Agent{}, APIError{Status: 400, Code: "AGENT_CREDENTIAL_REQUIRED", Message: "agent credential hash is required"}
+	}
 	now := s.clock()
-	agent := Agent{ID: newID("agent"), OrgID: node.OrgID, ProjectID: projectID, RuntimeID: node.RuntimeID, NodeID: node.ID, PublicKeyFingerprint: fingerprint, Version: version, Capabilities: capabilities, Status: "active", LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
+	agent := Agent{ID: newID("agent"), OrgID: node.OrgID, ProjectID: projectID, RuntimeID: node.RuntimeID, NodeID: node.ID, PublicKeyFingerprint: fingerprint, CredentialHash: credentialHash, Version: version, Capabilities: capabilities, Status: "active", LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
 	node.AgentID = agent.ID
 	node.AgentVersion = version
 	node.LastSeenAt = &now
@@ -361,14 +369,43 @@ func (s *Service) RegisterAgent(projectID, nodeID, fingerprint, version, key str
 	return agent, nil
 }
 
-func (s *Service) RotateAgent(projectID, agentID string) (Agent, error) {
+func (s *Service) VerifyAgent(projectID, nodeID, token string) (Agent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if token == "" {
+		return Agent{}, APIError{Status: 401, Code: "AGENT_AUTH_REQUIRED", Message: "agent bearer token is required"}
+	}
+	now := s.clock()
+	for id, agent := range s.agents {
+		if agent.ProjectID != projectID || agent.NodeID != nodeID {
+			continue
+		}
+		if bcrypt.CompareHashAndPassword([]byte(agent.CredentialHash), []byte(token)) != nil {
+			continue
+		}
+		if agent.Status != "active" {
+			return Agent{}, APIError{Status: 403, Code: "AGENT_REVOKED", Message: "agent is not active"}
+		}
+		agent.LastSeenAt = &now
+		agent.UpdatedAt = now
+		s.agents[id] = agent
+		return agent, nil
+	}
+	return Agent{}, APIError{Status: 403, Code: "AGENT_AUTH_INVALID", Message: "agent credential is invalid"}
+}
+
+func (s *Service) RotateAgent(projectID, agentID, credentialHash string) (Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	agent, ok := s.agents[agentID]
 	if !ok || agent.ProjectID != projectID {
 		return Agent{}, ErrNotFound
 	}
+	if credentialHash == "" {
+		return Agent{}, APIError{Status: 400, Code: "AGENT_CREDENTIAL_REQUIRED", Message: "agent credential hash is required"}
+	}
 	now := s.clock()
+	agent.CredentialHash = credentialHash
 	agent.LastRotationAt = &now
 	agent.UpdatedAt = now
 	s.agents[agentID] = agent
@@ -414,6 +451,35 @@ func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, 
 	s.runtimes[runtime.ID] = runtime
 	s.idempotency["bootstrap:"+projectID+":"+key] = session
 	s.refreshProjectLocked(project.ID)
+	return session, nil
+}
+
+func (s *Service) UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.bootstraps[sessionID]
+	if !ok || session.ProjectID != projectID {
+		return BootstrapSession{}, ErrNotFound
+	}
+	if !validBootstrapStatus(status) {
+		return BootstrapSession{}, APIError{Status: 400, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap status is invalid"}
+	}
+	now := s.clock()
+	session.Status = status
+	session.UpdatedAt = now
+	if status == "preflight" && session.StartedAt == nil {
+		session.StartedAt = &now
+	}
+	if !isActiveBootstrap(status) {
+		session.FinishedAt = &now
+	}
+	s.bootstraps[sessionID] = session
+	level := "info"
+	if status == "failed" {
+		level = "error"
+	}
+	s.events[sessionID] = append(s.events[sessionID], BootstrapEvent{ID: newID("evt"), OrgID: session.OrgID, ProjectID: session.ProjectID, SessionID: sessionID, NodeID: session.NodeID, Level: level, Step: status, MessageRedacted: RedactString(message), ProgressPercent: bootstrapProgress(status), CreatedAt: now})
+	s.refreshProjectLocked(projectID)
 	return session, nil
 }
 
@@ -552,6 +618,25 @@ func (s *Service) expireBootstrapsLocked() {
 
 func isActiveBootstrap(status string) bool {
 	return status == "created" || status == "preflight" || status == "installing" || status == "waiting_agent"
+}
+
+func validBootstrapStatus(status string) bool {
+	return status == "preflight" || status == "installing" || status == "waiting_agent" || status == "succeeded" || status == "failed" || status == "cancelled"
+}
+
+func bootstrapProgress(status string) int {
+	switch status {
+	case "preflight":
+		return 10
+	case "installing":
+		return 45
+	case "waiting_agent":
+		return 80
+	case "succeeded", "failed", "cancelled":
+		return 100
+	default:
+		return 0
+	}
 }
 
 func (s *Service) defaultScopeLocked(projectID string) (Project, Runtime, Environment, bool) {

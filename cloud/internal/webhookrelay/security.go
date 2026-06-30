@@ -1,6 +1,9 @@
 package webhookrelay
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"sync"
 	"time"
 )
@@ -46,6 +49,12 @@ func (s *CredentialStore) Take(sessionID string) (BootstrapCredential, bool) {
 	return envelope.value, true
 }
 
+func (s *CredentialStore) Delete(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.items, sessionID)
+}
+
 func (s *CredentialStore) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,10 +78,114 @@ func (s *CredentialStore) clock() time.Time {
 	return time.Now().UTC()
 }
 
+type BootstrapRegistration struct {
+	SessionID string
+	OrgID     string
+	ProjectID string
+	NodeID    string
+	Token     string
+	ExpiresAt time.Time
+}
+
+type RegistrationTokenStore struct {
+	mu        sync.Mutex
+	now       func() time.Time
+	bySession map[string]BootstrapRegistration
+	byHash    map[string]BootstrapRegistration
+}
+
+func NewRegistrationTokenStore() *RegistrationTokenStore {
+	return &RegistrationTokenStore{bySession: map[string]BootstrapRegistration{}, byHash: map[string]BootstrapRegistration{}}
+}
+
+func (s *RegistrationTokenStore) Put(sessionID, orgID, projectID, nodeID, token string, ttl time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeExpiredLocked()
+	reg := BootstrapRegistration{SessionID: sessionID, OrgID: orgID, ProjectID: projectID, NodeID: nodeID, Token: token, ExpiresAt: s.clock().Add(ttl)}
+	s.bySession[sessionID] = reg
+	s.byHash[tokenHash(token)] = reg
+}
+
+func (s *RegistrationTokenStore) TakeForWorker(sessionID string) (BootstrapRegistration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeExpiredLocked()
+	reg, ok := s.bySession[sessionID]
+	if !ok {
+		return BootstrapRegistration{}, false
+	}
+	delete(s.bySession, sessionID)
+	return reg, true
+}
+
+func (s *RegistrationTokenStore) Exchange(token string) (BootstrapRegistration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeExpiredLocked()
+	hash := tokenHash(token)
+	reg, ok := s.byHash[hash]
+	if !ok {
+		return BootstrapRegistration{}, false
+	}
+	delete(s.byHash, hash)
+	delete(s.bySession, reg.SessionID)
+	reg.Token = ""
+	return reg, true
+}
+
+func (s *RegistrationTokenStore) DeleteSession(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if reg, ok := s.bySession[sessionID]; ok {
+		delete(s.byHash, tokenHash(reg.Token))
+	}
+	for hash, reg := range s.byHash {
+		if reg.SessionID == sessionID {
+			delete(s.byHash, hash)
+		}
+	}
+	delete(s.bySession, sessionID)
+}
+
+func (s *RegistrationTokenStore) purgeExpiredLocked() {
+	now := s.clock()
+	for sessionID, reg := range s.bySession {
+		if now.After(reg.ExpiresAt) {
+			delete(s.bySession, sessionID)
+		}
+	}
+	for hash, reg := range s.byHash {
+		if now.After(reg.ExpiresAt) {
+			delete(s.byHash, hash)
+		}
+	}
+}
+
+func (s *RegistrationTokenStore) clock() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 type rateLimiter struct {
 	mu      sync.Mutex
 	now     func() time.Time
 	windows map[string]rateWindow
+}
+
+func newSecret(prefix string) string {
+	var data [32]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return prefix + "-" + hex.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+	}
+	return prefix + "-" + hex.EncodeToString(data[:])
+}
+
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 type rateWindow struct {

@@ -7,17 +7,35 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/auth"
 )
 
 func TestGitHubWebhookQueuesEnvelopeAndLongPollReturnsIt(t *testing.T) {
-	server := NewServer(Config{TTL: Duration(time.Hour), Routes: []Route{{
-		ProjectID:    "proj-dev",
+	server := NewServer(Config{TTL: Duration(time.Hour)})
+	hash, err := auth.HashPAT("agent-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := server.Registry.CreateProject("org-1", "Demo", "demo", "user-1", "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := server.Registry.UpsertNode(project.ID, "vps", "server", "healthy", "203.0.113.10", "", "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.RegisterAgent(project.ID, node.ID, "sha256:abc", hash, "v1", "agent", nil); err != nil {
+		t.Fatal(err)
+	}
+	server.Config.Routes = []Route{{
+		ProjectID:    project.ID,
 		ServiceID:    "svc-api",
 		ServiceName:  "api",
 		ServiceType:  "backend",
 		RepoFullName: "example/api",
 		Branch:       "main",
-	}}})
+	}}
 
 	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"clone_url":"https://github.com/example/api.git","full_name":"example/api"},"pusher":{"name":"alice"}}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/github", bytes.NewReader(body))
@@ -28,7 +46,8 @@ func TestGitHubWebhookQueuesEnvelopeAndLongPollReturnsIt(t *testing.T) {
 		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/agents/node-1/webhooks/next?project_id=proj-dev&wait=0s", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+node.ID+"/webhooks/next?project_id="+project.ID+"&wait=0s", nil)
+	req.Header.Set("Authorization", "Bearer agent-secret")
 	w = httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -38,7 +57,7 @@ func TestGitHubWebhookQueuesEnvelopeAndLongPollReturnsIt(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&env); err != nil {
 		t.Fatal(err)
 	}
-	if env.ProjectID != "proj-dev" || env.ServiceID != "svc-api" || env.Branch != "main" || env.Signature != "sha256=test" || env.TriggeredBy != "alice" {
+	if env.ProjectID != project.ID || env.ServiceID != "svc-api" || env.Branch != "main" || env.Signature != "sha256=test" || env.TriggeredBy != "alice" {
 		t.Fatalf("unexpected envelope: %+v", env)
 	}
 }

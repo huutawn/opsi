@@ -2,7 +2,6 @@ package webhookrelay
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,19 +16,20 @@ import (
 )
 
 type Server struct {
-	Queue       *Queue
-	Config      Config
-	OTP         *otp.Service
-	Auth        *auth.Service
-	Registry    registry.API
-	credentials *CredentialStore
-	limits      *rateLimiter
+	Queue         *Queue
+	Config        Config
+	OTP           *otp.Service
+	Auth          *auth.Service
+	Registry      registry.API
+	credentials   *CredentialStore
+	registrations *RegistrationTokenStore
+	limits        *rateLimiter
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
-	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), limits: newRateLimiter()}
+	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter()}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -40,7 +40,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/ai/incidents/analyze", s.handleAnalyzeIncident)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
+	mux.HandleFunc("/v1/agents/register", s.handleAgentRegister)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
+	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/", s.handleRegistryAPI)
 	return mux
 }
@@ -165,12 +167,13 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.authorizeAgent(r) {
-		writeError(w, http.StatusUnauthorized, "agent authorization required")
-		return
-	}
 	if !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
 		return
 	}
 	wait := 30 * time.Second
@@ -185,7 +188,7 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	if wait > 30*time.Second {
 		wait = 30 * time.Second
 	}
-	env, err := s.Queue.Next(r.Context(), r.URL.Query().Get("project_id"), wait)
+	env, err := s.Queue.Next(r.Context(), projectID, wait)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -197,17 +200,25 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, env)
 }
 
-func (s *Server) authorizeAgent(r *http.Request) bool {
-	if len(s.Config.AgentTokens) == 0 {
-		return true
+func (s *Server) authorizeAgent(w http.ResponseWriter, r *http.Request, projectID, nodeID string) (registry.Agent, bool) {
+	if projectID == "" || nodeID == "" {
+		writeError(w, http.StatusBadRequest, "project_id and node id are required")
+		return registry.Agent{}, false
 	}
-	token := bearerToken(r)
-	for _, allowed := range s.Config.AgentTokens {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(allowed)) == 1 {
-			return true
-		}
+	agent, err := s.Registry.VerifyAgent(projectID, nodeID, bearerToken(r))
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return registry.Agent{}, false
 	}
-	return false
+	return agent, true
+}
+
+func nodeIDFromAgentPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 3 || parts[0] != "v1" || parts[1] != "agents" {
+		return ""
+	}
+	return parts[2]
 }
 
 func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {

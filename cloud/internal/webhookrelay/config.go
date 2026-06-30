@@ -8,12 +8,13 @@ import (
 )
 
 type Config struct {
-	TTL         Duration   `json:"ttl"`
-	DatabaseURL string     `json:"database_url"`
-	OTP         OTPConfig  `json:"otp"`
-	SMTP        SMTPConfig `json:"smtp"`
-	Routes      []Route    `json:"routes"`
-	AgentTokens []string   `json:"agent_tokens"`
+	TTL                  Duration   `json:"ttl"`
+	DatabaseURL          string     `json:"database_url"`
+	OTP                  OTPConfig  `json:"otp"`
+	SMTP                 SMTPConfig `json:"smtp"`
+	Routes               []Route    `json:"routes"`
+	AgentTokens          []string   `json:"agent_tokens"`
+	BootstrapWorkerToken string     `json:"bootstrap_worker_token"`
 }
 
 type OTPConfig struct {

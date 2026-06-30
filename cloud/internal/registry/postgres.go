@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type PostgresService struct {
@@ -157,7 +159,7 @@ func (s PostgresService) UpsertNode(projectID, name, role, status, publicHost, a
 	return node, tx.Commit()
 }
 
-func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, version, key string, capabilities map[string]any) (Agent, error) {
+func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any) (Agent, error) {
 	ctx := context.Background()
 	scope := "agent:" + projectID + ":" + nodeID
 	if id, ok, err := s.idempotentResource(ctx, scope, key); err != nil || ok {
@@ -176,15 +178,18 @@ func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, version, 
 	if fingerprint == "" {
 		return Agent{}, APIError{Status: 400, Code: "AGENT_FINGERPRINT_REQUIRED", Message: "agent public key fingerprint is required"}
 	}
+	if credentialHash == "" {
+		return Agent{}, APIError{Status: 400, Code: "AGENT_CREDENTIAL_REQUIRED", Message: "agent credential hash is required"}
+	}
 	now := s.clock()
-	agent := Agent{ID: newID("agent"), OrgID: node.OrgID, ProjectID: projectID, RuntimeID: node.RuntimeID, NodeID: node.ID, PublicKeyFingerprint: fingerprint, Version: version, Capabilities: capabilities, Status: "active", LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
+	agent := Agent{ID: newID("agent"), OrgID: node.OrgID, ProjectID: projectID, RuntimeID: node.RuntimeID, NodeID: node.ID, PublicKeyFingerprint: fingerprint, CredentialHash: credentialHash, Version: version, Capabilities: capabilities, Status: "active", LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
 	data, _ := json.Marshal(capabilities)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Agent{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(id, org_id, project_id, runtime_id, node_id, public_key_fingerprint, version, capabilities, status, last_seen_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,'active',$9,$10,$11)`, agent.ID, agent.OrgID, agent.ProjectID, agent.RuntimeID, agent.NodeID, agent.PublicKeyFingerprint, agent.Version, string(data), agent.LastSeenAt, agent.CreatedAt, agent.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(id, org_id, project_id, runtime_id, node_id, public_key_fingerprint, credential_hash, version, capabilities, status, last_seen_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,'active',$10,$11,$12)`, agent.ID, agent.OrgID, agent.ProjectID, agent.RuntimeID, agent.NodeID, agent.PublicKeyFingerprint, agent.CredentialHash, agent.Version, string(data), agent.LastSeenAt, agent.CreatedAt, agent.UpdatedAt); err != nil {
 		return Agent{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET agent_id = $1, agent_version = NULLIF($2,''), last_seen_at = $3, updated_at = $3 WHERE id = $4 AND project_id = $5`, agent.ID, version, now, nodeID, projectID); err != nil {
@@ -196,9 +201,45 @@ func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, version, 
 	return agent, tx.Commit()
 }
 
-func (s PostgresService) RotateAgent(projectID, agentID string) (Agent, error) {
+func (s PostgresService) VerifyAgent(projectID, nodeID, token string) (Agent, error) {
+	if token == "" {
+		return Agent{}, APIError{Status: 401, Code: "AGENT_AUTH_REQUIRED", Message: "agent bearer token is required"}
+	}
 	ctx := context.Background()
-	res, err := s.DB.ExecContext(ctx, `UPDATE agents SET last_rotation_at = $1, updated_at = $1 WHERE id = $2 AND project_id = $3 AND status <> 'revoked'`, s.clock(), agentID, projectID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, runtime_id, node_id, public_key_fingerprint, COALESCE(credential_hash,''), COALESCE(version,''), capabilities::text, status, last_seen_at, last_rotation_at, created_at, updated_at FROM agents WHERE project_id = $1 AND node_id = $2`, projectID, nodeID)
+	if err != nil {
+		return Agent{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		agent, err := scanAgent(rows)
+		if err != nil {
+			return Agent{}, err
+		}
+		if bcrypt.CompareHashAndPassword([]byte(agent.CredentialHash), []byte(token)) != nil {
+			continue
+		}
+		if agent.Status != "active" {
+			return Agent{}, APIError{Status: 403, Code: "AGENT_REVOKED", Message: "agent is not active"}
+		}
+		now := s.clock()
+		agent.LastSeenAt = &now
+		agent.UpdatedAt = now
+		_, err = s.DB.ExecContext(ctx, `UPDATE agents SET last_seen_at = $1, updated_at = $1 WHERE id = $2`, now, agent.ID)
+		return agent, err
+	}
+	if err := rows.Err(); err != nil {
+		return Agent{}, err
+	}
+	return Agent{}, APIError{Status: 403, Code: "AGENT_AUTH_INVALID", Message: "agent credential is invalid"}
+}
+
+func (s PostgresService) RotateAgent(projectID, agentID, credentialHash string) (Agent, error) {
+	if credentialHash == "" {
+		return Agent{}, APIError{Status: 400, Code: "AGENT_CREDENTIAL_REQUIRED", Message: "agent credential hash is required"}
+	}
+	ctx := context.Background()
+	res, err := s.DB.ExecContext(ctx, `UPDATE agents SET credential_hash = $1, last_rotation_at = $2, updated_at = $2 WHERE id = $3 AND project_id = $4 AND status <> 'revoked'`, credentialHash, s.clock(), agentID, projectID)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -263,6 +304,45 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 		return BootstrapSession{}, err
 	}
 	return session, tx.Commit()
+}
+
+func (s PostgresService) UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error) {
+	if !validBootstrapStatus(status) {
+		return BootstrapSession{}, APIError{Status: 400, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap status is invalid"}
+	}
+	ctx := context.Background()
+	session, err := s.GetBootstrapSession(projectID, sessionID)
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	now := s.clock()
+	started := session.StartedAt
+	if status == "preflight" && started == nil {
+		started = &now
+	}
+	finished := session.FinishedAt
+	if !isActiveBootstrap(status) {
+		finished = &now
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE bootstrap_sessions SET status = $1, started_at = $2, finished_at = $3, updated_at = $4 WHERE project_id = $5 AND id = $6`, status, started, finished, now, projectID, sessionID); err != nil {
+		return BootstrapSession{}, err
+	}
+	level := "info"
+	if status == "failed" {
+		level = "error"
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) VALUES($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,$10)`, newID("evt"), session.OrgID, session.ProjectID, session.ID, session.NodeID, level, status, RedactString(message), bootstrapProgress(status), now); err != nil {
+		return BootstrapSession{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BootstrapSession{}, err
+	}
+	return s.GetBootstrapSession(projectID, sessionID)
 }
 
 func (s PostgresService) GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error) {
@@ -427,19 +507,11 @@ func (s PostgresService) getNode(ctx context.Context, id string) (Node, error) {
 }
 
 func (s PostgresService) getAgent(ctx context.Context, id string) (Agent, error) {
-	var a Agent
-	var capabilities string
-	var seen, rotated sql.NullTime
-	err := s.DB.QueryRowContext(ctx, `SELECT id, org_id, project_id, runtime_id, node_id, public_key_fingerprint, COALESCE(version,''), capabilities::text, status, last_seen_at, last_rotation_at, created_at, updated_at FROM agents WHERE id = $1`, id).Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.RuntimeID, &a.NodeID, &a.PublicKeyFingerprint, &a.Version, &capabilities, &a.Status, &seen, &rotated, &a.CreatedAt, &a.UpdatedAt)
+	row := s.DB.QueryRowContext(ctx, `SELECT id, org_id, project_id, runtime_id, node_id, public_key_fingerprint, COALESCE(credential_hash,''), COALESCE(version,''), capabilities::text, status, last_seen_at, last_rotation_at, created_at, updated_at FROM agents WHERE id = $1`, id)
+	a, err := scanAgent(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Agent{}, ErrNotFound
 	}
-	if err != nil {
-		return Agent{}, err
-	}
-	_ = json.Unmarshal([]byte(capabilities), &a.Capabilities)
-	a.LastSeenAt = nullTimePtr(seen)
-	a.LastRotationAt = nullTimePtr(rotated)
 	return a, nil
 }
 
@@ -539,6 +611,19 @@ func (s PostgresService) clock() time.Time {
 
 type nodeScanner interface {
 	Scan(dest ...any) error
+}
+
+func scanAgent(row nodeScanner) (Agent, error) {
+	var a Agent
+	var capabilities string
+	var seen, rotated sql.NullTime
+	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.RuntimeID, &a.NodeID, &a.PublicKeyFingerprint, &a.CredentialHash, &a.Version, &capabilities, &a.Status, &seen, &rotated, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		return Agent{}, err
+	}
+	_ = json.Unmarshal([]byte(capabilities), &a.Capabilities)
+	a.LastSeenAt = nullTimePtr(seen)
+	a.LastRotationAt = nullTimePtr(rotated)
+	return a, nil
 }
 
 func scanNode(row nodeScanner) (Node, error) {
