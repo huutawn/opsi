@@ -37,5 +37,6 @@ certs/
 AGENTS.md
 headroom_memory.db
 .agents
-.agent_archive
+.agents_archive
 docs
+.agents_active

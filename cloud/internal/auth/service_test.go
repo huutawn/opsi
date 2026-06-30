@@ -17,7 +17,22 @@ func TestVerifyPATReturnsMembershipRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.UserID != "owner@example.com" || result.Role != "Owner" || result.ProjectID != "proj" {
+	if result.UserID != "owner@example.com" || result.Role != "owner" || result.ProjectID != "proj" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestVerifyOrgPATReturnsOrgMembershipRole(t *testing.T) {
+	hash, err := HashPAT("pat_live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := Service{Store: MemoryStore{Candidates: []Candidate{{UserID: "u", OrgID: "org", Role: "Admin", Hash: hash, ExpiresAt: time.Now().Add(time.Hour)}}}}
+	result, err := svc.VerifyOrgPAT(context.Background(), VerifyRequest{Token: "pat_live", OrgID: "org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UserID != "u" || result.OrgID != "org" || result.Role != "admin" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }

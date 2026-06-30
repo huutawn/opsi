@@ -13,6 +13,7 @@ type Config struct {
 	OTP         OTPConfig  `json:"otp"`
 	SMTP        SMTPConfig `json:"smtp"`
 	Routes      []Route    `json:"routes"`
+	AgentTokens []string   `json:"agent_tokens"`
 }
 
 type OTPConfig struct {

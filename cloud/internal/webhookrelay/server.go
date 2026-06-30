@@ -2,6 +2,7 @@ package webhookrelay
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,19 +13,23 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 type Server struct {
-	Queue  *Queue
-	Config Config
-	OTP    *otp.Service
-	Auth   *auth.Service
+	Queue       *Queue
+	Config      Config
+	OTP         *otp.Service
+	Auth        *auth.Service
+	Registry    registry.API
+	credentials *CredentialStore
+	limits      *rateLimiter
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
-	return &Server{Queue: NewQueue(), Config: cfg, OTP: service}
+	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), limits: newRateLimiter()}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -36,6 +41,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
+	mux.HandleFunc("/api/", s.handleRegistryAPI)
 	return mux
 }
 
@@ -159,6 +165,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.authorizeAgent(r) {
+		writeError(w, http.StatusUnauthorized, "agent authorization required")
+		return
+	}
 	if !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -185,6 +195,19 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, env)
+}
+
+func (s *Server) authorizeAgent(r *http.Request) bool {
+	if len(s.Config.AgentTokens) == 0 {
+		return true
+	}
+	token := bearerToken(r)
+	for _, allowed := range s.Config.AgentTokens {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(allowed)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
