@@ -15,6 +15,8 @@ type PostgresService struct {
 	Now func() time.Time
 }
 
+const nodeSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, role, status, COALESCE(public_host,''), COALESCE(private_ip,''), COALESCE(provider,''), COALESCE(region,''), COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(arch,''), COALESCE(cpu_cores,0), COALESCE(memory_mb,0), COALESCE(disk_total_gb,0), COALESCE(k3s_role,''), COALESCE(k3s_status,''), COALESCE(k3s_version,''), COALESCE(agent_id,''), COALESCE(agent_version,''), last_seen_at, last_inventory_at, COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), created_at, updated_at FROM nodes`
+
 func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string) (Project, error) {
 	ctx := context.Background()
 	scope := "project:" + orgID
@@ -94,7 +96,7 @@ func (s PostgresService) ListNodes(projectID string) ([]Node, error) {
 	if _, _, _, err := s.defaultScope(context.Background(), projectID); err != nil {
 		return nil, err
 	}
-	rows, err := s.DB.QueryContext(context.Background(), `SELECT id, org_id, project_id, environment_id, runtime_id, name, role, status, COALESCE(public_host,''), COALESCE(agent_id,''), COALESCE(agent_version,''), last_seen_at, created_at, updated_at FROM nodes WHERE project_id = $1 ORDER BY created_at`, projectID)
+	rows, err := s.DB.QueryContext(context.Background(), nodeSelectSQL+` WHERE project_id = $1 ORDER BY created_at`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +110,135 @@ func (s PostgresService) ListNodes(projectID string) ([]Node, error) {
 		out = append(out, node)
 	}
 	return out, rows.Err()
+}
+
+func (s PostgresService) ListServices(projectID string) ([]ServiceRecord, error) {
+	if _, _, _, err := s.defaultScope(context.Background(), projectID); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(context.Background(), `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), namespace, created_at, updated_at FROM control_services WHERE project_id = $1 ORDER BY created_at`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ServiceRecord
+	for rows.Next() {
+		var r ServiceRecord
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.EnvironmentID, &r.RuntimeID, &r.Name, &r.Type, &r.Status, &r.SourceType, &r.RepoURL, &r.Image, &r.Namespace, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s PostgresService) ListDeployments(projectID string) ([]DeploymentJob, error) {
+	if _, _, _, err := s.defaultScope(context.Background(), projectID); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(context.Background(), `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, COALESCE(requested_by,''), started_at, finished_at, created_at, updated_at FROM deployment_jobs WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeploymentJob
+	for rows.Next() {
+		var d DeploymentJob
+		var started, finished sql.NullTime
+		if err := rows.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.IdempotencyKey, &d.RequestedBy, &started, &finished, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, err
+		}
+		d.StartedAt = nullTimePtr(started)
+		d.FinishedAt = nullTimePtr(finished)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s PostgresService) DeploymentEvents(projectID, deploymentID string) ([]DeploymentEvent, error) {
+	ctx := context.Background()
+	job, err := s.getDeployment(ctx, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	if job.ProjectID != projectID {
+		return nil, ErrNotFound
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, COALESCE(request_id,''), created_at FROM deployment_events WHERE project_id = $1 AND deployment_id = $2 ORDER BY created_at`, projectID, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeploymentEvent
+	for rows.Next() {
+		var e DeploymentEvent
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.ProjectID, &e.DeploymentID, &e.ServiceID, &e.Level, &e.Step, &e.MessageRedacted, &e.ProgressPercent, &e.RequestID, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s PostgresService) ListAudit(projectID string) ([]AuditEvent, error) {
+	if _, _, _, err := s.defaultScope(context.Background(), projectID); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(context.Background(), `SELECT id, org_id, COALESCE(project_id,''), COALESCE(actor_user_id,''), actor_type, action, resource_type, resource_id, result, metadata_redacted::text, created_at FROM cloud_audit_events WHERE project_id = $1 ORDER BY created_at DESC LIMIT 200`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEvent
+	for rows.Next() {
+		var event AuditEvent
+		var metadata string
+		if err := rows.Scan(&event.ID, &event.OrgID, &event.ProjectID, &event.ActorUserID, &event.ActorType, &event.Action, &event.ResourceType, &event.ResourceID, &event.Result, &metadata, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(metadata), &event.MetadataRedacted)
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func (s PostgresService) NodeDiagnostics(projectID, nodeID string) (NodeDiagnostics, error) {
+	ctx := context.Background()
+	node, err := s.getNode(ctx, nodeID)
+	if err != nil {
+		return NodeDiagnostics{}, err
+	}
+	if node.ProjectID != projectID {
+		return NodeDiagnostics{}, ErrNotFound
+	}
+	diag := NodeDiagnostics{Node: node}
+	if node.AgentID != "" {
+		agent, err := s.getAgent(ctx, node.AgentID)
+		if err == nil {
+			diag.Agent = &agent
+		}
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT e.id, e.org_id, e.project_id, e.session_id, COALESCE(e.node_id,''), e.level, e.step, e.message_redacted, e.progress_percent, e.created_at FROM bootstrap_events e WHERE e.project_id = $1 AND e.node_id = $2 ORDER BY e.created_at`, projectID, nodeID)
+	if err != nil {
+		return NodeDiagnostics{}, err
+	}
+	for rows.Next() {
+		var e BootstrapEvent
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.ProjectID, &e.SessionID, &e.NodeID, &e.Level, &e.Step, &e.MessageRedacted, &e.ProgressPercent, &e.CreatedAt); err != nil {
+			rows.Close()
+			return NodeDiagnostics{}, err
+		}
+		diag.OpenBootstrapEvents = append(diag.OpenBootstrapEvents, e)
+	}
+	if err := rows.Close(); err != nil {
+		return NodeDiagnostics{}, err
+	}
+	readiness, err := s.ProjectReadiness(projectID)
+	if err != nil {
+		return NodeDiagnostics{}, err
+	}
+	diag.Readiness = readiness
+	return diag, nil
 }
 
 func (s PostgresService) UpsertNode(projectID, name, role, status, publicHost, agentID, key string) (Node, error) {
@@ -192,7 +323,7 @@ func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, credentia
 	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(id, org_id, project_id, runtime_id, node_id, public_key_fingerprint, credential_hash, version, capabilities, status, last_seen_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,'active',$10,$11,$12)`, agent.ID, agent.OrgID, agent.ProjectID, agent.RuntimeID, agent.NodeID, agent.PublicKeyFingerprint, agent.CredentialHash, agent.Version, string(data), agent.LastSeenAt, agent.CreatedAt, agent.UpdatedAt); err != nil {
 		return Agent{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET agent_id = $1, agent_version = NULLIF($2,''), last_seen_at = $3, updated_at = $3 WHERE id = $4 AND project_id = $5`, agent.ID, version, now, nodeID, projectID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET agent_id = $1, agent_version = NULLIF($2,''), status = 'agent_connecting', last_seen_at = $3, updated_at = $3 WHERE id = $4 AND project_id = $5`, agent.ID, version, now, nodeID, projectID); err != nil {
 		return Agent{}, err
 	}
 	if err := insertIdempotency(ctx, tx, scope, key, "agent", agent.ID); err != nil {
@@ -234,6 +365,53 @@ func (s PostgresService) VerifyAgent(projectID, nodeID, token string) (Agent, er
 	return Agent{}, APIError{Status: 403, Code: "AGENT_AUTH_INVALID", Message: "agent credential is invalid"}
 }
 
+func (s PostgresService) RecordAgentHeartbeat(projectID, nodeID string, heartbeat AgentHeartbeat) (Node, error) {
+	ctx := context.Background()
+	node, err := s.getNode(ctx, nodeID)
+	if err != nil {
+		return Node{}, err
+	}
+	if node.ProjectID != projectID {
+		return Node{}, ErrNotFound
+	}
+	now := s.clock()
+	status := NodeAgentConnecting
+	if heartbeat.NodeReady {
+		status = NodeHealthy
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Node{}, err
+	}
+	defer tx.Rollback()
+	if node.AgentID != "" {
+		data, _ := json.Marshal(heartbeat.Capabilities)
+		if _, err := tx.ExecContext(ctx, `UPDATE agents SET version = COALESCE(NULLIF($1,''), version), capabilities = COALESCE($2::jsonb, capabilities), last_seen_at = $3, updated_at = $3 WHERE id = $4 AND project_id = $5`, heartbeat.Version, string(data), now, node.AgentID, projectID); err != nil {
+			return Node{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET status = $1, agent_version = COALESCE(NULLIF($2,''), agent_version), cpu_cores = NULLIF($3,0), memory_mb = NULLIF($4,0), disk_total_gb = NULLIF($5,0), k3s_status = NULLIF($6,''), last_seen_at = $7, last_inventory_at = $7, failure_code = NULL, failure_message_redacted = NULL, updated_at = $7 WHERE id = $8 AND project_id = $9`, status, heartbeat.Version, heartbeat.Capacity.CPUCores, heartbeat.Capacity.MemoryMB, heartbeat.Capacity.DiskTotalGB, heartbeat.K3SStatus, now, nodeID, projectID); err != nil {
+		return Node{}, err
+	}
+	if node.Role == "server" && status == NodeHealthy {
+		if _, err := tx.ExecContext(ctx, `UPDATE runtimes SET status = 'ready', server_node_id = $1, updated_at = $2 WHERE id = $3`, nodeID, now, node.RuntimeID); err != nil {
+			return Node{}, err
+		}
+	}
+	if status == NodeHealthy {
+		if _, err := tx.ExecContext(ctx, `WITH closed AS (UPDATE bootstrap_sessions SET status = 'succeeded', finished_at = $1, updated_at = $1 WHERE project_id = $2 AND node_id = $3 AND status IN ('created','preflight','installing','waiting_agent') RETURNING org_id, project_id, id, node_id) INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) SELECT $4, org_id, project_id, id, node_id, 'info', 'succeeded', 'agent heartbeat marked node healthy', 100, $1 FROM closed`, now, projectID, nodeID, newID("evt")); err != nil {
+			return Node{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Node{}, err
+	}
+	if _, err := s.refreshProject(ctx, projectID); err != nil {
+		return Node{}, err
+	}
+	return s.getNode(ctx, nodeID)
+}
+
 func (s PostgresService) RotateAgent(projectID, agentID, credentialHash string) (Agent, error) {
 	if credentialHash == "" {
 		return Agent{}, APIError{Status: 400, Code: "AGENT_CREDENTIAL_REQUIRED", Message: "agent credential hash is required"}
@@ -261,6 +439,62 @@ func (s PostgresService) RevokeAgent(projectID, agentID string) (Agent, error) {
 	return s.getAgent(ctx, agentID)
 }
 
+func (s PostgresService) DrainNode(projectID, nodeID string) (Node, error) {
+	ctx := context.Background()
+	res, err := s.DB.ExecContext(ctx, `UPDATE nodes SET status = 'draining', updated_at = $1 WHERE id = $2 AND project_id = $3 AND status <> 'removed'`, s.clock(), nodeID, projectID)
+	if err != nil {
+		return Node{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Node{}, ErrNotFound
+	}
+	if _, err := s.refreshProject(ctx, projectID); err != nil {
+		return Node{}, err
+	}
+	return s.getNode(ctx, nodeID)
+}
+
+func (s PostgresService) RemoveNode(projectID, nodeID string, force bool) (Node, error) {
+	ctx := context.Background()
+	node, err := s.getNode(ctx, nodeID)
+	if err != nil {
+		return Node{}, err
+	}
+	if node.ProjectID != projectID {
+		return Node{}, ErrNotFound
+	}
+	if node.Role == "server" && !force {
+		var count int
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE project_id = $1 AND role = 'server' AND status = 'healthy'`, projectID).Scan(&count); err != nil {
+			return Node{}, err
+		}
+		if count <= 1 {
+			return Node{}, APIError{Status: 409, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first"}
+		}
+	}
+	now := s.clock()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Node{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET status = 'removed', updated_at = $1 WHERE id = $2 AND project_id = $3`, now, nodeID, projectID); err != nil {
+		return Node{}, err
+	}
+	if node.AgentID != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE agents SET status = 'revoked', updated_at = $1 WHERE id = $2 AND project_id = $3`, now, node.AgentID, projectID); err != nil {
+			return Node{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Node{}, err
+	}
+	if _, err := s.refreshProject(ctx, projectID); err != nil {
+		return Node{}, err
+	}
+	return s.getNode(ctx, nodeID)
+}
+
 func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error) {
 	ctx := context.Background()
 	scope := "bootstrap:" + projectID
@@ -276,16 +510,24 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 	}
 	now := s.clock()
 	if role == "" {
-		role = "worker"
+		role = "first_server"
+		if ok, err := s.hasHealthyServer(ctx, projectID); err != nil {
+			return BootstrapSession{}, err
+		} else if ok {
+			role = "worker"
+		}
 	}
-	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: "pending", PublicHost: publicHost, CreatedAt: now, UpdatedAt: now}
+	if err := s.validateBootstrap(ctx, projectID, role, publicHost); err != nil {
+		return BootstrapSession{}, err
+	}
+	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: NodePending, PublicHost: publicHost, K3SRole: k3sRoleForBootstrap(role), CreatedAt: now, UpdatedAt: now}
 	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: "created", IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return BootstrapSession{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(id, org_id, project_id, environment_id, runtime_id, name, role, status, public_host, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, node.ID, node.OrgID, node.ProjectID, node.EnvironmentID, node.RuntimeID, node.Name, node.Role, node.Status, node.PublicHost, node.CreatedAt, node.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(id, org_id, project_id, environment_id, runtime_id, name, role, status, public_host, k3s_role, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, node.ID, node.OrgID, node.ProjectID, node.EnvironmentID, node.RuntimeID, node.Name, node.Role, node.Status, node.PublicHost, node.K3SRole, node.CreatedAt, node.UpdatedAt); err != nil {
 		return BootstrapSession{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_sessions(id, org_id, project_id, environment_id, runtime_id, node_id, created_by, role, status, idempotency_key, public_host, ssh_port, ssh_username, auth_method, expires_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, session.ID, session.OrgID, session.ProjectID, session.EnvironmentID, session.RuntimeID, session.NodeID, session.CreatedBy, session.Role, session.Status, session.IdempotencyKey, session.PublicHost, session.SSHPort, session.SSHUsername, session.AuthMethod, session.ExpiresAt, session.CreatedAt, session.UpdatedAt); err != nil {
@@ -362,6 +604,33 @@ func (s PostgresService) GetBootstrapSession(projectID, sessionID string) (Boots
 	b.StartedAt = nullTimePtr(started)
 	b.FinishedAt = nullTimePtr(finished)
 	return b, nil
+}
+
+func (s PostgresService) ListBootstrapSessions(projectID string) ([]BootstrapSession, error) {
+	ctx := context.Background()
+	if _, _, _, err := s.defaultScope(ctx, projectID); err != nil {
+		return nil, err
+	}
+	if err := s.expireBootstraps(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, created_at, updated_at FROM bootstrap_sessions WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BootstrapSession
+	for rows.Next() {
+		var b BootstrapSession
+		var started, finished sql.NullTime
+		if err := rows.Scan(&b.ID, &b.OrgID, &b.ProjectID, &b.EnvironmentID, &b.RuntimeID, &b.NodeID, &b.CreatedBy, &b.Role, &b.Status, &b.IdempotencyKey, &b.PublicHost, &b.SSHPort, &b.SSHUsername, &b.AuthMethod, &b.ExpiresAt, &started, &finished, &b.CreatedAt, &b.UpdatedAt); err != nil {
+			return nil, err
+		}
+		b.StartedAt = nullTimePtr(started)
+		b.FinishedAt = nullTimePtr(finished)
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 func (s PostgresService) BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent, error) {
@@ -456,6 +725,9 @@ func (s PostgresService) StartDeployment(projectID, serviceID, requestedBy, key,
 	if _, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, requested_by, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10,$11)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.IdempotencyKey, job.RequestedBy, job.CreatedAt, job.UpdatedAt); err != nil {
 		return DeploymentJob{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO deployment_events(id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, request_id, created_at) VALUES($1,$2,$3,$4,$5,'info',$6,'deployment queued',0,NULLIF($7,''),$8)`, newID("depevt"), job.OrgID, job.ProjectID, job.ID, job.ServiceID, job.Status, requestID, now); err != nil {
+		return DeploymentJob{}, err
+	}
 	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
 		return DeploymentJob{}, err
 	}
@@ -498,7 +770,7 @@ func (s PostgresService) getProject(ctx context.Context, id string) (Project, er
 }
 
 func (s PostgresService) getNode(ctx context.Context, id string) (Node, error) {
-	row := s.DB.QueryRowContext(ctx, `SELECT id, org_id, project_id, environment_id, runtime_id, name, role, status, COALESCE(public_host,''), COALESCE(agent_id,''), COALESCE(agent_version,''), last_seen_at, created_at, updated_at FROM nodes WHERE id = $1`, id)
+	row := s.DB.QueryRowContext(ctx, nodeSelectSQL+` WHERE id = $1`, id)
 	node, err := scanNode(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Node{}, ErrNotFound
@@ -593,6 +865,41 @@ func (s PostgresService) expireBootstraps(ctx context.Context) error {
 	return nil
 }
 
+func (s PostgresService) validateBootstrap(ctx context.Context, projectID, role, publicHost string) error {
+	if publicHost == "" {
+		return APIError{Status: 400, Code: "PUBLIC_HOST_REQUIRED", Message: "public_host is required"}
+	}
+	if role != "first_server" && role != "worker" {
+		return APIError{Status: 400, Code: "INVALID_NODE_ROLE", Message: "role must be first_server or worker"}
+	}
+	hasServer, err := s.hasHealthyServer(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if role == "first_server" && hasServer {
+		return APIError{Status: 409, Code: "SERVER_NODE_EXISTS", Message: "this runtime already has a healthy server", NextAction: "add_worker"}
+	}
+	if role == "worker" && !hasServer {
+		return APIError{Status: 409, Code: "SERVER_NODE_REQUIRED", Message: "add a healthy first server before adding workers", NextAction: "add_first_server"}
+	}
+	var active int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND public_host = $2 AND status IN ('created','preflight','installing','waiting_agent')`, projectID, publicHost).Scan(&active); err != nil {
+		return err
+	}
+	if active > 0 {
+		return APIError{Status: 409, Code: "ACTIVE_BOOTSTRAP_EXISTS", Message: "an active bootstrap session already targets this host", NextAction: "watch_existing_session"}
+	}
+	return nil
+}
+
+func (s PostgresService) hasHealthyServer(ctx context.Context, projectID string) (bool, error) {
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE project_id = $1 AND role = 'server' AND status = 'healthy'`, projectID).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (s PostgresService) idempotentResource(ctx context.Context, scope, key string) (string, bool, error) {
 	var id string
 	err := s.DB.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE scope = $1 AND key = $2`, scope, key).Scan(&id)
@@ -628,11 +935,12 @@ func scanAgent(row nodeScanner) (Agent, error) {
 
 func scanNode(row nodeScanner) (Node, error) {
 	var node Node
-	var lastSeen sql.NullTime
-	if err := row.Scan(&node.ID, &node.OrgID, &node.ProjectID, &node.EnvironmentID, &node.RuntimeID, &node.Name, &node.Role, &node.Status, &node.PublicHost, &node.AgentID, &node.AgentVersion, &lastSeen, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	var lastSeen, lastInventory sql.NullTime
+	if err := row.Scan(&node.ID, &node.OrgID, &node.ProjectID, &node.EnvironmentID, &node.RuntimeID, &node.Name, &node.Role, &node.Status, &node.PublicHost, &node.PrivateIP, &node.Provider, &node.Region, &node.OSName, &node.OSVersion, &node.Arch, &node.CPUCores, &node.MemoryMB, &node.DiskTotalGB, &node.K3SRole, &node.K3SStatus, &node.K3SVersion, &node.AgentID, &node.AgentVersion, &lastSeen, &lastInventory, &node.FailureCode, &node.FailureMessageRedacted, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		return Node{}, err
 	}
 	node.LastSeenAt = nullTimePtr(lastSeen)
+	node.LastInventoryAt = nullTimePtr(lastInventory)
 	return node, nil
 }
 

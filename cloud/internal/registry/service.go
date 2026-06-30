@@ -22,7 +22,11 @@ const (
 	RuntimeProvisioning = "provisioning"
 	RuntimeReady        = "ready"
 
-	NodeHealthy = "healthy"
+	NodePending         = "pending"
+	NodeAgentConnecting = "agent_connecting"
+	NodeHealthy         = "healthy"
+	NodeDraining        = "draining"
+	NodeRemoved         = "removed"
 
 	DeploymentQueued = "queued"
 )
@@ -75,20 +79,57 @@ type Runtime struct {
 }
 
 type Node struct {
-	ID            string     `json:"id"`
-	OrgID         string     `json:"org_id"`
-	ProjectID     string     `json:"project_id"`
-	EnvironmentID string     `json:"environment_id"`
-	RuntimeID     string     `json:"runtime_id"`
-	Name          string     `json:"name"`
-	Role          string     `json:"role"`
-	Status        string     `json:"status"`
-	PublicHost    string     `json:"public_host,omitempty"`
-	AgentID       string     `json:"agent_id,omitempty"`
-	AgentVersion  string     `json:"agent_version,omitempty"`
-	LastSeenAt    *time.Time `json:"last_seen_at,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID                     string     `json:"id"`
+	OrgID                  string     `json:"org_id"`
+	ProjectID              string     `json:"project_id"`
+	EnvironmentID          string     `json:"environment_id"`
+	RuntimeID              string     `json:"runtime_id"`
+	Name                   string     `json:"name"`
+	Role                   string     `json:"role"`
+	Status                 string     `json:"status"`
+	PublicHost             string     `json:"public_host,omitempty"`
+	PrivateIP              string     `json:"private_ip,omitempty"`
+	Provider               string     `json:"provider,omitempty"`
+	Region                 string     `json:"region,omitempty"`
+	OSName                 string     `json:"os_name,omitempty"`
+	OSVersion              string     `json:"os_version,omitempty"`
+	Arch                   string     `json:"arch,omitempty"`
+	CPUCores               int        `json:"cpu_cores,omitempty"`
+	MemoryMB               int        `json:"memory_mb,omitempty"`
+	DiskTotalGB            int        `json:"disk_total_gb,omitempty"`
+	K3SRole                string     `json:"k3s_role,omitempty"`
+	K3SStatus              string     `json:"k3s_status,omitempty"`
+	K3SVersion             string     `json:"k3s_version,omitempty"`
+	AgentID                string     `json:"agent_id,omitempty"`
+	AgentVersion           string     `json:"agent_version,omitempty"`
+	LastSeenAt             *time.Time `json:"last_seen_at,omitempty"`
+	LastInventoryAt        *time.Time `json:"last_inventory_at,omitempty"`
+	FailureCode            string     `json:"failure_code,omitempty"`
+	FailureMessageRedacted string     `json:"failure_message_redacted,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+}
+
+type AgentHeartbeat struct {
+	Version      string         `json:"version"`
+	Capabilities map[string]any `json:"capabilities,omitempty"`
+	K3SStatus    string         `json:"k3s_status,omitempty"`
+	NodeReady    bool           `json:"node_ready"`
+	Capacity     NodeCapacity   `json:"capacity,omitempty"`
+}
+
+type NodeCapacity struct {
+	CPUCores    int `json:"cpu_cores,omitempty"`
+	MemoryMB    int `json:"memory_mb,omitempty"`
+	DiskTotalGB int `json:"disk_total_gb,omitempty"`
+}
+
+type NodeDiagnostics struct {
+	Node                Node             `json:"node"`
+	Agent               *Agent           `json:"agent,omitempty"`
+	OpenBootstrapEvents []BootstrapEvent `json:"open_bootstrap_events,omitempty"`
+	RecentDeployments   []DeploymentJob  `json:"recent_deployment_jobs,omitempty"`
+	Readiness           Readiness        `json:"readiness"`
 }
 
 type Agent struct {
@@ -176,6 +217,20 @@ type DeploymentJob struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
+type DeploymentEvent struct {
+	ID              string    `json:"id"`
+	OrgID           string    `json:"org_id"`
+	ProjectID       string    `json:"project_id"`
+	DeploymentID    string    `json:"deployment_id"`
+	ServiceID       string    `json:"service_id"`
+	Level           string    `json:"level"`
+	Step            string    `json:"step"`
+	MessageRedacted string    `json:"message_redacted"`
+	ProgressPercent int       `json:"progress_percent"`
+	RequestID       string    `json:"request_id,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 type AuditEvent struct {
 	ID               string         `json:"id"`
 	OrgID            string         `json:"org_id"`
@@ -198,19 +253,20 @@ type Readiness struct {
 }
 
 type Service struct {
-	mu          sync.Mutex
-	projects    map[string]Project
-	envs        map[string]Environment
-	runtimes    map[string]Runtime
-	nodes       map[string]Node
-	agents      map[string]Agent
-	bootstraps  map[string]BootstrapSession
-	events      map[string][]BootstrapEvent
-	services    map[string]ServiceRecord
-	deployments map[string]DeploymentJob
-	audit       []AuditEvent
-	idempotency map[string]any
-	now         func() time.Time
+	mu           sync.Mutex
+	projects     map[string]Project
+	envs         map[string]Environment
+	runtimes     map[string]Runtime
+	nodes        map[string]Node
+	agents       map[string]Agent
+	bootstraps   map[string]BootstrapSession
+	events       map[string][]BootstrapEvent
+	services     map[string]ServiceRecord
+	deployments  map[string]DeploymentJob
+	deployEvents map[string][]DeploymentEvent
+	audit        []AuditEvent
+	idempotency  map[string]any
+	now          func() time.Time
 }
 
 type API interface {
@@ -218,33 +274,43 @@ type API interface {
 	ListProjects(orgID string) ([]Project, error)
 	ProjectReadiness(projectID string) (Readiness, error)
 	ListNodes(projectID string) ([]Node, error)
+	NodeDiagnostics(projectID, nodeID string) (NodeDiagnostics, error)
 	UpsertNode(projectID, name, role, status, publicHost, agentID, key string) (Node, error)
 	RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any) (Agent, error)
+	RecordAgentHeartbeat(projectID, nodeID string, heartbeat AgentHeartbeat) (Node, error)
 	VerifyAgent(projectID, nodeID, token string) (Agent, error)
 	RotateAgent(projectID, agentID, credentialHash string) (Agent, error)
 	RevokeAgent(projectID, agentID string) (Agent, error)
+	DrainNode(projectID, nodeID string) (Node, error)
+	RemoveNode(projectID, nodeID string, force bool) (Node, error)
 	CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error)
 	UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error)
 	GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error)
+	ListBootstrapSessions(projectID string) ([]BootstrapSession, error)
 	BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent, error)
 	CreateService(projectID, name, serviceType, sourceType, repoURL, image, key string) (ServiceRecord, error)
+	ListServices(projectID string) ([]ServiceRecord, error)
 	StartDeployment(projectID, serviceID, requestedBy, key, requestID string) (DeploymentJob, error)
+	ListDeployments(projectID string) ([]DeploymentJob, error)
+	DeploymentEvents(projectID, deploymentID string) ([]DeploymentEvent, error)
+	ListAudit(projectID string) ([]AuditEvent, error)
 	Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any)
 }
 
 func NewService() *Service {
 	return &Service{
-		projects:    map[string]Project{},
-		envs:        map[string]Environment{},
-		runtimes:    map[string]Runtime{},
-		nodes:       map[string]Node{},
-		agents:      map[string]Agent{},
-		bootstraps:  map[string]BootstrapSession{},
-		events:      map[string][]BootstrapEvent{},
-		services:    map[string]ServiceRecord{},
-		deployments: map[string]DeploymentJob{},
-		audit:       []AuditEvent{},
-		idempotency: map[string]any{},
+		projects:     map[string]Project{},
+		envs:         map[string]Environment{},
+		runtimes:     map[string]Runtime{},
+		nodes:        map[string]Node{},
+		agents:       map[string]Agent{},
+		bootstraps:   map[string]BootstrapSession{},
+		events:       map[string][]BootstrapEvent{},
+		services:     map[string]ServiceRecord{},
+		deployments:  map[string]DeploymentJob{},
+		deployEvents: map[string][]DeploymentEvent{},
+		audit:        []AuditEvent{},
+		idempotency:  map[string]any{},
 	}
 }
 
@@ -305,6 +371,83 @@ func (s *Service) ListNodes(projectID string) ([]Node, error) {
 	return out, nil
 }
 
+func (s *Service) ListServices(projectID string) ([]ServiceRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.projects[projectID]; !ok {
+		return nil, ErrNotFound
+	}
+	out := []ServiceRecord{}
+	for _, service := range s.services {
+		if service.ProjectID == projectID {
+			out = append(out, service)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) ListDeployments(projectID string) ([]DeploymentJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.projects[projectID]; !ok {
+		return nil, ErrNotFound
+	}
+	out := []DeploymentJob{}
+	for _, job := range s.deployments {
+		if job.ProjectID == projectID {
+			out = append(out, job)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) ListAudit(projectID string) ([]AuditEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.projects[projectID]; !ok {
+		return nil, ErrNotFound
+	}
+	out := []AuditEvent{}
+	for _, event := range s.audit {
+		if event.ProjectID == projectID {
+			out = append(out, event)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) NodeDiagnostics(projectID, nodeID string) (NodeDiagnostics, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node, ok := s.nodes[nodeID]
+	if !ok || node.ProjectID != projectID {
+		return NodeDiagnostics{}, ErrNotFound
+	}
+	diag := NodeDiagnostics{Node: node}
+	if node.AgentID != "" {
+		if agent, ok := s.agents[node.AgentID]; ok {
+			diag.Agent = &agent
+		}
+	}
+	for _, session := range s.bootstraps {
+		if session.ProjectID != projectID || session.NodeID != nodeID {
+			continue
+		}
+		diag.OpenBootstrapEvents = append(diag.OpenBootstrapEvents, s.events[session.ID]...)
+	}
+	for _, job := range s.deployments {
+		if job.ProjectID == projectID && job.RuntimeID == node.RuntimeID {
+			diag.RecentDeployments = append(diag.RecentDeployments, job)
+		}
+	}
+	readiness, err := s.readinessLocked(projectID)
+	if err != nil {
+		return NodeDiagnostics{}, err
+	}
+	diag.Readiness = readiness
+	return diag, nil
+}
+
 func (s *Service) UpsertNode(projectID, name, role, status, publicHost, agentID, key string) (Node, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,12 +504,74 @@ func (s *Service) RegisterAgent(projectID, nodeID, fingerprint, credentialHash, 
 	agent := Agent{ID: newID("agent"), OrgID: node.OrgID, ProjectID: projectID, RuntimeID: node.RuntimeID, NodeID: node.ID, PublicKeyFingerprint: fingerprint, CredentialHash: credentialHash, Version: version, Capabilities: capabilities, Status: "active", LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
 	node.AgentID = agent.ID
 	node.AgentVersion = version
+	node.Status = NodeAgentConnecting
 	node.LastSeenAt = &now
 	node.UpdatedAt = now
 	s.nodes[node.ID] = node
 	s.agents[agent.ID] = agent
 	s.idempotency["agent:"+projectID+":"+nodeID+":"+key] = agent
 	return agent, nil
+}
+
+func (s *Service) RecordAgentHeartbeat(projectID, nodeID string, heartbeat AgentHeartbeat) (Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node, ok := s.nodes[nodeID]
+	if !ok || node.ProjectID != projectID {
+		return Node{}, ErrNotFound
+	}
+	now := s.clock()
+	if node.AgentID != "" {
+		agent := s.agents[node.AgentID]
+		if heartbeat.Version != "" {
+			agent.Version = heartbeat.Version
+			node.AgentVersion = heartbeat.Version
+		}
+		if heartbeat.Capabilities != nil {
+			agent.Capabilities = heartbeat.Capabilities
+		}
+		agent.LastSeenAt = &now
+		agent.UpdatedAt = now
+		s.agents[agent.ID] = agent
+	}
+	node.LastSeenAt = &now
+	node.LastInventoryAt = &now
+	node.CPUCores = heartbeat.Capacity.CPUCores
+	node.MemoryMB = heartbeat.Capacity.MemoryMB
+	node.DiskTotalGB = heartbeat.Capacity.DiskTotalGB
+	if heartbeat.K3SStatus != "" {
+		node.K3SStatus = heartbeat.K3SStatus
+	}
+	if heartbeat.NodeReady {
+		node.Status = NodeHealthy
+		node.FailureCode = ""
+		node.FailureMessageRedacted = ""
+	} else if node.Status != NodeDraining && node.Status != NodeRemoved {
+		node.Status = NodeAgentConnecting
+	}
+	node.UpdatedAt = now
+	s.nodes[node.ID] = node
+	if node.Role == "server" && node.Status == NodeHealthy {
+		runtime := s.runtimes[node.RuntimeID]
+		runtime.Status = RuntimeReady
+		runtime.ServerNodeID = node.ID
+		runtime.UpdatedAt = now
+		s.runtimes[runtime.ID] = runtime
+	}
+	if node.Status == NodeHealthy {
+		for id, session := range s.bootstraps {
+			if session.ProjectID != projectID || session.NodeID != nodeID || !isActiveBootstrap(session.Status) {
+				continue
+			}
+			session.Status = "succeeded"
+			session.FinishedAt = &now
+			session.UpdatedAt = now
+			s.bootstraps[id] = session
+			s.events[id] = append(s.events[id], BootstrapEvent{ID: newID("evt"), OrgID: session.OrgID, ProjectID: projectID, SessionID: id, NodeID: nodeID, Level: "info", Step: "succeeded", MessageRedacted: "agent heartbeat marked node healthy", ProgressPercent: 100, CreatedAt: now})
+		}
+	}
+	s.refreshProjectLocked(projectID)
+	return node, nil
 }
 
 func (s *Service) VerifyAgent(projectID, nodeID, token string) (Agent, error) {
@@ -426,6 +631,48 @@ func (s *Service) RevokeAgent(projectID, agentID string) (Agent, error) {
 	return agent, nil
 }
 
+func (s *Service) DrainNode(projectID, nodeID string) (Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node, ok := s.nodes[nodeID]
+	if !ok || node.ProjectID != projectID {
+		return Node{}, ErrNotFound
+	}
+	if node.Status == NodeRemoved {
+		return Node{}, APIError{Status: 409, Code: "NODE_REMOVED", Message: "removed nodes cannot be drained"}
+	}
+	now := s.clock()
+	node.Status = NodeDraining
+	node.UpdatedAt = now
+	s.nodes[nodeID] = node
+	s.refreshProjectLocked(projectID)
+	return node, nil
+}
+
+func (s *Service) RemoveNode(projectID, nodeID string, force bool) (Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node, ok := s.nodes[nodeID]
+	if !ok || node.ProjectID != projectID {
+		return Node{}, ErrNotFound
+	}
+	if node.Role == "server" && !force && s.healthyServerCountLocked(projectID) <= 1 {
+		return Node{}, APIError{Status: 409, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first"}
+	}
+	now := s.clock()
+	node.Status = NodeRemoved
+	node.UpdatedAt = now
+	if node.AgentID != "" {
+		agent := s.agents[node.AgentID]
+		agent.Status = "revoked"
+		agent.UpdatedAt = now
+		s.agents[agent.ID] = agent
+	}
+	s.nodes[nodeID] = node
+	s.refreshProjectLocked(projectID)
+	return node, nil
+}
+
 func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -438,9 +685,15 @@ func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, 
 	}
 	now := s.clock()
 	if role == "" {
-		role = "worker"
+		role = "first_server"
+		if s.hasHealthyServerLocked(projectID) {
+			role = "worker"
+		}
 	}
-	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: "pending", PublicHost: publicHost, CreatedAt: now, UpdatedAt: now}
+	if err := s.validateBootstrapLocked(projectID, role, publicHost); err != nil {
+		return BootstrapSession{}, err
+	}
+	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: NodePending, PublicHost: publicHost, K3SRole: k3sRoleForBootstrap(role), CreatedAt: now, UpdatedAt: now}
 	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: "created", IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now}
 	event := BootstrapEvent{ID: newID("evt"), OrgID: project.OrgID, ProjectID: project.ID, SessionID: session.ID, NodeID: node.ID, Level: "info", Step: "created", MessageRedacted: "bootstrap session created", ProgressPercent: 0, CreatedAt: now}
 	runtime.Status = RuntimeProvisioning
@@ -505,6 +758,22 @@ func (s *Service) BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent
 	return append([]BootstrapEvent(nil), s.events[sessionID]...), nil
 }
 
+func (s *Service) ListBootstrapSessions(projectID string) ([]BootstrapSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireBootstrapsLocked()
+	if _, ok := s.projects[projectID]; !ok {
+		return nil, ErrNotFound
+	}
+	out := []BootstrapSession{}
+	for _, session := range s.bootstraps {
+		if session.ProjectID == projectID {
+			out = append(out, session)
+		}
+	}
+	return out, nil
+}
+
 func (s *Service) CreateService(projectID, name, serviceType, sourceType, repoURL, image, key string) (ServiceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -552,8 +821,19 @@ func (s *Service) StartDeployment(projectID, serviceID, requestedBy, key, reques
 	now := s.clock()
 	job := DeploymentJob{ID: newID("dep"), OrgID: service.OrgID, ProjectID: projectID, EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, ServiceID: serviceID, Status: DeploymentQueued, IdempotencyKey: key, RequestedBy: requestedBy, CreatedAt: now, UpdatedAt: now}
 	s.deployments[job.ID] = job
+	s.deployEvents[job.ID] = []DeploymentEvent{{ID: newID("depevt"), OrgID: service.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: serviceID, Level: "info", Step: DeploymentQueued, MessageRedacted: "deployment queued", ProgressPercent: 0, RequestID: requestID, CreatedAt: now}}
 	s.idempotency["deploy:"+projectID+":"+serviceID+":"+key] = job
 	return job, nil
+}
+
+func (s *Service) DeploymentEvents(projectID, deploymentID string) ([]DeploymentEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.deployments[deploymentID]
+	if !ok || job.ProjectID != projectID {
+		return nil, ErrNotFound
+	}
+	return append([]DeploymentEvent(nil), s.deployEvents[deploymentID]...), nil
 }
 
 func (s *Service) Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) {
@@ -599,6 +879,41 @@ func (s *Service) refreshProjectLocked(projectID string) string {
 	project.UpdatedAt = s.clock()
 	s.projects[projectID] = project
 	return status
+}
+
+func (s *Service) validateBootstrapLocked(projectID, role, publicHost string) error {
+	if publicHost == "" {
+		return APIError{Status: 400, Code: "PUBLIC_HOST_REQUIRED", Message: "public_host is required"}
+	}
+	if role != "first_server" && role != "worker" {
+		return APIError{Status: 400, Code: "INVALID_NODE_ROLE", Message: "role must be first_server or worker"}
+	}
+	if role == "first_server" && s.hasHealthyServerLocked(projectID) {
+		return APIError{Status: 409, Code: "SERVER_NODE_EXISTS", Message: "this runtime already has a healthy server", NextAction: "add_worker"}
+	}
+	if role == "worker" && !s.hasHealthyServerLocked(projectID) {
+		return APIError{Status: 409, Code: "SERVER_NODE_REQUIRED", Message: "add a healthy first server before adding workers", NextAction: "add_first_server"}
+	}
+	for _, session := range s.bootstraps {
+		if session.ProjectID == projectID && session.PublicHost == publicHost && isActiveBootstrap(session.Status) {
+			return APIError{Status: 409, Code: "ACTIVE_BOOTSTRAP_EXISTS", Message: "an active bootstrap session already targets this host", NextAction: "watch_existing_session"}
+		}
+	}
+	return nil
+}
+
+func (s *Service) hasHealthyServerLocked(projectID string) bool {
+	return s.healthyServerCountLocked(projectID) > 0
+}
+
+func (s *Service) healthyServerCountLocked(projectID string) int {
+	count := 0
+	for _, node := range s.nodes {
+		if node.ProjectID == projectID && node.Role == "server" && node.Status == NodeHealthy {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *Service) expireBootstrapsLocked() {
@@ -664,6 +979,13 @@ func roleForNode(role string) string {
 		return "server"
 	}
 	return role
+}
+
+func k3sRoleForBootstrap(role string) string {
+	if role == "first_server" {
+		return "server"
+	}
+	return "agent"
 }
 
 func newID(prefix string) string {

@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/", s.handleRegistryAPI)
+	mux.HandleFunc("/", s.handleUI)
 	return mux
 }
 
@@ -177,11 +178,11 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	if strings.HasSuffix(r.URL.Path, "/heartbeat") {
+		s.handleAgentHeartbeat(w, r)
 		return
 	}
-	if !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
+	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
 	}
@@ -212,6 +213,27 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, env)
+}
+
+func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+		return
+	}
+	var req registry.AgentHeartbeat
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	node, err := s.Registry.RecordAgentHeartbeat(projectID, nodeID, req)
+	if err == nil {
+		s.Registry.Audit(node.OrgID, projectID, "agent", "AGENT_HEARTBEAT_RECORDED", "node", node.ID, "success", map[string]any{"status": node.Status})
+	}
+	writeRegistryResult(w, r, node, err, http.StatusOK)
 }
 
 func (s *Server) authorizeAgent(w http.ResponseWriter, r *http.Request, projectID, nodeID string) (registry.Agent, bool) {

@@ -103,6 +103,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			memory_mb INTEGER,
 			disk_total_gb INTEGER,
 			k3s_role TEXT DEFAULT 'unknown',
+			k3s_status TEXT,
 			k3s_version TEXT,
 			agent_id TEXT,
 			agent_version TEXT,
@@ -114,6 +115,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			UNIQUE (runtime_id, name)
 		)`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS k3s_status TEXT`,
 		`CREATE INDEX IF NOT EXISTS nodes_project_status_idx ON nodes(project_id, status)`,
 		`CREATE TABLE IF NOT EXISTS agents (
 			id TEXT PRIMARY KEY,
@@ -244,6 +246,20 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			UNIQUE (project_id, service_id, idempotency_key)
 		)`,
 		`CREATE INDEX IF NOT EXISTS deployment_jobs_project_status_idx ON deployment_jobs(project_id, status, created_at)`,
+		`CREATE TABLE IF NOT EXISTS deployment_events (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			deployment_id TEXT NOT NULL REFERENCES deployment_jobs(id) ON DELETE CASCADE,
+			service_id TEXT NOT NULL REFERENCES control_services(id) ON DELETE CASCADE,
+			level TEXT NOT NULL,
+			step TEXT NOT NULL,
+			message_redacted TEXT NOT NULL,
+			progress_percent INTEGER NOT NULL DEFAULT 0,
+			request_id TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS deployment_events_deployment_created_idx ON deployment_events(deployment_id, created_at)`,
 		`CREATE TABLE IF NOT EXISTS cloud_audit_events (
 			id TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

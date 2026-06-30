@@ -105,6 +105,53 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			return
 		}
 	}
+	if len(parts) == 3 && parts[2] == "services" && r.Method == http.MethodGet {
+		value, err := s.Registry.ListServices(projectID)
+		writeRegistryResult(w, r, map[string]any{"services": value}, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 3 && parts[2] == "deployments" && r.Method == http.MethodGet {
+		value, err := s.Registry.ListDeployments(projectID)
+		writeRegistryResult(w, r, map[string]any{"deployments": value}, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 5 && parts[2] == "deployments" && parts[4] == "events" && r.Method == http.MethodGet {
+		value, err := s.Registry.DeploymentEvents(projectID, parts[3])
+		writeRegistryResult(w, r, map[string]any{"events": value}, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 3 && parts[2] == "audit" && r.Method == http.MethodGet {
+		value, err := s.Registry.ListAudit(projectID)
+		writeRegistryResult(w, r, map[string]any{"events": value}, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 4 && parts[2] == "nodes" && r.Method == http.MethodGet {
+		value, err := s.Registry.NodeDiagnostics(projectID, parts[3])
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 5 && parts[2] == "nodes" && (parts[4] == "drain" || parts[4] == "remove") && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if !s.requireRole(w, r, principal, projectID, "node", parts[3], "owner", "admin") {
+			return
+		}
+		var value registry.Node
+		var err error
+		action := "NODE_DRAINED"
+		if parts[4] == "remove" {
+			value, err = s.Registry.RemoveNode(projectID, parts[3], r.URL.Query().Get("force") == "true")
+			action = "NODE_REMOVED"
+		} else {
+			value, err = s.Registry.DrainNode(projectID, parts[3])
+		}
+		if err == nil {
+			s.Registry.Audit(value.OrgID, projectID, principal.UserID, action, "node", value.ID, "success", nil)
+		}
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return
+	}
 	if len(parts) == 3 && parts[2] == "agents" && r.Method == http.MethodPost {
 		if !requireWriteHeaders(w, r) {
 			return
@@ -224,6 +271,11 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "BOOTSTRAP_SESSION_CREATED", "bootstrap_session", value.ID, "success", map[string]any{"role": value.Role})
 		}
 		writeRegistryResult(w, r, value, err, http.StatusCreated)
+		return
+	}
+	if len(parts) == 3 && parts[2] == "bootstrap-sessions" && r.Method == http.MethodGet {
+		value, err := s.Registry.ListBootstrapSessions(projectID)
+		writeRegistryResult(w, r, map[string]any{"sessions": value}, err, http.StatusOK)
 		return
 	}
 	if len(parts) == 4 && parts[2] == "bootstrap-sessions" && r.Method == http.MethodGet {

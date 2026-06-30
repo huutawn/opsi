@@ -122,6 +122,10 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		writeRegistryFailure(w, r, err)
 		return
 	}
+	if _, err := s.Registry.UpdateBootstrapSession(reg.ProjectID, reg.SessionID, "waiting_agent", "agent registered; waiting for healthy heartbeat"); err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
 	s.Registry.Audit(agent.OrgID, agent.ProjectID, "agent", "AGENT_REGISTERED", "agent", agent.ID, "success", map[string]any{"node_id": agent.NodeID})
 	writeJSON(w, http.StatusCreated, map[string]any{"agent": agent, "agent_token": agentToken})
 }

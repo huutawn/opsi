@@ -109,6 +109,117 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 	}
 }
 
+func TestRegistryAPIReadModelsForUI(t *testing.T) {
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Demo","slug":"demo","created_by":"user-1"}`)))
+	req.Header.Set("Idempotency-Key", "ui-proj")
+	req.Header.Set("X-Request-ID", "req-ui-proj")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create project status=%d body=%s", w.Code, w.Body.String())
+	}
+	var project struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&project); err != nil {
+		t.Fatal(err)
+	}
+	serviceID := createService(t, handler, project.ID)
+
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/nodes", bytes.NewReader([]byte(`{"name":"vps-1","role":"server","status":"healthy","public_host":"203.0.113.10"}`)))
+	req.Header.Set("Idempotency-Key", "ui-node")
+	req.Header.Set("X-Request-ID", "req-ui-node")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("node status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{"requested_by":"ui"}`)))
+	req.Header.Set("Idempotency-Key", "ui-deploy")
+	req.Header.Set("X-Request-ID", "req-ui-deploy")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("deploy status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	for _, path := range []string{
+		"/api/projects/" + project.ID + "/services",
+		"/api/projects/" + project.ID + "/deployments",
+		"/api/projects/" + project.ID + "/bootstrap-sessions",
+		"/api/projects/" + project.ID + "/audit",
+	} {
+		req = httptest.NewRequest(http.MethodGet, path, nil)
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, w.Code, w.Body.String())
+		}
+		if !bytes.Contains(w.Body.Bytes(), []byte(serviceID)) && path != "/api/projects/"+project.ID+"/audit" && path != "/api/projects/"+project.ID+"/bootstrap-sessions" {
+			t.Fatalf("%s missing service id: %s", path, w.Body.String())
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/deployments", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("deployments status=%d body=%s", w.Code, w.Body.String())
+	}
+	var deploys struct {
+		Deployments []struct {
+			ID string `json:"id"`
+		} `json:"deployments"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&deploys); err != nil {
+		t.Fatal(err)
+	}
+	if len(deploys.Deployments) != 1 {
+		t.Fatalf("expected one deployment, got %+v", deploys)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/deployments/"+deploys.Deployments[0].ID+"/events", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("deployment queued")) {
+		t.Fatalf("deployment events status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestUIShellServesProductionWorkflow(t *testing.T) {
+	handler := NewServer(Config{}).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ui status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.Bytes()
+	for _, want := range [][]byte{
+		[]byte("Servers / Nodes"),
+		[]byte("Add first server"),
+		[]byte("Topology will appear after at least one healthy server and one deployed service."),
+		[]byte("type=\"password\""),
+		[]byte("Reconnect-safe"),
+	} {
+		if !bytes.Contains(body, want) {
+			t.Fatalf("ui missing %q", want)
+		}
+	}
+	for _, forbidden := range [][]byte{
+		[]byte("ssh "),
+		[]byte("opsi deploy"),
+		[]byte("localStorage.setItem(\"opsi_pat\""),
+	} {
+		if bytes.Contains(body, forbidden) {
+			t.Fatalf("ui contains forbidden workflow/text %q", forbidden)
+		}
+	}
+}
+
 func createService(t *testing.T, handler http.Handler, projectID string) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/services", bytes.NewReader([]byte(`{"name":"api","type":"application","source_type":"git","repo_url":"https://github.com/example/api.git"}`)))
@@ -253,6 +364,16 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"worker","public_host":"203.0.113.11","ssh_username":"root","auth_method":"password","ssh_password":"secret"}`)))
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	req.Header.Set("Idempotency-Key", "worker-before-server")
+	req.Header.Set("X-Request-ID", "req-worker-before-server")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("worker before server status=%d body=%s", w.Code, w.Body.String())
+	}
+
 	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/take", nil)
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -305,6 +426,62 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	}
 	if agentResp.Agent.ID == "" || agentResp.Agent.NodeID == "" || agentResp.AgentToken == "" || agentResp.Agent.Status != "active" {
 		t.Fatalf("unexpected agent exchange: %+v", agentResp)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/agents/"+agentResp.Agent.NodeID+"/heartbeat?project_id="+projectID, bytes.NewReader([]byte(`{"version":"v1.1","k3s_status":"ready","node_ready":true,"capacity":{"cpu_cores":2,"memory_mb":4096,"disk_total_gb":80},"capabilities":{"deploy":true}}`)))
+	req.Header.Set("Authorization", "Bearer "+agentResp.AgentToken)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("heartbeat status=%d body=%s", w.Code, w.Body.String())
+	}
+	var healthyNode struct {
+		Status       string `json:"status"`
+		LastSeenAt   string `json:"last_seen_at"`
+		MemoryMB     int    `json:"memory_mb"`
+		K3SStatus    string `json:"k3s_status"`
+		AgentVersion string `json:"agent_version"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&healthyNode); err != nil {
+		t.Fatal(err)
+	}
+	if healthyNode.Status != "healthy" || healthyNode.LastSeenAt == "" || healthyNode.MemoryMB != 4096 || healthyNode.K3SStatus != "ready" || healthyNode.AgentVersion != "v1.1" {
+		t.Fatalf("unexpected heartbeat node: %+v", healthyNode)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/readiness", nil)
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("readiness after heartbeat status=%d body=%s", w.Code, w.Body.String())
+	}
+	var ready struct {
+		Status    string `json:"status"`
+		CanDeploy bool   `json:"can_deploy"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if ready.Status != "ready" || !ready.CanDeploy {
+		t.Fatalf("unexpected readiness after heartbeat: %+v", ready)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/nodes/"+agentResp.Agent.NodeID, nil)
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("diagnostics status=%d body=%s", w.Code, w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("secret")) || !bytes.Contains(w.Body.Bytes(), []byte("agent heartbeat marked node healthy")) {
+		t.Fatalf("bad diagnostics body: %s", w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"worker","public_host":"203.0.113.11","ssh_username":"root","auth_method":"password","ssh_password":"secret"}`)))
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	req.Header.Set("Idempotency-Key", "worker-after-server")
+	req.Header.Set("X-Request-ID", "req-worker-after-server")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("worker after server status=%d body=%s", w.Code, w.Body.String())
 	}
 	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
 	w = httptest.NewRecorder()
@@ -372,6 +549,34 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("revoked agent poll status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/nodes/"+agentResp.Agent.NodeID+"/remove", nil)
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	req.Header.Set("Idempotency-Key", "node-remove-danger")
+	req.Header.Set("X-Request-ID", "req-node-remove-danger")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("only server remove status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/nodes/"+agentResp.Agent.NodeID+"/drain", nil)
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	req.Header.Set("Idempotency-Key", "node-drain")
+	req.Header.Set("X-Request-ID", "req-node-drain")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"status":"draining"`)) {
+		t.Fatalf("drain status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/nodes/"+agentResp.Agent.NodeID+"/remove?force=true", nil)
+	req.Header.Set("Authorization", "Bearer owner_pat")
+	req.Header.Set("Idempotency-Key", "node-remove-force")
+	req.Header.Set("X-Request-ID", "req-node-remove-force")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"status":"removed"`)) {
+		t.Fatalf("force remove status=%d body=%s", w.Code, w.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/finish", bytes.NewReader([]byte(`{"project_id":"`+projectID+`","status":"succeeded","message":"password=secret token=abc"}`)))

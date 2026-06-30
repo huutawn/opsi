@@ -1,6 +1,6 @@
 # Opsi CLI
 
-CLI is the local command and presentation layer. It stores PAT values in the OS keychain, talks to Agent through the published contract, serves the Local Web UI placeholder, streams deployment progress, and can consume telemetry sync chunks.
+CLI is the local command and presentation layer. It stores PAT values in the OS keychain, talks to Agent through the published contract, serves the built Local Web UI, streams deployment progress, and can consume telemetry sync chunks.
 
 ## Build
 
