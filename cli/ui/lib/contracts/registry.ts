@@ -135,6 +135,45 @@ export type SupportRunbook = {
   escalation_path: string;
 };
 
+export type GrafanaSeries = {
+  name: string;
+  status: string;
+  value: number;
+  points?: number[];
+};
+
+export type GrafanaPanel = {
+  id: string;
+  title: string;
+  kind: string;
+  unit: string;
+  query: string;
+  description?: string;
+  series: GrafanaSeries[];
+};
+
+export type GrafanaDashboard = {
+  title: string;
+  datasource: string;
+  refresh: string;
+  panels: GrafanaPanel[];
+};
+
+export type ProductionGate = {
+  name: string;
+  passed: boolean;
+  detail: string;
+};
+
+export type BreakGlassPolicy = {
+  time_limited: boolean;
+  approval_required: boolean;
+  reason_required: boolean;
+  audited: boolean;
+  secret_reveal_by_default: boolean;
+  owner_notification: string;
+};
+
 export type SupportSummary = {
   generated_at: string;
   readiness: Readiness;
@@ -148,9 +187,12 @@ export type SupportSummary = {
     open_bootstrap_jobs: number;
     audit_events: number;
   };
+  dashboard: GrafanaDashboard;
   signals: SupportSignal[];
   active_alerts: SupportAlert[];
   configured_alerts: SupportAlertRule[];
+  production_gates: ProductionGate[];
+  break_glass_policy: BreakGlassPolicy;
   runbooks: SupportRunbook[];
   recent_request_ids?: string[];
 };

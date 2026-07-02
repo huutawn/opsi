@@ -203,6 +203,7 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action})
 		return
 	}
@@ -251,6 +252,10 @@ func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Requ
 	}
 	job, err := s.Registry.CompleteDeployment(projectID, nodeID, deploymentID, r.Header.Get("X-Request-ID"), result)
 	if err == nil {
+		s.observer.Inc("deployment_results_total")
+		if job.Status == registry.DeploymentFailed {
+			s.observer.Inc("deployment_failures_total")
+		}
 		outcome := "failed"
 		if job.Status == registry.DeploymentSucceeded || job.Status == registry.DeploymentRolledBack {
 			outcome = "success"
@@ -276,6 +281,7 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	node, err := s.Registry.RecordAgentHeartbeat(projectID, nodeID, req)
 	if err == nil {
+		s.observer.Inc("agent_heartbeat_total")
 		s.Registry.Audit(node.OrgID, projectID, "agent", "AGENT_HEARTBEAT_RECORDED", "node", node.ID, "success", map[string]any{"status": node.Status})
 	}
 	writeRegistryResult(w, r, node, err, http.StatusOK)

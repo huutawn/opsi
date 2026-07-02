@@ -197,6 +197,7 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			return
 		}
 		if !s.limits.Allow("agent:"+projectID+":"+req.NodeID, 5, time.Hour) {
+			s.observer.Inc("rate_limited_total")
 			writeRegistryError(w, registry.APIError{Status: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "agent registration rate limit exceeded", RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
@@ -289,6 +290,7 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		}
 		value, err := s.Registry.CreateBootstrapSession(projectID, req.Role, req.PublicHost, req.SSHUsername, credential.AuthMethod, principal.UserID, r.Header.Get("Idempotency-Key"), req.SSHPort)
 		if err == nil {
+			s.observer.Inc("bootstrap_sessions_total")
 			ttl := time.Until(value.ExpiresAt)
 			if ttl <= 0 {
 				ttl = 30 * time.Minute
@@ -342,6 +344,7 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			return
 		}
 		if !s.limits.Allow("deploy:"+projectID, 60, time.Minute) {
+			s.observer.Inc("rate_limited_total")
 			writeRegistryError(w, registry.APIError{Status: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "deployment rate limit exceeded", RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
@@ -356,6 +359,7 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		}
 		value, err := s.Registry.StartDeployment(projectID, parts[3], req.RequestedBy, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"))
 		if err == nil {
+			s.observer.Inc("deployment_jobs_total")
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "DEPLOYMENT_STARTED", "deployment_job", value.ID, "success", map[string]any{"service_id": value.ServiceID})
 		}
 		writeRegistryResult(w, r, value, err, http.StatusAccepted)
@@ -417,6 +421,7 @@ func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, principal a
 		}
 	}
 	s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RBAC_DENIED", resourceType, resourceID, "denied", map[string]any{"role": principal.Role})
+	s.observer.Inc("rbac_denied_total")
 	writeRegistryError(w, registry.APIError{Status: http.StatusForbidden, Code: "PERMISSION_DENIED", Message: "role cannot perform this action", RequestID: r.Header.Get("X-Request-ID")})
 	return false
 }

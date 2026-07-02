@@ -13,6 +13,7 @@ type Observer struct {
 	mu       sync.Mutex
 	requests map[string]int64
 	errors   map[string]int64
+	counters map[string]int64
 	duration map[string]time.Duration
 	statuses map[int]int64
 }
@@ -21,6 +22,7 @@ func NewObserver() *Observer {
 	return &Observer{
 		requests: map[string]int64{},
 		errors:   map[string]int64{},
+		counters: map[string]int64{},
 		duration: map[string]time.Duration{},
 		statuses: map[int]int64{},
 	}
@@ -55,12 +57,22 @@ func (o *Observer) Record(component string, status int, duration time.Duration) 
 	}
 }
 
+func (o *Observer) Inc(name string) {
+	if o == nil || name == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.counters[name]++
+}
+
 func (o *Observer) Snapshot() ObserverSnapshot {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return ObserverSnapshot{
 		Requests: cloneStringInt(o.requests),
 		Errors:   cloneStringInt(o.errors),
+		Counters: cloneStringInt(o.counters),
 		Duration: cloneStringDuration(o.duration),
 		Statuses: cloneIntInt(o.statuses),
 	}
@@ -69,6 +81,7 @@ func (o *Observer) Snapshot() ObserverSnapshot {
 type ObserverSnapshot struct {
 	Requests map[string]int64
 	Errors   map[string]int64
+	Counters map[string]int64
 	Duration map[string]time.Duration
 	Statuses map[int]int64
 }
@@ -87,8 +100,14 @@ func (s ObserverSnapshot) Prometheus() string {
 	for _, key := range sortedKeysDuration(s.Duration) {
 		fmt.Fprintf(&b, "api_request_duration_seconds_sum{component=%q} %.6f\n", key, s.Duration[key].Seconds())
 	}
-	fmt.Fprintf(&b, "rbac_denied_total %d\n", s.Statuses[http.StatusForbidden])
-	fmt.Fprintf(&b, "rate_limited_total %d\n", s.Statuses[http.StatusTooManyRequests])
+	for _, key := range sortedKeys(s.Counters) {
+		if key == "rbac_denied_total" || key == "rate_limited_total" {
+			continue
+		}
+		fmt.Fprintf(&b, "%s %d\n", key, s.Counters[key])
+	}
+	fmt.Fprintf(&b, "rbac_denied_total %d\n", s.Counters["rbac_denied_total"])
+	fmt.Fprintf(&b, "rate_limited_total %d\n", s.Counters["rate_limited_total"])
 	return b.String()
 }
 

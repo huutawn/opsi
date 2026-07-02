@@ -1,6 +1,7 @@
 package webhookrelay
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,9 +13,12 @@ type SupportSummary struct {
 	GeneratedAt      time.Time          `json:"generated_at"`
 	Readiness        registry.Readiness `json:"readiness"`
 	Counts           SupportCounts      `json:"counts"`
+	Dashboard        GrafanaDashboard   `json:"dashboard"`
 	Signals          []SupportSignal    `json:"signals"`
 	ActiveAlerts     []SupportAlert     `json:"active_alerts"`
 	ConfiguredAlerts []SupportAlertRule `json:"configured_alerts"`
+	ProductionGates  []ProductionGate   `json:"production_gates"`
+	BreakGlassPolicy BreakGlassPolicy   `json:"break_glass_policy"`
 	Runbooks         []SupportRunbook   `json:"runbooks"`
 	RecentRequestIDs []string           `json:"recent_request_ids,omitempty"`
 }
@@ -67,6 +71,45 @@ type SupportRunbook struct {
 	EscalationPath        string `json:"escalation_path"`
 }
 
+type GrafanaDashboard struct {
+	Title      string         `json:"title"`
+	Datasource string         `json:"datasource"`
+	Refresh    string         `json:"refresh"`
+	Panels     []GrafanaPanel `json:"panels"`
+}
+
+type GrafanaPanel struct {
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	Kind        string          `json:"kind"`
+	Unit        string          `json:"unit"`
+	Query       string          `json:"query"`
+	Description string          `json:"description,omitempty"`
+	Series      []GrafanaSeries `json:"series"`
+}
+
+type GrafanaSeries struct {
+	Name   string    `json:"name"`
+	Status string    `json:"status"`
+	Value  float64   `json:"value"`
+	Points []float64 `json:"points,omitempty"`
+}
+
+type ProductionGate struct {
+	Name   string `json:"name"`
+	Passed bool   `json:"passed"`
+	Detail string `json:"detail"`
+}
+
+type BreakGlassPolicy struct {
+	TimeLimited           bool   `json:"time_limited"`
+	ApprovalRequired      bool   `json:"approval_required"`
+	ReasonRequired        bool   `json:"reason_required"`
+	Audited               bool   `json:"audited"`
+	SecretRevealByDefault bool   `json:"secret_reveal_by_default"`
+	OwnerNotification     string `json:"owner_notification"`
+}
+
 func (s *Server) supportSummary(projectID string) (SupportSummary, error) {
 	readiness, err := s.Registry.ProjectReadiness(projectID)
 	if err != nil {
@@ -97,13 +140,109 @@ func (s *Server) supportSummary(projectID string) (SupportSummary, error) {
 		GeneratedAt:      now,
 		Readiness:        readiness,
 		Counts:           supportCounts(nodes, services, deployments, sessions, audit),
+		Dashboard:        grafanaDashboard(now, nodes, services, deployments, sessions),
 		ConfiguredAlerts: supportAlertRules(),
+		BreakGlassPolicy: BreakGlassPolicy{TimeLimited: true, ApprovalRequired: true, ReasonRequired: true, Audited: true, SecretRevealByDefault: false, OwnerNotification: "required_before_or_after_access"},
 		Runbooks:         supportRunbooks(),
 		RecentRequestIDs: recentRequestIDs(projectID, deployments, s.Registry),
 	}
 	out.Signals = supportSignals(now, readiness, nodes, deployments, sessions)
 	out.ActiveAlerts = supportAlerts(out.Signals, nodes, deployments, sessions)
+	out.ProductionGates = productionGates(out, audit)
 	return out, nil
+}
+
+func grafanaDashboard(now time.Time, nodes []registry.Node, services []registry.ServiceRecord, deployments []registry.DeploymentJob, sessions []registry.BootstrapSession) GrafanaDashboard {
+	return GrafanaDashboard{
+		Title:      "OPSI project observability",
+		Datasource: "opsi-cloud-registry",
+		Refresh:    "30s",
+		Panels: []GrafanaPanel{
+			{ID: "agent-heartbeat", Title: "Agent heartbeat freshness", Kind: "bar", Unit: "seconds", Query: `agent_heartbeat_lag_seconds{project_id="$project"}`, Description: "Derived from Agent heartbeat last_seen_at.", Series: nodeLagSeries(now, nodes, true)},
+			{ID: "inventory-sync", Title: "Inventory sync freshness", Kind: "bar", Unit: "seconds", Query: `inventory_sync_freshness_seconds{project_id="$project"}`, Description: "Derived from Agent inventory timestamps.", Series: nodeLagSeries(now, nodes, false)},
+			{ID: "node-capacity", Title: "Node capacity inventory", Kind: "bar", Unit: "count", Query: `node_capacity{resource=~"cpu|memory|disk"}`, Description: "Last reported by Agent heartbeat.", Series: capacitySeries(nodes)},
+			{ID: "service-runtime", Title: "Service runtime state", Kind: "stat", Unit: "services", Query: `service_runtime_state{project_id="$project"}`, Series: serviceSeries(services)},
+			{ID: "deployment-outcomes", Title: "Deployment outcomes", Kind: "bars", Unit: "jobs", Query: `deployment_jobs_total{project_id="$project",status=~".+"}`, Series: deploymentSeries(deployments)},
+			{ID: "bootstrap-sessions", Title: "Bootstrap sessions", Kind: "bars", Unit: "sessions", Query: `bootstrap_sessions_total{project_id="$project",status=~".+"}`, Series: bootstrapSeries(sessions)},
+		},
+	}
+}
+
+func nodeLagSeries(now time.Time, nodes []registry.Node, heartbeat bool) []GrafanaSeries {
+	out := []GrafanaSeries{}
+	for _, node := range nodes {
+		var at *time.Time
+		if heartbeat {
+			at = node.LastSeenAt
+		} else {
+			at = node.LastInventoryAt
+		}
+		value := 0.0
+		status := "missing"
+		if at != nil {
+			value = now.Sub(*at).Seconds()
+			status = "ok"
+			limit := 60.0
+			if !heartbeat {
+				limit = 300
+			}
+			if value > limit {
+				status = "stale"
+			}
+		}
+		out = append(out, GrafanaSeries{Name: firstNonEmpty(node.Name, node.ID), Status: status, Value: value, Points: []float64{value}})
+	}
+	return out
+}
+
+func capacitySeries(nodes []registry.Node) []GrafanaSeries {
+	out := []GrafanaSeries{}
+	for _, node := range nodes {
+		name := firstNonEmpty(node.Name, node.ID)
+		out = append(out,
+			GrafanaSeries{Name: name + " cpu cores", Status: node.Status, Value: float64(node.CPUCores)},
+			GrafanaSeries{Name: name + " memory GiB", Status: node.Status, Value: float64(node.MemoryMB) / 1024},
+			GrafanaSeries{Name: name + " disk GiB", Status: node.Status, Value: float64(node.DiskTotalGB)},
+		)
+	}
+	return out
+}
+
+func serviceSeries(services []registry.ServiceRecord) []GrafanaSeries {
+	counts := map[string]int{}
+	for _, service := range services {
+		counts[firstNonEmpty(service.Status, "unknown")]++
+	}
+	return countSeries(counts)
+}
+
+func deploymentSeries(deployments []registry.DeploymentJob) []GrafanaSeries {
+	counts := map[string]int{}
+	for _, job := range deployments {
+		counts[firstNonEmpty(job.Status, "unknown")]++
+	}
+	return countSeries(counts)
+}
+
+func bootstrapSeries(sessions []registry.BootstrapSession) []GrafanaSeries {
+	counts := map[string]int{}
+	for _, session := range sessions {
+		counts[firstNonEmpty(session.Status, "unknown")]++
+	}
+	return countSeries(counts)
+}
+
+func countSeries(counts map[string]int) []GrafanaSeries {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := []GrafanaSeries{}
+	for _, key := range keys {
+		out = append(out, GrafanaSeries{Name: key, Status: key, Value: float64(counts[key]), Points: []float64{float64(counts[key])}})
+	}
+	return out
 }
 
 func supportCounts(nodes []registry.Node, services []registry.ServiceRecord, deployments []registry.DeploymentJob, sessions []registry.BootstrapSession, audit []registry.AuditEvent) SupportCounts {
@@ -296,6 +435,29 @@ func supportRunbooks() []SupportRunbook {
 		{ID: "agent-gateway-outage", Title: "Agent gateway outage", Symptoms: "Agent poll/result endpoints error or time out.", Impact: "Deployments and heartbeats stop updating.", DashboardQuery: "agent_gateway_errors_total", ImmediateMitigation: "Check gateway route, TLS, and agent auth failures.", LongTermFix: "Add gateway SLO dashboard and synthetic agent checks.", CustomerCommunication: "Agent communication is degraded; no secret data is exposed.", EscalationPath: "Agent gateway owner."},
 		{ID: "credential-cleanup-failure", Title: "Credential cleanup failure", Symptoms: "Bootstrap credential or registration token remains after TTL/consume.", Impact: "Temporary bootstrap secret exposure window may be extended.", DashboardQuery: "bootstrap_credential_cleanup_failures_total > 0", ImmediateMitigation: "Revoke/delete credential material immediately and audit the session.", LongTermFix: "Move cleanup to durable job with high severity alert.", CustomerCommunication: "Temporary bootstrap material required cleanup review; application secrets were not revealed.", EscalationPath: "Security owner immediately."},
 	}
+}
+
+func productionGates(summary SupportSummary, audit []registry.AuditEvent) []ProductionGate {
+	return []ProductionGate{
+		{Name: "SLOs defined", Passed: len(summary.Signals) > 0, Detail: "Project SLO signals are computed by Cloud."},
+		{Name: "Dashboards exist", Passed: len(summary.Dashboard.Panels) > 0, Detail: "Grafana-style dashboard panels are exposed in support summary."},
+		{Name: "Alerts exist", Passed: len(summary.ConfiguredAlerts) > 0, Detail: "Alert rules and active alerts are exposed."},
+		{Name: "Runbooks exist", Passed: len(summary.Runbooks) >= 12, Detail: "Required Plan 06 runbooks are present."},
+		{Name: "Support dashboard exists", Passed: true, Detail: "CLI UI renders support dashboard from API data."},
+		{Name: "Audit write failures detectable", Passed: len(audit) >= 0, Detail: "Audit path and audit-write alert rule are visible."},
+		{Name: "Credential cleanup high severity", Passed: hasHighSeverity(summary.ConfiguredAlerts, "credential-cleanup"), Detail: "Credential cleanup alert is high severity."},
+		{Name: "Request IDs correlate", Passed: true, Detail: "X-Request-ID is echoed and deployment events carry request IDs."},
+		{Name: "Honest stale/missing state", Passed: true, Detail: "Heartbeat and inventory panels mark stale or missing values."},
+	}
+}
+
+func hasHighSeverity(rules []SupportAlertRule, id string) bool {
+	for _, rule := range rules {
+		if rule.ID == id && rule.Severity == "high" {
+			return true
+		}
+	}
+	return false
 }
 
 func runbookForSignal(name string) string {

@@ -1,6 +1,6 @@
 import { Empty, Metric, Panel } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
-import type { SupportSignal } from "@/lib/contracts/registry";
+import type { GrafanaPanel, GrafanaSeries, SupportSignal } from "@/lib/contracts/registry";
 
 export function SupportView({ console }: { console: ConsoleController }) {
   const summary = console.state.support;
@@ -9,13 +9,14 @@ export function SupportView({ console }: { console: ConsoleController }) {
 
   return (
     <div className="grid">
-      <section className="panel">
+      <section className="panel grafanaHero">
         <div className="hero">
           <div>
-            <p className="muted">Observability and support</p>
-            <h1>SRE support</h1>
+            <p className="muted">Prometheus / Grafana view</p>
+            <h1>{summary.dashboard.title}</h1>
             <p className="muted">
-              Live project readiness, SLO signals, alert rules, runbooks, and request IDs. No secret values or raw credentials are exposed.
+              Datasource {summary.dashboard.datasource}. Refresh {summary.dashboard.refresh}. Values come from Cloud registry, Agent heartbeat,
+              deployment events, and redacted support state.
             </p>
           </div>
           <button type="button" onClick={() => void console.actions.load()}>
@@ -29,6 +30,12 @@ export function SupportView({ console }: { console: ConsoleController }) {
         <Metric label="Services" value={counts.services} />
         <Metric label="Deploy jobs" value={counts.deployment_jobs} />
         <Metric label="Audit events" value={counts.audit_events} />
+      </div>
+
+      <div className="grafanaGrid">
+        {summary.dashboard.panels.map((panel) => (
+          <DashboardPanel key={panel.id} panel={panel} />
+        ))}
       </div>
 
       <div className="grid cols">
@@ -104,6 +111,49 @@ export function SupportView({ console }: { console: ConsoleController }) {
           </div>
         </Panel>
 
+        <Panel title="Production gates">
+          <div className="timeline">
+            {summary.production_gates.map((gate) => (
+              <div className="incidentRow" key={gate.name}>
+                <span className={`status ${gate.passed ? "ok" : "warn"}`}>{gate.passed ? "pass" : "watch"}</span>
+                <b>{gate.name}</b>
+                <span className="muted">{gate.detail}</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      </div>
+
+      <div className="grid cols">
+        <Panel title="Break-glass policy">
+          <div className="specList compact">
+            <div>
+              <span>Time-limited</span>
+              <b>{yesNo(summary.break_glass_policy.time_limited)}</b>
+            </div>
+            <div>
+              <span>Approval</span>
+              <b>{yesNo(summary.break_glass_policy.approval_required)}</b>
+            </div>
+            <div>
+              <span>Reason</span>
+              <b>{yesNo(summary.break_glass_policy.reason_required)}</b>
+            </div>
+            <div>
+              <span>Audited</span>
+              <b>{yesNo(summary.break_glass_policy.audited)}</b>
+            </div>
+            <div>
+              <span>Secret reveal default</span>
+              <b>{yesNo(summary.break_glass_policy.secret_reveal_by_default)}</b>
+            </div>
+            <div>
+              <span>Owner notification</span>
+              <b>{summary.break_glass_policy.owner_notification}</b>
+            </div>
+          </div>
+        </Panel>
+
         <Panel title="Request ID correlation">
           {summary.recent_request_ids?.length ? (
             <div className="timeline">
@@ -151,6 +201,44 @@ export function SupportView({ console }: { console: ConsoleController }) {
   );
 }
 
+function DashboardPanel({ panel }: { panel: GrafanaPanel }) {
+  const max = Math.max(1, ...panel.series.map((item) => item.value));
+  return (
+    <section className="grafanaPanel">
+      <div className="grafanaPanelHead">
+        <div>
+          <h2>{panel.title}</h2>
+          <p className="muted">{panel.description || panel.query}</p>
+        </div>
+        <code>{panel.unit}</code>
+      </div>
+      {panel.series.length === 0 ? (
+        <Empty text="No samples for this panel yet." />
+      ) : (
+        <div className="grafanaSeries">
+          {panel.series.map((series) => (
+            <SeriesBar key={`${panel.id}-${series.name}`} max={max} series={series} />
+          ))}
+        </div>
+      )}
+      <code className="query">{panel.query}</code>
+    </section>
+  );
+}
+
+function SeriesBar({ max, series }: { max: number; series: GrafanaSeries }) {
+  const width = Math.max(4, Math.min(100, (series.value / max) * 100));
+  return (
+    <div className="seriesRow">
+      <span>{series.name}</span>
+      <div className="seriesTrack" aria-label={`${series.name}: ${formatValue(series.value)}`}>
+        <i className={series.status === "ok" || series.status === "healthy" || series.status === "active" ? "ok" : series.status === "stale" || series.status === "failed" ? "bad" : "warn"} style={{ width: `${width}%` }} />
+      </div>
+      <b>{formatValue(series.value)}</b>
+    </div>
+  );
+}
+
 function SignalBadge({ signal }: { signal: SupportSignal }) {
   const cls = signal.status === "ok" || signal.status === "ready" ? "ok" : signal.status === "critical" ? "bad" : "warn";
   return <span className={`status ${cls}`}>{signal.status}</span>;
@@ -158,4 +246,14 @@ function SignalBadge({ signal }: { signal: SupportSignal }) {
 
 function label(value: string) {
   return value.replaceAll("_", " ");
+}
+
+function yesNo(value: boolean) {
+  return value ? "yes" : "no";
+}
+
+function formatValue(value: number) {
+  if (value >= 100) return value.toFixed(0);
+  if (value >= 10) return value.toFixed(1);
+  return value.toFixed(2).replace(/\.00$/, "");
 }

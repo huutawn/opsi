@@ -270,6 +270,9 @@ func TestSupportSummaryAndMetrics(t *testing.T) {
 	body := w.Body.Bytes()
 	for _, want := range [][]byte{
 		[]byte("configured_alerts"),
+		[]byte("dashboard"),
+		[]byte("production_gates"),
+		[]byte("break_glass_policy"),
 		[]byte("credential-cleanup-failure"),
 		[]byte("agent_heartbeat_lag_seconds"),
 		[]byte("runbooks"),
@@ -285,7 +288,7 @@ func TestSupportSummaryAndMetrics(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("api_requests_total")) || !bytes.Contains(w.Body.Bytes(), []byte("api_request_duration_seconds_sum")) {
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("api_requests_total")) || !bytes.Contains(w.Body.Bytes(), []byte("api_request_duration_seconds_sum")) || !bytes.Contains(w.Body.Bytes(), []byte("bootstrap_sessions_total 1")) {
 		t.Fatalf("metrics status=%d body=%s", w.Code, w.Body.String())
 	}
 }
