@@ -17,5 +17,6 @@ export type ConsoleController = {
     loadBootstrapEvents: (sessionID: string) => Promise<void>;
     loadDeploymentEvents: (deploymentID: string) => Promise<void>;
     nodeAction: (nodeID: string, action: "drain" | "remove") => Promise<void>;
+    rollback: (deploymentID: string) => Promise<void>;
   };
 };

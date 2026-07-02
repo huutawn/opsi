@@ -42,6 +42,12 @@ export type ServiceRecord = {
   source_type: string;
   repo_url?: string;
   image?: string;
+  branch?: string;
+  git_sha?: string;
+  build_method?: string;
+  container_port?: number;
+  health_path?: string;
+  replicas?: number;
   namespace?: string;
 };
 
@@ -49,12 +55,22 @@ export type DeploymentJob = {
   id: string;
   service_id: string;
   status: string;
+  deployment_plan_hash?: string;
+  manifest_hash?: string;
+  previous_revision_ref?: string;
+  rollback_eligible?: boolean;
+  rollback_blocked_reason?: string;
+  agent_id?: string;
+  node_id?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
   requested_by?: string;
   created_at: string;
 };
 
 export type TimelineEvent = {
   id: string;
+  deployment_id?: string;
   step: string;
   message_redacted: string;
   progress_percent: number;

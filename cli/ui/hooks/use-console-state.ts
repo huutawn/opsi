@@ -134,6 +134,12 @@ export function useConsoleState() {
         source_type: form.get("source_type"),
         repo_url: form.get("repo_url"),
         image: form.get("image"),
+        branch: form.get("branch"),
+        git_sha: form.get("git_sha"),
+        build_method: form.get("build_method"),
+        container_port: Number(form.get("container_port") || 0),
+        health_path: form.get("health_path"),
+        replicas: Number(form.get("replicas") || 1),
       });
       event.currentTarget.reset();
       await load();
@@ -183,6 +189,18 @@ export function useConsoleState() {
     patch({ deploymentEvents: events.events ?? [] });
   }
 
+  async function rollback(deploymentID: string) {
+    if (!currentProject) return;
+    patch({ busy: `rollback-${deploymentID}` });
+    try {
+      const job = await client.rollback(currentProject.id, deploymentID);
+      await loadDeploymentEvents(job.id);
+      await load();
+    } finally {
+      patch({ busy: "" });
+    }
+  }
+
   return {
     active,
     cloudURL,
@@ -205,6 +223,7 @@ export function useConsoleState() {
       loadBootstrapEvents,
       loadDeploymentEvents,
       nodeAction,
+      rollback,
     },
   };
 }

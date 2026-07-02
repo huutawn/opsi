@@ -33,7 +33,33 @@ export function AddServiceForm({ console }: { console: ConsoleController }) {
           Repo URL
           <input className="field" name="repo_url" />
         </label>
-        <p className="muted span2">Deploy Now remains disabled until project readiness is ready.</p>
+        <label>
+          Branch
+          <input className="field" name="branch" placeholder="main" />
+        </label>
+        <label>
+          Git SHA
+          <input className="field" name="git_sha" required />
+        </label>
+        <label>
+          Build method
+          <select className="select" name="build_method">
+            <option value="dockerfile">Dockerfile</option>
+          </select>
+        </label>
+        <label>
+          Container port
+          <input className="field" min="1" name="container_port" type="number" />
+        </label>
+        <label>
+          Health path
+          <input className="field" name="health_path" placeholder="/health" />
+        </label>
+        <label>
+          Replicas
+          <input className="field" min="1" name="replicas" type="number" defaultValue={1} />
+        </label>
+        <p className="muted span2">Deploy requires readiness, a healthy deploy-capable Agent, and a concrete Git SHA.</p>
         <button className="primary span2" disabled={console.state.busy === "service"}>
           {console.state.busy === "service" ? "Saving" : "Save draft"}
         </button>

@@ -120,6 +120,29 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		writeRegistryResult(w, r, map[string]any{"events": value}, err, http.StatusOK)
 		return
 	}
+	if len(parts) == 5 && parts[2] == "deployments" && parts[4] == "rollback" && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if !s.requireRole(w, r, principal, projectID, "deployment_job", parts[3], "owner", "admin", "developer") {
+			return
+		}
+		var req struct {
+			RequestedBy string `json:"requested_by"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.RequestedBy == "" {
+			req.RequestedBy = principal.UserID
+		}
+		value, err := s.Registry.RollbackDeployment(projectID, parts[3], req.RequestedBy, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"))
+		if err == nil {
+			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "DEPLOYMENT_ROLLBACK_STARTED", "deployment_job", value.ID, "success", map[string]any{"source_deployment_id": parts[3], "service_id": value.ServiceID})
+		}
+		writeRegistryResult(w, r, value, err, http.StatusAccepted)
+		return
+	}
 	if len(parts) == 3 && parts[2] == "audit" && r.Method == http.MethodGet {
 		value, err := s.Registry.ListAudit(projectID)
 		writeRegistryResult(w, r, map[string]any{"events": value}, err, http.StatusOK)
@@ -295,17 +318,11 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		if !s.requireRole(w, r, principal, projectID, "service", projectID, "owner", "admin", "developer") {
 			return
 		}
-		var req struct {
-			Name       string `json:"name"`
-			Type       string `json:"type"`
-			SourceType string `json:"source_type"`
-			RepoURL    string `json:"repo_url"`
-			Image      string `json:"image"`
-		}
+		var req registry.ServiceDraft
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		value, err := s.Registry.CreateService(projectID, req.Name, req.Type, req.SourceType, req.RepoURL, req.Image, r.Header.Get("Idempotency-Key"))
+		value, err := s.Registry.CreateService(projectID, req, r.Header.Get("Idempotency-Key"))
 		if err == nil {
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "SERVICE_CREATED", "service", value.ID, "success", map[string]any{"type": value.Type})
 		}

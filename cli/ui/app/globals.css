@@ -30,6 +30,8 @@ body {
   color: var(--ink);
   font-family: "SF Pro Display", "Geist Sans", "Helvetica Neue", Arial, sans-serif;
   letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  text-rendering: optimizeLegibility;
 }
 
 button,
@@ -46,6 +48,25 @@ button {
   background: var(--panel);
   color: var(--ink);
   cursor: pointer;
+  transition:
+    background 180ms ease,
+    border-color 180ms ease,
+    transform 120ms ease,
+    box-shadow 180ms ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: #bfb8ac;
+  background: #f3f1ec;
+}
+
+button:focus-visible,
+.field:focus-visible,
+.select:focus-visible,
+.textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid #202427;
+  outline-offset: 2px;
 }
 
 button:active {
@@ -187,6 +208,10 @@ button:disabled {
   border-color: var(--accent);
   background: var(--accent);
   color: #ffffff;
+}
+
+.primary:hover:not(:disabled) {
+  background: #303234;
 }
 
 .danger {
@@ -458,6 +483,23 @@ th {
   clip: rect(0, 0, 0, 0);
 }
 
+.skipLink {
+  position: fixed;
+  z-index: 10;
+  top: 10px;
+  left: 10px;
+  transform: translateY(-140%);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  padding: 8px 10px;
+  text-decoration: none;
+}
+
+.skipLink:focus {
+  transform: translateY(0);
+}
+
 @media (max-width: 960px) {
   .app {
     grid-template-columns: 1fr;
@@ -466,6 +508,7 @@ th {
   .sidebar {
     position: relative;
     height: auto;
+    padding-bottom: 10px;
   }
 
   .topbar,
@@ -484,5 +527,20 @@ th {
 
   .hero {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .main {
+    padding: 12px;
+  }
+
+  .metrics {
+    grid-template-columns: 1fr;
+  }
+
+  th,
+  td {
+    white-space: normal;
   }
 }

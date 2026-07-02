@@ -182,6 +182,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentHeartbeat(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/deployments/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentDeploymentResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -189,6 +193,15 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	projectID := r.URL.Query().Get("project_id")
 	nodeID := nodeIDFromAgentPath(r.URL.Path)
 	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+		return
+	}
+	lease, ok, err := s.Registry.LeaseDeployment(projectID, nodeID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if ok {
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action})
 		return
 	}
 	wait := 30 * time.Second
@@ -213,6 +226,36 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, env)
+}
+
+func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+		return
+	}
+	deploymentID := deploymentIDFromAgentPath(r.URL.Path)
+	if deploymentID == "" {
+		writeError(w, http.StatusBadRequest, "deployment id is required")
+		return
+	}
+	var result registry.DeploymentResult
+	if !decodeJSON(w, r, &result) {
+		return
+	}
+	job, err := s.Registry.CompleteDeployment(projectID, nodeID, deploymentID, r.Header.Get("X-Request-ID"), result)
+	if err == nil {
+		outcome := "failed"
+		if job.Status == registry.DeploymentSucceeded || job.Status == registry.DeploymentRolledBack {
+			outcome = "success"
+		}
+		s.Registry.Audit(job.OrgID, projectID, "agent", "DEPLOYMENT_AGENT_RESULT_RECORDED", "deployment_job", job.ID, outcome, map[string]any{"status": job.Status, "failure_code": job.FailureCode})
+	}
+	writeRegistryResult(w, r, job, err, http.StatusOK)
 }
 
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +323,14 @@ func nodeIDFromAgentPath(path string) string {
 		return ""
 	}
 	return parts[2]
+}
+
+func deploymentIDFromAgentPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 6 || parts[3] != "deployments" {
+		return ""
+	}
+	return parts[4]
 }
 
 func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {

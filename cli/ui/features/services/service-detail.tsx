@@ -32,16 +32,18 @@ export function ServiceDetail({ console }: { console: ConsoleController }) {
           <b>{console.state.nodes.filter((node) => node.status === "healthy").length || 0}</b>
         </div>
         <div>
-          <span>Generated resources</span>
-          <b>{service.source_type === "image" ? "image pull + rollout" : "build/pull + apply manifests"}</b>
+          <span>Revision</span>
+          <b>{service.git_sha || service.image || "missing"}</b>
         </div>
         <div>
-          <span>Secret bindings</span>
-          <b>masked</b>
+          <span>Runtime shape</span>
+          <b>
+            {service.replicas ?? 1}x / port {service.container_port || "-"} / {service.health_path || "/health"}
+          </b>
         </div>
         <div>
           <span>Rollback policy</span>
-          <b>not exposed by Cloud API yet</b>
+          <b>previous successful revision required</b>
         </div>
       </div>
       <p className="muted">

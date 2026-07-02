@@ -68,7 +68,7 @@ export class RegistryClient {
     return this.call<{ services: ServiceRecord[] }>(`/api/projects/${projectID}/services`);
   }
 
-  createService(projectID: string, body: Record<string, FormDataEntryValue | null>) {
+  createService(projectID: string, body: Record<string, unknown>) {
     return this.call<ServiceRecord>(`/api/projects/${projectID}/services`, {
       method: "POST",
       write: true,
@@ -78,6 +78,14 @@ export class RegistryClient {
 
   deploy(projectID: string, serviceID: string) {
     return this.call<DeploymentJob>(`/api/projects/${projectID}/services/${serviceID}/deployments`, {
+      method: "POST",
+      write: true,
+      body: JSON.stringify({ requested_by: "cli-ui" }),
+    });
+  }
+
+  rollback(projectID: string, deploymentID: string) {
+    return this.call<DeploymentJob>(`/api/projects/${projectID}/deployments/${deploymentID}/rollback`, {
       method: "POST",
       write: true,
       body: JSON.stringify({ requested_by: "cli-ui" }),

@@ -64,7 +64,7 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 		t.Fatalf("unexpected error: %+v", apiErr)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/nodes", bytes.NewReader([]byte(`{"name":"vps-1","role":"server","status":"healthy","public_host":"203.0.113.10","agent_id":"agent-1"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/nodes", bytes.NewReader([]byte(`{"name":"vps-1","role":"server","status":"healthy","public_host":"203.0.113.10"}`)))
 	req.Header.Set("Idempotency-Key", "node-key")
 	req.Header.Set("X-Request-ID", "req-3")
 	w = httptest.NewRecorder()
@@ -72,6 +72,13 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("node status=%d body=%s", w.Code, w.Body.String())
 	}
+	var node struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&node); err != nil {
+		t.Fatal(err)
+	}
+	agentToken := registerDeployAgent(t, handler, project.ID, node.ID, "agent-key")
 
 	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/readiness", nil)
 	w = httptest.NewRecorder()
@@ -99,13 +106,42 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 		t.Fatalf("deploy status=%d body=%s", w.Code, w.Body.String())
 	}
 	var deploy struct {
-		Status string `json:"status"`
+		ID                 string `json:"id"`
+		Status             string `json:"status"`
+		DeploymentPlanHash string `json:"deployment_plan_hash"`
+		ManifestHash       string `json:"manifest_hash"`
+		NodeID             string `json:"node_id"`
+		AgentID            string `json:"agent_id"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&deploy); err != nil {
 		t.Fatal(err)
 	}
-	if deploy.Status != "queued" {
+	if deploy.Status != "queued" || deploy.DeploymentPlanHash == "" || deploy.ManifestHash == "" || deploy.NodeID == "" || deploy.AgentID == "" {
 		t.Fatalf("unexpected deploy: %+v", deploy)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+node.ID+"/webhooks/next?project_id="+project.ID+"&wait=0s", nil)
+	req.Header.Set("Authorization", "Bearer "+agentToken)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"kind":"deployment"`)) {
+		t.Fatalf("lease status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/agents/"+node.ID+"/deployments/"+deploy.ID+"/result?project_id="+project.ID, bytes.NewReader([]byte(`{"status":"succeeded","final_revision_ref":"rev-1","rollback_eligible":true}`)))
+	req.Header.Set("Authorization", "Bearer "+agentToken)
+	req.Header.Set("X-Request-ID", "req-result")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"status":"succeeded"`)) {
+		t.Fatalf("result status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{"requested_by":"user-1"}`)))
+	req.Header.Set("Idempotency-Key", "dep-key-locked")
+	req.Header.Set("X-Request-ID", "req-5")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected lock released after result, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -137,6 +173,13 @@ func TestRegistryAPIReadModelsForUI(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("node status=%d body=%s", w.Code, w.Body.String())
 	}
+	var node struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&node); err != nil {
+		t.Fatal(err)
+	}
+	_ = registerDeployAgent(t, handler, project.ID, node.ID, "ui-agent")
 
 	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{"requested_by":"ui"}`)))
 	req.Header.Set("Idempotency-Key", "ui-deploy")
@@ -222,7 +265,7 @@ func TestUIShellServesProductionWorkflow(t *testing.T) {
 
 func createService(t *testing.T, handler http.Handler, projectID string) string {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/services", bytes.NewReader([]byte(`{"name":"api","type":"application","source_type":"git","repo_url":"https://github.com/example/api.git"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/services", bytes.NewReader([]byte(`{"name":"api","type":"application","source_type":"git","repo_url":"https://github.com/example/api.git","branch":"main","git_sha":"a8f9c1d","container_port":8080,"health_path":"/health","replicas":2}`)))
 	req.Header.Set("Idempotency-Key", "svc-key")
 	req.Header.Set("X-Request-ID", "req-svc")
 	w := httptest.NewRecorder()
@@ -240,6 +283,35 @@ func createService(t *testing.T, handler http.Handler, projectID string) string 
 		t.Fatal("service id is empty")
 	}
 	return service.ID
+}
+
+func registerDeployAgent(t *testing.T, handler http.Handler, projectID, nodeID, key string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/agents", bytes.NewReader([]byte(`{"node_id":"`+nodeID+`","public_key_fingerprint":"sha256:test","version":"v1","capabilities":{"deploy":true}}`)))
+	req.Header.Set("Idempotency-Key", key)
+	req.Header.Set("X-Request-ID", "req-"+key)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("agent status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		AgentToken string `json:"agent_token"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.AgentToken == "" {
+		t.Fatal("missing agent token")
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/agents/"+nodeID+"/heartbeat?project_id="+projectID, bytes.NewReader([]byte(`{"version":"v1","k3s_status":"ready","node_ready":true,"capacity":{"cpu_cores":2,"memory_mb":4096,"disk_total_gb":80},"capabilities":{"deploy":true}}`)))
+	req.Header.Set("Authorization", "Bearer "+resp.AgentToken)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("heartbeat status=%d body=%s", w.Code, w.Body.String())
+	}
+	return resp.AgentToken
 }
 
 func TestRegistryAPIRBACCrossTenantAndIdempotency(t *testing.T) {

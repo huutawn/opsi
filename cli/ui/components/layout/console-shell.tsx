@@ -11,8 +11,11 @@ export function ConsoleShell() {
 
   return (
     <div className="app">
+      <a className="skipLink" href="#main">
+        Skip to content
+      </a>
       <Sidebar active={console.active} onSelect={console.setActive} />
-      <main className="main">
+      <main className="main" id="main">
         <Topbar
           cloudURL={console.cloudURL}
           orgID={console.orgID}

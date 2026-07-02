@@ -31,7 +31,7 @@ function ServiceGroup({ console, rows }: { console: ConsoleController; rows: typ
                 <b>{service.name}</b>
                 <br />
                 <span className="muted">
-                  {service.source_type} {service.repo_url || service.image || ""}
+                  {service.source_type} {service.git_sha || service.image || service.repo_url || ""}
                 </span>
               </td>
               <td>

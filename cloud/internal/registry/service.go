@@ -2,7 +2,9 @@ package registry
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -28,7 +30,27 @@ const (
 	NodeDraining        = "draining"
 	NodeRemoved         = "removed"
 
-	DeploymentQueued = "queued"
+	DeploymentQueued       = "queued"
+	DeploymentPlanning     = "planning"
+	DeploymentWaitingAgent = "waiting_agent"
+	DeploymentApplying     = "applying"
+	DeploymentRolloutWait  = "rollout_wait"
+	DeploymentVerifying    = "verifying"
+	DeploymentSucceeded    = "succeeded"
+	DeploymentFailed       = "failed"
+	DeploymentRollingBack  = "rolling_back"
+	DeploymentRolledBack   = "rolled_back"
+
+	EventDeploymentQueued       = "DEPLOYMENT_QUEUED"
+	EventDeploymentPlanCreated  = "DEPLOYMENT_PLAN_CREATED"
+	EventAgentJobAccepted       = "AGENT_JOB_ACCEPTED"
+	EventManifestApplyStarted   = "MANIFEST_APPLY_STARTED"
+	EventManifestApplySucceeded = "MANIFEST_APPLY_SUCCEEDED"
+	EventRolloutWaitStarted     = "ROLLOUT_WAIT_STARTED"
+	EventHealthCheckPassed      = "HEALTH_CHECK_PASSED"
+	EventDeploymentSucceeded    = "DEPLOYMENT_SUCCEEDED"
+	EventDeploymentFailed       = "DEPLOYMENT_FAILED"
+	EventRollbackAvailable      = "ROLLBACK_AVAILABLE"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -196,25 +218,59 @@ type ServiceRecord struct {
 	SourceType    string    `json:"source_type"`
 	RepoURL       string    `json:"repo_url,omitempty"`
 	Image         string    `json:"image,omitempty"`
+	Branch        string    `json:"branch,omitempty"`
+	GitSHA        string    `json:"git_sha,omitempty"`
+	BuildMethod   string    `json:"build_method,omitempty"`
+	ContainerPort int       `json:"container_port,omitempty"`
+	HealthPath    string    `json:"health_path,omitempty"`
+	Replicas      int       `json:"replicas,omitempty"`
 	Namespace     string    `json:"namespace"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+type ServiceDraft struct {
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	SourceType    string `json:"source_type"`
+	RepoURL       string `json:"repo_url"`
+	Image         string `json:"image"`
+	Branch        string `json:"branch"`
+	GitSHA        string `json:"git_sha"`
+	BuildMethod   string `json:"build_method"`
+	ContainerPort int    `json:"container_port"`
+	HealthPath    string `json:"health_path"`
+	Replicas      int    `json:"replicas"`
+}
+
 type DeploymentJob struct {
-	ID             string     `json:"id"`
-	OrgID          string     `json:"org_id"`
-	ProjectID      string     `json:"project_id"`
-	EnvironmentID  string     `json:"environment_id"`
-	RuntimeID      string     `json:"runtime_id"`
-	ServiceID      string     `json:"service_id"`
-	Status         string     `json:"status"`
-	IdempotencyKey string     `json:"idempotency_key"`
-	RequestedBy    string     `json:"requested_by,omitempty"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID                     string     `json:"id"`
+	OrgID                  string     `json:"org_id"`
+	ProjectID              string     `json:"project_id"`
+	EnvironmentID          string     `json:"environment_id"`
+	RuntimeID              string     `json:"runtime_id"`
+	ServiceID              string     `json:"service_id"`
+	Status                 string     `json:"status"`
+	IdempotencyKey         string     `json:"idempotency_key"`
+	DeploymentPlanHash     string     `json:"deployment_plan_hash,omitempty"`
+	ManifestHash           string     `json:"manifest_hash,omitempty"`
+	PreviousRevisionRef    string     `json:"previous_revision_ref,omitempty"`
+	RollbackEligible       bool       `json:"rollback_eligible"`
+	RollbackBlockedReason  string     `json:"rollback_blocked_reason,omitempty"`
+	RequestedBy            string     `json:"requested_by,omitempty"`
+	AgentID                string     `json:"agent_id,omitempty"`
+	NodeID                 string     `json:"node_id,omitempty"`
+	FailureCode            string     `json:"failure_code,omitempty"`
+	FailureMessageRedacted string     `json:"failure_message_redacted,omitempty"`
+	StartedAt              *time.Time `json:"started_at,omitempty"`
+	FinishedAt             *time.Time `json:"finished_at,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+}
+
+type deploymentLock struct {
+	DeploymentID string
+	ExpiresAt    time.Time
 }
 
 type DeploymentEvent struct {
@@ -229,6 +285,21 @@ type DeploymentEvent struct {
 	ProgressPercent int       `json:"progress_percent"`
 	RequestID       string    `json:"request_id,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
+}
+
+type DeploymentLease struct {
+	Deployment DeploymentJob `json:"deployment"`
+	Service    ServiceRecord `json:"service"`
+	Action     string        `json:"action"`
+}
+
+type DeploymentResult struct {
+	Status                 string `json:"status"`
+	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
+	FailureCode            string `json:"failure_code,omitempty"`
+	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
+	RollbackEligible       bool   `json:"rollback_eligible"`
+	RollbackBlockedReason  string `json:"rollback_blocked_reason,omitempty"`
 }
 
 type AuditEvent struct {
@@ -264,6 +335,7 @@ type Service struct {
 	services     map[string]ServiceRecord
 	deployments  map[string]DeploymentJob
 	deployEvents map[string][]DeploymentEvent
+	deployLocks  map[string]deploymentLock
 	audit        []AuditEvent
 	idempotency  map[string]any
 	now          func() time.Time
@@ -288,9 +360,12 @@ type API interface {
 	GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error)
 	ListBootstrapSessions(projectID string) ([]BootstrapSession, error)
 	BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent, error)
-	CreateService(projectID, name, serviceType, sourceType, repoURL, image, key string) (ServiceRecord, error)
+	CreateService(projectID string, draft ServiceDraft, key string) (ServiceRecord, error)
 	ListServices(projectID string) ([]ServiceRecord, error)
 	StartDeployment(projectID, serviceID, requestedBy, key, requestID string) (DeploymentJob, error)
+	RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error)
+	LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error)
+	CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error)
 	ListDeployments(projectID string) ([]DeploymentJob, error)
 	DeploymentEvents(projectID, deploymentID string) ([]DeploymentEvent, error)
 	ListAudit(projectID string) ([]AuditEvent, error)
@@ -309,6 +384,7 @@ func NewService() *Service {
 		services:     map[string]ServiceRecord{},
 		deployments:  map[string]DeploymentJob{},
 		deployEvents: map[string][]DeploymentEvent{},
+		deployLocks:  map[string]deploymentLock{},
 		audit:        []AuditEvent{},
 		idempotency:  map[string]any{},
 	}
@@ -774,7 +850,7 @@ func (s *Service) ListBootstrapSessions(projectID string) ([]BootstrapSession, e
 	return out, nil
 }
 
-func (s *Service) CreateService(projectID, name, serviceType, sourceType, repoURL, image, key string) (ServiceRecord, error) {
+func (s *Service) CreateService(projectID string, draft ServiceDraft, key string) (ServiceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if got, ok := s.idempotency["service:"+projectID+":"+key].(ServiceRecord); ok {
@@ -785,13 +861,25 @@ func (s *Service) CreateService(projectID, name, serviceType, sourceType, repoUR
 		return ServiceRecord{}, ErrNotFound
 	}
 	now := s.clock()
-	if serviceType == "" {
-		serviceType = "application"
+	if draft.Type == "" {
+		draft.Type = "application"
 	}
-	if sourceType == "" {
-		sourceType = "git"
+	if draft.SourceType == "" {
+		draft.SourceType = "git"
 	}
-	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: name, Type: serviceType, Status: "draft", SourceType: sourceType, RepoURL: repoURL, Image: image, Namespace: "default", CreatedAt: now, UpdatedAt: now}
+	if draft.Branch == "" {
+		draft.Branch = "main"
+	}
+	if draft.BuildMethod == "" {
+		draft.BuildMethod = "dockerfile"
+	}
+	if draft.HealthPath == "" {
+		draft.HealthPath = "/health"
+	}
+	if draft.Replicas == 0 {
+		draft.Replicas = 1
+	}
+	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, Namespace: "default", CreatedAt: now, UpdatedAt: now}
 	if record.Name == "" {
 		record.Name = record.ID
 	}
@@ -818,11 +906,110 @@ func (s *Service) StartDeployment(projectID, serviceID, requestedBy, key, reques
 	if !ok || service.ProjectID != projectID {
 		return DeploymentJob{}, ErrNotFound
 	}
+	if err := validateServiceForDeploy(service, requestID); err != nil {
+		return DeploymentJob{}, err
+	}
+	node, agent, err := s.deployAgentLocked(projectID, service.RuntimeID, requestID)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
 	now := s.clock()
-	job := DeploymentJob{ID: newID("dep"), OrgID: service.OrgID, ProjectID: projectID, EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, ServiceID: serviceID, Status: DeploymentQueued, IdempotencyKey: key, RequestedBy: requestedBy, CreatedAt: now, UpdatedAt: now}
+	previous := s.previousSuccessfulLocked(projectID, serviceID)
+	job := deploymentJobForPlan(service, previous, node, agent, key, requestedBy, now)
+	if err := s.acquireDeploymentLockLocked(serviceID, job.ID, now, requestID); err != nil {
+		return DeploymentJob{}, err
+	}
 	s.deployments[job.ID] = job
-	s.deployEvents[job.ID] = []DeploymentEvent{{ID: newID("depevt"), OrgID: service.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: serviceID, Level: "info", Step: DeploymentQueued, MessageRedacted: "deployment queued", ProgressPercent: 0, RequestID: requestID, CreatedAt: now}}
+	s.deployEvents[job.ID] = deploymentQueuedEvents(job, requestID, now)
 	s.idempotency["deploy:"+projectID+":"+serviceID+":"+key] = job
+	return job, nil
+}
+
+func (s *Service) RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if got, ok := s.idempotency["rollback:"+projectID+":"+deploymentID+":"+key].(DeploymentJob); ok {
+		return got, nil
+	}
+	source, ok := s.deployments[deploymentID]
+	if !ok || source.ProjectID != projectID {
+		return DeploymentJob{}, ErrNotFound
+	}
+	if !source.RollbackEligible {
+		reason := source.RollbackBlockedReason
+		if reason == "" {
+			reason = "deployment is not rollback eligible"
+		}
+		return DeploymentJob{}, APIError{Status: 409, Code: "ROLLBACK_NOT_AVAILABLE", Message: reason, RequestID: requestID}
+	}
+	service, ok := s.services[source.ServiceID]
+	if !ok || service.ProjectID != projectID {
+		return DeploymentJob{}, ErrNotFound
+	}
+	node, agent, err := s.deployAgentLocked(projectID, service.RuntimeID, requestID)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	now := s.clock()
+	job := deploymentJobForPlan(service, source, node, agent, key, requestedBy, now)
+	job.Status = DeploymentRollingBack
+	if err := s.acquireDeploymentLockLocked(service.ID, job.ID, now, requestID); err != nil {
+		return DeploymentJob{}, err
+	}
+	s.deployments[job.ID] = job
+	s.deployEvents[job.ID] = []DeploymentEvent{{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: DeploymentRollingBack, MessageRedacted: "rollback queued", ProgressPercent: 0, RequestID: requestID, CreatedAt: now}}
+	s.idempotency["rollback:"+projectID+":"+deploymentID+":"+key] = job
+	return job, nil
+}
+
+func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, job := range s.deployments {
+		if job.ProjectID != projectID || job.NodeID != nodeID || (job.Status != DeploymentQueued && job.Status != DeploymentRollingBack) {
+			continue
+		}
+		service, ok := s.services[job.ServiceID]
+		if !ok {
+			return DeploymentLease{}, false, ErrNotFound
+		}
+		action := "deploy"
+		if job.Status == DeploymentRollingBack {
+			action = "rollback"
+		}
+		job.Status = DeploymentWaitingAgent
+		job.UpdatedAt = s.clock()
+		s.deployments[id] = job
+		s.deployEvents[id] = append(s.deployEvents[id], DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: job.UpdatedAt})
+		return DeploymentLease{Deployment: job, Service: service, Action: action}, true, nil
+	}
+	return DeploymentLease{}, false, nil
+}
+
+func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.deployments[deploymentID]
+	if !ok || job.ProjectID != projectID || job.NodeID != nodeID {
+		return DeploymentJob{}, ErrNotFound
+	}
+	now := s.clock()
+	status := normalizedDeploymentResultStatus(result.Status)
+	job.Status = status
+	job.FailureCode = result.FailureCode
+	job.FailureMessageRedacted = RedactString(result.FailureMessageRedacted)
+	if result.FinalRevisionRef != "" {
+		job.ManifestHash = result.FinalRevisionRef
+	}
+	job.RollbackEligible = result.RollbackEligible
+	job.RollbackBlockedReason = result.RollbackBlockedReason
+	job.FinishedAt = &now
+	job.UpdatedAt = now
+	s.deployments[deploymentID] = job
+	s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], deploymentCompletionEvents(job, requestID, now)...)
+	if deploymentTerminalStatus(status) {
+		delete(s.deployLocks, job.ServiceID)
+	}
 	return job, nil
 }
 
@@ -834,6 +1021,144 @@ func (s *Service) DeploymentEvents(projectID, deploymentID string) ([]Deployment
 		return nil, ErrNotFound
 	}
 	return append([]DeploymentEvent(nil), s.deployEvents[deploymentID]...), nil
+}
+
+func validateServiceForDeploy(service ServiceRecord, requestID string) error {
+	if service.Type != "application" {
+		return APIError{Status: 409, Code: "SERVICE_NOT_DEPLOYABLE", Message: "Only application services can be deployed by the rollout workflow.", RequestID: requestID}
+	}
+	switch service.SourceType {
+	case "git":
+		if service.RepoURL == "" {
+			return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "git services require repo_url before deployment.", RequestID: requestID}
+		}
+		if service.GitSHA == "" {
+			return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "git services require git_sha before deployment.", RequestID: requestID}
+		}
+	case "image":
+		if service.Image == "" {
+			return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "image services require image before deployment.", RequestID: requestID}
+		}
+	default:
+		return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "source_type must be git or image.", RequestID: requestID}
+	}
+	return nil
+}
+
+func (s *Service) deployAgentLocked(projectID, runtimeID, requestID string) (Node, Agent, error) {
+	for _, node := range s.nodes {
+		if node.ProjectID != projectID || node.RuntimeID != runtimeID || node.Role != "server" || node.Status != NodeHealthy || node.AgentID == "" {
+			continue
+		}
+		agent := s.agents[node.AgentID]
+		if agent.ProjectID == projectID && agent.Status == "active" && capabilityEnabled(agent.Capabilities, "deploy") {
+			return node, agent, nil
+		}
+	}
+	return Node{}, Agent{}, APIError{Status: 409, Code: "AGENT_NOT_READY", Message: "A healthy server with an online deploy-capable agent is required.", NextAction: "wait_for_agent", RequestID: requestID}
+}
+
+func capabilityEnabled(capabilities map[string]any, name string) bool {
+	if capabilities == nil {
+		return false
+	}
+	value, ok := capabilities[name]
+	if !ok {
+		return false
+	}
+	enabled, ok := value.(bool)
+	return ok && enabled
+}
+
+func (s *Service) previousSuccessfulLocked(projectID, serviceID string) DeploymentJob {
+	var latest DeploymentJob
+	for _, job := range s.deployments {
+		if job.ProjectID == projectID && job.ServiceID == serviceID && job.Status == DeploymentSucceeded && job.CreatedAt.After(latest.CreatedAt) {
+			latest = job
+		}
+	}
+	return latest
+}
+
+func deploymentJobForPlan(service ServiceRecord, previous DeploymentJob, node Node, agent Agent, key, requestedBy string, now time.Time) DeploymentJob {
+	job := DeploymentJob{ID: newID("dep"), OrgID: service.OrgID, ProjectID: service.ProjectID, EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, ServiceID: service.ID, Status: DeploymentQueued, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, CreatedAt: now, UpdatedAt: now}
+	job.ManifestHash = hashJSON(map[string]any{"service_id": service.ID, "source_type": service.SourceType, "repo_url": service.RepoURL, "image": service.Image, "branch": service.Branch, "git_sha": service.GitSHA, "container_port": service.ContainerPort, "health_path": service.HealthPath, "replicas": service.Replicas, "namespace": service.Namespace})
+	job.PreviousRevisionRef = previous.ManifestHash
+	if job.PreviousRevisionRef == "" && previous.ID != "" {
+		job.PreviousRevisionRef = previous.ID
+	}
+	job.RollbackEligible = job.PreviousRevisionRef != ""
+	if !job.RollbackEligible {
+		job.RollbackBlockedReason = "no previous successful revision"
+	}
+	job.DeploymentPlanHash = hashJSON(map[string]any{"service_id": service.ID, "manifest_hash": job.ManifestHash, "previous_revision_ref": job.PreviousRevisionRef, "target_node_id": node.ID, "agent_id": agent.ID})
+	return job
+}
+
+func deploymentQueuedEvents(job DeploymentJob, requestID string, now time.Time) []DeploymentEvent {
+	events := []DeploymentEvent{
+		{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventDeploymentQueued, MessageRedacted: "deployment queued", ProgressPercent: 0, RequestID: requestID, CreatedAt: now},
+		{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventDeploymentPlanCreated, MessageRedacted: "deployment plan created", ProgressPercent: 10, RequestID: requestID, CreatedAt: now},
+	}
+	if job.RollbackEligible {
+		events = append(events, DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventRollbackAvailable, MessageRedacted: "rollback target recorded", ProgressPercent: 10, RequestID: requestID, CreatedAt: now})
+	}
+	return events
+}
+
+func deploymentCompletionEvents(job DeploymentJob, requestID string, now time.Time) []DeploymentEvent {
+	switch job.Status {
+	case DeploymentSucceeded:
+		return []DeploymentEvent{
+			{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventManifestApplyStarted, MessageRedacted: "manifest apply started", ProgressPercent: 55, RequestID: requestID, CreatedAt: now},
+			{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventManifestApplySucceeded, MessageRedacted: "manifest applied", ProgressPercent: 70, RequestID: requestID, CreatedAt: now},
+			{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventRolloutWaitStarted, MessageRedacted: "rollout watch completed", ProgressPercent: 90, RequestID: requestID, CreatedAt: now},
+			{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventHealthCheckPassed, MessageRedacted: "health check passed", ProgressPercent: 95, RequestID: requestID, CreatedAt: now},
+			{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventDeploymentSucceeded, MessageRedacted: "deployment succeeded", ProgressPercent: 100, RequestID: requestID, CreatedAt: now},
+		}
+	case DeploymentRolledBack:
+		return []DeploymentEvent{{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: DeploymentRolledBack, MessageRedacted: "rollback completed", ProgressPercent: 100, RequestID: requestID, CreatedAt: now}}
+	default:
+		message := job.FailureMessageRedacted
+		if message == "" {
+			message = "deployment failed"
+		}
+		return []DeploymentEvent{{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "error", Step: EventDeploymentFailed, MessageRedacted: message, ProgressPercent: 100, RequestID: requestID, CreatedAt: now}}
+	}
+}
+
+func normalizedDeploymentResultStatus(status string) string {
+	switch status {
+	case DeploymentSucceeded, "success":
+		return DeploymentSucceeded
+	case DeploymentRolledBack:
+		return DeploymentRolledBack
+	default:
+		return DeploymentFailed
+	}
+}
+
+func deploymentTerminalStatus(status string) bool {
+	switch status {
+	case DeploymentSucceeded, DeploymentFailed, DeploymentRolledBack:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) acquireDeploymentLockLocked(serviceID, deploymentID string, now time.Time, requestID string) error {
+	if lock, ok := s.deployLocks[serviceID]; ok && lock.ExpiresAt.After(now) {
+		return APIError{Status: 409, Code: "DEPLOYMENT_LOCKED", Message: "Another deployment is already active for this service.", NextAction: "watch_existing_deployment", RequestID: requestID}
+	}
+	s.deployLocks[serviceID] = deploymentLock{DeploymentID: deploymentID, ExpiresAt: now.Add(30 * time.Minute)}
+	return nil
+}
+
+func hashJSON(value any) string {
+	data, _ := json.Marshal(value)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Service) Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) {

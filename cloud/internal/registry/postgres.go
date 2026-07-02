@@ -17,6 +17,10 @@ type PostgresService struct {
 
 const nodeSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, role, status, COALESCE(public_host,''), COALESCE(private_ip,''), COALESCE(provider,''), COALESCE(region,''), COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(arch,''), COALESCE(cpu_cores,0), COALESCE(memory_mb,0), COALESCE(disk_total_gb,0), COALESCE(k3s_role,''), COALESCE(k3s_status,''), COALESCE(k3s_version,''), COALESCE(agent_id,''), COALESCE(agent_version,''), last_seen_at, last_inventory_at, COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), created_at, updated_at FROM nodes`
 
+const serviceSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), COALESCE(branch,''), COALESCE(git_sha,''), COALESCE(build_method,''), COALESCE(container_port,0), COALESCE(health_path,''), COALESCE(replicas_desired,0), namespace, created_at, updated_at FROM control_services`
+
+const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, COALESCE(deployment_plan_hash,''), COALESCE(manifest_hash,''), COALESCE(previous_revision_ref,''), COALESCE(rollback_eligible,false), COALESCE(rollback_blocked_reason,''), COALESCE(requested_by,''), COALESCE(agent_id,''), COALESCE(node_id,''), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), started_at, finished_at, created_at, updated_at FROM deployment_jobs`
+
 func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string) (Project, error) {
 	ctx := context.Background()
 	scope := "project:" + orgID
@@ -116,15 +120,15 @@ func (s PostgresService) ListServices(projectID string) ([]ServiceRecord, error)
 	if _, _, _, err := s.defaultScope(context.Background(), projectID); err != nil {
 		return nil, err
 	}
-	rows, err := s.DB.QueryContext(context.Background(), `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), namespace, created_at, updated_at FROM control_services WHERE project_id = $1 ORDER BY created_at`, projectID)
+	rows, err := s.DB.QueryContext(context.Background(), serviceSelectSQL+` WHERE project_id = $1 ORDER BY created_at`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []ServiceRecord
 	for rows.Next() {
-		var r ServiceRecord
-		if err := rows.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.EnvironmentID, &r.RuntimeID, &r.Name, &r.Type, &r.Status, &r.SourceType, &r.RepoURL, &r.Image, &r.Namespace, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		r, err := scanService(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -136,20 +140,17 @@ func (s PostgresService) ListDeployments(projectID string) ([]DeploymentJob, err
 	if _, _, _, err := s.defaultScope(context.Background(), projectID); err != nil {
 		return nil, err
 	}
-	rows, err := s.DB.QueryContext(context.Background(), `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, COALESCE(requested_by,''), started_at, finished_at, created_at, updated_at FROM deployment_jobs WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
+	rows, err := s.DB.QueryContext(context.Background(), deploymentSelectSQL+` WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []DeploymentJob
 	for rows.Next() {
-		var d DeploymentJob
-		var started, finished sql.NullTime
-		if err := rows.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.IdempotencyKey, &d.RequestedBy, &started, &finished, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		d, err := scanDeployment(rows)
+		if err != nil {
 			return nil, err
 		}
-		d.StartedAt = nullTimePtr(started)
-		d.FinishedAt = nullTimePtr(finished)
 		out = append(out, d)
 	}
 	return out, rows.Err()
@@ -654,7 +655,7 @@ func (s PostgresService) BootstrapEvents(projectID, sessionID string) ([]Bootstr
 	return out, rows.Err()
 }
 
-func (s PostgresService) CreateService(projectID, name, serviceType, sourceType, repoURL, image, key string) (ServiceRecord, error) {
+func (s PostgresService) CreateService(projectID string, draft ServiceDraft, key string) (ServiceRecord, error) {
 	ctx := context.Background()
 	scope := "service:" + projectID
 	if id, ok, err := s.idempotentResource(ctx, scope, key); err != nil || ok {
@@ -668,13 +669,25 @@ func (s PostgresService) CreateService(projectID, name, serviceType, sourceType,
 		return ServiceRecord{}, err
 	}
 	now := s.clock()
-	if serviceType == "" {
-		serviceType = "application"
+	if draft.Type == "" {
+		draft.Type = "application"
 	}
-	if sourceType == "" {
-		sourceType = "git"
+	if draft.SourceType == "" {
+		draft.SourceType = "git"
 	}
-	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: projectID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: name, Type: serviceType, Status: "draft", SourceType: sourceType, RepoURL: repoURL, Image: image, Namespace: "default", CreatedAt: now, UpdatedAt: now}
+	if draft.Branch == "" {
+		draft.Branch = "main"
+	}
+	if draft.BuildMethod == "" {
+		draft.BuildMethod = "dockerfile"
+	}
+	if draft.HealthPath == "" {
+		draft.HealthPath = "/health"
+	}
+	if draft.Replicas == 0 {
+		draft.Replicas = 1
+	}
+	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: projectID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, Namespace: "default", CreatedAt: now, UpdatedAt: now}
 	if record.Name == "" {
 		record.Name = record.ID
 	}
@@ -683,7 +696,7 @@ func (s PostgresService) CreateService(projectID, name, serviceType, sourceType,
 		return ServiceRecord{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO control_services(id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, repo_url, image, namespace, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, record.ID, record.OrgID, record.ProjectID, record.EnvironmentID, record.RuntimeID, record.Name, record.Type, record.Status, record.SourceType, record.RepoURL, record.Image, record.Namespace, record.CreatedAt, record.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO control_services(id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, repo_url, image, branch, git_sha, build_method, container_port, health_path, replicas_desired, namespace, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),NULLIF($13,''),NULLIF($14,''),NULLIF($15,0),NULLIF($16,''),$17,$18,$19,$20)`, record.ID, record.OrgID, record.ProjectID, record.EnvironmentID, record.RuntimeID, record.Name, record.Type, record.Status, record.SourceType, record.RepoURL, record.Image, record.Branch, record.GitSHA, record.BuildMethod, record.ContainerPort, record.HealthPath, record.Replicas, record.Namespace, record.CreatedAt, record.UpdatedAt); err != nil {
 		return ServiceRecord{}, err
 	}
 	if err := insertIdempotency(ctx, tx, scope, key, "service", record.ID); err != nil {
@@ -715,21 +728,171 @@ func (s PostgresService) StartDeployment(projectID, serviceID, requestedBy, key,
 	if service.ProjectID != projectID {
 		return DeploymentJob{}, ErrNotFound
 	}
+	if err := validateServiceForDeploy(service, requestID); err != nil {
+		return DeploymentJob{}, err
+	}
+	node, agent, err := s.deployAgent(ctx, projectID, service.RuntimeID, requestID)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
 	now := s.clock()
-	job := DeploymentJob{ID: newID("dep"), OrgID: service.OrgID, ProjectID: projectID, EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, ServiceID: serviceID, Status: DeploymentQueued, IdempotencyKey: key, RequestedBy: requestedBy, CreatedAt: now, UpdatedAt: now}
+	previous, err := s.previousSuccessful(ctx, projectID, serviceID)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	job := deploymentJobForPlan(service, previous, node, agent, key, requestedBy, now)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return DeploymentJob{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, requested_by, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10,$11)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.IdempotencyKey, job.RequestedBy, job.CreatedAt, job.UpdatedAt); err != nil {
+	if err := acquireDeploymentLock(ctx, tx, projectID, serviceID, job.ID, now, requestID); err != nil {
 		return DeploymentJob{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO deployment_events(id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, request_id, created_at) VALUES($1,$2,$3,$4,$5,'info',$6,'deployment queued',0,NULLIF($7,''),$8)`, newID("depevt"), job.OrgID, job.ProjectID, job.ID, job.ServiceID, job.Status, requestID, now); err != nil {
+	if err := insertDeployment(ctx, tx, job); err != nil {
+		return DeploymentJob{}, err
+	}
+	for _, event := range deploymentQueuedEvents(job, requestID, now) {
+		if err := insertDeploymentEvent(ctx, tx, event); err != nil {
+			return DeploymentJob{}, err
+		}
+	}
+	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
+		return DeploymentJob{}, err
+	}
+	return job, tx.Commit()
+}
+
+func (s PostgresService) RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error) {
+	ctx := context.Background()
+	scope := "rollback:" + projectID + ":" + deploymentID
+	if id, ok, err := s.idempotentResource(ctx, scope, key); err != nil || ok {
+		if err != nil {
+			return DeploymentJob{}, err
+		}
+		return s.getDeployment(ctx, id)
+	}
+	source, err := s.getDeployment(ctx, deploymentID)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	if source.ProjectID != projectID {
+		return DeploymentJob{}, ErrNotFound
+	}
+	if !source.RollbackEligible {
+		reason := source.RollbackBlockedReason
+		if reason == "" {
+			reason = "deployment is not rollback eligible"
+		}
+		return DeploymentJob{}, APIError{Status: 409, Code: "ROLLBACK_NOT_AVAILABLE", Message: reason, RequestID: requestID}
+	}
+	service, err := s.getService(ctx, source.ServiceID)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	node, agent, err := s.deployAgent(ctx, projectID, service.RuntimeID, requestID)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	now := s.clock()
+	job := deploymentJobForPlan(service, source, node, agent, key, requestedBy, now)
+	job.Status = DeploymentRollingBack
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	defer tx.Rollback()
+	if err := acquireDeploymentLock(ctx, tx, projectID, service.ID, job.ID, now, requestID); err != nil {
+		return DeploymentJob{}, err
+	}
+	if err := insertDeployment(ctx, tx, job); err != nil {
+		return DeploymentJob{}, err
+	}
+	event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: DeploymentRollingBack, MessageRedacted: "rollback queued", ProgressPercent: 0, RequestID: requestID, CreatedAt: now}
+	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 		return DeploymentJob{}, err
 	}
 	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
 		return DeploymentJob{}, err
+	}
+	return job, tx.Commit()
+}
+
+func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error) {
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentLease{}, false, err
+	}
+	defer tx.Rollback()
+	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack))
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeploymentLease{}, false, nil
+	}
+	if err != nil {
+		return DeploymentLease{}, false, err
+	}
+	action := "deploy"
+	if job.Status == DeploymentRollingBack {
+		action = "rollback"
+	}
+	now := s.clock()
+	job.Status = DeploymentWaitingAgent
+	job.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, updated_at = $2 WHERE id = $3`, job.Status, now, job.ID); err != nil {
+		return DeploymentLease{}, false, err
+	}
+	event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: now}
+	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
+		return DeploymentLease{}, false, err
+	}
+	service, err := scanService(tx.QueryRowContext(ctx, serviceSelectSQL+` WHERE id = $1`, job.ServiceID))
+	if err != nil {
+		return DeploymentLease{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DeploymentLease{}, false, err
+	}
+	return DeploymentLease{Deployment: job, Service: service, Action: action}, true, nil
+}
+
+func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error) {
+	ctx := context.Background()
+	job, err := s.getDeployment(ctx, deploymentID)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	if job.ProjectID != projectID || job.NodeID != nodeID {
+		return DeploymentJob{}, ErrNotFound
+	}
+	now := s.clock()
+	job.Status = normalizedDeploymentResultStatus(result.Status)
+	job.FailureCode = result.FailureCode
+	job.FailureMessageRedacted = RedactString(result.FailureMessageRedacted)
+	if result.FinalRevisionRef != "" {
+		job.ManifestHash = result.FinalRevisionRef
+	}
+	job.RollbackEligible = result.RollbackEligible
+	job.RollbackBlockedReason = result.RollbackBlockedReason
+	job.FinishedAt = &now
+	job.UpdatedAt = now
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, manifest_hash = NULLIF($2,''), rollback_eligible = $3, rollback_blocked_reason = NULLIF($4,''), failure_code = NULLIF($5,''), failure_message_redacted = NULLIF($6,''), finished_at = $7, updated_at = $7 WHERE id = $8 AND project_id = $9 AND node_id = $10`, job.Status, job.ManifestHash, job.RollbackEligible, job.RollbackBlockedReason, job.FailureCode, job.FailureMessageRedacted, now, deploymentID, projectID, nodeID); err != nil {
+		return DeploymentJob{}, err
+	}
+	for _, event := range deploymentCompletionEvents(job, requestID, now) {
+		if err := insertDeploymentEvent(ctx, tx, event); err != nil {
+			return DeploymentJob{}, err
+		}
+	}
+	if deploymentTerminalStatus(job.Status) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id = $1 AND deployment_id = $2`, job.ServiceID, job.ID); err != nil {
+			return DeploymentJob{}, err
+		}
 	}
 	return job, tx.Commit()
 }
@@ -788,8 +951,7 @@ func (s PostgresService) getAgent(ctx context.Context, id string) (Agent, error)
 }
 
 func (s PostgresService) getService(ctx context.Context, id string) (ServiceRecord, error) {
-	var r ServiceRecord
-	err := s.DB.QueryRowContext(ctx, `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), namespace, created_at, updated_at FROM control_services WHERE id = $1`, id).Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.EnvironmentID, &r.RuntimeID, &r.Name, &r.Type, &r.Status, &r.SourceType, &r.RepoURL, &r.Image, &r.Namespace, &r.CreatedAt, &r.UpdatedAt)
+	r, err := scanService(s.DB.QueryRowContext(ctx, serviceSelectSQL+` WHERE id = $1`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ServiceRecord{}, ErrNotFound
 	}
@@ -797,15 +959,81 @@ func (s PostgresService) getService(ctx context.Context, id string) (ServiceReco
 }
 
 func (s PostgresService) getDeployment(ctx context.Context, id string) (DeploymentJob, error) {
-	var d DeploymentJob
-	var started, finished sql.NullTime
-	err := s.DB.QueryRowContext(ctx, `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, COALESCE(requested_by,''), started_at, finished_at, created_at, updated_at FROM deployment_jobs WHERE id = $1`, id).Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.IdempotencyKey, &d.RequestedBy, &started, &finished, &d.CreatedAt, &d.UpdatedAt)
+	d, err := scanDeployment(s.DB.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id = $1`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeploymentJob{}, ErrNotFound
 	}
+	return d, err
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanService(row rowScanner) (ServiceRecord, error) {
+	var r ServiceRecord
+	err := row.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.EnvironmentID, &r.RuntimeID, &r.Name, &r.Type, &r.Status, &r.SourceType, &r.RepoURL, &r.Image, &r.Branch, &r.GitSHA, &r.BuildMethod, &r.ContainerPort, &r.HealthPath, &r.Replicas, &r.Namespace, &r.CreatedAt, &r.UpdatedAt)
+	return r, err
+}
+
+func scanDeployment(row rowScanner) (DeploymentJob, error) {
+	var d DeploymentJob
+	var started, finished sql.NullTime
+	err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.IdempotencyKey, &d.DeploymentPlanHash, &d.ManifestHash, &d.PreviousRevisionRef, &d.RollbackEligible, &d.RollbackBlockedReason, &d.RequestedBy, &d.AgentID, &d.NodeID, &d.FailureCode, &d.FailureMessageRedacted, &started, &finished, &d.CreatedAt, &d.UpdatedAt)
 	d.StartedAt = nullTimePtr(started)
 	d.FinishedAt = nullTimePtr(finished)
 	return d, err
+}
+
+func (s PostgresService) previousSuccessful(ctx context.Context, projectID, serviceID string) (DeploymentJob, error) {
+	d, err := scanDeployment(s.DB.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND service_id = $2 AND status = $3 ORDER BY created_at DESC LIMIT 1`, projectID, serviceID, DeploymentSucceeded))
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeploymentJob{}, nil
+	}
+	return d, err
+}
+
+func (s PostgresService) deployAgent(ctx context.Context, projectID, runtimeID, requestID string) (Node, Agent, error) {
+	rows, err := s.DB.QueryContext(ctx, nodeSelectSQL+` WHERE project_id = $1 AND runtime_id = $2 AND role = 'server' AND status = 'healthy' AND agent_id IS NOT NULL ORDER BY updated_at DESC`, projectID, runtimeID)
+	if err != nil {
+		return Node{}, Agent{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		node, err := scanNode(rows)
+		if err != nil {
+			return Node{}, Agent{}, err
+		}
+		agent, err := s.getAgent(ctx, node.AgentID)
+		if err == nil && agent.Status == "active" && capabilityEnabled(agent.Capabilities, "deploy") {
+			return node, agent, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Node{}, Agent{}, err
+	}
+	return Node{}, Agent{}, APIError{Status: 409, Code: "AGENT_NOT_READY", Message: "A healthy server with an online deploy-capable agent is required.", NextAction: "wait_for_agent", RequestID: requestID}
+}
+
+func acquireDeploymentLock(ctx context.Context, tx *sql.Tx, projectID, serviceID, deploymentID string, now time.Time, requestID string) error {
+	res, err := tx.ExecContext(ctx, `INSERT INTO service_deployment_locks(service_id, project_id, deployment_id, expires_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT (service_id) DO UPDATE SET deployment_id = EXCLUDED.deployment_id, expires_at = EXCLUDED.expires_at, updated_at = EXCLUDED.updated_at WHERE service_deployment_locks.expires_at <= $5`, serviceID, projectID, deploymentID, now.Add(30*time.Minute), now)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return APIError{Status: 409, Code: "DEPLOYMENT_LOCKED", Message: "Another deployment is already active for this service.", NextAction: "watch_existing_deployment", RequestID: requestID}
+	}
+	return nil
+}
+
+func insertDeployment(ctx context.Context, tx *sql.Tx, job DeploymentJob) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, deployment_plan_hash, manifest_hash, previous_revision_ref, rollback_eligible, rollback_blocked_reason, requested_by, agent_id, node_id, failure_code, failure_message_redacted, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),$12,NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),$19,$20)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.IdempotencyKey, job.DeploymentPlanHash, job.ManifestHash, job.PreviousRevisionRef, job.RollbackEligible, job.RollbackBlockedReason, job.RequestedBy, job.AgentID, job.NodeID, job.FailureCode, job.FailureMessageRedacted, job.CreatedAt, job.UpdatedAt)
+	return err
+}
+
+func insertDeploymentEvent(ctx context.Context, tx *sql.Tx, event DeploymentEvent) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_events(id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, request_id, created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11)`, event.ID, event.OrgID, event.ProjectID, event.DeploymentID, event.ServiceID, event.Level, event.Step, event.MessageRedacted, event.ProgressPercent, event.RequestID, event.CreatedAt)
+	return err
 }
 
 func (s PostgresService) refreshProject(ctx context.Context, projectID string) (string, error) {
