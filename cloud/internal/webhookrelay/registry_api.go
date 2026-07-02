@@ -148,6 +148,11 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		writeRegistryResult(w, r, map[string]any{"events": value}, err, http.StatusOK)
 		return
 	}
+	if len(parts) == 3 && parts[2] == "support" && r.Method == http.MethodGet {
+		value, err := s.supportSummary(projectID)
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return
+	}
 	if len(parts) == 4 && parts[2] == "nodes" && r.Method == http.MethodGet {
 		value, err := s.Registry.NodeDiagnostics(projectID, parts[3])
 		writeRegistryResult(w, r, value, err, http.StatusOK)

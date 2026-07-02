@@ -7,6 +7,7 @@ import type {
   Project,
   Readiness,
   ServiceRecord,
+  SupportSummary,
   TimelineEvent,
 } from "@/lib/contracts/registry";
 
@@ -102,6 +103,10 @@ export class RegistryClient {
 
   audit(projectID: string) {
     return this.call<{ events: AuditEvent[] }>(`/api/projects/${projectID}/audit`);
+  }
+
+  support(projectID: string) {
+    return this.call<SupportSummary>(`/api/projects/${projectID}/support`);
   }
 
   private async call<T>(path: string, init: RequestOptions = {}) {

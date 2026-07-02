@@ -32,6 +32,7 @@ export function useConsoleState() {
     bootstrapEvents: [],
     deploymentEvents: [],
     audit: [],
+    support: null,
     nodeDetail: null,
     serviceDetail: null,
     busy: "",
@@ -55,7 +56,7 @@ export function useConsoleState() {
         return;
       }
 
-      const [readiness, nodes, services, deployments, sessions, audit] = await loadProject(client, selected.id);
+      const [readiness, nodes, services, deployments, sessions, audit, support] = await loadProject(client, selected.id);
       const streamPatch = await reconnect(client, selected.id, sessions.sessions ?? [], deployments.deployments ?? []);
       setProjectID(selected.id);
       patch({
@@ -68,6 +69,7 @@ export function useConsoleState() {
         deployments: deployments.deployments ?? [],
         sessions: sessions.sessions ?? [],
         audit: audit.events ?? [],
+        support,
         ...streamPatch,
       });
     } catch (error) {
@@ -236,6 +238,7 @@ async function loadProject(client: RegistryClient, projectID: string) {
     client.deployments(projectID),
     client.bootstrapSessions(projectID),
     client.audit(projectID),
+    client.support(projectID),
   ]);
 }
 
@@ -262,6 +265,7 @@ function emptyPatch(projects: Project[]): Partial<ConsoleState> {
     deployments: [] as DeploymentJob[],
     sessions: [] as BootstrapSession[],
     audit: [],
+    support: null,
     bootstrapEvents: [] as TimelineEvent[],
     deploymentEvents: [] as TimelineEvent[],
     nodeDetail: null as NodeDiagnostics | null,

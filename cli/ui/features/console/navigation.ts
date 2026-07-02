@@ -1,7 +1,7 @@
 export const navGroups = [
   ["Setup", "Projects", "Servers / Nodes"],
   ["Operate", "Overview", "Services", "Deployments", "Incidents & RCA"],
-  ["Understand", "Topology", "Logs", "Metrics"],
+  ["Understand", "Topology", "Logs", "Metrics", "Support"],
   ["Control", "Secrets", "Audit", "Settings"],
 ] as const;
 

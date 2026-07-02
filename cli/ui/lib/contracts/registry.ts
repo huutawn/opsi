@@ -98,6 +98,63 @@ export type AuditEvent = {
   created_at: string;
 };
 
+export type SupportSignal = {
+  name: string;
+  status: string;
+  value: string;
+  target: string;
+  detail?: string;
+};
+
+export type SupportAlert = {
+  id: string;
+  severity: string;
+  status: string;
+  title: string;
+  resource_id?: string;
+  runbook_id: string;
+};
+
+export type SupportAlertRule = {
+  id: string;
+  severity: string;
+  title: string;
+  metric: string;
+  runbook_id: string;
+};
+
+export type SupportRunbook = {
+  id: string;
+  title: string;
+  symptoms: string;
+  impact: string;
+  dashboard_query: string;
+  immediate_mitigation: string;
+  long_term_fix: string;
+  customer_communication: string;
+  escalation_path: string;
+};
+
+export type SupportSummary = {
+  generated_at: string;
+  readiness: Readiness;
+  counts: {
+    nodes: number;
+    healthy_nodes: number;
+    services: number;
+    deployment_jobs: number;
+    failed_deployments: number;
+    bootstrap_sessions: number;
+    open_bootstrap_jobs: number;
+    audit_events: number;
+  };
+  signals: SupportSignal[];
+  active_alerts: SupportAlert[];
+  configured_alerts: SupportAlertRule[];
+  runbooks: SupportRunbook[];
+  recent_request_ids?: string[];
+};
+
 export type NodeDiagnostics = {
   node?: NodeRecord;
   open_bootstrap_events?: TimelineEvent[];
@@ -117,6 +174,7 @@ export type ConsoleState = {
   bootstrapEvents: TimelineEvent[];
   deploymentEvents: TimelineEvent[];
   audit: AuditEvent[];
+  support: SupportSummary | null;
   nodeDetail: NodeDiagnostics | null;
   serviceDetail: ServiceRecord | null;
   busy: string;

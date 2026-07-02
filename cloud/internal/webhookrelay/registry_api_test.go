@@ -232,6 +232,64 @@ func TestRegistryAPIReadModelsForUI(t *testing.T) {
 	}
 }
 
+func TestSupportSummaryAndMetrics(t *testing.T) {
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Demo","slug":"demo","created_by":"user-1"}`)))
+	req.Header.Set("Idempotency-Key", "support-proj")
+	req.Header.Set("X-Request-ID", "req-support-proj")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Header().Get("X-Request-ID") != "req-support-proj" {
+		t.Fatalf("request id was not echoed")
+	}
+	var project struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&project); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"password","ssh_password":"secret-password"}`)))
+	req.Header.Set("Idempotency-Key", "support-boot")
+	req.Header.Set("X-Request-ID", "req-support-boot")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("bootstrap status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/support", nil)
+	req.Header.Set("X-Request-ID", "req-support-summary")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("support status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.Bytes()
+	for _, want := range [][]byte{
+		[]byte("configured_alerts"),
+		[]byte("credential-cleanup-failure"),
+		[]byte("agent_heartbeat_lag_seconds"),
+		[]byte("runbooks"),
+	} {
+		if !bytes.Contains(body, want) {
+			t.Fatalf("support summary missing %q: %s", want, string(body))
+		}
+	}
+	if bytes.Contains(body, []byte("secret-password")) {
+		t.Fatalf("support summary leaked secret: %s", string(body))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("api_requests_total")) || !bytes.Contains(w.Body.Bytes(), []byte("api_request_duration_seconds_sum")) {
+		t.Fatalf("metrics status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestUIShellServesProductionWorkflow(t *testing.T) {
 	handler := NewServer(Config{}).Handler()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

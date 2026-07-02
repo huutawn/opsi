@@ -26,12 +26,13 @@ type Server struct {
 	credentials   CredentialVault
 	registrations RegistrationVault
 	limits        RateLimiter
+	observer      *Observer
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
-	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter()}
+	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter(), observer: NewObserver()}
 }
 
 func (s *Server) SetSecurityStores(credentials CredentialVault, registrations RegistrationVault, limits RateLimiter) {
@@ -49,6 +50,7 @@ func (s *Server) SetSecurityStores(credentials CredentialVault, registrations Re
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("/v1/auth/pat/verify", s.handlePATVerify)
 	mux.HandleFunc("/v1/ai/incidents/analyze", s.handleAnalyzeIncident)
@@ -59,7 +61,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/", s.handleRegistryAPI)
 	mux.HandleFunc("/", s.handleUI)
-	return mux
+	return s.observer.Wrap(mux)
 }
 
 func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
