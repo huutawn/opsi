@@ -1,35 +1,86 @@
 {
   "title": "OPSI Cloud SRE",
+  "uid": "opsi-cloud-sre",
+  "tags": ["opsi", "sre", "production"],
+  "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
     "to": "now"
   },
+  "templating": {
+    "list": [
+      {
+        "name": "component",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(api_requests_total, component)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
   "panels": [
     {
       "type": "stat",
-      "title": "API requests",
+      "title": "API request rate",
       "targets": [
-        { "expr": "sum(rate(api_requests_total[5m]))" }
+        { "expr": "sum(rate(api_requests_total{component=~\"$component\"}[5m]))", "legendFormat": "req/s" }
       ],
-      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 }
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "x": 0, "y": 0, "w": 5, "h": 4 }
     },
     {
       "type": "stat",
-      "title": "API errors",
+      "title": "API error ratio",
       "targets": [
-        { "expr": "sum(rate(api_errors_total[5m]))" }
+        { "expr": "sum(rate(api_errors_total{component=~\"$component\"}[5m])) / clamp_min(sum(rate(api_requests_total{component=~\"$component\"}[5m])), 1)", "legendFormat": "errors" }
       ],
-      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.005 },
+              { "color": "red", "value": 0.01 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "x": 5, "y": 0, "w": 5, "h": 4 }
     },
     {
       "type": "timeseries",
-      "title": "Request duration sum by component",
+      "title": "API average latency by component",
       "targets": [
-        { "expr": "sum by (component) (rate(api_request_duration_seconds_sum[5m]))" }
+        { "expr": "sum by (component) (rate(api_request_duration_seconds_sum{component=~\"$component\"}[5m])) / clamp_min(sum by (component) (rate(api_requests_total{component=~\"$component\"}[5m])), 1)", "legendFormat": "{{component}}" }
       ],
-      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 }
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "x": 10, "y": 0, "w": 7, "h": 8 }
+    },
+    {
+      "type": "stat",
+      "title": "Active high alerts",
+      "targets": [
+        { "expr": "sum(ALERTS{alertstate=\"firing\",severity=\"high\",alertname=~\"Opsi.*\"})", "legendFormat": "high" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "x": 17, "y": 0, "w": 7, "h": 4 }
     },
     {
       "type": "timeseries",
@@ -40,24 +91,33 @@
         { "expr": "increase(deployment_results_total[5m])", "legendFormat": "results" },
         { "expr": "increase(deployment_failures_total[5m])", "legendFormat": "failures" }
       ],
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 12 }
+      "gridPos": { "x": 0, "y": 4, "w": 10, "h": 8 }
     },
     {
       "type": "timeseries",
-      "title": "Abuse and access denials",
+      "title": "Access denials and rate limits",
       "targets": [
         { "expr": "increase(rate_limited_total[10m])", "legendFormat": "rate limited" },
         { "expr": "increase(rbac_denied_total[10m])", "legendFormat": "rbac denied" }
       ],
-      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 }
+      "gridPos": { "x": 10, "y": 8, "w": 7, "h": 8 }
     },
     {
       "type": "timeseries",
-      "title": "Bootstrap sessions",
+      "title": "Bootstrap and credential safety",
       "targets": [
-        { "expr": "increase(bootstrap_sessions_total[30m])" }
+        { "expr": "increase(bootstrap_sessions_total[30m])", "legendFormat": "sessions" },
+        { "expr": "increase(bootstrap_credential_cleanup_failures_total[30m])", "legendFormat": "cleanup failures" }
       ],
-      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 }
+      "gridPos": { "x": 17, "y": 8, "w": 7, "h": 8 }
+    },
+    {
+      "type": "table",
+      "title": "OPSI alert state",
+      "targets": [
+        { "expr": "ALERTS{alertname=~\"Opsi.*\"}", "format": "table", "instant": true }
+      ],
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 7 }
     }
   ]
 }

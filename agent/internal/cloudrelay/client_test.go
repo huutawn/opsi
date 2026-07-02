@@ -2,6 +2,9 @@ package cloudrelay
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,5 +79,22 @@ func TestPollDeploymentAndComplete(t *testing.T) {
 	}
 	if !completed {
 		t.Fatal("result was not submitted")
+	}
+}
+
+func TestClientSignsAgentRequests(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ts := r.Header.Get("X-Agent-Timestamp")
+		mac := hmac.New(sha256.New, []byte("agent-token"))
+		_, _ = mac.Write([]byte(r.Method + "\n" + r.URL.RequestURI() + "\n" + ts))
+		if r.Header.Get("X-Agent-Signature") != "sha256="+hex.EncodeToString(mac.Sum(nil)) {
+			t.Fatalf("bad signature headers: ts=%q sig=%q", ts, r.Header.Get("X-Agent-Signature"))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	_, err := Client{BaseURL: server.URL, ProjectID: "proj-dev", AgentToken: "agent-token", SignRequests: true}.PollDeployment(context.Background(), "node-1", time.Second)
+	if err != nil {
+		t.Fatal(err)
 	}
 }

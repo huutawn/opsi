@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -11,23 +12,29 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/opsi-dev/opsi/cli/internal/agentclient"
+	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
-func newStartCommand() *cobra.Command {
+func newStartCommand(configPath *string) *cobra.Command {
 	var addr string
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the local Opsi web server",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runStart(cmd.Context(), addr, cmd.OutOrStdout())
+			return runStart(cmd.Context(), addr, *configPath, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9780", "local web server address")
 	return cmd
 }
 
-func runStart(ctx context.Context, addr string, out io.Writer) error {
+func runStart(ctx context.Context, addr, configPath string, out io.Writer) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -35,7 +42,7 @@ func runStart(ctx context.Context, addr string, out io.Writer) error {
 	defer listener.Close()
 
 	server := &http.Server{
-		Handler:           newStartMux(resolveUIDir()),
+		Handler:           newStartMux(resolveUIDir(), cfg),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -59,11 +66,23 @@ func runStart(ctx context.Context, addr string, out io.Writer) error {
 	}
 }
 
-func newStartMux(uiDir string) *http.ServeMux {
+func newStartMux(uiDir string, cfg config.Config) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"opsi-cli"}`))
+	})
+	mux.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 800*time.Millisecond)
+		defer cancel()
+		status, err := agentclient.New(cfg).Status(ctx)
+		w.Header().Set("content-type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(status)
 	})
 	mux.Handle("/", newUIHandler(uiDir))
 	return mux

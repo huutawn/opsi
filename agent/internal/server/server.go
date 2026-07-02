@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
+	"github.com/opsi-dev/opsi/agent/internal/cloudrunner"
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/incident"
@@ -115,8 +117,8 @@ func (s *ServiceManagerService) CreateManagedService(ctx context.Context, req *a
 		return nil, status.Error(codes.InvalidArgument, "project_id is required")
 	}
 	if s.auth != nil {
-		if _, err := s.auth.VerifyAuth(ctx, secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(ctx)}); err != nil {
-			return nil, status.Error(codes.Unauthenticated, err.Error())
+		if _, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper); err != nil {
+			return nil, err
 		}
 	}
 	service, err := s.manager.CreateManaged(ctx, svcatalog.CreateManagedRequest{ProjectID: req.ProjectID, Name: req.Name, Type: req.Type, Namespace: req.Namespace, Overrides: req.Overrides})
@@ -131,8 +133,8 @@ func (s *ServiceManagerService) RegisterExternalService(ctx context.Context, req
 		return nil, status.Error(codes.InvalidArgument, "project_id is required")
 	}
 	if s.auth != nil {
-		if _, err := s.auth.VerifyAuth(ctx, secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(ctx)}); err != nil {
-			return nil, status.Error(codes.Unauthenticated, err.Error())
+		if _, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper); err != nil {
+			return nil, err
 		}
 	}
 	service, err := s.manager.RegisterExternal(ctx, svcatalog.RegisterExternalRequest{ProjectID: req.ProjectID, Name: req.Name, Type: req.Type, Namespace: req.Namespace, Host: req.Host, Port: req.Port, Overrides: req.Overrides})
@@ -147,8 +149,8 @@ func (s *ServiceManagerService) GetManagedService(ctx context.Context, req *agen
 		return nil, status.Error(codes.InvalidArgument, "project_id and id are required")
 	}
 	if s.auth != nil {
-		if _, err := s.auth.VerifyAuth(ctx, secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(ctx)}); err != nil {
-			return nil, status.Error(codes.Unauthenticated, err.Error())
+		if _, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer); err != nil {
+			return nil, err
 		}
 	}
 	service, err := s.store.GetManagedService(ctx, req.ProjectID, req.ID)
@@ -166,8 +168,8 @@ func (s *ServiceManagerService) DeleteManagedService(ctx context.Context, req *a
 		return nil, status.Error(codes.InvalidArgument, "project_id and id are required")
 	}
 	if s.auth != nil {
-		if _, err := s.auth.VerifyAuth(ctx, secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(ctx)}); err != nil {
-			return nil, status.Error(codes.Unauthenticated, err.Error())
+		if _, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper); err != nil {
+			return nil, err
 		}
 	}
 	if err := s.manager.Delete(ctx, svcatalog.DeleteRequest{ProjectID: req.ProjectID, ID: req.ID, PurgeData: req.PurgeData}); err != nil {
@@ -243,8 +245,8 @@ func (s *TelemetryService) Sync(req *agentv1.SyncRequest, stream agentv1.Telemet
 		return status.Error(codes.InvalidArgument, "project_id is required")
 	}
 	if s.auth != nil {
-		if _, err := s.auth.VerifyAuth(stream.Context(), secret.AuthContext{ProjectID: req.ProjectID, PAT: bearerToken(stream.Context())}); err != nil {
-			return status.Error(codes.Unauthenticated, err.Error())
+		if _, err := authorize(stream.Context(), s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer); err != nil {
+			return err
 		}
 	}
 	since := time.Unix(req.LastReceivedUnix, 0).UTC()
@@ -289,8 +291,8 @@ func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.De
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	if s.auth != nil {
-		if _, err := s.auth.VerifyAuth(stream.Context(), secret.AuthContext{ProjectID: resolved.ProjectID, PAT: bearerToken(stream.Context())}); err != nil {
-			return status.Error(codes.Unauthenticated, err.Error())
+		if _, err := authorize(stream.Context(), s.auth, resolved.ProjectID, secret.RoleOwner, secret.RoleDeveloper); err != nil {
+			return err
 		}
 	}
 	if err := s.validateDependencies(stream.Context(), resolved); err != nil {
@@ -500,6 +502,35 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			}()
 		}
 	}
+	if cfg.CloudRelay.Enabled {
+		deploymentCfg := cfg.Deployment
+		deploymentCfg.ProjectID = firstNonEmpty(deploymentCfg.ProjectID, cfg.CloudRelay.ProjectID)
+		pollInterval := parseDurationOr(cfg.CloudRelay.PollInterval, 2*time.Second)
+		longPollWait := parseDurationOr(cfg.CloudRelay.LongPollWait, 30*time.Second)
+		heartbeatInterval := parseDurationOr(cfg.CloudRelay.HeartbeatInterval, 30*time.Second)
+		runner := cloudrunner.Runner{
+			Client: cloudrelay.Client{
+				BaseURL:      cfg.CloudEndpoint,
+				ProjectID:    firstNonEmpty(cfg.CloudRelay.ProjectID, cfg.Deployment.ProjectID),
+				AgentToken:   cfg.CloudRelay.AgentToken,
+				SignRequests: cfg.CloudRelay.SignRequests,
+			},
+			NodeID:            cfg.NodeID,
+			Version:           version,
+			DeploymentConfig:  deploymentCfg,
+			Engine:            engine,
+			PollInterval:      pollInterval,
+			LongPollWait:      longPollWait,
+			HeartbeatInterval: heartbeatInterval,
+			Logger:            logger,
+		}
+		go func() {
+			logger.Info("agent cloud relay runner started", "poll_interval", pollInterval.String())
+			if err := runner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				errCh <- err
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
@@ -562,6 +593,17 @@ func authVerifier(cfg config.Config) secret.AuthVerifier {
 		}
 	}
 	return &secret.HTTPAuthVerifier{Endpoint: cfg.CloudEndpoint, CacheTTL: ttl}
+}
+
+func authorize(ctx context.Context, verifier secret.AuthVerifier, projectID string, allowed ...secret.Role) (secret.AuthContext, error) {
+	verified, err := verifier.VerifyAuth(ctx, secret.AuthContext{ProjectID: projectID, PAT: bearerToken(ctx)})
+	if err != nil {
+		return secret.AuthContext{}, status.Error(codes.Unauthenticated, err.Error())
+	}
+	if err := secret.RequireRole(verified, allowed...); err != nil {
+		return secret.AuthContext{}, status.Error(codes.PermissionDenied, err.Error())
+	}
+	return verified, nil
 }
 
 func authFromSecretRequest(req *agentv1.SecretRequest) secret.AuthContext {
@@ -727,6 +769,17 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func parseDurationOr(value string, fallback time.Duration) time.Duration {
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func deploymentEngineConfig(cfg config.Config) (deploy.EngineConfig, error) {

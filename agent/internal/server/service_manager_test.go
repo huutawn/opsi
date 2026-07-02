@@ -6,10 +6,30 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/svcatalog"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
+
+type roleVerifier struct{ role secret.Role }
+
+func (v roleVerifier) VerifyAuth(context.Context, secret.AuthContext) (secret.AuthContext, error) {
+	return secret.AuthContext{ProjectID: "demo", UserID: "user", Role: v.role}, nil
+}
+
+type fakeDeployStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s fakeDeployStream) Context() context.Context          { return s.ctx }
+func (s fakeDeployStream) Send(*agentv1.ProgressEvent) error { return nil }
 
 func TestServiceManagerCreateAndGet(t *testing.T) {
 	store, err := svcatalog.OpenStore(filepath.Join(t.TempDir(), "opsi.db"))
@@ -119,4 +139,37 @@ func TestDeploymentDependencyValidation(t *testing.T) {
 	if err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("expected missing dependency error, got %v", err)
 	}
+}
+
+func TestAgentRBACMatrixDeniesViewerMutations(t *testing.T) {
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer pat"))
+	manager := NewServiceManagerService(nil, svcatalog.Manager{}, roleVerifier{role: secret.RoleViewer})
+	if _, err := manager.CreateManagedService(ctx, &agentv1.CreateManagedServiceRequest{ProjectID: "demo", Name: "cache", Type: "redis"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("viewer create status = %v err=%v", status.Code(err), err)
+	}
+	deployer := NewDeploymentService(configForRBAC(), nil, roleVerifier{role: secret.RoleViewer}, nil)
+	err := deployer.Deploy(&agentv1.DeployRequest{ProjectID: "demo", ServiceID: "api", ServiceName: "api", RepoURL: "https://example.test/repo.git", GitSHA: "abcdef", ManifestPath: "k8s/deployment.yaml"}, fakeDeployStream{ctx: ctx})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("viewer deploy status = %v err=%v", status.Code(err), err)
+	}
+}
+
+func TestAgentRBACMatrixAllowsDeveloperMutations(t *testing.T) {
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer pat"))
+	store, err := svcatalog.OpenStore(filepath.Join(t.TempDir(), "opsi.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := NewServiceManagerService(store, svcatalog.Manager{Store: store, Applier: svcatalog.DryRunApplier{}}, roleVerifier{role: secret.RoleDeveloper})
+	if _, err := manager.CreateManagedService(ctx, &agentv1.CreateManagedServiceRequest{ProjectID: "demo", Name: "cache", Type: "redis"}); err != nil {
+		t.Fatalf("developer create: %v", err)
+	}
+}
+
+func configForRBAC() config.Config {
+	cfg := config.Default()
+	cfg.Deployment.ProjectID = "demo"
+	cfg.Deployment.ManifestPath = "k8s/deployment.yaml"
+	return cfg
 }

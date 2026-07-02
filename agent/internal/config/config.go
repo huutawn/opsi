@@ -17,6 +17,7 @@ type Config struct {
 	SQLitePath    string           `yaml:"sqlite_path"`
 	TLS           TLSConfig        `yaml:"tls"`
 	Auth          AuthConfig       `yaml:"auth"`
+	CloudRelay    CloudRelayConfig `yaml:"cloud_relay"`
 	Deployment    DeploymentConfig `yaml:"deployment"`
 	Telemetry     TelemetryConfig  `yaml:"telemetry"`
 	Secret        SecretConfig     `yaml:"secret"`
@@ -32,6 +33,16 @@ type TLSConfig struct {
 type AuthConfig struct {
 	Enabled        bool   `yaml:"enabled"`
 	VerifyCacheTTL string `yaml:"verify_cache_ttl"`
+}
+
+type CloudRelayConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	ProjectID         string `yaml:"project_id"`
+	AgentToken        string `yaml:"agent_token"`
+	PollInterval      string `yaml:"poll_interval"`
+	LongPollWait      string `yaml:"long_poll_wait"`
+	HeartbeatInterval string `yaml:"heartbeat_interval"`
+	SignRequests      bool   `yaml:"sign_requests"`
 }
 
 type DeploymentConfig struct {
@@ -91,6 +102,7 @@ func Default() Config {
 		CloudEndpoint: "https://cloud.localhost",
 		SQLitePath:    "./opsi-agent.sqlite",
 		Auth:          AuthConfig{Enabled: false, VerifyCacheTTL: "15m"},
+		CloudRelay:    CloudRelayConfig{Enabled: false, PollInterval: "2s", LongPollWait: "30s", HeartbeatInterval: "30s", SignRequests: true},
 		Deployment: DeploymentConfig{
 			ProjectID:                     "dev-project",
 			ServiceID:                     "example-app",
@@ -172,6 +184,28 @@ func (c Config) Validate() error {
 	if c.Auth.VerifyCacheTTL != "" {
 		if _, err := time.ParseDuration(c.Auth.VerifyCacheTTL); err != nil {
 			return fmt.Errorf("auth.verify_cache_ttl: %w", err)
+		}
+	}
+	if c.CloudRelay.Enabled {
+		if c.CloudEndpoint == "" {
+			return errors.New("cloud_endpoint is required when cloud_relay.enabled=true")
+		}
+		if c.CloudRelay.ProjectID == "" && c.Deployment.ProjectID == "" {
+			return errors.New("cloud_relay.project_id or deployment.project_id is required when cloud_relay.enabled=true")
+		}
+		if c.CloudRelay.AgentToken == "" {
+			return errors.New("cloud_relay.agent_token is required when cloud_relay.enabled=true")
+		}
+	}
+	for field, value := range map[string]string{
+		"cloud_relay.poll_interval":      c.CloudRelay.PollInterval,
+		"cloud_relay.long_poll_wait":     c.CloudRelay.LongPollWait,
+		"cloud_relay.heartbeat_interval": c.CloudRelay.HeartbeatInterval,
+	} {
+		if value != "" {
+			if _, err := time.ParseDuration(value); err != nil {
+				return fmt.Errorf("%s: %w", field, err)
+			}
 		}
 	}
 	if c.Deployment.PollInterval != "" {

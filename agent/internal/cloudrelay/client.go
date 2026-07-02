@@ -1,23 +1,27 @@
 package cloudrelay
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 )
 
 type Client struct {
-	BaseURL    string
-	ProjectID  string
-	AgentToken string
-	HTTPClient *http.Client
+	BaseURL      string
+	ProjectID    string
+	AgentToken   string
+	SignRequests bool
+	HTTPClient   *http.Client
 }
 
 type WebhookEnvelope struct {
@@ -70,6 +74,13 @@ type DeploymentResult struct {
 	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
 	RollbackEligible       bool   `json:"rollback_eligible"`
 	RollbackBlockedReason  string `json:"rollback_blocked_reason,omitempty"`
+}
+
+type Heartbeat struct {
+	Version      string         `json:"version"`
+	Capabilities map[string]any `json:"capabilities,omitempty"`
+	K3SStatus    string         `json:"k3s_status,omitempty"`
+	NodeReady    bool           `json:"node_ready"`
 }
 
 func (c Client) PollWebhook(ctx context.Context, agentID string, wait time.Duration) (*deploy.WebhookEvent, error) {
@@ -140,7 +151,7 @@ func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID str
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(string(data)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -153,6 +164,45 @@ func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("complete deployment: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c Client) Heartbeat(ctx context.Context, nodeID string, heartbeat Heartbeat) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/heartbeat"
+	query := endpoint.Query()
+	if c.ProjectID != "" {
+		query.Set("project_id", c.ProjectID)
+	}
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(heartbeat)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("heartbeat: status %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -199,5 +249,12 @@ func (c Client) pollNext(ctx context.Context, nodeID string, wait time.Duration)
 func (c Client) authorize(req *http.Request) {
 	if c.AgentToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.AgentToken)
+	}
+	if c.SignRequests && c.AgentToken != "" {
+		ts := time.Now().UTC().Format(time.RFC3339)
+		mac := hmac.New(sha256.New, []byte(c.AgentToken))
+		_, _ = mac.Write([]byte(req.Method + "\n" + req.URL.RequestURI() + "\n" + ts))
+		req.Header.Set("X-Agent-Timestamp", ts)
+		req.Header.Set("X-Agent-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
 }
