@@ -148,6 +148,7 @@ func (s *Server) supportSummary(projectID string) (SupportSummary, error) {
 	}
 	out.Signals = supportSignals(now, readiness, nodes, deployments, sessions)
 	out.ActiveAlerts = supportAlerts(out.Signals, nodes, deployments, sessions)
+	s.alerts.Notify(projectID, out.ActiveAlerts)
 	out.ProductionGates = productionGates(out, audit)
 	return out, nil
 }

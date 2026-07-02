@@ -1,0 +1,56 @@
+groups:
+  - name: opsi-cloud
+    rules:
+      - alert: OpsiControlPlaneHighErrorRate
+        expr: sum(rate(api_errors_total[5m])) / clamp_min(sum(rate(api_requests_total[5m])), 1) > 0.01
+        for: 5m
+        labels:
+          severity: high
+        annotations:
+          summary: OPSI control plane high error rate
+          runbook: control-plane-outage
+
+      - alert: OpsiRateLimitAbuseSpike
+        expr: increase(rate_limited_total[10m]) > 20
+        for: 2m
+        labels:
+          severity: medium
+        annotations:
+          summary: OPSI rate limit abuse spike
+          runbook: control-plane-outage
+
+      - alert: OpsiBootstrapCredentialCleanupFailure
+        expr: increase(bootstrap_credential_cleanup_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: high
+        annotations:
+          summary: OPSI bootstrap credential cleanup failure
+          runbook: credential-cleanup-failure
+
+      - alert: OpsiDeploymentFailureSpike
+        expr: increase(deployment_failures_total[15m]) > 3
+        for: 5m
+        labels:
+          severity: medium
+        annotations:
+          summary: OPSI deployment failure spike
+          runbook: deployment-rollout-timeout
+
+      - alert: OpsiAgentGatewayNoResults
+        expr: increase(agent_jobs_leased_total[15m]) > 0 and increase(deployment_results_total[15m]) == 0
+        for: 15m
+        labels:
+          severity: high
+        annotations:
+          summary: OPSI agent gateway leased jobs without results
+          runbook: agent-gateway-outage
+
+      - alert: OpsiAgentHeartbeatStopped
+        expr: increase(agent_heartbeat_total[5m]) == 0
+        for: 10m
+        labels:
+          severity: high
+        annotations:
+          summary: OPSI agent heartbeat updates stopped
+          runbook: agent-offline

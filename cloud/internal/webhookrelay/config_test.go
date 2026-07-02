@@ -14,7 +14,7 @@ func TestLoadConfigProductionRequiresDurableSecurity(t *testing.T) {
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("expected production config without strong tokens to fail")
 	}
-	if err := os.WriteFile(path, []byte(`{"production":true,"database_url":"postgres://example","bootstrap_worker_token":"12345678901234567890123456789012","bootstrap_secret_key":"abcdefghijklmnopqrstuvwxyz123456"}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"production":true,"database_url":"postgres://example","bootstrap_worker_token":"12345678901234567890123456789012","bootstrap_secret_key":"abcdefghijklmnopqrstuvwxyz123456","alerts":{"internal_token":"12345678901234567890123456789012"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(path)

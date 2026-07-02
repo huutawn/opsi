@@ -8,16 +8,17 @@ import (
 )
 
 type Config struct {
-	TTL                    Duration   `json:"ttl"`
-	DatabaseURL            string     `json:"database_url"`
-	Production             bool       `json:"production"`
-	OTP                    OTPConfig  `json:"otp"`
-	SMTP                   SMTPConfig `json:"smtp"`
-	Routes                 []Route    `json:"routes"`
-	AgentTokens            []string   `json:"agent_tokens"`
-	BootstrapWorkerToken   string     `json:"bootstrap_worker_token"`
-	BootstrapSecretKey     string     `json:"bootstrap_secret_key"`
-	RequireAgentSignatures bool       `json:"require_agent_signatures"`
+	TTL                    Duration    `json:"ttl"`
+	DatabaseURL            string      `json:"database_url"`
+	Production             bool        `json:"production"`
+	OTP                    OTPConfig   `json:"otp"`
+	SMTP                   SMTPConfig  `json:"smtp"`
+	Alerts                 AlertConfig `json:"alerts"`
+	Routes                 []Route     `json:"routes"`
+	AgentTokens            []string    `json:"agent_tokens"`
+	BootstrapWorkerToken   string      `json:"bootstrap_worker_token"`
+	BootstrapSecretKey     string      `json:"bootstrap_secret_key"`
+	RequireAgentSignatures bool        `json:"require_agent_signatures"`
 }
 
 type OTPConfig struct {
@@ -31,6 +32,13 @@ type SMTPConfig struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	From     string `json:"from"`
+}
+
+type AlertConfig struct {
+	WebhookURL    string `json:"webhook_url"`
+	MinSeverity   string `json:"min_severity"`
+	OutboxPath    string `json:"outbox_path"`
+	InternalToken string `json:"internal_token"`
 }
 
 type Route struct {
@@ -72,6 +80,9 @@ func LoadConfig(path string) (Config, error) {
 		}
 		if len(cfg.BootstrapSecretKey) < 32 {
 			return Config{}, fmt.Errorf("production requires bootstrap_secret_key with at least 32 bytes")
+		}
+		if len(cfg.Alerts.InternalToken) < 32 {
+			return Config{}, fmt.Errorf("production requires alerts.internal_token with at least 32 bytes")
 		}
 		cfg.RequireAgentSignatures = true
 	}

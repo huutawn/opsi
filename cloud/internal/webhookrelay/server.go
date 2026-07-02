@@ -27,12 +27,13 @@ type Server struct {
 	registrations RegistrationVault
 	limits        RateLimiter
 	observer      *Observer
+	alerts        *AlertManager
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
-	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter(), observer: NewObserver()}
+	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter(), observer: NewObserver(), alerts: NewAlertManager(cfg.Alerts)}
 }
 
 func (s *Server) SetSecurityStores(credentials CredentialVault, registrations RegistrationVault, limits RateLimiter) {
@@ -59,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/agents/register", s.handleAgentRegister)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
+	mux.HandleFunc("/api/internal/alerts", s.handleInternalAlerts)
 	mux.HandleFunc("/api/", s.handleRegistryAPI)
 	mux.HandleFunc("/", s.handleUI)
 	return s.observer.Wrap(mux)

@@ -1,0 +1,63 @@
+{
+  "title": "OPSI Cloud SRE",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "API requests",
+      "targets": [
+        { "expr": "sum(rate(api_requests_total[5m]))" }
+      ],
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 }
+    },
+    {
+      "type": "stat",
+      "title": "API errors",
+      "targets": [
+        { "expr": "sum(rate(api_errors_total[5m]))" }
+      ],
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request duration sum by component",
+      "targets": [
+        { "expr": "sum by (component) (rate(api_request_duration_seconds_sum[5m]))" }
+      ],
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent and deployment flow",
+      "targets": [
+        { "expr": "increase(agent_heartbeat_total[5m])", "legendFormat": "heartbeats" },
+        { "expr": "increase(agent_jobs_leased_total[5m])", "legendFormat": "leased jobs" },
+        { "expr": "increase(deployment_results_total[5m])", "legendFormat": "results" },
+        { "expr": "increase(deployment_failures_total[5m])", "legendFormat": "failures" }
+      ],
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 12 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Abuse and access denials",
+      "targets": [
+        { "expr": "increase(rate_limited_total[10m])", "legendFormat": "rate limited" },
+        { "expr": "increase(rbac_denied_total[10m])", "legendFormat": "rbac denied" }
+      ],
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Bootstrap sessions",
+      "targets": [
+        { "expr": "increase(bootstrap_sessions_total[30m])" }
+      ],
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 }
+    }
+  ]
+}

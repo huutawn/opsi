@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -293,6 +295,86 @@ func TestSupportSummaryAndMetrics(t *testing.T) {
 	}
 }
 
+func TestSupportAlertsRouteToWebhookAndOutbox(t *testing.T) {
+	var got []byte
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fail" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		got = append([]byte(nil), bytes.Clone(readBody(t, r))...)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer receiver.Close()
+
+	server := NewServer(Config{Alerts: AlertConfig{WebhookURL: receiver.URL, MinSeverity: "medium"}})
+	handler := server.Handler()
+	projectID := createProject(t, handler, "alert-proj")
+	createNode(t, handler, projectID, "pending-node", "pending")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/support", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("support status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(got, []byte(`"title":"node not healthy"`)) || bytes.Contains(got, []byte("Authorization")) {
+		t.Fatalf("bad alert webhook payload: %s", string(got))
+	}
+
+	outbox := filepath.Join(t.TempDir(), "alerts.jsonl")
+	server = NewServer(Config{Alerts: AlertConfig{WebhookURL: receiver.URL + "/fail", MinSeverity: "medium", OutboxPath: outbox}})
+	handler = server.Handler()
+	projectID = createProject(t, handler, "alert-outbox")
+	createNode(t, handler, projectID, "pending-node", "pending")
+	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/support", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	body, err := os.ReadFile(outbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte(`"title":"node not healthy"`)) {
+		t.Fatalf("outbox missing alert: %s", string(body))
+	}
+}
+
+func TestInternalAlertmanagerWebhookIsRedactedAndTokenGated(t *testing.T) {
+	outbox := filepath.Join(t.TempDir(), "alerts.jsonl")
+	server := NewServer(Config{Alerts: AlertConfig{OutboxPath: outbox, InternalToken: "12345678901234567890123456789012"}})
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/internal/alerts", bytes.NewReader([]byte(`{"alerts":[]}`)))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized alert status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	payload := []byte(`{"alerts":[{"status":"firing","labels":{"alertname":"OpsiControlPlaneHighErrorRate","severity":"high","project_id":"proj-1","resource_id":"api","password":"secret"},"annotations":{"summary":"OPSI control plane high error rate","runbook":"control-plane-outage","raw_log":"token=abc"}}]}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/internal/alerts", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer 12345678901234567890123456789012")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("alert status=%d body=%s", w.Code, w.Body.String())
+	}
+	body, err := os.ReadFile(outbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range [][]byte{[]byte(`"project_id":"proj-1"`), []byte(`"title":"OPSI control plane high error rate"`), []byte(`"runbook_id":"control-plane-outage"`)} {
+		if !bytes.Contains(body, want) {
+			t.Fatalf("outbox missing %q: %s", want, string(body))
+		}
+	}
+	for _, forbidden := range [][]byte{[]byte("secret"), []byte("token=abc"), []byte("raw_log"), []byte("password")} {
+		if bytes.Contains(body, forbidden) {
+			t.Fatalf("outbox leaked %q: %s", forbidden, string(body))
+		}
+	}
+}
+
 func TestUIShellServesProductionWorkflow(t *testing.T) {
 	handler := NewServer(Config{}).Handler()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -322,6 +404,47 @@ func TestUIShellServesProductionWorkflow(t *testing.T) {
 			t.Fatalf("ui contains forbidden workflow/text %q", forbidden)
 		}
 	}
+}
+
+func createProject(t *testing.T, handler http.Handler, key string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Demo","slug":"demo"}`)))
+	req.Header.Set("Idempotency-Key", key)
+	req.Header.Set("X-Request-ID", "req-"+key)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("project status=%d body=%s", w.Code, w.Body.String())
+	}
+	var project struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&project); err != nil {
+		t.Fatal(err)
+	}
+	return project.ID
+}
+
+func createNode(t *testing.T, handler http.Handler, projectID, name, status string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/nodes", bytes.NewReader([]byte(`{"name":"`+name+`","role":"server","status":"`+status+`","public_host":"203.0.113.10"}`)))
+	req.Header.Set("Idempotency-Key", "node-"+name)
+	req.Header.Set("X-Request-ID", "req-node-"+name)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("node status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func readBody(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	defer r.Body.Close()
+	body := new(bytes.Buffer)
+	if _, err := body.ReadFrom(r.Body); err != nil {
+		t.Fatal(err)
+	}
+	return body.Bytes()
 }
 
 func createService(t *testing.T, handler http.Handler, projectID string) string {

@@ -12,6 +12,12 @@
     "password": "",
     "from": "opsi@example.com"
   },
+  "alerts": {
+    "webhook_url": "",
+    "min_severity": "medium",
+    "outbox_path": "./opsi-alert-outbox.log",
+    "internal_token": ""
+  },
   "routes": [
     {
       "project_id": "dev-project",
