@@ -25,7 +25,7 @@ func NewRootCommand(options Options) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runStart(cmd.Context(), "127.0.0.1:9780", configPath, cmd.OutOrStdout())
+			return runStart(cmd.Context(), "127.0.0.1:9780", "", configPath, cmd.OutOrStdout())
 		},
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "", "path to CLI YAML config")

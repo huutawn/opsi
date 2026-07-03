@@ -62,7 +62,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/internal/alerts", s.handleInternalAlerts)
 	mux.HandleFunc("/api/", s.handleRegistryAPI)
-	mux.HandleFunc("/", s.handleUI)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if !s.Config.EnableDebugUI {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleUI(w, r)
+	})
 	return s.observer.Wrap(mux)
 }
 
@@ -78,7 +84,16 @@ func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
 		ServiceID     string `json:"service_id"`
 		AnomalyType   string `json:"anomaly_type"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid incident context")
+		return
+	}
+	if forbiddenAIPayload(body) {
+		writeError(w, http.StatusBadRequest, "incident context contains forbidden raw or secret-like fields")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid incident context")
 		return
 	}
@@ -86,7 +101,9 @@ func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid incident context")
 		return
 	}
-	// ponytail: Gemini call skipped; add provider adapter when API key/config exists.
+	provider := firstNonEmpty(s.Config.AI.Provider, "fixture")
+	fallback := provider != "fixture"
+	// ponytail: Gemini network call skipped; add provider adapter when stable API key/config exists.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"schema_version": "opsi.rca.v1",
 		"incident_id":    req.IncidentID,
@@ -100,7 +117,18 @@ func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
 			{"id": "scale-replicas", "type": "scale_replicas", "description": "Scale service replicas", "rollback_safe": true, "params": map[string]string{"service_id": req.ServiceID, "replicas": "2"}},
 			{"id": "rate-limit-ingress", "type": "rate_limit_ingress", "description": "Apply ingress rate limit", "rollback_safe": true, "params": map[string]string{"service_id": req.ServiceID, "rps": "10"}},
 		},
+		"metadata": map[string]any{"provider": "fixture", "configured_provider": provider, "fallback_used": fallback, "model": "fixture"},
 	})
+}
+
+func forbiddenAIPayload(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	for _, token := range []string{"raw_log", "raw_logs", "password", "secret", "token", "api_key", "kubeconfig", "private_key"} {
+		if strings.Contains(lower, `"`+token+`"`) || strings.Contains(lower, token+":") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {

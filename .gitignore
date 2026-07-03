@@ -22,6 +22,7 @@ certs/
 *.coverprofile
 *.prof
 /coverage/
+/release/
 
 # Go module vendor (optional but good to have if we don't commit it)
 # vendor/
@@ -38,5 +39,9 @@ AGENTS.md
 headroom_memory.db
 .agents
 .agents_archive
-docs
+docs/*
+!docs/status_matrix.md
+!docs/demo_runbook.md
+!docs/security_story.md
+!docs/future_work.md
 .agents_active

@@ -375,8 +375,18 @@ func TestInternalAlertmanagerWebhookIsRedactedAndTokenGated(t *testing.T) {
 	}
 }
 
-func TestUIShellServesProductionWorkflow(t *testing.T) {
+func TestUIShellRequiresDebugFlag(t *testing.T) {
 	handler := NewServer(Config{}).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("ui status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestDebugUIShellServesWorkflow(t *testing.T) {
+	handler := NewServer(Config{EnableDebugUI: true}).Handler()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)

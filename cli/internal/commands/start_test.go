@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +17,7 @@ func TestStartMuxServesHealthAndBuiltUI(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<!doctype html><title>Opsi Console</title>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(newStartMux(dir, config.Default()))
+	server := httptest.NewServer(newStartMux(dir, "", config.Default()))
 	defer server.Close()
 
 	res, err := http.Get(server.URL + "/health")
@@ -38,8 +39,8 @@ func TestStartMuxServesHealthAndBuiltUI(t *testing.T) {
 	}
 }
 
-func TestStartMuxReturnsUnavailableWhenUIMissing(t *testing.T) {
-	server := httptest.NewServer(newStartMux(filepath.Join(t.TempDir(), "missing"), config.Default()))
+func TestStartMuxServesEmbeddedUIWhenDirMissing(t *testing.T) {
+	server := httptest.NewServer(newStartMux(filepath.Join(t.TempDir(), "missing"), "", config.Default()))
 	defer server.Close()
 
 	res, err := http.Get(server.URL + "/")
@@ -47,13 +48,13 @@ func TestStartMuxReturnsUnavailableWhenUIMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusServiceUnavailable {
+	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", res.StatusCode)
 	}
 }
 
 func TestStartMuxLocalStatusReportsAgentUnavailable(t *testing.T) {
-	server := httptest.NewServer(newStartMux(t.TempDir(), config.Config{AgentAddr: "127.0.0.1:1"}))
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1"}))
 	defer server.Close()
 	res, err := http.Get(server.URL + "/api/local/status")
 	if err != nil {
@@ -62,6 +63,24 @@ func TestStartMuxLocalStatusReportsAgentUnavailable(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status = %d", res.StatusCode)
+	}
+}
+
+func TestStartMuxProxiesDevUI(t *testing.T) {
+	dev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("dev-ui"))
+	}))
+	defer dev.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), dev.URL, config.Default()))
+	defer server.Close()
+	res, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if string(body) != "dev-ui" {
+		t.Fatalf("body = %q", body)
 	}
 }
 
