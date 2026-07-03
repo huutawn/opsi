@@ -145,7 +145,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 
 	manifestPath := filepath.Join(workDir, req.ManifestPath)
 	renderedManifestPath := filepath.Join(workDir, ".opsi-rendered-manifest.yaml")
-	if err := renderManifestFile(manifestPath, renderedManifestPath, manifestOptions{ResourceRequestsJSON: req.ResourceRequestsJSON, ResourceLimitsJSON: req.ResourceLimitsJSON, TerminationGracePeriodSeconds: req.TerminationGracePeriodSeconds, IngressEnabled: req.IngressEnabled, BindingSecrets: bindingSecretNames(req.DependsOn)}); err != nil {
+	if err := renderManifestFile(manifestPath, renderedManifestPath, manifestOptions{ResourceRequestsJSON: req.ResourceRequestsJSON, ResourceLimitsJSON: req.ResourceLimitsJSON, TerminationGracePeriodSeconds: req.TerminationGracePeriodSeconds, IngressEnabled: req.IngressEnabled, BindingDependencies: req.DependsOn}); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
 	if err := emit(progress, record, PhaseApplying, "applying manifest", 70, nil); err != nil {
@@ -159,7 +159,11 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 		return record, err
 	}
 	if err := e.K3s.WatchRollout(ctx, req.ServiceName, req.Namespace, e.RolloutTimeout, e.PollInterval); err != nil {
+		var rolloutFailure RolloutFailure
 		decision := ClassifyFailure(err.Error(), false, 0)
+		if errors.As(err, &rolloutFailure) {
+			decision = ClassifyRolloutFailure(rolloutFailure)
+		}
 		record.RollbackSafe = decision.RollbackSafe
 		record.RollbackReason = decision.Reason
 		if !decision.RollbackSafe {

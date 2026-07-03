@@ -70,6 +70,9 @@ func TestClassifyFailure(t *testing.T) {
 	if decision := ClassifyFailure("crashloop", true, 6); decision.RollbackSafe || decision.FailType != FailTypeRuntimeCrash {
 		t.Fatalf("expected runtime no rollback: %+v", decision)
 	}
+	if decision := ClassifyRolloutFailure(RolloutFailure{Reason: "rollout failed", ContainerReasons: []string{"OOMKilled"}}); decision.RollbackSafe || decision.FailType != FailTypeResourceExhaustion {
+		t.Fatalf("expected typed resource signal no rollback: %+v", decision)
+	}
 }
 
 func TestRequestFromWebhook(t *testing.T) {

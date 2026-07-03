@@ -189,7 +189,7 @@ func (s *IncidentService) AnalyzeIncident(ctx context.Context, req *agentv1.Inci
 
 func (s *IncidentService) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
 	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Approve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, ActionID: req.ActionID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	rec, rca, err := s.service.Approve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, ActionID: req.ActionID, ActionHash: req.ActionHash, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
@@ -295,7 +295,8 @@ func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.De
 			return err
 		}
 	}
-	if err := s.validateDependencies(stream.Context(), resolved); err != nil {
+	resolved, err = s.validateDependencies(stream.Context(), resolved)
+	if err != nil {
 		return err
 	}
 	_, err = s.engine.Deploy(stream.Context(), resolved, func(event *deploy.ProgressEvent) error {
@@ -319,37 +320,47 @@ func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.De
 	return nil
 }
 
-func (s *DeploymentService) validateDependencies(ctx context.Context, req deploy.Request) error {
+func (s *DeploymentService) validateDependencies(ctx context.Context, req deploy.Request) (deploy.Request, error) {
 	if len(req.DependsOn) == 0 {
-		return nil
+		return req, nil
 	}
 	if s.serviceStore == nil {
-		return status.Error(codes.FailedPrecondition, "service catalog store is not configured")
+		return req, status.Error(codes.FailedPrecondition, "service catalog store is not configured")
 	}
-	envOwner := map[string]string{}
-	for _, dep := range req.DependsOn {
+	defaultOwner := map[string]string{}
+	unprefixedOwner := map[string]string{}
+	for i, dep := range req.DependsOn {
 		service, err := s.serviceStore.GetManagedService(ctx, req.ProjectID, dep.Name)
 		if err != nil {
-			return status.Error(codes.Internal, err.Error())
+			return req, status.Error(codes.Internal, err.Error())
 		}
 		if service == nil {
-			return status.Errorf(codes.FailedPrecondition, "dependency service %q is not registered", dep.Name)
+			return req, status.Errorf(codes.FailedPrecondition, "dependency service %q is not registered", dep.Name)
 		}
 		keys, ok := svcatalog.EnvKeysForType(service.Type)
 		if !ok {
-			return status.Errorf(codes.FailedPrecondition, "dependency service %q has unknown type %q", dep.Name, service.Type)
+			return req, status.Errorf(codes.FailedPrecondition, "dependency service %q has unknown type %q", dep.Name, service.Type)
 		}
+		req.DependsOn[i].EnvKeys = keys
 		for _, key := range keys {
-			if owner := envOwner[key]; owner != "" {
-				return status.Errorf(codes.FailedPrecondition, "dependency env collision on %s between %s and %s; use one dependency per generic env key until alias policy is enabled", key, owner, dep.Name)
+			if dep.ExposeAsDefault {
+				if owner := defaultOwner[key]; owner != "" {
+					return req, status.Errorf(codes.FailedPrecondition, "dependency default env collision on %s between %s and %s; only one dependency may expose_as_default", key, owner, dep.Name)
+				}
+				defaultOwner[key] = dep.Name
 			}
-			envOwner[key] = dep.Name
+			if dep.EnvPrefix == "" && !dep.ExposeAsDefault {
+				if owner := unprefixedOwner[key]; owner != "" {
+					return req, status.Errorf(codes.FailedPrecondition, "dependency env collision on %s between %s and %s; set env_prefix or expose_as_default on exactly one dependency", key, owner, dep.Name)
+				}
+				unprefixedOwner[key] = dep.Name
+			}
 		}
 		if err := s.serviceStore.UpsertBinding(ctx, svcatalog.ServiceBinding{ProjectID: req.ProjectID, AppServiceID: req.ServiceID, DependencyServiceID: service.ID, Namespace: req.Namespace}); err != nil {
-			return status.Error(codes.Internal, err.Error())
+			return req, status.Error(codes.Internal, err.Error())
 		}
 	}
-	return nil
+	return req, nil
 }
 
 func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Logger) error {
@@ -699,7 +710,7 @@ func incidentResponse(rec *telemetry.IncidentRecord, r incident.RCA) *agentv1.In
 		resp.ResolvedAtUnix = rec.ResolvedAt.Unix()
 	}
 	for _, action := range r.RecommendedActions {
-		resp.RecommendedActions = append(resp.RecommendedActions, agentv1.RecommendedAction{ID: action.ID, Type: action.Type, Description: action.Description, RollbackSafe: action.RollbackSafe, Params: action.Params})
+		resp.RecommendedActions = append(resp.RecommendedActions, agentv1.RecommendedAction{ID: action.ID, Type: action.Type, Description: action.Description, RollbackSafe: action.RollbackSafe, Params: action.Params, ActionHash: action.ActionHash})
 	}
 	return resp
 }

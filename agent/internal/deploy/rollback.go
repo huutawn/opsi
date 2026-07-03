@@ -21,6 +21,22 @@ type RollbackDecision struct {
 	SuggestedAction string
 }
 
+type RolloutFailure struct {
+	Reason              string
+	ReadinessEverPassed bool
+	MinutesAfterReady   int
+	ContainerReasons    []string
+	Events              []string
+}
+
+func (e RolloutFailure) Error() string {
+	return strings.TrimSpace(strings.Join(append([]string{e.Reason}, append(e.ContainerReasons, e.Events...)...), " "))
+}
+
+func ClassifyRolloutFailure(f RolloutFailure) RollbackDecision {
+	return ClassifyFailure(f.Error(), f.ReadinessEverPassed, f.MinutesAfterReady)
+}
+
 func ClassifyFailure(message string, readinessPassed bool, minutesAfterSuccess int) RollbackDecision {
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "oom") || strings.Contains(lower, "cpu throttle") || strings.Contains(lower, "resource") {

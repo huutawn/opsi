@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
 type Config struct {
 	TTL                    Duration    `json:"ttl"`
 	DatabaseURL            string      `json:"database_url"`
+	PublicBaseURL          string      `json:"public_base_url"`
 	Production             bool        `json:"production"`
 	OTP                    OTPConfig   `json:"otp"`
 	SMTP                   SMTPConfig  `json:"smtp"`
@@ -83,6 +85,12 @@ func LoadConfig(path string) (Config, error) {
 		}
 		if len(cfg.Alerts.InternalToken) < 32 {
 			return Config{}, fmt.Errorf("production requires alerts.internal_token with at least 32 bytes")
+		}
+		if cfg.OTP.DevEcho {
+			return Config{}, fmt.Errorf("production forbids otp.dev_echo")
+		}
+		if cfg.PublicBaseURL != "" && !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
+			return Config{}, fmt.Errorf("production requires public_base_url to use https")
 		}
 		cfg.RequireAgentSignatures = true
 	}

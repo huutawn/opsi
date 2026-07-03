@@ -25,6 +25,9 @@ func TestRenderManagedPostgresManifest(t *testing.T) {
 		"postgresql://opsi:",
 		"@mydb.default.svc.cluster.local:5432/myapp",
 		"storage: 5Gi",
+		"pg_isready",
+		"memory: 256Mi",
+		"allowPrivilegeEscalation: false",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in manifest:\n%s", want, out)
@@ -54,6 +57,9 @@ func TestRenderManagedRedisManifest(t *testing.T) {
 		"OPSI_CACHE_REDIS_URL:",
 		"redis://cache.prod.svc.cluster.local:6379",
 		`"128mb"`,
+		"redis-cli",
+		"cpu: 50m",
+		"allowPrivilegeEscalation: false",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in manifest:\n%s", want, out)

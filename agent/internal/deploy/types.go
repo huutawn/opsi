@@ -69,6 +69,7 @@ type ServiceDependency struct {
 	Name            string
 	EnvPrefix       string
 	ExposeAsDefault bool
+	EnvKeys         []string
 }
 
 type Record struct {
@@ -263,6 +264,9 @@ func (r Request) Validate() error {
 		if !safeKubernetesName(dep.Name) {
 			return fmt.Errorf("depends_on name %q must be a Kubernetes-safe service name", dep.Name)
 		}
+		if dep.EnvPrefix != "" && !safeEnvPrefix(dep.EnvPrefix) {
+			return fmt.Errorf("depends_on env_prefix %q must contain only uppercase letters, digits, and underscores", dep.EnvPrefix)
+		}
 		if seen[dep.Name] {
 			return fmt.Errorf("depends_on contains duplicate service %q", dep.Name)
 		}
@@ -390,6 +394,10 @@ func safeKubernetesName(value string) bool {
 	return regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`).MatchString(value) && len(value) <= 63
 }
 
+func safeEnvPrefix(value string) bool {
+	return regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`).MatchString(value)
+}
+
 func dependenciesFromContract(in []agentv1.ServiceDependency) []ServiceDependency {
 	if len(in) == 0 {
 		return nil
@@ -398,7 +406,7 @@ func dependenciesFromContract(in []agentv1.ServiceDependency) []ServiceDependenc
 	for _, dep := range in {
 		out = append(out, ServiceDependency{
 			Name:            strings.TrimSpace(dep.Name),
-			EnvPrefix:       strings.TrimSpace(dep.EnvPrefix),
+			EnvPrefix:       strings.ToUpper(strings.TrimSpace(dep.EnvPrefix)),
 			ExposeAsDefault: dep.ExposeAsDefault,
 		})
 	}

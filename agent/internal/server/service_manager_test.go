@@ -128,15 +128,27 @@ func TestDeploymentDependencyValidation(t *testing.T) {
 	}
 	svc := &DeploymentService{serviceStore: store}
 	req := deploy.Request{ProjectID: "demo", ServiceID: "api", Namespace: "default", DependsOn: []deploy.ServiceDependency{{Name: "primary-db"}, {Name: "cache"}}}
-	if err := svc.validateDependencies(ctx, req); err != nil {
+	if _, err := svc.validateDependencies(ctx, req); err != nil {
 		t.Fatal(err)
 	}
+	req.DependsOn = []deploy.ServiceDependency{{Name: "primary-db", EnvPrefix: "PRIMARY", ExposeAsDefault: true}, {Name: "analytics-db", EnvPrefix: "ANALYTICS"}}
+	enriched, err := svc.validateDependencies(ctx, req)
+	if err != nil {
+		t.Fatalf("prefixed same-type deps should pass: %v", err)
+	}
+	if len(enriched.DependsOn[0].EnvKeys) == 0 || enriched.DependsOn[0].EnvPrefix != "PRIMARY" {
+		t.Fatalf("missing enriched env keys: %+v", enriched.DependsOn)
+	}
 	req.DependsOn = []deploy.ServiceDependency{{Name: "primary-db"}, {Name: "analytics-db"}}
-	if err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "env collision") {
+	if _, err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "env collision") {
 		t.Fatalf("expected collision error, got %v", err)
 	}
+	req.DependsOn = []deploy.ServiceDependency{{Name: "primary-db", EnvPrefix: "PRIMARY", ExposeAsDefault: true}, {Name: "analytics-db", EnvPrefix: "ANALYTICS", ExposeAsDefault: true}}
+	if _, err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "default env collision") {
+		t.Fatalf("expected default collision error, got %v", err)
+	}
 	req.DependsOn = []deploy.ServiceDependency{{Name: "missing"}}
-	if err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "not registered") {
+	if _, err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("expected missing dependency error, got %v", err)
 	}
 }

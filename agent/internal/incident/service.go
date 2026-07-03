@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -56,6 +57,7 @@ type ActionRequest struct {
 	ProjectID  string `json:"project_id"`
 	IncidentID string `json:"incident_id"`
 	ActionID   string `json:"action_id"`
+	ActionHash string `json:"action_hash,omitempty"`
 	UserID     string `json:"user_id"`
 	Role       string `json:"role"`
 	PAT        string `json:"pat,omitempty"`
@@ -91,6 +93,7 @@ type Action struct {
 	Description  string            `json:"description"`
 	RollbackSafe bool              `json:"rollback_safe,omitempty"`
 	Params       map[string]string `json:"params,omitempty"`
+	ActionHash   string            `json:"action_hash,omitempty"`
 }
 
 type ActionResult struct {
@@ -172,6 +175,7 @@ func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*telemetry.I
 	if err := ValidateRCA(ictx, rca); err != nil {
 		return nil, RCA{}, err
 	}
+	rca = withActionHashes(rca)
 	data, _ := json.Marshal(rca)
 	updated, err := s.Store.UpdateIncidentRCA(ctx, req.ProjectID, req.IncidentID, StatusActionPending, string(data), s.now())
 	_ = s.audit(ctx, auth, "incident.analyze", req.IncidentID, result(err), "")
@@ -209,8 +213,14 @@ func (s *Service) Approve(ctx context.Context, req ActionRequest) (*telemetry.In
 	if action.Type == "rollback" && !action.RollbackSafe {
 		return nil, RCA{}, errors.New("rollback is not safe")
 	}
+	if req.ActionHash != "" && req.ActionHash != hashAction(action) {
+		return nil, RCA{}, errors.New("stale action: reload RCA before approving")
+	}
 	_ = s.audit(ctx, auth, "incident.action.approve", req.IncidentID, "success", action.Type)
 	execErr := s.execute(ctx, *rec, action)
+	if execErr == nil {
+		execErr = s.verify(ctx, *rec, action)
+	}
 	out := appendResult(rec.MitigationActions, ActionResult{ID: action.ID, Type: action.Type, ApprovedBy: auth.UserID, Status: result(execErr), Error: errString(execErr), ExecutedAt: s.now()})
 	updated, err := s.Store.AppendIncidentAction(ctx, req.ProjectID, req.IncidentID, StatusResolving, out, s.now())
 	_ = s.audit(ctx, auth, "incident.action.execute", req.IncidentID, result(execErr), action.Type)
@@ -305,7 +315,39 @@ func (s *Service) run(ctx context.Context, name string, args ...string) error {
 }
 
 func fallbackRCA(ctx IncidentContext) RCA {
-	return RCA{SchemaVersion: "opsi.rca.v1", IncidentID: ctx.IncidentID, RootCause: "Local anomaly detected: " + first(ctx.AnomalyType, "unknown"), Confidence: 0.62, ContributingFactors: []string{"metric anomaly", "recent service health degradation"}, RecommendedActions: []Action{{ID: "scale-replicas", Type: "scale_replicas", Description: "Scale service replicas to reduce pressure", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID, "replicas": "2"}}, {ID: "restart-pod", Type: "restart_pod", Description: "Restart deployment pods", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID}}}}
+	rca := RCA{SchemaVersion: "opsi.rca.v1", IncidentID: ctx.IncidentID, RootCause: "Local anomaly detected: " + first(ctx.AnomalyType, "unknown"), Confidence: 0.62, ContributingFactors: []string{"metric anomaly", "recent service health degradation"}, RecommendedActions: []Action{{ID: "scale-replicas", Type: "scale_replicas", Description: "Scale service replicas to reduce pressure", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID, "replicas": "2"}}, {ID: "restart-pod", Type: "restart_pod", Description: "Restart deployment pods", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID}}}}
+	return withActionHashes(rca)
+}
+
+func (s *Service) verify(ctx context.Context, rec telemetry.IncidentRecord, action Action) error {
+	if s.DryRun {
+		return nil
+	}
+	kubectl := first(s.KubectlPath, "kubectl")
+	namespace := first(action.Params["namespace"], s.Namespace, "default")
+	serviceID := first(action.Params["service_id"], rec.ServiceID)
+	switch action.Type {
+	case "restart_pod", "scale_replicas", "rollback", "increase_resource_limits":
+		return s.run(ctx, kubectl, "-n", namespace, "rollout", "status", "deployment/"+serviceID, "--timeout=60s")
+	case "rate_limit_ingress":
+		return s.run(ctx, kubectl, "-n", namespace, "get", "ingress/"+serviceID, "-o", "jsonpath={.metadata.annotations.nginx\\.ingress\\.kubernetes\\.io/limit-rps}")
+	default:
+		return nil
+	}
+}
+
+func withActionHashes(r RCA) RCA {
+	for i := range r.RecommendedActions {
+		r.RecommendedActions[i].ActionHash = hashAction(r.RecommendedActions[i])
+	}
+	return r
+}
+
+func hashAction(action Action) string {
+	action.ActionHash = ""
+	data, _ := json.Marshal(action)
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func canApprove(role secret.Role) bool {

@@ -362,7 +362,11 @@ func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"request_id": resp.RequestID, "expires_at": resp.ExpiresAt, "code": resp.Code})
+	out := map[string]any{"request_id": resp.RequestID, "expires_at": resp.ExpiresAt}
+	if resp.Code != "" {
+		out["code"] = resp.Code
+	}
+	writeJSON(w, http.StatusAccepted, out)
 }
 
 func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {

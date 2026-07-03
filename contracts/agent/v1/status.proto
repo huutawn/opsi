@@ -31,6 +31,12 @@ service SecretService {
   rpc RotateSecret(SecretRequest) returns (SecretResponse);
 }
 
+service IncidentService {
+  rpc AnalyzeIncident(IncidentAnalyzeRequest) returns (IncidentResponse);
+  rpc ApproveIncidentAction(IncidentActionRequest) returns (IncidentResponse);
+  rpc ResolveIncident(IncidentActionRequest) returns (IncidentResponse);
+}
+
 message StatusRequest {}
 
 message StatusResponse {
@@ -212,6 +218,45 @@ message SecretResponse {
   string namespace = 4;
   string username = 5;
   string password = 6;
+}
+
+message IncidentAnalyzeRequest {
+  string project_id = 1;
+  string incident_id = 2;
+  string user_id = 3;
+  string role = 4;
+  string pat = 5;
+}
+
+message IncidentActionRequest {
+  string project_id = 1;
+  string incident_id = 2;
+  string action_id = 3;
+  string user_id = 4;
+  string role = 5;
+  string pat = 6;
+}
+
+message IncidentResponse {
+  string incident_id = 1;
+  string project_id = 2;
+  string service_id = 3;
+  string status = 4;
+  string root_cause = 5;
+  double confidence = 6;
+  repeated string contributing_factors = 7;
+  repeated RecommendedAction recommended_actions = 8;
+  string mitigation_actions_json = 9;
+  int64 resolved_at_unix = 10;
+  int64 mttr_seconds = 11;
+}
+
+message RecommendedAction {
+  string id = 1;
+  string type = 2;
+  string description = 3;
+  bool rollback_safe = 4;
+  map<string, string> params = 5;
 }
 
 enum ErrorCode {

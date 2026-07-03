@@ -46,6 +46,7 @@ func (r Runner) Run(ctx context.Context) error {
 	if r.HeartbeatInterval <= 0 {
 		r.HeartbeatInterval = 30 * time.Second
 	}
+	r.sendHeartbeat(ctx)
 	go r.heartbeatLoop(ctx)
 	return r.jobLoop(ctx)
 }
@@ -53,7 +54,6 @@ func (r Runner) Run(ctx context.Context) error {
 func (r Runner) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(r.HeartbeatInterval)
 	defer ticker.Stop()
-	r.sendHeartbeat(ctx)
 	for {
 		select {
 		case <-ctx.Done():

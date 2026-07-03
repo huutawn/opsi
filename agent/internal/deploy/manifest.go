@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -18,7 +19,7 @@ type manifestOptions struct {
 	ResourceLimitsJSON            string
 	TerminationGracePeriodSeconds int
 	IngressEnabled                bool
-	BindingSecrets                []string
+	BindingDependencies           []ServiceDependency
 }
 
 func renderManifestFile(sourcePath, outputPath string, options manifestOptions) error {
@@ -84,10 +85,11 @@ func injectDeploymentDefaults(doc map[string]any, options manifestOptions) {
 	rolling["maxSurge"] = 1
 
 	template := ensureMap(spec, "template")
-	if len(options.BindingSecrets) > 0 {
+	bindings := bindingRefs(options.BindingDependencies)
+	if len(bindings) > 0 {
 		metadata := ensureMap(template, "metadata")
 		annotations := ensureMap(metadata, "annotations")
-		annotations["opsi.io/bindings-checksum"] = bindingsChecksum(options.BindingSecrets)
+		annotations["opsi.io/bindings-checksum"] = bindingsChecksum(bindings)
 	}
 	podSpec := ensureMap(template, "spec")
 	if options.TerminationGracePeriodSeconds <= 0 {
@@ -112,49 +114,103 @@ func injectDeploymentDefaults(doc map[string]any, options manifestOptions) {
 			exec := ensureMap(preStop, "exec")
 			exec["command"] = []any{"sh", "-c", "sleep 10"}
 		}
-		appendBindingSecrets(container, options.BindingSecrets)
+		appendBindings(container, bindings)
 	}
 }
 
-func appendBindingSecrets(container map[string]any, secrets []string) {
-	if len(secrets) == 0 {
+type bindingRef struct {
+	EnvName    string `json:"env_name"`
+	SecretName string `json:"secret_name"`
+	SecretKey  string `json:"secret_key"`
+}
+
+func appendBindings(container map[string]any, bindings []bindingRef) {
+	if len(bindings) == 0 {
 		return
 	}
-	envFrom, _ := container["envFrom"].([]any)
+	env, _ := container["env"].([]any)
 	seen := map[string]bool{}
-	for _, raw := range envFrom {
+	for _, raw := range env {
 		item, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		ref, _ := item["secretRef"].(map[string]any)
-		if name, _ := ref["name"].(string); name != "" {
+		if name, _ := item["name"].(string); name != "" {
 			seen[name] = true
 		}
 	}
-	for _, secret := range secrets {
-		if seen[secret] {
+	for _, binding := range bindings {
+		if seen[binding.EnvName] {
 			continue
 		}
-		envFrom = append(envFrom, map[string]any{"secretRef": map[string]any{"name": secret}})
+		env = append(env, map[string]any{
+			"name": binding.EnvName,
+			"valueFrom": map[string]any{"secretKeyRef": map[string]any{
+				"name": binding.SecretName,
+				"key":  binding.SecretKey,
+			}},
+		})
 	}
-	container["envFrom"] = envFrom
+	container["env"] = env
 }
 
-func bindingSecretNames(deps []ServiceDependency) []string {
+func bindingRefs(deps []ServiceDependency) []bindingRef {
 	if len(deps) == 0 {
 		return nil
 	}
-	names := make([]string, 0, len(deps))
+	counts := map[string]int{}
 	for _, dep := range deps {
-		names = append(names, "opsi-svc-"+dep.Name)
+		for _, key := range dep.EnvKeys {
+			counts[key]++
+		}
 	}
-	return names
+	var refs []bindingRef
+	for _, dep := range deps {
+		secret := "opsi-svc-" + dep.Name
+		servicePrefix := "OPSI_" + envNamePart(dep.Name) + "_"
+		for _, key := range dep.EnvKeys {
+			refs = append(refs, bindingRef{EnvName: servicePrefix + key, SecretName: secret, SecretKey: servicePrefix + key})
+			if dep.EnvPrefix != "" {
+				refs = append(refs, bindingRef{EnvName: dep.EnvPrefix + "_" + key, SecretName: secret, SecretKey: key})
+			}
+			if dep.ExposeAsDefault || (dep.EnvPrefix == "" && counts[key] == 1) {
+				refs = append(refs, bindingRef{EnvName: key, SecretName: secret, SecretKey: key})
+			}
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].EnvName != refs[j].EnvName {
+			return refs[i].EnvName < refs[j].EnvName
+		}
+		if refs[i].SecretName != refs[j].SecretName {
+			return refs[i].SecretName < refs[j].SecretName
+		}
+		return refs[i].SecretKey < refs[j].SecretKey
+	})
+	return refs
 }
 
-func bindingsChecksum(secrets []string) string {
-	sum := sha256.Sum256([]byte(strings.Join(secrets, "\n")))
+func bindingsChecksum(bindings []bindingRef) string {
+	data, _ := json.Marshal(bindings)
+	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func envNamePart(name string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	return strings.Trim(b.String(), "_")
 }
 
 func ensureMap(parent map[string]any, key string) map[string]any {

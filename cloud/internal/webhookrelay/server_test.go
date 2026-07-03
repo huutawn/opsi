@@ -83,3 +83,20 @@ func TestQueuePurgesExpiredEnvelopes(t *testing.T) {
 		t.Fatalf("expected expired item purged, got %d", got)
 	}
 }
+
+func TestOTPRequestOmitsCodeWithoutDevEcho(t *testing.T) {
+	server := NewServer(Config{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"ProjectID":"proj","UserID":"user","Purpose":"secret_reveal"}`)))
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["code"]; ok {
+		t.Fatalf("code leaked in non-dev response: %v", body)
+	}
+}

@@ -85,9 +85,13 @@ spec:
         opsi.io/service-type: {{ .Service.Type }}
         opsi.io/service-mode: {{ .Service.Mode }}
     spec:
+      securityContext:
+        fsGroup: 999
       containers:
         - name: postgres
           image: postgres:{{ index .Service.Config "version" }}
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: {{ .Service.Port }}
           env:
@@ -106,6 +110,23 @@ spec:
                 secretKeyRef:
                   name: {{ .Service.SecretName }}
                   key: POSTGRES_PASSWORD
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data

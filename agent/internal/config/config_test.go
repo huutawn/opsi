@@ -66,3 +66,26 @@ func TestValidateRejectsNegativeTerminationGrace(t *testing.T) {
 		t.Fatal("expected termination grace validation error")
 	}
 }
+
+func TestValidateRejectsInsecureNonLoopback(t *testing.T) {
+	cfg := Default()
+	cfg.ListenAddr = "0.0.0.0:9443"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected non-loopback without TLS/auth to fail")
+	}
+}
+
+func TestValidateProductionGuardrails(t *testing.T) {
+	cfg := Default()
+	cfg.Mode = "production"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected insecure production config to fail")
+	}
+	cfg.Auth.Enabled = true
+	cfg.TLS.ServerCertPath = "server.crt"
+	cfg.TLS.ServerKeyPath = "server.key"
+	cfg.Secret.EncryptionAtRestConfirmed = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected hardened production config to pass: %v", err)
+	}
+}

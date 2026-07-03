@@ -3,7 +3,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -11,6 +13,7 @@ import (
 
 type Config struct {
 	NodeID        string           `yaml:"node_id"`
+	Mode          string           `yaml:"mode"`
 	ListenAddr    string           `yaml:"listen_addr"`
 	HealthAddr    string           `yaml:"health_addr"`
 	CloudEndpoint string           `yaml:"cloud_endpoint"`
@@ -97,6 +100,7 @@ type SecretConfig struct {
 func Default() Config {
 	return Config{
 		NodeID:        "dev-agent",
+		Mode:          "dev",
 		ListenAddr:    "127.0.0.1:9443",
 		HealthAddr:    "127.0.0.1:9080",
 		CloudEndpoint: "https://cloud.localhost",
@@ -175,11 +179,39 @@ func (c Config) Validate() error {
 	if c.HealthAddr == "" {
 		return errors.New("health_addr is required")
 	}
+	if c.Mode == "" {
+		c.Mode = "dev"
+	}
+	if c.Mode != "dev" && c.Mode != "production" {
+		return errors.New("mode must be dev or production")
+	}
 	if c.TLS.RequireClientCert && c.TLS.CACertPath == "" {
 		return errors.New("tls.ca_cert_path is required when client certificates are required")
 	}
 	if (c.TLS.ServerCertPath == "") != (c.TLS.ServerKeyPath == "") {
 		return errors.New("tls.server_cert_path and tls.server_key_path must be configured together")
+	}
+	if !isLoopbackAddr(c.ListenAddr) {
+		if c.TLS.ServerCertPath == "" || c.TLS.ServerKeyPath == "" {
+			return errors.New("non-loopback listen_addr requires TLS server cert and key")
+		}
+		if !c.Auth.Enabled {
+			return errors.New("non-loopback listen_addr requires auth.enabled=true")
+		}
+	}
+	if c.Mode == "production" {
+		if !c.Auth.Enabled {
+			return errors.New("production requires auth.enabled=true")
+		}
+		if c.TLS.ServerCertPath == "" || c.TLS.ServerKeyPath == "" {
+			return errors.New("production requires TLS server cert and key")
+		}
+		if !strings.HasPrefix(c.CloudEndpoint, "https://") {
+			return errors.New("production requires cloud_endpoint to use https")
+		}
+		if !c.Secret.EncryptionAtRestConfirmed {
+			return errors.New("production requires secret.encryption_at_rest_confirmed=true")
+		}
 	}
 	if c.Auth.VerifyCacheTTL != "" {
 		if _, err := time.ParseDuration(c.Auth.VerifyCacheTTL); err != nil {
@@ -256,4 +288,16 @@ func (c Config) Validate() error {
 
 func (c TLSConfig) Enabled() bool {
 	return c.ServerCertPath != "" || c.ServerKeyPath != "" || c.RequireClientCert
+}
+
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
