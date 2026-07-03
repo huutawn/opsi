@@ -232,9 +232,10 @@ message IncidentActionRequest {
   string project_id = 1;
   string incident_id = 2;
   string action_id = 3;
-  string user_id = 4;
-  string role = 5;
-  string pat = 6;
+  string action_hash = 4;
+  string user_id = 5;
+  string role = 6;
+  string pat = 7;
 }
 
 message IncidentResponse {
@@ -257,6 +258,7 @@ message RecommendedAction {
   string description = 3;
   bool rollback_safe = 4;
   map<string, string> params = 5;
+  string action_hash = 6;
 }
 
 enum ErrorCode {

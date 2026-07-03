@@ -2,6 +2,7 @@ package incident
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,30 @@ func TestSanitizeIncidentContextDropsRawLog(t *testing.T) {
 	}
 }
 
+func TestIncidentContextBuilderAddsMetricAndLogEvidence(t *testing.T) {
+	store, err := telemetry.OpenSQLiteStore(t.TempDir() + "/telemetry.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	created := time.Unix(1000, 0).UTC()
+	rec := telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", NodeID: "node-1", ServiceID: "svc", AnomalyType: "cpu_spike", Severity: "P1", Status: "open", CreatedAt: created}
+	if err := store.InsertMetric(context.Background(), telemetry.MetricRecord{ProjectID: "p1", NodeID: "node-1", ServiceID: "svc", Name: "cpu_usage", Value: 96, Unit: "%", ObservedAt: created}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertLog(context.Background(), telemetry.LogRecord{ProjectID: "p1", NodeID: "node-1", ServiceID: "svc", Level: "error", Message: "password=secret boom", Fingerprint: "fp-1", ObservedAt: created}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := (IncidentContextBuilder{Store: store}).Build(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(ctx)
+	if ctx.MetricSnapshot["cpu_usage"]["value"] != float64(96) || len(ctx.LogPatterns) != 1 || strings.Contains(string(data), "password=secret") {
+		t.Fatalf("bad context evidence: %s", data)
+	}
+}
+
 func TestValidateRCABlocksUnsafeRollback(t *testing.T) {
 	ctx := IncidentContext{SchemaVersion: "opsi.incident_context.v1", IncidentID: "inc-1", ProjectID: "p1", ServiceID: "svc"}
 	err := ValidateRCA(ctx, RCA{SchemaVersion: "opsi.rca.v1", IncidentID: "inc-1", RootCause: "bad deploy", Confidence: 0.9, RecommendedActions: []Action{{ID: "a1", Type: "shell", Params: map[string]string{"service_id": "svc"}}}})
@@ -43,11 +68,20 @@ func TestValidateRCABlocksUnsafeRollback(t *testing.T) {
 
 func TestApproveExecutesAllowlistedAction(t *testing.T) {
 	store := &fakeStore{rec: telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: "svc", RCAResult: `{"schema_version":"opsi.rca.v1","incident_id":"inc-1","root_cause":"cpu","confidence":0.7,"recommended_actions":[{"id":"scale","type":"scale_replicas","params":{"service_id":"svc","replicas":"3"}}]}`, MitigationActions: "[]"}}
-	var called bool
-	svc := Service{Store: store, DryRun: false, Exec: func(context.Context, string, ...string) error { called = true; return nil }}
+	var calls int
+	svc := Service{Store: store, DryRun: false, Exec: func(context.Context, string, ...string) error { calls++; return nil }}
 	rec, _, err := svc.Approve(context.Background(), ActionRequest{ProjectID: "p1", IncidentID: "inc-1", ActionID: "scale", UserID: "u1", Role: "Developer"})
-	if err != nil || !called || rec.Status != StatusResolving {
-		t.Fatalf("approve failed rec=%+v called=%v err=%v", rec, called, err)
+	if err != nil || calls != 2 || rec.Status != StatusResolving {
+		t.Fatalf("approve failed rec=%+v calls=%v err=%v", rec, calls, err)
+	}
+}
+
+func TestApproveRejectsStaleActionHash(t *testing.T) {
+	store := &fakeStore{rec: telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: "svc", RCAResult: `{"schema_version":"opsi.rca.v1","incident_id":"inc-1","root_cause":"cpu","confidence":0.7,"recommended_actions":[{"id":"scale","type":"scale_replicas","params":{"service_id":"svc","replicas":"3"}}]}`, MitigationActions: "[]"}}
+	svc := Service{Store: store, DryRun: true}
+	_, _, err := svc.Approve(context.Background(), ActionRequest{ProjectID: "p1", IncidentID: "inc-1", ActionID: "scale", ActionHash: "sha256:stale", UserID: "u1", Role: "Developer"})
+	if err == nil || !strings.Contains(err.Error(), "stale action") {
+		t.Fatalf("expected stale action error, got %v", err)
 	}
 }
 

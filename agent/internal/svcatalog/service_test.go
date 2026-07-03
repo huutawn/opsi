@@ -2,6 +2,7 @@ package svcatalog
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestManagerCreateManagedAppliesAndStores(t *testing.T) {
 	}
 	defer store.Close()
 	applier := &recordingApplier{}
-	manager := Manager{Store: store, Applier: applier}
+	manager := Manager{Store: store, Applier: applier, Probe: func(context.Context, string, string) error { return nil }}
 
 	service, err := manager.CreateManaged(context.Background(), CreateManagedRequest{
 		ProjectID: "demo",
@@ -67,7 +68,7 @@ func TestManagerRegisterExternalAndDelete(t *testing.T) {
 	}
 	defer store.Close()
 	applier := &recordingApplier{}
-	manager := Manager{Store: store, Applier: applier}
+	manager := Manager{Store: store, Applier: applier, Probe: func(context.Context, string, string) error { return nil }}
 
 	service, err := manager.RegisterExternal(context.Background(), RegisterExternalRequest{
 		ProjectID: "demo",
@@ -79,7 +80,7 @@ func TestManagerRegisterExternalAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if service.Mode != "external" || !strings.Contains(applier.manifest, "type: ExternalName") {
+	if service.Mode != "external" || service.Status != "healthy" || !strings.Contains(applier.manifest, "type: ExternalName") {
 		t.Fatalf("bad external registration: service=%#v manifest=%s", service, applier.manifest)
 	}
 	if err := manager.Delete(context.Background(), DeleteRequest{ProjectID: "demo", ID: "legacy-db", PurgeData: true}); err != nil {
@@ -91,6 +92,37 @@ func TestManagerRegisterExternalAndDelete(t *testing.T) {
 	got, err := store.GetManagedService(context.Background(), "demo", "legacy-db")
 	if err != nil || got != nil {
 		t.Fatalf("service still stored: %#v %v", got, err)
+	}
+}
+
+func TestManagerRegisterExternalStoresUnhealthyProbe(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := Manager{
+		Store:   store,
+		Applier: &recordingApplier{},
+		Probe: func(context.Context, string, string) error {
+			return errors.New("dial failed")
+		},
+	}
+	service, err := manager.RegisterExternal(context.Background(), RegisterExternalRequest{
+		ProjectID: "demo",
+		Name:      "bad-cache",
+		Type:      "redis",
+		Host:      "192.0.2.10",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Status != "unhealthy" {
+		t.Fatalf("expected unhealthy external service, got %#v", service)
+	}
+	got, err := store.GetManagedService(context.Background(), "demo", "bad-cache")
+	if err != nil || got == nil || got.Status != "unhealthy" {
+		t.Fatalf("bad stored health: %#v %v", got, err)
 	}
 }
 

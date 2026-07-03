@@ -64,18 +64,21 @@ type ActionRequest struct {
 }
 
 type IncidentContext struct {
-	SchemaVersion string         `json:"schema_version"`
-	IncidentID    string         `json:"incident_id"`
-	ProjectID     string         `json:"project_id"`
-	NodeID        string         `json:"node_id,omitempty"`
-	ServiceID     string         `json:"service_id,omitempty"`
-	PodID         string         `json:"pod_id,omitempty"`
-	AnomalyType   string         `json:"anomaly_type"`
-	Severity      string         `json:"severity"`
-	Status        string         `json:"status"`
-	Metric        map[string]any `json:"metric,omitempty"`
-	LogPattern    map[string]any `json:"log_pattern,omitempty"`
-	CreatedAtUnix int64          `json:"created_at_unix"`
+	SchemaVersion  string                    `json:"schema_version"`
+	IncidentID     string                    `json:"incident_id"`
+	ProjectID      string                    `json:"project_id"`
+	NodeID         string                    `json:"node_id,omitempty"`
+	ServiceID      string                    `json:"service_id,omitempty"`
+	PodID          string                    `json:"pod_id,omitempty"`
+	AnomalyType    string                    `json:"anomaly_type"`
+	Severity       string                    `json:"severity"`
+	Status         string                    `json:"status"`
+	Metric         map[string]any            `json:"metric,omitempty"`
+	LogPattern     map[string]any            `json:"log_pattern,omitempty"`
+	MetricSnapshot map[string]map[string]any `json:"metric_snapshot,omitempty"`
+	LogPatterns    []map[string]any          `json:"log_patterns,omitempty"`
+	Sanitization   map[string]any            `json:"sanitization,omitempty"`
+	CreatedAtUnix  int64                     `json:"created_at_unix"`
 }
 
 type RCA struct {
@@ -160,7 +163,7 @@ func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*telemetry.I
 	if err != nil || rec == nil {
 		return nil, RCA{}, firstErr(err, errors.New("incident not found"))
 	}
-	ictx, err := SanitizeIncidentContext(*rec)
+	ictx, err := (IncidentContextBuilder{Store: s.Store, Window: 5 * time.Minute}).Build(ctx, *rec)
 	if err != nil {
 		return nil, RCA{}, err
 	}

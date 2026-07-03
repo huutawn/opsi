@@ -227,6 +227,7 @@ type IncidentActionRequest struct {
 	ProjectID  string `json:"project_id"`
 	IncidentID string `json:"incident_id"`
 	ActionID   string `json:"action_id"`
+	ActionHash string `json:"action_hash,omitempty"`
 	UserID     string `json:"user_id"`
 	Role       string `json:"role"`
 	PAT        string `json:"pat"`
@@ -252,6 +253,7 @@ type RecommendedAction struct {
 	Description  string            `json:"description"`
 	RollbackSafe bool              `json:"rollback_safe,omitempty"`
 	Params       map[string]string `json:"params,omitempty"`
+	ActionHash   string            `json:"action_hash,omitempty"`
 }
 
 type JSONCodec struct{}

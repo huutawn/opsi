@@ -3,12 +3,15 @@ package svcatalog
 import (
 	"context"
 	"fmt"
+	"net"
 	"regexp"
+	"time"
 )
 
 type Manager struct {
 	Store   *Store
 	Applier ManifestApplier
+	Probe   func(context.Context, string, string) error
 }
 
 type CreateManagedRequest struct {
@@ -51,6 +54,21 @@ func (m Manager) CreateManaged(ctx context.Context, req CreateManagedRequest) (*
 	return &rendered.Service, nil
 }
 
+func (m Manager) probe(ctx context.Context, host, port string) error {
+	if m.Probe != nil {
+		return m.Probe(ctx, host, port)
+	}
+	if _, ok := m.Applier.(DryRunApplier); ok {
+		return nil
+	}
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
 func (m Manager) RegisterExternal(ctx context.Context, req RegisterExternalRequest) (*ManagedService, error) {
 	if m.Store == nil {
 		return nil, fmt.Errorf("service catalog store is required")
@@ -64,6 +82,11 @@ func (m Manager) RegisterExternal(ctx context.Context, req RegisterExternalReque
 	}
 	if err := m.Applier.Apply(ctx, rendered.Service.Namespace, rendered.YAML); err != nil {
 		return nil, err
+	}
+	if err := m.probe(ctx, req.Host, rendered.Service.Port); err != nil {
+		rendered.Service.Status = "unhealthy"
+	} else {
+		rendered.Service.Status = "healthy"
 	}
 	if err := m.Store.UpsertManagedService(ctx, rendered.Service); err != nil {
 		return nil, err
