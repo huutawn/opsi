@@ -33,6 +33,8 @@ type OTPConfig struct {
 type AIConfig struct {
 	Provider        string   `json:"provider"`
 	APIKeyEnv       string   `json:"api_key_env"`
+	Model           string   `json:"model"`
+	Endpoint        string   `json:"endpoint"`
 	Timeout         Duration `json:"timeout"`
 	FallbackFixture bool     `json:"fallback_fixture"`
 }
@@ -65,7 +67,7 @@ type Route struct {
 type Duration time.Duration
 
 func LoadConfig(path string) (Config, error) {
-	cfg := Config{TTL: Duration(24 * time.Hour)}
+	cfg := Config{TTL: Duration(24 * time.Hour), AI: AIConfig{Provider: "fixture"}}
 	if path == "" {
 		return cfg, nil
 	}

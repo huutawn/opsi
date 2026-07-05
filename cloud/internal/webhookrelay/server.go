@@ -1,6 +1,8 @@
 package webhookrelay
 
 import (
+	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -101,24 +105,101 @@ func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid incident context")
 		return
 	}
-	provider := firstNonEmpty(s.Config.AI.Provider, "fixture")
-	fallback := provider != "fixture"
-	// ponytail: Gemini network call skipped; add provider adapter when stable API key/config exists.
-	writeJSON(w, http.StatusOK, map[string]any{
+	rca, err := s.analyzeIncident(r.Context(), req.IncidentID, req.ServiceID, firstNonEmpty(req.AnomalyType, "unknown anomaly"), body)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rca)
+}
+
+func (s *Server) analyzeIncident(ctx context.Context, incidentID, serviceID, anomalyType string, body []byte) (map[string]any, error) {
+	cfg := s.Config.AI
+	provider := firstNonEmpty(cfg.Provider, "fixture")
+	if provider == "gemini" {
+		rootCause, model, err := callGemini(ctx, cfg, body)
+		if err == nil {
+			return rcaResponse(incidentID, serviceID, rootCause, "gemini", provider, false, model), nil
+		}
+		if !cfg.FallbackFixture {
+			return nil, fmt.Errorf("gemini RCA failed")
+		}
+		return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, true, "fixture"), nil
+	}
+	return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, false, "fixture"), nil
+}
+
+func rcaResponse(incidentID, serviceID, rootCause, provider, configuredProvider string, fallback bool, model string) map[string]any {
+	return map[string]any{
 		"schema_version": "opsi.rca.v1",
-		"incident_id":    req.IncidentID,
-		"root_cause":     "Cloud fixture RCA: " + firstNonEmpty(req.AnomalyType, "unknown anomaly"),
+		"incident_id":    incidentID,
+		"root_cause":     rootCause,
 		"confidence":     0.64,
 		"contributing_factors": []string{
 			"sanitized metric context",
 			"service-level anomaly",
 		},
 		"recommended_actions": []map[string]any{
-			{"id": "scale-replicas", "type": "scale_replicas", "description": "Scale service replicas", "rollback_safe": true, "params": map[string]string{"service_id": req.ServiceID, "replicas": "2"}},
-			{"id": "rate-limit-ingress", "type": "rate_limit_ingress", "description": "Apply ingress rate limit", "rollback_safe": true, "params": map[string]string{"service_id": req.ServiceID, "rps": "10"}},
+			{"id": "scale-replicas", "type": "scale_replicas", "description": "Scale service replicas", "rollback_safe": true, "params": map[string]string{"service_id": serviceID, "replicas": "2"}},
+			{"id": "rate-limit-ingress", "type": "rate_limit_ingress", "description": "Apply ingress rate limit", "rollback_safe": true, "params": map[string]string{"service_id": serviceID, "rps": "10"}},
 		},
-		"metadata": map[string]any{"provider": "fixture", "configured_provider": provider, "fallback_used": fallback, "model": "fixture"},
-	})
+		"metadata": map[string]any{"provider": provider, "configured_provider": configuredProvider, "fallback_used": fallback, "model": model},
+	}
+}
+
+func callGemini(ctx context.Context, cfg AIConfig, incidentContext []byte) (string, string, error) {
+	key := os.Getenv(firstNonEmpty(cfg.APIKeyEnv, "GEMINI_API_KEY"))
+	if key == "" {
+		return "", "", fmt.Errorf("missing Gemini API key")
+	}
+	model := firstNonEmpty(cfg.Model, "gemini-2.0-flash")
+	endpoint := strings.TrimRight(firstNonEmpty(cfg.Endpoint, "https://generativelanguage.googleapis.com"), "/")
+	u, err := url.Parse(endpoint + "/v1beta/models/" + url.PathEscape(model) + ":generateContent")
+	if err != nil {
+		return "", "", err
+	}
+	q := u.Query()
+	q.Set("key", key)
+	u.RawQuery = q.Encode()
+	payload := map[string]any{"contents": []map[string]any{{"parts": []map[string]string{{"text": "Analyze this sanitized Opsi incident context. Return one concise root cause sentence only.\n" + string(incidentContext)}}}}}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", err
+	}
+	timeout := time.Duration(cfg.Timeout)
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(data))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("gemini status %d", resp.StatusCode)
+	}
+	var out struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return "", "", err
+	}
+	if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 || strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text) == "" {
+		return "", "", fmt.Errorf("gemini returned empty RCA")
+	}
+	return strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text), model, nil
 }
 
 func forbiddenAIPayload(body []byte) bool {
