@@ -3,6 +3,7 @@ package cloudrunner
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,5 +129,13 @@ func TestResultFromRecordIncludesIntentHash(t *testing.T) {
 	result := ResultFromRecord(deploy.Record{Status: deploy.StatusSuccess}, nil, cloudrelay.DeploymentLease{Deployment: cloudrelay.DeploymentJobEnvelope{DeploymentIntent: &cloudrelay.DeploymentIntent{Review: cloudrelay.DeploymentIntentReview{IntentHash: "sha256:intent"}}}})
 	if result.IntentHash != "sha256:intent" {
 		t.Fatalf("intent hash = %q", result.IntentHash)
+	}
+}
+
+func TestResultFromRecordRedactsFailureMessage(t *testing.T) {
+	secret := "top-secret-token"
+	result := ResultFromRecord(deploy.Record{Status: deploy.StatusFailed}, errors.New("kubectl failed password="+secret+" https://user:"+secret+"@example.test/repo.git"), cloudrelay.DeploymentLease{})
+	if strings.Contains(result.FailureMessageRedacted, secret) {
+		t.Fatalf("failure message leaked secret: %q", result.FailureMessageRedacted)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,11 +54,18 @@ func TestPollDeploymentAndComplete(t *testing.T) {
 		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents/node-1/webhooks/next":
-			_, _ = w.Write([]byte(`{"kind":"deployment","action":"deploy","deployment":{"id":"dep-1","deployment_plan_hash":"plan","manifest_hash":"manifest"},"service":{"id":"svc-api","name":"api","type":"application","source_type":"git","repo_url":"https://example.test/repo.git","branch":"main","git_sha":"abc","namespace":"default","health_path":"/health","replicas":2}}`))
+			_, _ = w.Write([]byte(`{"kind":"deployment","action":"deploy","lease_token":"lease-1","deployment":{"id":"dep-1","deployment_plan_hash":"plan","manifest_hash":"manifest"},"service":{"id":"svc-api","name":"api","type":"application","source_type":"git","repo_url":"https://example.test/repo.git","branch":"main","git_sha":"abc","namespace":"default","health_path":"/health","replicas":2}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/node-1/deployments/dep-1/result":
 			completed = true
 			if !strings.Contains(r.URL.RawQuery, "project_id=proj-dev") {
 				t.Fatalf("missing project query: %s", r.URL.RawQuery)
+			}
+			var result DeploymentResult
+			if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+			if result.LeaseToken != "lease-1" {
+				t.Fatalf("lease token = %q", result.LeaseToken)
 			}
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -71,10 +79,10 @@ func TestPollDeploymentAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease == nil || lease.Deployment.ID != "dep-1" || lease.Service.GitSHA != "abc" || lease.Action != "deploy" {
+	if lease == nil || lease.Deployment.ID != "dep-1" || lease.Service.GitSHA != "abc" || lease.Action != "deploy" || lease.LeaseToken != "lease-1" {
 		t.Fatalf("unexpected lease: %+v", lease)
 	}
-	if err := client.CompleteDeployment(context.Background(), "node-1", "dep-1", DeploymentResult{Status: "succeeded", FinalRevisionRef: "rev-1", RollbackEligible: true}); err != nil {
+	if err := client.CompleteDeployment(context.Background(), "node-1", "dep-1", DeploymentResult{Status: "succeeded", LeaseToken: lease.LeaseToken, FinalRevisionRef: "rev-1", RollbackEligible: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !completed {

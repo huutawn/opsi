@@ -1,6 +1,7 @@
 package secret
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -56,6 +57,7 @@ func (s *MemoryStore) Get(_ context.Context, ref SecretRef) (SecretValue, error)
 type KubernetesSecretStore struct {
 	KubectlPath   string
 	TOTPNamespace string
+	Runner        SecretApplyRunner
 }
 
 type KubernetesRolloutRestarter struct {
@@ -63,38 +65,30 @@ type KubernetesRolloutRestarter struct {
 	Timeout     string
 }
 
+type SecretApplyRunner interface {
+	Run(ctx context.Context, input []byte, name string, args ...string) ([]byte, error)
+}
+
+type ExecSecretApplyRunner struct{}
+
+func (ExecSecretApplyRunner) Run(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = bytes.NewReader(input)
+	return cmd.CombinedOutput()
+}
+
 func (s KubernetesSecretStore) Put(ctx context.Context, ref SecretRef, value SecretValue) error {
 	if err := validateRef(ref); err != nil {
 		return err
 	}
-	kubectl := firstNonEmpty(s.KubectlPath, "kubectl")
-	create := exec.CommandContext(ctx, kubectl, "-n", ref.Namespace, "create", "secret", "generic", ref.Name,
-		"--from-literal=username="+value.Username,
-		"--from-literal=password="+value.Password,
-		"--dry-run=client", "-o", "yaml")
-	apply := exec.CommandContext(ctx, kubectl, "apply", "-f", "-")
-	pipe, err := create.StdoutPipe()
+	manifest, err := secretManifest(ref.Namespace, ref.Name, map[string]string{
+		"username": value.Username,
+		"password": value.Password,
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("build kubernetes secret manifest: %w", err)
 	}
-	apply.Stdin = pipe
-	var applyErr strings.Builder
-	apply.Stderr = &applyErr
-	if err := create.Start(); err != nil {
-		return fmt.Errorf("start kubectl create secret: %w", err)
-	}
-	if err := apply.Start(); err != nil {
-		return fmt.Errorf("start kubectl apply secret: %w", err)
-	}
-	createErr := create.Wait()
-	applyWaitErr := apply.Wait()
-	if createErr != nil {
-		return fmt.Errorf("kubectl create secret: %w", createErr)
-	}
-	if applyWaitErr != nil {
-		return fmt.Errorf("kubectl apply secret: %w: %s", applyWaitErr, applyErr.String())
-	}
-	return nil
+	return s.applySecretManifest(ctx, manifest, value.Username, value.Password)
 }
 
 func (s KubernetesSecretStore) Get(ctx context.Context, ref SecretRef) (SecretValue, error) {
@@ -127,35 +121,13 @@ func (s KubernetesSecretStore) PutTOTP(ctx context.Context, auth AuthContext, se
 	if auth.ProjectID == "" || auth.UserID == "" {
 		return errors.New("project_id and user_id are required")
 	}
-	kubectl := firstNonEmpty(s.KubectlPath, "kubectl")
 	name := TOTPSecretName(auth.ProjectID, auth.UserID)
 	namespace := firstNonEmpty(s.TOTPNamespace, "default")
-	create := exec.CommandContext(ctx, kubectl, "-n", namespace, "create", "secret", "generic", name,
-		"--from-literal=totp_secret="+secretValue,
-		"--dry-run=client", "-o", "yaml")
-	apply := exec.CommandContext(ctx, kubectl, "apply", "-f", "-")
-	pipe, err := create.StdoutPipe()
+	manifest, err := secretManifest(namespace, name, map[string]string{"totp_secret": secretValue})
 	if err != nil {
-		return err
+		return fmt.Errorf("build kubernetes totp secret manifest: %w", err)
 	}
-	apply.Stdin = pipe
-	var applyErr strings.Builder
-	apply.Stderr = &applyErr
-	if err := create.Start(); err != nil {
-		return fmt.Errorf("start kubectl create totp secret: %w", err)
-	}
-	if err := apply.Start(); err != nil {
-		return fmt.Errorf("start kubectl apply totp secret: %w", err)
-	}
-	createErr := create.Wait()
-	applyWaitErr := apply.Wait()
-	if createErr != nil {
-		return fmt.Errorf("kubectl create totp secret: %w", createErr)
-	}
-	if applyWaitErr != nil {
-		return fmt.Errorf("kubectl apply totp secret: %w: %s", applyWaitErr, applyErr.String())
-	}
-	return nil
+	return s.applySecretManifest(ctx, manifest, secretValue)
 }
 
 func (s KubernetesSecretStore) GetTOTP(ctx context.Context, auth AuthContext) (string, error) {
@@ -202,6 +174,55 @@ func validateRef(ref SecretRef) error {
 		return errors.New("project_id, service_id, namespace and secret name are required")
 	}
 	return nil
+}
+
+func (s KubernetesSecretStore) applySecretManifest(ctx context.Context, manifest []byte, sensitive ...string) error {
+	runner := s.Runner
+	if runner == nil {
+		runner = ExecSecretApplyRunner{}
+	}
+	out, err := runner.Run(ctx, manifest, firstNonEmpty(s.KubectlPath, "kubectl"), "apply", "-f", "-")
+	if err != nil {
+		return fmt.Errorf("kubectl apply secret manifest failed: %s: %s", redactValues(err.Error(), sensitive...), redactValues(strings.TrimSpace(string(out)), sensitive...))
+	}
+	return nil
+}
+
+func secretManifest(namespace, name string, values map[string]string) ([]byte, error) {
+	data := make(map[string]string, len(values))
+	for key, value := range values {
+		data[key] = base64.StdEncoding.EncodeToString([]byte(value))
+	}
+	return json.Marshal(struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Type       string `json:"type"`
+		Metadata   struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"metadata"`
+		Data map[string]string `json:"data"`
+	}{
+		APIVersion: "v1",
+		Kind:       "Secret",
+		Type:       "Opaque",
+		Metadata: struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		}{Name: name, Namespace: namespace},
+		Data: data,
+	})
+}
+
+func redactValues(message string, values ...string) string {
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		message = strings.ReplaceAll(message, value, "[REDACTED]")
+		message = strings.ReplaceAll(message, base64.StdEncoding.EncodeToString([]byte(value)), "[REDACTED]")
+	}
+	return message
 }
 
 func decodeSecretField(value string) (string, error) {

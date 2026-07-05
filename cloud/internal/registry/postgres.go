@@ -19,7 +19,7 @@ const nodeSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id
 
 const serviceSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), COALESCE(branch,''), COALESCE(git_sha,''), COALESCE(build_method,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(manifest_path,''), watch_paths::text, COALESCE(container_port,0), COALESCE(health_path,''), COALESCE(replicas_desired,0), COALESCE(resources->'requests','{}'::jsonb)::text, COALESCE(resources->'limits','{}'::jsonb)::text, COALESCE(bindings,'[]'::jsonb)::text, namespace, created_at, updated_at FROM control_services`
 
-const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, COALESCE(deployment_plan_hash,''), COALESCE(manifest_hash,''), COALESCE(intent_hash,''), deployment_intent_json::text, COALESCE(previous_revision_ref,''), COALESCE(rollback_eligible,false), COALESCE(rollback_blocked_reason,''), COALESCE(requested_by,''), COALESCE(agent_id,''), COALESCE(node_id,''), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), started_at, finished_at, created_at, updated_at FROM deployment_jobs`
+const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, COALESCE(action,'deploy'), idempotency_key, COALESCE(deployment_plan_hash,''), COALESCE(manifest_hash,''), COALESCE(intent_hash,''), deployment_intent_json::text, COALESCE(previous_revision_ref,''), COALESCE(rollback_eligible,false), COALESCE(rollback_blocked_reason,''), COALESCE(requested_by,''), COALESCE(agent_id,''), COALESCE(node_id,''), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), COALESCE(lease_token,''), lease_expires_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), started_at, finished_at, created_at, updated_at FROM deployment_jobs`
 
 func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string) (Project, error) {
 	ctx := context.Background()
@@ -442,17 +442,14 @@ func (s PostgresService) RevokeAgent(projectID, agentID string) (Agent, error) {
 
 func (s PostgresService) DrainNode(projectID, nodeID string) (Node, error) {
 	ctx := context.Background()
-	res, err := s.DB.ExecContext(ctx, `UPDATE nodes SET status = 'draining', updated_at = $1 WHERE id = $2 AND project_id = $3 AND status <> 'removed'`, s.clock(), nodeID, projectID)
+	node, err := s.getNode(ctx, nodeID)
 	if err != nil {
 		return Node{}, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if node.ProjectID != projectID {
 		return Node{}, ErrNotFound
 	}
-	if _, err := s.refreshProject(ctx, projectID); err != nil {
-		return Node{}, err
-	}
-	return s.getNode(ctx, nodeID)
+	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node drain must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
 }
 
 func (s PostgresService) RemoveNode(projectID, nodeID string, force bool) (Node, error) {
@@ -473,27 +470,7 @@ func (s PostgresService) RemoveNode(projectID, nodeID string, force bool) (Node,
 			return Node{}, APIError{Status: 409, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first"}
 		}
 	}
-	now := s.clock()
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return Node{}, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET status = 'removed', updated_at = $1 WHERE id = $2 AND project_id = $3`, now, nodeID, projectID); err != nil {
-		return Node{}, err
-	}
-	if node.AgentID != "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE agents SET status = 'revoked', updated_at = $1 WHERE id = $2 AND project_id = $3`, now, node.AgentID, projectID); err != nil {
-			return Node{}, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return Node{}, err
-	}
-	if _, err := s.refreshProject(ctx, projectID); err != nil {
-		return Node{}, err
-	}
-	return s.getNode(ctx, nodeID)
+	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node remove must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
 }
 
 func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error) {
@@ -809,6 +786,7 @@ func (s PostgresService) RollbackDeployment(projectID, deploymentID, requestedBy
 	now := s.clock()
 	job := deploymentJobForPlan(service, source, node, agent, key, requestedBy, now)
 	job.Status = DeploymentRollingBack
+	job.Action = "rollback"
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return DeploymentJob{}, err
@@ -837,6 +815,10 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 		return DeploymentLease{}, false, err
 	}
 	defer tx.Rollback()
+	now := s.clock()
+	if err := expireDeploymentLeases(ctx, tx, projectID, now); err != nil {
+		return DeploymentLease{}, false, err
+	}
 	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack))
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeploymentLease{}, false, nil
@@ -848,10 +830,20 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	if job.Status == DeploymentRollingBack {
 		action = "rollback"
 	}
-	now := s.clock()
+	if job.Action != "" {
+		action = job.Action
+	}
+	leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
 	job.Status = DeploymentWaitingAgent
+	job.Action = action
+	job.AttemptCount++
+	if job.MaxAttempts == 0 {
+		job.MaxAttempts = defaultDeploymentMaxAttempts
+	}
+	job.LeaseToken = newID("lease")
+	job.LeaseExpiresAt = &leaseExpiresAt
 	job.UpdatedAt = now
-	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, updated_at = $2 WHERE id = $3`, job.Status, now, job.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, action = $2, lease_token = $3, lease_expires_at = $4, attempt_count = $5, max_attempts = $6, updated_at = $7 WHERE id = $8`, job.Status, job.Action, job.LeaseToken, leaseExpiresAt, job.AttemptCount, job.MaxAttempts, now, job.ID); err != nil {
 		return DeploymentLease{}, false, err
 	}
 	event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: now}
@@ -865,19 +857,39 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	if err := tx.Commit(); err != nil {
 		return DeploymentLease{}, false, err
 	}
-	return DeploymentLease{Deployment: job, Service: service, Action: action}, true, nil
+	return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken}, true, nil
 }
 
 func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error) {
 	ctx := context.Background()
-	job, err := s.getDeployment(ctx, deploymentID)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
+		return DeploymentJob{}, err
+	}
+	defer tx.Rollback()
+	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id = $1 FOR UPDATE`, deploymentID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DeploymentJob{}, ErrNotFound
+		}
 		return DeploymentJob{}, err
 	}
 	if job.ProjectID != projectID || job.NodeID != nodeID {
 		return DeploymentJob{}, ErrNotFound
 	}
+	if deploymentTerminalStatus(job.Status) {
+		return job, tx.Commit()
+	}
 	now := s.clock()
+	if job.Status != DeploymentWaitingAgent || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_LEASE_EXPIRED", Message: "deployment lease is not active", NextAction: "poll_for_new_lease", RequestID: requestID}
+	}
+	if job.LeaseToken != "" && result.LeaseToken != job.LeaseToken {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STALE_LEASE", Message: "deployment result lease token is stale", NextAction: "discard_result_and_poll", RequestID: requestID}
+	}
+	if job.IntentHash != "" && result.IntentHash != "" && result.IntentHash != job.IntentHash {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "deployment result intent hash does not match leased job", RequestID: requestID}
+	}
 	job.Status = normalizedDeploymentResultStatus(result.Status)
 	job.FailureCode = result.FailureCode
 	job.FailureMessageRedacted = RedactString(result.FailureMessageRedacted)
@@ -886,14 +898,11 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	}
 	job.RollbackEligible = result.RollbackEligible
 	job.RollbackBlockedReason = result.RollbackBlockedReason
+	job.LeaseToken = ""
+	job.LeaseExpiresAt = nil
 	job.FinishedAt = &now
 	job.UpdatedAt = now
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, manifest_hash = NULLIF($2,''), rollback_eligible = $3, rollback_blocked_reason = NULLIF($4,''), failure_code = NULLIF($5,''), failure_message_redacted = NULLIF($6,''), finished_at = $7, updated_at = $7 WHERE id = $8 AND project_id = $9 AND node_id = $10`, job.Status, job.ManifestHash, job.RollbackEligible, job.RollbackBlockedReason, job.FailureCode, job.FailureMessageRedacted, now, deploymentID, projectID, nodeID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, manifest_hash = NULLIF($2,''), rollback_eligible = $3, rollback_blocked_reason = NULLIF($4,''), failure_code = NULLIF($5,''), failure_message_redacted = NULLIF($6,''), lease_token = NULL, lease_expires_at = NULL, finished_at = $7, updated_at = $7 WHERE id = $8 AND project_id = $9 AND node_id = $10`, job.Status, job.ManifestHash, job.RollbackEligible, job.RollbackBlockedReason, job.FailureCode, job.FailureMessageRedacted, now, deploymentID, projectID, nodeID); err != nil {
 		return DeploymentJob{}, err
 	}
 	for _, event := range deploymentCompletionEvents(job, requestID, now) {
@@ -995,15 +1004,16 @@ func scanService(row rowScanner) (ServiceRecord, error) {
 
 func scanDeployment(row rowScanner) (DeploymentJob, error) {
 	var d DeploymentJob
-	var started, finished sql.NullTime
+	var leaseExpiresAt, started, finished sql.NullTime
 	var intentJSON string
-	err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.IdempotencyKey, &d.DeploymentPlanHash, &d.ManifestHash, &d.IntentHash, &intentJSON, &d.PreviousRevisionRef, &d.RollbackEligible, &d.RollbackBlockedReason, &d.RequestedBy, &d.AgentID, &d.NodeID, &d.FailureCode, &d.FailureMessageRedacted, &started, &finished, &d.CreatedAt, &d.UpdatedAt)
+	err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.Action, &d.IdempotencyKey, &d.DeploymentPlanHash, &d.ManifestHash, &d.IntentHash, &intentJSON, &d.PreviousRevisionRef, &d.RollbackEligible, &d.RollbackBlockedReason, &d.RequestedBy, &d.AgentID, &d.NodeID, &d.FailureCode, &d.FailureMessageRedacted, &d.LeaseToken, &leaseExpiresAt, &d.AttemptCount, &d.MaxAttempts, &started, &finished, &d.CreatedAt, &d.UpdatedAt)
 	if intentJSON != "" {
 		var intent DeploymentIntent
 		if json.Unmarshal([]byte(intentJSON), &intent) == nil {
 			d.DeploymentIntent = &intent
 		}
 	}
+	d.LeaseExpiresAt = nullTimePtr(leaseExpiresAt)
 	d.StartedAt = nullTimePtr(started)
 	d.FinishedAt = nullTimePtr(finished)
 	return d, err
@@ -1052,13 +1062,61 @@ func acquireDeploymentLock(ctx context.Context, tx *sql.Tx, projectID, serviceID
 
 func insertDeployment(ctx context.Context, tx *sql.Tx, job DeploymentJob) error {
 	intent, _ := json.Marshal(job.DeploymentIntent)
-	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, deployment_plan_hash, manifest_hash, intent_hash, deployment_intent_json, previous_revision_ref, rollback_eligible, rollback_blocked_reason, requested_by, agent_id, node_id, failure_code, failure_message_redacted, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),$12::jsonb,NULLIF($13,''),$14,NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),NULLIF($19,''),NULLIF($20,''),$21,$22)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.IdempotencyKey, job.DeploymentPlanHash, job.ManifestHash, job.IntentHash, string(intent), job.PreviousRevisionRef, job.RollbackEligible, job.RollbackBlockedReason, job.RequestedBy, job.AgentID, job.NodeID, job.FailureCode, job.FailureMessageRedacted, job.CreatedAt, job.UpdatedAt)
+	if job.MaxAttempts == 0 {
+		job.MaxAttempts = defaultDeploymentMaxAttempts
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, action, idempotency_key, deployment_plan_hash, manifest_hash, intent_hash, deployment_intent_json, previous_revision_ref, rollback_eligible, rollback_blocked_reason, requested_by, agent_id, node_id, failure_code, failure_message_redacted, attempt_count, max_attempts, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),$13::jsonb,NULLIF($14,''),$15,NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),NULLIF($19,''),NULLIF($20,''),NULLIF($21,''),$22,$23,$24,$25)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.Action, job.IdempotencyKey, job.DeploymentPlanHash, job.ManifestHash, job.IntentHash, string(intent), job.PreviousRevisionRef, job.RollbackEligible, job.RollbackBlockedReason, job.RequestedBy, job.AgentID, job.NodeID, job.FailureCode, job.FailureMessageRedacted, job.AttemptCount, job.MaxAttempts, job.CreatedAt, job.UpdatedAt)
 	return err
 }
 
 func insertDeploymentEvent(ctx context.Context, tx *sql.Tx, event DeploymentEvent) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_events(id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, request_id, created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11)`, event.ID, event.OrgID, event.ProjectID, event.DeploymentID, event.ServiceID, event.Level, event.Step, event.MessageRedacted, event.ProgressPercent, event.RequestID, event.CreatedAt)
 	return err
+}
+
+func expireDeploymentLeases(ctx context.Context, tx *sql.Tx, projectID string, now time.Time) error {
+	rows, err := tx.QueryContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND status = $2 AND lease_expires_at <= $3 FOR UPDATE`, projectID, DeploymentWaitingAgent, now)
+	if err != nil {
+		return err
+	}
+	var expired []DeploymentJob
+	for rows.Next() {
+		job, err := scanDeployment(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		expired = append(expired, job)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, job := range expired {
+		if job.MaxAttempts == 0 {
+			job.MaxAttempts = defaultDeploymentMaxAttempts
+		}
+		nextStatus := DeploymentQueued
+		if job.Action == "rollback" {
+			nextStatus = DeploymentRollingBack
+		}
+		level, step, message, progress := "warn", EventAgentLeaseExpired, "agent lease expired; job returned to queue", 20
+		finishedAt := any(nil)
+		if job.AttemptCount >= job.MaxAttempts {
+			nextStatus, level, step, message, progress = DeploymentDeadLetter, "error", EventDeploymentDeadLetter, "deployment lease attempts exhausted", 100
+			finishedAt = now
+			if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id = $1 AND deployment_id = $2`, job.ServiceID, job.ID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, lease_token = NULL, lease_expires_at = NULL, failure_code = CASE WHEN $1 = $2 THEN 'DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED' ELSE failure_code END, failure_message_redacted = CASE WHEN $1 = $2 THEN $3 ELSE failure_message_redacted END, finished_at = $4, updated_at = $5 WHERE id = $6`, nextStatus, DeploymentDeadLetter, message, finishedAt, now, job.ID); err != nil {
+			return err
+		}
+		event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: level, Step: step, MessageRedacted: message, ProgressPercent: progress, CreatedAt: now}
+		if err := insertDeploymentEvent(ctx, tx, event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s PostgresService) refreshProject(ctx context.Context, projectID string) (string, error) {

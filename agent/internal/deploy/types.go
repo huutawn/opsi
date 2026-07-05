@@ -262,6 +262,20 @@ func (r Request) Validate() error {
 	if r.ManifestPath == "" {
 		return errors.New("manifest_path is required")
 	}
+	if err := validateSafeRelPath("build_context", r.BuildContext); err != nil {
+		return err
+	}
+	if err := validateSafeRelPath("dockerfile", r.Dockerfile); err != nil {
+		return err
+	}
+	if err := validateSafeRelPath("manifest_path", r.ManifestPath); err != nil {
+		return err
+	}
+	for _, watchPath := range r.WatchPaths {
+		if err := validateSafeRelPath("watch_paths", watchPath); err != nil {
+			return err
+		}
+	}
 	if strings.Contains(r.ServiceName, "/") || strings.Contains(r.ServiceName, " ") {
 		return fmt.Errorf("service_name must be a Kubernetes deployment name")
 	}

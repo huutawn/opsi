@@ -14,12 +14,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
+	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"github.com/spf13/cobra"
 )
 
@@ -130,6 +132,9 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 			return
 		}
 	}
+	if localTelemetrySummary(w, r, cfg, factory) {
+		return
+	}
 	cloud, err := url.Parse(cfg.CloudURL)
 	if err != nil || cloud.Scheme == "" || cloud.Host == "" {
 		writeLocalError(w, r, http.StatusBadGateway, "INVALID_CLOUD_URL", "local cloud_url is invalid")
@@ -188,6 +193,68 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func localTelemetrySummary(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+	projectID, ok := telemetrySummaryProjectID(r.URL.Path)
+	if !ok {
+		return false
+	}
+	if r.Method != http.MethodGet {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return true
+	}
+	query := r.URL.Query()
+	sinceUnix, _ := strconv.ParseInt(query.Get("since_unix"), 10, 64)
+	maxChunkBytes, _ := strconv.ParseInt(query.Get("max_chunk_bytes"), 10, 32)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	summary := telemetrySummary{ProjectID: projectID, SinceUnix: sinceUnix, Source: "agent", PayloadPolicy: "raw telemetry payload remains local and is not returned to the browser"}
+	err := agentclient.New(cfg).Sync(ctx, &agentv1.SyncRequest{ProjectID: projectID, LastReceivedUnix: sinceUnix, MaxChunkBytes: int32(maxChunkBytes)}, func(chunk *agentv1.SyncChunk) error {
+		summary.ChunkCount++
+		summary.RecordCount += int(chunk.RecordCount)
+		if summary.StartUnix == 0 || chunk.StartUnix < summary.StartUnix {
+			summary.StartUnix = chunk.StartUnix
+		}
+		if chunk.EndUnix > summary.EndUnix {
+			summary.EndUnix = chunk.EndUnix
+		}
+		if chunk.Done {
+			summary.Done = true
+		}
+		return nil
+	})
+	w.Header().Set("content-type", "application/json")
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_TELEMETRY_UNAVAILABLE", "Agent telemetry summary is unavailable")
+		return true
+	}
+	_ = json.NewEncoder(w).Encode(summary)
+	return true
+}
+
+type telemetrySummary struct {
+	ProjectID     string `json:"project_id"`
+	SinceUnix     int64  `json:"since_unix"`
+	ChunkCount    int    `json:"chunk_count"`
+	RecordCount   int    `json:"record_count"`
+	StartUnix     int64  `json:"start_unix"`
+	EndUnix       int64  `json:"end_unix"`
+	Done          bool   `json:"done"`
+	Source        string `json:"source"`
+	PayloadPolicy string `json:"payload_policy"`
+}
+
+func telemetrySummaryProjectID(path string) (string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 6 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "telemetry" || parts[5] != "summary" {
+		return "", false
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	return projectID, err == nil && projectID != ""
 }
 
 func localDeploymentIDs(path, method string) (string, string, bool) {

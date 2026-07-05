@@ -127,11 +127,18 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
 
-	buildPath := filepath.Join(workDir, req.BuildContext)
+	buildPath, err := safeRelPath(workDir, req.BuildContext)
+	if err != nil {
+		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, fmt.Errorf("build_context is invalid: %w", err))
+	}
+	dockerfilePath, err := safeRelPath(workDir, req.Dockerfile)
+	if err != nil {
+		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, fmt.Errorf("dockerfile is invalid: %w", err))
+	}
 	if err := emit(progress, record, PhaseBuilding, "building image", 35, nil); err != nil {
 		return record, err
 	}
-	if err := e.Builder.Build(ctx, buildPath, req.Dockerfile, req.ImageTag); err != nil {
+	if err := e.Builder.Build(ctx, buildPath, dockerfilePath, req.ImageTag); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
 	if req.Registry != "" {
@@ -143,7 +150,10 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 		}
 	}
 
-	manifestPath := filepath.Join(workDir, req.ManifestPath)
+	manifestPath, err := safeRelPath(workDir, req.ManifestPath)
+	if err != nil {
+		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, fmt.Errorf("manifest_path is invalid: %w", err))
+	}
 	renderedManifestPath := filepath.Join(workDir, ".opsi-rendered-manifest.yaml")
 	if err := renderManifestFile(manifestPath, renderedManifestPath, manifestOptions{ResourceRequestsJSON: req.ResourceRequestsJSON, ResourceLimitsJSON: req.ResourceLimitsJSON, TerminationGracePeriodSeconds: req.TerminationGracePeriodSeconds, ContainerPort: req.ContainerPort, HealthPath: req.HealthPath, Replicas: req.Replicas, IngressEnabled: req.IngressEnabled, BindingDependencies: req.DependsOn}); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
@@ -174,6 +184,9 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 		if rollbackErr != nil {
 			return e.fail(ctx, record, progress, PhaseFailed, StatusFailedAfterRollback, fmt.Errorf("rollout: %w; rollback: %w", err, rollbackErr))
 		}
+		if verifyErr := e.K3s.WatchRollout(ctx, req.ServiceName, req.Namespace, e.RolloutTimeout, e.PollInterval); verifyErr != nil {
+			return e.fail(ctx, record, progress, PhaseFailed, StatusFailedAfterRollback, fmt.Errorf("rollout: %w; rollback verification: %w", err, verifyErr))
+		}
 		return e.fail(ctx, record, progress, PhaseRollback, StatusRolledBack, err)
 	}
 
@@ -190,9 +203,10 @@ func (e *Engine) fail(ctx context.Context, record Record, progress ProgressFunc,
 	record.Status = status
 	record.FinishedAt = time.Now().UTC()
 	record.Duration = record.FinishedAt.Sub(record.StartedAt)
-	record.Error = cause.Error()
+	redacted := RedactSensitive(cause.Error())
+	record.Error = redacted
 	_ = e.Store.Update(ctx, record)
-	_ = emit(progress, record, phase, cause.Error(), 100, cause)
+	_ = emit(progress, record, phase, redacted, 100, errors.New(redacted))
 	return record, cause
 }
 

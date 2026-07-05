@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 )
 
@@ -60,14 +61,35 @@ func TestIncidentContextBuilderAddsMetricAndLogEvidence(t *testing.T) {
 
 func TestValidateRCABlocksUnsafeRollback(t *testing.T) {
 	ctx := IncidentContext{SchemaVersion: "opsi.incident_context.v1", IncidentID: "inc-1", ProjectID: "p1", ServiceID: "svc"}
-	err := ValidateRCA(ctx, RCA{SchemaVersion: "opsi.rca.v1", IncidentID: "inc-1", RootCause: "bad deploy", Confidence: 0.9, RecommendedActions: []Action{{ID: "a1", Type: "shell", Params: map[string]string{"service_id": "svc"}}}})
+	err := ValidateRCA(ctx, RCA{SchemaVersion: "opsi.rca.v1", IncidentID: "inc-1", RootCause: "bad deploy", Confidence: 0.9, Metadata: metaForTest(ctx), RecommendedActions: []Action{{ID: "a1", Type: "shell", Params: map[string]string{"service_id": "svc"}}}})
 	if err == nil {
 		t.Fatal("expected invalid action")
 	}
 }
 
+func TestValidateRCARejectsMetadataHashMismatch(t *testing.T) {
+	ctx := IncidentContext{SchemaVersion: "opsi.incident_context.v1", IncidentID: "inc-1", ProjectID: "p1", ServiceID: "svc"}
+	rca := fallbackRCA(ctx)
+	rca.Metadata.InputContextHash = "sha256:bad"
+	if err := ValidateRCA(ctx, rca); err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Fatalf("expected metadata rejection, got %v", err)
+	}
+}
+
+func TestFallbackRCAIsExplicitLocalFallback(t *testing.T) {
+	ctx := IncidentContext{SchemaVersion: "opsi.incident_context.v1", IncidentID: "inc-1", ProjectID: "p1", ServiceID: "svc", AnomalyType: "cpu"}
+	rca := fallbackRCA(ctx)
+	if err := ValidateRCA(ctx, rca); err != nil {
+		t.Fatal(err)
+	}
+	if rca.Metadata.Provider != "local" || rca.Metadata.Model != "fallback" || !rca.Metadata.FallbackUsed || rca.Metadata.InputContextHash != HashIncidentContext(ctx) || !strings.Contains(rca.RootCause, "fallback") {
+		t.Fatalf("fallback metadata not explicit: %+v", rca.Metadata)
+	}
+}
+
 func TestApproveExecutesAllowlistedAction(t *testing.T) {
-	store := &fakeStore{rec: telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: "svc", RCAResult: `{"schema_version":"opsi.rca.v1","incident_id":"inc-1","root_cause":"cpu","confidence":0.7,"recommended_actions":[{"id":"scale","type":"scale_replicas","params":{"service_id":"svc","replicas":"3"}}]}`, MitigationActions: "[]"}}
+	base := incidentRecordWithRCA()
+	store := &fakeStore{rec: base}
 	var calls int
 	svc := Service{Store: store, DryRun: false, Exec: func(context.Context, string, ...string) error { calls++; return nil }}
 	rec, _, err := svc.Approve(context.Background(), ActionRequest{ProjectID: "p1", IncidentID: "inc-1", ActionID: "scale", UserID: "u1", Role: "Developer"})
@@ -77,12 +99,39 @@ func TestApproveExecutesAllowlistedAction(t *testing.T) {
 }
 
 func TestApproveRejectsStaleActionHash(t *testing.T) {
-	store := &fakeStore{rec: telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: "svc", RCAResult: `{"schema_version":"opsi.rca.v1","incident_id":"inc-1","root_cause":"cpu","confidence":0.7,"recommended_actions":[{"id":"scale","type":"scale_replicas","params":{"service_id":"svc","replicas":"3"}}]}`, MitigationActions: "[]"}}
+	store := &fakeStore{rec: incidentRecordWithRCA()}
 	svc := Service{Store: store, DryRun: true}
 	_, _, err := svc.Approve(context.Background(), ActionRequest{ProjectID: "p1", IncidentID: "inc-1", ActionID: "scale", ActionHash: "sha256:stale", UserID: "u1", Role: "Developer"})
 	if err == nil || !strings.Contains(err.Error(), "stale action") {
 		t.Fatalf("expected stale action error, got %v", err)
 	}
+}
+
+func TestApproveAuditsApprovalAndExecution(t *testing.T) {
+	audit := &fakeAudit{}
+	svc := Service{Store: &fakeStore{rec: incidentRecordWithRCA()}, Audit: audit, DryRun: true}
+	if _, _, err := svc.Approve(context.Background(), ActionRequest{ProjectID: "p1", IncidentID: "inc-1", ActionID: "scale", UserID: "u1", Role: "Developer"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(audit.records) != 2 || audit.records[0].Action != "incident.action.approve" || audit.records[1].Action != "incident.action.execute" {
+		t.Fatalf("missing approval/execute audit: %+v", audit.records)
+	}
+}
+
+func incidentRecordWithRCA() telemetry.IncidentRecord {
+	rec := telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: "svc", MitigationActions: "[]", CreatedAt: time.Unix(10, 0)}
+	ctx, err := SanitizeIncidentContext(rec)
+	if err != nil {
+		panic(err)
+	}
+	rca := RCA{SchemaVersion: "opsi.rca.v1", IncidentID: "inc-1", RootCause: "cpu", Confidence: 0.7, Metadata: metaForTest(ctx), RecommendedActions: []Action{{ID: "scale", Type: "scale_replicas", Params: map[string]string{"service_id": "svc", "replicas": "3"}}}}
+	data, _ := json.Marshal(rca)
+	rec.RCAResult = string(data)
+	return rec
+}
+
+func metaForTest(ctx IncidentContext) RCAMeta {
+	return RCAMeta{Provider: "fixture", ConfiguredProvider: "fixture", Model: "fixture", InputContextHash: HashIncidentContext(ctx), CreatedAt: time.Unix(10, 0).UTC().Format(time.RFC3339)}
 }
 
 type fakeStore struct{ rec telemetry.IncidentRecord }
@@ -101,4 +150,11 @@ func (f *fakeStore) AppendIncidentAction(_ context.Context, _, _, status, action
 func (f *fakeStore) ResolveIncident(context.Context, string, string, time.Time) (*telemetry.IncidentRecord, error) {
 	f.rec.Status = StatusResolved
 	return &f.rec, nil
+}
+
+type fakeAudit struct{ records []secret.AuditRecord }
+
+func (f *fakeAudit) InsertAudit(_ context.Context, record secret.AuditRecord) error {
+	f.records = append(f.records, record)
+	return nil
 }

@@ -8,6 +8,7 @@ import type {
   Readiness,
   ServiceRecord,
   SupportSummary,
+  TelemetrySummary,
   TimelineEvent,
 } from "@/lib/contracts/registry";
 
@@ -106,6 +107,12 @@ export class LocalClient {
 
   support(projectID: string) {
     return this.call<SupportSummary>(`/api/local/projects/${projectID}/support`);
+  }
+
+  telemetrySummary(projectID: string, sinceUnix = 0) {
+    return this.call<TelemetrySummary>(
+      `/api/local/projects/${projectID}/telemetry/summary?since_unix=${encodeURIComponent(String(sinceUnix))}`,
+    );
   }
 
   private async call<T>(path: string, init: RequestOptions = {}) {

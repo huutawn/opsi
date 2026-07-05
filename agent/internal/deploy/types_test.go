@@ -146,6 +146,27 @@ func TestRequestValidateRejectsBadInputs(t *testing.T) {
 	}
 }
 
+func TestRequestValidateRejectsUnsafeDeployPaths(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Request)
+	}{
+		{"build context traversal", func(req *Request) { req.BuildContext = "../../etc" }},
+		{"dockerfile absolute", func(req *Request) { req.Dockerfile = "/etc/passwd" }},
+		{"manifest backslash traversal", func(req *Request) { req.ManifestPath = `..\..\windows` }},
+		{"watch path traversal", func(req *Request) { req.WatchPaths = []string{"apps/api/**", "../secrets/**"} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := testRequest()
+			tc.mutate(&req)
+			if err := req.Validate(); err == nil {
+				t.Fatal("expected unsafe path to be rejected")
+			}
+		})
+	}
+}
+
 func TestRequestFromContractFillsConfigDefaults(t *testing.T) {
 	req, err := RequestFromContract(&agentv1.DeployRequest{ServiceName: "api", GitSHA: "abcdef1234567890"}, config.DeploymentConfig{
 		ProjectID:    "proj-dev",

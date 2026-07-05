@@ -43,12 +43,13 @@ export function NodesTable({ console }: { console: ConsoleController }) {
                 <button onClick={() => void console.actions.diagnostics(node.id)} type="button">
                   Details
                 </button>
-                <button disabled={node.status === "removed"} onClick={() => void console.actions.nodeAction(node.id, "drain")} type="button">
+                <button disabled title="Agent-backed K3s drain is not wired yet" onClick={() => void console.actions.nodeAction(node.id, "drain")} type="button">
                   Drain
                 </button>
                 <button
                   className="danger"
-                  disabled={node.status === "removed"}
+                  disabled
+                  title="Agent-backed K3s remove is not wired yet"
                   onClick={() => void console.actions.nodeAction(node.id, "remove")}
                   type="button"
                 >

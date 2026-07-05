@@ -1,0 +1,78 @@
+# Opsi Current Snapshot
+
+Detailed snapshot: `docs/current_state.md`. Architecture: `docs/architecture.md`.
+
+## Repo Shape
+
+- Go workspace with modules: `agent/`, `cli/`, `cloud/`, `contracts/go/`.
+- Canonical SRS is `docs/opsi_srs.md` (SRS v4 active production-ready contract); legacy SRS v3.2 is archived under `docs/archive/`.
+- Public contracts live under `contracts/`; current Go binding is hand-written JSON gRPC, not generated protobuf.
+- Runtime code exists for Phase 1-5 minimum slices; Cloud now serves a static production workflow UI for project/node/service/deploy/topology/audit flows.
+
+## Implemented Runtime
+
+  - Agent:
+  - gRPC services: Status, Deployment, ServiceManager, Telemetry, Secret, Incident.
+  - HTTP `/health`, TLS 1.3 config, optional client cert verification.
+  - SQLite WAL stores for service/deployment/managed service/telemetry/audit state.
+  - Deployment supports project/service scoped deploy, safe relative source path containment for build context/Dockerfile/manifest/watch paths, containerd-first builder, Docker fallback, dry-run, progress stream, rollout watch/rollback with post-rollback verification, redacted failure/status messages, and `depends_on` service binding injection.
+  - Service binding supports alias/prefix/default env policy for multiple same-type dependencies, deterministic binding checksum annotations, and typed rollout-failure classification before auto rollback.
+  - Service catalog supports PostgreSQL/Redis managed runtime plus external service registration; managed PostgreSQL/Redis manifests include probes/resources/security-context basics, and external service registration stores TCP probe status as healthy/unhealthy.
+  - Telemetry supports Kubernetes/cAdvisor/kubectl/runtime collectors, retention, zstd sync chunks, and project-scoped sync.
+  - Secret vault supports Kubernetes Secret storage via stdin-applied Secret manifests (no secret values in kubectl argv), Cloud PAT verify cache, OTP/TOTP reveal gate, rotation restart, and audit.
+  - Incident path supports evidence-backed sanitized RCA context from local telemetry metric/log fingerprint windows, typed mitigation allowlist, stale-action hash guard, post-action verification, resolution, MTTR, and audit.
+  - Cloud relay client can poll deployment leases, heartbeat, submit redacted deployment results, and sign Agent requests with HMAC headers for production Cloud guards.
+  - CloudRunner can poll Cloud deployment jobs with `DeploymentIntent` v1, execute git-source deploys through the Agent deployment engine using intent-scoped source/runtime/resource/binding fields, reject image-source jobs clearly for P0, report `intent_hash`, retry result reporting, and run with the Agent daemon when `cloud_relay.enabled=true`.
+
+- CLI:
+  - Cobra commands: `status`, `deploy`, `sync`, `service`, `secret`, `incident`, `login`, `start`.
+  - Agent gRPC client supports TLS, client cert, and server cert pinning.
+  - PAT storage uses OS keychain; tests use fake store.
+  - `opsi start` serves `/health`, supports `--dev-ui http://localhost:3000`, serves `cli/ui/out` when built, and returns an honest 503 when no UI build exists.
+  - CLI UI is split by route/layout/feature/hook/API/contracts and browser code now calls `/api/local/...` for project/readiness/node/service/deploy/topology/audit/support workflows. `opsi start` proxies Cloud registry calls through the CLI backend using the OS-keychain PAT, exposes `/api/local/session` with a short local session token, requires `X-Local-Session` plus `Idempotency-Key` on mutations, exposes `/api/local/status` for Agent status, exposes `/api/local/projects/{project_id}/telemetry/summary` from Agent telemetry sync metadata without returning raw payloads, and never returns the PAT to the browser.
+  - CLI local deploy submit validates image-source services before Cloud job creation when the service is known locally via the registry read model.
+
+- Cloud:
+- Local/dev runtime for webhook relay, OTP, PAT verify, fixture AI RCA, and Gemini RCA adapter with explicit fallback metadata.
+  - Control-plane registry API exposes org project create/list, project readiness, nodes, bootstrap sessions/events, services, deployment job creation, and deployment rollback request creation with write idempotency/request headers, RBAC, audit, bootstrap expiry cleanup, and machine-readable readiness errors.
+  - Registry read models expose project-scoped services, deployments with plan/manifest/rollback metadata, bootstrap sessions, deployment events, and audit events for UI refresh/reconnect without mock topology data.
+  - Registry security gate enforces owner/admin-only node/bootstrap/agent lifecycle actions, developer deploy/service actions, RBAC denial audit, bootstrap credential TTL/read-once storage, worker-only credential take, one-time agent registration token exchange, bcrypt-hashed agent bearer credentials, revoked/rotated agent poll blocking, redacted bootstrap events/audit metadata, bootstrap/deployment/agent-registration rate limits, and agent register/rotate/revoke records.
+  - Node/K3s/Agent lifecycle supports first-server vs worker bootstrap gating, active-host/idempotency protection, agent heartbeat/inventory readiness reconciliation, and node diagnostics. Drain/remove endpoints now block honestly unless/until Agent-backed K3s execution is wired; only-server removal precondition is still enforced before the blocked response.
+  - Deployment release flow enforces server-side service deploy prerequisites, concrete Git revision/build-context/dockerfile/manifest validation, early image-source rejection, deploy-capable Agent readiness, deterministic deployment/manifest/intent hashes, service-specific runtime/resource/binding intent fields, previous revision refs, versioned `DeploymentIntent` job envelopes, redacted deployment events, audit, idempotency, Agent job lease/result contract with lease tokens, expiry retry, dead-letter state, terminal lock release, and expiring service-level deployment locks.
+  - Production Cloud config requires Postgres, a strong bootstrap worker token, a strong bootstrap secret key, and Agent HMAC request signatures; with Postgres it uses AES-GCM encrypted bootstrap credential/registration storage, DB-backed rate limits, and DB triggers that make `cloud_audit_events` append-only.
+  - Postgres migration and runtime registry repository include org/project/environment/runtime/node/agent/bootstrap/service/deployment/audit/idempotency control-plane schema when `database_url` is configured; dev default uses in-memory store.
+  - OTP supports hashed code, TTL, one-time verify, rate limit, optional Postgres, SMTP/outbox, and dev echo.
+  - PAT verify uses bcrypt hash + project membership role when Postgres is configured.
+  - Static Cloud UI at `/` uses real registry APIs for project list/detail readiness, add-server bootstrap with reconnect-safe timeline, node diagnostics/actions, service drafts/detail, deploy queueing with redacted event timeline, topology from real nodes/services/deployments, and redacted audit.
+  - Cloud exposes request-ID echoing, Prometheus-style process/domain metrics at `/metrics`, project support summaries at `/api/projects/:projectID/support`, webhook/outbox alert routing, and deployable Prometheus/Alertmanager/Grafana provisioning artifacts. Support summaries include Grafana-style dashboard panels, SLO signals, configured alerts, active alerts, production gates, break-glass policy, runbooks, redacted support context, and recent deployment request IDs. CLI UI maps Metrics/Support to that real support dashboard. Cloud inline UI is now debug-only behind `enable_debug_ui=true`.
+- Cloud AI config is explicit (`fixture|gemini`), Gemini RCA calls use sanitized incident context only, fixture fallback is explicit, AI payloads reject raw-log/secret-like keys before analysis, and Agent RCA validation requires visible provider/model/fallback/input-context-hash metadata before storing or returning analysis.
+  - Root README documents clean-checkout verification, Go `GOTOOLCHAIN=local`, module test commands, optional `rtk` wrapper fallback, and offline cache expectations. Root Makefile exposes `verify`, `test`, `build`, `clean`, and `package-source`; builds binaries into `bin/`, injects a shared build SHA into `opsi version`, `opsi-agent --version`, and `opsi-cloud --version`, and creates a `release/` artifact layout with checksums and demo docs.
+  - Runtime security hardening includes Agent production/non-loopback config fail-fast, Cloud production OTP/dev-echo and HTTPS public URL guards, Agent request HMAC compatibility, omitted OTP `code` outside dev echo, secret reveal second-factor negative tests, AI raw-log/secret-like payload rejection tests, Incident action hash/post-action verification, and a proto-vs-handwritten-Go service/RPC drift test.
+
+## Known Gaps
+
+- OAuth login/PAT issuance UI not implemented.
+- Cloud webhook relay is in-memory; registry deployment job leases/results are durable with Postgres, but webhook/event relay queue is not wired to durable storage yet.
+- Cloud AI provider schema is still minimal; Gemini output is currently consumed as root-cause text while recommended actions remain typed fixture actions.
+- CLI UI WebSocket/SSE bridge, Agent-vault secret reveal/rotation endpoints, and incident registry endpoint are not implemented; unavailable actions are disabled instead of fake-success.
+- Standalone SSH bootstrap worker/K3s installer binary is not implemented; Cloud exposes the secure take/finish contract and lifecycle state machine.
+- Agent-backed K3s drain/remove execution is not implemented; Cloud blocks node lifecycle requests instead of marking metadata-only success.
+- K3s encryption-at-rest is config-gated, not auto-detected.
+- Service catalog lacks DB-native rotation, service logs, backup/restore workflows for managed services, and full managed-service readiness reconciliation.
+- HA server topology and heartbeat timeout reconciler remain future work.
+- Plan 06 support dashboard and external observability provisioning exist; HA server topology, heartbeat timeout reconciler, and provider-specific Slack/PagerDuty adapters remain future work.
+- Local Web UI still needs Agent-owned local endpoints for secret reveal/rotation, incidents/RCA actions, logs, detailed telemetry views, and runtime audit merge; missing Agent-owned local endpoints return typed disabled errors instead of fake success.
+- Source hygiene gate passes after `make clean`; generated binaries/UI outputs/DB files are no longer required for verification.
+
+## Commands
+
+Run from module dirs, not repo root:
+
+```bash
+rtk go test ./...      # agent/
+rtk go test ./...      # cli/
+rtk go test ./...      # cloud/
+rtk go test ./...      # contracts/go/
+```
+
+Last checked for P1 hardening: agent 80 passed, cloud 26 passed, cli 21 passed, contracts/go 1 passed.

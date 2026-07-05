@@ -84,6 +84,18 @@ export type TimelineEvent = {
   created_at: string;
 };
 
+export type TelemetrySummary = {
+  project_id: string;
+  since_unix: number;
+  chunk_count: number;
+  record_count: number;
+  start_unix: number;
+  end_unix: number;
+  done: boolean;
+  source: "agent";
+  payload_policy: string;
+};
+
 export type BootstrapSession = {
   id: string;
   status: string;

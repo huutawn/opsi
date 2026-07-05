@@ -116,20 +116,21 @@ func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
 func (s *Server) analyzeIncident(ctx context.Context, incidentID, serviceID, anomalyType string, body []byte) (map[string]any, error) {
 	cfg := s.Config.AI
 	provider := firstNonEmpty(cfg.Provider, "fixture")
+	inputHash := "sha256:" + sha256Hex(body)
 	if provider == "gemini" {
 		rootCause, model, err := callGemini(ctx, cfg, body)
 		if err == nil {
-			return rcaResponse(incidentID, serviceID, rootCause, "gemini", provider, false, model), nil
+			return rcaResponse(incidentID, serviceID, rootCause, "gemini", provider, false, model, inputHash), nil
 		}
 		if !cfg.FallbackFixture {
 			return nil, fmt.Errorf("gemini RCA failed")
 		}
-		return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, true, "fixture"), nil
+		return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, true, "fixture", inputHash), nil
 	}
-	return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, false, "fixture"), nil
+	return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, false, "fixture", inputHash), nil
 }
 
-func rcaResponse(incidentID, serviceID, rootCause, provider, configuredProvider string, fallback bool, model string) map[string]any {
+func rcaResponse(incidentID, serviceID, rootCause, provider, configuredProvider string, fallback bool, model, inputHash string) map[string]any {
 	return map[string]any{
 		"schema_version": "opsi.rca.v1",
 		"incident_id":    incidentID,
@@ -143,8 +144,13 @@ func rcaResponse(incidentID, serviceID, rootCause, provider, configuredProvider 
 			{"id": "scale-replicas", "type": "scale_replicas", "description": "Scale service replicas", "rollback_safe": true, "params": map[string]string{"service_id": serviceID, "replicas": "2"}},
 			{"id": "rate-limit-ingress", "type": "rate_limit_ingress", "description": "Apply ingress rate limit", "rollback_safe": true, "params": map[string]string{"service_id": serviceID, "rps": "10"}},
 		},
-		"metadata": map[string]any{"provider": provider, "configured_provider": configuredProvider, "fallback_used": fallback, "model": model},
+		"metadata": map[string]any{"provider": provider, "configured_provider": configuredProvider, "fallback_used": fallback, "model": model, "input_context_hash": inputHash, "created_at": time.Now().UTC().Format(time.RFC3339)},
 	}
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func callGemini(ctx context.Context, cfg AIConfig, incidentContext []byte) (string, string, error) {
@@ -305,7 +311,8 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	}
 	projectID := r.URL.Query().Get("project_id")
 	nodeID := nodeIDFromAgentPath(r.URL.Path)
-	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
 		return
 	}
 	lease, ok, err := s.Registry.LeaseDeployment(projectID, nodeID)
@@ -315,7 +322,8 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	}
 	if ok {
 		s.observer.Inc("agent_jobs_leased_total")
-		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action})
+		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action, "lease_token": lease.LeaseToken})
 		return
 	}
 	wait := 30 * time.Second
@@ -349,7 +357,8 @@ func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Requ
 	}
 	projectID := r.URL.Query().Get("project_id")
 	nodeID := nodeIDFromAgentPath(r.URL.Path)
-	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
 		return
 	}
 	deploymentID := deploymentIDFromAgentPath(r.URL.Path)
@@ -372,6 +381,8 @@ func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Requ
 			outcome = "success"
 		}
 		s.Registry.Audit(job.OrgID, projectID, "agent", "DEPLOYMENT_AGENT_RESULT_RECORDED", "deployment_job", job.ID, outcome, map[string]any{"status": job.Status, "failure_code": job.FailureCode})
+	} else {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_RESULT_REJECTED", "deployment_job", deploymentID, "denied", map[string]any{"error": err.Error()})
 	}
 	writeRegistryResult(w, r, job, err, http.StatusOK)
 }

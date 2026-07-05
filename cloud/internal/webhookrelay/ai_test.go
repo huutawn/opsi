@@ -2,6 +2,8 @@ package webhookrelay
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -24,13 +26,16 @@ func TestAnalyzeIncidentFallbackContract(t *testing.T) {
 		IncidentID         string `json:"incident_id"`
 		RecommendedActions []any  `json:"recommended_actions"`
 		Metadata           struct {
-			Provider string `json:"provider"`
+			Provider         string `json:"provider"`
+			Model            string `json:"model"`
+			InputContextHash string `json:"input_context_hash"`
+			CreatedAt        string `json:"created_at"`
 		} `json:"metadata"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.SchemaVersion != "opsi.rca.v1" || out.IncidentID != "inc-1" || len(out.RecommendedActions) == 0 || out.Metadata.Provider != "fixture" {
+	if out.SchemaVersion != "opsi.rca.v1" || out.IncidentID != "inc-1" || len(out.RecommendedActions) == 0 || out.Metadata.Provider != "fixture" || out.Metadata.Model != "fixture" || out.Metadata.InputContextHash != hashBody(body) || out.Metadata.CreatedAt == "" {
 		t.Fatalf("bad response: %+v", out)
 	}
 }
@@ -113,4 +118,9 @@ func TestAnalyzeIncidentGeminiProviderFallsBackWhenAllowed(t *testing.T) {
 	if out.Metadata.Provider != "fixture" || out.Metadata.ConfiguredProvider != "gemini" || !out.Metadata.FallbackUsed {
 		t.Fatalf("bad fallback response: %+v", out)
 	}
+}
+
+func hashBody(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

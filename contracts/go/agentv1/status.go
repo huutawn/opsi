@@ -245,6 +245,7 @@ type IncidentResponse struct {
 	MitigationActionsJSON string              `json:"mitigation_actions_json,omitempty"`
 	ResolvedAtUnix        int64               `json:"resolved_at_unix,omitempty"`
 	MTTRSeconds           int64               `json:"mttr_seconds,omitempty"`
+	RCAMetadata           *RCAMetadata        `json:"rca_metadata,omitempty"`
 }
 
 type RecommendedAction struct {
@@ -254,6 +255,15 @@ type RecommendedAction struct {
 	RollbackSafe bool              `json:"rollback_safe,omitempty"`
 	Params       map[string]string `json:"params,omitempty"`
 	ActionHash   string            `json:"action_hash,omitempty"`
+}
+
+type RCAMetadata struct {
+	Provider           string `json:"provider"`
+	ConfiguredProvider string `json:"configured_provider,omitempty"`
+	Model              string `json:"model"`
+	FallbackUsed       bool   `json:"fallback_used"`
+	InputContextHash   string `json:"input_context_hash"`
+	CreatedAt          string `json:"created_at"`
 }
 
 type JSONCodec struct{}

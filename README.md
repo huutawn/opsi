@@ -7,6 +7,8 @@ Local-first control plane prototype. Current implementation state lives in `docs
 Supported toolchain:
 
 - Go `1.26.4`
+- Node `24.16.0`
+- npm `11.17.0`
 - `GOTOOLCHAIN=local` in normal verification, so Go will not download a toolchain implicitly
 - Node/npm for `cli/ui`; UI dependencies are restored from `cli/ui/package-lock.json`
 - `rtk` is optional for Make targets. If installed, Make auto-detects it and wraps commands; if absent, raw `go`, `npm`, `tar`, and shell commands run directly. To force raw commands: `make RTK= verify`.
@@ -18,6 +20,15 @@ make verify
 make test
 make build
 make clean
+make package-source
+```
+
+CI runs the same clean path from `.github/workflows/ci.yml`:
+
+```bash
+make clean
+make verify
+make build
 make package-source
 ```
 

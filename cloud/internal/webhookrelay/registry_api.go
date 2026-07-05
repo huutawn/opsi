@@ -165,19 +165,29 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		if !s.requireRole(w, r, principal, projectID, "node", parts[3], "owner", "admin") {
 			return
 		}
-		var value registry.Node
-		var err error
-		action := "NODE_DRAINED"
+		nodes, err := s.Registry.ListNodes(projectID)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		node, ok := nodeByID(nodes, parts[3])
+		if !ok {
+			writeRegistryFailure(w, r, registry.ErrNotFound)
+			return
+		}
+		action := "NODE_DRAIN_REQUEST_BLOCKED"
 		if parts[4] == "remove" {
-			value, err = s.Registry.RemoveNode(projectID, parts[3], r.URL.Query().Get("force") == "true")
-			action = "NODE_REMOVED"
-		} else {
-			value, err = s.Registry.DrainNode(projectID, parts[3])
+			action = "NODE_REMOVE_REQUEST_BLOCKED"
+			if node.Role == "server" && r.URL.Query().Get("force") != "true" && healthyServerCount(nodes) <= 1 {
+				err := registry.APIError{Status: http.StatusConflict, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first", RequestID: r.Header.Get("X-Request-ID")}
+				s.Registry.Audit(node.OrgID, projectID, principal.UserID, action, "node", node.ID, "failure", map[string]any{"error_code": err.Code})
+				writeRegistryError(w, err)
+				return
+			}
 		}
-		if err == nil {
-			s.Registry.Audit(value.OrgID, projectID, principal.UserID, action, "node", value.ID, "success", nil)
-		}
-		writeRegistryResult(w, r, value, err, http.StatusOK)
+		apiErr := registry.APIError{Status: http.StatusNotImplemented, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node drain/remove must execute through Agent/K3s; Cloud registry cannot mark runtime lifecycle complete", NextAction: "wire_agent_node_lifecycle_endpoint", RequestID: r.Header.Get("X-Request-ID")}
+		s.Registry.Audit(node.OrgID, projectID, principal.UserID, action, "node", node.ID, "failure", map[string]any{"error_code": apiErr.Code})
+		writeRegistryError(w, apiErr)
 		return
 	}
 	if len(parts) == 3 && parts[2] == "agents" && r.Method == http.MethodPost {
@@ -412,6 +422,25 @@ func requireWriteHeaders(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func nodeByID(nodes []registry.Node, id string) (registry.Node, bool) {
+	for _, node := range nodes {
+		if node.ID == id {
+			return node, true
+		}
+	}
+	return registry.Node{}, false
+}
+
+func healthyServerCount(nodes []registry.Node) int {
+	count := 0
+	for _, node := range nodes {
+		if node.Role == "server" && node.Status == registry.NodeHealthy {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, principal auth.VerifyResult, projectID, resourceType, resourceID string, allowed ...string) bool {

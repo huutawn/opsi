@@ -42,6 +42,7 @@ type WebhookEnvelope struct {
 type DeploymentLease struct {
 	Kind       string                `json:"kind"`
 	Action     string                `json:"action"`
+	LeaseToken string                `json:"lease_token,omitempty"`
 	Deployment DeploymentJobEnvelope `json:"deployment"`
 	Service    ServiceEnvelope       `json:"service"`
 }
@@ -139,6 +140,7 @@ type ServiceEnvelope struct {
 
 type DeploymentResult struct {
 	Status                 string `json:"status"`
+	LeaseToken             string `json:"lease_token,omitempty"`
 	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
 	IntentHash             string `json:"intent_hash,omitempty"`
 	FailureCode            string `json:"failure_code,omitempty"`

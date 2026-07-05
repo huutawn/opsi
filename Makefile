@@ -1,5 +1,8 @@
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
+GO_VERSION ?= 1.26.4
+NODE_VERSION ?= 24.16.0
+NPM_VERSION ?= 11.17.0
 GOCACHE ?= /tmp/opsi-go-cache
 GOTOOLCHAIN ?= local
 UI_NPM ?= npm
@@ -7,9 +10,14 @@ RTK ?= $(shell command -v rtk >/dev/null 2>&1 && echo rtk)
 RUN := $(if $(strip $(RTK)),$(RTK),)
 PROXY := $(if $(strip $(RTK)),$(RTK) proxy,)
 
-.PHONY: verify test build ui-build lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
+.PHONY: check-toolchain verify test build ui-build lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
 
-verify: source-hygiene lint test ui-build
+check-toolchain:
+	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
+	@node --version | grep -qx "v$(NODE_VERSION)" || { echo "Node $(NODE_VERSION) required"; node --version; exit 1; }
+	@$(UI_NPM) --version | grep -qx "$(NPM_VERSION)" || { echo "npm $(NPM_VERSION) required"; $(UI_NPM) --version; exit 1; }
+
+verify: check-toolchain source-hygiene lint test ui-build
 
 test:
 	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...

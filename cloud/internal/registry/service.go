@@ -40,6 +40,7 @@ const (
 	DeploymentFailed       = "failed"
 	DeploymentRollingBack  = "rolling_back"
 	DeploymentRolledBack   = "rolled_back"
+	DeploymentDeadLetter   = "dead_letter"
 
 	EventDeploymentQueued       = "DEPLOYMENT_QUEUED"
 	EventDeploymentPlanCreated  = "DEPLOYMENT_PLAN_CREATED"
@@ -51,9 +52,16 @@ const (
 	EventDeploymentSucceeded    = "DEPLOYMENT_SUCCEEDED"
 	EventDeploymentFailed       = "DEPLOYMENT_FAILED"
 	EventRollbackAvailable      = "ROLLBACK_AVAILABLE"
+	EventAgentLeaseExpired      = "AGENT_LEASE_EXPIRED"
+	EventDeploymentDeadLetter   = "DEPLOYMENT_DEAD_LETTER"
 )
 
 var ErrNotFound = errors.New("not found")
+
+const (
+	defaultDeploymentLeaseDuration = 5 * time.Minute
+	defaultDeploymentMaxAttempts   = 3
+)
 
 type APIError struct {
 	Status     int    `json:"-"`
@@ -337,6 +345,7 @@ type DeploymentJob struct {
 	RuntimeID              string            `json:"runtime_id"`
 	ServiceID              string            `json:"service_id"`
 	Status                 string            `json:"status"`
+	Action                 string            `json:"action,omitempty"`
 	IdempotencyKey         string            `json:"idempotency_key"`
 	DeploymentPlanHash     string            `json:"deployment_plan_hash,omitempty"`
 	ManifestHash           string            `json:"manifest_hash,omitempty"`
@@ -350,6 +359,10 @@ type DeploymentJob struct {
 	NodeID                 string            `json:"node_id,omitempty"`
 	FailureCode            string            `json:"failure_code,omitempty"`
 	FailureMessageRedacted string            `json:"failure_message_redacted,omitempty"`
+	LeaseToken             string            `json:"-"`
+	LeaseExpiresAt         *time.Time        `json:"lease_expires_at,omitempty"`
+	AttemptCount           int               `json:"attempt_count,omitempty"`
+	MaxAttempts            int               `json:"max_attempts,omitempty"`
 	StartedAt              *time.Time        `json:"started_at,omitempty"`
 	FinishedAt             *time.Time        `json:"finished_at,omitempty"`
 	CreatedAt              time.Time         `json:"created_at"`
@@ -379,10 +392,12 @@ type DeploymentLease struct {
 	Deployment DeploymentJob `json:"deployment"`
 	Service    ServiceRecord `json:"service"`
 	Action     string        `json:"action"`
+	LeaseToken string        `json:"lease_token,omitempty"`
 }
 
 type DeploymentResult struct {
 	Status                 string `json:"status"`
+	LeaseToken             string `json:"lease_token,omitempty"`
 	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
 	IntentHash             string `json:"intent_hash,omitempty"`
 	FailureCode            string `json:"failure_code,omitempty"`
@@ -803,15 +818,7 @@ func (s *Service) DrainNode(projectID, nodeID string) (Node, error) {
 	if !ok || node.ProjectID != projectID {
 		return Node{}, ErrNotFound
 	}
-	if node.Status == NodeRemoved {
-		return Node{}, APIError{Status: 409, Code: "NODE_REMOVED", Message: "removed nodes cannot be drained"}
-	}
-	now := s.clock()
-	node.Status = NodeDraining
-	node.UpdatedAt = now
-	s.nodes[nodeID] = node
-	s.refreshProjectLocked(projectID)
-	return node, nil
+	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node drain must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
 }
 
 func (s *Service) RemoveNode(projectID, nodeID string, force bool) (Node, error) {
@@ -824,18 +831,7 @@ func (s *Service) RemoveNode(projectID, nodeID string, force bool) (Node, error)
 	if node.Role == "server" && !force && s.healthyServerCountLocked(projectID) <= 1 {
 		return Node{}, APIError{Status: 409, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first"}
 	}
-	now := s.clock()
-	node.Status = NodeRemoved
-	node.UpdatedAt = now
-	if node.AgentID != "" {
-		agent := s.agents[node.AgentID]
-		agent.Status = "revoked"
-		agent.UpdatedAt = now
-		s.agents[agent.ID] = agent
-	}
-	s.nodes[nodeID] = node
-	s.refreshProjectLocked(projectID)
-	return node, nil
+	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node remove must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
 }
 
 func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error) {
@@ -1051,6 +1047,7 @@ func (s *Service) RollbackDeployment(projectID, deploymentID, requestedBy, key, 
 	now := s.clock()
 	job := deploymentJobForPlan(service, source, node, agent, key, requestedBy, now)
 	job.Status = DeploymentRollingBack
+	job.Action = "rollback"
 	if err := s.acquireDeploymentLockLocked(service.ID, job.ID, now, requestID); err != nil {
 		return DeploymentJob{}, err
 	}
@@ -1063,6 +1060,7 @@ func (s *Service) RollbackDeployment(projectID, deploymentID, requestedBy, key, 
 func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireDeploymentLeasesLocked(projectID)
 	for id, job := range s.deployments {
 		if job.ProjectID != projectID || job.NodeID != nodeID || (job.Status != DeploymentQueued && job.Status != DeploymentRollingBack) {
 			continue
@@ -1075,11 +1073,23 @@ func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bo
 		if job.Status == DeploymentRollingBack {
 			action = "rollback"
 		}
+		if job.Action != "" {
+			action = job.Action
+		}
+		now := s.clock()
+		leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
 		job.Status = DeploymentWaitingAgent
-		job.UpdatedAt = s.clock()
+		job.Action = action
+		job.AttemptCount++
+		if job.MaxAttempts == 0 {
+			job.MaxAttempts = defaultDeploymentMaxAttempts
+		}
+		job.LeaseToken = newID("lease")
+		job.LeaseExpiresAt = &leaseExpiresAt
+		job.UpdatedAt = now
 		s.deployments[id] = job
 		s.deployEvents[id] = append(s.deployEvents[id], DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: job.UpdatedAt})
-		return DeploymentLease{Deployment: job, Service: service, Action: action}, true, nil
+		return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken}, true, nil
 	}
 	return DeploymentLease{}, false, nil
 }
@@ -1091,7 +1101,19 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	if !ok || job.ProjectID != projectID || job.NodeID != nodeID {
 		return DeploymentJob{}, ErrNotFound
 	}
+	if deploymentTerminalStatus(job.Status) {
+		return job, nil
+	}
 	now := s.clock()
+	if job.Status != DeploymentWaitingAgent || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_LEASE_EXPIRED", Message: "deployment lease is not active", NextAction: "poll_for_new_lease", RequestID: requestID}
+	}
+	if job.LeaseToken != "" && result.LeaseToken != job.LeaseToken {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STALE_LEASE", Message: "deployment result lease token is stale", NextAction: "discard_result_and_poll", RequestID: requestID}
+	}
+	if job.IntentHash != "" && result.IntentHash != "" && result.IntentHash != job.IntentHash {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "deployment result intent hash does not match leased job", RequestID: requestID}
+	}
 	status := normalizedDeploymentResultStatus(result.Status)
 	job.Status = status
 	job.FailureCode = result.FailureCode
@@ -1101,6 +1123,8 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	}
 	job.RollbackEligible = result.RollbackEligible
 	job.RollbackBlockedReason = result.RollbackBlockedReason
+	job.LeaseToken = ""
+	job.LeaseExpiresAt = nil
 	job.FinishedAt = &now
 	job.UpdatedAt = now
 	s.deployments[deploymentID] = job
@@ -1109,6 +1133,36 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 		delete(s.deployLocks, job.ServiceID)
 	}
 	return job, nil
+}
+
+func (s *Service) expireDeploymentLeasesLocked(projectID string) {
+	now := s.clock()
+	for id, job := range s.deployments {
+		if job.ProjectID != projectID || job.Status != DeploymentWaitingAgent || job.LeaseExpiresAt == nil || job.LeaseExpiresAt.After(now) {
+			continue
+		}
+		job.LeaseToken = ""
+		job.LeaseExpiresAt = nil
+		job.UpdatedAt = now
+		if job.MaxAttempts == 0 {
+			job.MaxAttempts = defaultDeploymentMaxAttempts
+		}
+		if job.AttemptCount >= job.MaxAttempts {
+			job.Status = DeploymentDeadLetter
+			job.FailureCode = "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED"
+			job.FailureMessageRedacted = "deployment lease attempts exhausted"
+			job.FinishedAt = &now
+			delete(s.deployLocks, job.ServiceID)
+			s.deployEvents[id] = append(s.deployEvents[id], DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "error", Step: EventDeploymentDeadLetter, MessageRedacted: job.FailureMessageRedacted, ProgressPercent: 100, CreatedAt: now})
+		} else {
+			job.Status = DeploymentQueued
+			if job.Action == "rollback" {
+				job.Status = DeploymentRollingBack
+			}
+			s.deployEvents[id] = append(s.deployEvents[id], DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "warn", Step: EventAgentLeaseExpired, MessageRedacted: "agent lease expired; job returned to queue", ProgressPercent: 20, CreatedAt: now})
+		}
+		s.deployments[id] = job
+	}
 }
 
 func (s *Service) DeploymentEvents(projectID, deploymentID string) ([]DeploymentEvent, error) {
@@ -1186,7 +1240,7 @@ func (s *Service) previousSuccessfulLocked(projectID, serviceID string) Deployme
 }
 
 func deploymentJobForPlan(service ServiceRecord, previous DeploymentJob, node Node, agent Agent, key, requestedBy string, now time.Time) DeploymentJob {
-	job := DeploymentJob{ID: newID("dep"), OrgID: service.OrgID, ProjectID: service.ProjectID, EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, ServiceID: service.ID, Status: DeploymentQueued, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, CreatedAt: now, UpdatedAt: now}
+	job := DeploymentJob{ID: newID("dep"), OrgID: service.OrgID, ProjectID: service.ProjectID, EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, ServiceID: service.ID, Status: DeploymentQueued, Action: "deploy", IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, CreatedAt: now, UpdatedAt: now}
 	intent := deploymentIntentForService(service, job.ID, requestedBy)
 	job.ManifestHash = hashJSON(map[string]any{"service_id": service.ID, "source_type": service.SourceType, "repo_url": service.RepoURL, "image": service.Image, "branch": service.Branch, "git_sha": service.GitSHA, "build_context": service.BuildContext, "dockerfile": service.Dockerfile, "manifest_path": service.ManifestPath, "watch_paths": service.WatchPaths, "container_port": service.ContainerPort, "health_path": service.HealthPath, "replicas": service.Replicas, "resource_requests": service.ResourceRequests, "resource_limits": service.ResourceLimits, "bindings": service.Bindings, "namespace": service.Namespace})
 	intent.Review.ManifestHash = job.ManifestHash
@@ -1337,7 +1391,7 @@ func normalizedDeploymentResultStatus(status string) string {
 
 func deploymentTerminalStatus(status string) bool {
 	switch status {
-	case DeploymentSucceeded, DeploymentFailed, DeploymentRolledBack:
+	case DeploymentSucceeded, DeploymentFailed, DeploymentRolledBack, DeploymentDeadLetter:
 		return true
 	default:
 		return false

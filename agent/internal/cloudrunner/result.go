@@ -11,6 +11,7 @@ import (
 func ResultFromRecord(record deploy.Record, err error, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
 	result := cloudrelay.DeploymentResult{
 		Status:                "failed",
+		LeaseToken:            lease.LeaseToken,
 		FinalRevisionRef:      firstNonEmpty(record.ImageTag, lease.Deployment.ManifestHash),
 		IntentHash:            firstNonEmpty(lease.Deployment.IntentHash, intentHashFromLease(lease)),
 		RollbackEligible:      lease.Deployment.PreviousRevisionRef != "",
@@ -31,12 +32,12 @@ func ResultFromRecord(record deploy.Record, err error, lease cloudrelay.Deployme
 		result.RollbackBlockedReason = "no previous successful revision"
 	}
 	if err != nil {
-		result.FailureMessageRedacted = err.Error()
+		result.FailureMessageRedacted = deploy.RedactSensitive(err.Error())
 		if result.FailureCode == "" {
 			result.FailureCode = failureCode(err)
 		}
 	} else if record.Error != "" {
-		result.FailureMessageRedacted = record.Error
+		result.FailureMessageRedacted = deploy.RedactSensitive(record.Error)
 	}
 	return result
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,6 +55,9 @@ func TestEngineDeployRollbackOnRolloutFailure(t *testing.T) {
 	if record.Status != StatusRolledBack || !record.RollbackSafe || record.RollbackReason == "" || !fakes.rollbackCalled {
 		t.Fatalf("expected rollback, record=%+v rollback=%v", record, fakes.rollbackCalled)
 	}
+	if fakes.watchCalls != 2 {
+		t.Fatalf("expected rollout watch plus rollback verification, got %d", fakes.watchCalls)
+	}
 }
 
 func TestEngineDeployBuildFailure(t *testing.T) {
@@ -84,6 +88,44 @@ func TestEngineDeployRollbackFailure(t *testing.T) {
 	}
 	if record.Status != StatusFailedAfterRollback {
 		t.Fatalf("unexpected record: %+v", record)
+	}
+}
+
+func TestEngineDeployRollbackVerificationFailure(t *testing.T) {
+	store := openTestStore(t)
+	fakes := &fakeAdapters{watchErrs: []error{errors.New("rollout timeout"), errors.New("old revision not ready")}}
+	engine := NewEngine(store, EngineConfig{Git: fakes, Builder: fakes, K3s: fakes, BuildRoot: t.TempDir()})
+
+	record, err := engine.Deploy(context.Background(), testRequest(), nil)
+	if err == nil {
+		t.Fatal("expected rollback verification error")
+	}
+	if record.Status != StatusFailedAfterRollback || record.Error != "rollout: rollout timeout; rollback verification: old revision not ready" {
+		t.Fatalf("unexpected record: %+v", record)
+	}
+}
+
+func TestEngineFailureRedactsSecretsInRecordAndProgress(t *testing.T) {
+	store := openTestStore(t)
+	secret := "secret-token-123"
+	fakes := &fakeAdapters{buildErr: errors.New("push failed token=" + secret + " url=https://user:" + secret + "@example.test/repo.git")}
+	engine := NewEngine(store, EngineConfig{Git: fakes, Builder: fakes, K3s: fakes, BuildRoot: t.TempDir()})
+	var messages []string
+
+	record, err := engine.Deploy(context.Background(), testRequest(), func(event *ProgressEvent) error {
+		messages = append(messages, event.Message)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected build error")
+	}
+	if contains(record.Error, secret) {
+		t.Fatalf("record leaked secret: %q", record.Error)
+	}
+	for _, msg := range messages {
+		if contains(msg, secret) {
+			t.Fatalf("progress leaked secret: %q", msg)
+		}
 	}
 }
 
@@ -118,6 +160,8 @@ func testRequest() Request {
 
 type fakeAdapters struct {
 	watchErr       error
+	watchErrs      []error
+	watchCalls     int
 	buildErr       error
 	rollbackErr    error
 	rollbackCalled bool
@@ -144,9 +188,20 @@ func (f *fakeAdapters) Build(context.Context, string, string, string) error     
 func (f *fakeAdapters) Push(context.Context, string) error                          { return nil }
 func (f *fakeAdapters) Apply(context.Context, string, string, string, string) error { return nil }
 func (f *fakeAdapters) WatchRollout(context.Context, string, string, time.Duration, time.Duration) error {
+	f.watchCalls++
+	if len(f.watchErrs) > 0 {
+		err := f.watchErrs[0]
+		f.watchErrs = f.watchErrs[1:]
+		return err
+	}
+	if f.watchCalls > 1 {
+		return nil
+	}
 	return f.watchErr
 }
 func (f *fakeAdapters) Rollback(context.Context, string, string) error {
 	f.rollbackCalled = true
 	return f.rollbackErr
 }
+
+func contains(s, sub string) bool { return strings.Contains(s, sub) }

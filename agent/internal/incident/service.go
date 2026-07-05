@@ -88,6 +88,16 @@ type RCA struct {
 	Confidence          float64  `json:"confidence"`
 	ContributingFactors []string `json:"contributing_factors"`
 	RecommendedActions  []Action `json:"recommended_actions"`
+	Metadata            RCAMeta  `json:"metadata"`
+}
+
+type RCAMeta struct {
+	Provider           string `json:"provider"`
+	ConfiguredProvider string `json:"configured_provider,omitempty"`
+	Model              string `json:"model"`
+	FallbackUsed       bool   `json:"fallback_used"`
+	InputContextHash   string `json:"input_context_hash"`
+	CreatedAt          string `json:"created_at"`
 }
 
 type Action struct {
@@ -202,7 +212,7 @@ func (s *Service) Approve(ctx context.Context, req ActionRequest) (*telemetry.In
 	if err := json.Unmarshal([]byte(rec.RCAResult), &rca); err != nil {
 		return nil, RCA{}, errors.New("incident has no valid rca")
 	}
-	ictx, err := SanitizeIncidentContext(*rec)
+	ictx, err := (IncidentContextBuilder{Store: s.Store, Window: 5 * time.Minute}).Build(ctx, *rec)
 	if err != nil {
 		return nil, RCA{}, err
 	}
@@ -267,6 +277,9 @@ func ValidateRCA(ctx IncidentContext, r RCA) error {
 	if r.SchemaVersion != "opsi.rca.v1" || r.IncidentID != ctx.IncidentID || r.RootCause == "" || r.Confidence < 0 || r.Confidence > 1 {
 		return errors.New("invalid rca")
 	}
+	if r.Metadata.Provider == "" || r.Metadata.Model == "" || r.Metadata.CreatedAt == "" || r.Metadata.InputContextHash != HashIncidentContext(ctx) {
+		return errors.New("invalid rca metadata")
+	}
 	if len(r.RecommendedActions) == 0 || len(r.RecommendedActions) > 5 {
 		return errors.New("invalid recommended_actions")
 	}
@@ -318,7 +331,7 @@ func (s *Service) run(ctx context.Context, name string, args ...string) error {
 }
 
 func fallbackRCA(ctx IncidentContext) RCA {
-	rca := RCA{SchemaVersion: "opsi.rca.v1", IncidentID: ctx.IncidentID, RootCause: "Local anomaly detected: " + first(ctx.AnomalyType, "unknown"), Confidence: 0.62, ContributingFactors: []string{"metric anomaly", "recent service health degradation"}, RecommendedActions: []Action{{ID: "scale-replicas", Type: "scale_replicas", Description: "Scale service replicas to reduce pressure", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID, "replicas": "2"}}, {ID: "restart-pod", Type: "restart_pod", Description: "Restart deployment pods", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID}}}}
+	rca := RCA{SchemaVersion: "opsi.rca.v1", IncidentID: ctx.IncidentID, RootCause: "Local fallback analysis: " + first(ctx.AnomalyType, "unknown"), Confidence: 0.62, ContributingFactors: []string{"metric anomaly", "recent service health degradation"}, RecommendedActions: []Action{{ID: "scale-replicas", Type: "scale_replicas", Description: "Scale service replicas to reduce pressure", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID, "replicas": "2"}}, {ID: "restart-pod", Type: "restart_pod", Description: "Restart deployment pods", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID}}}, Metadata: RCAMeta{Provider: "local", ConfiguredProvider: "local", Model: "fallback", FallbackUsed: true, InputContextHash: HashIncidentContext(ctx), CreatedAt: time.Now().UTC().Format(time.RFC3339)}}
 	return withActionHashes(rca)
 }
 
@@ -349,6 +362,12 @@ func withActionHashes(r RCA) RCA {
 func hashAction(action Action) string {
 	action.ActionHash = ""
 	data, _ := json.Marshal(action)
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func HashIncidentContext(ctx IncidentContext) string {
+	data, _ := json.Marshal(ctx)
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }

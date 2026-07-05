@@ -13,6 +13,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
+	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 )
 
 func TestStartMuxServesHealthAndBuiltUI(t *testing.T) {
@@ -276,6 +277,72 @@ func TestLocalDisabledAgentEndpointIsTyped(t *testing.T) {
 	if body.Error.Code != "SECRETS_LOCAL_API_NOT_IMPLEMENTED" {
 		t.Fatalf("code = %q", body.Error.Code)
 	}
+}
+
+func TestLocalTelemetrySummaryUsesAgentAndHidesRawPayload(t *testing.T) {
+	agent := &localTelemetryServer{}
+	agentAddr, stop := startCommandTelemetryServer(t, agent)
+	defer stop()
+	cloudCalled := false
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cloudCalled = true
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, nil))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/telemetry/summary?since_unix=41")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+	if cloudCalled {
+		t.Fatal("telemetry summary must not call Cloud")
+	}
+	if strings.Contains(string(body), "raw-metric-password") {
+		t.Fatalf("response leaked raw payload: %s", body)
+	}
+	var summary struct {
+		ProjectID   string `json:"project_id"`
+		SinceUnix   int64  `json:"since_unix"`
+		ChunkCount  int    `json:"chunk_count"`
+		RecordCount int    `json:"record_count"`
+		Source      string `json:"source"`
+	}
+	if err := json.Unmarshal(body, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.ProjectID != "proj-1" || summary.SinceUnix != 41 || summary.ChunkCount != 1 || summary.RecordCount != 3 || summary.Source != "agent" {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	if agent.lastReceivedUnix != 41 {
+		t.Fatalf("agent since_unix = %d", agent.lastReceivedUnix)
+	}
+}
+
+type localTelemetryServer struct {
+	lastReceivedUnix int64
+}
+
+func (s *localTelemetryServer) Sync(req *agentv1.SyncRequest, stream agentv1.TelemetryService_SyncServer) error {
+	s.lastReceivedUnix = req.LastReceivedUnix
+	return stream.Send(&agentv1.SyncChunk{
+		ProjectID:   req.ProjectID,
+		StartUnix:   req.LastReceivedUnix,
+		EndUnix:     99,
+		RecordCount: 3,
+		Compression: "zstd",
+		Payload:     []byte("raw-metric-password=secret"),
+		Done:        true,
+	})
 }
 
 func TestLocalSessionDoesNotExposePAT(t *testing.T) {

@@ -712,6 +712,9 @@ func incidentResponse(rec *telemetry.IncidentRecord, r incident.RCA) *agentv1.In
 	for _, action := range r.RecommendedActions {
 		resp.RecommendedActions = append(resp.RecommendedActions, agentv1.RecommendedAction{ID: action.ID, Type: action.Type, Description: action.Description, RollbackSafe: action.RollbackSafe, Params: action.Params, ActionHash: action.ActionHash})
 	}
+	if r.Metadata.Provider != "" {
+		resp.RCAMetadata = &agentv1.RCAMetadata{Provider: r.Metadata.Provider, ConfiguredProvider: r.Metadata.ConfiguredProvider, Model: r.Metadata.Model, FallbackUsed: r.Metadata.FallbackUsed, InputContextHash: r.Metadata.InputContextHash, CreatedAt: r.Metadata.CreatedAt}
+	}
 	return resp
 }
 

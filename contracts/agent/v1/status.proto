@@ -250,6 +250,7 @@ message IncidentResponse {
   string mitigation_actions_json = 9;
   int64 resolved_at_unix = 10;
   int64 mttr_seconds = 11;
+  RCAMetadata rca_metadata = 12;
 }
 
 message RecommendedAction {
@@ -259,6 +260,15 @@ message RecommendedAction {
   bool rollback_safe = 4;
   map<string, string> params = 5;
   string action_hash = 6;
+}
+
+message RCAMetadata {
+  string provider = 1;
+  string configured_provider = 2;
+  string model = 3;
+  bool fallback_used = 4;
+  string input_context_hash = 5;
+  string created_at = 6;
 }
 
 enum ErrorCode {
