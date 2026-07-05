@@ -55,6 +55,9 @@ type Request struct {
 	Dockerfile                    string
 	ManifestPath                  string
 	WatchPaths                    []string
+	ContainerPort                 int
+	HealthPath                    string
+	Replicas                      int
 	TerminationGracePeriodSeconds int
 	ResourceRequestsJSON          string
 	ResourceLimitsJSON            string
@@ -102,6 +105,9 @@ type ServiceRecord struct {
 	Dockerfile                    string
 	ManifestPath                  string
 	WatchPaths                    []string
+	ContainerPort                 int
+	HealthPath                    string
+	Replicas                      int
 	TerminationGracePeriodSeconds int
 	ResourceRequestsJSON          string
 	ResourceLimitsJSON            string
@@ -123,6 +129,9 @@ func ServiceRecordFromRequest(req Request) ServiceRecord {
 		Dockerfile:                    req.Dockerfile,
 		ManifestPath:                  req.ManifestPath,
 		WatchPaths:                    req.WatchPaths,
+		ContainerPort:                 req.ContainerPort,
+		HealthPath:                    req.HealthPath,
+		Replicas:                      req.Replicas,
 		TerminationGracePeriodSeconds: req.TerminationGracePeriodSeconds,
 		ResourceRequestsJSON:          req.ResourceRequestsJSON,
 		ResourceLimitsJSON:            req.ResourceLimitsJSON,

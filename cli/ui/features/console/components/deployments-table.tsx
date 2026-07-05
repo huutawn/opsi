@@ -5,7 +5,7 @@ import { formatTime } from "@/lib/formatting/time";
 
 export function DeploymentsTable({ console }: { console: ConsoleController }) {
   const { deployments, services } = console.state;
-  if (!deployments.length) return <Empty text="No deployments. Queued jobs will appear from Cloud API." />;
+  if (!deployments.length) return <Empty text="No deployments. Queued jobs will appear after local submit." />;
   return (
     <div className="tableWrap">
       <table>

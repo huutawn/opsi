@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { RegistryClient } from "@/lib/api/registry-client";
+import { LocalClient } from "@/lib/api/local-client";
 import type {
   BootstrapSession,
   ConsoleState,
@@ -14,9 +14,7 @@ import type {
 } from "@/lib/contracts/registry";
 
 export function useConsoleState() {
-  const [cloudURL, setCloudURL] = useState("http://127.0.0.1:9800");
   const [orgID, setOrgID] = useState("org-1");
-  const [pat, setPAT] = useState("");
   const [active, setActive] = useState("Projects");
   const [projectID, setProjectID] = useState("");
   const [state, setState] = useState<ConsoleState>({
@@ -38,7 +36,7 @@ export function useConsoleState() {
     busy: "",
   });
 
-  const client = useMemo(() => new RegistryClient({ cloudURL, pat }), [cloudURL, pat]);
+  const client = useMemo(() => new LocalClient(), []);
   const currentProject = state.projects.find((item) => item.id === projectID) ?? state.projects[0] ?? null;
 
   function patch(value: Partial<ConsoleState>) {
@@ -139,6 +137,9 @@ export function useConsoleState() {
         branch: form.get("branch"),
         git_sha: form.get("git_sha"),
         build_method: form.get("build_method"),
+        build_context: form.get("build_context"),
+        dockerfile: form.get("dockerfile"),
+        manifest_path: form.get("manifest_path"),
         container_port: Number(form.get("container_port") || 0),
         health_path: form.get("health_path"),
         replicas: Number(form.get("replicas") || 1),
@@ -205,13 +206,9 @@ export function useConsoleState() {
 
   return {
     active,
-    cloudURL,
     orgID,
-    pat,
     setActive,
-    setCloudURL,
     setOrgID,
-    setPAT,
     setProjectID,
     setServiceDetail: (serviceDetail: ServiceRecord | null) => patch({ serviceDetail }),
     state: { ...state, project: currentProject },
@@ -230,7 +227,7 @@ export function useConsoleState() {
   };
 }
 
-async function loadProject(client: RegistryClient, projectID: string) {
+async function loadProject(client: LocalClient, projectID: string) {
   return Promise.all([
     client.readiness(projectID),
     client.nodes(projectID),
@@ -243,7 +240,7 @@ async function loadProject(client: RegistryClient, projectID: string) {
 }
 
 async function reconnect(
-  client: RegistryClient,
+  client: LocalClient,
   projectID: string,
   sessions: BootstrapSession[],
   deployments: DeploymentJob[],

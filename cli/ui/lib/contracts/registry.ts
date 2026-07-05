@@ -45,6 +45,10 @@ export type ServiceRecord = {
   branch?: string;
   git_sha?: string;
   build_method?: string;
+  build_context?: string;
+  dockerfile?: string;
+  manifest_path?: string;
+  watch_paths?: string[];
   container_port?: number;
   health_path?: string;
   replicas?: number;
@@ -57,6 +61,8 @@ export type DeploymentJob = {
   status: string;
   deployment_plan_hash?: string;
   manifest_hash?: string;
+  intent_hash?: string;
+  deployment_intent?: unknown;
   previous_revision_ref?: string;
   rollback_eligible?: boolean;
   rollback_blocked_reason?: string;

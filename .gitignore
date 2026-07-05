@@ -3,17 +3,25 @@
 
 # Go Binaries and Executables
 /bin/
+/release/
+/dist/
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+agent/opsi-agent
+cli/opsi
+cloud/opsi-cloud
 opsi-agent
 opsi-cli
 opsi-cloud
 certs/
+*.db
 *.sqlite
+*.sqlite3
 *.sqlite-*
+*.tsbuildinfo
 .AGENTS
 .AGENTS/*
 # Test and Coverage
@@ -22,7 +30,11 @@ certs/
 *.coverprofile
 *.prof
 /coverage/
-/release/
+.tmp/
+tmp/
+cli/ui/out/
+cli/ui/.next/
+cli/ui/node_modules/
 
 # Go module vendor (optional but good to have if we don't commit it)
 # vendor/
@@ -37,9 +49,12 @@ certs/
 .serena
 AGENTS.md
 headroom_memory.db
-.agents
+.agents/*
+.agents/rules_enforced.md
 .agents_archive
 docs/*
+docs/repair/
+!docs/repair/*.md
 !docs/status_matrix.md
 !docs/demo_runbook.md
 !docs/security_story.md

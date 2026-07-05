@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	AgentAddr     string    `yaml:"agent_addr"`
+	CloudURL      string    `yaml:"cloud_url"`
 	SyncStatePath string    `yaml:"sync_state_path"`
 	TLS           TLSConfig `yaml:"tls"`
 }
@@ -23,7 +24,7 @@ type TLSConfig struct {
 }
 
 func Default() Config {
-	return Config{AgentAddr: "127.0.0.1:9443"}
+	return Config{AgentAddr: "127.0.0.1:9443", CloudURL: "http://127.0.0.1:9800"}
 }
 
 func Load(path string) (Config, error) {
@@ -48,6 +49,9 @@ func Load(path string) (Config, error) {
 func (c Config) Validate() error {
 	if c.AgentAddr == "" {
 		return errors.New("agent_addr is required")
+	}
+	if c.CloudURL == "" {
+		return errors.New("cloud_url is required")
 	}
 	if (c.TLS.ClientCertPath == "") != (c.TLS.ClientKeyPath == "") {
 		return errors.New("tls.client_cert_path and tls.client_key_path must be configured together")

@@ -1,14 +1,13 @@
 # Opsi Status Matrix
 
-| SRS requirement | Status | Evidence | Gap | Issue ID |
-|---|---|---|---|---|
-| Local-first Agent owns runtime execution/data | Partial | `agent/` deploy, telemetry, secrets, incidents; CLI local status bridge | Local UI still needs more Agent-backed pages | A-01, CS-02, P2-A |
-| Continuous deployment from Cloud relay to Agent | Implemented minimum | `agent/internal/cloudrunner`, Cloud lease/result APIs | Progress events are still terminal/coarse | D-01, D-03 |
-| Project-scoped operational actions | Implemented minimum | Agent/Cloud requests carry `project_id`; RBAC tests exist | Keep expanding matrix as RPCs grow | SEC-01 |
-| PAT verify and role-aware access | Implemented minimum | Cloud bcrypt PAT verify; Agent mutation guards | OAuth/PAT issuance UI missing | SEC-01 |
-| Secret reveal gated by Owner + OTP/TOTP | Implemented minimum | Agent secret service + Cloud OTP | Agent-vault HTTP UI endpoints missing | SEC-05 |
-| Cloud does not store raw operational payloads | Partial | Telemetry remains local; AI endpoint rejects secret/raw-log keys | Durable webhook relay queue still pending | CS-03, OBS-04, P2-B |
-| AI RCA uses sanitized context | Partial | Incident context schema gate; fixture metadata explicit | Gemini/provider adapter not wired | OBS-02, P2-C |
-| Audit trail for sensitive actions | Implemented minimum | Cloud/Agent audit paths; Postgres append-only trigger | More UI audit filtering needed | SEC-06 |
-| Production packaging | Partial | `Makefile build/release`, version ldflags, embedded CLI UI | Installer/service units not included | DX-03, P2-F |
-
+| Requirement ID | Requirement | Status | Evidence paths | Tests | Gaps | Next action |
+|---|---|---|---|---|---|---|
+| A-01 | Local-first Agent owns runtime execution/data | Partial | `agent/`; `cli/internal/commands/start.go`; `cli/ui/lib/api/local-client.ts`; `/api/local/session`; `/api/local/status`; `/api/local/projects...` | `make verify`; local session/mutation guard tests; local proxy keychain/PAT tests; UI build | Secret reveal/rotation, incidents/RCA actions, telemetry/logs, and runtime audit merge still need Agent-backed local endpoints | Implement remaining Agent-owned local API facade areas |
+| D-01 | Continuous deployment from Cloud relay to Agent | Partial | `agent/internal/cloudrunner`; `agent/internal/deploy`; `cloud/internal/registry`; Cloud lease/result APIs | CloudRunner, deploy manifest, registry intent, local proxy, and registry API tests | Progress events are terminal/coarse; durable relay queue still pending | Expand progress streaming and durable relay without storing raw runtime payloads |
+| SEC-01 | Project-scoped operational actions | Implemented | Agent/Cloud requests carry `project_id`; RBAC guards | RBAC and service/deploy tests | Matrix must expand as RPC surface grows | Keep project-scope tests mandatory for new operations |
+| SEC-02 | PAT verify and role-aware access | Partial | `cloud/internal/auth`; Agent PAT verify cache; CLI keychain; `/api/local/session` | Auth/keychain/local session tests | OAuth/PAT issuance UI missing; browser login endpoint returns typed disabled error | Implement browser-safe OAuth/local login flow |
+| SEC-05 | Secret reveal gated by Owner + OTP/TOTP | Partial | Agent secret service; Cloud OTP | Non-owner reveal, missing second-factor, verified-role, OTP expiry/one-time/rate-limit tests | Agent-vault HTTP UI endpoints missing | Add local secret endpoints through CLI backend |
+| CS-03 | Cloud does not store raw operational payloads | Partial | Local telemetry stores; AI payload sanitizer | Sanitizer/redaction tests | Durable webhook relay queue still pending | Add durable relay without raw runtime payload storage |
+| OBS-02 | AI RCA uses sanitized context | Partial | Incident context schema gate; fixture/Gemini adapter metadata | Raw-log/secret-like AI payload rejection, Incident sanitizer, unsafe action, stale-action tests | Gemini output still maps mostly to root-cause text; actions remain fixture-typed | Expand provider schema without allowing free-form execution |
+| SEC-06 | Audit trail for sensitive actions | Partial | Cloud/Agent audit paths; Postgres append-only trigger; `/api/local/projects/{project_id}/audit` proxy | Audit/RBAC/local proxy tests | Runtime audit merge with Agent audit is still pending | Merge Agent runtime audit into local audit endpoint |
+| DX-03 | Production packaging and source hygiene | Partial | `README.md`; `Makefile` `verify`, `clean`, `package-source`; `.gitignore`; `docs/repair/00_FIX_SCOPE_AND_GATES.md` | `make verify`; `make test`; `make build`; `make clean`; `make source-hygiene`; `make package-source` | Installer/service units missing | Keep generated artifacts out of source; add installer/service units later |

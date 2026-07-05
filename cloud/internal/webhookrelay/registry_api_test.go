@@ -112,20 +112,32 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 		Status             string `json:"status"`
 		DeploymentPlanHash string `json:"deployment_plan_hash"`
 		ManifestHash       string `json:"manifest_hash"`
+		IntentHash         string `json:"intent_hash"`
 		NodeID             string `json:"node_id"`
 		AgentID            string `json:"agent_id"`
+		DeploymentIntent   struct {
+			IntentVersion string `json:"intent_version"`
+			Source        struct {
+				BuildContext string `json:"build_context"`
+				Dockerfile   string `json:"dockerfile"`
+				ManifestPath string `json:"manifest_path"`
+			} `json:"source"`
+		} `json:"deployment_intent"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&deploy); err != nil {
 		t.Fatal(err)
 	}
-	if deploy.Status != "queued" || deploy.DeploymentPlanHash == "" || deploy.ManifestHash == "" || deploy.NodeID == "" || deploy.AgentID == "" {
+	if deploy.Status != "queued" || deploy.DeploymentPlanHash == "" || deploy.ManifestHash == "" || deploy.IntentHash == "" || deploy.NodeID == "" || deploy.AgentID == "" || deploy.DeploymentIntent.IntentVersion == "" {
 		t.Fatalf("unexpected deploy: %+v", deploy)
+	}
+	if deploy.DeploymentIntent.Source.BuildContext != "." || deploy.DeploymentIntent.Source.Dockerfile != "Dockerfile" || deploy.DeploymentIntent.Source.ManifestPath == "" {
+		t.Fatalf("unexpected deployment intent: %+v", deploy.DeploymentIntent)
 	}
 	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+node.ID+"/webhooks/next?project_id="+project.ID+"&wait=0s", nil)
 	req.Header.Set("Authorization", "Bearer "+agentToken)
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"kind":"deployment"`)) {
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"kind":"deployment"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"intent_hash":"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"deployment_intent"`)) {
 		t.Fatalf("lease status=%d body=%s", w.Code, w.Body.String())
 	}
 	req = httptest.NewRequest(http.MethodPost, "/v1/agents/"+node.ID+"/deployments/"+deploy.ID+"/result?project_id="+project.ID, bytes.NewReader([]byte(`{"status":"succeeded","final_revision_ref":"rev-1","rollback_eligible":true}`)))

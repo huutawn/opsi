@@ -85,3 +85,48 @@ func TestRequestFromLeaseRejectsImageSource(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestRequestFromLeaseUsesDeploymentIntentBeforeConfig(t *testing.T) {
+	req, err := RequestFromLease(cloudrelay.DeploymentLease{
+		Deployment: cloudrelay.DeploymentJobEnvelope{DeploymentIntent: &cloudrelay.DeploymentIntent{
+			ProjectID: "intent-proj",
+			Source: cloudrelay.DeploymentIntentSource{
+				Type:         "git",
+				RepoURL:      "https://example.test/intent.git",
+				Branch:       "intent-main",
+				GitSHA:       "0123456789abcdef",
+				BuildContext: "services/api",
+				Dockerfile:   "Dockerfile.intent",
+				ManifestPath: "deploy/intent",
+				WatchPaths:   []string{"services/api/**"},
+			},
+			Runtime:   cloudrelay.DeploymentIntentRuntime{ContainerPort: 9090, Replicas: 3},
+			Health:    cloudrelay.DeploymentIntentHealth{Path: "/ready"},
+			Resources: map[string]any{"requests": map[string]string{"cpu": "250m"}, "limits": map[string]string{"memory": "768Mi"}},
+			Bindings:  []cloudrelay.DeploymentIntentBinding{{ServiceID: "svc-db", Alias: "primary-db", EnvPrefix: "DB", ExposeAsDefault: true, EnvKeys: []string{"DATABASE_URL"}}},
+		}},
+		Service: cloudrelay.ServiceEnvelope{ID: "api", Name: "api", Type: "application", SourceType: "git", RepoURL: "https://example.test/service.git", Branch: "service-main", GitSHA: "service-sha", BuildContext: "service", Dockerfile: "Dockerfile.service", ManifestPath: "deploy/service", WatchPaths: []string{"service/**"}, Namespace: "default"},
+	}, config.DeploymentConfig{ProjectID: "cfg-proj", RepoURL: "https://example.test/cfg.git", Branch: "cfg-main", BuildContext: "cfg", Dockerfile: "Dockerfile.cfg", ManifestPath: "deploy/cfg", WatchPaths: []string{"cfg/**"}, Namespace: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.ProjectID != "intent-proj" || req.RepoURL != "https://example.test/intent.git" || req.Branch != "intent-main" || req.GitSHA != "0123456789abcdef" || req.BuildContext != "services/api" || req.Dockerfile != "Dockerfile.intent" || req.ManifestPath != "deploy/intent" {
+		t.Fatalf("request used fallback: %+v", req)
+	}
+	if len(req.WatchPaths) != 1 || req.WatchPaths[0] != "services/api/**" {
+		t.Fatalf("watch paths = %#v", req.WatchPaths)
+	}
+	if req.ContainerPort != 9090 || req.HealthPath != "/ready" || req.Replicas != 3 || req.ResourceRequestsJSON != `{"cpu":"250m"}` || req.ResourceLimitsJSON != `{"memory":"768Mi"}` {
+		t.Fatalf("runtime/resources = %+v", req)
+	}
+	if len(req.DependsOn) != 1 || req.DependsOn[0].Name != "primary-db" || req.DependsOn[0].EnvPrefix != "DB" || len(req.DependsOn[0].EnvKeys) != 1 {
+		t.Fatalf("depends_on = %#v", req.DependsOn)
+	}
+}
+
+func TestResultFromRecordIncludesIntentHash(t *testing.T) {
+	result := ResultFromRecord(deploy.Record{Status: deploy.StatusSuccess}, nil, cloudrelay.DeploymentLease{Deployment: cloudrelay.DeploymentJobEnvelope{DeploymentIntent: &cloudrelay.DeploymentIntent{Review: cloudrelay.DeploymentIntentReview{IntentHash: "sha256:intent"}}}})
+	if result.IntentHash != "sha256:intent" {
+		t.Fatalf("intent hash = %q", result.IntentHash)
+	}
+}

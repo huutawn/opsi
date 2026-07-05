@@ -23,13 +23,16 @@ spec:
 		ResourceRequestsJSON:          DefaultResourceRequestsJSON,
 		ResourceLimitsJSON:            DefaultResourceLimitsJSON,
 		TerminationGracePeriodSeconds: 45,
+		ContainerPort:                 9090,
+		HealthPath:                    "/ready",
+		Replicas:                      3,
 		IngressEnabled:                true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := string(rendered)
-	for _, want := range []string{"maxUnavailable: 0", "terminationGracePeriodSeconds: 45", "memory: 128Mi", "cpu: 500m", "sleep 10", "cpu: 200m"} {
+	for _, want := range []string{"replicas: 3", "maxUnavailable: 0", "terminationGracePeriodSeconds: 45", "containerPort: 9090", "path: /ready", "memory: 128Mi", "cpu: 500m", "sleep 10", "cpu: 200m"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in manifest:\n%s", want, out)
 		}

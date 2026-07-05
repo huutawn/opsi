@@ -1,42 +1,64 @@
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 GOCACHE ?= /tmp/opsi-go-cache
+GOTOOLCHAIN ?= local
+UI_NPM ?= npm
+RTK ?= $(shell command -v rtk >/dev/null 2>&1 && echo rtk)
+RUN := $(if $(strip $(RTK)),$(RTK),)
+PROXY := $(if $(strip $(RTK)),$(RTK) proxy,)
 
-.PHONY: test build ui-build lint e2e-dry-run release smoke-release
+.PHONY: verify test build ui-build lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
+
+verify: source-hygiene lint test ui-build
 
 test:
-	cd contracts/go && rtk env GOCACHE=$(GOCACHE) go test ./...
-	cd agent && rtk env GOCACHE=$(GOCACHE) go test ./...
-	cd cli && rtk env GOCACHE=$(GOCACHE) go test ./...
-	cd cloud && rtk env GOCACHE=$(GOCACHE) go test ./...
+	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
+	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
+	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./cmd/... ./internal/...
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
 
 build:
-	rtk mkdir -p bin
-	cd agent && rtk env GOCACHE=$(GOCACHE) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-agent ./cmd/opsi-agent
-	cd cli && rtk env GOCACHE=$(GOCACHE) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi ./cmd/opsi
-	cd cloud && rtk env GOCACHE=$(GOCACHE) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-cloud ./cmd/opsi-cloud
+	$(RUN) mkdir -p bin
+	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-agent ./cmd/opsi-agent
+	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi ./cmd/opsi
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-cloud ./cmd/opsi-cloud
 
 ui-build:
-	cd cli/ui && rtk npm run build
+	cd cli/ui && $(RUN) $(UI_NPM) ci
+	cd cli/ui && $(RUN) $(UI_NPM) run build
 
 lint:
-	cd agent && rtk env GOCACHE=$(GOCACHE) go vet ./...
-	cd cli && rtk env GOCACHE=$(GOCACHE) go vet ./...
-	cd cloud && rtk env GOCACHE=$(GOCACHE) go vet ./...
-	cd contracts/go && rtk env GOCACHE=$(GOCACHE) go vet ./...
+	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
+	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./cmd/... ./internal/...
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
+	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
+
+source-hygiene:
+	@if $(PROXY) find . -type f \( -path './bin/*' -o -path './release/*' -o -path './cli/ui/out/*' -o -path './cli/ui/.next/*' -o -name 'opsi-agent' -o -name 'opsi-cloud' -o -name 'opsi' -o -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.sqlite3' -o -name '*.tsbuildinfo' \) -print | grep -n "."; then echo "source hygiene failed: run 'make clean' and do not commit generated artifacts"; exit 1; fi
+
+package-source:
+	$(RUN) mkdir -p dist
+	$(RUN) tar --exclude-vcs --exclude='./bin' --exclude='./release' --exclude='./dist' --exclude='./agent/opsi-agent' --exclude='./cli/opsi' --exclude='./cloud/opsi-cloud' --exclude='./cli/ui/out' --exclude='./cli/ui/.next' --exclude='./cli/ui/node_modules' --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite-*' --exclude='*.sqlite3' --exclude='*.tsbuildinfo' --exclude='./coverage' --exclude='./.tmp' --exclude='./tmp' -czf dist/opsi-source.tar.gz --transform 's,^,opsi/,' .
+	$(RUN) $(MAKE) check-source-package
+
+check-source-package:
+	@if $(RUN) tar -tzf dist/opsi-source.tar.gz | grep -En "(^opsi/bin/|^opsi/release/|opsi-agent$$|opsi-cloud$$|/opsi$$|\\.db$$|\\.sqlite($$|-)|\\.sqlite3$$|tsconfig\\.tsbuildinfo|cli/ui/(out|\\.next|node_modules)/)"; then echo "source archive contains forbidden artifacts"; exit 1; fi
+
+clean:
+	$(RUN) rm -rf bin release dist agent/opsi-agent cli/opsi cloud/opsi-cloud cli/ui/out cli/ui/.next cli/ui/node_modules cli/ui/tsconfig.tsbuildinfo headroom_memory.db coverage .tmp tmp
 
 e2e-dry-run:
-	cd agent && rtk env GOCACHE=$(GOCACHE) go test ./internal/cloudrunner
+	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/cloudrunner
 
 release: build
-	rtk mkdir -p release/config.examples release/docs
-	rtk cp bin/opsi release/opsi
-	rtk cp bin/opsi-agent release/opsi-agent
-	rtk cp bin/opsi-cloud release/opsi-cloud
-	rtk cp docs/demo_runbook.md release/docs/demo_runbook.md
-	cd release && rtk sha256sum opsi opsi-agent opsi-cloud > checksums.txt
+	$(RUN) mkdir -p release/config.examples release/docs
+	$(RUN) cp bin/opsi release/opsi
+	$(RUN) cp bin/opsi-agent release/opsi-agent
+	$(RUN) cp bin/opsi-cloud release/opsi-cloud
+	$(RUN) cp docs/demo_runbook.md release/docs/demo_runbook.md
+	cd release && $(RUN) sha256sum opsi opsi-agent opsi-cloud > checksums.txt
 
 smoke-release:
-	rtk proxy ./release/opsi version
-	rtk proxy ./release/opsi-agent --version
-	rtk proxy ./release/opsi-cloud --version
+	$(PROXY) ./release/opsi version
+	$(PROXY) ./release/opsi-agent --version
+	$(PROXY) ./release/opsi-cloud --version

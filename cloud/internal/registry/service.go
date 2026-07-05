@@ -207,65 +207,153 @@ type BootstrapEvent struct {
 }
 
 type ServiceRecord struct {
-	ID            string    `json:"id"`
-	OrgID         string    `json:"org_id"`
-	ProjectID     string    `json:"project_id"`
-	EnvironmentID string    `json:"environment_id"`
-	RuntimeID     string    `json:"runtime_id"`
-	Name          string    `json:"name"`
-	Type          string    `json:"type"`
-	Status        string    `json:"status"`
-	SourceType    string    `json:"source_type"`
-	RepoURL       string    `json:"repo_url,omitempty"`
-	Image         string    `json:"image,omitempty"`
-	Branch        string    `json:"branch,omitempty"`
-	GitSHA        string    `json:"git_sha,omitempty"`
-	BuildMethod   string    `json:"build_method,omitempty"`
-	ContainerPort int       `json:"container_port,omitempty"`
-	HealthPath    string    `json:"health_path,omitempty"`
-	Replicas      int       `json:"replicas,omitempty"`
-	Namespace     string    `json:"namespace"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID               string            `json:"id"`
+	OrgID            string            `json:"org_id"`
+	ProjectID        string            `json:"project_id"`
+	EnvironmentID    string            `json:"environment_id"`
+	RuntimeID        string            `json:"runtime_id"`
+	Name             string            `json:"name"`
+	Type             string            `json:"type"`
+	Status           string            `json:"status"`
+	SourceType       string            `json:"source_type"`
+	RepoURL          string            `json:"repo_url,omitempty"`
+	Image            string            `json:"image,omitempty"`
+	Branch           string            `json:"branch,omitempty"`
+	GitSHA           string            `json:"git_sha,omitempty"`
+	BuildMethod      string            `json:"build_method,omitempty"`
+	BuildContext     string            `json:"build_context,omitempty"`
+	Dockerfile       string            `json:"dockerfile,omitempty"`
+	ManifestPath     string            `json:"manifest_path,omitempty"`
+	WatchPaths       []string          `json:"watch_paths,omitempty"`
+	ContainerPort    int               `json:"container_port,omitempty"`
+	HealthPath       string            `json:"health_path,omitempty"`
+	Replicas         int               `json:"replicas,omitempty"`
+	ResourceRequests map[string]string `json:"resource_requests,omitempty"`
+	ResourceLimits   map[string]string `json:"resource_limits,omitempty"`
+	Bindings         []ServiceBinding  `json:"bindings,omitempty"`
+	Namespace        string            `json:"namespace"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
 type ServiceDraft struct {
-	Name          string `json:"name"`
-	Type          string `json:"type"`
-	SourceType    string `json:"source_type"`
-	RepoURL       string `json:"repo_url"`
-	Image         string `json:"image"`
-	Branch        string `json:"branch"`
-	GitSHA        string `json:"git_sha"`
-	BuildMethod   string `json:"build_method"`
-	ContainerPort int    `json:"container_port"`
-	HealthPath    string `json:"health_path"`
-	Replicas      int    `json:"replicas"`
+	Name             string            `json:"name"`
+	Type             string            `json:"type"`
+	SourceType       string            `json:"source_type"`
+	RepoURL          string            `json:"repo_url"`
+	Image            string            `json:"image"`
+	Branch           string            `json:"branch"`
+	GitSHA           string            `json:"git_sha"`
+	BuildMethod      string            `json:"build_method"`
+	BuildContext     string            `json:"build_context"`
+	Dockerfile       string            `json:"dockerfile"`
+	ManifestPath     string            `json:"manifest_path"`
+	WatchPaths       []string          `json:"watch_paths"`
+	ContainerPort    int               `json:"container_port"`
+	HealthPath       string            `json:"health_path"`
+	Replicas         int               `json:"replicas"`
+	ResourceRequests map[string]string `json:"resource_requests"`
+	ResourceLimits   map[string]string `json:"resource_limits"`
+	Bindings         []ServiceBinding  `json:"bindings"`
+}
+
+type ServiceBinding struct {
+	ServiceID       string   `json:"service_id"`
+	Alias           string   `json:"alias,omitempty"`
+	EnvPrefix       string   `json:"env_prefix,omitempty"`
+	ExposeAsDefault bool     `json:"expose_as_default,omitempty"`
+	EnvKeys         []string `json:"env_keys,omitempty"`
+}
+
+const DeploymentIntentVersion = "2026-07-opsi-deployment-intent-v1"
+
+type DeploymentIntent struct {
+	IntentVersion string                    `json:"intent_version"`
+	ProjectID     string                    `json:"project_id"`
+	ServiceID     string                    `json:"service_id"`
+	DeploymentID  string                    `json:"deployment_id"`
+	RequestedBy   string                    `json:"requested_by,omitempty"`
+	Source        DeploymentIntentSource    `json:"source"`
+	Image         DeploymentIntentImage     `json:"image,omitempty"`
+	Runtime       DeploymentIntentRuntime   `json:"runtime"`
+	Health        DeploymentIntentHealth    `json:"health"`
+	Resources     map[string]any            `json:"resources,omitempty"`
+	Bindings      []DeploymentIntentBinding `json:"bindings,omitempty"`
+	Rollout       DeploymentIntentRollout   `json:"rollout"`
+	Review        DeploymentIntentReview    `json:"review"`
+}
+
+type DeploymentIntentSource struct {
+	Type         string   `json:"type"`
+	RepoURL      string   `json:"repo_url,omitempty"`
+	Branch       string   `json:"branch,omitempty"`
+	GitSHA       string   `json:"git_sha,omitempty"`
+	BuildContext string   `json:"build_context,omitempty"`
+	Dockerfile   string   `json:"dockerfile,omitempty"`
+	ManifestPath string   `json:"manifest_path,omitempty"`
+	WatchPaths   []string `json:"watch_paths,omitempty"`
+}
+
+type DeploymentIntentImage struct {
+	Repository string `json:"repository,omitempty"`
+	Tag        string `json:"tag,omitempty"`
+	PullPolicy string `json:"pull_policy,omitempty"`
+}
+
+type DeploymentIntentRuntime struct {
+	ContainerPort int            `json:"container_port,omitempty"`
+	Env           map[string]any `json:"env,omitempty"`
+	Replicas      int            `json:"replicas,omitempty"`
+}
+
+type DeploymentIntentHealth struct {
+	Path string `json:"path,omitempty"`
+}
+
+type DeploymentIntentBinding struct {
+	ServiceID       string   `json:"service_id"`
+	Alias           string   `json:"alias,omitempty"`
+	EnvPrefix       string   `json:"env_prefix,omitempty"`
+	ExposeAsDefault bool     `json:"expose_as_default,omitempty"`
+	EnvKeys         []string `json:"env_keys,omitempty"`
+}
+
+type DeploymentIntentRollout struct {
+	TimeoutSeconds int  `json:"timeout_seconds"`
+	AutoRollback   bool `json:"auto_rollback"`
+}
+
+type DeploymentIntentReview struct {
+	Confirmed    bool   `json:"confirmed"`
+	ManifestHash string `json:"manifest_hash,omitempty"`
+	IntentHash   string `json:"intent_hash,omitempty"`
 }
 
 type DeploymentJob struct {
-	ID                     string     `json:"id"`
-	OrgID                  string     `json:"org_id"`
-	ProjectID              string     `json:"project_id"`
-	EnvironmentID          string     `json:"environment_id"`
-	RuntimeID              string     `json:"runtime_id"`
-	ServiceID              string     `json:"service_id"`
-	Status                 string     `json:"status"`
-	IdempotencyKey         string     `json:"idempotency_key"`
-	DeploymentPlanHash     string     `json:"deployment_plan_hash,omitempty"`
-	ManifestHash           string     `json:"manifest_hash,omitempty"`
-	PreviousRevisionRef    string     `json:"previous_revision_ref,omitempty"`
-	RollbackEligible       bool       `json:"rollback_eligible"`
-	RollbackBlockedReason  string     `json:"rollback_blocked_reason,omitempty"`
-	RequestedBy            string     `json:"requested_by,omitempty"`
-	AgentID                string     `json:"agent_id,omitempty"`
-	NodeID                 string     `json:"node_id,omitempty"`
-	FailureCode            string     `json:"failure_code,omitempty"`
-	FailureMessageRedacted string     `json:"failure_message_redacted,omitempty"`
-	StartedAt              *time.Time `json:"started_at,omitempty"`
-	FinishedAt             *time.Time `json:"finished_at,omitempty"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
+	ID                     string            `json:"id"`
+	OrgID                  string            `json:"org_id"`
+	ProjectID              string            `json:"project_id"`
+	EnvironmentID          string            `json:"environment_id"`
+	RuntimeID              string            `json:"runtime_id"`
+	ServiceID              string            `json:"service_id"`
+	Status                 string            `json:"status"`
+	IdempotencyKey         string            `json:"idempotency_key"`
+	DeploymentPlanHash     string            `json:"deployment_plan_hash,omitempty"`
+	ManifestHash           string            `json:"manifest_hash,omitempty"`
+	IntentHash             string            `json:"intent_hash,omitempty"`
+	DeploymentIntent       *DeploymentIntent `json:"deployment_intent,omitempty"`
+	PreviousRevisionRef    string            `json:"previous_revision_ref,omitempty"`
+	RollbackEligible       bool              `json:"rollback_eligible"`
+	RollbackBlockedReason  string            `json:"rollback_blocked_reason,omitempty"`
+	RequestedBy            string            `json:"requested_by,omitempty"`
+	AgentID                string            `json:"agent_id,omitempty"`
+	NodeID                 string            `json:"node_id,omitempty"`
+	FailureCode            string            `json:"failure_code,omitempty"`
+	FailureMessageRedacted string            `json:"failure_message_redacted,omitempty"`
+	StartedAt              *time.Time        `json:"started_at,omitempty"`
+	FinishedAt             *time.Time        `json:"finished_at,omitempty"`
+	CreatedAt              time.Time         `json:"created_at"`
+	UpdatedAt              time.Time         `json:"updated_at"`
 }
 
 type deploymentLock struct {
@@ -296,6 +384,7 @@ type DeploymentLease struct {
 type DeploymentResult struct {
 	Status                 string `json:"status"`
 	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
+	IntentHash             string `json:"intent_hash,omitempty"`
 	FailureCode            string `json:"failure_code,omitempty"`
 	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
 	RollbackEligible       bool   `json:"rollback_eligible"`
@@ -873,13 +962,22 @@ func (s *Service) CreateService(projectID string, draft ServiceDraft, key string
 	if draft.BuildMethod == "" {
 		draft.BuildMethod = "dockerfile"
 	}
+	if draft.BuildContext == "" {
+		draft.BuildContext = "."
+	}
+	if draft.Dockerfile == "" {
+		draft.Dockerfile = "Dockerfile"
+	}
+	if draft.ManifestPath == "" {
+		draft.ManifestPath = "k8s/deployment.yaml"
+	}
 	if draft.HealthPath == "" {
 		draft.HealthPath = "/health"
 	}
 	if draft.Replicas == 0 {
 		draft.Replicas = 1
 	}
-	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, Namespace: "default", CreatedAt: now, UpdatedAt: now}
+	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, BuildContext: draft.BuildContext, Dockerfile: draft.Dockerfile, ManifestPath: draft.ManifestPath, WatchPaths: draft.WatchPaths, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, ResourceRequests: cloneStringMap(draft.ResourceRequests), ResourceLimits: cloneStringMap(draft.ResourceLimits), Bindings: cloneServiceBindings(draft.Bindings), Namespace: "default", CreatedAt: now, UpdatedAt: now}
 	if record.Name == "" {
 		record.Name = record.ID
 	}
@@ -1035,10 +1133,17 @@ func validateServiceForDeploy(service ServiceRecord, requestID string) error {
 		if service.GitSHA == "" {
 			return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "git services require git_sha before deployment.", RequestID: requestID}
 		}
-	case "image":
-		if service.Image == "" {
-			return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "image services require image before deployment.", RequestID: requestID}
+		if service.BuildContext == "" {
+			return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "git services require build_context before deployment.", RequestID: requestID}
 		}
+		if service.Dockerfile == "" {
+			return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "git services require dockerfile before deployment.", RequestID: requestID}
+		}
+		if service.ManifestPath == "" {
+			return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "git services require manifest_path before deployment.", RequestID: requestID}
+		}
+	case "image":
+		return APIError{Status: 400, Code: "IMAGE_DEPLOY_NOT_SUPPORTED", Message: "Image-source deploy is not supported by the current Agent runner. Use Git source or enable the image deploy capability.", RequestID: requestID}
 	default:
 		return APIError{Status: 400, Code: "SERVICE_CONFIG_INVALID", Message: "source_type must be git or image.", RequestID: requestID}
 	}
@@ -1082,7 +1187,12 @@ func (s *Service) previousSuccessfulLocked(projectID, serviceID string) Deployme
 
 func deploymentJobForPlan(service ServiceRecord, previous DeploymentJob, node Node, agent Agent, key, requestedBy string, now time.Time) DeploymentJob {
 	job := DeploymentJob{ID: newID("dep"), OrgID: service.OrgID, ProjectID: service.ProjectID, EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, ServiceID: service.ID, Status: DeploymentQueued, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, CreatedAt: now, UpdatedAt: now}
-	job.ManifestHash = hashJSON(map[string]any{"service_id": service.ID, "source_type": service.SourceType, "repo_url": service.RepoURL, "image": service.Image, "branch": service.Branch, "git_sha": service.GitSHA, "container_port": service.ContainerPort, "health_path": service.HealthPath, "replicas": service.Replicas, "namespace": service.Namespace})
+	intent := deploymentIntentForService(service, job.ID, requestedBy)
+	job.ManifestHash = hashJSON(map[string]any{"service_id": service.ID, "source_type": service.SourceType, "repo_url": service.RepoURL, "image": service.Image, "branch": service.Branch, "git_sha": service.GitSHA, "build_context": service.BuildContext, "dockerfile": service.Dockerfile, "manifest_path": service.ManifestPath, "watch_paths": service.WatchPaths, "container_port": service.ContainerPort, "health_path": service.HealthPath, "replicas": service.Replicas, "resource_requests": service.ResourceRequests, "resource_limits": service.ResourceLimits, "bindings": service.Bindings, "namespace": service.Namespace})
+	intent.Review.ManifestHash = job.ManifestHash
+	intent.Review.IntentHash = hashJSON(intent)
+	job.IntentHash = intent.Review.IntentHash
+	job.DeploymentIntent = &intent
 	job.PreviousRevisionRef = previous.ManifestHash
 	if job.PreviousRevisionRef == "" && previous.ID != "" {
 		job.PreviousRevisionRef = previous.ID
@@ -1091,8 +1201,95 @@ func deploymentJobForPlan(service ServiceRecord, previous DeploymentJob, node No
 	if !job.RollbackEligible {
 		job.RollbackBlockedReason = "no previous successful revision"
 	}
-	job.DeploymentPlanHash = hashJSON(map[string]any{"service_id": service.ID, "manifest_hash": job.ManifestHash, "previous_revision_ref": job.PreviousRevisionRef, "target_node_id": node.ID, "agent_id": agent.ID})
+	job.DeploymentPlanHash = hashJSON(map[string]any{"service_id": service.ID, "manifest_hash": job.ManifestHash, "intent_hash": job.IntentHash, "previous_revision_ref": job.PreviousRevisionRef, "target_node_id": node.ID, "agent_id": agent.ID})
 	return job
+}
+
+func deploymentIntentForService(service ServiceRecord, deploymentID, requestedBy string) DeploymentIntent {
+	image := DeploymentIntentImage{}
+	if service.Image != "" {
+		image.Repository = service.Image
+		image.PullPolicy = "IfNotPresent"
+	}
+	replicas := service.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	return DeploymentIntent{
+		IntentVersion: DeploymentIntentVersion,
+		ProjectID:     service.ProjectID,
+		ServiceID:     service.ID,
+		DeploymentID:  deploymentID,
+		RequestedBy:   requestedBy,
+		Source: DeploymentIntentSource{
+			Type:         service.SourceType,
+			RepoURL:      service.RepoURL,
+			Branch:       service.Branch,
+			GitSHA:       service.GitSHA,
+			BuildContext: service.BuildContext,
+			Dockerfile:   service.Dockerfile,
+			ManifestPath: service.ManifestPath,
+			WatchPaths:   append([]string(nil), service.WatchPaths...),
+		},
+		Image:     image,
+		Runtime:   DeploymentIntentRuntime{ContainerPort: service.ContainerPort, Env: map[string]any{}, Replicas: replicas},
+		Health:    DeploymentIntentHealth{Path: service.HealthPath},
+		Resources: deploymentIntentResources(service),
+		Bindings:  deploymentIntentBindings(service.Bindings),
+		Rollout:   DeploymentIntentRollout{TimeoutSeconds: 600, AutoRollback: true},
+		Review:    DeploymentIntentReview{Confirmed: true},
+	}
+}
+
+func deploymentIntentResources(service ServiceRecord) map[string]any {
+	resources := map[string]any{}
+	if len(service.ResourceRequests) > 0 {
+		resources["requests"] = cloneStringMap(service.ResourceRequests)
+	}
+	if len(service.ResourceLimits) > 0 {
+		resources["limits"] = cloneStringMap(service.ResourceLimits)
+	}
+	return resources
+}
+
+func deploymentIntentBindings(bindings []ServiceBinding) []DeploymentIntentBinding {
+	if len(bindings) == 0 {
+		return nil
+	}
+	out := make([]DeploymentIntentBinding, 0, len(bindings))
+	for _, binding := range bindings {
+		out = append(out, DeploymentIntentBinding{
+			ServiceID:       binding.ServiceID,
+			Alias:           binding.Alias,
+			EnvPrefix:       binding.EnvPrefix,
+			ExposeAsDefault: binding.ExposeAsDefault,
+			EnvKeys:         append([]string(nil), binding.EnvKeys...),
+		})
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneServiceBindings(in []ServiceBinding) []ServiceBinding {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ServiceBinding, 0, len(in))
+	for _, binding := range in {
+		binding.EnvKeys = append([]string(nil), binding.EnvKeys...)
+		out = append(out, binding)
+	}
+	return out
 }
 
 func deploymentQueuedEvents(job DeploymentJob, requestID string, now time.Time) []DeploymentEvent {

@@ -145,7 +145,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress ProgressFunc)
 
 	manifestPath := filepath.Join(workDir, req.ManifestPath)
 	renderedManifestPath := filepath.Join(workDir, ".opsi-rendered-manifest.yaml")
-	if err := renderManifestFile(manifestPath, renderedManifestPath, manifestOptions{ResourceRequestsJSON: req.ResourceRequestsJSON, ResourceLimitsJSON: req.ResourceLimitsJSON, TerminationGracePeriodSeconds: req.TerminationGracePeriodSeconds, IngressEnabled: req.IngressEnabled, BindingDependencies: req.DependsOn}); err != nil {
+	if err := renderManifestFile(manifestPath, renderedManifestPath, manifestOptions{ResourceRequestsJSON: req.ResourceRequestsJSON, ResourceLimitsJSON: req.ResourceLimitsJSON, TerminationGracePeriodSeconds: req.TerminationGracePeriodSeconds, ContainerPort: req.ContainerPort, HealthPath: req.HealthPath, Replicas: req.Replicas, IngressEnabled: req.IngressEnabled, BindingDependencies: req.DependsOn}); err != nil {
 		return e.fail(ctx, record, progress, PhaseFailed, StatusFailed, err)
 	}
 	if err := emit(progress, record, PhaseApplying, "applying manifest", 70, nil); err != nil {

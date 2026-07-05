@@ -7,6 +7,7 @@ export function ServiceDetail({ console }: { console: ConsoleController }) {
   if (!service) return null;
   const jobs = console.state.deployments.filter((item) => item.service_id === service.id);
   const deps = console.state.services.filter((item) => item.type !== "application" && item.id !== service.id);
+  const deployDisabled = !console.state.readiness?.can_deploy || service.source_type !== "git" || console.state.busy === `deploy-${service.id}`;
   return (
     <Panel title="Service detail">
       <div className="metrics">
@@ -47,13 +48,15 @@ export function ServiceDetail({ console }: { console: ConsoleController }) {
         </div>
       </div>
       <p className="muted">
-        {console.state.readiness?.can_deploy
-          ? "Review complete. Deployment will queue through the Cloud registry API."
-          : "Project is not ready. Add the first healthy server before deploying."}
+        {service.source_type !== "git"
+          ? "Image-source deploy is not supported by the current Agent runner."
+          : console.state.readiness?.can_deploy
+            ? "Review complete. Deployment will queue through the local API."
+            : "Project is not ready. Add the first healthy server before deploying."}
       </p>
       <button
         className="primary"
-        disabled={!console.state.readiness?.can_deploy || console.state.busy === `deploy-${service.id}`}
+        disabled={deployDisabled}
         onClick={() => void console.actions.deploy(service.id)}
         type="button"
       >

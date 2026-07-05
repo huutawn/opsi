@@ -46,6 +46,17 @@ func TestAnalyzeIncidentRejectsSecretLikePayload(t *testing.T) {
 	}
 }
 
+func TestAnalyzeIncidentRejectsRawLogPayload(t *testing.T) {
+	server := NewServer(Config{})
+	body := []byte(`{"schema_version":"opsi.incident_context.v1","incident_id":"inc-1","project_id":"p1","raw_log":"panic password=secret"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/ai/incidents/analyze", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAnalyzeIncidentGeminiProviderUsesConfiguredEndpoint(t *testing.T) {
 	t.Setenv("GEMINI_TEST_KEY", "test-key")
 	gemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

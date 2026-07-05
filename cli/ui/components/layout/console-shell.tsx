@@ -17,13 +17,9 @@ export function ConsoleShell() {
       <Sidebar active={console.active} onSelect={console.setActive} />
       <main className="main" id="main">
         <Topbar
-          cloudURL={console.cloudURL}
           orgID={console.orgID}
-          onCloudURL={console.setCloudURL}
           onOrgID={console.setOrgID}
-          onPAT={console.setPAT}
           onRefresh={() => void console.actions.load()}
-          pat={console.pat}
         />
         <ProjectPicker onSelect={console.setProjectID} project={console.state.project} projects={console.state.projects} />
         <ConsoleRouter console={console} />

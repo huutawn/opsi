@@ -25,7 +25,7 @@ func NewRootCommand(options Options) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runStart(cmd.Context(), "127.0.0.1:9780", "", configPath, cmd.OutOrStdout())
+			return runStart(cmd.Context(), "127.0.0.1:9780", "", configPath, cmd.OutOrStdout(), options.KeychainFactory)
 		},
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "", "path to CLI YAML config")
@@ -37,7 +37,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.AddCommand(newSecretCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newIncidentCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newLoginCommand(options.KeychainFactory))
-	root.AddCommand(newStartCommand(&configPath))
+	root.AddCommand(newStartCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print CLI version",

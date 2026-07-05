@@ -87,6 +87,19 @@ func TestServiceRejectsNonOwnerReveal(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsRevealWithoutSecondFactor(t *testing.T) {
+	store := NewMemoryStore()
+	svc := &Service{Store: store, Audit: &auditSink{}, Encryption: StaticEncryptionVerifier(true), TOTPSecretByUser: map[string]string{}}
+	ref := SecretRef{ProjectID: "proj", ServiceID: "svc", Namespace: "default", Name: "db"}
+	if err := store.Put(context.Background(), ref, SecretValue{Username: "u", Password: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.Reveal(context.Background(), AuthContext{ProjectID: "proj", UserID: "owner", Role: RoleOwner}, ref, "", "", "")
+	if err == nil {
+		t.Fatal("expected second-factor denial")
+	}
+}
+
 func TestServiceUsesVerifiedRoleInsteadOfRequestRole(t *testing.T) {
 	store := NewMemoryStore()
 	now := time.Date(2026, 6, 20, 1, 0, 0, 0, time.UTC)

@@ -48,6 +48,18 @@ export function AddServiceForm({ console }: { console: ConsoleController }) {
           </select>
         </label>
         <label>
+          Build context
+          <input className="field" name="build_context" defaultValue="." />
+        </label>
+        <label>
+          Dockerfile
+          <input className="field" name="dockerfile" defaultValue="Dockerfile" />
+        </label>
+        <label>
+          Manifest path
+          <input className="field" name="manifest_path" defaultValue="k8s/deployment.yaml" />
+        </label>
+        <label>
           Container port
           <input className="field" min="1" name="container_port" type="number" />
         </label>

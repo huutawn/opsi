@@ -19,5 +19,5 @@ export const OperationsViewMap: Record<string, (props: { console: ConsoleControl
   Metrics: SupportView,
   Support: SupportView,
   "Incidents & RCA": IncidentsView,
-  Settings: () => <PlaceholderView title="Settings" text="Cloud URL and PAT are held in memory. PAT is not persisted by this UI." />,
+  Settings: () => <PlaceholderView title="Settings" text="Cloud credentials stay in the local CLI backend and OS keychain." />,
 };

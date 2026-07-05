@@ -12,6 +12,7 @@ func ResultFromRecord(record deploy.Record, err error, lease cloudrelay.Deployme
 	result := cloudrelay.DeploymentResult{
 		Status:                "failed",
 		FinalRevisionRef:      firstNonEmpty(record.ImageTag, lease.Deployment.ManifestHash),
+		IntentHash:            firstNonEmpty(lease.Deployment.IntentHash, intentHashFromLease(lease)),
 		RollbackEligible:      lease.Deployment.PreviousRevisionRef != "",
 		RollbackBlockedReason: "",
 	}
@@ -38,6 +39,13 @@ func ResultFromRecord(record deploy.Record, err error, lease cloudrelay.Deployme
 		result.FailureMessageRedacted = record.Error
 	}
 	return result
+}
+
+func intentHashFromLease(lease cloudrelay.DeploymentLease) string {
+	if lease.Deployment.DeploymentIntent == nil {
+		return ""
+	}
+	return lease.Deployment.DeploymentIntent.Review.IntentHash
 }
 
 func failureCode(err error) string {

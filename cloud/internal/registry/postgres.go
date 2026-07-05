@@ -17,9 +17,9 @@ type PostgresService struct {
 
 const nodeSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, role, status, COALESCE(public_host,''), COALESCE(private_ip,''), COALESCE(provider,''), COALESCE(region,''), COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(arch,''), COALESCE(cpu_cores,0), COALESCE(memory_mb,0), COALESCE(disk_total_gb,0), COALESCE(k3s_role,''), COALESCE(k3s_status,''), COALESCE(k3s_version,''), COALESCE(agent_id,''), COALESCE(agent_version,''), last_seen_at, last_inventory_at, COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), created_at, updated_at FROM nodes`
 
-const serviceSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), COALESCE(branch,''), COALESCE(git_sha,''), COALESCE(build_method,''), COALESCE(container_port,0), COALESCE(health_path,''), COALESCE(replicas_desired,0), namespace, created_at, updated_at FROM control_services`
+const serviceSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), COALESCE(branch,''), COALESCE(git_sha,''), COALESCE(build_method,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(manifest_path,''), watch_paths::text, COALESCE(container_port,0), COALESCE(health_path,''), COALESCE(replicas_desired,0), COALESCE(resources->'requests','{}'::jsonb)::text, COALESCE(resources->'limits','{}'::jsonb)::text, COALESCE(bindings,'[]'::jsonb)::text, namespace, created_at, updated_at FROM control_services`
 
-const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, COALESCE(deployment_plan_hash,''), COALESCE(manifest_hash,''), COALESCE(previous_revision_ref,''), COALESCE(rollback_eligible,false), COALESCE(rollback_blocked_reason,''), COALESCE(requested_by,''), COALESCE(agent_id,''), COALESCE(node_id,''), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), started_at, finished_at, created_at, updated_at FROM deployment_jobs`
+const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, COALESCE(deployment_plan_hash,''), COALESCE(manifest_hash,''), COALESCE(intent_hash,''), deployment_intent_json::text, COALESCE(previous_revision_ref,''), COALESCE(rollback_eligible,false), COALESCE(rollback_blocked_reason,''), COALESCE(requested_by,''), COALESCE(agent_id,''), COALESCE(node_id,''), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), started_at, finished_at, created_at, updated_at FROM deployment_jobs`
 
 func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string) (Project, error) {
 	ctx := context.Background()
@@ -681,13 +681,22 @@ func (s PostgresService) CreateService(projectID string, draft ServiceDraft, key
 	if draft.BuildMethod == "" {
 		draft.BuildMethod = "dockerfile"
 	}
+	if draft.BuildContext == "" {
+		draft.BuildContext = "."
+	}
+	if draft.Dockerfile == "" {
+		draft.Dockerfile = "Dockerfile"
+	}
+	if draft.ManifestPath == "" {
+		draft.ManifestPath = "k8s/deployment.yaml"
+	}
 	if draft.HealthPath == "" {
 		draft.HealthPath = "/health"
 	}
 	if draft.Replicas == 0 {
 		draft.Replicas = 1
 	}
-	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: projectID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, Namespace: "default", CreatedAt: now, UpdatedAt: now}
+	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: projectID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, BuildContext: draft.BuildContext, Dockerfile: draft.Dockerfile, ManifestPath: draft.ManifestPath, WatchPaths: draft.WatchPaths, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, ResourceRequests: cloneStringMap(draft.ResourceRequests), ResourceLimits: cloneStringMap(draft.ResourceLimits), Bindings: cloneServiceBindings(draft.Bindings), Namespace: "default", CreatedAt: now, UpdatedAt: now}
 	if record.Name == "" {
 		record.Name = record.ID
 	}
@@ -696,7 +705,10 @@ func (s PostgresService) CreateService(projectID string, draft ServiceDraft, key
 		return ServiceRecord{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO control_services(id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, repo_url, image, branch, git_sha, build_method, container_port, health_path, replicas_desired, namespace, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),NULLIF($13,''),NULLIF($14,''),NULLIF($15,0),NULLIF($16,''),$17,$18,$19,$20)`, record.ID, record.OrgID, record.ProjectID, record.EnvironmentID, record.RuntimeID, record.Name, record.Type, record.Status, record.SourceType, record.RepoURL, record.Image, record.Branch, record.GitSHA, record.BuildMethod, record.ContainerPort, record.HealthPath, record.Replicas, record.Namespace, record.CreatedAt, record.UpdatedAt); err != nil {
+	watchPaths, _ := json.Marshal(record.WatchPaths)
+	resources, _ := json.Marshal(deploymentIntentResources(record))
+	bindings, _ := json.Marshal(record.Bindings)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO control_services(id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, repo_url, image, branch, git_sha, build_method, build_context, dockerfile, manifest_path, watch_paths, container_port, health_path, replicas_desired, resources, bindings, namespace, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),$18::jsonb,NULLIF($19,0),NULLIF($20,''),$21,$22::jsonb,$23::jsonb,$24,$25,$26)`, record.ID, record.OrgID, record.ProjectID, record.EnvironmentID, record.RuntimeID, record.Name, record.Type, record.Status, record.SourceType, record.RepoURL, record.Image, record.Branch, record.GitSHA, record.BuildMethod, record.BuildContext, record.Dockerfile, record.ManifestPath, string(watchPaths), record.ContainerPort, record.HealthPath, record.Replicas, string(resources), string(bindings), record.Namespace, record.CreatedAt, record.UpdatedAt); err != nil {
 		return ServiceRecord{}, err
 	}
 	if err := insertIdempotency(ctx, tx, scope, key, "service", record.ID); err != nil {
@@ -972,14 +984,26 @@ type rowScanner interface {
 
 func scanService(row rowScanner) (ServiceRecord, error) {
 	var r ServiceRecord
-	err := row.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.EnvironmentID, &r.RuntimeID, &r.Name, &r.Type, &r.Status, &r.SourceType, &r.RepoURL, &r.Image, &r.Branch, &r.GitSHA, &r.BuildMethod, &r.ContainerPort, &r.HealthPath, &r.Replicas, &r.Namespace, &r.CreatedAt, &r.UpdatedAt)
+	var watchPaths, requests, limits, bindings string
+	err := row.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.EnvironmentID, &r.RuntimeID, &r.Name, &r.Type, &r.Status, &r.SourceType, &r.RepoURL, &r.Image, &r.Branch, &r.GitSHA, &r.BuildMethod, &r.BuildContext, &r.Dockerfile, &r.ManifestPath, &watchPaths, &r.ContainerPort, &r.HealthPath, &r.Replicas, &requests, &limits, &bindings, &r.Namespace, &r.CreatedAt, &r.UpdatedAt)
+	_ = json.Unmarshal([]byte(watchPaths), &r.WatchPaths)
+	_ = json.Unmarshal([]byte(requests), &r.ResourceRequests)
+	_ = json.Unmarshal([]byte(limits), &r.ResourceLimits)
+	_ = json.Unmarshal([]byte(bindings), &r.Bindings)
 	return r, err
 }
 
 func scanDeployment(row rowScanner) (DeploymentJob, error) {
 	var d DeploymentJob
 	var started, finished sql.NullTime
-	err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.IdempotencyKey, &d.DeploymentPlanHash, &d.ManifestHash, &d.PreviousRevisionRef, &d.RollbackEligible, &d.RollbackBlockedReason, &d.RequestedBy, &d.AgentID, &d.NodeID, &d.FailureCode, &d.FailureMessageRedacted, &started, &finished, &d.CreatedAt, &d.UpdatedAt)
+	var intentJSON string
+	err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.IdempotencyKey, &d.DeploymentPlanHash, &d.ManifestHash, &d.IntentHash, &intentJSON, &d.PreviousRevisionRef, &d.RollbackEligible, &d.RollbackBlockedReason, &d.RequestedBy, &d.AgentID, &d.NodeID, &d.FailureCode, &d.FailureMessageRedacted, &started, &finished, &d.CreatedAt, &d.UpdatedAt)
+	if intentJSON != "" {
+		var intent DeploymentIntent
+		if json.Unmarshal([]byte(intentJSON), &intent) == nil {
+			d.DeploymentIntent = &intent
+		}
+	}
 	d.StartedAt = nullTimePtr(started)
 	d.FinishedAt = nullTimePtr(finished)
 	return d, err
@@ -1027,7 +1051,8 @@ func acquireDeploymentLock(ctx context.Context, tx *sql.Tx, projectID, serviceID
 }
 
 func insertDeployment(ctx context.Context, tx *sql.Tx, job DeploymentJob) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, deployment_plan_hash, manifest_hash, previous_revision_ref, rollback_eligible, rollback_blocked_reason, requested_by, agent_id, node_id, failure_code, failure_message_redacted, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),$12,NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),$19,$20)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.IdempotencyKey, job.DeploymentPlanHash, job.ManifestHash, job.PreviousRevisionRef, job.RollbackEligible, job.RollbackBlockedReason, job.RequestedBy, job.AgentID, job.NodeID, job.FailureCode, job.FailureMessageRedacted, job.CreatedAt, job.UpdatedAt)
+	intent, _ := json.Marshal(job.DeploymentIntent)
+	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, idempotency_key, deployment_plan_hash, manifest_hash, intent_hash, deployment_intent_json, previous_revision_ref, rollback_eligible, rollback_blocked_reason, requested_by, agent_id, node_id, failure_code, failure_message_redacted, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),$12::jsonb,NULLIF($13,''),$14,NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),NULLIF($19,''),NULLIF($20,''),$21,$22)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.IdempotencyKey, job.DeploymentPlanHash, job.ManifestHash, job.IntentHash, string(intent), job.PreviousRevisionRef, job.RollbackEligible, job.RollbackBlockedReason, job.RequestedBy, job.AgentID, job.NodeID, job.FailureCode, job.FailureMessageRedacted, job.CreatedAt, job.UpdatedAt)
 	return err
 }
 

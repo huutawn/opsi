@@ -18,6 +18,9 @@ type manifestOptions struct {
 	ResourceRequestsJSON          string
 	ResourceLimitsJSON            string
 	TerminationGracePeriodSeconds int
+	ContainerPort                 int
+	HealthPath                    string
+	Replicas                      int
 	IngressEnabled                bool
 	BindingDependencies           []ServiceDependency
 }
@@ -78,6 +81,11 @@ func injectDeploymentDefaults(doc map[string]any, options manifestOptions) {
 		return
 	}
 	spec := ensureMap(doc, "spec")
+	if options.Replicas > 0 {
+		if _, exists := spec["replicas"]; !exists {
+			spec["replicas"] = options.Replicas
+		}
+	}
 	strategy := ensureMap(spec, "strategy")
 	strategy["type"] = "RollingUpdate"
 	rolling := ensureMap(strategy, "rollingUpdate")
@@ -108,6 +116,24 @@ func injectDeploymentDefaults(doc map[string]any, options manifestOptions) {
 		resources := ensureMap(container, "resources")
 		mergeStringMap(ensureMap(resources, "requests"), requests)
 		mergeStringMap(ensureMap(resources, "limits"), limits)
+		if options.ContainerPort > 0 {
+			ports, _ := container["ports"].([]any)
+			if len(ports) == 0 {
+				container["ports"] = []any{map[string]any{"containerPort": options.ContainerPort}}
+			}
+		}
+		if options.HealthPath != "" {
+			probePort := any("http")
+			if options.ContainerPort > 0 {
+				probePort = options.ContainerPort
+			}
+			if _, exists := container["readinessProbe"]; !exists {
+				container["readinessProbe"] = httpProbe(options.HealthPath, probePort)
+			}
+			if _, exists := container["livenessProbe"]; !exists {
+				container["livenessProbe"] = httpProbe(options.HealthPath, probePort)
+			}
+		}
 		if options.IngressEnabled {
 			lifecycle := ensureMap(container, "lifecycle")
 			preStop := ensureMap(lifecycle, "preStop")
@@ -115,6 +141,15 @@ func injectDeploymentDefaults(doc map[string]any, options manifestOptions) {
 			exec["command"] = []any{"sh", "-c", "sleep 10"}
 		}
 		appendBindings(container, bindings)
+	}
+}
+
+func httpProbe(path string, port any) map[string]any {
+	return map[string]any{
+		"httpGet":             map[string]any{"path": path, "port": port},
+		"initialDelaySeconds": 10,
+		"timeoutSeconds":      3,
+		"failureThreshold":    3,
 	}
 }
 

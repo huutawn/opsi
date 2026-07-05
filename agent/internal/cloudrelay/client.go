@@ -47,29 +47,100 @@ type DeploymentLease struct {
 }
 
 type DeploymentJobEnvelope struct {
-	ID                  string `json:"id"`
-	DeploymentPlanHash  string `json:"deployment_plan_hash"`
-	ManifestHash        string `json:"manifest_hash"`
-	PreviousRevisionRef string `json:"previous_revision_ref"`
+	ID                  string            `json:"id"`
+	DeploymentPlanHash  string            `json:"deployment_plan_hash"`
+	ManifestHash        string            `json:"manifest_hash"`
+	IntentHash          string            `json:"intent_hash"`
+	DeploymentIntent    *DeploymentIntent `json:"deployment_intent,omitempty"`
+	PreviousRevisionRef string            `json:"previous_revision_ref"`
+}
+
+type DeploymentIntent struct {
+	IntentVersion string                    `json:"intent_version"`
+	ProjectID     string                    `json:"project_id"`
+	ServiceID     string                    `json:"service_id"`
+	DeploymentID  string                    `json:"deployment_id"`
+	RequestedBy   string                    `json:"requested_by,omitempty"`
+	Source        DeploymentIntentSource    `json:"source"`
+	Image         DeploymentIntentImage     `json:"image,omitempty"`
+	Runtime       DeploymentIntentRuntime   `json:"runtime"`
+	Health        DeploymentIntentHealth    `json:"health"`
+	Resources     map[string]any            `json:"resources,omitempty"`
+	Bindings      []DeploymentIntentBinding `json:"bindings,omitempty"`
+	Rollout       DeploymentIntentRollout   `json:"rollout"`
+	Review        DeploymentIntentReview    `json:"review"`
+}
+
+type DeploymentIntentSource struct {
+	Type         string   `json:"type"`
+	RepoURL      string   `json:"repo_url,omitempty"`
+	Branch       string   `json:"branch,omitempty"`
+	GitSHA       string   `json:"git_sha,omitempty"`
+	BuildContext string   `json:"build_context,omitempty"`
+	Dockerfile   string   `json:"dockerfile,omitempty"`
+	ManifestPath string   `json:"manifest_path,omitempty"`
+	WatchPaths   []string `json:"watch_paths,omitempty"`
+}
+
+type DeploymentIntentRuntime struct {
+	ContainerPort int            `json:"container_port,omitempty"`
+	Env           map[string]any `json:"env,omitempty"`
+	Replicas      int            `json:"replicas,omitempty"`
+}
+
+type DeploymentIntentHealth struct {
+	Path                string `json:"path,omitempty"`
+	InitialDelaySeconds int    `json:"initial_delay_seconds,omitempty"`
+	TimeoutSeconds      int    `json:"timeout_seconds,omitempty"`
+	FailureThreshold    int    `json:"failure_threshold,omitempty"`
+}
+
+type DeploymentIntentBinding struct {
+	ServiceID       string   `json:"service_id"`
+	Alias           string   `json:"alias,omitempty"`
+	EnvPrefix       string   `json:"env_prefix,omitempty"`
+	ExposeAsDefault bool     `json:"expose_as_default,omitempty"`
+	EnvKeys         []string `json:"env_keys,omitempty"`
+}
+
+type DeploymentIntentImage struct {
+	Repository string `json:"repository,omitempty"`
+	Tag        string `json:"tag,omitempty"`
+	PullPolicy string `json:"pull_policy,omitempty"`
+}
+
+type DeploymentIntentRollout struct {
+	TimeoutSeconds int  `json:"timeout_seconds"`
+	AutoRollback   bool `json:"auto_rollback"`
+}
+
+type DeploymentIntentReview struct {
+	ManifestHash string `json:"manifest_hash,omitempty"`
+	IntentHash   string `json:"intent_hash,omitempty"`
 }
 
 type ServiceEnvelope struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	SourceType string `json:"source_type"`
-	RepoURL    string `json:"repo_url"`
-	Image      string `json:"image"`
-	Branch     string `json:"branch"`
-	GitSHA     string `json:"git_sha"`
-	Namespace  string `json:"namespace"`
-	HealthPath string `json:"health_path"`
-	Replicas   int    `json:"replicas"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	SourceType   string   `json:"source_type"`
+	RepoURL      string   `json:"repo_url"`
+	Image        string   `json:"image"`
+	Branch       string   `json:"branch"`
+	GitSHA       string   `json:"git_sha"`
+	BuildContext string   `json:"build_context"`
+	Dockerfile   string   `json:"dockerfile"`
+	ManifestPath string   `json:"manifest_path"`
+	WatchPaths   []string `json:"watch_paths"`
+	Namespace    string   `json:"namespace"`
+	HealthPath   string   `json:"health_path"`
+	Replicas     int      `json:"replicas"`
 }
 
 type DeploymentResult struct {
 	Status                 string `json:"status"`
 	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
+	IntentHash             string `json:"intent_hash,omitempty"`
 	FailureCode            string `json:"failure_code,omitempty"`
 	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
 	RollbackEligible       bool   `json:"rollback_eligible"`

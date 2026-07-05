@@ -15,7 +15,7 @@ npm run build
 - `components/`: shared layout and primitives.
 - `features/`: product workflow views.
 - `hooks/`: client state orchestration.
-- `lib/api`: typed Cloud registry client.
+- `lib/api`: typed local backend client.
 - `lib/contracts`: UI-facing registry contracts.
 
-PAT is held in React memory only. Browser storage is intentionally unused.
+Long-lived credentials stay in the CLI backend and OS keychain. Browser storage is intentionally unused.
