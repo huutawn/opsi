@@ -23,6 +23,8 @@ make clean
 make package-source
 ```
 
+`make verify` is canonical. It checks the pinned toolchain, source hygiene, Go vet/tests for `agent/`, `cli/`, `cloud/`, and `contracts/go/`, then runs `npm ci`, `npm run build`, and `npm run lint` in `cli/ui`.
+
 CI runs the same clean path from `.github/workflows/ci.yml`:
 
 ```bash

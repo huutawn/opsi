@@ -10,14 +10,14 @@ RTK ?= $(shell command -v rtk >/dev/null 2>&1 && echo rtk)
 RUN := $(if $(strip $(RTK)),$(RTK),)
 PROXY := $(if $(strip $(RTK)),$(RTK) proxy,)
 
-.PHONY: check-toolchain verify test build ui-build lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
+.PHONY: check-toolchain verify test build ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
 	@node --version | grep -qx "v$(NODE_VERSION)" || { echo "Node $(NODE_VERSION) required"; node --version; exit 1; }
 	@$(UI_NPM) --version | grep -qx "$(NPM_VERSION)" || { echo "npm $(NPM_VERSION) required"; $(UI_NPM) --version; exit 1; }
 
-verify: check-toolchain source-hygiene lint test ui-build
+verify: check-toolchain source-hygiene lint test ui-build ui-lint
 
 test:
 	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
@@ -34,6 +34,9 @@ build:
 ui-build:
 	cd cli/ui && $(RUN) $(UI_NPM) ci
 	cd cli/ui && $(RUN) $(UI_NPM) run build
+
+ui-lint:
+	cd cli/ui && $(RUN) $(UI_NPM) run lint
 
 lint:
 	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
