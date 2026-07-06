@@ -112,6 +112,9 @@ func LoadConfig(path string) (Config, error) {
 		if cfg.OTP.DevEcho {
 			return Config{}, fmt.Errorf("production forbids otp.dev_echo")
 		}
+		if cfg.EnableDebugUI {
+			return Config{}, fmt.Errorf("production forbids enable_debug_ui")
+		}
 		if cfg.PublicBaseURL != "" && !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
 			return Config{}, fmt.Errorf("production requires public_base_url to use https")
 		}
