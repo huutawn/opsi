@@ -18,5 +18,8 @@ export type ConsoleController = {
     loadDeploymentEvents: (deploymentID: string) => Promise<void>;
     nodeAction: (nodeID: string, action: "drain" | "remove") => Promise<void>;
     rollback: (deploymentID: string) => Promise<void>;
+    secretCreate: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+    secretReveal: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+    secretRotate: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   };
 };

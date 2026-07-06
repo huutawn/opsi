@@ -31,6 +31,7 @@ export function useConsoleState() {
     deploymentEvents: [],
     audit: [],
     support: null,
+    secretReveal: null,
     nodeDetail: null,
     serviceDetail: null,
     busy: "",
@@ -204,6 +205,52 @@ export function useConsoleState() {
     }
   }
 
+  async function secretCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentProject) return;
+    const form = new FormData(event.currentTarget);
+    patch({ busy: "secret-create", secretReveal: null });
+    try {
+      await client.createSecret(currentProject.id, secretBody(form));
+      event.currentTarget.reset();
+      await load();
+    } finally {
+      patch({ busy: "" });
+    }
+  }
+
+  async function secretReveal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentProject) return;
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "");
+    patch({ busy: "secret-reveal", secretReveal: null });
+    try {
+      const revealed = await client.revealSecret(currentProject.id, name, secretBody(form));
+      patch({ secretReveal: revealed });
+      window.setTimeout(() => patch({ secretReveal: null }), (revealed.ttl_seconds ?? 60) * 1000);
+      event.currentTarget.reset();
+      await load();
+    } finally {
+      patch({ busy: "" });
+    }
+  }
+
+  async function secretRotate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentProject) return;
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "");
+    patch({ busy: "secret-rotate", secretReveal: null });
+    try {
+      await client.rotateSecret(currentProject.id, name, secretBody(form));
+      event.currentTarget.reset();
+      await load();
+    } finally {
+      patch({ busy: "" });
+    }
+  }
+
   return {
     active,
     orgID,
@@ -223,7 +270,23 @@ export function useConsoleState() {
       loadDeploymentEvents,
       nodeAction,
       rollback,
+      secretCreate,
+      secretReveal,
+      secretRotate,
     },
+  };
+}
+
+function secretBody(form: FormData) {
+  return {
+    service_id: form.get("service_id"),
+    name: form.get("name"),
+    namespace: form.get("namespace"),
+    user_id: form.get("user_id"),
+    role: form.get("role"),
+    otp_request_id: form.get("otp_request_id"),
+    otp_code: form.get("otp_code"),
+    totp_code: form.get("totp_code"),
   };
 }
 

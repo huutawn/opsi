@@ -96,6 +96,19 @@ export type TelemetrySummary = {
   payload_policy: string;
 };
 
+export type SecretResult = {
+  status: string;
+  source: "agent";
+  project_id: string;
+  service_id: string;
+  name: string;
+  namespace?: string;
+  username?: string;
+  password?: string;
+  ttl_seconds?: number;
+  reveal_expires_at?: string;
+};
+
 export type BootstrapSession = {
   id: string;
   status: string;
@@ -235,6 +248,7 @@ export type ConsoleState = {
   deploymentEvents: TimelineEvent[];
   audit: AuditEvent[];
   support: SupportSummary | null;
+  secretReveal: SecretResult | null;
   nodeDetail: NodeDiagnostics | null;
   serviceDetail: ServiceRecord | null;
   busy: string;

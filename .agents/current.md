@@ -24,11 +24,12 @@ Detailed snapshot: `docs/current_state.md`. Architecture: `docs/architecture.md`
   - Cloud relay client can poll deployment leases, heartbeat, submit redacted deployment results, and sign Agent requests with HMAC headers for production Cloud guards.
   - CloudRunner can poll Cloud deployment jobs with `DeploymentIntent` v1, execute git-source deploys through the Agent deployment engine using intent-scoped source/runtime/resource/binding fields, reject image-source jobs clearly for P0, report `intent_hash`, retry result reporting, and run with the Agent daemon when `cloud_relay.enabled=true`.
 
-- CLI:
+  - CLI:
   - Cobra commands: `status`, `deploy`, `sync`, `service`, `secret`, `incident`, `login`, `start`.
   - Agent gRPC client supports TLS, client cert, and server cert pinning.
   - PAT storage uses OS keychain; tests use fake store.
   - `opsi start` serves `/health`, supports `--dev-ui http://localhost:3000`, serves `cli/ui/out` when built, and returns an honest 503 when no UI build exists.
+  - Local secret create/reveal/rotate endpoints are wired Browser -> CLI local backend -> Agent gRPC SecretService -> runtime Secret store. Create/rotate return metadata only; reveal requires explicit intent plus OTP/TOTP and returns `Cache-Control: no-store` with a short TTL. List/delete/secret-audit remain unsupported instead of fake-success.
   - CLI UI is split by route/layout/feature/hook/API/contracts and browser code now calls `/api/local/...` for project/readiness/node/service/deploy/topology/audit/support workflows. `opsi start` proxies Cloud registry calls through the CLI backend using the OS-keychain PAT, exposes `/api/local/session` with a short local session token, requires `X-Local-Session` plus `Idempotency-Key` on mutations, exposes `/api/local/status` for Agent status, exposes `/api/local/projects/{project_id}/telemetry/summary` from Agent telemetry sync metadata without returning raw payloads, and never returns the PAT to the browser.
   - CLI local deploy submit validates image-source services before Cloud job creation when the service is known locally via the registry read model.
 
@@ -54,14 +55,14 @@ Detailed snapshot: `docs/current_state.md`. Architecture: `docs/architecture.md`
 - OAuth login/PAT issuance UI not implemented.
 - Cloud webhook relay is in-memory; registry deployment job leases/results are durable with Postgres, but webhook/event relay queue is not wired to durable storage yet.
 - Cloud AI provider schema is still minimal; Gemini output is currently consumed as root-cause text while recommended actions remain typed fixture actions.
-- CLI UI WebSocket/SSE bridge, Agent-vault secret reveal/rotation endpoints, and incident registry endpoint are not implemented; unavailable actions are disabled instead of fake-success.
+- CLI UI WebSocket/SSE bridge and incident registry endpoint are not implemented; unavailable actions are disabled instead of fake-success.
 - Standalone SSH bootstrap worker/K3s installer binary is not implemented; Cloud exposes the secure take/finish contract and lifecycle state machine.
 - Agent-backed K3s drain/remove execution is not implemented; Cloud blocks node lifecycle requests instead of marking metadata-only success.
 - K3s encryption-at-rest is config-gated, not auto-detected.
 - Service catalog lacks DB-native rotation, service logs, backup/restore workflows for managed services, and full managed-service readiness reconciliation.
 - HA server topology and heartbeat timeout reconciler remain future work.
 - Plan 06 support dashboard and external observability provisioning exist; HA server topology, heartbeat timeout reconciler, and provider-specific Slack/PagerDuty adapters remain future work.
-- Local Web UI still needs Agent-owned local endpoints for secret reveal/rotation, incidents/RCA actions, logs, detailed telemetry views, and runtime audit merge; missing Agent-owned local endpoints return typed disabled errors instead of fake success.
+- Local Web UI still needs Agent-owned endpoints for incidents/RCA actions, logs, detailed telemetry views, secret list/delete/secret-audit, and runtime audit merge; missing Agent-owned local endpoints return typed unsupported errors instead of fake success.
 - Source hygiene gate passes after `make clean`; generated binaries/UI outputs/DB files are no longer required for verification.
 
 ## Commands

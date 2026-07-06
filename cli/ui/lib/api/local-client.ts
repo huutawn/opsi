@@ -7,6 +7,7 @@ import type {
   Project,
   Readiness,
   ServiceRecord,
+  SecretResult,
   SupportSummary,
   TelemetrySummary,
   TimelineEvent,
@@ -113,6 +114,30 @@ export class LocalClient {
     return this.call<TelemetrySummary>(
       `/api/local/projects/${projectID}/telemetry/summary?since_unix=${encodeURIComponent(String(sinceUnix))}`,
     );
+  }
+
+  createSecret(projectID: string, body: Record<string, unknown>) {
+    return this.call<SecretResult>(`/api/local/projects/${projectID}/secrets`, {
+      method: "POST",
+      write: true,
+      body: JSON.stringify(body),
+    });
+  }
+
+  revealSecret(projectID: string, name: string, body: Record<string, unknown>) {
+    return this.call<SecretResult>(`/api/local/projects/${projectID}/secrets/${encodeURIComponent(name)}/reveal`, {
+      method: "POST",
+      write: true,
+      body: JSON.stringify({ ...body, reveal: true }),
+    });
+  }
+
+  rotateSecret(projectID: string, name: string, body: Record<string, unknown>) {
+    return this.call<SecretResult>(`/api/local/projects/${projectID}/secrets/${encodeURIComponent(name)}/rotate`, {
+      method: "POST",
+      write: true,
+      body: JSON.stringify(body),
+    });
   }
 
   private async call<T>(path: string, init: RequestOptions = {}) {

@@ -3,6 +3,7 @@ package secret
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,6 +98,31 @@ func TestServiceRejectsRevealWithoutSecondFactor(t *testing.T) {
 	_, err := svc.Reveal(context.Background(), AuthContext{ProjectID: "proj", UserID: "owner", Role: RoleOwner}, ref, "", "", "")
 	if err == nil {
 		t.Fatal("expected second-factor denial")
+	}
+}
+
+func TestServiceAuditNeverIncludesSecretValue(t *testing.T) {
+	audit := &auditSink{}
+	store := NewMemoryStore()
+	now := time.Date(2026, 6, 20, 1, 0, 0, 0, time.UTC)
+	totpSecret := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	svc := &Service{Store: store, Audit: audit, Encryption: StaticEncryptionVerifier(true), TOTPSecretByUser: map[string]string{"proj:owner": totpSecret}, Now: func() time.Time { return now }}
+	ref := SecretRef{ProjectID: "proj", ServiceID: "svc", Namespace: "default", Name: "db"}
+	if err := store.Put(context.Background(), ref, SecretValue{Username: "user", Password: "super-secret-value"}); err != nil {
+		t.Fatal(err)
+	}
+	code, err := GenerateTOTPCode(totpSecret, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Reveal(context.Background(), AuthContext{ProjectID: "proj", UserID: "owner", Role: RoleOwner}, ref, "", "", code); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range audit.records {
+		rendered := record.Action + record.ResourceID + record.MetadataJSON
+		if strings.Contains(rendered, "super-secret-value") {
+			t.Fatalf("audit leaked secret value: %+v", record)
+		}
 	}
 }
 

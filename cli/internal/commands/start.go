@@ -23,6 +23,8 @@ import (
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 )
 
 func newStartCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
@@ -100,7 +102,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			"cloud_connected": true,
 			"agent_connected": true,
 			"local_session":   localSession,
-			"capabilities":    []string{"projects", "nodes", "services", "deployments", "audit", "support"},
+			"capabilities":    []string{"projects", "nodes", "services", "deployments", "secrets", "audit", "support"},
 		})
 	})
 	mux.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +135,9 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 		}
 	}
 	if localTelemetrySummary(w, r, cfg, factory) {
+		return
+	}
+	if localSecretOperation(w, r, cfg, factory) {
 		return
 	}
 	cloud, err := url.Parse(cfg.CloudURL)
@@ -193,6 +198,199 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "secrets" {
+		return false
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	if err != nil || projectID == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+		return true
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusNotImplemented, "SECRETS_OPERATION_UNSUPPORTED", "this secret operation is not supported by the local Agent API")
+		return true
+	}
+	if len(parts) == 5 {
+		req, ok := readLocalSecretRequest(w, r, projectID, "")
+		if !ok {
+			return true
+		}
+		callLocalSecretAgent(w, r, cfg, factory, "created", req.SecretRequest, false)
+		return true
+	}
+	if len(parts) != 7 {
+		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local secret route is not implemented")
+		return true
+	}
+	name, err := url.PathUnescape(parts[5])
+	if err != nil || name == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "SECRET_NAME_REQUIRED", "secret name is required")
+		return true
+	}
+	req, ok := readLocalSecretRequest(w, r, projectID, name)
+	if !ok {
+		return true
+	}
+	switch parts[6] {
+	case "reveal":
+		if !req.explicitReveal {
+			writeLocalError(w, r, http.StatusBadRequest, "SECRET_REVEAL_INTENT_REQUIRED", "secret reveal requires explicit reveal intent")
+			return true
+		}
+		if !req.hasSecondFactor() {
+			writeLocalError(w, r, http.StatusBadRequest, "SECRET_SECOND_FACTOR_REQUIRED", "secret reveal requires OTP or TOTP")
+			return true
+		}
+		callLocalSecretAgent(w, r, cfg, factory, "revealed", req.SecretRequest, true)
+	case "rotate":
+		if !req.hasSecondFactor() {
+			writeLocalError(w, r, http.StatusBadRequest, "SECRET_SECOND_FACTOR_REQUIRED", "secret rotation requires OTP or TOTP")
+			return true
+		}
+		callLocalSecretAgent(w, r, cfg, factory, "rotated", req.SecretRequest, false)
+	default:
+		writeLocalError(w, r, http.StatusNotImplemented, "SECRETS_OPERATION_UNSUPPORTED", "this secret operation is not supported by the local Agent API")
+	}
+	return true
+}
+
+type localSecretRequest struct {
+	*agentv1.SecretRequest
+	explicitReveal bool
+}
+
+func (req localSecretRequest) hasSecondFactor() bool {
+	return req.TOTPCode != "" || (req.OTPRequestID != "" && req.OTPCode != "")
+}
+
+func readLocalSecretRequest(w http.ResponseWriter, r *http.Request, projectID, pathName string) (localSecretRequest, bool) {
+	var raw map[string]json.RawMessage
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err := dec.Decode(&raw); err != nil {
+		writeLocalError(w, r, http.StatusBadRequest, "INVALID_SECRET_REQUEST", "invalid secret request")
+		return localSecretRequest{}, false
+	}
+	allowed := map[string]bool{
+		"service_id": true, "name": true, "namespace": true, "user_id": true, "role": true,
+		"otp_code": true, "otp_request_id": true, "totp_code": true, "reveal": true, "explicit_intent": true,
+	}
+	for key := range raw {
+		lower := strings.ToLower(key)
+		if !allowed[lower] {
+			writeLocalError(w, r, http.StatusBadRequest, "SECRET_INPUT_UNSUPPORTED", "secret request contains an unsupported field")
+			return localSecretRequest{}, false
+		}
+	}
+	name := pathName
+	if name == "" {
+		name = jsonString(raw, "name")
+	}
+	req := &agentv1.SecretRequest{
+		ProjectID:    projectID,
+		ServiceID:    jsonString(raw, "service_id"),
+		Name:         name,
+		Namespace:    jsonString(raw, "namespace"),
+		UserID:       jsonString(raw, "user_id"),
+		Role:         jsonString(raw, "role"),
+		OTPCode:      jsonString(raw, "otp_code"),
+		OTPRequestID: jsonString(raw, "otp_request_id"),
+		TOTPCode:     jsonString(raw, "totp_code"),
+	}
+	if req.ServiceID == "" || req.Name == "" || req.UserID == "" || req.Role == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "SECRET_REQUIRED_FIELDS_MISSING", "service_id, name, user_id and role are required")
+		return localSecretRequest{}, false
+	}
+	return localSecretRequest{SecretRequest: req, explicitReveal: jsonBool(raw, "reveal") || strings.EqualFold(jsonString(raw, "explicit_intent"), "reveal")}, true
+}
+
+func jsonString(raw map[string]json.RawMessage, key string) string {
+	data, ok := raw[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func jsonBool(raw map[string]json.RawMessage, key string) bool {
+	data, ok := raw[key]
+	if !ok {
+		return false
+	}
+	var value bool
+	return json.Unmarshal(data, &value) == nil && value
+}
+
+func callLocalSecretAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), statusText string, req *agentv1.SecretRequest, includePassword bool) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	client := agentclient.New(cfg)
+	var (
+		resp *agentv1.SecretResponse
+		err  error
+	)
+	switch statusText {
+	case "created":
+		resp, err = client.CreateSecret(ctx, req)
+	case "revealed":
+		resp, err = client.RevealSecret(ctx, req)
+	case "rotated":
+		resp, err = client.RotateSecret(ctx, req)
+	}
+	if err != nil {
+		writeLocalAgentSecretError(w, r, err)
+		return
+	}
+	out := map[string]any{
+		"status":     statusText,
+		"source":     "agent",
+		"project_id": resp.ProjectID,
+		"service_id": resp.ServiceID,
+		"name":       resp.Name,
+		"namespace":  resp.Namespace,
+		"username":   resp.Username,
+	}
+	if includePassword {
+		out["password"] = resp.Password
+		out["ttl_seconds"] = 60
+		out["reveal_expires_at"] = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func writeLocalAgentSecretError(w http.ResponseWriter, r *http.Request, err error) {
+	statusCode := http.StatusBadGateway
+	code := "AGENT_SECRET_OPERATION_FAILED"
+	switch grpcstatus.Code(err) {
+	case codes.InvalidArgument:
+		statusCode, code = http.StatusBadRequest, "INVALID_SECRET_REQUEST"
+	case codes.Unauthenticated:
+		statusCode, code = http.StatusUnauthorized, "AGENT_AUTH_REQUIRED"
+	case codes.PermissionDenied:
+		statusCode, code = http.StatusForbidden, "SECRET_ACCESS_DENIED"
+	case codes.FailedPrecondition:
+		statusCode, code = http.StatusPreconditionFailed, "SECRET_PRECONDITION_FAILED"
+	case codes.Unimplemented:
+		statusCode, code = http.StatusNotImplemented, "AGENT_SECRET_UNSUPPORTED"
+	case codes.DeadlineExceeded:
+		statusCode, code = http.StatusGatewayTimeout, "AGENT_SECRET_TIMEOUT"
+	case codes.Unavailable:
+		statusCode, code = http.StatusBadGateway, "AGENT_UNAVAILABLE"
+	}
+	writeLocalError(w, r, statusCode, code, "Agent secret operation failed")
 }
 
 func localTelemetrySummary(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
@@ -333,7 +531,6 @@ func disabledLocalCapability(path string) (string, bool) {
 		fragment string
 		code     string
 	}{
-		{"/secrets", "SECRETS_LOCAL_API_NOT_IMPLEMENTED"},
 		{"/incidents", "INCIDENTS_LOCAL_API_NOT_IMPLEMENTED"},
 		{"/telemetry", "TELEMETRY_LOCAL_API_NOT_IMPLEMENTED"},
 		{"/logs", "LOGS_LOCAL_API_NOT_IMPLEMENTED"},
