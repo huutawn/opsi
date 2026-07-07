@@ -11,6 +11,12 @@ const validProductionConfig = `"production":true,"database_url":"postgres://secr
 
 func TestLoadConfigProductionRequiresDurableSecurity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cloud.json")
+	if err := os.WriteFile(path, []byte(`{"production":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "production requires database_url") {
+		t.Fatalf("expected production database_url failure, got %v", err)
+	}
 	if err := os.WriteFile(path, []byte(`{"production":true,"database_url":"postgres://example","bootstrap_worker_token":"short","bootstrap_secret_key":"also-short"}`), 0600); err != nil {
 		t.Fatal(err)
 	}

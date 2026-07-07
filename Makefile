@@ -6,9 +6,9 @@ NPM_VERSION ?= 11.17.0
 GOCACHE ?= /tmp/opsi-go-cache
 GOTOOLCHAIN ?= local
 UI_NPM ?= npm
-RTK ?= $(shell command -v rtk >/dev/null 2>&1 && echo rtk)
-RUN := $(if $(strip $(RTK)),$(RTK),)
-PROXY := $(if $(strip $(RTK)),$(RTK) proxy,)
+ ?= $(shell command -v  >/dev/null 2>&1 && echo )
+RUN := $(if $(strip $()),$(),)
+PROXY := $(if $(strip $()),$() proxy,)
 
 .PHONY: check-toolchain verify test build ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
 

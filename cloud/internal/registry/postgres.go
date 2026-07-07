@@ -735,10 +735,10 @@ func (s PostgresService) StartDeployment(projectID, serviceID, requestedBy, key,
 		return DeploymentJob{}, err
 	}
 	defer tx.Rollback()
-	if err := acquireDeploymentLock(ctx, tx, projectID, serviceID, job.ID, now, requestID); err != nil {
+	if err := insertDeployment(ctx, tx, job); err != nil {
 		return DeploymentJob{}, err
 	}
-	if err := insertDeployment(ctx, tx, job); err != nil {
+	if err := acquireDeploymentLock(ctx, tx, projectID, serviceID, job.ID, now, requestID); err != nil {
 		return DeploymentJob{}, err
 	}
 	for _, event := range deploymentQueuedEvents(job, requestID, now) {
@@ -792,10 +792,10 @@ func (s PostgresService) RollbackDeployment(projectID, deploymentID, requestedBy
 		return DeploymentJob{}, err
 	}
 	defer tx.Rollback()
-	if err := acquireDeploymentLock(ctx, tx, projectID, service.ID, job.ID, now, requestID); err != nil {
+	if err := insertDeployment(ctx, tx, job); err != nil {
 		return DeploymentJob{}, err
 	}
-	if err := insertDeployment(ctx, tx, job); err != nil {
+	if err := acquireDeploymentLock(ctx, tx, projectID, service.ID, job.ID, now, requestID); err != nil {
 		return DeploymentJob{}, err
 	}
 	event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: DeploymentRollingBack, MessageRedacted: "rollback queued", ProgressPercent: 0, RequestID: requestID, CreatedAt: now}
@@ -821,6 +821,9 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	}
 	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack))
 	if errors.Is(err, sql.ErrNoRows) {
+		if err := tx.Commit(); err != nil {
+			return DeploymentLease{}, false, err
+		}
 		return DeploymentLease{}, false, nil
 	}
 	if err != nil {
@@ -1115,8 +1118,28 @@ func expireDeploymentLeases(ctx context.Context, tx *sql.Tx, projectID string, n
 		if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 			return err
 		}
+		action := "DEPLOYMENT_RETRY_SCHEDULED"
+		result := "success"
+		if nextStatus == DeploymentDeadLetter {
+			action = "DEPLOYMENT_DEAD_LETTERED"
+			result = "failure"
+		}
+		if err := insertCloudAudit(ctx, tx, job.OrgID, projectID, "agent", action, "deployment_job", job.ID, result, map[string]any{"status": nextStatus, "attempt_count": job.AttemptCount, "max_attempts": job.MaxAttempts}); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func insertCloudAudit(ctx context.Context, tx *sql.Tx, orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) error {
+	data, _ := json.Marshal(RedactMap(metadata))
+	actorType := "user"
+	if actorUserID == "agent" {
+		actorType = "agent"
+		actorUserID = ""
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_user_id, actor_type, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7,$8,$9,$10,now())`, newID("aud"), orgID, projectID, actorUserID, actorType, action, resourceType, resourceID, result, string(data))
+	return err
 }
 
 func (s PostgresService) refreshProject(ctx context.Context, projectID string) (string, error) {

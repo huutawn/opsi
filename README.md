@@ -11,7 +11,7 @@ Supported toolchain:
 - npm `11.17.0`
 - `GOTOOLCHAIN=local` in normal verification, so Go will not download a toolchain implicitly
 - Node/npm for `cli/ui`; UI dependencies are restored from `cli/ui/package-lock.json`
-- `rtk` is optional for Make targets. If installed, Make auto-detects it and wraps commands; if absent, raw `go`, `npm`, `tar`, and shell commands run directly. To force raw commands: `make RTK= verify`.
+- `` is optional for Make targets. If installed, Make auto-detects it and wraps commands; if absent, raw `go`, `npm`, `tar`, and shell commands run directly. To force raw commands: `make = verify`.
 
 Required clean-checkout commands:
 

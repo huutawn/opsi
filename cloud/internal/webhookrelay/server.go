@@ -22,7 +22,7 @@ import (
 )
 
 type Server struct {
-	Queue         *Queue
+	Queue         RelayQueue
 	Config        Config
 	OTP           *otp.Service
 	Auth          *auth.Service
@@ -274,20 +274,21 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		ttl = 24 * time.Hour
 	}
 	env := Envelope{
-		ID:          newID(),
-		ProjectID:   route.ProjectID,
-		ServiceID:   route.ServiceID,
-		ServiceName: route.ServiceName,
-		ServiceType: route.ServiceType,
-		RepoURL:     firstNonEmpty(route.RepoURL, push.Repository.CloneURL),
-		Ref:         push.Ref,
-		After:       push.After,
-		Branch:      branch,
-		TriggeredBy: push.Pusher.Name,
-		Body:        string(body),
-		Signature:   firstNonEmpty(r.Header.Get("X-Hub-Signature-256"), r.Header.Get("X-Hub-Signature")),
-		ReceivedAt:  now,
-		ExpiresAt:   now.Add(ttl),
+		ID:             newID(),
+		ProjectID:      route.ProjectID,
+		ServiceID:      route.ServiceID,
+		ServiceName:    route.ServiceName,
+		ServiceType:    route.ServiceType,
+		RepoURL:        firstNonEmpty(route.RepoURL, push.Repository.CloneURL),
+		Ref:            push.Ref,
+		After:          push.After,
+		Branch:         branch,
+		TriggeredBy:    push.Pusher.Name,
+		Body:           string(body),
+		Signature:      firstNonEmpty(r.Header.Get("X-Hub-Signature-256"), r.Header.Get("X-Hub-Signature")),
+		IdempotencyKey: firstNonEmpty(r.Header.Get("X-GitHub-Delivery"), sha256Hex(body)),
+		ReceivedAt:     now,
+		ExpiresAt:      now.Add(ttl),
 	}
 	if err := s.Queue.Enqueue(env); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

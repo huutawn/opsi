@@ -35,26 +35,27 @@ Detailed snapshot: `docs/current_state.md`. Architecture: `docs/architecture.md`
   - Local incident list/detail/analyze/approve/resolve endpoints are wired Browser -> CLI local backend -> Agent gRPC IncidentService. Analyze returns Agent RCA metadata and advisory-only policy; approve requires explicit local session, idempotency key, action approval, and action hash before Agent execution.
 
 - Cloud:
-- Local/dev runtime for webhook relay, OTP, PAT verify, fixture AI RCA, and Gemini RCA adapter with explicit fallback metadata.
+- Local/dev runtime for OTP, PAT verify, fixture AI RCA, and Gemini RCA adapter with explicit fallback metadata.
   - Control-plane registry API exposes org project create/list, project readiness, nodes, bootstrap sessions/events, services, deployment job creation, and deployment rollback request creation with write idempotency/request headers, RBAC, audit, bootstrap expiry cleanup, and machine-readable readiness errors.
   - Registry read models expose project-scoped services, deployments with plan/manifest/rollback metadata, bootstrap sessions, deployment events, and audit events for UI refresh/reconnect without mock topology data.
   - Registry security gate enforces owner/admin-only node/bootstrap/agent lifecycle actions, developer deploy/service actions, RBAC denial audit, bootstrap credential TTL/read-once storage, worker-only credential take, one-time agent registration token exchange, bcrypt-hashed agent bearer credentials, revoked/rotated agent poll blocking, redacted bootstrap events/audit metadata, bootstrap/deployment/agent-registration rate limits, and agent register/rotate/revoke records.
   - Node/K3s/Agent lifecycle supports first-server vs worker bootstrap gating, active-host/idempotency protection, agent heartbeat/inventory readiness reconciliation, and node diagnostics. Drain/remove endpoints now block honestly unless/until Agent-backed K3s execution is wired; only-server removal precondition is still enforced before the blocked response.
   - Deployment release flow enforces server-side service deploy prerequisites, concrete Git revision/build-context/dockerfile/manifest validation, early image-source rejection, deploy-capable Agent readiness, deterministic deployment/manifest/intent hashes, service-specific runtime/resource/binding intent fields, previous revision refs, versioned `DeploymentIntent` job envelopes, redacted deployment events, audit, idempotency, Agent job lease/result contract with lease tokens, expiry retry, dead-letter state, terminal lock release, and expiring service-level deployment locks.
   - Production Cloud config requires Postgres, a strong bootstrap worker token, a strong bootstrap secret key, and Agent HMAC request signatures; it rejects debug UI, OTP dev echo, and non-HTTPS public URLs. With Postgres it uses AES-GCM encrypted bootstrap credential/registration storage, DB-backed rate limits, and DB triggers that make `cloud_audit_events` append-only.
-  - Postgres migration and runtime registry repository include org/project/environment/runtime/node/agent/bootstrap/service/deployment/audit/idempotency control-plane schema when `database_url` is configured; dev default uses in-memory store.
+  - Postgres migration and runtime registry repository include org/project/environment/runtime/node/agent/bootstrap/service/deployment/audit/idempotency control-plane schema when `database_url` is configured; dev default uses in-memory registry store.
+  - Webhook relay queue uses Postgres `relay_jobs`/`relay_events` when `database_url` is configured and keeps only sanitized envelope metadata plus changed paths, body hash, idempotency key, status/attempt timestamps, and redacted errors. Raw webhook body is not persisted or delivered. In-memory webhook queue remains dev/test only.
   - OTP supports hashed code, TTL, one-time verify, rate limit, optional Postgres, SMTP/outbox, and dev echo.
   - PAT verify uses bcrypt hash + project membership role when Postgres is configured.
   - Static Cloud UI at `/` uses real registry APIs for project list/detail readiness, add-server bootstrap with reconnect-safe timeline, node diagnostics/actions, service drafts/detail, deploy queueing with redacted event timeline, topology from real nodes/services/deployments, and redacted audit.
   - Cloud exposes request-ID echoing, Prometheus-style process/domain metrics at `/metrics`, project support summaries at `/api/projects/:projectID/support`, webhook/outbox alert routing, and deployable Prometheus/Alertmanager/Grafana provisioning artifacts. Support summaries include Grafana-style dashboard panels, SLO signals, configured alerts, active alerts, production gates, break-glass policy, runbooks, redacted support context, and recent deployment request IDs. CLI UI maps Metrics/Support to that real support dashboard. Cloud inline UI is now debug-only behind `enable_debug_ui=true`.
 - Cloud AI config is explicit (`fixture|gemini`), Gemini RCA calls use sanitized incident context only, fixture fallback is explicit, AI payloads reject raw-log/secret-like keys before analysis, and Agent RCA validation requires visible provider/model/fallback/input-context-hash metadata before storing or returning analysis.
-  - Root README documents clean-checkout verification, Go `GOTOOLCHAIN=local`, module test commands, optional `rtk` wrapper fallback, and offline cache expectations. Root Makefile exposes `verify`, `test`, `build`, `clean`, and `package-source`; `verify` covers Go vet/tests plus UI `npm ci`, build/typecheck, and lint; builds binaries into `bin/`, injects a shared build SHA into `opsi version`, `opsi-agent --version`, and `opsi-cloud --version`, and creates a `release/` artifact layout with checksums and demo docs.
+  - Root README documents clean-checkout verification, Go `GOTOOLCHAIN=local`, module test commands, optional `` wrapper fallback, and offline cache expectations. Root Makefile exposes `verify`, `test`, `build`, `clean`, and `package-source`; `verify` covers Go vet/tests plus UI `npm ci`, build/typecheck, and lint; builds binaries into `bin/`, injects a shared build SHA into `opsi version`, `opsi-agent --version`, and `opsi-cloud --version`, and creates a `release/` artifact layout with checksums and demo docs.
   - Runtime security hardening includes Agent production/non-loopback config fail-fast, Cloud production OTP/dev-echo and HTTPS public URL guards, Agent request HMAC compatibility, omitted OTP `code` outside dev echo, secret reveal second-factor negative tests, AI raw-log/secret-like payload rejection tests, Incident action hash/post-action verification, and a proto-vs-handwritten-Go service/RPC drift test.
 
 ## Known Gaps
 
 - OAuth login/PAT issuance UI not implemented.
-- Cloud webhook relay is in-memory; registry deployment job leases/results are durable with Postgres, but webhook/event relay queue is not wired to durable storage yet.
+- Cloud webhook relay is durable with Postgres when `database_url` is configured; database-backed relay notification/outbox delivery beyond webhook/deployment relay remains future work.
 - Cloud AI provider schema is still minimal; Gemini output is currently consumed as root-cause text while recommended actions remain typed fixture actions.
 - CLI UI WebSocket/SSE bridge and incident registry endpoint are not implemented; unavailable actions are disabled instead of fake-success.
 - Standalone SSH bootstrap worker/K3s installer binary is not implemented; Cloud exposes the secure take/finish contract and lifecycle state machine.
@@ -71,10 +72,10 @@ Detailed snapshot: `docs/current_state.md`. Architecture: `docs/architecture.md`
 Run from module dirs, not repo root:
 
 ```bash
-rtk go test ./...      # agent/
-rtk go test ./...      # cli/
-rtk go test ./...      # cloud/
-rtk go test ./...      # contracts/go/
+ go test ./...      # agent/
+ go test ./...      # cli/
+ go test ./...      # cloud/
+ go test ./...      # contracts/go/
 ```
 
 Last checked for P1 hardening: agent 80 passed, cloud 26 passed, cli 21 passed, contracts/go 1 passed.

@@ -51,9 +51,9 @@ PAT verification compares the presented token against bcrypt hashes in `personal
 ## Build/Test
 
 ```bash
-rtk go test ./...
-rtk go build ./cmd/opsi-cloud
-rtk go run ./cmd/opsi-cloud --config config.example.json --addr 127.0.0.1:9800
+ go test ./...
+ go build ./cmd/opsi-cloud
+ go run ./cmd/opsi-cloud --config config.example.json --addr 127.0.0.1:9800
 ```
 
 ## Phase 2 Webhook Relay Contract

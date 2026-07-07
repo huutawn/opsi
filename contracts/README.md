@@ -9,5 +9,5 @@ Shared API contracts live here. This layer must not contain business logic.
 ## Build/Test
 
 ```bash
-rtk go test ./...
+ go test ./...
 ```

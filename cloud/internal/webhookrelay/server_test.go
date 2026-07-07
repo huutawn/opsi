@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +61,9 @@ func TestGitHubWebhookQueuesEnvelopeAndLongPollReturnsIt(t *testing.T) {
 	if env.ProjectID != project.ID || env.ServiceID != "svc-api" || env.Branch != "main" || env.Signature != "sha256=test" || env.TriggeredBy != "alice" {
 		t.Fatalf("unexpected envelope: %+v", env)
 	}
+	if env.Body != "" {
+		t.Fatal("raw webhook body must not be persisted or delivered")
+	}
 }
 
 func TestGitHubWebhookRejectsUnknownRoute(t *testing.T) {
@@ -81,6 +85,46 @@ func TestQueuePurgesExpiredEnvelopes(t *testing.T) {
 	}
 	if got := queue.Len(); got != 0 {
 		t.Fatalf("expected expired item purged, got %d", got)
+	}
+}
+
+func TestQueueSanitizesEnvelopeAndPreservesChangedFiles(t *testing.T) {
+	queue := NewQueue()
+	body := `{"commits":[{"modified":["apps/api/main.go"],"added":["packages/shared/a.go"],"removed":["old.go"]}],"password":"hunter2"}`
+	if err := queue.Enqueue(Envelope{ProjectID: "proj", ServiceID: "svc", Body: body, IdempotencyKey: "delivery-1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	env, err := queue.Next(t.Context(), "proj", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env == nil || env.Body != "" || len(env.Modified) != 3 {
+		t.Fatalf("bad sanitized env: %+v", env)
+	}
+	data, _ := json.Marshal(env)
+	if strings.Contains(string(data), "hunter2") || strings.Contains(string(data), `"body"`) {
+		t.Fatalf("sensitive raw payload persisted: %s", data)
+	}
+}
+
+func TestQueueIdempotencyRejectsDifferentBody(t *testing.T) {
+	queue := NewQueue()
+	base := Envelope{ProjectID: "proj", ServiceID: "svc", IdempotencyKey: "delivery-1", ExpiresAt: time.Now().Add(time.Hour)}
+	base.Body = `{"after":"a"}`
+	if err := queue.Enqueue(base); err != nil {
+		t.Fatal(err)
+	}
+	again := base
+	again.Body = `{"after":"b"}`
+	if err := queue.Enqueue(again); err == nil {
+		t.Fatal("expected idempotency conflict")
+	}
+	same := base
+	if err := queue.Enqueue(same); err != nil {
+		t.Fatal(err)
+	}
+	if got := queue.Len(); got != 1 {
+		t.Fatalf("duplicate idempotency key should not enqueue twice, got %d", got)
 	}
 }
 

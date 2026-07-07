@@ -5,26 +5,26 @@ Agent is the execution brain that runs on the user's VPS. It provides config loa
 ## Build
 
 ```bash
-rtk go build ./cmd/opsi-agent
+ go build ./cmd/opsi-agent
 ```
 
 ## Test
 
 ```bash
-rtk go test ./...
-rtk go test -cover ./...
+ go test ./...
+ go test -cover ./...
 ```
 
 ## Run locally
 
 ```bash
-rtk go run ./cmd/opsi-agent --config config.example.yaml
+ go run ./cmd/opsi-agent --config config.example.yaml
 ```
 
 Generate local development certificates first if TLS paths are enabled:
 
 ```bash
-rtk ../scripts/dev-certs.sh ./certs
+ ../scripts/dev-certs.sh ./certs
 ```
 
 For local deployment smoke tests without containerd/K3s, keep `deployment.dry_run: true` in `config.example.yaml`. Production single-node K3s deployments use `git`, `nerdctl --namespace k8s.io build`, `kubectl apply`, `kubectl set image`, and `kubectl rollout status/undo`. Docker remains available with `deployment.builder_mode: docker` for compatibility or registry-oriented flows.
