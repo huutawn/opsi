@@ -136,6 +136,9 @@ func metaForTest(ctx IncidentContext) RCAMeta {
 
 type fakeStore struct{ rec telemetry.IncidentRecord }
 
+func (f *fakeStore) ListIncidents(context.Context, string, string, int) ([]telemetry.IncidentRecord, error) {
+	return []telemetry.IncidentRecord{f.rec}, nil
+}
 func (f *fakeStore) GetIncident(context.Context, string, string) (*telemetry.IncidentRecord, error) {
 	return &f.rec, nil
 }

@@ -94,6 +94,51 @@ export type TelemetrySummary = {
   done: boolean;
   source: "agent";
   payload_policy: string;
+  health?: string;
+  metric_count?: number;
+  log_count?: number;
+  error_count?: number;
+  service_count?: number;
+};
+
+export type TelemetryLogEntry = {
+  service_id?: string;
+  pod_id?: string;
+  namespace?: string;
+  level: string;
+  message: string;
+  fingerprint: string;
+  observed_unix: number;
+};
+
+export type TelemetryServiceStatus = {
+  service_id: string;
+  health: string;
+  pod_count: number;
+  ready_pods: number;
+  cpu_cores?: number;
+  memory_bytes?: number;
+  restart_count?: number;
+  recent_error_count?: number;
+  last_seen_unix?: number;
+};
+
+export type TelemetryQueryResponse = {
+  project_id: string;
+  source: "agent";
+  payload_policy: string;
+  summary?: {
+    since_unix: number;
+    end_unix: number;
+    metric_count: number;
+    log_count: number;
+    error_count: number;
+    service_count: number;
+    health: string;
+  };
+  services?: TelemetryServiceStatus[];
+  logs?: TelemetryLogEntry[];
+  next_cursor?: string;
 };
 
 export type SecretResult = {
@@ -107,6 +152,48 @@ export type SecretResult = {
   password?: string;
   ttl_seconds?: number;
   reveal_expires_at?: string;
+};
+
+export type IncidentRcaMetadata = {
+  provider: string;
+  configured_provider?: string;
+  model: string;
+  fallback_used: boolean;
+  input_context_hash: string;
+  created_at: string;
+};
+
+export type IncidentAction = {
+  id: string;
+  type: string;
+  description: string;
+  rollback_safe?: boolean;
+  params?: Record<string, string>;
+  action_hash?: string;
+};
+
+export type IncidentResponse = {
+  incident_id: string;
+  project_id: string;
+  service_id?: string;
+  status: string;
+  root_cause?: string;
+  confidence?: number;
+  contributing_factors?: string[];
+  recommended_actions?: IncidentAction[];
+  mitigation_actions_json?: string;
+  resolved_at_unix?: number;
+  mttr_seconds?: number;
+  rca_metadata?: IncidentRcaMetadata;
+};
+
+export type IncidentResult = {
+  status: string;
+  source: "agent";
+  advisory_only: boolean;
+  audit_policy: string;
+  payload_policy: string;
+  incident: IncidentResponse;
 };
 
 export type BootstrapSession = {
@@ -249,6 +336,7 @@ export type ConsoleState = {
   audit: AuditEvent[];
   support: SupportSummary | null;
   secretReveal: SecretResult | null;
+  incidentResult: IncidentResult | null;
   nodeDetail: NodeDiagnostics | null;
   serviceDetail: ServiceRecord | null;
   busy: string;

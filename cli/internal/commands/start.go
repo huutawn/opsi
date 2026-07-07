@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -102,7 +103,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			"cloud_connected": true,
 			"agent_connected": true,
 			"local_session":   localSession,
-			"capabilities":    []string{"projects", "nodes", "services", "deployments", "secrets", "audit", "support"},
+			"capabilities":    []string{"projects", "nodes", "services", "deployments", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
 	})
 	mux.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {
@@ -134,10 +135,13 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 			return
 		}
 	}
-	if localTelemetrySummary(w, r, cfg, factory) {
+	if localTelemetry(w, r, cfg, factory) {
 		return
 	}
 	if localSecretOperation(w, r, cfg, factory) {
+		return
+	}
+	if localIncidentOperation(w, r, cfg, factory) {
 		return
 	}
 	cloud, err := url.Parse(cfg.CloudURL)
@@ -147,10 +151,6 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	}
 	path, rawQuery, err := localToCloudPath(r.URL)
 	if err != nil {
-		if isLocalCapability(path) {
-			writeLocalError(w, r, http.StatusNotImplemented, path, err.Error())
-			return
-		}
 		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", err.Error())
 		return
 	}
@@ -393,44 +393,256 @@ func writeLocalAgentSecretError(w http.ResponseWriter, r *http.Request, err erro
 	writeLocalError(w, r, statusCode, code, "Agent secret operation failed")
 }
 
-func localTelemetrySummary(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
-	projectID, ok := telemetrySummaryProjectID(r.URL.Path)
+func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "incidents" {
+		return false
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	if err != nil || projectID == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+		return true
+	}
+	if r.Method == http.MethodGet {
+		req, ok := readLocalIncidentQuery(w, r, projectID)
+		if !ok {
+			return true
+		}
+		if len(parts) == 5 {
+			callLocalIncidentListAgent(w, r, cfg, factory, req)
+			return true
+		}
+		if len(parts) == 6 {
+			incidentID, err := url.PathUnescape(parts[5])
+			if err != nil || incidentID == "" {
+				writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ID_REQUIRED", "incident_id is required")
+				return true
+			}
+			callLocalIncidentGetAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID, UserID: req.UserID, Role: req.Role})
+			return true
+		}
+		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local incident route is not implemented")
+		return true
+	}
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return true
+	}
+	if len(parts) < 7 {
+		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local incident route is not implemented")
+		return true
+	}
+	incidentID, err := url.PathUnescape(parts[5])
+	if err != nil || incidentID == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ID_REQUIRED", "incident_id is required")
+		return true
+	}
+	req, ok := readLocalIncidentRequest(w, r, projectID, incidentID)
+	if !ok {
+		return true
+	}
+	switch {
+	case len(parts) == 7 && parts[6] == "analyze":
+		callLocalIncidentAgent(w, r, cfg, factory, "analyzed", &agentv1.IncidentAnalyzeRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role}, nil)
+	case len(parts) == 7 && parts[6] == "resolve":
+		callLocalIncidentAgent(w, r, cfg, factory, "resolved", nil, &agentv1.IncidentActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role})
+	case len(parts) == 9 && parts[6] == "actions" && parts[8] == "approve":
+		actionID, err := url.PathUnescape(parts[7])
+		if err != nil || actionID == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ACTION_ID_REQUIRED", "action_id is required")
+			return true
+		}
+		if !req.Approved {
+			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ACTION_APPROVAL_REQUIRED", "mitigation requires explicit user approval")
+			return true
+		}
+		if req.ActionHash == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ACTION_HASH_REQUIRED", "mitigation approval requires the current action_hash")
+			return true
+		}
+		callLocalIncidentAgent(w, r, cfg, factory, "approved", nil, &agentv1.IncidentActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, ActionID: actionID, ActionHash: req.ActionHash, UserID: req.UserID, Role: req.Role})
+	default:
+		writeLocalError(w, r, http.StatusNotImplemented, "INCIDENT_OPERATION_UNSUPPORTED", "this incident operation is not supported by the local Agent API")
+	}
+	return true
+}
+
+type localIncidentRequest struct {
+	ProjectID  string
+	IncidentID string
+	UserID     string
+	Role       string
+	ActionHash string
+	Approved   bool
+}
+
+func readLocalIncidentQuery(w http.ResponseWriter, r *http.Request, projectID string) (*agentv1.IncidentListRequest, bool) {
+	query := r.URL.Query()
+	limit, _ := strconv.ParseInt(query.Get("limit"), 10, 32)
+	req := &agentv1.IncidentListRequest{ProjectID: projectID, Status: strings.TrimSpace(query.Get("status")), Limit: int32(limit), UserID: strings.TrimSpace(query.Get("user_id")), Role: strings.TrimSpace(query.Get("role"))}
+	if req.UserID == "" || req.Role == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_REQUIRED_FIELDS_MISSING", "user_id and role are required")
+		return nil, false
+	}
+	return req, true
+}
+
+func readLocalIncidentRequest(w http.ResponseWriter, r *http.Request, projectID, incidentID string) (localIncidentRequest, bool) {
+	var raw map[string]json.RawMessage
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err := dec.Decode(&raw); err != nil {
+		writeLocalError(w, r, http.StatusBadRequest, "INVALID_INCIDENT_REQUEST", "invalid incident request")
+		return localIncidentRequest{}, false
+	}
+	allowed := map[string]bool{"user_id": true, "role": true, "action_hash": true, "approved": true, "approve": true, "explicit_approval": true}
+	for key := range raw {
+		if !allowed[strings.ToLower(key)] {
+			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_INPUT_UNSUPPORTED", "incident request contains an unsupported field")
+			return localIncidentRequest{}, false
+		}
+	}
+	req := localIncidentRequest{ProjectID: projectID, IncidentID: incidentID, UserID: jsonString(raw, "user_id"), Role: jsonString(raw, "role"), ActionHash: jsonString(raw, "action_hash"), Approved: jsonBool(raw, "approved") || jsonBool(raw, "approve") || jsonBool(raw, "explicit_approval")}
+	if req.UserID == "" || req.Role == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_REQUIRED_FIELDS_MISSING", "user_id and role are required")
+		return localIncidentRequest{}, false
+	}
+	return req, true
+}
+
+func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentListRequest) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	resp, err := agentclient.New(cfg).ListIncidents(ctx, req)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records come from Agent runtime state; RCA context is sanitized before AI use", "incidents": resp.Incidents})
+}
+
+func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	resp, err := agentclient.New(cfg).GetIncident(ctx, req)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records come from Agent runtime state; RCA context is sanitized before AI use", "incident": resp})
+}
+
+func callLocalIncidentAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), statusText string, analyze *agentv1.IncidentAnalyzeRequest, action *agentv1.IncidentActionRequest) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	client := agentclient.New(cfg)
+	var (
+		resp *agentv1.IncidentResponse
+		err  error
+	)
+	switch statusText {
+	case "analyzed":
+		resp, err = client.AnalyzeIncident(ctx, analyze)
+	case "approved":
+		resp, err = client.ApproveIncidentAction(ctx, action)
+	case "resolved":
+		resp, err = client.ResolveIncident(ctx, action)
+	}
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":         statusText,
+		"source":         "agent",
+		"advisory_only":  statusText == "analyzed",
+		"audit_policy":   "Agent records RCA and mitigation attempts with redacted metadata",
+		"payload_policy": "AI receives sanitized IncidentContext only; raw logs, raw metrics, secrets, kubeconfig, private keys, and source code stay local",
+		"incident":       resp,
+	})
+}
+
+func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err error) {
+	statusCode := http.StatusBadGateway
+	code := "AGENT_INCIDENT_OPERATION_FAILED"
+	switch grpcstatus.Code(err) {
+	case codes.InvalidArgument:
+		statusCode, code = http.StatusBadRequest, "INVALID_INCIDENT_REQUEST"
+	case codes.Unauthenticated:
+		statusCode, code = http.StatusUnauthorized, "AGENT_AUTH_REQUIRED"
+	case codes.PermissionDenied:
+		statusCode, code = http.StatusForbidden, "INCIDENT_ACCESS_DENIED"
+	case codes.FailedPrecondition:
+		statusCode, code = http.StatusPreconditionFailed, "INCIDENT_PRECONDITION_FAILED"
+	case codes.NotFound:
+		statusCode, code = http.StatusNotFound, "INCIDENT_NOT_FOUND"
+	case codes.Unimplemented:
+		statusCode, code = http.StatusNotImplemented, "AGENT_INCIDENT_UNSUPPORTED"
+	case codes.DeadlineExceeded:
+		statusCode, code = http.StatusGatewayTimeout, "AGENT_INCIDENT_TIMEOUT"
+	case codes.Unavailable:
+		statusCode, code = http.StatusBadGateway, "AGENT_UNAVAILABLE"
+	}
+	writeLocalError(w, r, statusCode, code, "Agent incident operation failed")
+}
+
+func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+	req, view, ok := localTelemetryRequest(w, r)
 	if !ok {
 		return false
+	}
+	if req == nil {
+		return true
 	}
 	if r.Method != http.MethodGet {
 		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
 		return true
 	}
-	query := r.URL.Query()
-	sinceUnix, _ := strconv.ParseInt(query.Get("since_unix"), 10, 64)
-	maxChunkBytes, _ := strconv.ParseInt(query.Get("max_chunk_bytes"), 10, 32)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if pat := optionalPAT(factory); pat != "" {
 		ctx = agentclient.WithPAT(ctx, pat)
 	}
-	summary := telemetrySummary{ProjectID: projectID, SinceUnix: sinceUnix, Source: "agent", PayloadPolicy: "raw telemetry payload remains local and is not returned to the browser"}
-	err := agentclient.New(cfg).Sync(ctx, &agentv1.SyncRequest{ProjectID: projectID, LastReceivedUnix: sinceUnix, MaxChunkBytes: int32(maxChunkBytes)}, func(chunk *agentv1.SyncChunk) error {
-		summary.ChunkCount++
-		summary.RecordCount += int(chunk.RecordCount)
-		if summary.StartUnix == 0 || chunk.StartUnix < summary.StartUnix {
-			summary.StartUnix = chunk.StartUnix
-		}
-		if chunk.EndUnix > summary.EndUnix {
-			summary.EndUnix = chunk.EndUnix
-		}
-		if chunk.Done {
-			summary.Done = true
-		}
-		return nil
-	})
+	resp, err := agentclient.New(cfg).QueryTelemetry(ctx, req)
 	w.Header().Set("content-type", "application/json")
 	if err != nil {
-		writeLocalError(w, r, http.StatusBadGateway, "AGENT_TELEMETRY_UNAVAILABLE", "Agent telemetry summary is unavailable")
+		writeLocalAgentTelemetryError(w, r, err)
 		return true
 	}
-	_ = json.NewEncoder(w).Encode(summary)
+	sanitizeTelemetryResponse(resp)
+	if view == "summary" && resp.Summary != nil {
+		_ = json.NewEncoder(w).Encode(telemetrySummary{
+			ProjectID:     resp.ProjectID,
+			SinceUnix:     resp.Summary.SinceUnix,
+			RecordCount:   int(resp.Summary.MetricCount + resp.Summary.LogCount),
+			StartUnix:     resp.Summary.SinceUnix,
+			EndUnix:       resp.Summary.EndUnix,
+			Done:          true,
+			Source:        "agent",
+			PayloadPolicy: resp.PayloadPolicy,
+			Health:        resp.Summary.Health,
+			MetricCount:   int(resp.Summary.MetricCount),
+			LogCount:      int(resp.Summary.LogCount),
+			ErrorCount:    int(resp.Summary.ErrorCount),
+			ServiceCount:  int(resp.Summary.ServiceCount),
+		})
+		return true
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 	return true
 }
 
@@ -444,15 +656,110 @@ type telemetrySummary struct {
 	Done          bool   `json:"done"`
 	Source        string `json:"source"`
 	PayloadPolicy string `json:"payload_policy"`
+	Health        string `json:"health,omitempty"`
+	MetricCount   int    `json:"metric_count,omitempty"`
+	LogCount      int    `json:"log_count,omitempty"`
+	ErrorCount    int    `json:"error_count,omitempty"`
+	ServiceCount  int    `json:"service_count,omitempty"`
 }
 
-func telemetrySummaryProjectID(path string) (string, bool) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 6 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "telemetry" || parts[5] != "summary" {
-		return "", false
+func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.TelemetryQueryRequest, string, bool) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" {
+		return nil, "", false
 	}
 	projectID, err := url.PathUnescape(parts[3])
-	return projectID, err == nil && projectID != ""
+	if err != nil || projectID == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+		return nil, "", true
+	}
+	query := r.URL.Query()
+	sinceUnix, _ := strconv.ParseInt(query.Get("since_unix"), 10, 64)
+	limit, _ := strconv.ParseInt(query.Get("limit"), 10, 32)
+	req := &agentv1.TelemetryQueryRequest{ProjectID: projectID, SinceUnix: sinceUnix, Cursor: query.Get("cursor"), Limit: int32(limit)}
+	switch {
+	case len(parts) == 6 && parts[4] == "telemetry" && parts[5] == "summary":
+		req.IncludeSummary = true
+		req.IncludeServices = true
+		return req, "summary", true
+	case len(parts) == 7 && parts[4] == "telemetry" && parts[5] == "services":
+		serviceID, err := url.PathUnescape(parts[6])
+		if err != nil || serviceID == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "SERVICE_ID_REQUIRED", "service_id is required")
+			return nil, "", true
+		}
+		req.ServiceID = serviceID
+		req.IncludeSummary = true
+		req.IncludeServices = true
+		return req, "service", true
+	case len(parts) == 5 && parts[4] == "logs":
+		req.ServiceID = query.Get("service_id")
+		req.IncludeLogs = true
+		return req, "logs", true
+	case len(parts) == 6 && parts[4] == "logs" && parts[5] == "query":
+		req.ServiceID = query.Get("service_id")
+		req.IncludeLogs = true
+		return req, "logs", true
+	}
+	if parts[4] == "telemetry" || parts[4] == "logs" {
+		writeLocalError(w, r, http.StatusNotImplemented, "TELEMETRY_OPERATION_UNSUPPORTED", "this telemetry/logs operation is not supported by the local Agent API")
+		return nil, "", true
+	}
+	return nil, "", false
+}
+
+func writeLocalAgentTelemetryError(w http.ResponseWriter, r *http.Request, err error) {
+	statusCode := http.StatusBadGateway
+	code := "AGENT_TELEMETRY_UNAVAILABLE"
+	switch grpcstatus.Code(err) {
+	case codes.InvalidArgument:
+		statusCode, code = http.StatusBadRequest, "INVALID_TELEMETRY_REQUEST"
+	case codes.Unauthenticated:
+		statusCode, code = http.StatusUnauthorized, "AGENT_AUTH_REQUIRED"
+	case codes.PermissionDenied:
+		statusCode, code = http.StatusForbidden, "TELEMETRY_ACCESS_DENIED"
+	case codes.Unimplemented:
+		statusCode, code = http.StatusNotImplemented, "AGENT_TELEMETRY_UNSUPPORTED"
+	case codes.DeadlineExceeded:
+		statusCode, code = http.StatusGatewayTimeout, "AGENT_TELEMETRY_TIMEOUT"
+	case codes.Unavailable:
+		statusCode, code = http.StatusBadGateway, "AGENT_UNAVAILABLE"
+	}
+	writeLocalError(w, r, statusCode, code, "Agent telemetry operation failed")
+}
+
+func sanitizeTelemetryResponse(resp *agentv1.TelemetryQueryResponse) {
+	if resp == nil {
+		return
+	}
+	resp.PayloadPolicy = localTelemetryPayloadPolicy(resp.PayloadPolicy)
+	for i := range resp.Logs {
+		resp.Logs[i].Message = redactLocalTelemetryText(resp.Logs[i].Message)
+	}
+}
+
+func localTelemetryPayloadPolicy(value string) string {
+	if value != "" {
+		return value
+	}
+	return "raw logs and raw metric streams remain Agent-local; browser responses are redacted summaries/windows"
+}
+
+var localTelemetryRedactors = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	{regexp.MustCompile(`(?i)(authorization:\s*bearer\s+)[^\s,;]+`), `${1}[REDACTED]`},
+	{regexp.MustCompile(`(?i)(password|passwd|pwd|token|pat|api[_-]?key|secret|authorization|bearer)\s*[:=]\s*("[^"]+"|'[^']+'|[^\s,;]+)`), `$1=[REDACTED]`},
+	{regexp.MustCompile(`-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----`), `[REDACTED_PRIVATE_KEY]`},
+}
+
+func redactLocalTelemetryText(value string) string {
+	out := value
+	for _, redactor := range localTelemetryRedactors {
+		out = redactor.re.ReplaceAllString(out, redactor.repl)
+	}
+	return strings.ReplaceAll(out, "kubeconfig", "[REDACTED]")
 }
 
 func localDeploymentIDs(path, method string) (string, string, bool) {
@@ -517,33 +824,10 @@ func localToCloudPath(u *url.URL) (string, string, error) {
 	if strings.HasPrefix(path, "/projects/") && strings.HasSuffix(path, "/nodes/bootstrap") {
 		return "/api" + strings.TrimSuffix(path, "/nodes/bootstrap") + "/bootstrap-sessions", u.RawQuery, nil
 	}
-	if disabledCode, ok := disabledLocalCapability(path); ok {
-		return disabledCode, "", fmt.Errorf("local endpoint %s is not wired to the Agent yet", u.Path)
-	}
 	if strings.HasPrefix(path, "/projects/") {
 		return "/api" + path, u.RawQuery, nil
 	}
 	return "", "", fmt.Errorf("local route %s is not implemented", u.Path)
-}
-
-func disabledLocalCapability(path string) (string, bool) {
-	for _, marker := range []struct {
-		fragment string
-		code     string
-	}{
-		{"/incidents", "INCIDENTS_LOCAL_API_NOT_IMPLEMENTED"},
-		{"/telemetry", "TELEMETRY_LOCAL_API_NOT_IMPLEMENTED"},
-		{"/logs", "LOGS_LOCAL_API_NOT_IMPLEMENTED"},
-	} {
-		if strings.Contains(path, marker.fragment) {
-			return marker.code, true
-		}
-	}
-	return "", false
-}
-
-func isLocalCapability(code string) bool {
-	return strings.HasSuffix(code, "_LOCAL_API_NOT_IMPLEMENTED")
 }
 
 func isMutation(method string) bool {

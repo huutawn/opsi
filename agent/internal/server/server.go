@@ -187,6 +187,29 @@ func (s *IncidentService) AnalyzeIncident(ctx context.Context, req *agentv1.Inci
 	return incidentResponse(rec, rca), nil
 }
 
+func (s *IncidentService) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
+	records, err := s.service.List(ctx, incident.ListRequest{ProjectID: req.ProjectID, Status: req.Status, Limit: int(req.Limit), UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	if err != nil {
+		return nil, mapIncidentError(err)
+	}
+	out := &agentv1.IncidentListResponse{}
+	for i := range records {
+		rec := records[i]
+		out.Incidents = append(out.Incidents, *incidentResponse(&rec, incidentRCA(rec.RCAResult)))
+	}
+	return out, nil
+}
+
+func (s *IncidentService) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
+	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
+	rec, rca, err := s.service.Get(ctx, incident.AnalyzeRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	if err != nil {
+		return nil, mapIncidentError(err)
+	}
+	return incidentResponse(rec, rca), nil
+}
+
 func (s *IncidentService) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
 	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
 	rec, rca, err := s.service.Approve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, ActionID: req.ActionID, ActionHash: req.ActionHash, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
@@ -279,6 +302,35 @@ func (s *TelemetryService) Sync(req *agentv1.SyncRequest, stream agentv1.Telemet
 		}
 	}
 	return nil
+}
+
+func (s *TelemetryService) QueryTelemetry(ctx context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error) {
+	if req.ProjectID == "" {
+		return nil, status.Error(codes.InvalidArgument, "project_id is required")
+	}
+	if req.Limit < 0 || req.Limit > 200 {
+		return nil, status.Error(codes.InvalidArgument, "limit must be between 0 and 200")
+	}
+	if req.Cursor != "" {
+		cursor, err := time.Parse(time.RFC3339Nano, req.Cursor)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, "cursor is invalid")
+		}
+		req.SinceUnix = cursor.Unix()
+	}
+	if !req.IncludeLogs && !req.IncludeSummary && !req.IncludeServices {
+		return nil, status.Error(codes.InvalidArgument, "at least one telemetry view must be requested")
+	}
+	if s.auth != nil {
+		if _, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer); err != nil {
+			return nil, err
+		}
+	}
+	resp, err := telemetry.BuildQueryResponse(ctx, s.store, req, time.Now().UTC())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return resp, nil
 }
 
 func NewDeploymentService(cfg config.Config, engine *deploy.Engine, auth secret.AuthVerifier, serviceStore *svcatalog.Store) *DeploymentService {
@@ -716,6 +768,12 @@ func incidentResponse(rec *telemetry.IncidentRecord, r incident.RCA) *agentv1.In
 		resp.RCAMetadata = &agentv1.RCAMetadata{Provider: r.Metadata.Provider, ConfiguredProvider: r.Metadata.ConfiguredProvider, Model: r.Metadata.Model, FallbackUsed: r.Metadata.FallbackUsed, InputContextHash: r.Metadata.InputContextHash, CreatedAt: r.Metadata.CreatedAt}
 	}
 	return resp
+}
+
+func incidentRCA(raw string) incident.RCA {
+	var r incident.RCA
+	_ = json.Unmarshal([]byte(raw), &r)
+	return r
 }
 
 func incidentService(cfg config.Config, store telemetry.Store, auth secret.AuthVerifier) *incident.Service {

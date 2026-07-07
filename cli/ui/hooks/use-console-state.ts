@@ -32,6 +32,7 @@ export function useConsoleState() {
     audit: [],
     support: null,
     secretReveal: null,
+    incidentResult: null,
     nodeDetail: null,
     serviceDetail: null,
     busy: "",
@@ -251,6 +252,48 @@ export function useConsoleState() {
     }
   }
 
+  async function incidentAnalyze(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentProject) return;
+    const form = new FormData(event.currentTarget);
+    const incidentID = String(form.get("incident_id") ?? "");
+    patch({ busy: "incident-analyze", incidentResult: null });
+    try {
+      patch({ incidentResult: await client.analyzeIncident(currentProject.id, incidentID, incidentBody(form)) });
+    } finally {
+      patch({ busy: "" });
+    }
+  }
+
+  async function incidentApprove(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentProject) return;
+    const form = new FormData(event.currentTarget);
+    const incidentID = String(form.get("incident_id") ?? "");
+    const actionID = String(form.get("action_id") ?? "");
+    patch({ busy: "incident-approve" });
+    try {
+      patch({ incidentResult: await client.approveIncident(currentProject.id, incidentID, actionID, incidentBody(form)) });
+      await load();
+    } finally {
+      patch({ busy: "" });
+    }
+  }
+
+  async function incidentResolve(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentProject) return;
+    const form = new FormData(event.currentTarget);
+    const incidentID = String(form.get("incident_id") ?? "");
+    patch({ busy: "incident-resolve" });
+    try {
+      patch({ incidentResult: await client.resolveIncident(currentProject.id, incidentID, incidentBody(form)) });
+      await load();
+    } finally {
+      patch({ busy: "" });
+    }
+  }
+
   return {
     active,
     orgID,
@@ -268,6 +311,9 @@ export function useConsoleState() {
       load,
       loadBootstrapEvents,
       loadDeploymentEvents,
+      incidentAnalyze,
+      incidentApprove,
+      incidentResolve,
       nodeAction,
       rollback,
       secretCreate,
@@ -287,6 +333,14 @@ function secretBody(form: FormData) {
     otp_request_id: form.get("otp_request_id"),
     otp_code: form.get("otp_code"),
     totp_code: form.get("totp_code"),
+  };
+}
+
+function incidentBody(form: FormData) {
+  return {
+    user_id: form.get("user_id"),
+    role: form.get("role"),
+    action_hash: form.get("action_hash"),
   };
 }
 
@@ -326,6 +380,7 @@ function emptyPatch(projects: Project[]): Partial<ConsoleState> {
     sessions: [] as BootstrapSession[],
     audit: [],
     support: null,
+    incidentResult: null,
     bootstrapEvents: [] as TimelineEvent[],
     deploymentEvents: [] as TimelineEvent[],
     nodeDetail: null as NodeDiagnostics | null,

@@ -8,7 +8,9 @@ import type {
   Readiness,
   ServiceRecord,
   SecretResult,
+  IncidentResult,
   SupportSummary,
+  TelemetryQueryResponse,
   TelemetrySummary,
   TimelineEvent,
 } from "@/lib/contracts/registry";
@@ -116,6 +118,21 @@ export class LocalClient {
     );
   }
 
+  telemetryService(projectID: string, serviceID: string, sinceUnix = 0) {
+    return this.call<TelemetryQueryResponse>(
+      `/api/local/projects/${projectID}/telemetry/services/${encodeURIComponent(serviceID)}?since_unix=${encodeURIComponent(String(sinceUnix))}`,
+    );
+  }
+
+  logs(projectID: string, params: { serviceID?: string; cursor?: string; limit?: number } = {}) {
+    const query = new URLSearchParams();
+    if (params.serviceID) query.set("service_id", params.serviceID);
+    if (params.cursor) query.set("cursor", params.cursor);
+    if (params.limit) query.set("limit", String(params.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return this.call<TelemetryQueryResponse>(`/api/local/projects/${projectID}/logs${suffix}`);
+  }
+
   createSecret(projectID: string, body: Record<string, unknown>) {
     return this.call<SecretResult>(`/api/local/projects/${projectID}/secrets`, {
       method: "POST",
@@ -134,6 +151,33 @@ export class LocalClient {
 
   rotateSecret(projectID: string, name: string, body: Record<string, unknown>) {
     return this.call<SecretResult>(`/api/local/projects/${projectID}/secrets/${encodeURIComponent(name)}/rotate`, {
+      method: "POST",
+      write: true,
+      body: JSON.stringify(body),
+    });
+  }
+
+  analyzeIncident(projectID: string, incidentID: string, body: Record<string, unknown>) {
+    return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/analyze`, {
+      method: "POST",
+      write: true,
+      body: JSON.stringify(body),
+    });
+  }
+
+  approveIncident(projectID: string, incidentID: string, actionID: string, body: Record<string, unknown>) {
+    return this.call<IncidentResult>(
+      `/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/actions/${encodeURIComponent(actionID)}/approve`,
+      {
+        method: "POST",
+        write: true,
+        body: JSON.stringify({ ...body, approved: true }),
+      },
+    );
+  }
+
+  resolveIncident(projectID: string, incidentID: string, body: Record<string, unknown>) {
+    return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/resolve`, {
       method: "POST",
       write: true,
       body: JSON.stringify(body),

@@ -181,6 +181,59 @@ type SyncChunk struct {
 	Done           bool   `json:"done"`
 }
 
+type TelemetryQueryRequest struct {
+	ProjectID       string `json:"project_id"`
+	ServiceID       string `json:"service_id,omitempty"`
+	SinceUnix       int64  `json:"since_unix,omitempty"`
+	Cursor          string `json:"cursor,omitempty"`
+	Limit           int32  `json:"limit,omitempty"`
+	IncludeLogs     bool   `json:"include_logs,omitempty"`
+	IncludeSummary  bool   `json:"include_summary,omitempty"`
+	IncludeServices bool   `json:"include_services,omitempty"`
+}
+
+type TelemetryQueryResponse struct {
+	ProjectID     string                   `json:"project_id"`
+	Source        string                   `json:"source"`
+	PayloadPolicy string                   `json:"payload_policy"`
+	Summary       *TelemetryRuntimeSummary `json:"summary,omitempty"`
+	Services      []TelemetryServiceStatus `json:"services,omitempty"`
+	Logs          []TelemetryLogEntry      `json:"logs,omitempty"`
+	NextCursor    string                   `json:"next_cursor,omitempty"`
+}
+
+type TelemetryRuntimeSummary struct {
+	SinceUnix    int64  `json:"since_unix"`
+	EndUnix      int64  `json:"end_unix"`
+	MetricCount  int32  `json:"metric_count"`
+	LogCount     int32  `json:"log_count"`
+	ErrorCount   int32  `json:"error_count"`
+	ServiceCount int32  `json:"service_count"`
+	Health       string `json:"health"`
+}
+
+type TelemetryServiceStatus struct {
+	ServiceID        string  `json:"service_id"`
+	Health           string  `json:"health"`
+	PodCount         int32   `json:"pod_count"`
+	ReadyPods        int32   `json:"ready_pods"`
+	CPUCores         float64 `json:"cpu_cores,omitempty"`
+	MemoryBytes      float64 `json:"memory_bytes,omitempty"`
+	RestartCount     int32   `json:"restart_count,omitempty"`
+	RecentErrorCount int32   `json:"recent_error_count,omitempty"`
+	LastSeenUnix     int64   `json:"last_seen_unix,omitempty"`
+}
+
+type TelemetryLogEntry struct {
+	ServiceID    string `json:"service_id,omitempty"`
+	PodID        string `json:"pod_id,omitempty"`
+	Namespace    string `json:"namespace,omitempty"`
+	Level        string `json:"level"`
+	Message      string `json:"message"`
+	Fingerprint  string `json:"fingerprint"`
+	ObservedUnix int64  `json:"observed_unix"`
+}
+
 type SetupTOTPRequest struct {
 	ProjectID string `json:"project_id"`
 	UserID    string `json:"user_id"`
@@ -215,6 +268,23 @@ type SecretResponse struct {
 	Password  string `json:"password,omitempty"`
 }
 
+type IncidentListRequest struct {
+	ProjectID string `json:"project_id"`
+	Status    string `json:"status"`
+	Limit     int32  `json:"limit"`
+	UserID    string `json:"user_id"`
+	Role      string `json:"role"`
+	PAT       string `json:"pat"`
+}
+
+type IncidentGetRequest struct {
+	ProjectID  string `json:"project_id"`
+	IncidentID string `json:"incident_id"`
+	UserID     string `json:"user_id"`
+	Role       string `json:"role"`
+	PAT        string `json:"pat"`
+}
+
 type IncidentAnalyzeRequest struct {
 	ProjectID  string `json:"project_id"`
 	IncidentID string `json:"incident_id"`
@@ -231,6 +301,10 @@ type IncidentActionRequest struct {
 	UserID     string `json:"user_id"`
 	Role       string `json:"role"`
 	PAT        string `json:"pat"`
+}
+
+type IncidentListResponse struct {
+	Incidents []IncidentResponse `json:"incidents"`
 }
 
 type IncidentResponse struct {
@@ -615,12 +689,17 @@ var ServiceManagerService_ServiceDesc = grpc.ServiceDesc{
 
 type TelemetryServiceServer interface {
 	Sync(*SyncRequest, TelemetryService_SyncServer) error
+	QueryTelemetry(context.Context, *TelemetryQueryRequest) (*TelemetryQueryResponse, error)
 }
 
 type UnimplementedTelemetryServiceServer struct{}
 
 func (UnimplementedTelemetryServiceServer) Sync(*SyncRequest, TelemetryService_SyncServer) error {
 	return status.Error(codes.Unimplemented, "method Sync not implemented")
+}
+
+func (UnimplementedTelemetryServiceServer) QueryTelemetry(context.Context, *TelemetryQueryRequest) (*TelemetryQueryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryTelemetry not implemented")
 }
 
 type TelemetryService_SyncServer interface {
@@ -634,6 +713,7 @@ func RegisterTelemetryServiceServer(server grpc.ServiceRegistrar, service Teleme
 
 type TelemetryServiceClient interface {
 	Sync(ctx context.Context, in *SyncRequest, opts ...grpc.CallOption) (TelemetryService_SyncClient, error)
+	QueryTelemetry(ctx context.Context, in *TelemetryQueryRequest, opts ...grpc.CallOption) (*TelemetryQueryResponse, error)
 }
 
 type telemetryServiceClient struct {
@@ -658,6 +738,13 @@ func (c *telemetryServiceClient) Sync(ctx context.Context, in *SyncRequest, opts
 		return nil, err
 	}
 	return x, nil
+}
+
+func (c *telemetryServiceClient) QueryTelemetry(ctx context.Context, in *TelemetryQueryRequest, opts ...grpc.CallOption) (*TelemetryQueryResponse, error) {
+	out := new(TelemetryQueryResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+TelemetryServiceName+"/QueryTelemetry", in, out, opts...)
+	return out, err
 }
 
 type TelemetryService_SyncClient interface {
@@ -685,6 +772,21 @@ func telemetrySyncHandler(service any, stream grpc.ServerStream) error {
 	return service.(TelemetryServiceServer).Sync(in, &telemetryServiceSyncServer{stream})
 }
 
+func telemetryQueryHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(TelemetryQueryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(TelemetryServiceServer).QueryTelemetry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + TelemetryServiceName + "/QueryTelemetry"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(TelemetryServiceServer).QueryTelemetry(ctx, req.(*TelemetryQueryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 type telemetryServiceSyncServer struct {
 	grpc.ServerStream
 }
@@ -696,7 +798,9 @@ func (x *telemetryServiceSyncServer) Send(m *SyncChunk) error {
 var TelemetryService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: TelemetryServiceName,
 	HandlerType: (*TelemetryServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{MethodName: "QueryTelemetry", Handler: telemetryQueryHandler},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Sync",
@@ -865,12 +969,22 @@ var SecretService_ServiceDesc = grpc.ServiceDesc{
 }
 
 type IncidentServiceServer interface {
+	ListIncidents(context.Context, *IncidentListRequest) (*IncidentListResponse, error)
+	GetIncident(context.Context, *IncidentGetRequest) (*IncidentResponse, error)
 	AnalyzeIncident(context.Context, *IncidentAnalyzeRequest) (*IncidentResponse, error)
 	ApproveIncidentAction(context.Context, *IncidentActionRequest) (*IncidentResponse, error)
 	ResolveIncident(context.Context, *IncidentActionRequest) (*IncidentResponse, error)
 }
 
 type UnimplementedIncidentServiceServer struct{}
+
+func (UnimplementedIncidentServiceServer) ListIncidents(context.Context, *IncidentListRequest) (*IncidentListResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListIncidents not implemented")
+}
+
+func (UnimplementedIncidentServiceServer) GetIncident(context.Context, *IncidentGetRequest) (*IncidentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetIncident not implemented")
+}
 
 func (UnimplementedIncidentServiceServer) AnalyzeIncident(context.Context, *IncidentAnalyzeRequest) (*IncidentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AnalyzeIncident not implemented")
@@ -889,6 +1003,8 @@ func RegisterIncidentServiceServer(server grpc.ServiceRegistrar, service Inciden
 }
 
 type IncidentServiceClient interface {
+	ListIncidents(ctx context.Context, in *IncidentListRequest, opts ...grpc.CallOption) (*IncidentListResponse, error)
+	GetIncident(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
 	AnalyzeIncident(ctx context.Context, in *IncidentAnalyzeRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
 	ApproveIncidentAction(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
 	ResolveIncident(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
@@ -898,6 +1014,20 @@ type incidentServiceClient struct{ cc grpc.ClientConnInterface }
 
 func NewIncidentServiceClient(cc grpc.ClientConnInterface) IncidentServiceClient {
 	return &incidentServiceClient{cc: cc}
+}
+
+func (c *incidentServiceClient) ListIncidents(ctx context.Context, in *IncidentListRequest, opts ...grpc.CallOption) (*IncidentListResponse, error) {
+	out := new(IncidentListResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/ListIncidents", in, out, opts...)
+	return out, err
+}
+
+func (c *incidentServiceClient) GetIncident(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
+	out := new(IncidentResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/GetIncident", in, out, opts...)
+	return out, err
 }
 
 func (c *incidentServiceClient) AnalyzeIncident(ctx context.Context, in *IncidentAnalyzeRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
@@ -919,6 +1049,36 @@ func (c *incidentServiceClient) ResolveIncident(ctx context.Context, in *Inciden
 	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
 	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/ResolveIncident", in, out, opts...)
 	return out, err
+}
+
+func listIncidentsHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(IncidentServiceServer).ListIncidents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/ListIncidents"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(IncidentServiceServer).ListIncidents(ctx, req.(*IncidentListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func getIncidentHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentGetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(IncidentServiceServer).GetIncident(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/GetIncident"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(IncidentServiceServer).GetIncident(ctx, req.(*IncidentGetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func analyzeIncidentHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
@@ -970,6 +1130,8 @@ var IncidentService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: IncidentServiceName,
 	HandlerType: (*IncidentServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{MethodName: "ListIncidents", Handler: listIncidentsHandler},
+		{MethodName: "GetIncident", Handler: getIncidentHandler},
 		{MethodName: "AnalyzeIncident", Handler: analyzeIncidentHandler},
 		{MethodName: "ApproveIncidentAction", Handler: approveIncidentActionHandler},
 		{MethodName: "ResolveIncident", Handler: resolveIncidentHandler},

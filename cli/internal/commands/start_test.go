@@ -496,7 +496,7 @@ func TestLocalTelemetrySummaryUsesAgentAndHidesRawPayload(t *testing.T) {
 	if err := json.Unmarshal(body, &summary); err != nil {
 		t.Fatal(err)
 	}
-	if summary.ProjectID != "proj-1" || summary.SinceUnix != 41 || summary.ChunkCount != 1 || summary.RecordCount != 3 || summary.Source != "agent" {
+	if summary.ProjectID != "proj-1" || summary.SinceUnix != 41 || summary.RecordCount != 3 || summary.Source != "agent" {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 	if agent.lastReceivedUnix != 41 {
@@ -504,8 +504,233 @@ func TestLocalTelemetrySummaryUsesAgentAndHidesRawPayload(t *testing.T) {
 	}
 }
 
+func TestLocalLogsUseAgentNotCloudAndRedact(t *testing.T) {
+	agent := &localTelemetryServer{}
+	agentAddr, stop := startCommandTelemetryServer(t, agent)
+	defer stop()
+	cloudCalled := false
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cloudCalled = true
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, nil))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/logs?service_id=svc-1&limit=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+	if cloudCalled {
+		t.Fatal("logs must not call Cloud")
+	}
+	if !agent.includeLogs || agent.serviceID != "svc-1" {
+		t.Fatalf("agent logs request not used: include=%v service=%q", agent.includeLogs, agent.serviceID)
+	}
+	if strings.Contains(string(body), "super-secret") || strings.Contains(string(body), "browser-pat") {
+		t.Fatalf("log response leaked secret-like value: %s", body)
+	}
+	if !strings.Contains(string(body), "[REDACTED]") {
+		t.Fatalf("log response was not redacted: %s", body)
+	}
+}
+
+func TestLocalTelemetryInvalidInputFailsClosed(t *testing.T) {
+	agent := &localTelemetryServer{}
+	agentAddr, stop := startCommandTelemetryServer(t, agent)
+	defer stop()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: "http://127.0.0.1:1"}, nil))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/logs?cursor=not-a-time")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+}
+
+func TestLocalIncidentAnalyzeUsesAgentNotCloud(t *testing.T) {
+	agent := &localIncidentServer{}
+	agentAddr, stop := startLocalIncidentServer(t, agent)
+	defer stop()
+	cloudCalled := false
+	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cloudCalled = true
+	}))
+	defer cloud.Close()
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("keychain-pat"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+	session := localTestSession(t, server.URL)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/analyze", strings.NewReader(`{"user_id":"dev","role":"Developer"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Local-Session", session)
+	req.Header.Set("Idempotency-Key", "incident-analyze-1")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+	if cloudCalled {
+		t.Fatal("incident analyze must not call Cloud from local backend")
+	}
+	if agent.analyzeCalls != 1 || agent.lastAnalyze.ProjectID != "proj-1" || agent.lastAnalyze.IncidentID != "inc-1" || agent.lastAuth != "Bearer keychain-pat" {
+		t.Fatalf("agent analyze not used: calls=%d auth=%q req=%+v", agent.analyzeCalls, agent.lastAuth, agent.lastAnalyze)
+	}
+	if !strings.Contains(string(body), `"source":"agent"`) || !strings.Contains(string(body), `"advisory_only":true`) || !strings.Contains(string(body), `"fallback_used":true`) {
+		t.Fatalf("missing boundary/advisory metadata: %s", body)
+	}
+}
+
+func TestLocalIncidentListUsesAgentNotCloud(t *testing.T) {
+	agent := &localIncidentServer{}
+	agentAddr, stop := startLocalIncidentServer(t, agent)
+	defer stop()
+	cloudCalled := false
+	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cloudCalled = true
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, nil))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents?user_id=viewer&role=Viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK || cloudCalled || agent.listCalls != 1 || !strings.Contains(string(body), `"incidents"`) {
+		t.Fatalf("status=%d cloud=%v calls=%d body=%s", res.StatusCode, cloudCalled, agent.listCalls, body)
+	}
+}
+
+func TestLocalIncidentApproveRequiresExplicitApproval(t *testing.T) {
+	agent := &localIncidentServer{}
+	agentAddr, stop := startLocalIncidentServer(t, agent)
+	defer stop()
+	cloudCalled := false
+	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cloudCalled = true
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, nil))
+	defer server.Close()
+	session := localTestSession(t, server.URL)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/actions/scale/approve", strings.NewReader(`{"user_id":"dev","role":"Developer","action_hash":"sha256:ok"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Local-Session", session)
+	req.Header.Set("Idempotency-Key", "incident-approve-no")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+	if cloudCalled || agent.approveCalls != 0 {
+		t.Fatalf("unapproved mitigation reached cloud=%v agent_calls=%d", cloudCalled, agent.approveCalls)
+	}
+}
+
+func TestLocalIncidentRejectsArbitraryCommand(t *testing.T) {
+	agent := &localIncidentServer{}
+	agentAddr, stop := startLocalIncidentServer(t, agent)
+	defer stop()
+	cloudCalled := false
+	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cloudCalled = true
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, nil))
+	defer server.Close()
+	session := localTestSession(t, server.URL)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/actions/shell/approve", strings.NewReader(`{"user_id":"dev","role":"Developer","approved":true,"action_hash":"sha256:ok","command":"kubectl delete pod x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Local-Session", session)
+	req.Header.Set("Idempotency-Key", "incident-command")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+	if cloudCalled || agent.approveCalls != 0 || strings.Contains(string(body), "kubectl delete") {
+		t.Fatalf("arbitrary command leaked/reached backend cloud=%v agent=%d body=%s", cloudCalled, agent.approveCalls, body)
+	}
+}
+
+func TestLocalIncidentApproveSendsAllowlistActionHashToAgent(t *testing.T) {
+	agent := &localIncidentServer{}
+	agentAddr, stop := startLocalIncidentServer(t, agent)
+	defer stop()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: "http://127.0.0.1:1"}, nil))
+	defer server.Close()
+	session := localTestSession(t, server.URL)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/actions/scale/approve", strings.NewReader(`{"user_id":"dev","role":"Developer","approved":true,"action_hash":"sha256:ok"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Local-Session", session)
+	req.Header.Set("Idempotency-Key", "incident-approve-1")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+	if agent.approveCalls != 1 || agent.lastAction.ActionID != "scale" || agent.lastAction.ActionHash != "sha256:ok" {
+		t.Fatalf("approval not passed to Agent: calls=%d req=%+v", agent.approveCalls, agent.lastAction)
+	}
+	if !strings.Contains(string(body), `"audit_policy"`) {
+		t.Fatalf("missing audit policy: %s", body)
+	}
+}
+
 type localTelemetryServer struct {
+	agentv1.UnimplementedTelemetryServiceServer
 	lastReceivedUnix int64
+	includeLogs      bool
+	serviceID        string
 }
 
 func (s *localTelemetryServer) Sync(req *agentv1.SyncRequest, stream agentv1.TelemetryService_SyncServer) error {
@@ -519,6 +744,30 @@ func (s *localTelemetryServer) Sync(req *agentv1.SyncRequest, stream agentv1.Tel
 		Payload:     []byte("raw-metric-password=secret"),
 		Done:        true,
 	})
+}
+
+func (s *localTelemetryServer) QueryTelemetry(_ context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error) {
+	s.lastReceivedUnix = req.SinceUnix
+	s.includeLogs = req.IncludeLogs
+	s.serviceID = req.ServiceID
+	if req.Cursor != "" {
+		return nil, status.Error(codes.InvalidArgument, "cursor is invalid")
+	}
+	resp := &agentv1.TelemetryQueryResponse{
+		ProjectID:     req.ProjectID,
+		Source:        "agent",
+		PayloadPolicy: "raw telemetry payload remains local and is not returned to the browser",
+	}
+	if req.IncludeSummary {
+		resp.Summary = &agentv1.TelemetryRuntimeSummary{SinceUnix: req.SinceUnix, EndUnix: 99, MetricCount: 2, LogCount: 1, ErrorCount: 1, ServiceCount: 1, Health: "degraded"}
+	}
+	if req.IncludeServices {
+		resp.Services = []agentv1.TelemetryServiceStatus{{ServiceID: "svc-1", Health: "degraded", PodCount: 1, ReadyPods: 0, RestartCount: 2, RecentErrorCount: 1, LastSeenUnix: 99}}
+	}
+	if req.IncludeLogs {
+		resp.Logs = []agentv1.TelemetryLogEntry{{ServiceID: "svc-1", PodID: "pod-1", Namespace: "app", Level: "error", Message: "password=super-secret Authorization: Bearer browser-pat", Fingerprint: "fp", ObservedUnix: 99}}
+	}
+	return resp, nil
 }
 
 func TestLocalSessionDoesNotExposePAT(t *testing.T) {
@@ -595,6 +844,101 @@ func startLocalSecretServer(t *testing.T, service agentv1.SecretServiceServer) (
 	}
 	server := grpc.NewServer()
 	agentv1.RegisterSecretServiceServer(server, service)
+	go func() { _ = server.Serve(listener) }()
+	return listener.Addr().String(), server.Stop
+}
+
+type localIncidentServer struct {
+	agentv1.UnimplementedIncidentServiceServer
+	listCalls    int
+	getCalls     int
+	analyzeCalls int
+	approveCalls int
+	resolveCalls int
+	lastAnalyze  agentv1.IncidentAnalyzeRequest
+	lastAction   agentv1.IncidentActionRequest
+	lastAuth     string
+	err          error
+}
+
+func (s *localIncidentServer) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+	s.listCalls++
+	s.lastAuth = localAuthHeader(ctx)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &agentv1.IncidentListResponse{Incidents: []agentv1.IncidentResponse{*localIncidentResponse(req.ProjectID, "inc-1")}}, nil
+}
+
+func (s *localIncidentServer) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
+	s.getCalls++
+	s.lastAuth = localAuthHeader(ctx)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
+}
+
+func (s *localIncidentServer) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
+	s.analyzeCalls++
+	s.lastAnalyze = *req
+	s.lastAuth = localAuthHeader(ctx)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
+}
+
+func (s *localIncidentServer) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+	s.approveCalls++
+	s.lastAction = *req
+	s.lastAuth = localAuthHeader(ctx)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
+}
+
+func (s *localIncidentServer) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+	s.resolveCalls++
+	s.lastAction = *req
+	s.lastAuth = localAuthHeader(ctx)
+	if s.err != nil {
+		return nil, s.err
+	}
+	resp := localIncidentResponse(req.ProjectID, req.IncidentID)
+	resp.Status = "resolved"
+	return resp, nil
+}
+
+func localIncidentResponse(projectID, incidentID string) *agentv1.IncidentResponse {
+	return &agentv1.IncidentResponse{
+		ProjectID:   projectID,
+		IncidentID:  incidentID,
+		ServiceID:   "svc-1",
+		Status:      "action_pending",
+		RootCause:   "Local fallback analysis: crash_loop",
+		Confidence:  0.62,
+		RCAMetadata: &agentv1.RCAMetadata{Provider: "local", Model: "fallback", FallbackUsed: true, InputContextHash: "sha256:ctx", CreatedAt: "2026-01-01T00:00:00Z"},
+		RecommendedActions: []agentv1.RecommendedAction{{
+			ID:           "scale",
+			Type:         "scale_replicas",
+			Description:  "Scale replicas",
+			RollbackSafe: true,
+			ActionHash:   "sha256:ok",
+			Params:       map[string]string{"service_id": "svc-1", "replicas": "2"},
+		}},
+	}
+}
+
+func startLocalIncidentServer(t *testing.T, service agentv1.IncidentServiceServer) (string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	agentv1.RegisterIncidentServiceServer(server, service)
 	go func() { _ = server.Serve(listener) }()
 	return listener.Addr().String(), server.Stop
 }

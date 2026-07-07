@@ -4,6 +4,7 @@ import { ProjectsView } from "@/features/console/projects-view";
 import { ServicesView } from "@/features/console/services-view";
 import type { ConsoleController } from "@/features/console/types";
 import { IncidentsView } from "@/features/incidents/incidents-view";
+import { LogsView } from "@/features/logs/logs-view";
 import { SecretsView } from "@/features/secrets/secrets-view";
 import { SupportView } from "@/features/support/support-view";
 
@@ -15,7 +16,7 @@ export const OperationsViewMap: Record<string, (props: { console: ConsoleControl
   Topology: TopologyView,
   Audit: AuditView,
   Secrets: SecretsView,
-  Logs: () => <PlaceholderView title="Logs" text="Logs stream from Agent storage after a workload is deployed." />,
+  Logs: LogsView,
   Metrics: SupportView,
   Support: SupportView,
   "Incidents & RCA": IncidentsView,

@@ -15,6 +15,7 @@ type Store interface {
 	InsertMetric(ctx context.Context, record MetricRecord) error
 	InsertLog(ctx context.Context, record LogRecord) error
 	InsertIncident(ctx context.Context, record IncidentRecord) error
+	ListIncidents(ctx context.Context, projectID, status string, limit int) ([]IncidentRecord, error)
 	GetIncident(ctx context.Context, projectID, incidentID string) (*IncidentRecord, error)
 	UpdateIncidentRCA(ctx context.Context, projectID, incidentID, status, rcaResult string, updated time.Time) (*IncidentRecord, error)
 	AppendIncidentAction(ctx context.Context, projectID, incidentID, status, mitigationActions string, updated time.Time) (*IncidentRecord, error)
@@ -304,6 +305,40 @@ FROM incidents
 WHERE project_id = ? AND id = ?
 `, projectID, incidentID)
 	return scanIncident(row)
+}
+
+func (s *SQLiteStore) ListIncidents(ctx context.Context, projectID, status string, limit int) ([]IncidentRecord, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	query := `
+SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix
+FROM incidents
+WHERE project_id = ?
+`
+	args := []any{projectID}
+	if status != "" {
+		query += " AND status = ?"
+		args = append(args, status)
+	}
+	query += " ORDER BY created_at_unix DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list incidents: %w", err)
+	}
+	defer rows.Close()
+	var out []IncidentRecord
+	for rows.Next() {
+		rec, err := scanIncident(rows)
+		if err != nil {
+			return nil, err
+		}
+		if rec != nil {
+			out = append(out, *rec)
+		}
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLiteStore) UpdateIncidentRCA(ctx context.Context, projectID, incidentID, status, rcaResult string, updated time.Time) (*IncidentRecord, error) {

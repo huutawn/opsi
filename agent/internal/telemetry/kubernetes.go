@@ -58,6 +58,20 @@ func (c KubernetesCollector) Collect(ctx context.Context) ([]MetricRecord, []Log
 		metrics = append(metrics, fallbackMetrics...)
 		_ = fallbackLogs
 	}
+	for _, meta := range pods {
+		if meta.ProjectID == "" || meta.ServiceID == "" || meta.PodID == "" {
+			continue
+		}
+		ready := 0.0
+		if meta.ContainerCount > 0 && meta.ReadyContainers == meta.ContainerCount {
+			ready = 1
+		}
+		now := c.now()
+		metrics = append(metrics,
+			MetricRecord{ProjectID: meta.ProjectID, NodeID: meta.NodeID, ServiceID: meta.ServiceID, PodID: meta.PodID, Name: "pod.ready", Value: ready, Unit: "bool", ObservedAt: now},
+			MetricRecord{ProjectID: meta.ProjectID, NodeID: meta.NodeID, ServiceID: meta.ServiceID, PodID: meta.PodID, Name: "pod.restart_count", Value: float64(meta.RestartCount), Unit: "count", ObservedAt: now},
+		)
+	}
 	logs := c.collectLogs(ctx, pods)
 	return metrics, logs, nil
 }
@@ -77,6 +91,12 @@ func (c KubernetesCollector) listPods(ctx context.Context) (map[string]podMeta, 
 			Spec struct {
 				NodeName string `json:"nodeName"`
 			} `json:"spec"`
+			Status struct {
+				ContainerStatuses []struct {
+					Ready        bool  `json:"ready"`
+					RestartCount int32 `json:"restartCount"`
+				} `json:"containerStatuses"`
+			} `json:"status"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
@@ -95,6 +115,13 @@ func (c KubernetesCollector) listPods(ctx context.Context) (map[string]podMeta, 
 			ServiceID: serviceID,
 			PodID:     item.Metadata.Name,
 			Namespace: item.Metadata.Namespace,
+		}
+		for _, container := range item.Status.ContainerStatuses {
+			meta.ContainerCount++
+			if container.Ready {
+				meta.ReadyContainers++
+			}
+			meta.RestartCount += container.RestartCount
 		}
 		items[item.Metadata.Namespace+"/"+item.Metadata.Name] = meta
 	}
@@ -199,11 +226,14 @@ func (c KubernetesCollector) now() time.Time {
 }
 
 type podMeta struct {
-	ProjectID string
-	NodeID    string
-	ServiceID string
-	PodID     string
-	Namespace string
+	ProjectID       string
+	NodeID          string
+	ServiceID       string
+	PodID           string
+	Namespace       string
+	ContainerCount  int32
+	ReadyContainers int32
+	RestartCount    int32
 }
 
 func parseKubernetesCPU(raw string) (float64, error) {

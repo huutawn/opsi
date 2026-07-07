@@ -22,6 +22,7 @@ service ServiceManagerService {
 
 service TelemetryService {
   rpc Sync(SyncRequest) returns (stream SyncChunk);
+  rpc QueryTelemetry(TelemetryQueryRequest) returns (TelemetryQueryResponse);
 }
 
 service SecretService {
@@ -32,6 +33,8 @@ service SecretService {
 }
 
 service IncidentService {
+  rpc ListIncidents(IncidentListRequest) returns (IncidentListResponse);
+  rpc GetIncident(IncidentGetRequest) returns (IncidentResponse);
   rpc AnalyzeIncident(IncidentAnalyzeRequest) returns (IncidentResponse);
   rpc ApproveIncidentAction(IncidentActionRequest) returns (IncidentResponse);
   rpc ResolveIncident(IncidentActionRequest) returns (IncidentResponse);
@@ -186,6 +189,59 @@ message SyncChunk {
   bool done = 8;
 }
 
+message TelemetryQueryRequest {
+  string project_id = 1;
+  string service_id = 2;
+  int64 since_unix = 3;
+  string cursor = 4;
+  int32 limit = 5;
+  bool include_logs = 6;
+  bool include_summary = 7;
+  bool include_services = 8;
+}
+
+message TelemetryQueryResponse {
+  string project_id = 1;
+  string source = 2;
+  string payload_policy = 3;
+  TelemetryRuntimeSummary summary = 4;
+  repeated TelemetryServiceStatus services = 5;
+  repeated TelemetryLogEntry logs = 6;
+  string next_cursor = 7;
+}
+
+message TelemetryRuntimeSummary {
+  int64 since_unix = 1;
+  int64 end_unix = 2;
+  int32 metric_count = 3;
+  int32 log_count = 4;
+  int32 error_count = 5;
+  int32 service_count = 6;
+  string health = 7;
+}
+
+message TelemetryServiceStatus {
+  string service_id = 1;
+  string health = 2;
+  int32 pod_count = 3;
+  int32 ready_pods = 4;
+  double cpu_cores = 5;
+  double memory_bytes = 6;
+  int32 restart_count = 7;
+  int32 recent_error_count = 8;
+  int64 last_seen_unix = 9;
+}
+
+message TelemetryLogEntry {
+  string service_id = 1;
+  string pod_id = 2;
+  string namespace = 3;
+  string level = 4;
+  string message = 5;
+  string fingerprint = 6;
+  int64 observed_unix = 7;
+}
+
 message SetupTOTPRequest {
   string project_id = 1;
   string user_id = 2;
@@ -220,6 +276,23 @@ message SecretResponse {
   string password = 6;
 }
 
+message IncidentListRequest {
+  string project_id = 1;
+  string status = 2;
+  int32 limit = 3;
+  string user_id = 4;
+  string role = 5;
+  string pat = 6;
+}
+
+message IncidentGetRequest {
+  string project_id = 1;
+  string incident_id = 2;
+  string user_id = 3;
+  string role = 4;
+  string pat = 5;
+}
+
 message IncidentAnalyzeRequest {
   string project_id = 1;
   string incident_id = 2;
@@ -236,6 +309,10 @@ message IncidentActionRequest {
   string user_id = 5;
   string role = 6;
   string pat = 7;
+}
+
+message IncidentListResponse {
+  repeated IncidentResponse incidents = 1;
 }
 
 message IncidentResponse {

@@ -28,6 +28,7 @@ const (
 
 type Store interface {
 	GetIncident(ctx context.Context, projectID, incidentID string) (*telemetry.IncidentRecord, error)
+	ListIncidents(ctx context.Context, projectID, status string, limit int) ([]telemetry.IncidentRecord, error)
 	UpdateIncidentRCA(ctx context.Context, projectID, incidentID, status, rcaResult string, updated time.Time) (*telemetry.IncidentRecord, error)
 	AppendIncidentAction(ctx context.Context, projectID, incidentID, status, mitigationActions string, updated time.Time) (*telemetry.IncidentRecord, error)
 	ResolveIncident(ctx context.Context, projectID, incidentID string, resolved time.Time) (*telemetry.IncidentRecord, error)
@@ -51,6 +52,15 @@ type AnalyzeRequest struct {
 	UserID     string `json:"user_id"`
 	Role       string `json:"role"`
 	PAT        string `json:"pat,omitempty"`
+}
+
+type ListRequest struct {
+	ProjectID string `json:"project_id"`
+	Status    string `json:"status,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	UserID    string `json:"user_id"`
+	Role      string `json:"role"`
+	PAT       string `json:"pat,omitempty"`
 }
 
 type ActionRequest struct {
@@ -158,6 +168,35 @@ func (c HTTPAnalyzerClient) Analyze(ctx context.Context, req IncidentContext) (R
 		return fallbackRCA(req), nil
 	}
 	return out, nil
+}
+
+func (s *Service) List(ctx context.Context, req ListRequest) ([]telemetry.IncidentRecord, error) {
+	auth, err := s.authorize(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT})
+	if err != nil {
+		return nil, err
+	}
+	if !canRead(auth.Role) {
+		return nil, errors.New("permission denied")
+	}
+	if auth.ProjectID == "" || auth.UserID == "" {
+		return nil, errors.New("project_id and user_id are required")
+	}
+	return s.Store.ListIncidents(ctx, auth.ProjectID, strings.TrimSpace(req.Status), req.Limit)
+}
+
+func (s *Service) Get(ctx context.Context, req AnalyzeRequest) (*telemetry.IncidentRecord, RCA, error) {
+	auth, err := s.authorize(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT})
+	if err != nil {
+		return nil, RCA{}, err
+	}
+	if !canRead(auth.Role) {
+		return nil, RCA{}, errors.New("permission denied")
+	}
+	rec, err := s.Store.GetIncident(ctx, auth.ProjectID, req.IncidentID)
+	if err != nil || rec == nil {
+		return nil, RCA{}, firstErr(err, errors.New("incident not found"))
+	}
+	return rec, rcaFromIncident(rec), nil
 }
 
 func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*telemetry.IncidentRecord, RCA, error) {
@@ -374,6 +413,9 @@ func HashIncidentContext(ctx IncidentContext) string {
 
 func canApprove(role secret.Role) bool {
 	return role == secret.RoleOwner || role == secret.RoleDeveloper
+}
+func canRead(role secret.Role) bool {
+	return role == secret.RoleOwner || role == secret.RoleDeveloper || role == secret.RoleViewer
 }
 func allowedAction(t string) bool {
 	return t == "restart_pod" || t == "scale_replicas" || t == "rate_limit_ingress" || t == "rollback" || t == "increase_resource_limits"

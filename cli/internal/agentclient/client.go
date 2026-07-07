@@ -98,6 +98,15 @@ func (c *Client) Sync(ctx context.Context, req *agentv1.SyncRequest, onChunk fun
 	}
 }
 
+func (c *Client) QueryTelemetry(ctx context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewTelemetryServiceClient(conn).QueryTelemetry(ctx, req)
+}
+
 func (c *Client) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
@@ -186,6 +195,24 @@ func (c *Client) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnaly
 	}
 	defer conn.Close()
 	return agentv1.NewIncidentServiceClient(conn).AnalyzeIncident(ctx, req)
+}
+
+func (c *Client) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewIncidentServiceClient(conn).ListIncidents(ctx, req)
+}
+
+func (c *Client) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewIncidentServiceClient(conn).GetIncident(ctx, req)
 }
 
 func (c *Client) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
