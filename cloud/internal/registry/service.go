@@ -743,11 +743,10 @@ func (s *Service) RecordAgentHeartbeat(projectID, nodeID string, heartbeat Agent
 			if session.ProjectID != projectID || session.NodeID != nodeID || !isActiveBootstrap(session.Status) {
 				continue
 			}
-			session.Status = "succeeded"
-			session.FinishedAt = &now
+			session.Status = "verifying"
 			session.UpdatedAt = now
 			s.bootstraps[id] = session
-			s.events[id] = append(s.events[id], BootstrapEvent{ID: newID("evt"), OrgID: session.OrgID, ProjectID: projectID, SessionID: id, NodeID: nodeID, Level: "info", Step: "succeeded", MessageRedacted: "agent heartbeat marked node healthy", ProgressPercent: 100, CreatedAt: now})
+			s.events[id] = append(s.events[id], BootstrapEvent{ID: newID("evt"), OrgID: session.OrgID, ProjectID: projectID, SessionID: id, NodeID: nodeID, Level: "info", Step: "verifying", MessageRedacted: "agent heartbeat marked node healthy; waiting for worker verification", ProgressPercent: 90, CreatedAt: now})
 		}
 	}
 	s.refreshProjectLocked(projectID)
@@ -855,8 +854,8 @@ func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, 
 		return BootstrapSession{}, err
 	}
 	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: NodePending, PublicHost: publicHost, K3SRole: k3sRoleForBootstrap(role), CreatedAt: now, UpdatedAt: now}
-	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: "created", IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now}
-	event := BootstrapEvent{ID: newID("evt"), OrgID: project.OrgID, ProjectID: project.ID, SessionID: session.ID, NodeID: node.ID, Level: "info", Step: "created", MessageRedacted: "bootstrap session created", ProgressPercent: 0, CreatedAt: now}
+	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: "pending", IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now}
+	event := BootstrapEvent{ID: newID("evt"), OrgID: project.OrgID, ProjectID: project.ID, SessionID: session.ID, NodeID: node.ID, Level: "info", Step: "pending", MessageRedacted: "bootstrap session pending worker", ProgressPercent: 0, CreatedAt: now}
 	runtime.Status = RuntimeProvisioning
 	runtime.UpdatedAt = now
 	s.nodes[node.ID] = node
@@ -881,7 +880,7 @@ func (s *Service) UpdateBootstrapSession(projectID, sessionID, status, message s
 	now := s.clock()
 	session.Status = status
 	session.UpdatedAt = now
-	if status == "preflight" && session.StartedAt == nil {
+	if (status == "validating" || status == "preflight") && session.StartedAt == nil {
 		session.StartedAt = &now
 	}
 	if !isActiveBootstrap(status) {
@@ -1437,7 +1436,7 @@ func (s *Service) refreshProjectLocked(projectID string) string {
 	project := s.projects[projectID]
 	status := ProjectNoNodes
 	for _, session := range s.bootstraps {
-		if session.ProjectID == projectID && session.Status != "failed" && session.Status != "cancelled" && session.Status != "expired" && session.Status != "succeeded" {
+		if session.ProjectID == projectID && isActiveBootstrap(session.Status) {
 			status = ProjectBootstrapping
 			break
 		}
@@ -1508,22 +1507,35 @@ func (s *Service) expireBootstrapsLocked() {
 }
 
 func isActiveBootstrap(status string) bool {
-	return status == "created" || status == "preflight" || status == "installing" || status == "waiting_agent"
+	switch status {
+	case "created", "pending", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying":
+		return true
+	default:
+		return false
+	}
 }
 
 func validBootstrapStatus(status string) bool {
-	return status == "preflight" || status == "installing" || status == "waiting_agent" || status == "succeeded" || status == "failed" || status == "cancelled"
+	return isActiveBootstrap(status) || status == "completed" || status == "succeeded" || status == "failed" || status == "cancelled" || status == "expired"
 }
 
 func bootstrapProgress(status string) int {
 	switch status {
-	case "preflight":
+	case "pending", "created":
+		return 0
+	case "preflight", "validating":
 		return 10
-	case "installing":
+	case "connecting":
+		return 20
+	case "installing", "installing_k3s":
 		return 45
-	case "waiting_agent":
+	case "installing_agent":
+		return 65
+	case "registering_agent", "waiting_agent":
 		return 80
-	case "succeeded", "failed", "cancelled":
+	case "verifying":
+		return 90
+	case "completed", "succeeded", "failed", "cancelled", "expired":
 		return 100
 	default:
 		return 0
@@ -1574,8 +1586,14 @@ func newID(prefix string) string {
 
 var redactors = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)-----BEGIN (?:OPENSSH|RSA) PRIVATE KEY-----.*?-----END (?:OPENSSH|RSA) PRIVATE KEY-----`),
+	regexp.MustCompile(`(?i)(private[_ -]?key['"]?\s*[:=]\s*)[^\s,}]+`),
+	regexp.MustCompile(`(?i)(kubeconfig['"]?\s*[:=]\s*)[^\s,}]+`),
+	regexp.MustCompile(`(?i)(pat['"]?\s*[:=]\s*)[^\s,}]+`),
+	regexp.MustCompile(`(?i)(app[_ -]?secret['"]?\s*[:=]\s*)[^\s,}]+`),
 	regexp.MustCompile(`(?i)(password=)[^\s&]+`),
+	regexp.MustCompile(`(?i)(password['"]?\s*[:=]\s*)[^\s,}]+`),
 	regexp.MustCompile(`(?i)(token=)[^\s&]+`),
+	regexp.MustCompile(`(?i)(token['"]?\s*[:=]\s*)[^\s,}]+`),
 	regexp.MustCompile(`(?i)(K3S_TOKEN=)[^\s&]+`),
 	regexp.MustCompile(`(?i)(Authorization:\s*)\S+`),
 	regexp.MustCompile(`(?i)(DATABASE_URL=)[^\s]+`),

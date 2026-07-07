@@ -400,7 +400,7 @@ func (s PostgresService) RecordAgentHeartbeat(projectID, nodeID string, heartbea
 		}
 	}
 	if status == NodeHealthy {
-		if _, err := tx.ExecContext(ctx, `WITH closed AS (UPDATE bootstrap_sessions SET status = 'succeeded', finished_at = $1, updated_at = $1 WHERE project_id = $2 AND node_id = $3 AND status IN ('created','preflight','installing','waiting_agent') RETURNING org_id, project_id, id, node_id) INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) SELECT $4, org_id, project_id, id, node_id, 'info', 'succeeded', 'agent heartbeat marked node healthy', 100, $1 FROM closed`, now, projectID, nodeID, newID("evt")); err != nil {
+		if _, err := tx.ExecContext(ctx, `WITH updated AS (UPDATE bootstrap_sessions SET status = 'verifying', updated_at = $1 WHERE project_id = $2 AND node_id = $3 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying') RETURNING org_id, project_id, id, node_id) INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) SELECT $4, org_id, project_id, id, node_id, 'info', 'verifying', 'agent heartbeat marked node healthy; waiting for worker verification', 90, $1 FROM updated`, now, projectID, nodeID, newID("evt")); err != nil {
 			return Node{}, err
 		}
 	}
@@ -499,7 +499,7 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 		return BootstrapSession{}, err
 	}
 	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: NodePending, PublicHost: publicHost, K3SRole: k3sRoleForBootstrap(role), CreatedAt: now, UpdatedAt: now}
-	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: "created", IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now}
+	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: "pending", IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return BootstrapSession{}, err
@@ -511,7 +511,7 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_sessions(id, org_id, project_id, environment_id, runtime_id, node_id, created_by, role, status, idempotency_key, public_host, ssh_port, ssh_username, auth_method, expires_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, session.ID, session.OrgID, session.ProjectID, session.EnvironmentID, session.RuntimeID, session.NodeID, session.CreatedBy, session.Role, session.Status, session.IdempotencyKey, session.PublicHost, session.SSHPort, session.SSHUsername, session.AuthMethod, session.ExpiresAt, session.CreatedAt, session.UpdatedAt); err != nil {
 		return BootstrapSession{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) VALUES($1,$2,$3,$4,$5,'info','created','bootstrap session created',0,$6)`, newID("evt"), session.OrgID, session.ProjectID, session.ID, session.NodeID, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) VALUES($1,$2,$3,$4,$5,'info','pending','bootstrap session pending worker',0,$6)`, newID("evt"), session.OrgID, session.ProjectID, session.ID, session.NodeID, now); err != nil {
 		return BootstrapSession{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE runtimes SET status = 'provisioning', updated_at = $1 WHERE id = $2`, now, runtime.ID); err != nil {
@@ -537,7 +537,7 @@ func (s PostgresService) UpdateBootstrapSession(projectID, sessionID, status, me
 	}
 	now := s.clock()
 	started := session.StartedAt
-	if status == "preflight" && started == nil {
+	if (status == "validating" || status == "preflight") && started == nil {
 		started = &now
 	}
 	finished := session.FinishedAt
@@ -1155,7 +1155,7 @@ func (s PostgresService) refreshProject(ctx context.Context, projectID string) (
 		status = ProjectReady
 	} else {
 		var active int
-		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND status IN ('created','preflight','installing','waiting_agent')`, projectID).Scan(&active); err != nil {
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying')`, projectID).Scan(&active); err != nil {
 			return "", err
 		}
 		if active > 0 {
@@ -1168,7 +1168,7 @@ func (s PostgresService) refreshProject(ctx context.Context, projectID string) (
 
 func (s PostgresService) expireBootstraps(ctx context.Context) error {
 	now := s.clock()
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, COALESCE(node_id,'') FROM bootstrap_sessions WHERE status IN ('created','preflight','installing','waiting_agent') AND expires_at < $1`, now)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, COALESCE(node_id,'') FROM bootstrap_sessions WHERE status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying') AND expires_at < $1`, now)
 	if err != nil {
 		return err
 	}
@@ -1217,7 +1217,7 @@ func (s PostgresService) validateBootstrap(ctx context.Context, projectID, role,
 		return APIError{Status: 409, Code: "SERVER_NODE_REQUIRED", Message: "add a healthy first server before adding workers", NextAction: "add_first_server"}
 	}
 	var active int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND public_host = $2 AND status IN ('created','preflight','installing','waiting_agent')`, projectID, publicHost).Scan(&active); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND public_host = $2 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying')`, projectID, publicHost).Scan(&active); err != nil {
 		return err
 	}
 	if active > 0 {

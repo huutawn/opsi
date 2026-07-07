@@ -9,6 +9,12 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
+type bootstrapWorkerStateRequest struct {
+	ProjectID string `json:"project_id"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+}
+
 func (s *Server) handleBootstrapWorker(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -20,9 +26,15 @@ func (s *Server) handleBootstrapWorker(w http.ResponseWriter, r *http.Request) {
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) != 5 || parts[0] != "internal" || parts[1] != "bootstrap" || parts[2] != "sessions" || parts[4] != "take" {
-		if len(parts) == 5 && parts[0] == "internal" && parts[1] == "bootstrap" && parts[2] == "sessions" && parts[4] == "finish" {
-			s.handleBootstrapWorkerFinish(w, r, parts[3])
-			return
+		if len(parts) == 5 && parts[0] == "internal" && parts[1] == "bootstrap" && parts[2] == "sessions" {
+			if parts[4] == "progress" {
+				s.handleBootstrapWorkerProgress(w, r, parts[3])
+				return
+			}
+			if parts[4] == "finish" {
+				s.handleBootstrapWorkerFinish(w, r, parts[3])
+				return
+			}
 		}
 		http.NotFound(w, r)
 		return
@@ -38,15 +50,19 @@ func (s *Server) handleBootstrapWorker(w http.ResponseWriter, r *http.Request) {
 		writeRegistryError(w, registry.APIError{Status: http.StatusGone, Code: "AGENT_REGISTRATION_TOKEN_UNAVAILABLE", Message: "agent registration token is expired or already taken", RequestID: r.Header.Get("X-Request-ID")})
 		return
 	}
-	if _, err := s.Registry.UpdateBootstrapSession(reg.ProjectID, sessionID, "preflight", "bootstrap worker took credential"); err != nil {
+	session, err := s.Registry.UpdateBootstrapSession(reg.ProjectID, sessionID, "validating", "bootstrap worker took credential")
+	if err != nil {
 		writeRegistryFailure(w, r, err)
 		return
 	}
-	s.Registry.Audit(reg.OrgID, reg.ProjectID, "bootstrap-worker", "BOOTSTRAP_PREFLIGHT_STARTED", "bootstrap_session", sessionID, "success", map[string]any{"node_id": reg.NodeID})
+	s.Registry.Audit(reg.OrgID, reg.ProjectID, "bootstrap-worker", "BOOTSTRAP_STATE_VALIDATING", "bootstrap_session", sessionID, "success", map[string]any{"node_id": reg.NodeID})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id":                 sessionID,
 		"project_id":                 reg.ProjectID,
 		"node_id":                    reg.NodeID,
+		"public_host":                session.PublicHost,
+		"ssh_port":                   session.SSHPort,
+		"role":                       session.Role,
 		"agent_registration_token":   reg.Token,
 		"agent_registration_expires": reg.ExpiresAt,
 		"ssh": map[string]any{
@@ -58,34 +74,57 @@ func (s *Server) handleBootstrapWorker(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleBootstrapWorkerFinish(w http.ResponseWriter, r *http.Request, sessionID string) {
-	var req struct {
-		ProjectID string `json:"project_id"`
-		Status    string `json:"status"`
-		Message   string `json:"message"`
-	}
+func (s *Server) handleBootstrapWorkerProgress(w http.ResponseWriter, r *http.Request, sessionID string) {
+	var req bootstrapWorkerStateRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.Status != "succeeded" && req.Status != "failed" && req.Status != "cancelled" {
-		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap finish requires succeeded, failed, or cancelled", RequestID: r.Header.Get("X-Request-ID")})
-		return
-	}
+	s.applyBootstrapWorkerState(w, r, sessionID, req)
+}
+
+func (s *Server) applyBootstrapWorkerState(w http.ResponseWriter, r *http.Request, sessionID string, req bootstrapWorkerStateRequest) {
 	session, err := s.Registry.UpdateBootstrapSession(req.ProjectID, sessionID, req.Status, req.Message)
 	if err != nil {
 		writeRegistryFailure(w, r, err)
 		return
 	}
-	if req.Status == "succeeded" || req.Status == "failed" || req.Status == "cancelled" {
+	if !bootstrapStatusActive(req.Status) {
 		s.credentials.Delete(sessionID)
 		s.registrations.DeleteSession(sessionID)
 	}
-	action := "BOOTSTRAP_SUCCEEDED"
-	if req.Status != "succeeded" {
+	action := "BOOTSTRAP_STATE_" + strings.ToUpper(req.Status)
+	if req.Status == "succeeded" {
+		action = "BOOTSTRAP_SUCCEEDED"
+	}
+	if req.Status == "completed" {
+		action = "BOOTSTRAP_COMPLETED"
+	}
+	if req.Status == "failed" {
 		action = "BOOTSTRAP_FAILED"
 	}
-	s.Registry.Audit(session.OrgID, session.ProjectID, "bootstrap-worker", action, "bootstrap_session", session.ID, req.Status, map[string]any{"message": req.Message})
+	s.Registry.Audit(session.OrgID, session.ProjectID, "bootstrap-worker", action, "bootstrap_session", session.ID, req.Status, map[string]any{"message": registry.RedactString(req.Message)})
 	writeJSON(w, http.StatusOK, session)
+}
+
+func (s *Server) handleBootstrapWorkerFinish(w http.ResponseWriter, r *http.Request, sessionID string) {
+	var req bootstrapWorkerStateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Status != "completed" && req.Status != "succeeded" && req.Status != "failed" && req.Status != "cancelled" {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap finish requires completed, failed, or cancelled", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	s.applyBootstrapWorkerState(w, r, sessionID, req)
+}
+
+func bootstrapStatusActive(status string) bool {
+	switch status {
+	case "created", "pending", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
