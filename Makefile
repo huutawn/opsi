@@ -9,7 +9,7 @@ UI_NPM ?= npm
 RUN :=
 PROXY :=
 
-.PHONY: check-toolchain verify test build ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
+.PHONY: check-toolchain verify test build verify-dr ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -23,6 +23,9 @@ test:
 	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
 	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./cmd/... ./internal/...
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
+
+verify-dr:
+	$(RUN) ./scripts/verify-dr.sh
 
 build:
 	$(RUN) mkdir -p bin
