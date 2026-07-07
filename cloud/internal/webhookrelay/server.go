@@ -306,6 +306,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentDeploymentResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/node-lifecycle/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentNodeLifecycleResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -325,6 +329,18 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action, "lease_token": lease.LeaseToken})
+		return
+	}
+	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		job := lifecycle.Job
+		s.Registry.Audit(job.OrgID, projectID, agent.ID, "NODE_LIFECYCLE_ACCEPTED", "node_lifecycle_job", job.ID, "success", map[string]any{"action": job.Action, "target_node_id": job.TargetNodeID, "status": job.Status, "attempt_count": job.AttemptCount})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "node_lifecycle", "id": job.ID, "action": job.Action, "project_id": job.ProjectID, "target_node_id": job.TargetNodeID, "target_node_name": job.TargetNodeName, "confirm_remove": job.ConfirmRemove, "lease_token": lifecycle.LeaseToken})
 		return
 	}
 	wait := 30 * time.Second
@@ -386,6 +402,54 @@ func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Requ
 		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_RESULT_REJECTED", "deployment_job", deploymentID, "denied", map[string]any{"error": err.Error()})
 	}
 	writeRegistryResult(w, r, job, err, http.StatusOK)
+}
+
+func (s *Server) handleAgentNodeLifecycleResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
+		return
+	}
+	jobID := nodeLifecycleIDFromAgentPath(r.URL.Path)
+	if jobID == "" {
+		writeError(w, http.StatusBadRequest, "node lifecycle job id is required")
+		return
+	}
+	var result registry.NodeLifecycleResult
+	if !decodeJSON(w, r, &result) {
+		return
+	}
+	job, err := s.Registry.CompleteNodeLifecycle(projectID, nodeID, jobID, r.Header.Get("X-Request-ID"), result)
+	if err == nil {
+		outcome := "failure"
+		action := "NODE_LIFECYCLE_FAILED"
+		if job.Status == registry.NodeLifecycleCompleted {
+			outcome = "success"
+			action = "NODE_LIFECYCLE_COMPLETED"
+		}
+		if job.Status == registry.NodeLifecycleUnsupported {
+			action = "NODE_LIFECYCLE_UNSUPPORTED"
+		}
+		s.Registry.Audit(job.OrgID, projectID, agent.ID, action, "node_lifecycle_job", job.ID, outcome, map[string]any{"status": job.Status, "action": job.Action, "target_node_id": job.TargetNodeID, "verified": job.Verified, "failure_code": job.FailureCode})
+	} else {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "NODE_LIFECYCLE_RESULT_REJECTED", "node_lifecycle_job", jobID, "denied", map[string]any{"error": err.Error()})
+	}
+	writeRegistryResult(w, r, job, err, http.StatusOK)
+}
+
+func nodeLifecycleIDFromAgentPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "node-lifecycle" {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {

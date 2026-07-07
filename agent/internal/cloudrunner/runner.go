@@ -9,11 +9,13 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 )
 
 type CloudClient interface {
-	PollDeployment(context.Context, string, time.Duration) (*cloudrelay.DeploymentLease, error)
+	PollJob(context.Context, string, time.Duration) (*cloudrelay.JobLease, error)
 	CompleteDeployment(context.Context, string, string, cloudrelay.DeploymentResult) error
+	CompleteNodeLifecycle(context.Context, string, string, cloudrelay.NodeLifecycleResult) error
 	Heartbeat(context.Context, string, cloudrelay.Heartbeat) error
 }
 
@@ -24,6 +26,7 @@ type DeployEngine interface {
 type Runner struct {
 	Client            CloudClient
 	Engine            DeployEngine
+	NodeLifecycle     NodeLifecycleExecutor
 	NodeID            string
 	Version           string
 	DeploymentConfig  config.DeploymentConfig
@@ -31,6 +34,10 @@ type Runner struct {
 	LongPollWait      time.Duration
 	HeartbeatInterval time.Duration
 	Logger            *slog.Logger
+}
+
+type NodeLifecycleExecutor interface {
+	Execute(context.Context, nodelifecycle.Request) nodelifecycle.Result
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -69,7 +76,7 @@ func (r Runner) sendHeartbeat(ctx context.Context) {
 		Version:      r.Version,
 		NodeReady:    true,
 		K3SStatus:    "ready",
-		Capabilities: map[string]any{"deploy": true},
+		Capabilities: map[string]any{"deploy": true, "node_lifecycle": r.NodeLifecycle != nil},
 	})
 	if err != nil {
 		r.log().Warn("cloud heartbeat failed", "error", err)
@@ -85,16 +92,35 @@ func (r Runner) jobLoop(ctx context.Context) error {
 			return ctx.Err()
 		case <-timer.C:
 		}
-		lease, err := r.Client.PollDeployment(ctx, r.NodeID, r.LongPollWait)
+		lease, err := r.Client.PollJob(ctx, r.NodeID, r.LongPollWait)
 		if err != nil {
-			r.log().Warn("cloud deployment poll failed", "error", err)
+			r.log().Warn("cloud job poll failed", "error", err)
 			timer.Reset(r.PollInterval)
 			continue
 		}
-		if lease != nil {
-			r.handleLease(ctx, *lease)
+		if lease != nil && lease.Deployment != nil {
+			r.handleLease(ctx, *lease.Deployment)
+		}
+		if lease != nil && lease.NodeLifecycle != nil {
+			r.handleNodeLifecycle(ctx, *lease.NodeLifecycle)
 		}
 		timer.Reset(r.PollInterval)
+	}
+}
+
+func (r Runner) handleNodeLifecycle(ctx context.Context, lease cloudrelay.NodeLifecycleLease) {
+	result := r.executeNodeLifecycle(ctx, lease)
+	for attempt := 0; attempt < 3; attempt++ {
+		err := r.Client.CompleteNodeLifecycle(ctx, r.NodeID, lease.ID, result)
+		if err == nil {
+			return
+		}
+		r.log().Warn("cloud node lifecycle result report failed", "job_id", lease.ID, "attempt", attempt+1, "error", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
 	}
 }
 
@@ -112,6 +138,19 @@ func (r Runner) handleLease(ctx context.Context, lease cloudrelay.DeploymentLeas
 		case <-time.After(time.Duration(attempt+1) * time.Second):
 		}
 	}
+}
+
+func (r Runner) executeNodeLifecycle(ctx context.Context, lease cloudrelay.NodeLifecycleLease) cloudrelay.NodeLifecycleResult {
+	if r.NodeLifecycle == nil {
+		return cloudrelay.NodeLifecycleResult{Status: "unsupported", LeaseToken: lease.LeaseToken, FailureCode: "NODE_LIFECYCLE_UNSUPPORTED", FailureMessageRedacted: "node lifecycle executor is not configured"}
+	}
+	result := r.NodeLifecycle.Execute(ctx, nodelifecycle.Request{
+		Action:         lease.Action,
+		TargetNodeID:   lease.TargetNodeID,
+		TargetNodeName: lease.TargetName,
+		ConfirmRemove:  lease.ConfirmRemove,
+	})
+	return cloudrelay.NodeLifecycleResult{Status: result.Status, LeaseToken: lease.LeaseToken, FailureCode: result.FailureCode, FailureMessageRedacted: result.FailureMessageRedacted, Verified: result.Verified}
 }
 
 func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {

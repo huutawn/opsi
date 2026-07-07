@@ -30,6 +30,14 @@ const (
 	NodeDraining        = "draining"
 	NodeRemoved         = "removed"
 
+	NodeLifecycleRequested   = "requested"
+	NodeLifecycleAccepted    = "accepted"
+	NodeLifecycleRunning     = "running"
+	NodeLifecycleVerifying   = "verifying"
+	NodeLifecycleCompleted   = "completed"
+	NodeLifecycleFailed      = "failed"
+	NodeLifecycleUnsupported = "unsupported"
+
 	DeploymentQueued       = "queued"
 	DeploymentPlanning     = "planning"
 	DeploymentWaitingAgent = "waiting_agent"
@@ -54,6 +62,10 @@ const (
 	EventRollbackAvailable      = "ROLLBACK_AVAILABLE"
 	EventAgentLeaseExpired      = "AGENT_LEASE_EXPIRED"
 	EventDeploymentDeadLetter   = "DEPLOYMENT_DEAD_LETTER"
+	EventNodeLifecycleRequested = "NODE_LIFECYCLE_REQUESTED"
+	EventNodeLifecycleAccepted  = "NODE_LIFECYCLE_ACCEPTED"
+	EventNodeLifecycleCompleted = "NODE_LIFECYCLE_COMPLETED"
+	EventNodeLifecycleFailed    = "NODE_LIFECYCLE_FAILED"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -160,6 +172,45 @@ type NodeDiagnostics struct {
 	OpenBootstrapEvents []BootstrapEvent `json:"open_bootstrap_events,omitempty"`
 	RecentDeployments   []DeploymentJob  `json:"recent_deployment_jobs,omitempty"`
 	Readiness           Readiness        `json:"readiness"`
+}
+
+type NodeLifecycleJob struct {
+	ID                     string     `json:"id"`
+	OrgID                  string     `json:"org_id"`
+	ProjectID              string     `json:"project_id"`
+	RuntimeID              string     `json:"runtime_id"`
+	Action                 string     `json:"action"`
+	Status                 string     `json:"status"`
+	TargetNodeID           string     `json:"target_node_id"`
+	TargetNodeName         string     `json:"target_node_name"`
+	NodeID                 string     `json:"node_id"`
+	AgentID                string     `json:"agent_id,omitempty"`
+	RequestedBy            string     `json:"requested_by,omitempty"`
+	IdempotencyKey         string     `json:"idempotency_key,omitempty"`
+	ConfirmRemove          bool       `json:"confirm_remove,omitempty"`
+	LeaseToken             string     `json:"-"`
+	LeaseExpiresAt         *time.Time `json:"lease_expires_at,omitempty"`
+	AttemptCount           int        `json:"attempt_count"`
+	MaxAttempts            int        `json:"max_attempts"`
+	FailureCode            string     `json:"failure_code,omitempty"`
+	FailureMessageRedacted string     `json:"failure_message_redacted,omitempty"`
+	Verified               bool       `json:"verified"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+	FinishedAt             *time.Time `json:"finished_at,omitempty"`
+}
+
+type NodeLifecycleLease struct {
+	Job        NodeLifecycleJob `json:"job"`
+	LeaseToken string           `json:"lease_token"`
+}
+
+type NodeLifecycleResult struct {
+	Status                 string `json:"status"`
+	LeaseToken             string `json:"lease_token,omitempty"`
+	FailureCode            string `json:"failure_code,omitempty"`
+	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
+	Verified               bool   `json:"verified"`
 }
 
 type Agent struct {
@@ -438,6 +489,7 @@ type Service struct {
 	events       map[string][]BootstrapEvent
 	services     map[string]ServiceRecord
 	deployments  map[string]DeploymentJob
+	lifecycles   map[string]NodeLifecycleJob
 	deployEvents map[string][]DeploymentEvent
 	deployLocks  map[string]deploymentLock
 	audit        []AuditEvent
@@ -459,6 +511,9 @@ type API interface {
 	RevokeAgent(projectID, agentID string) (Agent, error)
 	DrainNode(projectID, nodeID string) (Node, error)
 	RemoveNode(projectID, nodeID string, force bool) (Node, error)
+	RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error)
+	LeaseNodeLifecycle(projectID, nodeID string) (NodeLifecycleLease, bool, error)
+	CompleteNodeLifecycle(projectID, nodeID, jobID, requestID string, result NodeLifecycleResult) (NodeLifecycleJob, error)
 	CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error)
 	UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error)
 	GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error)
@@ -487,6 +542,7 @@ func NewService() *Service {
 		events:       map[string][]BootstrapEvent{},
 		services:     map[string]ServiceRecord{},
 		deployments:  map[string]DeploymentJob{},
+		lifecycles:   map[string]NodeLifecycleJob{},
 		deployEvents: map[string][]DeploymentEvent{},
 		deployLocks:  map[string]deploymentLock{},
 		audit:        []AuditEvent{},
@@ -831,6 +887,124 @@ func (s *Service) RemoveNode(projectID, nodeID string, force bool) (Node, error)
 		return Node{}, APIError{Status: 409, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first"}
 	}
 	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node remove must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
+}
+
+func (s *Service) RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key != "" {
+		if got, ok := s.idempotency["node_lifecycle:"+projectID+":"+targetNodeID+":"+action+":"+key].(NodeLifecycleJob); ok {
+			return got, nil
+		}
+	}
+	if action != "drain" && action != "remove" {
+		return NodeLifecycleJob{}, APIError{Status: 400, Code: "NODE_LIFECYCLE_UNSUPPORTED", Message: "node lifecycle action is not supported", RequestID: requestID}
+	}
+	target, ok := s.nodes[targetNodeID]
+	if !ok || target.ProjectID != projectID {
+		return NodeLifecycleJob{}, ErrNotFound
+	}
+	if target.Name == "" {
+		return NodeLifecycleJob{}, APIError{Status: 400, Code: "INVALID_NODE_TARGET", Message: "node target name is required", RequestID: requestID}
+	}
+	if action == "remove" {
+		if target.Role == "server" && !force && s.healthyServerCountLocked(projectID) <= 1 {
+			return NodeLifecycleJob{}, APIError{Status: 409, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first", RequestID: requestID}
+		}
+		if !confirmRemove {
+			return NodeLifecycleJob{}, APIError{Status: 400, Code: "REMOVE_INTENT_REQUIRED", Message: "remove requires explicit intent", RequestID: requestID}
+		}
+	}
+	executor, agent, err := s.lifecycleAgentLocked(projectID, target.RuntimeID, target.ID, requestID)
+	if err != nil {
+		return NodeLifecycleJob{}, err
+	}
+	now := s.clock()
+	job := NodeLifecycleJob{ID: newID("nlj"), OrgID: target.OrgID, ProjectID: projectID, RuntimeID: target.RuntimeID, Action: action, Status: NodeLifecycleRequested, TargetNodeID: target.ID, TargetNodeName: target.Name, NodeID: executor.ID, AgentID: agent.ID, RequestedBy: requestedBy, IdempotencyKey: key, ConfirmRemove: confirmRemove, MaxAttempts: defaultDeploymentMaxAttempts, CreatedAt: now, UpdatedAt: now}
+	s.lifecycles[job.ID] = job
+	if key != "" {
+		s.idempotency["node_lifecycle:"+projectID+":"+targetNodeID+":"+action+":"+key] = job
+	}
+	return job, nil
+}
+
+func (s *Service) LeaseNodeLifecycle(projectID, nodeID string) (NodeLifecycleLease, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireNodeLifecycleLeasesLocked(projectID)
+	for id, job := range s.lifecycles {
+		if job.ProjectID != projectID || job.NodeID != nodeID || job.Status != NodeLifecycleRequested {
+			continue
+		}
+		now := s.clock()
+		leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
+		job.Status = NodeLifecycleAccepted
+		job.AttemptCount++
+		if job.MaxAttempts == 0 {
+			job.MaxAttempts = defaultDeploymentMaxAttempts
+		}
+		job.LeaseToken = newID("lease")
+		job.LeaseExpiresAt = &leaseExpiresAt
+		job.UpdatedAt = now
+		s.lifecycles[id] = job
+		return NodeLifecycleLease{Job: job, LeaseToken: job.LeaseToken}, true, nil
+	}
+	return NodeLifecycleLease{}, false, nil
+}
+
+func (s *Service) CompleteNodeLifecycle(projectID, nodeID, jobID, requestID string, result NodeLifecycleResult) (NodeLifecycleJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.lifecycles[jobID]
+	if !ok || job.ProjectID != projectID || job.NodeID != nodeID {
+		return NodeLifecycleJob{}, ErrNotFound
+	}
+	if nodeLifecycleTerminal(job.Status) {
+		return job, nil
+	}
+	now := s.clock()
+	if job.Status != NodeLifecycleAccepted || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) {
+		return NodeLifecycleJob{}, APIError{Status: 409, Code: "NODE_LIFECYCLE_LEASE_EXPIRED", Message: "node lifecycle lease is not active", NextAction: "poll_for_new_lease", RequestID: requestID}
+	}
+	if job.LeaseToken != "" && result.LeaseToken != job.LeaseToken {
+		return NodeLifecycleJob{}, APIError{Status: 409, Code: "NODE_LIFECYCLE_STALE_LEASE", Message: "node lifecycle result lease token is stale", NextAction: "discard_result_and_poll", RequestID: requestID}
+	}
+	job.Status = normalizeNodeLifecycleResult(result)
+	job.FailureCode = result.FailureCode
+	job.FailureMessageRedacted = RedactString(result.FailureMessageRedacted)
+	job.Verified = result.Verified
+	job.LeaseToken = ""
+	job.LeaseExpiresAt = nil
+	job.FinishedAt = &now
+	job.UpdatedAt = now
+	if job.Status == NodeLifecycleCompleted && !job.Verified {
+		job.Status = NodeLifecycleFailed
+		job.FailureCode = "NODE_LIFECYCLE_NOT_VERIFIED"
+		job.FailureMessageRedacted = "node lifecycle result was not verified by Agent"
+	}
+	if target, ok := s.nodes[job.TargetNodeID]; ok && target.ProjectID == projectID {
+		target.UpdatedAt = now
+		target.FailureCode = job.FailureCode
+		target.FailureMessageRedacted = job.FailureMessageRedacted
+		if job.Status == NodeLifecycleCompleted {
+			if job.Action == "drain" {
+				target.Status = NodeDraining
+			}
+			if job.Action == "remove" {
+				target.Status = NodeRemoved
+				if target.AgentID != "" {
+					agent := s.agents[target.AgentID]
+					agent.Status = "revoked"
+					agent.UpdatedAt = now
+					s.agents[agent.ID] = agent
+				}
+			}
+		}
+		s.nodes[target.ID] = target
+	}
+	s.lifecycles[jobID] = job
+	s.refreshProjectLocked(projectID)
+	return job, nil
 }
 
 func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error) {
@@ -1214,6 +1388,58 @@ func (s *Service) deployAgentLocked(projectID, runtimeID, requestID string) (Nod
 		}
 	}
 	return Node{}, Agent{}, APIError{Status: 409, Code: "AGENT_NOT_READY", Message: "A healthy server with an online deploy-capable agent is required.", NextAction: "wait_for_agent", RequestID: requestID}
+}
+
+func (s *Service) lifecycleAgentLocked(projectID, runtimeID, targetNodeID, requestID string) (Node, Agent, error) {
+	for _, node := range s.nodes {
+		if node.ProjectID != projectID || node.RuntimeID != runtimeID || node.Status != NodeHealthy || node.AgentID == "" {
+			continue
+		}
+		agent := s.agents[node.AgentID]
+		if agent.ProjectID == projectID && agent.Status == "active" && capabilityEnabled(agent.Capabilities, "node_lifecycle") {
+			return node, agent, nil
+		}
+	}
+	return Node{}, Agent{}, APIError{Status: 409, Code: "AGENT_NOT_READY", Message: "A healthy node-lifecycle-capable Agent is required.", NextAction: "wait_for_agent", RequestID: requestID}
+}
+
+func (s *Service) expireNodeLifecycleLeasesLocked(projectID string) {
+	now := s.clock()
+	for id, job := range s.lifecycles {
+		if job.ProjectID != projectID || job.Status != NodeLifecycleAccepted || job.LeaseExpiresAt == nil || job.LeaseExpiresAt.After(now) {
+			continue
+		}
+		job.LeaseToken = ""
+		job.LeaseExpiresAt = nil
+		job.UpdatedAt = now
+		if job.MaxAttempts == 0 {
+			job.MaxAttempts = defaultDeploymentMaxAttempts
+		}
+		if job.AttemptCount >= job.MaxAttempts {
+			job.Status = NodeLifecycleFailed
+			job.FailureCode = "NODE_LIFECYCLE_LEASE_ATTEMPTS_EXHAUSTED"
+			job.FailureMessageRedacted = "node lifecycle lease attempts exhausted"
+			job.FinishedAt = &now
+		} else {
+			job.Status = NodeLifecycleRequested
+		}
+		s.lifecycles[id] = job
+	}
+}
+
+func normalizeNodeLifecycleResult(result NodeLifecycleResult) string {
+	switch result.Status {
+	case NodeLifecycleCompleted:
+		return NodeLifecycleCompleted
+	case NodeLifecycleUnsupported:
+		return NodeLifecycleUnsupported
+	default:
+		return NodeLifecycleFailed
+	}
+}
+
+func nodeLifecycleTerminal(status string) bool {
+	return status == NodeLifecycleCompleted || status == NodeLifecycleFailed || status == NodeLifecycleUnsupported
 }
 
 func capabilityEnabled(capabilities map[string]any, name string) bool {

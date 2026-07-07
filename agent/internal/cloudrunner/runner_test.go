@@ -10,22 +10,30 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 )
 
 type fakeClient struct {
-	leases     []cloudrelay.DeploymentLease
-	results    []cloudrelay.DeploymentResult
-	heartbeats int
-	cancel     context.CancelFunc
+	leases      []cloudrelay.DeploymentLease
+	nodeLeases  []cloudrelay.NodeLifecycleLease
+	results     []cloudrelay.DeploymentResult
+	nodeResults []cloudrelay.NodeLifecycleResult
+	heartbeats  int
+	cancel      context.CancelFunc
 }
 
-func (f *fakeClient) PollDeployment(context.Context, string, time.Duration) (*cloudrelay.DeploymentLease, error) {
-	if len(f.leases) == 0 {
-		return nil, context.Canceled
+func (f *fakeClient) PollJob(context.Context, string, time.Duration) (*cloudrelay.JobLease, error) {
+	if len(f.leases) > 0 {
+		lease := f.leases[0]
+		f.leases = f.leases[1:]
+		return &cloudrelay.JobLease{Kind: "deployment", Deployment: &lease}, nil
 	}
-	lease := f.leases[0]
-	f.leases = f.leases[1:]
-	return &lease, nil
+	if len(f.nodeLeases) > 0 {
+		lease := f.nodeLeases[0]
+		f.nodeLeases = f.nodeLeases[1:]
+		return &cloudrelay.JobLease{Kind: "node_lifecycle", NodeLifecycle: &lease}, nil
+	}
+	return nil, context.Canceled
 }
 
 func (f *fakeClient) CompleteDeployment(_ context.Context, _ string, _ string, result cloudrelay.DeploymentResult) error {
@@ -36,9 +44,23 @@ func (f *fakeClient) CompleteDeployment(_ context.Context, _ string, _ string, r
 	return nil
 }
 
+func (f *fakeClient) CompleteNodeLifecycle(_ context.Context, _ string, _ string, result cloudrelay.NodeLifecycleResult) error {
+	f.nodeResults = append(f.nodeResults, result)
+	if f.cancel != nil {
+		f.cancel()
+	}
+	return nil
+}
+
 func (f *fakeClient) Heartbeat(context.Context, string, cloudrelay.Heartbeat) error {
 	f.heartbeats++
 	return nil
+}
+
+type fakeLifecycle struct{}
+
+func (fakeLifecycle) Execute(context.Context, nodelifecycle.Request) nodelifecycle.Result {
+	return nodelifecycle.Result{Status: nodelifecycle.StatusCompleted, Verified: true}
 }
 
 type fakeEngine struct{}
@@ -77,6 +99,28 @@ func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
 	}
 	if client.heartbeats == 0 {
 		t.Fatal("heartbeat was not sent")
+	}
+}
+
+func TestRunnerExecutesNodeLifecycleLeaseAndReportsResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &fakeClient{cancel: cancel, nodeLeases: []cloudrelay.NodeLifecycleLease{{
+		Kind: "node_lifecycle", ID: "nlj-1", Action: "drain", TargetNodeID: "node-target", TargetName: "node-a", LeaseToken: "lease-1",
+	}}}
+	runner := Runner{
+		Client:            client,
+		Engine:            fakeEngine{},
+		NodeLifecycle:     fakeLifecycle{},
+		NodeID:            "node-1",
+		PollInterval:      time.Millisecond,
+		LongPollWait:      time.Millisecond,
+		HeartbeatInterval: time.Hour,
+	}
+	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run err = %v", err)
+	}
+	if len(client.nodeResults) != 1 || client.nodeResults[0].Status != "completed" || !client.nodeResults[0].Verified || client.nodeResults[0].LeaseToken != "lease-1" {
+		t.Fatalf("node result = %#v", client.nodeResults)
 	}
 }
 

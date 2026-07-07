@@ -165,29 +165,32 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		if !s.requireRole(w, r, principal, projectID, "node", parts[3], "owner", "admin") {
 			return
 		}
-		nodes, err := s.Registry.ListNodes(projectID)
-		if err != nil {
-			writeRegistryFailure(w, r, err)
-			return
+		var req struct {
+			RequestedBy   string `json:"requested_by"`
+			ConfirmRemove bool   `json:"confirm_remove"`
 		}
-		node, ok := nodeByID(nodes, parts[3])
-		if !ok {
-			writeRegistryFailure(w, r, registry.ErrNotFound)
-			return
-		}
-		action := "NODE_DRAIN_REQUEST_BLOCKED"
-		if parts[4] == "remove" {
-			action = "NODE_REMOVE_REQUEST_BLOCKED"
-			if node.Role == "server" && r.URL.Query().Get("force") != "true" && healthyServerCount(nodes) <= 1 {
-				err := registry.APIError{Status: http.StatusConflict, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first", RequestID: r.Header.Get("X-Request-ID")}
-				s.Registry.Audit(node.OrgID, projectID, principal.UserID, action, "node", node.ID, "failure", map[string]any{"error_code": err.Code})
-				writeRegistryError(w, err)
+		if r.ContentLength != 0 {
+			if !decodeJSON(w, r, &req) {
 				return
 			}
 		}
-		apiErr := registry.APIError{Status: http.StatusNotImplemented, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node drain/remove must execute through Agent/K3s; Cloud registry cannot mark runtime lifecycle complete", NextAction: "wire_agent_node_lifecycle_endpoint", RequestID: r.Header.Get("X-Request-ID")}
-		s.Registry.Audit(node.OrgID, projectID, principal.UserID, action, "node", node.ID, "failure", map[string]any{"error_code": apiErr.Code})
-		writeRegistryError(w, apiErr)
+		if req.RequestedBy == "" {
+			req.RequestedBy = principal.UserID
+		}
+		job, err := s.Registry.RequestNodeLifecycle(projectID, parts[3], parts[4], req.RequestedBy, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), req.ConfirmRemove, r.URL.Query().Get("force") == "true")
+		if err == nil {
+			s.Registry.Audit(job.OrgID, projectID, principal.UserID, "NODE_LIFECYCLE_REQUESTED", "node_lifecycle_job", job.ID, "success", map[string]any{"action": job.Action, "target_node_id": job.TargetNodeID, "status": job.Status})
+		} else if nodes, listErr := s.Registry.ListNodes(projectID); listErr == nil {
+			if node, ok := nodeByID(nodes, parts[3]); ok {
+				code := "NODE_LIFECYCLE_REQUEST_FAILED"
+				var apiErr registry.APIError
+				if errors.As(err, &apiErr) {
+					code = apiErr.Code
+				}
+				s.Registry.Audit(node.OrgID, projectID, principal.UserID, "NODE_LIFECYCLE_REQUEST_REJECTED", "node", node.ID, "failure", map[string]any{"action": parts[4], "error_code": code})
+			}
+		}
+		writeRegistryResult(w, r, job, err, http.StatusAccepted)
 		return
 	}
 	if len(parts) == 3 && parts[2] == "agents" && r.Method == http.MethodPost {

@@ -21,6 +21,8 @@ const serviceSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime
 
 const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, COALESCE(action,'deploy'), idempotency_key, COALESCE(deployment_plan_hash,''), COALESCE(manifest_hash,''), COALESCE(intent_hash,''), deployment_intent_json::text, COALESCE(previous_revision_ref,''), COALESCE(rollback_eligible,false), COALESCE(rollback_blocked_reason,''), COALESCE(requested_by,''), COALESCE(agent_id,''), COALESCE(node_id,''), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), COALESCE(lease_token,''), lease_expires_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), started_at, finished_at, created_at, updated_at FROM deployment_jobs`
 
+const nodeLifecycleSelectSQL = `SELECT id, org_id, project_id, runtime_id, action, status, target_node_id, target_node_name, node_id, COALESCE(agent_id,''), COALESCE(requested_by,''), COALESCE(idempotency_key,''), confirm_remove, COALESCE(lease_token,''), lease_expires_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), verified, finished_at, created_at, updated_at FROM node_lifecycle_jobs`
+
 func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string) (Project, error) {
 	ctx := context.Background()
 	scope := "project:" + orgID
@@ -471,6 +473,156 @@ func (s PostgresService) RemoveNode(projectID, nodeID string, force bool) (Node,
 		}
 	}
 	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node remove must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
+}
+
+func (s PostgresService) RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error) {
+	ctx := context.Background()
+	if key != "" {
+		job, err := scanNodeLifecycle(s.DB.QueryRowContext(ctx, nodeLifecycleSelectSQL+` WHERE project_id = $1 AND target_node_id = $2 AND action = $3 AND idempotency_key = $4`, projectID, targetNodeID, action, key))
+		if err == nil {
+			return job, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return NodeLifecycleJob{}, err
+		}
+	}
+	if action != "drain" && action != "remove" {
+		return NodeLifecycleJob{}, APIError{Status: 400, Code: "NODE_LIFECYCLE_UNSUPPORTED", Message: "node lifecycle action is not supported", RequestID: requestID}
+	}
+	target, err := s.getNode(ctx, targetNodeID)
+	if err != nil {
+		return NodeLifecycleJob{}, err
+	}
+	if target.ProjectID != projectID {
+		return NodeLifecycleJob{}, ErrNotFound
+	}
+	if target.Name == "" {
+		return NodeLifecycleJob{}, APIError{Status: 400, Code: "INVALID_NODE_TARGET", Message: "node target name is required", RequestID: requestID}
+	}
+	if action == "remove" {
+		if target.Role == "server" && !force {
+			var servers int
+			if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE project_id = $1 AND role = 'server' AND status = 'healthy'`, projectID).Scan(&servers); err != nil {
+				return NodeLifecycleJob{}, err
+			}
+			if servers <= 1 {
+				return NodeLifecycleJob{}, APIError{Status: 409, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first", RequestID: requestID}
+			}
+		}
+		if !confirmRemove {
+			return NodeLifecycleJob{}, APIError{Status: 400, Code: "REMOVE_INTENT_REQUIRED", Message: "remove requires explicit intent", RequestID: requestID}
+		}
+	}
+	executor, agent, err := s.lifecycleAgent(ctx, projectID, target.RuntimeID, requestID)
+	if err != nil {
+		return NodeLifecycleJob{}, err
+	}
+	now := s.clock()
+	job := NodeLifecycleJob{ID: newID("nlj"), OrgID: target.OrgID, ProjectID: projectID, RuntimeID: target.RuntimeID, Action: action, Status: NodeLifecycleRequested, TargetNodeID: target.ID, TargetNodeName: target.Name, NodeID: executor.ID, AgentID: agent.ID, RequestedBy: requestedBy, IdempotencyKey: key, ConfirmRemove: confirmRemove, MaxAttempts: defaultDeploymentMaxAttempts, CreatedAt: now, UpdatedAt: now}
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO node_lifecycle_jobs(id, org_id, project_id, runtime_id, action, status, target_node_id, target_node_name, node_id, agent_id, requested_by, idempotency_key, confirm_remove, attempt_count, max_attempts, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),$13,$14,$15,$16,$17)`, job.ID, job.OrgID, job.ProjectID, job.RuntimeID, job.Action, job.Status, job.TargetNodeID, job.TargetNodeName, job.NodeID, job.AgentID, job.RequestedBy, job.IdempotencyKey, job.ConfirmRemove, job.AttemptCount, job.MaxAttempts, job.CreatedAt, job.UpdatedAt)
+	return job, err
+}
+
+func (s PostgresService) LeaseNodeLifecycle(projectID, nodeID string) (NodeLifecycleLease, bool, error) {
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return NodeLifecycleLease{}, false, err
+	}
+	defer tx.Rollback()
+	now := s.clock()
+	if err := expireNodeLifecycleLeases(ctx, tx, projectID, now); err != nil {
+		return NodeLifecycleLease{}, false, err
+	}
+	job, err := scanNodeLifecycle(tx.QueryRowContext(ctx, nodeLifecycleSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status = $3 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, NodeLifecycleRequested))
+	if errors.Is(err, sql.ErrNoRows) {
+		return NodeLifecycleLease{}, false, tx.Commit()
+	}
+	if err != nil {
+		return NodeLifecycleLease{}, false, err
+	}
+	leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
+	job.Status = NodeLifecycleAccepted
+	job.AttemptCount++
+	if job.MaxAttempts == 0 {
+		job.MaxAttempts = defaultDeploymentMaxAttempts
+	}
+	job.LeaseToken = newID("lease")
+	job.LeaseExpiresAt = &leaseExpiresAt
+	job.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `UPDATE node_lifecycle_jobs SET status = $1, lease_token = $2, lease_expires_at = $3, attempt_count = $4, max_attempts = $5, updated_at = $6 WHERE id = $7`, job.Status, job.LeaseToken, leaseExpiresAt, job.AttemptCount, job.MaxAttempts, now, job.ID); err != nil {
+		return NodeLifecycleLease{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return NodeLifecycleLease{}, false, err
+	}
+	return NodeLifecycleLease{Job: job, LeaseToken: job.LeaseToken}, true, nil
+}
+
+func (s PostgresService) CompleteNodeLifecycle(projectID, nodeID, jobID, requestID string, result NodeLifecycleResult) (NodeLifecycleJob, error) {
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return NodeLifecycleJob{}, err
+	}
+	defer tx.Rollback()
+	job, err := scanNodeLifecycle(tx.QueryRowContext(ctx, nodeLifecycleSelectSQL+` WHERE id = $1 FOR UPDATE`, jobID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return NodeLifecycleJob{}, ErrNotFound
+	}
+	if err != nil {
+		return NodeLifecycleJob{}, err
+	}
+	if job.ProjectID != projectID || job.NodeID != nodeID {
+		return NodeLifecycleJob{}, ErrNotFound
+	}
+	if nodeLifecycleTerminal(job.Status) {
+		return job, tx.Commit()
+	}
+	now := s.clock()
+	if job.Status != NodeLifecycleAccepted || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) {
+		return NodeLifecycleJob{}, APIError{Status: 409, Code: "NODE_LIFECYCLE_LEASE_EXPIRED", Message: "node lifecycle lease is not active", NextAction: "poll_for_new_lease", RequestID: requestID}
+	}
+	if job.LeaseToken != "" && result.LeaseToken != job.LeaseToken {
+		return NodeLifecycleJob{}, APIError{Status: 409, Code: "NODE_LIFECYCLE_STALE_LEASE", Message: "node lifecycle result lease token is stale", NextAction: "discard_result_and_poll", RequestID: requestID}
+	}
+	job.Status = normalizeNodeLifecycleResult(result)
+	job.FailureCode = result.FailureCode
+	job.FailureMessageRedacted = RedactString(result.FailureMessageRedacted)
+	job.Verified = result.Verified
+	if job.Status == NodeLifecycleCompleted && !job.Verified {
+		job.Status = NodeLifecycleFailed
+		job.FailureCode = "NODE_LIFECYCLE_NOT_VERIFIED"
+		job.FailureMessageRedacted = "node lifecycle result was not verified by Agent"
+	}
+	job.LeaseToken = ""
+	job.LeaseExpiresAt = nil
+	job.FinishedAt = &now
+	job.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `UPDATE node_lifecycle_jobs SET status = $1, failure_code = NULLIF($2,''), failure_message_redacted = NULLIF($3,''), verified = $4, lease_token = NULL, lease_expires_at = NULL, finished_at = $5, updated_at = $5 WHERE id = $6`, job.Status, job.FailureCode, job.FailureMessageRedacted, job.Verified, now, job.ID); err != nil {
+		return NodeLifecycleJob{}, err
+	}
+	targetStatus := ""
+	if job.Status == NodeLifecycleCompleted && job.Action == "drain" {
+		targetStatus = NodeDraining
+	}
+	if job.Status == NodeLifecycleCompleted && job.Action == "remove" {
+		targetStatus = NodeRemoved
+	}
+	if targetStatus != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET status = $1, failure_code = NULL, failure_message_redacted = NULL, updated_at = $2 WHERE id = $3 AND project_id = $4`, targetStatus, now, job.TargetNodeID, projectID); err != nil {
+			return NodeLifecycleJob{}, err
+		}
+		if job.Action == "remove" {
+			if _, err := tx.ExecContext(ctx, `UPDATE agents SET status = 'revoked', updated_at = $1 WHERE node_id = $2 AND project_id = $3`, now, job.TargetNodeID, projectID); err != nil {
+				return NodeLifecycleJob{}, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return NodeLifecycleJob{}, err
+	}
+	return job, nil
 }
 
 func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error) {
@@ -1022,6 +1174,15 @@ func scanDeployment(row rowScanner) (DeploymentJob, error) {
 	return d, err
 }
 
+func scanNodeLifecycle(row rowScanner) (NodeLifecycleJob, error) {
+	var j NodeLifecycleJob
+	var leaseExpiresAt, finished sql.NullTime
+	err := row.Scan(&j.ID, &j.OrgID, &j.ProjectID, &j.RuntimeID, &j.Action, &j.Status, &j.TargetNodeID, &j.TargetNodeName, &j.NodeID, &j.AgentID, &j.RequestedBy, &j.IdempotencyKey, &j.ConfirmRemove, &j.LeaseToken, &leaseExpiresAt, &j.AttemptCount, &j.MaxAttempts, &j.FailureCode, &j.FailureMessageRedacted, &j.Verified, &finished, &j.CreatedAt, &j.UpdatedAt)
+	j.LeaseExpiresAt = nullTimePtr(leaseExpiresAt)
+	j.FinishedAt = nullTimePtr(finished)
+	return j, err
+}
+
 func (s PostgresService) previousSuccessful(ctx context.Context, projectID, serviceID string) (DeploymentJob, error) {
 	d, err := scanDeployment(s.DB.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND service_id = $2 AND status = $3 ORDER BY created_at DESC LIMIT 1`, projectID, serviceID, DeploymentSucceeded))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1050,6 +1211,28 @@ func (s PostgresService) deployAgent(ctx context.Context, projectID, runtimeID, 
 		return Node{}, Agent{}, err
 	}
 	return Node{}, Agent{}, APIError{Status: 409, Code: "AGENT_NOT_READY", Message: "A healthy server with an online deploy-capable agent is required.", NextAction: "wait_for_agent", RequestID: requestID}
+}
+
+func (s PostgresService) lifecycleAgent(ctx context.Context, projectID, runtimeID, requestID string) (Node, Agent, error) {
+	rows, err := s.DB.QueryContext(ctx, nodeSelectSQL+` WHERE project_id = $1 AND runtime_id = $2 AND status = 'healthy' AND agent_id IS NOT NULL ORDER BY updated_at DESC`, projectID, runtimeID)
+	if err != nil {
+		return Node{}, Agent{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		node, err := scanNode(rows)
+		if err != nil {
+			return Node{}, Agent{}, err
+		}
+		agent, err := s.getAgent(ctx, node.AgentID)
+		if err == nil && agent.Status == "active" && capabilityEnabled(agent.Capabilities, "node_lifecycle") {
+			return node, agent, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Node{}, Agent{}, err
+	}
+	return Node{}, Agent{}, APIError{Status: 409, Code: "AGENT_NOT_READY", Message: "A healthy node-lifecycle-capable Agent is required.", NextAction: "wait_for_agent", RequestID: requestID}
 }
 
 func acquireDeploymentLock(ctx context.Context, tx *sql.Tx, projectID, serviceID, deploymentID string, now time.Time, requestID string) error {
@@ -1125,6 +1308,44 @@ func expireDeploymentLeases(ctx context.Context, tx *sql.Tx, projectID string, n
 			result = "failure"
 		}
 		if err := insertCloudAudit(ctx, tx, job.OrgID, projectID, "agent", action, "deployment_job", job.ID, result, map[string]any{"status": nextStatus, "attempt_count": job.AttemptCount, "max_attempts": job.MaxAttempts}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func expireNodeLifecycleLeases(ctx context.Context, tx *sql.Tx, projectID string, now time.Time) error {
+	rows, err := tx.QueryContext(ctx, nodeLifecycleSelectSQL+` WHERE project_id = $1 AND status = $2 AND lease_expires_at <= $3 FOR UPDATE`, projectID, NodeLifecycleAccepted, now)
+	if err != nil {
+		return err
+	}
+	var expired []NodeLifecycleJob
+	for rows.Next() {
+		job, err := scanNodeLifecycle(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		expired = append(expired, job)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, job := range expired {
+		if job.MaxAttempts == 0 {
+			job.MaxAttempts = defaultDeploymentMaxAttempts
+		}
+		nextStatus := NodeLifecycleRequested
+		finishedAt := any(nil)
+		failureCode := job.FailureCode
+		failureMessage := job.FailureMessageRedacted
+		if job.AttemptCount >= job.MaxAttempts {
+			nextStatus = NodeLifecycleFailed
+			finishedAt = now
+			failureCode = "NODE_LIFECYCLE_LEASE_ATTEMPTS_EXHAUSTED"
+			failureMessage = "node lifecycle lease attempts exhausted"
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE node_lifecycle_jobs SET status = $1, lease_token = NULL, lease_expires_at = NULL, failure_code = NULLIF($2,''), failure_message_redacted = NULLIF($3,''), finished_at = $4, updated_at = $5 WHERE id = $6`, nextStatus, failureCode, failureMessage, finishedAt, now, job.ID); err != nil {
 			return err
 		}
 	}

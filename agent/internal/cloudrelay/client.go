@@ -47,6 +47,12 @@ type DeploymentLease struct {
 	Service    ServiceEnvelope       `json:"service"`
 }
 
+type JobLease struct {
+	Kind          string              `json:"kind"`
+	Deployment    *DeploymentLease    `json:"deployment_lease,omitempty"`
+	NodeLifecycle *NodeLifecycleLease `json:"node_lifecycle_lease,omitempty"`
+}
+
 type DeploymentJobEnvelope struct {
 	ID                  string            `json:"id"`
 	DeploymentPlanHash  string            `json:"deployment_plan_hash"`
@@ -149,6 +155,25 @@ type DeploymentResult struct {
 	RollbackBlockedReason  string `json:"rollback_blocked_reason,omitempty"`
 }
 
+type NodeLifecycleLease struct {
+	Kind          string `json:"kind"`
+	ID            string `json:"id"`
+	Action        string `json:"action"`
+	ProjectID     string `json:"project_id"`
+	TargetNodeID  string `json:"target_node_id"`
+	TargetName    string `json:"target_node_name"`
+	ConfirmRemove bool   `json:"confirm_remove"`
+	LeaseToken    string `json:"lease_token,omitempty"`
+}
+
+type NodeLifecycleResult struct {
+	Status                 string `json:"status"`
+	LeaseToken             string `json:"lease_token,omitempty"`
+	FailureCode            string `json:"failure_code,omitempty"`
+	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
+	Verified               bool   `json:"verified"`
+}
+
 type Heartbeat struct {
 	Version      string         `json:"version"`
 	Capabilities map[string]any `json:"capabilities,omitempty"`
@@ -164,7 +189,7 @@ func (c Client) PollWebhook(ctx context.Context, agentID string, wait time.Durat
 	var kind struct {
 		Kind string `json:"kind"`
 	}
-	if err := json.Unmarshal(body, &kind); err == nil && kind.Kind == "deployment" {
+	if err := json.Unmarshal(body, &kind); err == nil && (kind.Kind == "deployment" || kind.Kind == "node_lifecycle") {
 		return nil, nil
 	}
 	var envelope WebhookEnvelope
@@ -202,6 +227,35 @@ func (c Client) PollDeployment(ctx context.Context, nodeID string, wait time.Dur
 	return &lease, nil
 }
 
+func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) (*JobLease, error) {
+	body, status, err := c.pollNext(ctx, nodeID, wait)
+	if err != nil || status == http.StatusNoContent {
+		return nil, err
+	}
+	var kind struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(body, &kind); err != nil {
+		return nil, err
+	}
+	switch kind.Kind {
+	case "deployment":
+		var lease DeploymentLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, Deployment: &lease}, nil
+	case "node_lifecycle":
+		var lease NodeLifecycleLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, NodeLifecycle: &lease}, nil
+	default:
+		return nil, nil
+	}
+}
+
 func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID string, result DeploymentResult) error {
 	if c.BaseURL == "" {
 		return fmt.Errorf("cloud base URL is required")
@@ -237,6 +291,45 @@ func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("complete deployment: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c Client) CompleteNodeLifecycle(ctx context.Context, nodeID, jobID string, result NodeLifecycleResult) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/node-lifecycle/" + url.PathEscape(jobID) + "/result"
+	query := endpoint.Query()
+	if c.ProjectID != "" {
+		query.Set("project_id", c.ProjectID)
+	}
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete node lifecycle: status %d", resp.StatusCode)
 	}
 	return nil
 }

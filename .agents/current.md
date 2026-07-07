@@ -60,7 +60,7 @@ Detailed snapshot: `docs/current_state.md`. Architecture: `docs/architecture.md`
 - Cloud AI provider schema is still minimal; Gemini output is currently consumed as root-cause text while recommended actions remain typed fixture actions.
 - CLI UI WebSocket/SSE bridge and incident registry endpoint are not implemented; unavailable actions are disabled instead of fake-success.
 - Bootstrap worker does not install SSH/K3s/Opsi Agent yet; it fails closed after envelope validation and cannot report production readiness. Clean VPS Add Server remains blocked until the runtime installer is implemented and manually/e2e verified.
-- Agent-backed K3s drain/remove execution is not implemented; Cloud blocks node lifecycle requests instead of marking metadata-only success.
+- Agent-backed K3s drain/remove now exists through typed Cloud `node_lifecycle` job envelopes leased by Agent. Agent runs allowlisted `kubectl` cordon/drain/delete-node operations, verifies before reporting `completed`, and Cloud only updates node status from verified Agent results. Missing Agent, invalid target, K3s failure, timeout, unverified result, unsupported action, or missing remove intent fail closed with redacted errors. Real K3s worker-node manual/e2e evidence is still missing, so K3s node lifecycle remains `Partial`, not production-ready.
 - K3s encryption-at-rest is config-gated, not auto-detected.
 - Service catalog lacks DB-native rotation, service logs, backup/restore workflows for managed services, and full managed-service readiness reconciliation.
 - HA server topology and heartbeat timeout reconciler remain future work.

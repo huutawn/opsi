@@ -896,7 +896,7 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	req.Header.Set("X-Request-ID", "req-node-drain")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusNotImplemented || !bytes.Contains(w.Body.Bytes(), []byte(`"error_code":"NODE_LIFECYCLE_AGENT_REQUIRED"`)) {
+	if w.Code != http.StatusConflict || !bytes.Contains(w.Body.Bytes(), []byte(`"error_code":"AGENT_NOT_READY"`)) {
 		t.Fatalf("drain status=%d body=%s", w.Code, w.Body.String())
 	}
 	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/nodes/"+agentResp.Agent.NodeID+"/drain", nil)
@@ -905,16 +905,16 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	req.Header.Set("X-Request-ID", "req-node-drain-retry")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusNotImplemented || !bytes.Contains(w.Body.Bytes(), []byte(`"next_action":"wire_agent_node_lifecycle_endpoint"`)) {
+	if w.Code != http.StatusConflict || !bytes.Contains(w.Body.Bytes(), []byte(`"next_action":"wait_for_agent"`)) {
 		t.Fatalf("drain retry status=%d body=%s", w.Code, w.Body.String())
 	}
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/nodes/"+agentResp.Agent.NodeID+"/remove?force=true", nil)
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/nodes/"+agentResp.Agent.NodeID+"/remove?force=true", bytes.NewReader([]byte(`{"confirm_remove":true}`)))
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	req.Header.Set("Idempotency-Key", "node-remove-force")
 	req.Header.Set("X-Request-ID", "req-node-remove-force")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusNotImplemented || !bytes.Contains(w.Body.Bytes(), []byte(`"error_code":"NODE_LIFECYCLE_AGENT_REQUIRED"`)) {
+	if w.Code != http.StatusConflict || !bytes.Contains(w.Body.Bytes(), []byte(`"error_code":"AGENT_NOT_READY"`)) {
 		t.Fatalf("force remove status=%d body=%s", w.Code, w.Body.String())
 	}
 	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/nodes/"+agentResp.Agent.NodeID, nil)
@@ -928,7 +928,7 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("NODE_DRAIN_REQUEST_BLOCKED")) || !bytes.Contains(w.Body.Bytes(), []byte("NODE_REMOVE_REQUEST_BLOCKED")) {
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("NODE_LIFECYCLE_REQUEST_REJECTED")) {
 		t.Fatalf("missing blocked lifecycle audit status=%d body=%s", w.Code, w.Body.String())
 	}
 
