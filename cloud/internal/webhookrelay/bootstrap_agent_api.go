@@ -16,15 +16,20 @@ type bootstrapWorkerStateRequest struct {
 }
 
 func (s *Server) handleBootstrapWorker(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 	if s.Config.BootstrapWorkerToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Bootstrap-Worker-Token")), []byte(s.Config.BootstrapWorkerToken)) != 1 {
 		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "BOOTSTRAP_WORKER_AUTH_REQUIRED", Message: "bootstrap worker token is required", RequestID: r.Header.Get("X-Request-ID")})
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if r.Method == http.MethodGet && len(parts) == 5 && parts[0] == "internal" && parts[1] == "bootstrap" && parts[2] == "sessions" && parts[4] == "status" {
+		session, err := s.Registry.GetBootstrapSession(r.URL.Query().Get("project_id"), parts[3])
+		writeRegistryResult(w, r, session, err, http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	if len(parts) != 5 || parts[0] != "internal" || parts[1] != "bootstrap" || parts[2] != "sessions" || parts[4] != "take" {
 		if len(parts) == 5 && parts[0] == "internal" && parts[1] == "bootstrap" && parts[2] == "sessions" {
 			if parts[4] == "progress" {
@@ -120,7 +125,7 @@ func (s *Server) handleBootstrapWorkerFinish(w http.ResponseWriter, r *http.Requ
 
 func bootstrapStatusActive(status string) bool {
 	switch status {
-	case "created", "pending", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying":
+	case "created", "pending", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
 		return true
 	default:
 		return false

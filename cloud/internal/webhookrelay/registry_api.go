@@ -478,7 +478,7 @@ func bootstrapCredential(method, username, privateKey, password, k3sToken string
 		if privateKey == "" || password != "" {
 			return BootstrapCredential{}, errors.New("private_key auth requires ssh_private_key only")
 		}
-		return BootstrapCredential{}, errors.New("ssh_private_key cannot be stored by Cloud; use a local bootstrap worker credential path when SSH bootstrap is implemented")
+		return BootstrapCredential{}, errors.New("ssh_private_key cannot be stored by Cloud; use password auth for the supported bootstrap path")
 	case "password":
 		if password == "" || privateKey != "" {
 			return BootstrapCredential{}, errors.New("password auth requires ssh_password only")

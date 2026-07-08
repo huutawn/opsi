@@ -402,7 +402,7 @@ func (s PostgresService) RecordAgentHeartbeat(projectID, nodeID string, heartbea
 		}
 	}
 	if status == NodeHealthy {
-		if _, err := tx.ExecContext(ctx, `WITH updated AS (UPDATE bootstrap_sessions SET status = 'verifying', updated_at = $1 WHERE project_id = $2 AND node_id = $3 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying') RETURNING org_id, project_id, id, node_id) INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) SELECT $4, org_id, project_id, id, node_id, 'info', 'verifying', 'agent heartbeat marked node healthy; waiting for worker verification', 90, $1 FROM updated`, now, projectID, nodeID, newID("evt")); err != nil {
+		if _, err := tx.ExecContext(ctx, `WITH updated AS (UPDATE bootstrap_sessions SET status = 'verifying', updated_at = $1 WHERE project_id = $2 AND node_id = $3 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying') RETURNING org_id, project_id, id, node_id) INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) SELECT $4, org_id, project_id, id, node_id, 'info', 'verifying', 'agent heartbeat marked node healthy; waiting for worker verification', 90, $1 FROM updated`, now, projectID, nodeID, newID("evt")); err != nil {
 			return Node{}, err
 		}
 	}
@@ -1376,7 +1376,7 @@ func (s PostgresService) refreshProject(ctx context.Context, projectID string) (
 		status = ProjectReady
 	} else {
 		var active int
-		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying')`, projectID).Scan(&active); err != nil {
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID).Scan(&active); err != nil {
 			return "", err
 		}
 		if active > 0 {
@@ -1389,7 +1389,7 @@ func (s PostgresService) refreshProject(ctx context.Context, projectID string) (
 
 func (s PostgresService) expireBootstraps(ctx context.Context) error {
 	now := s.clock()
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, COALESCE(node_id,'') FROM bootstrap_sessions WHERE status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying') AND expires_at < $1`, now)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, COALESCE(node_id,'') FROM bootstrap_sessions WHERE status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying') AND expires_at < $1`, now)
 	if err != nil {
 		return err
 	}
@@ -1438,7 +1438,7 @@ func (s PostgresService) validateBootstrap(ctx context.Context, projectID, role,
 		return APIError{Status: 409, Code: "SERVER_NODE_REQUIRED", Message: "add a healthy first server before adding workers", NextAction: "add_first_server"}
 	}
 	var active int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND public_host = $2 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying')`, projectID, publicHost).Scan(&active); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND public_host = $2 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID, publicHost).Scan(&active); err != nil {
 		return err
 	}
 	if active > 0 {

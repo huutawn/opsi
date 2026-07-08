@@ -1734,7 +1734,7 @@ func (s *Service) expireBootstrapsLocked() {
 
 func isActiveBootstrap(status string) bool {
 	switch status {
-	case "created", "pending", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying":
+	case "created", "pending", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
 		return true
 	default:
 		return false
@@ -1759,7 +1759,7 @@ func bootstrapProgress(status string) int {
 		return 65
 	case "registering_agent", "waiting_agent":
 		return 80
-	case "verifying":
+	case "verifying_agent", "verifying":
 		return 90
 	case "completed", "succeeded", "failed", "cancelled", "expired":
 		return 100
