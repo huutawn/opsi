@@ -31,3 +31,32 @@ jobs:
       - run: make verify
       - run: make build
       - run: make package-source
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: opsi
+          POSTGRES_USER: opsi
+          POSTGRES_PASSWORD: opsi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opsi -d opsi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      GOTOOLCHAIN: local
+      GOCACHE: /tmp/opsi-go-cache
+      OPSI_REQUIRE_POSTGRES_TESTS: "1"
+      OPSI_TEST_DATABASE_URL: postgres://opsi:opsi@127.0.0.1:5432/opsi?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache-dependency-path: cloud/go.sum
+      - run: make verify-postgres

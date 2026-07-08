@@ -3,7 +3,6 @@ package webhookrelay
 import (
 	"context"
 	"database/sql"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,10 +12,7 @@ import (
 )
 
 func TestPostgresQueuePersistsSanitizedJobsWhenDatabaseAvailable(t *testing.T) {
-	dsn := os.Getenv("OPSI_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("set OPSI_TEST_DATABASE_URL to run Postgres relay persistence test")
-	}
+	dsn := requirePostgresTestDSN(t, "relay persistence")
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
