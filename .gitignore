@@ -63,6 +63,9 @@ docs/current_state.md
 !docs/demo_runbook.md
 !docs/security_story.md
 !docs/future_work.md
+!docs/runbooks/
+docs/runbooks/*
+!docs/runbooks/clean_vps_k3s_e2e.md
 !docs/archive/
 docs/archive/*
 docs/archive/README.md

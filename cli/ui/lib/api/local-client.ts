@@ -16,12 +16,44 @@ import type {
 } from "@/lib/contracts/registry";
 
 type RequestOptions = RequestInit & { write?: boolean };
+export type LocalSessionStatus = {
+  authenticated: boolean;
+  cloud_connected: "ok" | "failed" | "unknown";
+  agent_connected: "ok" | "failed" | "unknown";
+  token_status?: string;
+  local_session?: string;
+  capabilities?: string[];
+};
 
 export class LocalClient {
   private localSession = "";
 
   async session() {
-    return this.call<{ local_session?: string }>("/api/local/session");
+    return this.call<LocalSessionStatus>("/api/local/session");
+  }
+
+  startLogin(projectID?: string) {
+    return this.call<{ auth_url: string; status: string }>("/api/local/session/login/start", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectID ?? "" }),
+    });
+  }
+
+  logout(projectID?: string) {
+    this.localSession = "";
+    return this.call<{ authenticated: false }>("/api/local/session/logout", {
+      method: "POST",
+      write: true,
+      body: JSON.stringify({ project_id: projectID ?? "" }),
+    });
+  }
+
+  rotatePAT(projectID?: string) {
+    return this.call<{ rotated: boolean; revoked_old: boolean }>("/api/local/session/token/rotate", {
+      method: "POST",
+      write: true,
+      body: JSON.stringify({ project_id: projectID ?? "" }),
+    });
   }
 
   async projects(orgID: string) {

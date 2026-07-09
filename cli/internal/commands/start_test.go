@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -784,6 +785,175 @@ func TestLocalSessionDoesNotExposePAT(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(string(body)), "pat") {
 		t.Fatalf("session leaked PAT: %s", body)
+	}
+}
+
+func TestLocalBrowserLoginRedeemsToKeychainWithoutBrowserPAT(t *testing.T) {
+	store := keychain.NewFakeStore()
+	var localState string
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/browser/start":
+			var req struct {
+				LocalState string `json:"local_state"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			localState = req.LocalState
+			_, _ = w.Write([]byte(`{"auth_url":"https://cloud.example.test/login","status":"pending"}`))
+		case "/v1/auth/browser/redeem":
+			_, _ = w.Write([]byte(`{"token":"pat_secret_should_stay_local","session":{"user_id":"u","project_id":"proj"}}`))
+		default:
+			t.Fatalf("unexpected Cloud path %s", r.URL.Path)
+		}
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{"project_id":"proj"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if strings.Contains(string(body), "pat_secret") || localState == "" {
+		t.Fatalf("login start leaked token or missed state: body=%s state=%q", body, localState)
+	}
+
+	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err = client.Get(server.URL + "/api/local/session/callback?code=grant-1&state=" + url.QueryEscape(localState))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("callback status = %d", res.StatusCode)
+	}
+	got, err := store.GetPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "pat_secret_should_stay_local" {
+		t.Fatalf("stored token = %q", got)
+	}
+}
+
+func TestLocalPATRotateFailurePreservesOldToken(t *testing.T) {
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("old-pat"); err != nil {
+		t.Fatal(err)
+	}
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/pat/rotate" {
+			t.Fatalf("unexpected Cloud path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+	session := localTestSession(t, server.URL)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/session/token/rotate", strings.NewReader(`{"project_id":"proj"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Local-Session", session)
+	req.Header.Set("Idempotency-Key", "rotate-1")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	got, err := store.GetPAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "old-pat" {
+		t.Fatalf("old token not preserved: %q", got)
+	}
+}
+
+func TestLocalLogoutRevokesAndClearsKeychain(t *testing.T) {
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("old-pat"); err != nil {
+		t.Fatal(err)
+	}
+	revoked := false
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/pat/revoke" {
+			t.Fatalf("unexpected Cloud path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer old-pat" {
+			t.Fatalf("auth = %q", got)
+		}
+		revoked = true
+		_, _ = w.Write([]byte(`{"revoked":true}`))
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+	session := localTestSession(t, server.URL)
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/session/logout", strings.NewReader(`{"project_id":"proj"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Local-Session", session)
+	req.Header.Set("Idempotency-Key", "logout-1")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || !revoked {
+		t.Fatalf("status=%d revoked=%v", res.StatusCode, revoked)
+	}
+	if _, err := store.GetPAT(); err == nil {
+		t.Fatal("token still present after logout")
+	}
+}
+
+func TestBrowserUIDoesNotStorePATOrCallCloudDirectly(t *testing.T) {
+	root := filepath.Clean("../../ui")
+	forbidden := []string{"localStorage", "sessionStorage", "indexedDB", "document.cookie", "NEXT_PUBLIC_CLOUD", "CloudRegistryClient", "cloudURL", "localhost:9800", "127.0.0.1:9800"}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case "node_modules", "out", ".next":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".ts") && !strings.HasSuffix(path, ".tsx") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(data)
+		for _, token := range forbidden {
+			if strings.Contains(text, token) {
+				t.Fatalf("%s contains forbidden browser auth/direct-cloud token %q", path, token)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

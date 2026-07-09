@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -22,7 +25,9 @@ type VerifyRequest struct {
 }
 
 type VerifyResult struct {
+	TokenID   string    `json:"-"`
 	UserID    string    `json:"user_id"`
+	Email     string    `json:"email,omitempty"`
 	OrgID     string    `json:"org_id,omitempty"`
 	ProjectID string    `json:"project_id"`
 	Role      string    `json:"role"`
@@ -31,7 +36,9 @@ type VerifyResult struct {
 }
 
 type Candidate struct {
+	ID        string
 	UserID    string
+	Email     string
 	OrgID     string
 	ProjectID string
 	Role      string
@@ -46,6 +53,18 @@ type Store interface {
 
 type OrgStore interface {
 	OrgPATCandidates(ctx context.Context, orgID string) ([]Candidate, error)
+}
+
+type LifecycleStore interface {
+	IssuePATForEmail(ctx context.Context, email, projectID, tokenHash string, expiresAt time.Time) (Candidate, error)
+	IssuePATForUser(ctx context.Context, userID, projectID, tokenHash string, expiresAt time.Time) (Candidate, error)
+	RevokePAT(ctx context.Context, tokenID string) error
+}
+
+type IssueResult struct {
+	Token     string       `json:"token,omitempty"`
+	Session   VerifyResult `json:"session"`
+	ExpiresAt time.Time    `json:"expires_at"`
 }
 
 type Service struct {
@@ -78,7 +97,7 @@ func (s Service) VerifyPAT(ctx context.Context, req VerifyRequest) (VerifyResult
 		if !candidate.ExpiresAt.IsZero() && !now.Before(candidate.ExpiresAt) {
 			return VerifyResult{}, ErrExpired
 		}
-		return VerifyResult{UserID: candidate.UserID, OrgID: candidate.OrgID, ProjectID: candidate.ProjectID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt, Revoked: candidate.Revoked}, nil
+		return VerifyResult{TokenID: candidate.ID, UserID: candidate.UserID, Email: candidate.Email, OrgID: candidate.OrgID, ProjectID: candidate.ProjectID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt, Revoked: candidate.Revoked}, nil
 	}
 	return VerifyResult{}, ErrInvalidToken
 }
@@ -109,9 +128,59 @@ func (s Service) VerifyOrgPAT(ctx context.Context, req VerifyRequest) (VerifyRes
 		if !candidate.ExpiresAt.IsZero() && !now.Before(candidate.ExpiresAt) {
 			return VerifyResult{}, ErrExpired
 		}
-		return VerifyResult{UserID: candidate.UserID, OrgID: candidate.OrgID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt, Revoked: candidate.Revoked}, nil
+		return VerifyResult{TokenID: candidate.ID, UserID: candidate.UserID, Email: candidate.Email, OrgID: candidate.OrgID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt, Revoked: candidate.Revoked}, nil
 	}
 	return VerifyResult{}, ErrInvalidToken
+}
+
+func (s Service) IssuePATForEmail(ctx context.Context, email, projectID string, ttl time.Duration) (IssueResult, error) {
+	store, ok := s.Store.(LifecycleStore)
+	if !ok || email == "" {
+		return IssueResult{}, ErrNoMembership
+	}
+	token, hash, expiresAt, err := s.newToken(ttl)
+	if err != nil {
+		return IssueResult{}, err
+	}
+	candidate, err := store.IssuePATForEmail(ctx, email, projectID, hash, expiresAt)
+	if err != nil {
+		return IssueResult{}, err
+	}
+	session := VerifyResult{TokenID: candidate.ID, UserID: candidate.UserID, Email: candidate.Email, OrgID: candidate.OrgID, ProjectID: candidate.ProjectID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt}
+	return IssueResult{Token: token, Session: session, ExpiresAt: expiresAt}, nil
+}
+
+func (s Service) RotatePAT(ctx context.Context, token, projectID string, ttl time.Duration) (IssueResult, VerifyResult, error) {
+	current, err := s.VerifyPAT(ctx, VerifyRequest{Token: token, ProjectID: projectID})
+	if err != nil {
+		return IssueResult{}, VerifyResult{}, err
+	}
+	store, ok := s.Store.(LifecycleStore)
+	if !ok {
+		return IssueResult{}, VerifyResult{}, ErrInvalidToken
+	}
+	newToken, hash, expiresAt, err := s.newToken(ttl)
+	if err != nil {
+		return IssueResult{}, VerifyResult{}, err
+	}
+	candidate, err := store.IssuePATForUser(ctx, current.UserID, current.ProjectID, hash, expiresAt)
+	if err != nil {
+		return IssueResult{}, VerifyResult{}, err
+	}
+	session := VerifyResult{TokenID: candidate.ID, UserID: candidate.UserID, Email: candidate.Email, OrgID: candidate.OrgID, ProjectID: candidate.ProjectID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt}
+	return IssueResult{Token: newToken, Session: session, ExpiresAt: expiresAt}, current, nil
+}
+
+func (s Service) RevokePAT(ctx context.Context, token, projectID string) (VerifyResult, error) {
+	current, err := s.VerifyPAT(ctx, VerifyRequest{Token: token, ProjectID: projectID})
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	store, ok := s.Store.(LifecycleStore)
+	if !ok {
+		return VerifyResult{}, ErrInvalidToken
+	}
+	return current, store.RevokePAT(ctx, current.TokenID)
 }
 
 func HashPAT(token string) (string, error) {
@@ -123,6 +192,22 @@ func HashPAT(token string) (string, error) {
 		return "", err
 	}
 	return string(hash), nil
+}
+
+func (s Service) newToken(ttl time.Duration) (string, string, time.Time, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", "", time.Time{}, err
+	}
+	token := "opsi_pat_" + base64.RawURLEncoding.EncodeToString(raw[:])
+	hash, err := HashPAT(token)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	if ttl <= 0 {
+		ttl = 90 * 24 * time.Hour
+	}
+	return token, hash, s.now().Add(ttl), nil
 }
 
 func (s Service) now() time.Time {
@@ -146,6 +231,47 @@ func (s MemoryStore) PATCandidates(_ context.Context, projectID string) ([]Candi
 	return out, nil
 }
 
+func (s *MemoryStore) IssuePATForEmail(_ context.Context, email, projectID, tokenHash string, expiresAt time.Time) (Candidate, error) {
+	for _, candidate := range s.Candidates {
+		if candidate.Email == email || candidate.UserID == email {
+			if projectID == "" || candidate.ProjectID == projectID {
+				candidate.ID = fmt.Sprintf("pat_%d", len(s.Candidates)+1)
+				candidate.Email = firstNonEmpty(candidate.Email, email)
+				candidate.Hash = tokenHash
+				candidate.ExpiresAt = expiresAt
+				candidate.Revoked = false
+				s.Candidates = append(s.Candidates, candidate)
+				return candidate, nil
+			}
+		}
+	}
+	return Candidate{}, ErrNoMembership
+}
+
+func (s *MemoryStore) IssuePATForUser(_ context.Context, userID, projectID, tokenHash string, expiresAt time.Time) (Candidate, error) {
+	for _, candidate := range s.Candidates {
+		if candidate.UserID == userID && (projectID == "" || candidate.ProjectID == projectID) {
+			candidate.ID = fmt.Sprintf("pat_%d", len(s.Candidates)+1)
+			candidate.Hash = tokenHash
+			candidate.ExpiresAt = expiresAt
+			candidate.Revoked = false
+			s.Candidates = append(s.Candidates, candidate)
+			return candidate, nil
+		}
+	}
+	return Candidate{}, ErrNoMembership
+}
+
+func (s *MemoryStore) RevokePAT(_ context.Context, tokenID string) error {
+	for i := range s.Candidates {
+		if s.Candidates[i].ID == tokenID {
+			s.Candidates[i].Revoked = true
+			return nil
+		}
+	}
+	return ErrInvalidToken
+}
+
 func (s MemoryStore) OrgPATCandidates(_ context.Context, orgID string) ([]Candidate, error) {
 	out := make([]Candidate, 0, len(s.Candidates))
 	for _, candidate := range s.Candidates {
@@ -154,6 +280,15 @@ func (s MemoryStore) OrgPATCandidates(_ context.Context, orgID string) ([]Candid
 		}
 	}
 	return out, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func normalizeRole(role string) string {

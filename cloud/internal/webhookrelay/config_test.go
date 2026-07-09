@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const validProductionConfig = `"production":true,"database_url":"postgres://secret-db.example.test/opsi","public_base_url":"https://cloud.example.test","bootstrap_worker_token":"secret-worker-token-123456789012","bootstrap_secret_key":"secret-bootstrap-key-12345678901","alerts":{"internal_token":"secret-alert-token-1234567890123"}`
+const validProductionConfig = `"production":true,"database_url":"postgres://secret-db.example.test/opsi","public_base_url":"https://cloud.example.test","bootstrap_worker_token":"secret-worker-token-123456789012","bootstrap_secret_key":"secret-bootstrap-key-12345678901","alerts":{"internal_token":"secret-alert-token-1234567890123"},"auth":{"provider":"generic","client_id":"client","client_secret":"secret-client","auth_url":"https://auth.example.test/authorize","token_url":"https://auth.example.test/token","user_info_url":"https://auth.example.test/userinfo","redirect_url":"https://cloud.example.test/v1/auth/browser/callback"}`
 
 func TestLoadConfigProductionRequiresDurableSecurity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cloud.json")

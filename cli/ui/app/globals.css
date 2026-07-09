@@ -132,10 +132,26 @@ button:disabled {
 }
 
 .topbar {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(160px, 240px) minmax(140px, 220px) auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   margin-bottom: 14px;
+}
+
+.topbar label {
+  min-width: 220px;
+  flex: 1 1 240px;
+}
+
+.statusPill {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 9px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .projectPicker {

@@ -23,6 +23,7 @@ type Config struct {
 	BootstrapWorkerToken   string      `json:"bootstrap_worker_token"`
 	BootstrapSecretKey     string      `json:"bootstrap_secret_key"`
 	RequireAgentSignatures bool        `json:"require_agent_signatures"`
+	Auth                   AuthConfig  `json:"auth"`
 }
 
 type OTPConfig struct {
@@ -52,6 +53,17 @@ type AlertConfig struct {
 	MinSeverity   string `json:"min_severity"`
 	OutboxPath    string `json:"outbox_path"`
 	InternalToken string `json:"internal_token"`
+}
+
+type AuthConfig struct {
+	Provider     string   `json:"provider"`
+	ClientID     string   `json:"client_id"`
+	ClientSecret string   `json:"client_secret"`
+	AuthURL      string   `json:"auth_url"`
+	TokenURL     string   `json:"token_url"`
+	UserInfoURL  string   `json:"user_info_url"`
+	RedirectURL  string   `json:"redirect_url"`
+	Scopes       []string `json:"scopes"`
 }
 
 type Route struct {
@@ -114,6 +126,9 @@ func LoadConfig(path string) (Config, error) {
 		}
 		if cfg.EnableDebugUI {
 			return Config{}, fmt.Errorf("production forbids enable_debug_ui")
+		}
+		if cfg.Auth.Provider == "" || cfg.Auth.ClientID == "" || cfg.Auth.ClientSecret == "" || cfg.Auth.AuthURL == "" || cfg.Auth.TokenURL == "" || cfg.Auth.UserInfoURL == "" || cfg.Auth.RedirectURL == "" {
+			return Config{}, fmt.Errorf("production requires auth OAuth config")
 		}
 		if cfg.PublicBaseURL != "" && !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
 			return Config{}, fmt.Errorf("production requires public_base_url to use https")

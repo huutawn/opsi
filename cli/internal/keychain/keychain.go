@@ -12,6 +12,7 @@ const patKey = "default-pat"
 type Store interface {
 	SetPAT(token string) error
 	GetPAT() (string, error)
+	DeletePAT() error
 }
 
 type OSStore struct {
@@ -48,6 +49,10 @@ func (s *OSStore) GetPAT() (string, error) {
 	return string(item.Data), nil
 }
 
+func (s *OSStore) DeletePAT() error {
+	return s.ring.Remove(patKey)
+}
+
 type FakeStore struct {
 	mu    sync.Mutex
 	token string
@@ -69,4 +74,11 @@ func (s *FakeStore) GetPAT() (string, error) {
 		return "", fmt.Errorf("PAT not found")
 	}
 	return s.token, nil
+}
+
+func (s *FakeStore) DeletePAT() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.token = ""
+	return nil
 }

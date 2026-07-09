@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +164,104 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected lock released after result, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestBrowserAuthFlowUsesOneTimeGrantAndAuditsWithoutPAT(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			_, _ = w.Write([]byte(`{"access_token":"provider-token"}`))
+		case "/userinfo":
+			if r.Header.Get("Authorization") != "Bearer provider-token" {
+				t.Fatalf("provider auth = %q", r.Header.Get("Authorization"))
+			}
+			_, _ = w.Write([]byte(`{"email":"u@example.test"}`))
+		default:
+			t.Fatalf("provider path = %s", r.URL.Path)
+		}
+	}))
+	defer provider.Close()
+
+	server := NewServer(Config{Auth: AuthConfig{
+		Provider:     "generic",
+		ClientID:     "client",
+		ClientSecret: "secret",
+		AuthURL:      provider.URL + "/authorize",
+		TokenURL:     provider.URL + "/token",
+		UserInfoURL:  provider.URL + "/userinfo",
+		RedirectURL:  "https://cloud.example.test/v1/auth/browser/callback",
+	}})
+	project, err := server.Registry.CreateProject("org", "Demo", "demo", "u", "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &auth.MemoryStore{Candidates: []auth.Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: project.ID, Role: "Owner"}}}
+	server.Auth = &auth.Service{Store: store}
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/browser/start", bytes.NewReader([]byte(`{"local_callback":"http://127.0.0.1:9780/api/local/session/callback","local_state":"local-state","project_id":"`+project.ID+`"}`)))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "opsi_pat_") {
+		t.Fatalf("start leaked PAT: %s", w.Body.String())
+	}
+	var start struct {
+		AuthURL string `json:"auth_url"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&start); err != nil {
+		t.Fatal(err)
+	}
+	authURL, err := url.Parse(start.AuthURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := authURL.Query().Get("state")
+	if state == "" {
+		t.Fatal("empty provider state")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/auth/browser/callback?code=provider-code&state="+url.QueryEscape(state), nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status=%d body=%s", w.Code, w.Body.String())
+	}
+	location := w.Header().Get("Location")
+	if strings.Contains(location, "opsi_pat_") {
+		t.Fatalf("callback leaked PAT in redirect: %s", location)
+	}
+	localURL, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := localURL.Query().Get("code")
+	if grant == "" || localURL.Query().Get("state") != "local-state" {
+		t.Fatalf("bad local redirect: %s", location)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/auth/browser/redeem", bytes.NewReader([]byte(`{"code":"`+grant+`"}`)))
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("redeem status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "opsi_pat_") {
+		t.Fatalf("local-backend redeem did not receive PAT")
+	}
+	events, err := server.Registry.ListAudit(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "token_issued" {
+		t.Fatalf("missing token issue audit: %+v", events)
+	}
+	data, _ := json.Marshal(events)
+	if strings.Contains(string(data), "opsi_pat_") || strings.Contains(string(data), "provider-token") {
+		t.Fatalf("audit leaked credential: %s", data)
 	}
 }
 

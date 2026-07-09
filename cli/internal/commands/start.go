@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
@@ -80,17 +82,42 @@ func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer
 
 func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error)) *http.ServeMux {
 	localSession := newLocalSessionToken()
+	authFlow := &localAuthFlow{states: map[string]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"opsi-cli"}`))
 	})
 	mux.HandleFunc("/api/local/session/login", func(w http.ResponseWriter, r *http.Request) {
-		writeLocalError(w, r, http.StatusNotImplemented, "LOGIN_NOT_IMPLEMENTED", "Browser login is not implemented; run opsi login to store a PAT in the OS keychain")
+		startLocalBrowserLogin(w, r, cfg, authFlow)
+	})
+	mux.HandleFunc("/api/local/session/login/start", func(w http.ResponseWriter, r *http.Request) {
+		startLocalBrowserLogin(w, r, cfg, authFlow)
+	})
+	mux.HandleFunc("/api/local/session/callback", func(w http.ResponseWriter, r *http.Request) {
+		completeLocalBrowserLogin(w, r, cfg, factory, authFlow)
+	})
+	mux.HandleFunc("/api/local/session/logout", func(w http.ResponseWriter, r *http.Request) {
+		if !requireLocalSession(w, r, localSession) {
+			return
+		}
+		logoutLocalSession(w, r, cfg, factory)
+	})
+	mux.HandleFunc("/api/local/session/token/rotate", func(w http.ResponseWriter, r *http.Request) {
+		if !requireLocalSession(w, r, localSession) {
+			return
+		}
+		rotateLocalPAT(w, r, cfg, factory)
+	})
+	mux.HandleFunc("/api/local/session/token/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if !requireLocalSession(w, r, localSession) {
+			return
+		}
+		logoutLocalSession(w, r, cfg, factory)
 	})
 	mux.HandleFunc("/api/local/session", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			writeLocalError(w, r, http.StatusNotImplemented, "LOGIN_NOT_IMPLEMENTED", "Browser login is not implemented; run opsi login to store a PAT in the OS keychain")
+			startLocalBrowserLogin(w, r, cfg, authFlow)
 			return
 		}
 		if r.Method != http.MethodGet {
@@ -98,10 +125,12 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			return
 		}
 		w.Header().Set("content-type", "application/json")
+		authenticated := optionalPAT(factory) != ""
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"authenticated":   optionalPAT(factory) != "",
-			"cloud_connected": true,
-			"agent_connected": true,
+			"authenticated":   authenticated,
+			"cloud_connected": "unknown",
+			"agent_connected": "unknown",
+			"token_status":    tokenStatus(factory),
 			"local_session":   localSession,
 			"capabilities":    []string{"projects", "nodes", "services", "deployments", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
@@ -122,6 +151,232 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	})
 	mux.Handle("/", newUIHandler(uiDir, devUI))
 	return mux
+}
+
+type localAuthFlow struct {
+	mu     sync.Mutex
+	states map[string]time.Time
+}
+
+func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.Config, flow *localAuthFlow) {
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return
+	}
+	var body struct {
+		ProjectID string `json:"project_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+	state := newLocalSessionToken()
+	callback := "http://" + r.Host + "/api/local/session/callback"
+	payload, _ := json.Marshal(map[string]any{"local_callback": callback, "local_state": state, "project_id": body.ProjectID})
+	resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/browser/start", "", payload)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "AUTH_START_FAILED", "Cloud auth start is unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeLocalError(w, r, resp.StatusCode, "AUTH_UNAVAILABLE", "Cloud auth flow is unavailable")
+		return
+	}
+	flow.mu.Lock()
+	flow.states[state] = time.Now().UTC().Add(5 * time.Minute)
+	flow.mu.Unlock()
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func requireLocalSession(w http.ResponseWriter, r *http.Request, localSession string) bool {
+	if r.Header.Get("X-Local-Session") != localSession {
+		writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_SESSION_REQUIRED", "mutating local requests require X-Local-Session")
+		return false
+	}
+	if r.Header.Get("Idempotency-Key") == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "mutating local requests require Idempotency-Key")
+		return false
+	}
+	return true
+}
+
+func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), flow *localAuthFlow) {
+	if r.Method != http.MethodGet {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return
+	}
+	code, state := r.URL.Query().Get("code"), r.URL.Query().Get("state")
+	flow.mu.Lock()
+	expiresAt, ok := flow.states[state]
+	if ok {
+		delete(flow.states, state)
+	}
+	flow.mu.Unlock()
+	if !ok || time.Now().UTC().After(expiresAt) || code == "" {
+		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_CALLBACK_INVALID", "auth callback expired or invalid")
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"code": code})
+	resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/browser/redeem", "", payload)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "AUTH_REDEEM_FAILED", "Cloud auth redeem is unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_REDEEM_FAILED", "Cloud auth grant was rejected")
+		return
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.Token == "" {
+		writeLocalError(w, r, http.StatusBadGateway, "AUTH_REDEEM_FAILED", "Cloud auth response was invalid")
+		return
+	}
+	store, err := storeFromFactory(factory)
+	if err != nil || store.SetPAT(out.Token) != nil {
+		writeLocalError(w, r, http.StatusInternalServerError, "LOCAL_CREDENTIAL_STORE_FAILED", "could not store credential in OS keychain")
+		return
+	}
+	http.Redirect(w, r, "/?auth=ok", http.StatusFound)
+}
+
+func rotateLocalPAT(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) {
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return
+	}
+	store, err := storeFromFactory(factory)
+	if err != nil {
+		writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_CREDENTIAL_MISSING", "local credential is unavailable")
+		return
+	}
+	oldPAT, err := store.GetPAT()
+	if err != nil || oldPAT == "" {
+		writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_CREDENTIAL_MISSING", "local credential is unavailable")
+		return
+	}
+	var body struct {
+		ProjectID string `json:"project_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+	payload, _ := json.Marshal(map[string]string{"project_id": body.ProjectID})
+	resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/pat/rotate", oldPAT, payload)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "PAT_ROTATE_FAILED", "Cloud PAT rotation is unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeLocalError(w, r, http.StatusUnauthorized, "PAT_ROTATE_FAILED", "Cloud PAT rotation failed")
+		return
+	}
+	var out struct {
+		Token   string         `json:"token"`
+		Session map[string]any `json:"session"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.Token == "" {
+		writeLocalError(w, r, http.StatusBadGateway, "PAT_ROTATE_FAILED", "Cloud PAT rotation response was invalid")
+		return
+	}
+	if err := store.SetPAT(out.Token); err != nil {
+		writeLocalError(w, r, http.StatusInternalServerError, "LOCAL_CREDENTIAL_STORE_FAILED", "old credential was preserved because keychain update failed")
+		return
+	}
+	revokedOld := revokeCloudPAT(r.Context(), cfg.CloudURL, oldPAT, body.ProjectID) == nil
+	writeLocalJSON(w, http.StatusOK, map[string]any{"rotated": true, "revoked_old": revokedOld, "session": out.Session})
+}
+
+func logoutLocalSession(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) {
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return
+	}
+	store, err := storeFromFactory(factory)
+	if err == nil {
+		if pat, getErr := store.GetPAT(); getErr == nil && pat != "" {
+			var body struct {
+				ProjectID string `json:"project_id"`
+			}
+			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+			_ = revokeCloudPAT(r.Context(), cfg.CloudURL, pat, body.ProjectID)
+		}
+		_ = store.DeletePAT()
+	}
+	writeLocalJSON(w, http.StatusOK, map[string]any{"authenticated": false, "revoked": true})
+}
+
+func probeCloud(ctx context.Context, cloudURL string) string {
+	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cloudURL, "/")+"/health", nil)
+	if err != nil {
+		return "unknown"
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "failed"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return "ok"
+	}
+	return "failed"
+}
+
+func probeAgent(ctx context.Context, cfg config.Config) string {
+	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	defer cancel()
+	if _, err := agentclient.New(cfg).Status(ctx); err != nil {
+		return "failed"
+	}
+	return "ok"
+}
+
+func tokenStatus(factory func() (keychain.Store, error)) string {
+	if optionalPAT(factory) == "" {
+		return "missing"
+	}
+	return "present"
+}
+
+func postCloudJSON(ctx context.Context, cloudURL, path, pat string, payload []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cloudURL, "/")+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if pat != "" {
+		req.Header.Set("Authorization", "Bearer "+pat)
+	}
+	return http.DefaultClient.Do(req)
+}
+
+func revokeCloudPAT(ctx context.Context, cloudURL, pat, projectID string) error {
+	payload, _ := json.Marshal(map[string]string{"project_id": projectID})
+	resp, err := postCloudJSON(ctx, cloudURL, "/v1/auth/pat/revoke", pat, payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("revoke status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func storeFromFactory(factory func() (keychain.Store, error)) (keychain.Store, error) {
+	if factory == nil {
+		return nil, fmt.Errorf("keychain is not configured")
+	}
+	return factory()
+}
+
+func writeLocalJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), localSession string) {

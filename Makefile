@@ -9,7 +9,7 @@ UI_NPM ?= npm
 RUN :=
 PROXY :=
 
-.PHONY: check-toolchain verify test verify-postgres build verify-dr ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
+.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -34,6 +34,15 @@ verify-postgres:
 
 verify-dr:
 	$(RUN) ./scripts/verify-dr.sh
+
+verify-e2e-k3s-preflight:
+	$(RUN) ./scripts/e2e/verify-k3s.sh --preflight
+
+verify-e2e-k3s:
+	$(RUN) ./scripts/e2e/verify-k3s.sh
+
+verify-e2e-k3s-selfcheck:
+	$(RUN) ./scripts/e2e/verify-k3s.sh --self-test
 
 build:
 	$(RUN) mkdir -p bin

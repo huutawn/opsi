@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
@@ -32,12 +34,15 @@ type Server struct {
 	limits        RateLimiter
 	observer      *Observer
 	alerts        *AlertManager
+	authMu        sync.Mutex
+	oauthStates   map[string]oauthState
+	authGrants    map[string]authGrant
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
-	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter(), observer: NewObserver(), alerts: NewAlertManager(cfg.Alerts)}
+	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter(), observer: NewObserver(), alerts: NewAlertManager(cfg.Alerts), oauthStates: map[string]oauthState{}, authGrants: map[string]authGrant{}}
 }
 
 func (s *Server) SetSecurityStores(credentials CredentialVault, registrations RegistrationVault, limits RateLimiter) {
@@ -58,6 +63,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("/v1/auth/pat/verify", s.handlePATVerify)
+	mux.HandleFunc("/v1/auth/browser/start", s.handleBrowserAuthStart)
+	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)
+	mux.HandleFunc("/v1/auth/browser/redeem", s.handleBrowserAuthRedeem)
+	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
+	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
 	mux.HandleFunc("/v1/ai/incidents/analyze", s.handleAnalyzeIncident)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
@@ -241,6 +251,271 @@ func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+type oauthState struct {
+	LocalCallback string
+	LocalState    string
+	ProjectID     string
+	ExpiresAt     time.Time
+}
+
+type authGrant struct {
+	Token     string
+	Session   auth.VerifyResult
+	ExpiresAt time.Time
+}
+
+func (s *Server) handleBrowserAuthStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.Auth == nil || !s.authConfigured() {
+		s.auditAuth("", "", "", "login_started", "failure", map[string]any{"reason": "auth_not_configured"})
+		writeError(w, http.StatusServiceUnavailable, "auth flow is not configured")
+		return
+	}
+	var req struct {
+		LocalCallback string `json:"local_callback"`
+		LocalState    string `json:"local_state"`
+		ProjectID     string `json:"project_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid auth start request")
+		return
+	}
+	if !localCallbackAllowed(req.LocalCallback) || req.LocalState == "" {
+		writeError(w, http.StatusBadRequest, "invalid local callback")
+		return
+	}
+	state := randomToken("oauth")
+	expiresAt := time.Now().UTC().Add(5 * time.Minute)
+	s.authMu.Lock()
+	s.oauthStates[state] = oauthState{LocalCallback: req.LocalCallback, LocalState: req.LocalState, ProjectID: req.ProjectID, ExpiresAt: expiresAt}
+	s.authMu.Unlock()
+
+	u, err := url.Parse(s.Config.Auth.AuthURL)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "auth provider URL is invalid")
+		return
+	}
+	q := u.Query()
+	q.Set("response_type", "code")
+	q.Set("client_id", s.Config.Auth.ClientID)
+	q.Set("redirect_uri", s.Config.Auth.RedirectURL)
+	q.Set("state", state)
+	if len(s.Config.Auth.Scopes) > 0 {
+		q.Set("scope", strings.Join(s.Config.Auth.Scopes, " "))
+	}
+	u.RawQuery = q.Encode()
+	s.auditAuth("", "", req.ProjectID, "login_started", "success", map[string]any{"provider": s.Config.Auth.Provider})
+	writeJSON(w, http.StatusOK, map[string]any{"auth_url": u.String(), "expires_at": expiresAt, "status": "pending"})
+}
+
+func (s *Server) handleBrowserAuthCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	state := r.URL.Query().Get("state")
+	code := r.URL.Query().Get("code")
+	s.authMu.Lock()
+	pending, ok := s.oauthStates[state]
+	if ok {
+		delete(s.oauthStates, state)
+	}
+	s.authMu.Unlock()
+	if !ok || time.Now().UTC().After(pending.ExpiresAt) || code == "" {
+		writeError(w, http.StatusUnauthorized, "auth state expired or invalid")
+		return
+	}
+	email, err := s.exchangeOAuthCode(r.Context(), code)
+	if err != nil {
+		s.auditAuth("", "", pending.ProjectID, "auth_failure", "failure", map[string]any{"reason": err.Error()})
+		writeError(w, http.StatusUnauthorized, "OAuth provider login failed")
+		return
+	}
+	issued, err := s.Auth.IssuePATForEmail(r.Context(), email, pending.ProjectID, 90*24*time.Hour)
+	if err != nil {
+		s.auditAuth("", "", pending.ProjectID, "token_issued", "failure", map[string]any{"email": email, "reason": err.Error()})
+		writeError(w, http.StatusForbidden, "project membership not found")
+		return
+	}
+	grant := randomToken("grant")
+	s.authMu.Lock()
+	s.authGrants[grant] = authGrant{Token: issued.Token, Session: issued.Session, ExpiresAt: time.Now().UTC().Add(90 * time.Second)}
+	s.authMu.Unlock()
+	s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": s.Config.Auth.Provider, "email": email})
+	cb, _ := url.Parse(pending.LocalCallback)
+	q := cb.Query()
+	q.Set("code", grant)
+	q.Set("state", pending.LocalState)
+	cb.RawQuery = q.Encode()
+	http.Redirect(w, r, cb.String(), http.StatusFound)
+}
+
+func (s *Server) handleBrowserAuthRedeem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid auth redeem request")
+		return
+	}
+	s.authMu.Lock()
+	grant, ok := s.authGrants[req.Code]
+	if ok {
+		delete(s.authGrants, req.Code)
+	}
+	s.authMu.Unlock()
+	if !ok || time.Now().UTC().After(grant.ExpiresAt) {
+		writeError(w, http.StatusUnauthorized, "auth grant expired or invalid")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": grant.Token, "session": grant.Session})
+}
+
+func (s *Server) handlePATRotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.Auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth service is not configured")
+		return
+	}
+	var req struct {
+		ProjectID string `json:"project_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	issued, old, err := s.Auth.RotatePAT(r.Context(), bearerFromRequest(r), req.ProjectID, 90*24*time.Hour)
+	if err != nil {
+		s.auditAuth("", "", req.ProjectID, "token_rotated", "failure", map[string]any{"reason": err.Error()})
+		writeError(w, http.StatusUnauthorized, "PAT rotation failed")
+		return
+	}
+	s.auditAuth(old.OrgID, old.UserID, old.ProjectID, "token_rotated", "success", map[string]any{"old_token_id": old.TokenID, "new_expires_at": issued.ExpiresAt})
+	writeJSON(w, http.StatusOK, map[string]any{"token": issued.Token, "session": issued.Session})
+}
+
+func (s *Server) handlePATRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.Auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth service is not configured")
+		return
+	}
+	var req struct {
+		ProjectID string `json:"project_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	result, err := s.Auth.RevokePAT(r.Context(), bearerFromRequest(r), req.ProjectID)
+	if err != nil {
+		s.auditAuth("", "", req.ProjectID, "token_revoked", "failure", map[string]any{"reason": err.Error()})
+		writeError(w, http.StatusUnauthorized, "PAT revocation failed")
+		return
+	}
+	s.auditAuth(result.OrgID, result.UserID, result.ProjectID, "token_revoked", "success", map[string]any{"token_id": result.TokenID})
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "session": result})
+}
+
+func (s *Server) exchangeOAuthCode(ctx context.Context, code string) (string, error) {
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("client_id", s.Config.Auth.ClientID)
+	form.Set("client_secret", s.Config.Auth.ClientSecret)
+	form.Set("redirect_uri", s.Config.Auth.RedirectURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Config.Auth.TokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("token exchange status %d", resp.StatusCode)
+	}
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tokenResp); err != nil {
+		return "", err
+	}
+	if tokenResp.AccessToken == "" {
+		return "", fmt.Errorf("missing access token")
+	}
+	userReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.Config.Auth.UserInfoURL, nil)
+	if err != nil {
+		return "", err
+	}
+	userReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
+	userReq.Header.Set("Accept", "application/json")
+	userResp, err := http.DefaultClient.Do(userReq)
+	if err != nil {
+		return "", err
+	}
+	defer userResp.Body.Close()
+	if userResp.StatusCode < 200 || userResp.StatusCode >= 300 {
+		return "", fmt.Errorf("userinfo status %d", userResp.StatusCode)
+	}
+	var user struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(io.LimitReader(userResp.Body, 1<<20)).Decode(&user); err != nil {
+		return "", err
+	}
+	if user.Email == "" {
+		return "", fmt.Errorf("userinfo email missing")
+	}
+	return user.Email, nil
+}
+
+func (s *Server) authConfigured() bool {
+	cfg := s.Config.Auth
+	return cfg.ClientID != "" && cfg.ClientSecret != "" && cfg.AuthURL != "" && cfg.TokenURL != "" && cfg.UserInfoURL != "" && cfg.RedirectURL != ""
+}
+
+func (s *Server) auditAuth(orgID, userID, projectID, action, result string, metadata map[string]any) {
+	if s.Registry != nil && orgID != "" {
+		s.Registry.Audit(orgID, projectID, userID, action, "auth", firstNonEmpty(projectID, userID, "auth"), result, metadata)
+	}
+}
+
+func localCallbackAllowed(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return u.Scheme == "http" && (host == "127.0.0.1" || host == "localhost")
+}
+
+func bearerFromRequest(r *http.Request) string {
+	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
+func randomToken(prefix string) string {
+	var raw [24]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	}
+	return prefix + "_" + base64Raw(raw[:])
+}
+
+func base64Raw(data []byte) string {
+	return base64.RawURLEncoding.EncodeToString(data)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

@@ -63,3 +63,41 @@ func TestVerifyPATRejectsExpiredRevokedAndWrongToken(t *testing.T) {
 		})
 	}
 }
+
+func TestPATIssueRotateAndRevoke(t *testing.T) {
+	now := time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC)
+	store := &MemoryStore{Candidates: []Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: "proj", Role: "Owner"}}}
+	svc := Service{Store: store, Now: func() time.Time { return now }}
+
+	issued, err := svc.IssuePATForEmail(context.Background(), "u@example.test", "proj", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.Token == "" || issued.Session.Role != "owner" || issued.Session.ProjectID != "proj" {
+		t.Fatalf("bad issue result: %+v", issued.Session)
+	}
+	if _, err := svc.VerifyPAT(context.Background(), VerifyRequest{Token: issued.Token, ProjectID: "proj"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rotated, old, err := svc.RotatePAT(context.Background(), issued.Token, "proj", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Token == "" || rotated.Token == issued.Token || old.TokenID == "" {
+		t.Fatalf("bad rotation: new=%q old=%+v", rotated.Token, old)
+	}
+	if _, err := svc.VerifyPAT(context.Background(), VerifyRequest{Token: issued.Token, ProjectID: "proj"}); err != nil {
+		t.Fatalf("old token should remain valid until local commit/revoke: %v", err)
+	}
+
+	if _, err := svc.RevokePAT(context.Background(), issued.Token, "proj"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.VerifyPAT(context.Background(), VerifyRequest{Token: issued.Token, ProjectID: "proj"}); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("expected revoked old token, got %v", err)
+	}
+	if _, err := svc.VerifyPAT(context.Background(), VerifyRequest{Token: rotated.Token, ProjectID: "proj"}); err != nil {
+		t.Fatalf("new token should remain valid: %v", err)
+	}
+}

@@ -25,6 +25,15 @@ make package-source
 
 `make verify` is canonical. It checks the pinned toolchain, source hygiene, Go vet/tests for `agent/`, `cli/`, `cloud/`, and `contracts/go/`, then runs `npm ci`, `npm run build`, and `npm run lint` in `cli/ui`.
 
+Clean VPS/K3s E2E proof is separate because it needs protected infrastructure:
+
+```bash
+make verify-e2e-k3s-preflight
+make verify-e2e-k3s
+```
+
+Runbook: `docs/runbooks/clean_vps_k3s_e2e.md`.
+
 CI runs the same clean path from `.github/workflows/ci.yml`:
 
 ```bash
