@@ -9,7 +9,7 @@ UI_NPM ?= npm
 RUN :=
 PROXY :=
 
-.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
+.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -43,6 +43,15 @@ verify-e2e-k3s:
 
 verify-e2e-k3s-selfcheck:
 	$(RUN) ./scripts/e2e/verify-k3s.sh --self-test
+
+verify-e2e-node-lifecycle-preflight:
+	$(RUN) ./scripts/e2e/verify-node-lifecycle.sh --preflight
+
+verify-e2e-node-lifecycle:
+	$(RUN) ./scripts/e2e/verify-node-lifecycle.sh
+
+verify-e2e-node-lifecycle-selfcheck:
+	$(RUN) ./scripts/e2e/verify-node-lifecycle.sh --self-test
 
 build:
 	$(RUN) mkdir -p bin
