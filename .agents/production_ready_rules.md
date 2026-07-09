@@ -32,9 +32,9 @@ Do not claim production-ready unless `docs/production_ready/09_PRODUCTION_ACCEPT
 1. `docs/opsi_srs.md` is the canonical current SRS v4 production-ready contract.
 2. Legacy SRS/plans must be archived and labeled historical.
 3. `docs/current_state.md` must describe implemented behavior only.
-4. `docs/status_matrix.md` must use only: `Implemented`, `Partial`, `ContractOnly`, `DemoOnly`, `Blocked`, `NotStarted`, `Deprecated`.
+4. `docs/status_matrix.md` must use only: `DONE`, `PARTIAL`, `CONTRACT_ONLY`, `DOC_ONLY`, `NOT_STARTED`, `FAILED_OR_REGRESSED`, `BLOCKED`, `UNPROVEN`, `MANUAL_GATED`.
 5. Any boundary change requires ADR.
-6. A feature cannot be marked `Implemented` without tests or verified manual evidence.
+6. A feature cannot be marked `DONE` without code, tests, config, verification command, and docs evidence.
 
 ## Mandatory review rejection checklist
 

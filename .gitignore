@@ -52,7 +52,7 @@ headroom_memory.db
 .agents/*
 .agents/rules_enforced.md
 .agents/current.md
-!.agents/production_ready_rules.md
+.agents/production_ready_rules.md
 .agents_archive
 docs/*
 docs/repair/
@@ -79,3 +79,4 @@ docs/architecture_decisions/ADR-002-srs-v4-current-direction.md
 .agents/current.md
 docs/status_matrix.md
 k
+.agents/production_ready_rules.md
