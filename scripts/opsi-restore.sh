@@ -23,8 +23,13 @@ else
   mkdir -p "$RESTORE_DIR"
 fi
 tar -C "$RESTORE_DIR" -xzf "$ARTIFACT"
+"$ROOT/scripts/opsi-inspect-backup.sh" "$ARTIFACT" >/dev/null
 
 if [[ "$AGENT_ONLY" != "1" && -f "$RESTORE_DIR/cloud/cloud.dump" ]]; then
+  if [[ "${OPSI_DR_KEY_MATERIAL_CONFIRMED:-}" != "1" ]]; then
+    echo "OPSI_DR_KEY_MATERIAL_CONFIRMED=1 is required before Cloud restore" >&2
+    exit 2
+  fi
   if [[ -z "$CLOUD_DSN" ]]; then
     echo "OPSI_CLOUD_DATABASE_URL is required for Cloud DB restore" >&2
     exit 2

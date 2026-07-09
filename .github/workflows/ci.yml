@@ -60,3 +60,18 @@ jobs:
           go-version: "1.26.4"
           cache-dependency-path: cloud/go.sum
       - run: make verify-postgres
+
+  dr:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
+      GOCACHE: /tmp/opsi-go-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache-dependency-path: |
+            agent/go.sum
+            cloud/go.sum
+      - run: make verify-dr-full

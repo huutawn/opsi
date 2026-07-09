@@ -33,6 +33,7 @@ env GOCACHE="${GOCACHE:-/tmp/opsi-go-cache}" GOTOOLCHAIN="${GOTOOLCHAIN:-local}"
   OPSI_DR_RESTORE_BACKUP_URL="postgres://postgres:opsi@127.0.0.1:5432/opsi?sslmode=disable" \
   OPSI_DR_PGDUMP_CMD="docker exec $SRC pg_dump" \
   OPSI_DR_PGRESTORE_CMD="docker exec -i $DST pg_restore" \
+  OPSI_DR_KEY_MATERIAL_CONFIRMED=1 \
   go test ./internal/dr -run TestCloudBackupRestoreDRProof -v
 
 cd "$ROOT/agent"

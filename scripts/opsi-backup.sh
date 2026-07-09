@@ -6,6 +6,8 @@ BACKUP_DIR="${OPSI_BACKUP_DIR:-}"
 ARTIFACT="${OPSI_BACKUP_ARTIFACT:-}"
 CLOUD_DSN="${OPSI_CLOUD_DATABASE_URL:-${DATABASE_URL:-}}"
 AGENT_ONLY="${OPSI_AGENT_ONLY_BACKUP:-}"
+FORMAT="opsi-dr-backup-v2"
+SCHEMA_VERSION="${OPSI_DR_SCHEMA_VERSION:-1}"
 
 if [[ -z "$BACKUP_DIR" ]]; then
   echo "OPSI_BACKUP_DIR is required" >&2
@@ -43,7 +45,8 @@ if [[ -n "${OPSI_AGENT_DEPLOY_DB:-}${OPSI_AGENT_SERVICE_CATALOG_DB:-}${OPSI_AGEN
 fi
 
 cat > "$STAGE/manifest.json" <<JSON
-{"format":"opsi-dr-backup-v1","created_by":"scripts/opsi-backup.sh","covers":["cloud_postgres_if_configured","agent_deploy_sqlite_if_configured","agent_service_catalog_sqlite_if_configured","agent_telemetry_incident_audit_uptime_metadata_if_configured"],"excludes":["app_secret_values","PAT_values","private_keys","kubeconfig","raw_logs","raw_metrics","source_code_snapshots"]}
+{"format":"$FORMAT","artifact":"$ARTIFACT","cloud_schema_version":$SCHEMA_VERSION,"min_restore_schema_version":$SCHEMA_VERSION,"created_by":"scripts/opsi-backup.sh","covers":["cloud_postgres_all_current_tables_if_configured","cloud_projects_members_rbac_nodes_agents_bootstrap_services_deployments_relay_idempotency_audit_pat_hashes_if_configured","agent_deploy_sqlite_if_configured","agent_service_catalog_sqlite_if_configured","agent_telemetry_incident_audit_uptime_metadata_if_configured"],"requires_external":["cloud_signing_keys","cloud_bootstrap_encryption_key","agent_tls_private_key","agent_cloud_relay_hmac_secret","k3s_datastore_or_cluster_backup"],"excludes":["app_secret_values","PAT_values","ssh_private_keys","kubeconfig","raw_logs","raw_metrics","source_code_snapshots","docker_layers","managed_service_user_data","k3s_datastore"]}
 JSON
 tar -C "$STAGE" -czf "$ARTIFACT" .
+"$ROOT/scripts/opsi-inspect-backup.sh" "$ARTIFACT" >/dev/null
 echo "backup artifact: $ARTIFACT"

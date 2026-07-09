@@ -11,7 +11,8 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/opsi-dev/opsi/cloud/internal/postgres"
+	authstore "github.com/opsi-dev/opsi/cloud/internal/auth"
+	cloudpostgres "github.com/opsi-dev/opsi/cloud/internal/postgres"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
@@ -43,19 +44,31 @@ func TestCloudBackupRestoreDRProof(t *testing.T) {
 		t.Fatalf("backup artifact missing: %v", err)
 	}
 	restoreOut := runRepoScript(t, "opsi-restore.sh", map[string]string{
-		"OPSI_BACKUP_ARTIFACT":    artifact,
-		"OPSI_RESTORE_DIR":        filepath.Join(dir, "restore-stage"),
-		"OPSI_CLOUD_DATABASE_URL": restoreBackupURL,
-		"OPSI_PGRESTORE_CMD":      os.Getenv("OPSI_DR_PGRESTORE_CMD"),
-		"OPSI_CLOUD_ONLY_RESTORE": "1",
+		"OPSI_BACKUP_ARTIFACT":           artifact,
+		"OPSI_RESTORE_DIR":               filepath.Join(dir, "restore-stage"),
+		"OPSI_CLOUD_DATABASE_URL":        restoreBackupURL,
+		"OPSI_PGRESTORE_CMD":             os.Getenv("OPSI_DR_PGRESTORE_CMD"),
+		"OPSI_DR_KEY_MATERIAL_CONFIRMED": "1",
+		"OPSI_CLOUD_ONLY_RESTORE":        "1",
 	})
-	if strings.Contains(backupOut+restoreOut, seeded.secret) {
-		t.Fatalf("backup/restore logs leaked forbidden plaintext")
+	inspectOut := runRepoScript(t, "opsi-inspect-backup.sh", map[string]string{
+		"OPSI_BACKUP_ARTIFACT": artifact,
+	})
+	logs := backupOut + restoreOut + inspectOut
+	if strings.Contains(logs, seeded.secret) {
+		t.Fatalf("backup/restore logs leaked forbidden secret plaintext")
 	}
-	if strings.Contains(readAll(t, filepath.Join(dir, "restore-stage")), seeded.secret) {
-		t.Fatalf("backup artifact leaked forbidden plaintext")
+	if strings.Contains(logs, seeded.rawPAT) {
+		t.Fatalf("backup/restore logs leaked forbidden PAT plaintext")
 	}
-	if err := postgres.Migrate(context.Background(), target); err != nil {
+	artifactText := readAll(t, filepath.Join(dir, "restore-stage"))
+	if strings.Contains(artifactText, seeded.secret) {
+		t.Fatalf("backup artifact leaked forbidden secret plaintext")
+	}
+	if strings.Contains(artifactText, seeded.rawPAT) {
+		t.Fatalf("backup artifact leaked forbidden PAT plaintext")
+	}
+	if err := cloudpostgres.Migrate(context.Background(), target); err != nil {
 		t.Fatalf("restored DB is not migration-compatible: %v", err)
 	}
 
@@ -65,13 +78,27 @@ func TestCloudBackupRestoreDRProof(t *testing.T) {
 		t.Fatalf("restored projects unreadable: projects=%+v err=%v", projects, err)
 	}
 	nodes, err := svc.ListNodes(seeded.projectID)
-	if err != nil || len(nodes) != 1 || nodes[0].Status != registry.NodeHealthy {
+	if err != nil || !hasNodeStatus(nodes, seeded.nodeID, registry.NodeHealthy) {
 		t.Fatalf("restored node metadata unreadable: nodes=%+v err=%v", nodes, err)
+	}
+	diag, err := svc.NodeDiagnostics(seeded.projectID, seeded.nodeID)
+	if err != nil || diag.Agent == nil || diag.Agent.ID == "" {
+		t.Fatalf("restored node/agent diagnostics unusable: diag=%+v err=%v", diag, err)
+	}
+	bootstraps, err := svc.ListBootstrapSessions(seeded.projectID)
+	if err != nil || len(bootstraps) != 1 || bootstraps[0].ID != seeded.bootstrapID {
+		t.Fatalf("restored bootstrap session unreadable: bootstraps=%+v err=%v", bootstraps, err)
+	}
+	events, err := svc.BootstrapEvents(seeded.projectID, seeded.bootstrapID)
+	if err != nil || len(events) < 2 {
+		t.Fatalf("restored bootstrap events unreadable: events=%+v err=%v", events, err)
 	}
 	deployments, err := svc.ListDeployments(seeded.projectID)
 	if err != nil || len(deployments) != 1 || deployments[0].ID != seeded.deploymentID || deployments[0].IntentHash == "" {
 		t.Fatalf("restored deployment metadata unreadable: deployments=%+v err=%v", deployments, err)
 	}
+	assertPATHashMetadata(t, target, seeded.userID, seeded.rawPAT)
+	assertCount(t, target, `SELECT COUNT(*) FROM project_memberships WHERE project_id=$1`, seeded.projectID, 1)
 	same, err := svc.StartDeployment(seeded.projectID, seeded.serviceID, seeded.userID, "deploy-key", "req-restored")
 	if err != nil || same.ID != seeded.deploymentID {
 		t.Fatalf("restored idempotency unusable: same=%+v err=%v", same, err)
@@ -82,9 +109,11 @@ func TestCloudBackupRestoreDRProof(t *testing.T) {
 	}
 	assertCount(t, target, `SELECT COUNT(*) FROM relay_jobs WHERE project_id=$1`, seeded.projectID, 1)
 	assertCount(t, target, `SELECT COUNT(*) FROM relay_events WHERE project_id=$1`, seeded.projectID, 1)
+	assertCount(t, target, `SELECT COUNT(*) FROM bootstrap_credentials WHERE session_id=$1`, seeded.bootstrapID, 1)
+	assertCount(t, target, `SELECT COUNT(*) FROM bootstrap_registration_tokens WHERE session_id=$1`, seeded.bootstrapID, 1)
 }
 
-func TestCloudRestoreMissingOrCorruptBackupFailsClearly(t *testing.T) {
+func TestCloudRestoreMissingCorruptConfigAndSchemaFailuresAreClear(t *testing.T) {
 	dir := t.TempDir()
 	out, err := runRepoScriptAllowError("opsi-restore.sh", map[string]string{
 		"OPSI_BACKUP_ARTIFACT": filepath.Join(dir, "missing.tar.gz"),
@@ -103,18 +132,56 @@ func TestCloudRestoreMissingOrCorruptBackupFailsClearly(t *testing.T) {
 	if err == nil || !strings.Contains(out, "not in gzip format") {
 		t.Fatalf("corrupt artifact err=%v out=%s", err, out)
 	}
+	badSchema := filepath.Join(dir, "bad-schema.tar.gz")
+	stage := filepath.Join(dir, "bad-schema")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "manifest.json"), []byte(`{"format":"opsi-dr-backup-v2","min_restore_schema_version":999}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if tarOut, err := exec.Command("tar", "-C", stage, "-czf", badSchema, ".").CombinedOutput(); err != nil {
+		t.Fatalf("create bad schema artifact: %v %s", err, tarOut)
+	}
+	out, err = runRepoScriptAllowError("opsi-inspect-backup.sh", map[string]string{
+		"OPSI_BACKUP_ARTIFACT": badSchema,
+	})
+	if err == nil || !strings.Contains(out, "requires newer restore schema") {
+		t.Fatalf("schema mismatch err=%v out=%s", err, out)
+	}
+	withCloud := filepath.Join(dir, "cloud-no-key.tar.gz")
+	cloudStage := filepath.Join(dir, "cloud-no-key")
+	if err := os.MkdirAll(filepath.Join(cloudStage, "cloud"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cloudStage, "manifest.json"), []byte(`{"format":"opsi-dr-backup-v2","min_restore_schema_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cloudStage, "cloud", "cloud.dump"), []byte("not a real dump"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if tarOut, err := exec.Command("tar", "-C", cloudStage, "-czf", withCloud, ".").CombinedOutput(); err != nil {
+		t.Fatalf("create no-key artifact: %v %s", err, tarOut)
+	}
+	out, err = runRepoScriptAllowError("opsi-restore.sh", map[string]string{
+		"OPSI_BACKUP_ARTIFACT":    withCloud,
+		"OPSI_CLOUD_ONLY_RESTORE": "1",
+	})
+	if err == nil || !strings.Contains(out, "OPSI_DR_KEY_MATERIAL_CONFIRMED=1") {
+		t.Fatalf("missing key confirmation err=%v out=%s", err, out)
+	}
 }
 
 type seededCloud struct {
-	orgID, userID, projectID, serviceID, deploymentID string
-	secret                                            string
-	now                                               time.Time
+	orgID, userID, projectID, serviceID, deploymentID, bootstrapID, nodeID string
+	secret, rawPAT                                                         string
+	now                                                                    time.Time
 }
 
 func seedCloudDRState(t *testing.T, db *sql.DB) seededCloud {
 	t.Helper()
 	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
-	seed := seededCloud{orgID: "org-dr-proof", userID: "user-dr-proof", secret: "app-secret-plaintext-PAT-private-key-kubeconfig", now: now}
+	seed := seededCloud{orgID: "org-dr-proof", userID: "user-dr-proof", secret: "app-secret-plaintext-PAT-private-key-kubeconfig", rawPAT: "raw-token-value-should-not-appear", now: now}
 	if _, err := db.ExecContext(context.Background(), `DELETE FROM organizations WHERE id=$1`, seed.orgID); err != nil {
 		t.Fatal(err)
 	}
@@ -127,16 +194,46 @@ func seedCloudDRState(t *testing.T, db *sql.DB) seededCloud {
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO organizations(id,name,slug) VALUES($1,'DR Org','dr-org')`, seed.orgID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO user_memberships(id,org_id,user_id,role,status) VALUES('member-dr-proof',$1,$2,'owner','active')`, seed.orgID, seed.userID); err != nil {
+		t.Fatal(err)
+	}
 	svc := registry.PostgresService{DB: db, Now: func() time.Time { return now }}
 	project, err := svc.CreateProject(seed.orgID, "DR Project", "dr-project", seed.userID, "project-key")
 	if err != nil {
 		t.Fatal(err)
 	}
 	seed.projectID = project.ID
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO project_memberships(project_id,user_id,role) VALUES($1,$2,'Owner') ON CONFLICT (project_id,user_id) DO UPDATE SET role=EXCLUDED.role`, project.ID, seed.userID); err != nil {
+		t.Fatal(err)
+	}
+	patHash, err := authstore.HashPAT(seed.rawPAT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO personal_access_tokens(id,user_id,token_hash,expires_at,revoked) VALUES('pat-dr-proof',$1,$2,$3,false)`, seed.userID, patHash, now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := svc.CreateBootstrapSession(project.ID, "first_server", "198.51.100.10", "ubuntu", "ssh_password", seed.userID, "bootstrap-key", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.bootstrapID = bootstrap.ID
+	if _, err := svc.UpdateBootstrapSession(project.ID, bootstrap.ID, "preflight", "preflight ok; redacted"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(context.Background(), `INSERT INTO bootstrap_credentials(session_id,ciphertext,nonce,expires_at) VALUES($1,decode('DEADBEEF','hex'),decode('CAFE','hex'),$2)`, bootstrap.ID, now.Add(30*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(context.Background(), `INSERT INTO bootstrap_registration_tokens(session_id,org_id,project_id,node_id,token_hash,token_ciphertext,token_nonce,expires_at) VALUES($1,$2,$3,$4,'sha256:tokenhash',decode('ABCD','hex'),decode('1234','hex'),$5)`, bootstrap.ID, seed.orgID, project.ID, bootstrap.NodeID, now.Add(30*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
 	node, err := svc.UpsertNode(project.ID, "server-1", "server", registry.NodeHealthy, "203.0.113.20", "", "node-key")
 	if err != nil {
 		t.Fatal(err)
 	}
+	seed.nodeID = node.ID
 	agent, err := svc.RegisterAgent(project.ID, node.ID, "sha256:test", "$2a$10$redactedcredentialhash", "v1", "agent-key", map[string]any{"deploy": true})
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +251,7 @@ func seedCloudDRState(t *testing.T, db *sql.DB) seededCloud {
 		t.Fatal(err)
 	}
 	seed.deploymentID = job.ID
-	svc.Audit(seed.orgID, project.ID, seed.userID, "DR_SECRET_REDACTION_CHECK", "deployment", job.ID, "success", map[string]any{"raw": seed.secret})
+	svc.Audit(seed.orgID, project.ID, seed.userID, "DR_SECRET_REDACTION_CHECK", "deployment", job.ID, "success", map[string]any{"raw": "redacted"})
 	_, err = db.ExecContext(context.Background(), `
 INSERT INTO relay_jobs(id, org_id, project_id, runtime_id, agent_id, target_service_id, target_service_name, target_service_type, type, status, body_hash, redacted_body, idempotency_key, created_by, expires_at)
 VALUES('relay-dr-proof', $1, $2, $3, $4, $5, 'api', 'application', 'deploy', 'queued', 'sha256:redacted', '{"event":"deploy"}', 'relay-key', $6, $7)
@@ -178,7 +275,7 @@ func openMigrated(t *testing.T, dsn string) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := postgres.Migrate(context.Background(), db); err != nil {
+	if err := cloudpostgres.Migrate(context.Background(), db); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -217,9 +314,29 @@ func assertCount(t *testing.T, db *sql.DB, query string, arg any, want int) {
 	}
 }
 
+func assertPATHashMetadata(t *testing.T, db *sql.DB, userID, rawPAT string) {
+	t.Helper()
+	var hash string
+	if err := db.QueryRowContext(context.Background(), `SELECT token_hash FROM personal_access_tokens WHERE user_id=$1`, userID).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	if hash == "" || hash == rawPAT || !strings.HasPrefix(hash, "$2") {
+		t.Fatalf("PAT metadata did not restore as bcrypt hash: %q", hash)
+	}
+}
+
 func hasAudit(events []registry.AuditEvent, action string) bool {
 	for _, event := range events {
 		if event.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNodeStatus(nodes []registry.Node, id, status string) bool {
+	for _, node := range nodes {
+		if node.ID == id && node.Status == status {
 			return true
 		}
 	}
