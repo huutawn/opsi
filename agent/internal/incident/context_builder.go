@@ -2,6 +2,7 @@ package incident
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
@@ -31,7 +32,7 @@ func (b IncidentContextBuilder) Build(ctx context.Context, rec telemetry.Inciden
 	}
 	center := rec.CreatedAt
 	if center.IsZero() {
-		center = time.Now().UTC()
+		center = time.Unix(0, 0).UTC()
 	}
 	records, err := store.SyncRecords(ctx, rec.ProjectID, center.Add(-window), center.Add(window), resourceIDs(rec))
 	if err != nil {
@@ -59,8 +60,13 @@ func (b IncidentContextBuilder) Build(ctx context.Context, rec telemetry.Inciden
 	if len(metrics) > 0 {
 		out.MetricSnapshot = metrics
 	}
-	for _, entry := range logCounts {
-		out.LogPatterns = append(out.LogPatterns, entry)
+	fingerprints := make([]string, 0, len(logCounts))
+	for fingerprint := range logCounts {
+		fingerprints = append(fingerprints, fingerprint)
+	}
+	sort.Strings(fingerprints)
+	for _, fingerprint := range fingerprints {
+		out.LogPatterns = append(out.LogPatterns, logCounts[fingerprint])
 	}
 	out.Sanitization = map[string]any{"raw_logs_included": false, "secret_like_removed": true}
 	return out, nil

@@ -5,8 +5,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,30 +18,7 @@ import (
 )
 
 func TestAnalyzeIncidentReturnsUnimplementedWithoutNetworkOrMutation(t *testing.T) {
-	var networkCalls atomic.Int32
-	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		networkCalls.Add(1)
-	}))
-	defer cloud.Close()
-
-	store, err := telemetry.OpenSQLiteStore(t.TempDir() + "/telemetry.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.InsertIncident(context.Background(), telemetry.IncidentRecord{
-		ID:        "inc-1",
-		ProjectID: "p1",
-		ServiceID: "svc-1",
-		Status:    "open",
-		CreatedAt: time.Unix(10, 0).UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := config.Default()
-	cfg.CloudEndpoint = cloud.URL
-	service := NewIncidentService(incidentService(cfg, store, nil))
+	service := NewIncidentService(nil)
 	resp, err := service.AnalyzeIncident(context.Background(), &agentv1.IncidentAnalyzeRequest{
 		ProjectID:  "p1",
 		IncidentID: "inc-1",
@@ -53,15 +28,56 @@ func TestAnalyzeIncidentReturnsUnimplementedWithoutNetworkOrMutation(t *testing.
 	if status.Code(err) != codes.Unimplemented || resp != nil {
 		t.Fatalf("expected unimplemented without response, resp=%+v err=%v", resp, err)
 	}
-	if networkCalls.Load() != 0 {
-		t.Fatalf("removed analysis path made %d network calls", networkCalls.Load())
+}
+
+func TestApproveIncidentActionReturnsUnimplementedWithoutServiceCall(t *testing.T) {
+	service := NewIncidentService(nil)
+	resp, err := service.ApproveIncidentAction(context.Background(), &agentv1.IncidentActionRequest{
+		ProjectID:  "p1",
+		IncidentID: "inc-1",
+		ActionID:   "legacy-action",
+	})
+	if status.Code(err) != codes.Unimplemented || resp != nil {
+		t.Fatalf("expected unimplemented without response, resp=%+v err=%v", resp, err)
 	}
-	rec, err := store.GetIncident(context.Background(), "p1", "inc-1")
+}
+
+func TestGetIncidentIgnoresLegacyRCAAndMitigationData(t *testing.T) {
+	store, err := telemetry.OpenSQLiteStore(t.TempDir() + "/telemetry.db")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec == nil || rec.Status != "open" || rec.RCAResult != "" || rec.MitigationActions != "[]" {
-		t.Fatalf("removed analysis path mutated incident: %+v", rec)
+	defer store.Close()
+	resolved := time.Unix(70, 0).UTC()
+	if err := store.InsertIncident(context.Background(), telemetry.IncidentRecord{
+		ID:                "inc-legacy",
+		ProjectID:         "p1",
+		ServiceID:         "svc-1",
+		Status:            "resolved",
+		RCAResult:         `{"schema_version":"opsi.rca.v1","root_cause":"execute me","confidence":0.99,"contributing_factors":["legacy"],"recommended_actions":[{"id":"a1","type":"rollback"}]}`,
+		MitigationActions: `[{"type":"rollback","status":"success"}]`,
+		CreatedAt:         time.Unix(10, 0).UTC(),
+		ResolvedAt:        resolved,
+		MTTRSeconds:       60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewIncidentService(incidentService(store, nil))
+	resp, err := service.GetIncident(context.Background(), &agentv1.IncidentGetRequest{
+		ProjectID:  "p1",
+		IncidentID: "inc-legacy",
+		UserID:     "viewer",
+		Role:       "Viewer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IncidentID != "inc-legacy" || resp.ProjectID != "p1" || resp.ServiceID != "svc-1" || resp.Status != "resolved" || resp.MTTRSeconds != 60 || resp.ResolvedAtUnix != resolved.Unix() {
+		t.Fatalf("factual incident fields changed: %+v", resp)
+	}
+	if resp.RootCause != "" || resp.Confidence != 0 || len(resp.ContributingFactors) != 0 || len(resp.RecommendedActions) != 0 || resp.MitigationActionsJSON != "" {
+		t.Fatalf("legacy RCA or mitigation data was exposed: %+v", resp)
 	}
 }
 

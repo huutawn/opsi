@@ -192,36 +192,31 @@ func (s *IncidentService) ListIncidents(ctx context.Context, req *agentv1.Incide
 	out := &agentv1.IncidentListResponse{}
 	for i := range records {
 		rec := records[i]
-		out.Incidents = append(out.Incidents, *incidentResponse(&rec, incidentRCA(rec.RCAResult)))
+		out.Incidents = append(out.Incidents, *incidentResponse(&rec))
 	}
 	return out, nil
 }
 
 func (s *IncidentService) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
 	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Get(ctx, incident.IncidentRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	rec, err := s.service.Get(ctx, incident.IncidentRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
-	return incidentResponse(rec, rca), nil
+	return incidentResponse(rec), nil
 }
 
-func (s *IncidentService) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Approve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, ActionID: req.ActionID, ActionHash: req.ActionHash, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
-	if err != nil {
-		return nil, mapIncidentError(err)
-	}
-	return incidentResponse(rec, rca), nil
+func (s *IncidentService) ApproveIncidentAction(context.Context, *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "incident RCA-backed action approval has been removed")
 }
 
 func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
 	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Resolve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	rec, err := s.service.Resolve(ctx, incident.ResolveRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
-	return incidentResponse(rec, rca), nil
+	return incidentResponse(rec), nil
 }
 
 func (s *SecretService) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
@@ -468,7 +463,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
 	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore, authVerifier)))
-	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(cfg, telemetryStore, authVerifier)))
+	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(telemetryStore, authVerifier)))
 
 	healthServer := &http.Server{
 		Handler:           healthHandler(version, startedAt, cfg),
@@ -743,41 +738,25 @@ func mapIncidentError(err error) error {
 	}
 }
 
-func incidentResponse(rec *telemetry.IncidentRecord, r incident.RCA) *agentv1.IncidentResponse {
+func incidentResponse(rec *telemetry.IncidentRecord) *agentv1.IncidentResponse {
 	resp := &agentv1.IncidentResponse{
-		IncidentID:            rec.ID,
-		ProjectID:             rec.ProjectID,
-		ServiceID:             rec.ServiceID,
-		Status:                rec.Status,
-		RootCause:             r.RootCause,
-		Confidence:            r.Confidence,
-		ContributingFactors:   r.ContributingFactors,
-		MitigationActionsJSON: rec.MitigationActions,
-		MTTRSeconds:           rec.MTTRSeconds,
+		IncidentID:  rec.ID,
+		ProjectID:   rec.ProjectID,
+		ServiceID:   rec.ServiceID,
+		Status:      rec.Status,
+		MTTRSeconds: rec.MTTRSeconds,
 	}
 	if !rec.ResolvedAt.IsZero() {
 		resp.ResolvedAtUnix = rec.ResolvedAt.Unix()
 	}
-	for _, action := range r.RecommendedActions {
-		resp.RecommendedActions = append(resp.RecommendedActions, agentv1.RecommendedAction{ID: action.ID, Type: action.Type, Description: action.Description, RollbackSafe: action.RollbackSafe, Params: action.Params, ActionHash: action.ActionHash})
-	}
 	return resp
 }
 
-func incidentRCA(raw string) incident.RCA {
-	var r incident.RCA
-	_ = json.Unmarshal([]byte(raw), &r)
-	return r
-}
-
-func incidentService(cfg config.Config, store telemetry.Store, auth secret.AuthVerifier) *incident.Service {
+func incidentService(store telemetry.Store, auth secret.AuthVerifier) *incident.Service {
 	return &incident.Service{
-		Store:       store,
-		Audit:       store.(secret.AuditSink),
-		Auth:        auth,
-		KubectlPath: cfg.Telemetry.KubectlPath,
-		Namespace:   firstNonEmpty(cfg.Deployment.Namespace, cfg.Secret.Namespace),
-		DryRun:      cfg.Deployment.DryRun || cfg.Deployment.BuilderMode == "dry_run",
+		Store: store,
+		Audit: store.(secret.AuditSink),
+		Auth:  auth,
 	}
 }
 
