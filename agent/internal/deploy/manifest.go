@@ -21,7 +21,6 @@ type manifestOptions struct {
 	ContainerPort                 int
 	HealthPath                    string
 	Replicas                      int
-	IngressEnabled                bool
 	BindingDependencies           []ServiceDependency
 }
 
@@ -133,12 +132,6 @@ func injectDeploymentDefaults(doc map[string]any, options manifestOptions) {
 			if _, exists := container["livenessProbe"]; !exists {
 				container["livenessProbe"] = httpProbe(options.HealthPath, probePort)
 			}
-		}
-		if options.IngressEnabled {
-			lifecycle := ensureMap(container, "lifecycle")
-			preStop := ensureMap(lifecycle, "preStop")
-			exec := ensureMap(preStop, "exec")
-			exec["command"] = []any{"sh", "-c", "sleep 10"}
 		}
 		appendBindings(container, bindings)
 	}

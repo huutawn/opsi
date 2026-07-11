@@ -2,6 +2,7 @@ package agentv1
 
 import (
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -38,6 +39,30 @@ func TestProtoServiceRPCContractDrift(t *testing.T) {
 	}
 }
 
+func TestDeployRequestContractDrift(t *testing.T) {
+	data, err := os.ReadFile("../../agent/v1/status.proto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := protoMessageFields(string(data), "DeployRequest")
+	typ := reflect.TypeOf(DeployRequest{})
+	got := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			got = append(got, name)
+		}
+	}
+	sort.Strings(got)
+	if strings.Join(want, ",") != strings.Join(got, ",") {
+		t.Fatalf("DeployRequest field drift: proto=%v binding=%v", want, got)
+	}
+	proto := string(data)
+	if !regexp.MustCompile(`reserved\s+19\s*;`).MatchString(proto) || !regexp.MustCompile(`reserved\s+"ingress_enabled"\s*;`).MatchString(proto) {
+		t.Fatal("DeployRequest must reserve removed field number 19 and name ingress_enabled")
+	}
+}
+
 func protoRPCs(src string) map[string][]string {
 	out := map[string][]string{}
 	serviceRE := regexp.MustCompile(`(?s)service\s+(\w+)\s*\{(.*?)\}`)
@@ -49,6 +74,21 @@ func protoRPCs(src string) map[string][]string {
 		sort.Strings(out[service[1]])
 	}
 	return out
+}
+
+func protoMessageFields(src, messageName string) []string {
+	messageRE := regexp.MustCompile(`(?s)message\s+` + regexp.QuoteMeta(messageName) + `\s*\{(.*?)\}`)
+	match := messageRE.FindStringSubmatch(src)
+	if len(match) != 2 {
+		return nil
+	}
+	fieldRE := regexp.MustCompile(`(?m)^\s*(?:repeated\s+)?[\w.]+\s+(\w+)\s*=\s*\d+\s*;`)
+	fields := make([]string, 0)
+	for _, field := range fieldRE.FindAllStringSubmatch(match[1], -1) {
+		fields = append(fields, field[1])
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 func descMethods(desc grpc.ServiceDesc) []string {

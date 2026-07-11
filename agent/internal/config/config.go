@@ -64,7 +64,6 @@ type DeploymentConfig struct {
 	TerminationGracePeriodSeconds int               `yaml:"termination_grace_period_seconds"`
 	ResourceRequests              map[string]string `yaml:"resource_requests"`
 	ResourceLimits                map[string]string `yaml:"resource_limits"`
-	IngressEnabled                bool              `yaml:"ingress_enabled"`
 	Registry                      string            `yaml:"registry"`
 	BuilderMode                   string            `yaml:"builder_mode"`
 	NerdctlPath                   string            `yaml:"nerdctl_path"`
@@ -121,7 +120,6 @@ func Default() Config {
 			TerminationGracePeriodSeconds: 30,
 			ResourceRequests:              map[string]string{"cpu": "100m", "memory": "128Mi"},
 			ResourceLimits:                map[string]string{"cpu": "500m", "memory": "512Mi"},
-			IngressEnabled:                true,
 			BuilderMode:                   "containerd",
 			NerdctlPath:                   "nerdctl",
 			ContainerdNS:                  "k8s.io",
@@ -159,6 +157,15 @@ func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	var removed struct {
+		Deployment map[string]yaml.Node `yaml:"deployment"`
+	}
+	if err := yaml.Unmarshal(data, &removed); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if _, exists := removed.Deployment["ingress_enabled"]; exists {
+		return Config{}, errors.New("deployment.ingress_enabled has been removed; gateway exposure is not implemented")
 	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)

@@ -43,7 +43,6 @@ func RequestFromLease(lease cloudrelay.DeploymentLease, cfg config.DeploymentCon
 		TerminationGracePeriodSeconds: firstNonZeroInt(cfg.TerminationGracePeriodSeconds, deploy.DefaultTerminationGracePeriodSeconds),
 		ResourceRequestsJSON:          resourceSectionJSON(intent.Resources, "requests", cfg.ResourceRequests, deploy.DefaultResourceRequestsJSON),
 		ResourceLimitsJSON:            resourceSectionJSON(intent.Resources, "limits", cfg.ResourceLimits, deploy.DefaultResourceLimitsJSON),
-		IngressEnabled:                cfg.IngressEnabled,
 		Registry:                      cfg.Registry,
 		TriggeredBy:                   "cloud",
 		DependsOn:                     dependenciesFromIntent(intent.Bindings),

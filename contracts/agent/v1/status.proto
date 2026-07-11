@@ -67,6 +67,9 @@ message ProgressEvent {
 }
 
 message DeployRequest {
+  reserved 19;
+  reserved "ingress_enabled";
+
   string project_id = 1;
   string service_id = 2;
   string service_name = 3;
@@ -85,7 +88,6 @@ message DeployRequest {
   int32 termination_grace_period_seconds = 16;
   string resource_requests_json = 17;
   string resource_limits_json = 18;
-  bool ingress_enabled = 19;
   repeated ServiceDependency depends_on = 20;
 }
 

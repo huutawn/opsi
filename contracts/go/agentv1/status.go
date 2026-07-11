@@ -79,7 +79,6 @@ type DeployRequest struct {
 	TerminationGracePeriodSeconds int32               `json:"termination_grace_period_seconds,omitempty"`
 	ResourceRequestsJSON          string              `json:"resource_requests_json,omitempty"`
 	ResourceLimitsJSON            string              `json:"resource_limits_json,omitempty"`
-	IngressEnabled                bool                `json:"ingress_enabled,omitempty"`
 	DependsOn                     []ServiceDependency `json:"depends_on,omitempty"`
 }
 

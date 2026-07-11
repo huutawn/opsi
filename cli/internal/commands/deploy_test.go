@@ -28,7 +28,7 @@ func TestDeployCommandStreamsProgress(t *testing.T) {
 	}})
 	buf := bytes.NewBuffer(nil)
 	cmd.SetOut(buf)
-	cmd.SetArgs([]string{"--config", configPath, "deploy", "--project-id", "proj-dev", "--service-id", "svc-api", "--service-name", "api", "--repo-url", "https://example.test/repo.git", "--git-sha", "abc", "--manifest-path", "k8s/deploy.yaml", "--watch-path", "apps/api/**", "--depends-on", "mydb", "--termination-grace-period-seconds", "45", "--resource-request", "cpu=100m", "--resource-limit", "memory=512Mi", "--ingress"})
+	cmd.SetArgs([]string{"--config", configPath, "deploy", "--project-id", "proj-dev", "--service-id", "svc-api", "--service-name", "api", "--repo-url", "https://example.test/repo.git", "--git-sha", "abc", "--manifest-path", "k8s/deploy.yaml", "--watch-path", "apps/api/**", "--depends-on", "mydb", "--termination-grace-period-seconds", "45", "--resource-request", "cpu=100m", "--resource-limit", "memory=512Mi"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -44,13 +44,32 @@ func (commandDeploymentServer) Deploy(req *agentv1.DeployRequest, stream agentv1
 	if req.ProjectID != "proj-dev" || req.ServiceID != "svc-api" || req.ServiceName != "api" || req.GitSHA != "abc" {
 		return nil
 	}
-	if len(req.WatchPaths) != 1 || req.WatchPaths[0] != "apps/api/**" || req.TerminationGracePeriodSeconds != 45 || req.ResourceRequestsJSON != `{"cpu":"100m"}` || req.ResourceLimitsJSON != `{"memory":"512Mi"}` || !req.IngressEnabled {
+	if len(req.WatchPaths) != 1 || req.WatchPaths[0] != "apps/api/**" || req.TerminationGracePeriodSeconds != 45 || req.ResourceRequestsJSON != `{"cpu":"100m"}` || req.ResourceLimitsJSON != `{"memory":"512Mi"}` {
 		return nil
 	}
 	if len(req.DependsOn) != 1 || req.DependsOn[0].Name != "mydb" {
 		return nil
 	}
 	return stream.Send(&agentv1.ProgressEvent{OperationID: "dep_test", ProjectID: req.ProjectID, ServiceID: req.ServiceID, ServiceName: req.ServiceName, Phase: "success", Message: "ok", Percent: 100})
+}
+
+func TestDeployHelpDoesNotAdvertiseIngress(t *testing.T) {
+	cmd := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) {
+		return keychain.NewFakeStore(), nil
+	}})
+	buf := bytes.NewBuffer(nil)
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"deploy", "--help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	help := buf.String()
+	for _, unwanted := range []string{"--ingress", "Traefik-safe", "gateway"} {
+		if strings.Contains(help, unwanted) {
+			t.Fatalf("deploy help advertises removed capability %q:\n%s", unwanted, help)
+		}
+	}
 }
 
 func startCommandDeploymentServer(t *testing.T) (string, func()) {

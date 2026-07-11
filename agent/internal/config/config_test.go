@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +49,30 @@ func TestDefaultUsesContainerdBuilder(t *testing.T) {
 	}
 	if cfg.Deployment.TerminationGracePeriodSeconds != 30 || cfg.Deployment.ResourceRequests["cpu"] != "100m" || cfg.Deployment.ResourceLimits["memory"] != "512Mi" {
 		t.Fatalf("unexpected deployment safety defaults: %+v", cfg.Deployment)
+	}
+}
+
+func TestLoadRejectsRemovedIngressEnabledConfig(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "agent.yaml")
+			data := []byte("cloud_relay:\n  agent_token: do-not-leak\ndeployment:\n  ingress_enabled: " + value + "\n")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("expected removed config key to be rejected")
+			}
+			if !strings.Contains(err.Error(), "deployment.ingress_enabled has been removed; gateway exposure is not implemented") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if strings.Contains(err.Error(), "do-not-leak") || strings.Contains(err.Error(), "agent_token") {
+				t.Fatalf("error leaked config data: %v", err)
+			}
+		})
 	}
 }
 

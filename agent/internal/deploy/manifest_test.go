@@ -26,13 +26,12 @@ spec:
 		ContainerPort:                 9090,
 		HealthPath:                    "/ready",
 		Replicas:                      3,
-		IngressEnabled:                true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := string(rendered)
-	for _, want := range []string{"replicas: 3", "maxUnavailable: 0", "terminationGracePeriodSeconds: 45", "containerPort: 9090", "path: /ready", "memory: 128Mi", "cpu: 500m", "sleep 10", "cpu: 200m"} {
+	for _, want := range []string{"replicas: 3", "maxUnavailable: 0", "terminationGracePeriodSeconds: 45", "containerPort: 9090", "path: /ready", "memory: 128Mi", "cpu: 500m", "cpu: 200m"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in manifest:\n%s", want, out)
 		}
@@ -44,12 +43,64 @@ func TestRenderManifestLeavesNonDeployment(t *testing.T) {
 kind: Service
 metadata:
   name: api
-`), manifestOptions{IngressEnabled: true})
+`), manifestOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(rendered), "preStop") || strings.Contains(string(rendered), "resources") {
 		t.Fatalf("unexpected mutation:\n%s", rendered)
+	}
+}
+
+func TestRenderManifestDoesNotInventLifecycle(t *testing.T) {
+	rendered, err := renderManifest([]byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: api:old
+`), manifestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(rendered)
+	for _, unwanted := range []string{"lifecycle:", "preStop:", "sleep 10"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("unexpected %q in manifest:\n%s", unwanted, out)
+		}
+	}
+}
+
+func TestRenderManifestPreservesUserLifecycle(t *testing.T) {
+	rendered, err := renderManifest([]byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: api:old
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /app/shutdown
+`), manifestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(rendered)
+	if !strings.Contains(out, "/app/shutdown") || !strings.Contains(out, "lifecycle:") || !strings.Contains(out, "preStop:") {
+		t.Fatalf("user lifecycle was not preserved:\n%s", out)
+	}
+	if strings.Contains(out, "sleep 10") {
+		t.Fatalf("fake lifecycle command was injected:\n%s", out)
 	}
 }
 

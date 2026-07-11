@@ -27,7 +27,6 @@ deployment:
   resource_limits:
     cpu: 500m
     memory: 512Mi
-  ingress_enabled: true
   registry: ""
   builder_mode: containerd
   nerdctl_path: nerdctl

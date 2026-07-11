@@ -61,7 +61,6 @@ type Request struct {
 	TerminationGracePeriodSeconds int
 	ResourceRequestsJSON          string
 	ResourceLimitsJSON            string
-	IngressEnabled                bool
 	Registry                      string
 	ImageTag                      string
 	TriggeredBy                   string
@@ -184,7 +183,6 @@ func RequestFromContract(in *agentv1.DeployRequest, cfg config.DeploymentConfig)
 		TerminationGracePeriodSeconds: firstNonZeroInt(int(in.TerminationGracePeriodSeconds), cfg.TerminationGracePeriodSeconds, DefaultTerminationGracePeriodSeconds),
 		ResourceRequestsJSON:          firstNonEmpty(in.ResourceRequestsJSON, resourceJSON(cfg.ResourceRequests, DefaultResourceRequestsJSON)),
 		ResourceLimitsJSON:            firstNonEmpty(in.ResourceLimitsJSON, resourceJSON(cfg.ResourceLimits, DefaultResourceLimitsJSON)),
-		IngressEnabled:                in.IngressEnabled || cfg.IngressEnabled,
 		Registry:                      firstNonEmpty(in.Registry, cfg.Registry),
 		ImageTag:                      in.ImageTag,
 		TriggeredBy:                   firstNonEmpty(in.TriggeredBy, "cli"),
@@ -225,7 +223,6 @@ func RequestFromWebhook(event WebhookEvent, cfg config.DeploymentConfig) (Reques
 		TerminationGracePeriodSeconds: firstNonZeroInt(cfg.TerminationGracePeriodSeconds, DefaultTerminationGracePeriodSeconds),
 		ResourceRequestsJSON:          resourceJSON(cfg.ResourceRequests, DefaultResourceRequestsJSON),
 		ResourceLimitsJSON:            resourceJSON(cfg.ResourceLimits, DefaultResourceLimitsJSON),
-		IngressEnabled:                cfg.IngressEnabled,
 		Registry:                      cfg.Registry,
 		TriggeredBy:                   firstNonEmpty(event.TriggeredBy, "webhook"),
 	}

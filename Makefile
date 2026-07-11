@@ -79,6 +79,9 @@ lint:
 source-hygiene:
 	@if $(PROXY) find . -type f \( -path './bin/*' -o -path './release/*' -o -path './cli/ui/out/*' -o -path './cli/ui/.next/*' -o -name 'opsi-agent' -o -name 'opsi-cloud' -o -name 'opsi-bootstrap-worker' -o -name 'opsi' -o -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.sqlite3' -o -name '*.tsbuildinfo' \) -print | grep -n "."; then echo "source hygiene failed: run 'make clean' and do not commit generated artifacts"; exit 1; fi
 	@legacy_action='rate_limit_'ingress; legacy_annotation='nginx.ingress.kubernetes.io/'limit-rps; if rg -n "$$legacy_action|$$legacy_annotation" . --glob '!docs/archive/**' --glob '!docs/opsi-roadmap-v3/**' --glob '!docs/opsi_roadmap_v3/**' --glob '!.git/**'; then echo "legacy ingress remediation reference found"; exit 1; fi
+	@if rg -n 'IngressEnabled|Traefik-safe graceful shutdown defaults|sleep 10' agent cli cloud contracts --glob '!**/*_test.go'; then echo "removed ingress deployment capability found in production code"; exit 1; fi
+	@if rg -n 'bool ingress_enabled|json:"ingress_enabled|yaml:"ingress_enabled|^[[:space:]]*ingress_enabled:' agent cli cloud contracts --glob '!**/*_test.go'; then echo "removed ingress deployment config or contract found"; exit 1; fi
+	@if rg -n '"ingress"' cli/internal/commands --glob '!**/*_test.go'; then echo "removed --ingress CLI flag found"; exit 1; fi
 
 package-source:
 	$(RUN) mkdir -p dist
