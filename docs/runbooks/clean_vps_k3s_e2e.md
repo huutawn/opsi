@@ -22,7 +22,6 @@ export OPSI_E2E_VPS_SSH_PASSWORD=...
 export OPSI_E2E_SERVICE_REPO=https://github.com/.../opsi.git
 export OPSI_E2E_SERVICE_SHA=...
 export OPSI_E2E_TOTP_CODE=...
-export OPSI_E2E_APPROVE_MITIGATION=YES
 ```
 
 Optional incident trigger:
@@ -31,7 +30,9 @@ Optional incident trigger:
 export OPSI_E2E_BAD_SERVICE_SHA=...
 ```
 
-Covered steps: local session auth, Add Server bootstrap, K3s install verification, Agent heartbeat/readiness, Git service deploy, K3s rollout/runtime verification, Agent-backed secret create/rotate/reveal gate, Agent-backed telemetry/log fetch, incident list/analyze, explicit approved allowlisted mitigation, audit fetch, sanitized artifacts, cleanup instructions.
+Covered steps: local session auth, Add Server bootstrap, K3s install verification, Agent heartbeat/readiness, Git service deploy, K3s rollout/runtime verification, Agent-backed secret create/rotate/reveal gate, Agent-backed telemetry/log fetch, factual incident list/detail/resolve, deployment and incident resolve audit evidence, sanitized artifacts, cleanup instructions.
+
+The incident proof validates factual lifecycle state only. Opsi currently has no incident-derived remediation action plane; the future safe ActionPlane and gateway policy adapters are not implemented.
 
 Not covered until a maintainer runs the full command against real infra: worker-node join, HA/server removal, DR, release checksum distribution proof, provider OAuth setup.
 

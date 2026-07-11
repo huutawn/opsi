@@ -32,7 +32,6 @@ TOTP_CODE="${OPSI_E2E_TOTP_CODE:-}"
 OTP_REQUEST_ID="${OPSI_E2E_OTP_REQUEST_ID:-}"
 OTP_CODE="${OPSI_E2E_OTP_CODE:-}"
 APP_SECRET_VALUE="${OPSI_E2E_APP_SECRET_VALUE:-e2e-secret-value-$RUN_ID}"
-APPROVE_MITIGATION="${OPSI_E2E_APPROVE_MITIGATION:-}"
 POLL_SECONDS="${OPSI_E2E_POLL_SECONDS:-900}"
 
 usage() {
@@ -50,7 +49,6 @@ Required env for full run:
   OPSI_E2E_SERVICE_REPO
   OPSI_E2E_SERVICE_SHA
   OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE
-  OPSI_E2E_APPROVE_MITIGATION=YES
 
 The local URL must be the CLI local backend. This script never calls Cloud
 directly for runtime workflows.
@@ -130,7 +128,6 @@ preflight() {
   if [ -z "$TOTP_CODE" ] && { [ -z "$OTP_REQUEST_ID" ] || [ -z "$OTP_CODE" ]; }; then
     fail "missing second factor: set OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE"
   fi
-  [ "$APPROVE_MITIGATION" = "YES" ] || fail "missing explicit approval: set OPSI_E2E_APPROVE_MITIGATION=YES"
   curl -fsS "$LOCAL_URL/health" >/dev/null || fail "local backend unavailable at OPSI_E2E_LOCAL_URL"
   if command -v sshpass >/dev/null 2>&1 && [ "${OPSI_E2E_SKIP_SSH_AUTH_CHECK:-}" != "1" ]; then
     SSHPASS="$TARGET_SSH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER@$TARGET_HOST" 'test "$(uname -s)" = Linux && test -r /etc/os-release' >/dev/null || fail "SSH auth/preflight failed"
@@ -187,7 +184,7 @@ elif kind == "second_factor":
     data = {"service_id":e.get("OPSI_E2E_SERVICE_ID", e.get("OPSI_E2E_SERVICE_NAME","opsi-e2e-sample")),"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default","user_id":e.get("OPSI_E2E_USER_ID","e2e-owner@example.com"),"role":e.get("OPSI_E2E_USER_ROLE","Owner"),"reveal":True}
     if e.get("OPSI_E2E_TOTP_CODE"): data["totp_code"] = e["OPSI_E2E_TOTP_CODE"]
     else: data.update({"otp_request_id":e["OPSI_E2E_OTP_REQUEST_ID"],"otp_code":e["OPSI_E2E_OTP_CODE"]})
-elif kind == "incident_user":
+elif kind == "incident_resolve":
     data = {"user_id":e.get("OPSI_E2E_USER_ID","e2e-owner@example.com"),"role":e.get("OPSI_E2E_USER_ROLE","Owner")}
 else:
     raise SystemExit("unknown json kind")
@@ -275,6 +272,41 @@ verify_runtime() {
   remote_k3s "sudo k3s kubectl -n default get deploy,svc,pods -l app.kubernetes.io/name=$SERVICE_NAME -o wide" | redact > "$ARTIFACT_DIR/k3s-runtime.redacted.log" || fail "K3s runtime state failed"
 }
 
+verify_incident_detail() {
+  local incident_id="$1"
+  python3 -c 'import json, sys
+expected = sys.argv[1]
+data = json.load(sys.stdin)
+incident = data.get("incident", data)
+if incident.get("incident_id") != expected:
+    raise SystemExit("incident detail returned the wrong incident_id")
+forbidden = {
+    "root" + "_cause",
+    "recommended" + "_actions",
+    "rca" + "_metadata",
+    "action" + "_hash",
+    "mitigation" + "_actions_json",
+}
+def walk(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key.lower() in forbidden:
+                raise SystemExit(f"legacy incident field exposed: {key}")
+            walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            walk(child)
+walk(data)' "$incident_id"
+}
+
+verify_agent_incident_resolve_audit() {
+  local incident_id="$1" project_q incident_q
+  printf -v project_q '%q' "$PROJECT_ID"
+  printf -v incident_q '%q' "$incident_id"
+  remote_k3s "sudo python3 -c 'import sqlite3,sys; row=sqlite3.connect(sys.argv[1]).execute(\"SELECT COUNT(*) FROM audit_log WHERE project_id=? AND action=? AND resource_type=? AND resource_id=? AND result=?\",(sys.argv[2],\"incident.resolve\",\"incident\",sys.argv[3],\"success\")).fetchone(); ok=bool(row and row[0] > 0); print(\"incident.resolve audit verified\" if ok else \"\"); raise SystemExit(0 if ok else 1)' /var/lib/opsi/opsi-agent.sqlite $project_q $incident_q" \
+    > "$ARTIFACT_DIR/incident-resolve-audit.txt" || fail "Agent incident.resolve audit missing"
+}
+
 manual_cleanup() {
   mkdir -p "$ARTIFACT_DIR"
   cat > "$ARTIFACT_DIR/cleanup.txt" <<EOF
@@ -289,28 +321,27 @@ run_e2e() {
   preflight
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
-  log "step 1/15 clean VPS target accepted: $TARGET_HOST"
-  local f body id deploy_id incidents incident_id analyze action_id action_hash approve_body audit
+  local f body id good_deploy_id bad_deploy_id incidents incident_id incident_detail resolve audit deployment_events
   f="$(mktemp)"; write_json "$f" bootstrap
   body="$(api_file POST "/api/local/projects/$PROJECT_ID/nodes/bootstrap" "$f" bootstrap 1)" || fail "bootstrap session create failed"
   rm -f "$f"
   id="$(printf '%s' "$body" | json_get id)" || fail "bootstrap response missing id"
-  log "step 2-6 bootstrap/session created through local backend: session=$id"
   wait_json_field "/api/local/projects/$PROJECT_ID/bootstrap-sessions/$id" status completed bootstrap-session
+  log "step 1/11 bootstrap completed through local backend: session=$id target=$TARGET_HOST"
   wait_json_field "/api/local/projects/$PROJECT_ID/readiness" status ready readiness
-  log "step 6 Agent heartbeat/readiness verified"
+  log "step 2/11 Agent heartbeat/readiness verified"
 
   f="$(mktemp)"; write_json "$f" service
   body="$(api_file POST "/api/local/projects/$PROJECT_ID/services" "$f" service-create 1)" || fail "service create failed"
   rm -f "$f"
   SERVICE_ID="$(printf '%s' "$body" | json_get id)" || fail "service response missing id"
   export OPSI_E2E_SERVICE_ID="$SERVICE_ID"
-  log "step 7 service draft created: service=$SERVICE_ID"
   body="$(api_file POST "/api/local/projects/$PROJECT_ID/services/$SERVICE_ID/deployments" <(printf '{"requested_by":"%s"}' "$USER_ID") deploy-start 1)" || fail "deployment start failed"
-  deploy_id="$(printf '%s' "$body" | json_get id)" || fail "deployment response missing id"
-  wait_deployment_status "$deploy_id" succeeded
+  good_deploy_id="$(printf '%s' "$body" | json_get id)" || fail "deployment response missing id"
+  wait_deployment_status "$good_deploy_id" succeeded
+  log "step 3/11 service created and deployed: service=$SERVICE_ID deployment=$good_deploy_id"
   verify_runtime
-  log "step 8 rollout/runtime verified"
+  log "step 4/11 K3s rollout/runtime verified"
 
   f="$(mktemp)"; write_json "$f" secret
   api_file POST "/api/local/projects/$PROJECT_ID/secrets" "$f" secret-create 1 >/dev/null || fail "secret create failed"
@@ -320,44 +351,45 @@ run_e2e() {
     fail "secret value leaked into reveal output"
   fi
   rm -f "$f"
-  log "step 9 secret create/rotate/reveal path ran via local Agent facade"
+  log "step 5/11 secret create/rotate/reveal path ran via local Agent facade"
 
   api_file GET "/api/local/projects/$PROJECT_ID/telemetry/summary?service_id=$SERVICE_ID" - telemetry-summary 0 >/dev/null || fail "telemetry summary failed"
   api_file GET "/api/local/projects/$PROJECT_ID/logs?service_id=$SERVICE_ID&limit=50" - logs 0 >/dev/null || fail "logs failed"
-  log "step 10 sanitized telemetry/logs fetched through local backend"
+  log "step 6/11 sanitized telemetry/logs fetched through local backend"
 
   f="$(mktemp)"; write_json "$f" bad_service
   body="$(api_file POST "/api/local/projects/$PROJECT_ID/services" "$f" bad-service-create 1)" || fail "bad service create failed"
   rm -f "$f"
   BAD_SERVICE_ID="$(printf '%s' "$body" | json_get id)" || fail "bad service response missing id"
   body="$(api_file POST "/api/local/projects/$PROJECT_ID/services/$BAD_SERVICE_ID/deployments" <(printf '{"requested_by":"%s"}' "$USER_ID") bad-deploy-start 1)" || fail "bad deployment start failed"
-  deploy_id="$(printf '%s' "$body" | json_get id)" || fail "bad deployment response missing id"
-  wait_deployment_terminal "$deploy_id"
-  log "step 11 controlled incident trigger executed via failing rollout: deployment=$deploy_id"
+  bad_deploy_id="$(printf '%s' "$body" | json_get id)" || fail "bad deployment response missing id"
+  wait_deployment_terminal "$bad_deploy_id"
+  log "step 7/11 controlled incident trigger executed via failing rollout: deployment=$bad_deploy_id"
   incidents="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents?user_id=$USER_ID&role=$USER_ROLE&status=open&limit=10" - incidents 0)" || fail "incident list failed"
-  incident_id="$(printf '%s' "$incidents" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("incidents", d if isinstance(d,list) else []); print(a[0]["id"] if a else "")')"
+  incident_id="$(printf '%s' "$incidents" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("incidents", d if isinstance(d,list) else []); targets=set(sys.argv[1:]); print(next((item.get("incident_id","") for item in a if item.get("service_id") in targets), ""))' "$BAD_SERVICE_ID" "$BAD_SERVICE_NAME")"
   [ -n "$incident_id" ] || fail "no controlled incident found; E2E does not pass without a real Agent incident"
-  f="$(mktemp)"; write_json "$f" incident_user
-  analyze="$(api_file POST "/api/local/projects/$PROJECT_ID/incidents/$incident_id/analyze" "$f" incident-analyze 1)" || fail "RCA analyze failed"
-  action_id="$(printf '%s' "$analyze" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("actions") or d.get("recommended_actions") or []; print(a[0].get("id","") if a else "")')"
-  action_hash="$(printf '%s' "$analyze" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("actions") or d.get("recommended_actions") or []; print(a[0].get("action_hash","") if a else "")')"
-  [ -n "$action_id" ] && [ -n "$action_hash" ] || fail "RCA produced no typed allowlisted mitigation"
-  api_file POST "/api/local/projects/$PROJECT_ID/incidents/$incident_id/actions/$action_id/approve" "$f" incident-approval-denied 1 >/dev/null && fail "mitigation approved without explicit approval"
-  approve_body="$(mktemp)"
-  python3 - "$approve_body" "$action_hash" <<'PY'
-import json, os, sys
-open(sys.argv[1],"w").write(json.dumps({"user_id":os.environ.get("OPSI_E2E_USER_ID","e2e-owner@example.com"),"role":os.environ.get("OPSI_E2E_USER_ROLE","Owner"),"approved":True,"action_hash":sys.argv[2]}))
-PY
-  api_file POST "/api/local/projects/$PROJECT_ID/incidents/$incident_id/actions/$action_id/approve" "$approve_body" incident-approve 1 >/dev/null || fail "approved mitigation failed"
-  rm -f "$f" "$approve_body"
-  log "step 12-13 RCA sanitized context + explicit allowlisted mitigation verified"
+  incident_detail="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents/$incident_id?user_id=$USER_ID&role=$USER_ROLE" - incident-detail 0)" || fail "incident detail failed"
+  printf '%s' "$incident_detail" | verify_incident_detail "$incident_id" || fail "incident detail violated factual contract"
+  f="$(mktemp)"; write_json "$f" incident_resolve
+  resolve="$(api_file POST "/api/local/projects/$PROJECT_ID/incidents/$incident_id/resolve" "$f" incident-resolve 1)" || fail "incident resolve failed"
+  rm -f "$f"
+  if [ "$(printf '%s' "$resolve" | json_get status 2>/dev/null || true)" != "resolved" ]; then
+    incident_detail="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents/$incident_id?user_id=$USER_ID&role=$USER_ROLE" - incident-detail-resolved 0)" || fail "resolved incident detail failed"
+    [ "$(printf '%s' "$incident_detail" | json_get incident.status 2>/dev/null || true)" = "resolved" ] || fail "incident status was not resolved"
+  fi
+  verify_agent_incident_resolve_audit "$incident_id"
+  log "step 8/11 factual incident list/detail/resolve lifecycle verified: incident=$incident_id"
 
+  deployment_events="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$good_deploy_id/events" - deployment-events 0)" || fail "deployment events fetch failed"
+  printf '%s' "$deployment_events" | grep -q 'DEPLOYMENT_SUCCEEDED' || fail "deployment success event missing"
   audit="$(api_file GET "/api/local/projects/$PROJECT_ID/audit" - audit 0)" || fail "audit fetch failed"
-  printf '%s' "$audit" | grep -E 'BOOTSTRAP|DEPLOYMENT|SERVICE|AGENT|SECRET|INCIDENT|MITIGATION|AUDIT' >/dev/null || fail "audit trail missing expected events"
+  printf '%s' "$audit" | grep -q 'DEPLOYMENT_STARTED' || fail "deployment audit event missing"
+  printf '%s' "$audit" | grep -q 'SERVICE_CREATED' || fail "service audit event missing"
+  log "step 9/11 deployment events plus Cloud and Agent audit evidence verified"
   check_artifacts_clean || fail "redaction failed: artifact contains sensitive value"
-  log "step 14 audit verified without sensitive payloads"
+  log "step 10/11 artifacts verified without sensitive payloads"
   manual_cleanup
-  log "step 15 cleanup instructions written"
+  log "step 11/11 cleanup instructions written"
   log "PASS: clean VPS/K3s E2E proof complete"
 }
 
@@ -366,6 +398,10 @@ self_test() {
   OPSI_E2E_VPS_SSH_PASSWORD="secret-password" OPSI_E2E_APP_SECRET_VALUE="app-secret" OPSI_E2E_TOTP_CODE="123456" OPSI_E2E_OTP_CODE="" \
     bash -c 'printf "password=secret-password token=abc kubeconfig=raw app-secret 123456" | '"$0"' --redact-only' > "$ARTIFACT_DIR/redaction-test.txt"
   grep -q '\[REDACTED\]' "$ARTIFACT_DIR/redaction-test.txt" || fail "self-test redaction failed"
+  printf '{"incident":{"incident_id":"inc-self-test","status":"open"}}' | verify_incident_detail inc-self-test || fail "self-test factual incident detail failed"
+  if printf '{"incident":{"incident_id":"inc-self-test","action_%s":"legacy"}}' hash | verify_incident_detail inc-self-test >/dev/null 2>&1; then
+    fail "self-test legacy incident field was accepted"
+  fi
   if env -i PATH="$PATH" OPSI_E2E_ARTIFACT_DIR="$ARTIFACT_DIR/missing" "$0" --preflight >/tmp/opsi-e2e-preflight.out 2>&1; then
     fail "self-test missing prereq did not fail"
   fi
@@ -373,7 +409,7 @@ self_test() {
   grep -q "/api/local/projects" "$0" || fail "self-test local backend path missing"
   grep -q "k3s kubectl" "$0" || fail "self-test real K3s check missing"
   grep -q "X-Local-Session" "$0" || fail "self-test local session guard missing"
-  grep -q "explicit approval" "$0" || fail "self-test mitigation approval guard missing"
+  grep -q 'incidents/\$incident_id/resolve' "$0" || fail "self-test incident resolve path missing"
   grep -q "Manual cleanup" "$0" || fail "self-test cleanup path missing"
   log "self-test: ok"
 }

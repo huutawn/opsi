@@ -18,7 +18,6 @@ jobs:
       OPSI_E2E_SERVICE_SHA: ${{ secrets.OPSI_E2E_SERVICE_SHA }}
       OPSI_E2E_BAD_SERVICE_SHA: ${{ secrets.OPSI_E2E_BAD_SERVICE_SHA }}
       OPSI_E2E_TOTP_CODE: ${{ secrets.OPSI_E2E_TOTP_CODE }}
-      OPSI_E2E_APPROVE_MITIGATION: ${{ secrets.OPSI_E2E_APPROVE_MITIGATION }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

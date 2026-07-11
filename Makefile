@@ -45,6 +45,7 @@ verify-e2e-k3s:
 
 verify-e2e-k3s-selfcheck:
 	$(RUN) ./scripts/e2e/verify-k3s.sh --self-test
+	@if rg -n 'OPSI_E2E_APPROVE_MITIGATION|incidents/.*/analyze|incidents/.*/actions/.*/approve|recommended_actions|action_hash' scripts/e2e/verify-k3s.sh; then echo "stale incident RCA/approval E2E dependency found"; exit 1; fi
 
 verify-e2e-node-lifecycle-preflight:
 	$(RUN) ./scripts/e2e/verify-node-lifecycle.sh --preflight
@@ -77,6 +78,7 @@ lint:
 
 source-hygiene:
 	@if $(PROXY) find . -type f \( -path './bin/*' -o -path './release/*' -o -path './cli/ui/out/*' -o -path './cli/ui/.next/*' -o -name 'opsi-agent' -o -name 'opsi-cloud' -o -name 'opsi-bootstrap-worker' -o -name 'opsi' -o -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.sqlite3' -o -name '*.tsbuildinfo' \) -print | grep -n "."; then echo "source hygiene failed: run 'make clean' and do not commit generated artifacts"; exit 1; fi
+	@legacy_action='rate_limit_'ingress; legacy_annotation='nginx.ingress.kubernetes.io/'limit-rps; if rg -n "$$legacy_action|$$legacy_annotation" . --glob '!docs/archive/**' --glob '!docs/opsi-roadmap-v3/**' --glob '!docs/opsi_roadmap_v3/**' --glob '!.git/**'; then echo "legacy ingress remediation reference found"; exit 1; fi
 
 package-source:
 	$(RUN) mkdir -p dist
