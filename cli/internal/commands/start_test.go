@@ -562,51 +562,6 @@ func TestLocalTelemetryInvalidInputFailsClosed(t *testing.T) {
 	}
 }
 
-func TestLocalIncidentAnalyzeUsesAgentNotCloud(t *testing.T) {
-	agent := &localIncidentServer{}
-	agentAddr, stop := startLocalIncidentServer(t, agent)
-	defer stop()
-	cloudCalled := false
-	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		cloudCalled = true
-	}))
-	defer cloud.Close()
-	store := keychain.NewFakeStore()
-	if err := store.SetPAT("keychain-pat"); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, func() (keychain.Store, error) {
-		return store, nil
-	}))
-	defer server.Close()
-	session := localTestSession(t, server.URL)
-
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/analyze", strings.NewReader(`{"user_id":"dev","role":"Developer"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Local-Session", session)
-	req.Header.Set("Idempotency-Key", "incident-analyze-1")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d body=%s", res.StatusCode, body)
-	}
-	if cloudCalled {
-		t.Fatal("incident analyze must not call Cloud from local backend")
-	}
-	if agent.analyzeCalls != 1 || agent.lastAnalyze.ProjectID != "proj-1" || agent.lastAnalyze.IncidentID != "inc-1" || agent.lastAuth != "Bearer keychain-pat" {
-		t.Fatalf("agent analyze not used: calls=%d auth=%q req=%+v", agent.analyzeCalls, agent.lastAuth, agent.lastAnalyze)
-	}
-	if !strings.Contains(string(body), `"source":"agent"`) || !strings.Contains(string(body), `"advisory_only":true`) || !strings.Contains(string(body), `"fallback_used":true`) {
-		t.Fatalf("missing boundary/advisory metadata: %s", body)
-	}
-}
-
 func TestLocalIncidentListUsesAgentNotCloud(t *testing.T) {
 	agent := &localIncidentServer{}
 	agentAddr, stop := startLocalIncidentServer(t, agent)
@@ -630,73 +585,41 @@ func TestLocalIncidentListUsesAgentNotCloud(t *testing.T) {
 	}
 }
 
-func TestLocalIncidentApproveRequiresExplicitApproval(t *testing.T) {
+func TestLocalIncidentDetailUsesAgentAndReturnsFactsOnly(t *testing.T) {
 	agent := &localIncidentServer{}
 	agentAddr, stop := startLocalIncidentServer(t, agent)
 	defer stop()
-	cloudCalled := false
-	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		cloudCalled = true
-	}))
-	defer cloud.Close()
-	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, nil))
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: "http://127.0.0.1:1"}, nil))
 	defer server.Close()
-	session := localTestSession(t, server.URL)
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/actions/scale/approve", strings.NewReader(`{"user_id":"dev","role":"Developer","action_hash":"sha256:ok"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Local-Session", session)
-	req.Header.Set("Idempotency-Key", "incident-approve-no")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusBadRequest {
-		body, _ := io.ReadAll(res.Body)
-		t.Fatalf("status=%d body=%s", res.StatusCode, body)
-	}
-	if cloudCalled || agent.approveCalls != 0 {
-		t.Fatalf("unapproved mitigation reached cloud=%v agent_calls=%d", cloudCalled, agent.approveCalls)
-	}
-}
-
-func TestLocalIncidentRejectsArbitraryCommand(t *testing.T) {
-	agent := &localIncidentServer{}
-	agentAddr, stop := startLocalIncidentServer(t, agent)
-	defer stop()
-	cloudCalled := false
-	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		cloudCalled = true
-	}))
-	defer cloud.Close()
-	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, nil))
-	defer server.Close()
-	session := localTestSession(t, server.URL)
-
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/actions/shell/approve", strings.NewReader(`{"user_id":"dev","role":"Developer","approved":true,"action_hash":"sha256:ok","command":"kubectl delete pod x"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Local-Session", session)
-	req.Header.Set("Idempotency-Key", "incident-command")
-	res, err := http.DefaultClient.Do(req)
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents/inc-1?user_id=viewer&role=Viewer")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusBadRequest {
+	if res.StatusCode != http.StatusOK || agent.getCalls != 1 {
 		t.Fatalf("status=%d body=%s", res.StatusCode, body)
 	}
-	if cloudCalled || agent.approveCalls != 0 || strings.Contains(string(body), "kubectl delete") {
-		t.Fatalf("arbitrary command leaked/reached backend cloud=%v agent=%d body=%s", cloudCalled, agent.approveCalls, body)
+	var payload struct {
+		Incident map[string]any `json:"incident"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{
+		"incident_id": true, "project_id": true, "node_id": true, "service_id": true, "pod_id": true,
+		"status": true, "severity": true, "anomaly_type": true, "created_at_unix": true,
+		"resolved_at_unix": true, "mttr_seconds": true,
+	}
+	for field := range payload.Incident {
+		if !allowed[field] {
+			t.Fatalf("detail response contains non-factual field %q: %s", field, body)
+		}
 	}
 }
 
-func TestLocalIncidentApproveSendsAllowlistActionHashToAgent(t *testing.T) {
+func TestRemovedLocalIncidentRoutesReturnNotFound(t *testing.T) {
 	agent := &localIncidentServer{}
 	agentAddr, stop := startLocalIncidentServer(t, agent)
 	defer stop()
@@ -704,26 +627,76 @@ func TestLocalIncidentApproveSendsAllowlistActionHashToAgent(t *testing.T) {
 	defer server.Close()
 	session := localTestSession(t, server.URL)
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/actions/scale/approve", strings.NewReader(`{"user_id":"dev","role":"Developer","approved":true,"action_hash":"sha256:ok"}`))
+	for _, path := range []string{
+		"/api/local/projects/proj-1/incidents/inc-1/analyze",
+		"/api/local/projects/proj-1/incidents/inc-1/actions/scale/approve",
+	} {
+		req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(`{"user_id":"dev","role":"Developer"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Local-Session", session)
+		req.Header.Set("Idempotency-Key", "removed-route")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("removed route %s status=%d", path, res.StatusCode)
+		}
+	}
+	if agent.resolveCalls != 0 {
+		t.Fatalf("removed routes reached Agent: resolve_calls=%d", agent.resolveCalls)
+	}
+}
+
+func TestLocalIncidentResolveRequiresSessionAndIdempotency(t *testing.T) {
+	agent := &localIncidentServer{}
+	agentAddr, stop := startLocalIncidentServer(t, agent)
+	defer stop()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: "http://127.0.0.1:1"}, nil))
+	defer server.Close()
+
+	newRequest := func() *http.Request {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/resolve", strings.NewReader(`{"user_id":"dev","role":"Developer"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+	res, err := http.DefaultClient.Do(newRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("resolve without session status=%d", res.StatusCode)
+	}
+
+	session := localTestSession(t, server.URL)
+	req := newRequest()
 	req.Header.Set("X-Local-Session", session)
-	req.Header.Set("Idempotency-Key", "incident-approve-1")
-	res, err := http.DefaultClient.Do(req)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("resolve without idempotency status=%d", res.StatusCode)
+	}
+
+	req = newRequest()
+	req.Header.Set("X-Local-Session", session)
+	req.Header.Set("Idempotency-Key", "incident-resolve-1")
+	res, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d body=%s", res.StatusCode, body)
-	}
-	if agent.approveCalls != 1 || agent.lastAction.ActionID != "scale" || agent.lastAction.ActionHash != "sha256:ok" {
-		t.Fatalf("approval not passed to Agent: calls=%d req=%+v", agent.approveCalls, agent.lastAction)
-	}
-	if !strings.Contains(string(body), `"audit_policy"`) {
-		t.Fatalf("missing audit policy: %s", body)
+	if res.StatusCode != http.StatusOK || agent.resolveCalls != 1 || agent.lastResolve.ProjectID != "proj-1" || agent.lastResolve.IncidentID != "inc-1" {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status=%d calls=%d req=%+v body=%s", res.StatusCode, agent.resolveCalls, agent.lastResolve, body)
 	}
 }
 
@@ -1022,11 +995,8 @@ type localIncidentServer struct {
 	agentv1.UnimplementedIncidentServiceServer
 	listCalls    int
 	getCalls     int
-	analyzeCalls int
-	approveCalls int
 	resolveCalls int
-	lastAnalyze  agentv1.IncidentAnalyzeRequest
-	lastAction   agentv1.IncidentActionRequest
+	lastResolve  agentv1.IncidentResolveRequest
 	lastAuth     string
 	err          error
 }
@@ -1049,29 +1019,9 @@ func (s *localIncidentServer) GetIncident(ctx context.Context, req *agentv1.Inci
 	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
 }
 
-func (s *localIncidentServer) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
-	s.analyzeCalls++
-	s.lastAnalyze = *req
-	s.lastAuth = localAuthHeader(ctx)
-	if s.err != nil {
-		return nil, s.err
-	}
-	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
-}
-
-func (s *localIncidentServer) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
-	s.approveCalls++
-	s.lastAction = *req
-	s.lastAuth = localAuthHeader(ctx)
-	if s.err != nil {
-		return nil, s.err
-	}
-	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
-}
-
-func (s *localIncidentServer) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+func (s *localIncidentServer) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
 	s.resolveCalls++
-	s.lastAction = *req
+	s.lastResolve = *req
 	s.lastAuth = localAuthHeader(ctx)
 	if s.err != nil {
 		return nil, s.err
@@ -1083,21 +1033,15 @@ func (s *localIncidentServer) ResolveIncident(ctx context.Context, req *agentv1.
 
 func localIncidentResponse(projectID, incidentID string) *agentv1.IncidentResponse {
 	return &agentv1.IncidentResponse{
-		ProjectID:   projectID,
-		IncidentID:  incidentID,
-		ServiceID:   "svc-1",
-		Status:      "action_pending",
-		RootCause:   "Local fallback analysis: crash_loop",
-		Confidence:  0.62,
-		RCAMetadata: &agentv1.RCAMetadata{Provider: "local", Model: "fallback", FallbackUsed: true, InputContextHash: "sha256:ctx", CreatedAt: "2026-01-01T00:00:00Z"},
-		RecommendedActions: []agentv1.RecommendedAction{{
-			ID:           "scale",
-			Type:         "scale_replicas",
-			Description:  "Scale replicas",
-			RollbackSafe: true,
-			ActionHash:   "sha256:ok",
-			Params:       map[string]string{"service_id": "svc-1", "replicas": "2"},
-		}},
+		ProjectID:     projectID,
+		IncidentID:    incidentID,
+		NodeID:        "node-1",
+		ServiceID:     "svc-1",
+		PodID:         "pod-1",
+		Status:        "open",
+		Severity:      "high",
+		AnomalyType:   "crash_loop",
+		CreatedAtUnix: 10,
 	}
 }
 

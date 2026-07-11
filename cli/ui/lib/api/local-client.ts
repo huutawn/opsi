@@ -9,6 +9,7 @@ import type {
   ServiceRecord,
   SecretResult,
   IncidentResult,
+  IncidentListResult,
   SupportSummary,
   TelemetryQueryResponse,
   TelemetrySummary,
@@ -189,23 +190,15 @@ export class LocalClient {
     });
   }
 
-  analyzeIncident(projectID: string, incidentID: string, body: Record<string, unknown>) {
-    return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/analyze`, {
-      method: "POST",
-      write: true,
-      body: JSON.stringify(body),
-    });
+  incidents(projectID: string, userID: string, role: string, status = "") {
+    const query = new URLSearchParams({ user_id: userID, role });
+    if (status) query.set("status", status);
+    return this.call<IncidentListResult>(`/api/local/projects/${projectID}/incidents?${query}`);
   }
 
-  approveIncident(projectID: string, incidentID: string, actionID: string, body: Record<string, unknown>) {
-    return this.call<IncidentResult>(
-      `/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/actions/${encodeURIComponent(actionID)}/approve`,
-      {
-        method: "POST",
-        write: true,
-        body: JSON.stringify({ ...body, approved: true }),
-      },
-    );
+  incident(projectID: string, incidentID: string, userID: string, role: string) {
+    const query = new URLSearchParams({ user_id: userID, role });
+    return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}?${query}`);
   }
 
   resolveIncident(projectID: string, incidentID: string, body: Record<string, unknown>) {

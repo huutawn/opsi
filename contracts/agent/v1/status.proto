@@ -35,9 +35,7 @@ service SecretService {
 service IncidentService {
   rpc ListIncidents(IncidentListRequest) returns (IncidentListResponse);
   rpc GetIncident(IncidentGetRequest) returns (IncidentResponse);
-  rpc AnalyzeIncident(IncidentAnalyzeRequest) returns (IncidentResponse);
-  rpc ApproveIncidentAction(IncidentActionRequest) returns (IncidentResponse);
-  rpc ResolveIncident(IncidentActionRequest) returns (IncidentResponse);
+  rpc ResolveIncident(IncidentResolveRequest) returns (IncidentResponse);
 }
 
 message StatusRequest {}
@@ -293,22 +291,12 @@ message IncidentGetRequest {
   string pat = 5;
 }
 
-message IncidentAnalyzeRequest {
+message IncidentResolveRequest {
   string project_id = 1;
   string incident_id = 2;
   string user_id = 3;
   string role = 4;
   string pat = 5;
-}
-
-message IncidentActionRequest {
-  string project_id = 1;
-  string incident_id = 2;
-  string action_id = 3;
-  string action_hash = 4;
-  string user_id = 5;
-  string role = 6;
-  string pat = 7;
 }
 
 message IncidentListResponse {
@@ -320,32 +308,13 @@ message IncidentResponse {
   string project_id = 2;
   string service_id = 3;
   string status = 4;
-  string root_cause = 5;
-  double confidence = 6;
-  repeated string contributing_factors = 7;
-  repeated RecommendedAction recommended_actions = 8;
-  string mitigation_actions_json = 9;
+  string node_id = 5;
+  string pod_id = 6;
+  string anomaly_type = 7;
+  string severity = 8;
+  int64 created_at_unix = 9;
   int64 resolved_at_unix = 10;
   int64 mttr_seconds = 11;
-  RCAMetadata rca_metadata = 12;
-}
-
-message RecommendedAction {
-  string id = 1;
-  string type = 2;
-  string description = 3;
-  bool rollback_safe = 4;
-  map<string, string> params = 5;
-  string action_hash = 6;
-}
-
-message RCAMetadata {
-  string provider = 1;
-  string configured_provider = 2;
-  string model = 3;
-  bool fallback_used = 4;
-  string input_context_hash = 5;
-  string created_at = 6;
 }
 
 enum ErrorCode {

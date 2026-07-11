@@ -19,6 +19,6 @@ export const OperationsViewMap: Record<string, (props: { console: ConsoleControl
   Logs: LogsView,
   Metrics: SupportView,
   Support: SupportView,
-  "Incidents & RCA": IncidentsView,
+  Incidents: IncidentsView,
   Settings: () => <PlaceholderView title="Settings" text="Cloud credentials stay in the local CLI backend and OS keychain." />,
 };

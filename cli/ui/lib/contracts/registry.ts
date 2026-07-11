@@ -154,46 +154,31 @@ export type SecretResult = {
   reveal_expires_at?: string;
 };
 
-export type IncidentRcaMetadata = {
-  provider: string;
-  configured_provider?: string;
-  model: string;
-  fallback_used: boolean;
-  input_context_hash: string;
-  created_at: string;
-};
-
-export type IncidentAction = {
-  id: string;
-  type: string;
-  description: string;
-  rollback_safe?: boolean;
-  params?: Record<string, string>;
-  action_hash?: string;
-};
-
 export type IncidentResponse = {
   incident_id: string;
   project_id: string;
+  node_id?: string;
   service_id?: string;
+  pod_id?: string;
   status: string;
-  root_cause?: string;
-  confidence?: number;
-  contributing_factors?: string[];
-  recommended_actions?: IncidentAction[];
-  mitigation_actions_json?: string;
+  severity?: string;
+  anomaly_type?: string;
+  created_at_unix?: number;
   resolved_at_unix?: number;
   mttr_seconds?: number;
-  rca_metadata?: IncidentRcaMetadata;
 };
 
 export type IncidentResult = {
-  status: string;
+  status?: string;
   source: "agent";
-  advisory_only: boolean;
-  audit_policy: string;
   payload_policy: string;
   incident: IncidentResponse;
+};
+
+export type IncidentListResult = {
+  source: "agent";
+  payload_policy: string;
+  incidents: IncidentResponse[];
 };
 
 export type BootstrapSession = {
@@ -336,7 +321,9 @@ export type ConsoleState = {
   audit: AuditEvent[];
   support: SupportSummary | null;
   secretReveal: SecretResult | null;
-  incidentResult: IncidentResult | null;
+  incidents: IncidentResponse[];
+  incidentDetail: IncidentResponse | null;
+  incidentError: string;
   nodeDetail: NodeDiagnostics | null;
   serviceDetail: ServiceRecord | null;
   busy: string;

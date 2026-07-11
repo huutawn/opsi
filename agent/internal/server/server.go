@@ -179,10 +179,6 @@ func (s *ServiceManagerService) DeleteManagedService(ctx context.Context, req *a
 	return &agentv1.DeleteManagedServiceResponse{ProjectID: req.ProjectID, ID: req.ID, Deleted: true}, nil
 }
 
-func (s *IncidentService) AnalyzeIncident(context.Context, *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "incident AI analysis has been removed")
-}
-
 func (s *IncidentService) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
 	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
 	records, err := s.service.List(ctx, incident.ListRequest{ProjectID: req.ProjectID, Status: req.Status, Limit: int(req.Limit), UserID: req.UserID, Role: req.Role, PAT: req.PAT})
@@ -206,11 +202,7 @@ func (s *IncidentService) GetIncident(ctx context.Context, req *agentv1.Incident
 	return incidentResponse(rec), nil
 }
 
-func (s *IncidentService) ApproveIncidentAction(context.Context, *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "incident RCA-backed action approval has been removed")
-}
-
-func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
 	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
 	rec, err := s.service.Resolve(ctx, incident.ResolveRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
 	if err != nil {
@@ -742,9 +734,16 @@ func incidentResponse(rec *telemetry.IncidentRecord) *agentv1.IncidentResponse {
 	resp := &agentv1.IncidentResponse{
 		IncidentID:  rec.ID,
 		ProjectID:   rec.ProjectID,
+		NodeID:      rec.NodeID,
 		ServiceID:   rec.ServiceID,
+		PodID:       rec.PodID,
 		Status:      rec.Status,
+		Severity:    rec.Severity,
+		AnomalyType: rec.AnomalyType,
 		MTTRSeconds: rec.MTTRSeconds,
+	}
+	if !rec.CreatedAt.IsZero() {
+		resp.CreatedAtUnix = rec.CreatedAt.Unix()
 	}
 	if !rec.ResolvedAt.IsZero() {
 		resp.ResolvedAtUnix = rec.ResolvedAt.Unix()

@@ -12,33 +12,22 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 )
 
-func TestAnalyzeIncidentReturnsUnimplementedWithoutNetworkOrMutation(t *testing.T) {
-	service := NewIncidentService(nil)
-	resp, err := service.AnalyzeIncident(context.Background(), &agentv1.IncidentAnalyzeRequest{
-		ProjectID:  "p1",
-		IncidentID: "inc-1",
-		UserID:     "u1",
-		Role:       "Owner",
-	})
-	if status.Code(err) != codes.Unimplemented || resp != nil {
-		t.Fatalf("expected unimplemented without response, resp=%+v err=%v", resp, err)
+func TestIncidentServiceDescriptorContainsOnlyActiveIncidentRPCs(t *testing.T) {
+	want := map[string]bool{"ListIncidents": true, "GetIncident": true, "ResolveIncident": true}
+	if len(agentv1.IncidentService_ServiceDesc.Methods) != len(want) {
+		t.Fatalf("unexpected incident RPC count: %+v", agentv1.IncidentService_ServiceDesc.Methods)
 	}
-}
-
-func TestApproveIncidentActionReturnsUnimplementedWithoutServiceCall(t *testing.T) {
-	service := NewIncidentService(nil)
-	resp, err := service.ApproveIncidentAction(context.Background(), &agentv1.IncidentActionRequest{
-		ProjectID:  "p1",
-		IncidentID: "inc-1",
-		ActionID:   "legacy-action",
-	})
-	if status.Code(err) != codes.Unimplemented || resp != nil {
-		t.Fatalf("expected unimplemented without response, resp=%+v err=%v", resp, err)
+	for _, method := range agentv1.IncidentService_ServiceDesc.Methods {
+		if !want[method.MethodName] {
+			t.Fatalf("unexpected incident RPC %q", method.MethodName)
+		}
+		delete(want, method.MethodName)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing active incident RPCs: %v", want)
 	}
 }
 
@@ -54,7 +43,7 @@ func TestGetIncidentIgnoresLegacyRCAAndMitigationData(t *testing.T) {
 		ProjectID:         "p1",
 		ServiceID:         "svc-1",
 		Status:            "resolved",
-		RCAResult:         `{"schema_version":"opsi.rca.v1","root_cause":"execute me","confidence":0.99,"contributing_factors":["legacy"],"recommended_actions":[{"id":"a1","type":"rollback"}]}`,
+		RCAResult:         `{"legacy":"ignored"}`,
 		MitigationActions: `[{"type":"rollback","status":"success"}]`,
 		CreatedAt:         time.Unix(10, 0).UTC(),
 		ResolvedAt:        resolved,
@@ -75,9 +64,6 @@ func TestGetIncidentIgnoresLegacyRCAAndMitigationData(t *testing.T) {
 	}
 	if resp.IncidentID != "inc-legacy" || resp.ProjectID != "p1" || resp.ServiceID != "svc-1" || resp.Status != "resolved" || resp.MTTRSeconds != 60 || resp.ResolvedAtUnix != resolved.Unix() {
 		t.Fatalf("factual incident fields changed: %+v", resp)
-	}
-	if resp.RootCause != "" || resp.Confidence != 0 || len(resp.ContributingFactors) != 0 || len(resp.RecommendedActions) != 0 || resp.MitigationActionsJSON != "" {
-		t.Fatalf("legacy RCA or mitigation data was exposed: %+v", resp)
 	}
 }
 

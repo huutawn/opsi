@@ -188,15 +188,6 @@ func (c *Client) DeleteManagedService(ctx context.Context, req *agentv1.DeleteMa
 	return agentv1.NewServiceManagerServiceClient(conn).DeleteManagedService(ctx, req)
 }
 
-func (c *Client) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
-	conn, err := c.dial(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	return agentv1.NewIncidentServiceClient(conn).AnalyzeIncident(ctx, req)
-}
-
 func (c *Client) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
@@ -215,16 +206,7 @@ func (c *Client) GetIncident(ctx context.Context, req *agentv1.IncidentGetReques
 	return agentv1.NewIncidentServiceClient(conn).GetIncident(ctx, req)
 }
 
-func (c *Client) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
-	conn, err := c.dial(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	return agentv1.NewIncidentServiceClient(conn).ApproveIncidentAction(ctx, req)
-}
-
-func (c *Client) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+func (c *Client) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
 		return nil, err

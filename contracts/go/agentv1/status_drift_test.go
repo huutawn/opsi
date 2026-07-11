@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-func TestProtoServiceRPCsMatchHandwrittenBinding(t *testing.T) {
+func TestProtoServiceRPCContractDrift(t *testing.T) {
 	data, err := os.ReadFile("../../agent/v1/status.proto")
 	if err != nil {
 		t.Fatal(err)

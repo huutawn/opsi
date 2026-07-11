@@ -683,7 +683,7 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
 		return true
 	}
-	if len(parts) < 7 {
+	if len(parts) != 7 || parts[6] != "resolve" {
 		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local incident route is not implemented")
 		return true
 	}
@@ -696,29 +696,7 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 	if !ok {
 		return true
 	}
-	switch {
-	case len(parts) == 7 && parts[6] == "analyze":
-		callLocalIncidentAgent(w, r, cfg, factory, "analyzed", &agentv1.IncidentAnalyzeRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role}, nil)
-	case len(parts) == 7 && parts[6] == "resolve":
-		callLocalIncidentAgent(w, r, cfg, factory, "resolved", nil, &agentv1.IncidentActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role})
-	case len(parts) == 9 && parts[6] == "actions" && parts[8] == "approve":
-		actionID, err := url.PathUnescape(parts[7])
-		if err != nil || actionID == "" {
-			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ACTION_ID_REQUIRED", "action_id is required")
-			return true
-		}
-		if !req.Approved {
-			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ACTION_APPROVAL_REQUIRED", "mitigation requires explicit user approval")
-			return true
-		}
-		if req.ActionHash == "" {
-			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ACTION_HASH_REQUIRED", "mitigation approval requires the current action_hash")
-			return true
-		}
-		callLocalIncidentAgent(w, r, cfg, factory, "approved", nil, &agentv1.IncidentActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, ActionID: actionID, ActionHash: req.ActionHash, UserID: req.UserID, Role: req.Role})
-	default:
-		writeLocalError(w, r, http.StatusNotImplemented, "INCIDENT_OPERATION_UNSUPPORTED", "this incident operation is not supported by the local Agent API")
-	}
+	callLocalIncidentResolveAgent(w, r, cfg, factory, &agentv1.IncidentResolveRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role})
 	return true
 }
 
@@ -727,8 +705,6 @@ type localIncidentRequest struct {
 	IncidentID string
 	UserID     string
 	Role       string
-	ActionHash string
-	Approved   bool
 }
 
 func readLocalIncidentQuery(w http.ResponseWriter, r *http.Request, projectID string) (*agentv1.IncidentListRequest, bool) {
@@ -749,14 +725,14 @@ func readLocalIncidentRequest(w http.ResponseWriter, r *http.Request, projectID,
 		writeLocalError(w, r, http.StatusBadRequest, "INVALID_INCIDENT_REQUEST", "invalid incident request")
 		return localIncidentRequest{}, false
 	}
-	allowed := map[string]bool{"user_id": true, "role": true, "action_hash": true, "approved": true, "approve": true, "explicit_approval": true}
+	allowed := map[string]bool{"user_id": true, "role": true}
 	for key := range raw {
 		if !allowed[strings.ToLower(key)] {
 			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_INPUT_UNSUPPORTED", "incident request contains an unsupported field")
 			return localIncidentRequest{}, false
 		}
 	}
-	req := localIncidentRequest{ProjectID: projectID, IncidentID: incidentID, UserID: jsonString(raw, "user_id"), Role: jsonString(raw, "role"), ActionHash: jsonString(raw, "action_hash"), Approved: jsonBool(raw, "approved") || jsonBool(raw, "approve") || jsonBool(raw, "explicit_approval")}
+	req := localIncidentRequest{ProjectID: projectID, IncidentID: incidentID, UserID: jsonString(raw, "user_id"), Role: jsonString(raw, "role")}
 	if req.UserID == "" || req.Role == "" {
 		writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_REQUIRED_FIELDS_MISSING", "user_id and role are required")
 		return localIncidentRequest{}, false
@@ -777,7 +753,7 @@ func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg conf
 	}
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records come from Agent runtime state; RCA context is sanitized before AI use", "incidents": resp.Incidents})
+	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incidents": resp.Incidents})
 }
 
 func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest) {
@@ -793,28 +769,16 @@ func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg confi
 	}
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records come from Agent runtime state; RCA context is sanitized before AI use", "incident": resp})
+	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incident": resp})
 }
 
-func callLocalIncidentAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), statusText string, analyze *agentv1.IncidentAnalyzeRequest, action *agentv1.IncidentActionRequest) {
+func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentResolveRequest) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if pat := optionalPAT(factory); pat != "" {
 		ctx = agentclient.WithPAT(ctx, pat)
 	}
-	client := agentclient.New(cfg)
-	var (
-		resp *agentv1.IncidentResponse
-		err  error
-	)
-	switch statusText {
-	case "analyzed":
-		resp, err = client.AnalyzeIncident(ctx, analyze)
-	case "approved":
-		resp, err = client.ApproveIncidentAction(ctx, action)
-	case "resolved":
-		resp, err = client.ResolveIncident(ctx, action)
-	}
+	resp, err := agentclient.New(cfg).ResolveIncident(ctx, req)
 	if err != nil {
 		writeLocalAgentIncidentError(w, r, err)
 		return
@@ -822,11 +786,9 @@ func callLocalIncidentAgent(w http.ResponseWriter, r *http.Request, cfg config.C
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":         statusText,
+		"status":         "resolved",
 		"source":         "agent",
-		"advisory_only":  statusText == "analyzed",
-		"audit_policy":   "Agent records RCA and mitigation attempts with redacted metadata",
-		"payload_policy": "AI receives sanitized IncidentContext only; raw logs, raw metrics, secrets, kubeconfig, private keys, and source code stay local",
+		"payload_policy": "incident records contain factual Agent runtime state only",
 		"incident":       resp,
 	})
 }

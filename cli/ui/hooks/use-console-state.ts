@@ -32,7 +32,9 @@ export function useConsoleState() {
     audit: [],
     support: null,
     secretReveal: null,
-    incidentResult: null,
+    incidents: [],
+    incidentDetail: null,
+    incidentError: "",
     nodeDetail: null,
     serviceDetail: null,
     busy: "",
@@ -252,31 +254,44 @@ export function useConsoleState() {
     }
   }
 
-  async function incidentAnalyze(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
-    const incidentID = String(form.get("incident_id") ?? "");
-    patch({ busy: "incident-analyze", incidentResult: null });
-    try {
-      patch({ incidentResult: await client.analyzeIncident(currentProject.id, incidentID, incidentBody(form)) });
-    } finally {
-      patch({ busy: "" });
-    }
+  async function incidentList(event: FormEvent<HTMLFormElement>) {
+	 event.preventDefault();
+	 if (!currentProject) return;
+	 const form = new FormData(event.currentTarget);
+	 patch({ busy: "incident-list", incidentDetail: null, incidentError: "" });
+	 try {
+	   const result = await client.incidents(
+	     currentProject.id,
+	     String(form.get("user_id") ?? ""),
+	     String(form.get("role") ?? ""),
+	     String(form.get("status") ?? ""),
+	   );
+	   patch({ incidents: result.incidents ?? [] });
+	 } catch (error) {
+	   patch({ incidentError: (error as Error).message });
+	 } finally {
+	   patch({ busy: "" });
+	 }
   }
 
-  async function incidentApprove(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
-    const incidentID = String(form.get("incident_id") ?? "");
-    const actionID = String(form.get("action_id") ?? "");
-    patch({ busy: "incident-approve" });
-    try {
-      patch({ incidentResult: await client.approveIncident(currentProject.id, incidentID, actionID, incidentBody(form)) });
-      await load();
-    } finally {
-      patch({ busy: "" });
+  async function incidentGet(event: FormEvent<HTMLFormElement>) {
+	 event.preventDefault();
+	 if (!currentProject) return;
+	 const form = new FormData(event.currentTarget);
+	 const incidentID = String(form.get("incident_id") ?? "");
+	 patch({ busy: "incident-get", incidentDetail: null, incidentError: "" });
+	 try {
+	   const result = await client.incident(
+	     currentProject.id,
+	     incidentID,
+	     String(form.get("user_id") ?? ""),
+	     String(form.get("role") ?? ""),
+	   );
+	   patch({ incidentDetail: result.incident });
+	 } catch (error) {
+	   patch({ incidentError: (error as Error).message });
+	 } finally {
+	   patch({ busy: "" });
     }
   }
 
@@ -285,11 +300,16 @@ export function useConsoleState() {
     if (!currentProject) return;
     const form = new FormData(event.currentTarget);
     const incidentID = String(form.get("incident_id") ?? "");
-    patch({ busy: "incident-resolve" });
-    try {
-      patch({ incidentResult: await client.resolveIncident(currentProject.id, incidentID, incidentBody(form)) });
-      await load();
-    } finally {
+	 patch({ busy: "incident-resolve", incidentError: "" });
+	 try {
+	   const result = await client.resolveIncident(currentProject.id, incidentID, incidentBody(form));
+	   patch({
+	     incidentDetail: result.incident,
+	     incidents: state.incidents.map((item) => (item.incident_id === result.incident.incident_id ? result.incident : item)),
+	   });
+	 } catch (error) {
+	   patch({ incidentError: (error as Error).message });
+	 } finally {
       patch({ busy: "" });
     }
   }
@@ -299,7 +319,10 @@ export function useConsoleState() {
     orgID,
     setActive,
     setOrgID,
-    setProjectID,
+    setProjectID: (id: string) => {
+      setProjectID(id);
+      patch({ incidents: [], incidentDetail: null, incidentError: "" });
+    },
     setServiceDetail: (serviceDetail: ServiceRecord | null) => patch({ serviceDetail }),
     state: { ...state, project: currentProject },
     actions: {
@@ -311,8 +334,8 @@ export function useConsoleState() {
       load,
       loadBootstrapEvents,
       loadDeploymentEvents,
-      incidentAnalyze,
-      incidentApprove,
+      incidentList,
+      incidentGet,
       incidentResolve,
       nodeAction,
       rollback,
@@ -340,7 +363,6 @@ function incidentBody(form: FormData) {
   return {
     user_id: form.get("user_id"),
     role: form.get("role"),
-    action_hash: form.get("action_hash"),
   };
 }
 
@@ -380,7 +402,9 @@ function emptyPatch(projects: Project[]): Partial<ConsoleState> {
     sessions: [] as BootstrapSession[],
     audit: [],
     support: null,
-    incidentResult: null,
+    incidents: [],
+    incidentDetail: null,
+    incidentError: "",
     bootstrapEvents: [] as TimelineEvent[],
     deploymentEvents: [] as TimelineEvent[],
     nodeDetail: null as NodeDiagnostics | null,
