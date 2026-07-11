@@ -1,7 +1,6 @@
 package webhookrelay
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -13,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -68,7 +66,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/auth/browser/redeem", s.handleBrowserAuthRedeem)
 	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
 	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
-	mux.HandleFunc("/v1/ai/incidents/analyze", s.handleAnalyzeIncident)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/register", s.handleAgentRegister)
@@ -86,146 +83,9 @@ func (s *Server) Handler() http.Handler {
 	return s.observer.Wrap(mux)
 }
 
-func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		SchemaVersion string `json:"schema_version"`
-		IncidentID    string `json:"incident_id"`
-		ProjectID     string `json:"project_id"`
-		ServiceID     string `json:"service_id"`
-		AnomalyType   string `json:"anomaly_type"`
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid incident context")
-		return
-	}
-	if forbiddenAIPayload(body) {
-		writeError(w, http.StatusBadRequest, "incident context contains forbidden raw or secret-like fields")
-		return
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid incident context")
-		return
-	}
-	if req.SchemaVersion != "opsi.incident_context.v1" || req.IncidentID == "" || req.ProjectID == "" {
-		writeError(w, http.StatusBadRequest, "invalid incident context")
-		return
-	}
-	rca, err := s.analyzeIncident(r.Context(), req.IncidentID, req.ServiceID, firstNonEmpty(req.AnomalyType, "unknown anomaly"), body)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, rca)
-}
-
-func (s *Server) analyzeIncident(ctx context.Context, incidentID, serviceID, anomalyType string, body []byte) (map[string]any, error) {
-	cfg := s.Config.AI
-	provider := firstNonEmpty(cfg.Provider, "fixture")
-	inputHash := "sha256:" + sha256Hex(body)
-	if provider == "gemini" {
-		rootCause, model, err := callGemini(ctx, cfg, body)
-		if err == nil {
-			return rcaResponse(incidentID, serviceID, rootCause, "gemini", provider, false, model, inputHash), nil
-		}
-		if !cfg.FallbackFixture {
-			return nil, fmt.Errorf("gemini RCA failed")
-		}
-		return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, true, "fixture", inputHash), nil
-	}
-	return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, false, "fixture", inputHash), nil
-}
-
-func rcaResponse(incidentID, serviceID, rootCause, provider, configuredProvider string, fallback bool, model, inputHash string) map[string]any {
-	return map[string]any{
-		"schema_version": "opsi.rca.v1",
-		"incident_id":    incidentID,
-		"root_cause":     rootCause,
-		"confidence":     0.64,
-		"contributing_factors": []string{
-			"sanitized metric context",
-			"service-level anomaly",
-		},
-		"recommended_actions": []map[string]any{
-			{"id": "scale-replicas", "type": "scale_replicas", "description": "Scale service replicas", "rollback_safe": true, "params": map[string]string{"service_id": serviceID, "replicas": "2"}},
-			{"id": "rate-limit-ingress", "type": "rate_limit_ingress", "description": "Apply ingress rate limit", "rollback_safe": true, "params": map[string]string{"service_id": serviceID, "rps": "10"}},
-		},
-		"metadata": map[string]any{"provider": provider, "configured_provider": configuredProvider, "fallback_used": fallback, "model": model, "input_context_hash": inputHash, "created_at": time.Now().UTC().Format(time.RFC3339)},
-	}
-}
-
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
-}
-
-func callGemini(ctx context.Context, cfg AIConfig, incidentContext []byte) (string, string, error) {
-	key := os.Getenv(firstNonEmpty(cfg.APIKeyEnv, "GEMINI_API_KEY"))
-	if key == "" {
-		return "", "", fmt.Errorf("missing Gemini API key")
-	}
-	model := firstNonEmpty(cfg.Model, "gemini-2.0-flash")
-	endpoint := strings.TrimRight(firstNonEmpty(cfg.Endpoint, "https://generativelanguage.googleapis.com"), "/")
-	u, err := url.Parse(endpoint + "/v1beta/models/" + url.PathEscape(model) + ":generateContent")
-	if err != nil {
-		return "", "", err
-	}
-	q := u.Query()
-	q.Set("key", key)
-	u.RawQuery = q.Encode()
-	payload := map[string]any{"contents": []map[string]any{{"parts": []map[string]string{{"text": "Analyze this sanitized Opsi incident context. Return one concise root cause sentence only.\n" + string(incidentContext)}}}}}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return "", "", err
-	}
-	timeout := time.Duration(cfg.Timeout)
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(data))
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("gemini status %d", resp.StatusCode)
-	}
-	var out struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return "", "", err
-	}
-	if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 || strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text) == "" {
-		return "", "", fmt.Errorf("gemini returned empty RCA")
-	}
-	return strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text), model, nil
-}
-
-func forbiddenAIPayload(body []byte) bool {
-	lower := strings.ToLower(string(body))
-	for _, token := range []string{"raw_log", "raw_logs", "password", "secret", "token", "api_key", "kubeconfig", "private_key"} {
-		if strings.Contains(lower, `"`+token+`"`) || strings.Contains(lower, token+":") {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {

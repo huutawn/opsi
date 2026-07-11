@@ -144,3 +144,26 @@ func TestOTPRequestOmitsCodeWithoutDevEcho(t *testing.T) {
 		t.Fatalf("code leaked in non-dev response: %v", body)
 	}
 }
+
+func TestAIRoutesRemoved(t *testing.T) {
+	handler := NewServer(Config{}).Handler()
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/v1/ai/incidents/analyze"},
+		{method: http.MethodGet, path: "/v1/ai/incidents/analyze"},
+		{method: http.MethodGet, path: "/v1/ai/unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status=%d, want %d", rec.Code, http.StatusNotFound)
+			}
+		})
+	}
+}

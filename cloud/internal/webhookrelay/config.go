@@ -14,7 +14,6 @@ type Config struct {
 	PublicBaseURL          string      `json:"public_base_url"`
 	Production             bool        `json:"production"`
 	EnableDebugUI          bool        `json:"enable_debug_ui"`
-	AI                     AIConfig    `json:"ai"`
 	OTP                    OTPConfig   `json:"otp"`
 	SMTP                   SMTPConfig  `json:"smtp"`
 	Alerts                 AlertConfig `json:"alerts"`
@@ -29,15 +28,6 @@ type Config struct {
 type OTPConfig struct {
 	DevEcho    bool   `json:"dev_echo"`
 	OutboxPath string `json:"outbox_path"`
-}
-
-type AIConfig struct {
-	Provider        string   `json:"provider"`
-	APIKeyEnv       string   `json:"api_key_env"`
-	Model           string   `json:"model"`
-	Endpoint        string   `json:"endpoint"`
-	Timeout         Duration `json:"timeout"`
-	FallbackFixture bool     `json:"fallback_fixture"`
 }
 
 type SMTPConfig struct {
@@ -79,7 +69,7 @@ type Route struct {
 type Duration time.Duration
 
 func LoadConfig(path string) (Config, error) {
-	cfg := Config{TTL: Duration(24 * time.Hour), AI: AIConfig{Provider: "fixture"}}
+	cfg := Config{TTL: Duration(24 * time.Hour)}
 	if path == "" {
 		return cfg, nil
 	}
@@ -95,18 +85,6 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if time.Duration(cfg.TTL) > 24*time.Hour {
 		return Config{}, fmt.Errorf("ttl must be <= 24h")
-	}
-	if cfg.AI.Provider == "" {
-		cfg.AI.Provider = "fixture"
-	}
-	if cfg.AI.Provider != "fixture" && cfg.AI.Provider != "gemini" {
-		return Config{}, fmt.Errorf("ai.provider must be fixture or gemini")
-	}
-	if cfg.AI.Provider == "gemini" && cfg.AI.APIKeyEnv == "" {
-		cfg.AI.APIKeyEnv = "GEMINI_API_KEY"
-	}
-	if cfg.AI.Provider == "gemini" && !cfg.AI.FallbackFixture && os.Getenv(cfg.AI.APIKeyEnv) == "" {
-		return Config{}, fmt.Errorf("ai.provider gemini requires %s or fallback_fixture", cfg.AI.APIKeyEnv)
 	}
 	if cfg.Production {
 		if cfg.DatabaseURL == "" {
