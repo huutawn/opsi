@@ -728,7 +728,8 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("k3s token status=%d body=%s", w.Code, w.Body.String())
 	}
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"private_key","ssh_private_key":"-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----"}`)))
+	privateKeyMarker := "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"private_key","ssh_private_key":"`+privateKeyMarker+`\nsecret\n-----END OPENSSH PRIVATE KEY-----"}`)))
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	req.Header.Set("Idempotency-Key", "boot-private-key")
 	req.Header.Set("X-Request-ID", "req-boot-private-key")

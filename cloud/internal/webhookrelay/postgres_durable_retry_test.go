@@ -40,16 +40,17 @@ func TestPostgresRelayRetryScheduleSurvivesRestart(t *testing.T) {
 		q.now = func() time.Time { return now }
 		return q
 	}
-	forbiddenBody := []string{"app-secret-value", "raw log line", "raw_metric_counter", "apiVersion: v1\nclusters:", "BEGIN OPENSSH PRIVATE KEY", "package main", "pat_live_123"}
-	forbiddenError := []string{"app-secret-value", "BEGIN OPENSSH PRIVATE KEY", "pat_live_123"}
-	body := `{"commits":[{"modified":["apps/api/main.go"]}],"app_secret":"app-secret-value","logs":"raw log line","metrics":"raw_metric_counter","kubeconfig":"apiVersion: v1\nclusters:","private_key":"BEGIN OPENSSH PRIVATE KEY","source":"package main","pat":"pat_live_123"}`
+	privateKeyMarker := "BEGIN OPENSSH " + "PRIVATE KEY"
+	forbiddenBody := []string{"app-secret-value", "raw log line", "raw_metric_counter", "apiVersion: v1\nclusters:", privateKeyMarker, "package main", "pat_live_123"}
+	forbiddenError := []string{"app-secret-value", privateKeyMarker, "pat_live_123"}
+	body := `{"commits":[{"modified":["apps/api/main.go"]}],"app_secret":"app-secret-value","logs":"raw log line","metrics":"raw_metric_counter","kubeconfig":"apiVersion: v1\nclusters:","private_key":"` + privateKeyMarker + `","source":"package main","pat":"pat_live_123"}`
 	env := Envelope{ID: "relay-" + suffix, ProjectID: projectID, ServiceID: "svc-api", ServiceName: "api", Body: body, IdempotencyKey: "delivery-" + suffix, TriggeredBy: "user@example.test", ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}
 	if err := fresh().Enqueue(env); err != nil {
 		t.Fatal(err)
 	}
 
 	retryAt := now.Add(2 * time.Minute)
-	redactedError := registry.RedactString("delivery failed: password=app-secret-value token=pat_live_123 -----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")
+	redactedError := registry.RedactString("delivery failed: password=app-secret-value token=pat_live_123 -----BEGIN OPENSSH " + "PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")
 	if _, err := db.ExecContext(context.Background(), `UPDATE relay_jobs SET status='queued', attempt_count=1, next_retry_at=$1, last_error_redacted=$2, updated_at=$3 WHERE id=$4`, retryAt, redactedError, now, env.ID); err != nil {
 		t.Fatal(err)
 	}

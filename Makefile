@@ -9,7 +9,7 @@ UI_NPM ?= npm
 RUN :=
 PROXY :=
 
-.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck ui-build ui-lint lint source-hygiene package-source check-source-package clean e2e-dry-run release smoke-release
+.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck ui-build ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -77,19 +77,20 @@ lint:
 	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 
 source-hygiene:
-	@if $(PROXY) find . -type f \( -path './bin/*' -o -path './release/*' -o -path './cli/ui/out/*' -o -path './cli/ui/.next/*' -o -name 'opsi-agent' -o -name 'opsi-cloud' -o -name 'opsi-bootstrap-worker' -o -name 'opsi' -o -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.sqlite3' -o -name '*.tsbuildinfo' \) -print | grep -n "."; then echo "source hygiene failed: run 'make clean' and do not commit generated artifacts"; exit 1; fi
+	$(RUN) ./scripts/source-package.sh check-tree
 	@legacy_action='rate_limit_'ingress; legacy_annotation='nginx.ingress.kubernetes.io/'limit-rps; if rg -n "$$legacy_action|$$legacy_annotation" . --glob '!docs/archive/**' --glob '!docs/opsi-roadmap-v3/**' --glob '!docs/opsi_roadmap_v3/**' --glob '!.git/**'; then echo "legacy ingress remediation reference found"; exit 1; fi
 	@if rg -n 'IngressEnabled|Traefik-safe graceful shutdown defaults|sleep 10' agent cli cloud contracts --glob '!**/*_test.go'; then echo "removed ingress deployment capability found in production code"; exit 1; fi
 	@if rg -n 'bool ingress_enabled|json:"ingress_enabled|yaml:"ingress_enabled|^[[:space:]]*ingress_enabled:' agent cli cloud contracts --glob '!**/*_test.go'; then echo "removed ingress deployment config or contract found"; exit 1; fi
 	@if rg -n '"ingress"' cli/internal/commands --glob '!**/*_test.go'; then echo "removed --ingress CLI flag found"; exit 1; fi
 
 package-source:
-	$(RUN) mkdir -p dist
-	$(RUN) tar --exclude-vcs --exclude='./bin' --exclude='./release' --exclude='./dist' --exclude='./agent/opsi-agent' --exclude='./cli/opsi' --exclude='./cloud/opsi-cloud' --exclude='./cloud/opsi-bootstrap-worker' --exclude='./cli/ui/out' --exclude='./cli/ui/.next' --exclude='./cli/ui/node_modules' --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite-*' --exclude='*.sqlite3' --exclude='*.tsbuildinfo' --exclude='./coverage' --exclude='./.tmp' --exclude='./tmp' -czf dist/opsi-source.tar.gz --transform 's,^,opsi/,' .
-	$(RUN) $(MAKE) check-source-package
+	$(RUN) ./scripts/source-package.sh build dist/opsi-source.tar.gz
 
 check-source-package:
-	@if $(RUN) tar -tzf dist/opsi-source.tar.gz | grep -En "(^opsi/bin/|^opsi/release/|opsi-agent$$|opsi-cloud$$|opsi-bootstrap-worker$$|/opsi$$|\\.db$$|\\.sqlite($$|-)|\\.sqlite3$$|tsconfig\\.tsbuildinfo|cli/ui/(out|\\.next|node_modules)/)"; then echo "source archive contains forbidden artifacts"; exit 1; fi
+	$(RUN) ./scripts/source-package.sh check dist/opsi-source.tar.gz
+
+verify-source-package-policy:
+	$(RUN) ./scripts/source-package.sh self-test
 
 clean:
 	$(RUN) rm -rf bin release dist agent/opsi-agent cli/opsi cloud/opsi-cloud cloud/opsi-bootstrap-worker cli/ui/out cli/ui/.next cli/ui/node_modules cli/ui/tsconfig.tsbuildinfo headroom_memory.db coverage .tmp tmp
@@ -98,13 +99,17 @@ e2e-dry-run:
 	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/cloudrunner
 
 release: build
+	$(RUN) rm -rf release
 	$(RUN) mkdir -p release/config.examples release/docs
 	$(RUN) cp bin/opsi release/opsi
 	$(RUN) cp bin/opsi-agent release/opsi-agent
 	$(RUN) cp bin/opsi-cloud release/opsi-cloud
 	$(RUN) cp bin/opsi-bootstrap-worker release/opsi-bootstrap-worker
+	$(RUN) cp agent/config.example.yaml release/config.examples/agent.config.example.yaml
+	$(RUN) cp cloud/config.example.json release/config.examples/cloud.config.example.json
 	$(RUN) cp docs/demo_runbook.md release/docs/demo_runbook.md
 	cd release && $(RUN) sha256sum opsi opsi-agent opsi-cloud opsi-bootstrap-worker > checksums.txt
+	$(RUN) ./scripts/source-package.sh check-release release
 
 smoke-release:
 	$(PROXY) ./release/opsi version

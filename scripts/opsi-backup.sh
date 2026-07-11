@@ -47,6 +47,6 @@ fi
 cat > "$STAGE/manifest.json" <<JSON
 {"format":"$FORMAT","artifact":"$ARTIFACT","cloud_schema_version":$SCHEMA_VERSION,"min_restore_schema_version":$SCHEMA_VERSION,"created_by":"scripts/opsi-backup.sh","covers":["cloud_postgres_all_current_tables_if_configured","cloud_projects_members_rbac_nodes_agents_bootstrap_services_deployments_relay_idempotency_audit_pat_hashes_if_configured","agent_deploy_sqlite_if_configured","agent_service_catalog_sqlite_if_configured","agent_telemetry_incident_audit_uptime_metadata_if_configured"],"requires_external":["cloud_signing_keys","cloud_bootstrap_encryption_key","agent_tls_private_key","agent_cloud_relay_hmac_secret","k3s_datastore_or_cluster_backup"],"excludes":["app_secret_values","PAT_values","ssh_private_keys","kubeconfig","raw_logs","raw_metrics","source_code_snapshots","docker_layers","managed_service_user_data","k3s_datastore"]}
 JSON
-tar -C "$STAGE" -czf "$ARTIFACT" .
+tar -C "$STAGE" -czf "$ARTIFACT" manifest.json cloud agent
 "$ROOT/scripts/opsi-inspect-backup.sh" "$ARTIFACT" >/dev/null
 echo "backup artifact: $ARTIFACT"

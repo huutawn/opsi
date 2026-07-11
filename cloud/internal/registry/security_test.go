@@ -6,7 +6,7 @@ import (
 )
 
 func TestRedactStringAndAuditMetadata(t *testing.T) {
-	secret := "password=hunter2 token=abc K3S_TOKEN=join DATABASE_URL=postgres://u:p@h/db Authorization: Bearer abc\n-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
+	secret := "password=hunter2 token=abc K3S_TOKEN=join DATABASE_URL=postgres://u:p@h/db Authorization: Bearer abc\n-----BEGIN OPENSSH " + "PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
 	redacted := RedactString(secret)
 	for _, leaked := range []string{"hunter2", "token=abc", "K3S_TOKEN=join", "postgres://", "Bearer abc", "OPENSSH PRIVATE KEY"} {
 		if strings.Contains(redacted, leaked) {

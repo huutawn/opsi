@@ -16,14 +16,40 @@ cloud/opsi-cloud
 opsi-agent
 opsi-cli
 opsi-cloud
-certs/
-*.db
-*.sqlite
-*.sqlite3
-*.sqlite-*
 *.tsbuildinfo
 .AGENTS
 .AGENTS/*
+
+# Local runtime configuration
+**/config.local.yaml
+**/config.local.yml
+**/config.local.json
+**/config.local.toml
+
+# Environment and credential files
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+
+# Runtime certificates, keys and keystores
+**/certs/
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/id_rsa
+**/id_ed25519
+**/kubeconfig
+**/kubeconfig.*
+
+# Runtime output
+**/*-outbox.log
+**/*.log
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-*
+**/*.db
 # Test and Coverage
 *.test
 *.out

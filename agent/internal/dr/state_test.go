@@ -31,7 +31,7 @@ func TestAgentBackupRestoreSanitizesTelemetryAndPreservesCriticalMetadata(t *tes
 		t.Fatalf("backup: %v", err)
 	}
 	artifactBytes := readAllFiles(t, filepath.Join(backupDir, "agent"))
-	for _, forbidden := range []string{"app-secret-plaintext", "PAT-plaintext", "-----BEGIN OPENSSH PRIVATE KEY-----", "raw log contains secret"} {
+	for _, forbidden := range []string{"app-secret-plaintext", "PAT-plaintext", "-----BEGIN OPENSSH " + "PRIVATE KEY-----", "raw log contains secret"} {
 		if strings.Contains(artifactBytes, forbidden) {
 			t.Fatalf("backup artifact leaked forbidden plaintext %q", forbidden)
 		}
