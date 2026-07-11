@@ -67,23 +67,30 @@ func TestValidateRCABlocksUnsafeRollback(t *testing.T) {
 	}
 }
 
-func TestValidateRCARejectsMetadataHashMismatch(t *testing.T) {
+func TestValidateLegacyRCARejectsContextHashMismatch(t *testing.T) {
 	ctx := IncidentContext{SchemaVersion: "opsi.incident_context.v1", IncidentID: "inc-1", ProjectID: "p1", ServiceID: "svc"}
-	rca := fallbackRCA(ctx)
+	rca := validLegacyRCA(ctx)
 	rca.Metadata.InputContextHash = "sha256:bad"
-	if err := ValidateRCA(ctx, rca); err == nil || !strings.Contains(err.Error(), "metadata") {
-		t.Fatalf("expected metadata rejection, got %v", err)
+	if err := ValidateRCA(ctx, rca); err == nil || !strings.Contains(err.Error(), "context integrity") {
+		t.Fatalf("expected context integrity rejection, got %v", err)
 	}
 }
 
-func TestFallbackRCAIsExplicitLocalFallback(t *testing.T) {
-	ctx := IncidentContext{SchemaVersion: "opsi.incident_context.v1", IncidentID: "inc-1", ProjectID: "p1", ServiceID: "svc", AnomalyType: "cpu"}
-	rca := fallbackRCA(ctx)
-	if err := ValidateRCA(ctx, rca); err != nil {
-		t.Fatal(err)
+func TestListGetResolveAuthorizationIsPreserved(t *testing.T) {
+	store := &fakeStore{rec: telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", Status: "open"}}
+	svc := Service{Store: store}
+
+	if records, err := svc.List(context.Background(), ListRequest{ProjectID: "p1", UserID: "viewer", Role: "Viewer"}); err != nil || len(records) != 1 {
+		t.Fatalf("viewer list failed records=%+v err=%v", records, err)
 	}
-	if rca.Metadata.Provider != "local" || rca.Metadata.Model != "fallback" || !rca.Metadata.FallbackUsed || rca.Metadata.InputContextHash != HashIncidentContext(ctx) || !strings.Contains(rca.RootCause, "fallback") {
-		t.Fatalf("fallback metadata not explicit: %+v", rca.Metadata)
+	if rec, _, err := svc.Get(context.Background(), IncidentRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "viewer", Role: "Viewer"}); err != nil || rec == nil {
+		t.Fatalf("viewer get failed rec=%+v err=%v", rec, err)
+	}
+	if _, _, err := svc.Resolve(context.Background(), ActionRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "viewer", Role: "Viewer"}); err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("expected viewer resolve denial, got %v", err)
+	}
+	if rec, _, err := svc.Resolve(context.Background(), ActionRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "owner", Role: "Owner"}); err != nil || rec.Status != StatusResolved {
+		t.Fatalf("owner resolve failed rec=%+v err=%v", rec, err)
 	}
 }
 
@@ -131,7 +138,18 @@ func incidentRecordWithRCA() telemetry.IncidentRecord {
 }
 
 func metaForTest(ctx IncidentContext) RCAMeta {
-	return RCAMeta{Provider: "fixture", ConfiguredProvider: "fixture", Model: "fixture", InputContextHash: HashIncidentContext(ctx), CreatedAt: time.Unix(10, 0).UTC().Format(time.RFC3339)}
+	return RCAMeta{InputContextHash: HashIncidentContext(ctx), CreatedAt: time.Unix(10, 0).UTC().Format(time.RFC3339)}
+}
+
+func validLegacyRCA(ctx IncidentContext) RCA {
+	return RCA{
+		SchemaVersion:      "opsi.rca.v1",
+		IncidentID:         ctx.IncidentID,
+		RootCause:          "legacy root cause",
+		Confidence:         0.7,
+		Metadata:           metaForTest(ctx),
+		RecommendedActions: []Action{{ID: "scale", Type: "scale_replicas", Params: map[string]string{"service_id": ctx.ServiceID, "replicas": "3"}}},
+	}
 }
 
 type fakeStore struct{ rec telemetry.IncidentRecord }
@@ -140,9 +158,6 @@ func (f *fakeStore) ListIncidents(context.Context, string, string, int) ([]telem
 	return []telemetry.IncidentRecord{f.rec}, nil
 }
 func (f *fakeStore) GetIncident(context.Context, string, string) (*telemetry.IncidentRecord, error) {
-	return &f.rec, nil
-}
-func (f *fakeStore) UpdateIncidentRCA(context.Context, string, string, string, string, time.Time) (*telemetry.IncidentRecord, error) {
 	return &f.rec, nil
 }
 func (f *fakeStore) AppendIncidentAction(_ context.Context, _, _, status, actions string, _ time.Time) (*telemetry.IncidentRecord, error) {

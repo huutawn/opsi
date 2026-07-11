@@ -1,7 +1,6 @@
 package incident
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -20,16 +18,13 @@ import (
 )
 
 const (
-	StatusAnalyzed      = "analyzed"
-	StatusActionPending = "action_pending"
-	StatusResolving     = "resolving"
-	StatusResolved      = "resolved"
+	StatusResolving = "resolving"
+	StatusResolved  = "resolved"
 )
 
 type Store interface {
 	GetIncident(ctx context.Context, projectID, incidentID string) (*telemetry.IncidentRecord, error)
 	ListIncidents(ctx context.Context, projectID, status string, limit int) ([]telemetry.IncidentRecord, error)
-	UpdateIncidentRCA(ctx context.Context, projectID, incidentID, status, rcaResult string, updated time.Time) (*telemetry.IncidentRecord, error)
 	AppendIncidentAction(ctx context.Context, projectID, incidentID, status, mitigationActions string, updated time.Time) (*telemetry.IncidentRecord, error)
 	ResolveIncident(ctx context.Context, projectID, incidentID string, resolved time.Time) (*telemetry.IncidentRecord, error)
 }
@@ -38,7 +33,6 @@ type Service struct {
 	Store       Store
 	Audit       secret.AuditSink
 	Auth        secret.AuthVerifier
-	Cloud       AnalyzerClient
 	KubectlPath string
 	Namespace   string
 	DryRun      bool
@@ -46,7 +40,7 @@ type Service struct {
 	Now         func() time.Time
 }
 
-type AnalyzeRequest struct {
+type IncidentRequest struct {
 	ProjectID  string `json:"project_id"`
 	IncidentID string `json:"incident_id"`
 	UserID     string `json:"user_id"`
@@ -102,12 +96,8 @@ type RCA struct {
 }
 
 type RCAMeta struct {
-	Provider           string `json:"provider"`
-	ConfiguredProvider string `json:"configured_provider,omitempty"`
-	Model              string `json:"model"`
-	FallbackUsed       bool   `json:"fallback_used"`
-	InputContextHash   string `json:"input_context_hash"`
-	CreatedAt          string `json:"created_at"`
+	InputContextHash string `json:"input_context_hash"`
+	CreatedAt        string `json:"created_at"`
 }
 
 type Action struct {
@@ -128,48 +118,6 @@ type ActionResult struct {
 	ExecutedAt time.Time `json:"executed_at"`
 }
 
-type AnalyzerClient interface {
-	Analyze(ctx context.Context, req IncidentContext) (RCA, error)
-}
-
-type HTTPAnalyzerClient struct {
-	Endpoint string
-	Client   *http.Client
-}
-
-func (c HTTPAnalyzerClient) Analyze(ctx context.Context, req IncidentContext) (RCA, error) {
-	endpoint := strings.TrimRight(c.Endpoint, "/")
-	if endpoint == "" {
-		return fallbackRCA(req), nil
-	}
-	body, _ := json.Marshal(req)
-	client := c.Client
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/ai/incidents/analyze", bytes.NewReader(body))
-	if err != nil {
-		return fallbackRCA(req), nil
-	}
-	httpReq.Header.Set("content-type", "application/json")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return fallbackRCA(req), nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return fallbackRCA(req), nil
-	}
-	var out RCA
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return fallbackRCA(req), nil
-	}
-	if err := ValidateRCA(req, out); err != nil {
-		return fallbackRCA(req), nil
-	}
-	return out, nil
-}
-
 func (s *Service) List(ctx context.Context, req ListRequest) ([]telemetry.IncidentRecord, error) {
 	auth, err := s.authorize(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT})
 	if err != nil {
@@ -184,7 +132,7 @@ func (s *Service) List(ctx context.Context, req ListRequest) ([]telemetry.Incide
 	return s.Store.ListIncidents(ctx, auth.ProjectID, strings.TrimSpace(req.Status), req.Limit)
 }
 
-func (s *Service) Get(ctx context.Context, req AnalyzeRequest) (*telemetry.IncidentRecord, RCA, error) {
+func (s *Service) Get(ctx context.Context, req IncidentRequest) (*telemetry.IncidentRecord, RCA, error) {
 	auth, err := s.authorize(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT})
 	if err != nil {
 		return nil, RCA{}, err
@@ -197,41 +145,6 @@ func (s *Service) Get(ctx context.Context, req AnalyzeRequest) (*telemetry.Incid
 		return nil, RCA{}, firstErr(err, errors.New("incident not found"))
 	}
 	return rec, rcaFromIncident(rec), nil
-}
-
-func (s *Service) Analyze(ctx context.Context, req AnalyzeRequest) (*telemetry.IncidentRecord, RCA, error) {
-	auth, err := s.authorize(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT})
-	if err != nil {
-		return nil, RCA{}, err
-	}
-	if !canApprove(auth.Role) {
-		_ = s.audit(ctx, auth, "incident.analyze", req.IncidentID, "denied", "rbac")
-		return nil, RCA{}, errors.New("permission denied")
-	}
-	rec, err := s.Store.GetIncident(ctx, req.ProjectID, req.IncidentID)
-	if err != nil || rec == nil {
-		return nil, RCA{}, firstErr(err, errors.New("incident not found"))
-	}
-	ictx, err := (IncidentContextBuilder{Store: s.Store, Window: 5 * time.Minute}).Build(ctx, *rec)
-	if err != nil {
-		return nil, RCA{}, err
-	}
-	client := s.Cloud
-	if client == nil {
-		client = HTTPAnalyzerClient{}
-	}
-	rca, err := client.Analyze(ctx, ictx)
-	if err != nil {
-		return nil, RCA{}, err
-	}
-	if err := ValidateRCA(ictx, rca); err != nil {
-		return nil, RCA{}, err
-	}
-	rca = withActionHashes(rca)
-	data, _ := json.Marshal(rca)
-	updated, err := s.Store.UpdateIncidentRCA(ctx, req.ProjectID, req.IncidentID, StatusActionPending, string(data), s.now())
-	_ = s.audit(ctx, auth, "incident.analyze", req.IncidentID, result(err), "")
-	return updated, rca, err
 }
 
 func (s *Service) Approve(ctx context.Context, req ActionRequest) (*telemetry.IncidentRecord, RCA, error) {
@@ -316,8 +229,8 @@ func ValidateRCA(ctx IncidentContext, r RCA) error {
 	if r.SchemaVersion != "opsi.rca.v1" || r.IncidentID != ctx.IncidentID || r.RootCause == "" || r.Confidence < 0 || r.Confidence > 1 {
 		return errors.New("invalid rca")
 	}
-	if r.Metadata.Provider == "" || r.Metadata.Model == "" || r.Metadata.CreatedAt == "" || r.Metadata.InputContextHash != HashIncidentContext(ctx) {
-		return errors.New("invalid rca metadata")
+	if r.Metadata.CreatedAt == "" || r.Metadata.InputContextHash != HashIncidentContext(ctx) {
+		return errors.New("invalid legacy rca context integrity")
 	}
 	if len(r.RecommendedActions) == 0 || len(r.RecommendedActions) > 5 {
 		return errors.New("invalid recommended_actions")
@@ -367,11 +280,6 @@ func (s *Service) run(ctx context.Context, name string, args ...string) error {
 		return s.Exec(ctx, name, args...)
 	}
 	return exec.CommandContext(ctx, name, args...).Run()
-}
-
-func fallbackRCA(ctx IncidentContext) RCA {
-	rca := RCA{SchemaVersion: "opsi.rca.v1", IncidentID: ctx.IncidentID, RootCause: "Local fallback analysis: " + first(ctx.AnomalyType, "unknown"), Confidence: 0.62, ContributingFactors: []string{"metric anomaly", "recent service health degradation"}, RecommendedActions: []Action{{ID: "scale-replicas", Type: "scale_replicas", Description: "Scale service replicas to reduce pressure", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID, "replicas": "2"}}, {ID: "restart-pod", Type: "restart_pod", Description: "Restart deployment pods", RollbackSafe: true, Params: map[string]string{"service_id": ctx.ServiceID}}}, Metadata: RCAMeta{Provider: "local", ConfiguredProvider: "local", Model: "fallback", FallbackUsed: true, InputContextHash: HashIncidentContext(ctx), CreatedAt: time.Now().UTC().Format(time.RFC3339)}}
-	return withActionHashes(rca)
 }
 
 func (s *Service) verify(ctx context.Context, rec telemetry.IncidentRecord, action Action) error {

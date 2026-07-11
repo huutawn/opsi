@@ -5,14 +5,65 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/config"
+	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
+
+func TestAnalyzeIncidentReturnsUnimplementedWithoutNetworkOrMutation(t *testing.T) {
+	var networkCalls atomic.Int32
+	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		networkCalls.Add(1)
+	}))
+	defer cloud.Close()
+
+	store, err := telemetry.OpenSQLiteStore(t.TempDir() + "/telemetry.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.InsertIncident(context.Background(), telemetry.IncidentRecord{
+		ID:        "inc-1",
+		ProjectID: "p1",
+		ServiceID: "svc-1",
+		Status:    "open",
+		CreatedAt: time.Unix(10, 0).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.CloudEndpoint = cloud.URL
+	service := NewIncidentService(incidentService(cfg, store, nil))
+	resp, err := service.AnalyzeIncident(context.Background(), &agentv1.IncidentAnalyzeRequest{
+		ProjectID:  "p1",
+		IncidentID: "inc-1",
+		UserID:     "u1",
+		Role:       "Owner",
+	})
+	if status.Code(err) != codes.Unimplemented || resp != nil {
+		t.Fatalf("expected unimplemented without response, resp=%+v err=%v", resp, err)
+	}
+	if networkCalls.Load() != 0 {
+		t.Fatalf("removed analysis path made %d network calls", networkCalls.Load())
+	}
+	rec, err := store.GetIncident(context.Background(), "p1", "inc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil || rec.Status != "open" || rec.RCAResult != "" || rec.MitigationActions != "[]" {
+		t.Fatalf("removed analysis path mutated incident: %+v", rec)
+	}
+}
 
 func TestRunServesHealthAndStatus(t *testing.T) {
 	cfg := config.Default()

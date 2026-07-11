@@ -179,13 +179,8 @@ func (s *ServiceManagerService) DeleteManagedService(ctx context.Context, req *a
 	return &agentv1.DeleteManagedServiceResponse{ProjectID: req.ProjectID, ID: req.ID, Deleted: true}, nil
 }
 
-func (s *IncidentService) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Analyze(ctx, incident.AnalyzeRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
-	if err != nil {
-		return nil, mapIncidentError(err)
-	}
-	return incidentResponse(rec, rca), nil
+func (s *IncidentService) AnalyzeIncident(context.Context, *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "incident AI analysis has been removed")
 }
 
 func (s *IncidentService) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
@@ -204,7 +199,7 @@ func (s *IncidentService) ListIncidents(ctx context.Context, req *agentv1.Incide
 
 func (s *IncidentService) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
 	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Get(ctx, incident.AnalyzeRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	rec, rca, err := s.service.Get(ctx, incident.IncidentRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
@@ -766,9 +761,6 @@ func incidentResponse(rec *telemetry.IncidentRecord, r incident.RCA) *agentv1.In
 	for _, action := range r.RecommendedActions {
 		resp.RecommendedActions = append(resp.RecommendedActions, agentv1.RecommendedAction{ID: action.ID, Type: action.Type, Description: action.Description, RollbackSafe: action.RollbackSafe, Params: action.Params, ActionHash: action.ActionHash})
 	}
-	if r.Metadata.Provider != "" {
-		resp.RCAMetadata = &agentv1.RCAMetadata{Provider: r.Metadata.Provider, ConfiguredProvider: r.Metadata.ConfiguredProvider, Model: r.Metadata.Model, FallbackUsed: r.Metadata.FallbackUsed, InputContextHash: r.Metadata.InputContextHash, CreatedAt: r.Metadata.CreatedAt}
-	}
 	return resp
 }
 
@@ -783,7 +775,6 @@ func incidentService(cfg config.Config, store telemetry.Store, auth secret.AuthV
 		Store:       store,
 		Audit:       store.(secret.AuditSink),
 		Auth:        auth,
-		Cloud:       incident.HTTPAnalyzerClient{Endpoint: cfg.CloudEndpoint},
 		KubectlPath: cfg.Telemetry.KubectlPath,
 		Namespace:   firstNonEmpty(cfg.Deployment.Namespace, cfg.Secret.Namespace),
 		DryRun:      cfg.Deployment.DryRun || cfg.Deployment.BuilderMode == "dry_run",
