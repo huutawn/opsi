@@ -1,80 +1,46 @@
-# Opsi Mandatory Production-Ready Rules
+# Opsi Production-readiness Rules
 
-Load this file for every implementation, review, refactor, or planning task until all P0 production gates are green.
-
-## Prime rule
-
-Do not claim production-ready unless `docs/production_ready/09_PRODUCTION_ACCEPTANCE_GATES.md` has all P0 gates green with code, tests, docs, and manual/e2e evidence.
+Production readiness is `UNPROVEN`. Do not claim it until roadmap v3 hardening,
+release/DR acceptance, and repeated protected real-infrastructure gates pass with
+reviewed redacted artifacts.
 
 ## Mandatory boundaries
 
-1. Browser production workflows must call `/api/local/...`; no direct Cloud runtime calls.
-2. Browser must never receive or store long-lived PATs, private keys, kubeconfig, app secrets, OTP seeds, or raw runtime credentials.
-3. Cloud must not own runtime execution and must not store raw logs, raw metrics, app secret values, kubeconfig, Docker layers, source code, or long-lived runtime payloads.
-4. Agent owns deployment execution, K3s operations, runtime secrets, telemetry, incidents, local audit, and runtime sync buffer.
-5. CLI local backend owns OS keychain PAT access and local session facade.
+1. Browser production workflows use `/api/local/...`; long-lived PATs remain in
+   CLI OS keychain.
+2. Cloud owns control-plane metadata, not runtime execution, raw logs/metrics,
+   application secrets, kubeconfig, source code, AI runtime, or AI providers.
+3. Agent owns runtime facts and execution. Current incident surface is factual
+   list/get/resolve only.
+4. Historical RCA/mitigation columns are storage-only and never authority.
+5. `IncidentEvidence v1`, Safe ActionPlane, CLI MCP, and managed gateway are not
+   implemented at M0.
+6. Future AI is user-owned through the CLI-side MCP boundary, cannot connect
+   directly to Agent, and cannot execute or approve. Human approval is separate;
+   Agent deterministic policy and typed executors are authoritative.
 
 ## Mandatory implementation rules
 
-1. No fake success. Return typed unsupported/blocked errors when capability is missing.
-2. No metadata-only runtime operations in production. Drain/remove/deploy/rotate/mitigate must execute through Agent or be blocked.
-3. All mutating operations require RBAC, project scope, audit, request ID, and idempotency key where retryable.
-4. Deployment jobs must carry versioned `DeploymentIntent` and Agent must reject unsafe/unknown intent.
-5. Unsupported image-source deploy must be rejected before queueing unless implemented end-to-end.
-6. Long-running operations must be restart-safe or explicitly recoverable.
-7. Production Cloud must not use in-memory store for relay, audit, bootstrap, idempotency, or registry source of truth.
-8. Secret values must never be passed through process command args.
-9. Deployment source paths must be validated against path traversal and symlink escape.
-10. AI output is advisory; Agent executes only typed allowlist actions after explicit user approval and audit.
+- No fake success or future-as-current claim.
+- Every mutation requires project scope, RBAC, audit, request identity, and
+  idempotency where retryable.
+- Runtime operations execute through Agent or fail closed.
+- Secret values never enter command arguments, logs, audit, Cloud metadata, MCP
+  output, or AI context.
+- Deployment paths reject traversal/symlink escape and unsupported source types
+  before runtime work.
+- R4/free-form shell, arbitrary kubectl/SQL, host/K3s destructive operations,
+  credential export, and autonomous remediation are forbidden for AI origin.
 
-## Mandatory documentation rules
+## Active sources
 
-1. `docs/opsi_srs.md` is the canonical current SRS v4 production-ready contract.
-2. Legacy SRS/plans must be archived and labeled historical.
-3. `docs/current_state.md` must describe implemented behavior only.
-4. `docs/status_matrix.md` must use only: `DONE`, `PARTIAL`, `CONTRACT_ONLY`, `DOC_ONLY`, `NOT_STARTED`, `FAILED_OR_REGRESSED`, `BLOCKED`, `UNPROVEN`, `MANUAL_GATED`.
-5. Any boundary change requires ADR.
-6. A feature cannot be marked `DONE` without code, tests, config, verification command, and docs evidence.
+- `docs/opsi_srs.md` — target requirements;
+- `docs/architecture.md` — current and target boundaries;
+- `docs/current_state.md` — implemented state;
+- `docs/status_matrix.md` — evidence-backed status;
+- `docs/production_ready/README.md` — acceptance-document index;
+- `docs/opsi_roadmap_v3/09_PRODUCTION_HARDENING.md` and
+  `docs/opsi_roadmap_v3/10_RELEASE_DR_ACCEPTANCE.md` — future production gates.
 
-## Mandatory review rejection checklist
-
-Reject the change if any answer is yes:
-
-- Does browser code call Cloud directly for production runtime workflow?
-- Does Cloud receive/store raw logs, raw metrics, secrets, kubeconfig, source code, or Docker layers?
-- Does UI show success without backend execution?
-- Can a user queue an unsupported deployment?
-- Can path traversal escape repo checkout during deploy?
-- Can a secret appear in command args, logs, errors, audit, support summary, or AI payload?
-- Can a user access another org/project resource?
-- Can Cloud restart lose a deployment/bootstrap job?
-- Did behavior change without updating current state/status matrix?
-- Is production mode allowed with debug UI, dev OTP echo, weak secrets, unsigned Agent requests, or in-memory store?
-
-## Required files for production work
-
-Read these before changing production behavior:
-
-- `.agents/rules.md`
-- `.agents/production_ready_rules.md`
-- `docs/production_ready/00_MASTER_PRODUCTION_READY_PLAN.md`
-- `docs/production_ready/09_PRODUCTION_ACCEPTANCE_GATES.md`
-- relevant plan under `docs/production_ready/`
-- `docs/current_state.md`
-- `docs/status_matrix.md`
-
-## Required gates before completion
-
-At minimum run or explain why you cannot run:
-
-```bash
-make clean
-make verify
-make test
-make build
-rg -n "placeholder|mock|fixture|debug-only|not implemented|unsupported|TODO|FIXME" docs .agents agent cli cloud contracts
-rg -n "CloudRegistryClient|NEXT_PUBLIC_CLOUD|cloudURL|localhost:9800|127\.0\.0\.1:9800" cli/ui
-rg -n "--from-literal|private key|kubeconfig|TOTP secret|OTP code|Gemini API key|OpenAI API key|DATABASE_URL" agent cli cloud contracts docs .agents
-```
-
-Every allowed match must be explained in the final change summary.
+Minimum repository checks are `make verify`, `make test`, `make source-hygiene`,
+`make package-source`, and the relevant protected real-infrastructure workflow.

@@ -1,5 +1,7 @@
 # Clean VPS/K3s E2E Proof
 
+Status: active runbook; `MANUAL_GATED`.
+
 Canonical commands:
 
 ```bash
@@ -7,9 +9,13 @@ make verify-e2e-k3s-preflight
 make verify-e2e-k3s
 ```
 
-Supported target: a clean Ubuntu 22.04/24.04 VPS reachable by SSH password auth. The path uses the CLI local backend, Cloud metadata/job envelopes, bootstrap worker, Agent, and real K3s. It does not use fake adapters or Agent dry-run.
+Supported target: a clean Ubuntu 22.04/24.04 VPS reachable by SSH password
+authentication. The path uses the CLI local backend, Cloud metadata/job
+envelopes, Bootstrap Worker, Agent, and real K3s. It does not use Agent dry-run
+or fake runtime adapters.
 
-Required tools: `bash`, `curl`, `python3`, `ssh`, `sshpass`, `go`, `node`, `npm`, `kubectl`.
+Required tools: `bash`, `curl`, `python3`, `ssh`, `sshpass`, `go`, `node`, `npm`,
+and `kubectl`.
 
 Required environment:
 
@@ -24,16 +30,40 @@ export OPSI_E2E_SERVICE_SHA=...
 export OPSI_E2E_TOTP_CODE=...
 ```
 
-Optional incident trigger:
+Optional controlled failure revision:
 
 ```bash
 export OPSI_E2E_BAD_SERVICE_SHA=...
 ```
 
-Covered steps: local session auth, Add Server bootstrap, K3s install verification, Agent heartbeat/readiness, Git service deploy, K3s rollout/runtime verification, Agent-backed secret create/rotate/reveal gate, Agent-backed telemetry/log fetch, factual incident list/detail/resolve, deployment and incident resolve audit evidence, sanitized artifacts, cleanup instructions.
+## Active scenario
 
-The incident proof validates factual lifecycle state only. Opsi currently has no incident-derived remediation action plane; the future safe ActionPlane and gateway policy adapters are not implemented.
+The current script covers local session authentication, Add Server bootstrap,
+K3s/Agent readiness, Git deployment, runtime rollout checks, secret
+create/rotate/reveal gates, telemetry/log queries, deployment audit, and a
+factual incident lifecycle:
 
-Not covered until a maintainer runs the full command against real infra: worker-node join, HA/server removal, DR, release checksum distribution proof, provider OAuth setup.
+1. list incidents;
+2. get incident detail;
+3. resolve the incident;
+4. verify `incident.resolve` audit.
 
-Artifacts: `.tmp/e2e-k3s/<run-id>/`. Files are redacted; raw kubeconfig, SSH password, PAT, OTP/TOTP, app secret values, and raw logs are not stored as artifacts.
+The incident proof contains no AI analysis, root-cause result, recommended
+action, mitigation approval, action hash, or fallback provider behavior.
+
+## Current limitations
+
+Opsi currently has no public `IncidentEvidence v1`, Safe ActionPlane, CLI MCP
+bridge, or managed gateway. This runbook does not claim those target flows.
+
+The command path exists, but no committed real-infrastructure pass artifact
+currently proves the complete scenario. Do not change `MANUAL_GATED` to `DONE`
+until a maintainer runs the protected workflow, reviews the redacted output, and
+commits or otherwise records the accepted artifact.
+
+Artifacts are written under `.tmp/e2e-k3s/<run-id>/`. Raw kubeconfig, SSH
+password, PAT, OTP/TOTP, app secret values, and raw logs must not be stored.
+
+Not currently proven: worker-node join/HA, Opsi-managed gateway/TLS, future
+evidence/action/MCP flow, release checksum distribution, full DR, or production
+acceptance.

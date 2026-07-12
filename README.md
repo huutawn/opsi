@@ -1,17 +1,32 @@
 # Opsi
 
-Local-first control plane prototype. Current implementation state lives in `docs/current_state.md`.
+Opsi is a local-first operations control-plane prototype. Current implementation
+truth lives in `docs/current_state.md`; target requirements live in
+`docs/opsi_srs.md`; capability evidence lives in `docs/status_matrix.md`.
 
-## Build And Test
+## Current M0 boundary
+
+- Cloud has no AI runtime or AI provider integration.
+- Agent has no AI analyzer, fallback RCA, or RCA-backed execution.
+- Active incidents support factual list/get/resolve only.
+- `IncidentEvidence v1`, Safe ActionPlane, and the CLI-side MCP bridge are not
+  implemented.
+- Opsi does not currently render or manage Ingress, Gateway, domains, or TLS.
+- Production readiness and a complete clean VPS/K3s pass remain unproven.
+
+The roadmap target is user-owned AI through a future local CLI MCP bridge. AI
+will read redacted evidence and propose typed actions; deterministic Agent policy
+and a separate human approval channel remain authoritative. MCP will not expose
+execute or approve tools.
+
+## Build and test
 
 Supported toolchain:
 
-- Go `1.26.4`
-- Node `24.16.0`
-- npm `11.17.0`
-- `GOTOOLCHAIN=local` in normal verification, so Go will not download a toolchain implicitly
-- Node/npm for `cli/ui`; UI dependencies are restored from `cli/ui/package-lock.json`
-- `` is optional for Make targets. If installed, Make auto-detects it and wraps commands; if absent, raw `go`, `npm`, `tar`, and shell commands run directly. To force raw commands: `make = verify`.
+- Go `1.26.4` with `GOTOOLCHAIN=local`;
+- Node `24.16.0`;
+- npm `11.17.0`;
+- UI dependencies restored from `cli/ui/package-lock.json`.
 
 Required clean-checkout commands:
 
@@ -23,25 +38,8 @@ make clean
 make package-source
 ```
 
-`make verify` is canonical. It checks the pinned toolchain, source hygiene, Go vet/tests for `agent/`, `cli/`, `cloud/`, and `contracts/go/`, then runs `npm ci`, `npm run build`, and `npm run lint` in `cli/ui`.
-
-Clean VPS/K3s E2E proof is separate because it needs protected infrastructure:
-
-```bash
-make verify-e2e-k3s-preflight
-make verify-e2e-k3s
-```
-
-Runbook: `docs/runbooks/clean_vps_k3s_e2e.md`.
-
-CI runs the same clean path from `.github/workflows/ci.yml`:
-
-```bash
-make clean
-make verify
-make build
-make package-source
-```
+`make verify` checks toolchain, source hygiene, Go vet/tests for each module, and
+the UI restore/build/lint path. No optional command wrapper is required.
 
 Module test commands:
 
@@ -52,8 +50,21 @@ cd cli && GOTOOLCHAIN=local go test ./cmd/... ./internal/...
 cd cloud && GOTOOLCHAIN=local go test ./...
 ```
 
-Offline behavior:
+## Clean VPS/K3s proof
 
-- Go verification uses `GOTOOLCHAIN=local`; dependencies must already be in the module cache or vendored by the environment.
-- UI verification runs `npm ci`; it is reproducible from the lockfile but needs registry/cache access when packages are not already cached.
-- `make package-source` excludes binaries, release artifacts, databases, UI output, caches, and coverage files, then validates the archive.
+```bash
+make verify-e2e-k3s-preflight
+make verify-e2e-k3s
+```
+
+The active incident segment checks list, detail, resolve, and resolve audit only.
+The command path exists, but no committed real-infrastructure pass artifact
+currently proves the complete scenario. See
+`docs/runbooks/clean_vps_k3s_e2e.md`.
+
+## Roadmap order
+
+M0 ends with V3-008 documentation truth. After review, Phase 2 starts at V3-009:
+convert Bootstrap Worker from `RunOnce(session_id)` to a poll/lease daemon.
+IncidentEvidence, Safe ActionPlane, CLI MCP, and production gates remain later
+ordered work.

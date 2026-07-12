@@ -1,45 +1,48 @@
 # Demo Runbook
 
-## Clean Setup
+Status: active factual demo guide; not a production-readiness artifact.
 
-1. Build artifacts:
-   ```bash
-   make ui-build
-   make release
-   make smoke-release
-   ```
-2. Start Cloud in dev mode with debug UI only if needed:
-   ```bash
-   ./release/opsi-cloud --addr 127.0.0.1:9800 --config cloud.dev.json
-   ```
-3. Start Agent with local/dev config:
-   ```bash
-   ./release/opsi-agent --config agent.dev.yaml
-   ```
-4. Start local UI:
-   ```bash
-   ./release/opsi start --addr 127.0.0.1:9780 --config cli.dev.yaml
-   ```
+## Clean setup
 
-## Happy Path
+1. Build artifacts with `make ui-build`, `make release`, and
+   `make smoke-release`.
+2. Start Cloud in development mode only with an explicitly sanitized local
+   configuration.
+3. Start Agent with local development configuration.
+4. Start the Local UI through `opsi start`.
 
-1. Create/open a project.
-2. Register first server/node.
+Local configuration files and credentials are operator-created runtime inputs;
+they are not tracked source artifacts.
+
+## Happy path
+
+1. Create or open a project.
+2. Register the first server/node.
 3. Register a Git-backed service.
-4. Queue deployment.
-5. Confirm Agent leases job, reports result, Cloud deployment becomes terminal.
-6. Open support/metrics and audit screens; verify request IDs and redaction.
+4. Queue a deployment.
+5. Confirm Agent leases the job and reports a terminal runtime result.
+6. Inspect telemetry/log summaries and redacted audit metadata.
 
-## Failure Path
+## Failure and incident path
 
-1. Queue a bad deployment revision.
-2. Confirm deployment fails terminally or rolls back.
-3. Open incident/RCA flow.
-4. Verify RCA metadata shows fixture/fallback when no provider is configured.
+1. Queue a controlled failing deployment revision.
+2. Confirm failure or deploy-time rollback behavior from factual deployment
+   state.
+3. List incidents and open incident detail.
+4. Resolve the incident and verify resolve audit.
 
-## Fallbacks
+Do not demonstrate or claim AI analysis, fallback RCA, recommended mitigation,
+incident action approval, managed gateway behavior, MCP, or Safe ActionPlane.
+Those capabilities are not implemented at M0.
 
-- Cloud unavailable: local Agent/CLI commands still expose status and local runtime paths.
-- UI build stale/missing: CLI binary serves embedded `cli/ui/out`; devs may use `opsi start --dev-ui http://localhost:3000`.
-- Gemini/API unavailable: fixture RCA is explicit via response metadata; do not claim provider mode.
+## Honest fallbacks
 
+- If Cloud is unavailable, only workflows that do not require fresh Cloud
+  identity/OTP/relay may continue locally.
+- If the UI build is missing, `opsi start` returns an honest unavailable response
+  or may proxy an explicitly configured development UI.
+- If Agent is unavailable, runtime operations fail unavailable; there is no shell
+  or SSH execution fallback.
+
+For real infrastructure use `docs/runbooks/clean_vps_k3s_e2e.md`. Its status is
+`MANUAL_GATED` because no committed full-pass artifact exists.
