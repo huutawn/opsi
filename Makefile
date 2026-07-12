@@ -10,7 +10,7 @@ RUN :=
 PROXY :=
 DEV_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/dev-control-plane/.env -f deploy/dev-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck ui-build ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm ui-build ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -62,6 +62,13 @@ verify-e2e-node-lifecycle:
 
 verify-e2e-node-lifecycle-selfcheck:
 	$(RUN) ./scripts/e2e/verify-node-lifecycle.sh --self-test
+
+verify-dev-control-plane-preflight:
+	./scripts/e2e/verify-dev-control-plane.sh --preflight
+
+verify-dev-control-plane-clean-vm:
+	./scripts/e2e/verify-dev-control-plane.sh \
+	  --evidence docs/evidence/v3-013-clean-vm.md
 
 build:
 	$(RUN) mkdir -p bin

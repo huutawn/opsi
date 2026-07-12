@@ -100,6 +100,9 @@ docs/runbooks/*
 !docs/runbooks/clean_vps_k3s_e2e.md
 !docs/runbooks/bootstrap_first_owner.md
 !docs/runbooks/dev_control_plane.md
+!docs/evidence/
+docs/evidence/*
+!docs/evidence/v3-013-clean-vm.md
 !docs/architecture_decisions/
 docs/architecture_decisions/*
 !docs/architecture_decisions/ADR-001-control-plane-boundary.md
