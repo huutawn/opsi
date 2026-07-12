@@ -33,6 +33,10 @@ opsi-cloud
 **/.env.*
 !**/.env.example
 !**/.env.sample
+/deploy/dev-control-plane/.env
+/deploy/dev-control-plane/config/cloud.json
+/deploy/dev-control-plane/config/bootstrap-worker.json
+/deploy/dev-control-plane/secrets/**
 
 # Runtime certificates, keys and keystores
 **/certs/
@@ -95,6 +99,7 @@ docs/*
 docs/runbooks/*
 !docs/runbooks/clean_vps_k3s_e2e.md
 !docs/runbooks/bootstrap_first_owner.md
+!docs/runbooks/dev_control_plane.md
 !docs/architecture_decisions/
 docs/architecture_decisions/*
 !docs/architecture_decisions/ADR-001-control-plane-boundary.md

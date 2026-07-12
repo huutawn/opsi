@@ -1,0 +1,94 @@
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    logging: *bounded-logging
+
+  cloud:
+    image: opsi-cloud-dev:${OPSI_VERSION:-dev}
+    build:
+      context: ../../cloud
+      dockerfile: Dockerfile
+      target: cloud
+      args:
+        GO_VERSION: 1.26.4
+        VERSION: ${OPSI_VERSION:-dev}
+    command: ["--addr", "0.0.0.0:9800", "--config", "/etc/opsi/cloud.json"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config/cloud.json:/etc/opsi/cloud.json:ro,Z
+      - ./secrets:/run/opsi-secrets:Z
+      - cloud-data:/var/lib/opsi
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9800/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    logging: *bounded-logging
+
+  bootstrap-worker:
+    image: opsi-bootstrap-worker-dev:${OPSI_VERSION:-dev}
+    build:
+      context: ../../cloud
+      dockerfile: Dockerfile
+      target: bootstrap-worker
+      args:
+        GO_VERSION: 1.26.4
+        VERSION: ${OPSI_VERSION:-dev}
+    command: ["--config", "/etc/opsi/bootstrap-worker.json"]
+    depends_on:
+      cloud:
+        condition: service_healthy
+    volumes:
+      - ./config/bootstrap-worker.json:/etc/opsi/bootstrap-worker.json:ro,Z
+    healthcheck:
+      test: ["CMD", "opsi-bootstrap-worker", "--check", "--config", "/etc/opsi/bootstrap-worker.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    logging: *bounded-logging
+
+  reverse-proxy:
+    image: caddy:2.10.0-alpine
+    depends_on:
+      cloud:
+        condition: service_healthy
+    ports:
+      - "${OPSI_DEV_BIND_ADDRESS}:${OPSI_DEV_HTTP_PORT}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro,Z
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+    logging: *bounded-logging
+
+volumes:
+  postgres-data:
+  cloud-data:

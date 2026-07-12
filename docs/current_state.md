@@ -124,6 +124,18 @@ evidence.
 
 ## Deployment and gateway truth
 
+Opsi now has one supported development control-plane deployment path: Docker
+Compose. The package starts PostgreSQL, Opsi Cloud, one Bootstrap Worker, and a
+Caddy reverse proxy. PostgreSQL data and Cloud OTP/alert outboxes use named
+volumes. All four services have health checks, `unless-stopped` restart policy,
+and bounded Docker logs. Cloud performs the existing schema migration during
+controlled startup after PostgreSQL becomes healthy.
+
+The committed configuration examples contain placeholders only. Runtime
+environment, Cloud/Worker configuration, secret directory, and initial PAT
+files are gitignored. This package is development-only; V3-013 must still prove
+clean-VM deployment and independent service restart. M1 has not passed.
+
 Git-based deployment exists and can apply user-provided manifests. Such a
 manifest may contain its own Service, Ingress, Gateway, TLS, lifecycle, or
 shutdown configuration; those resources are user-owned input, not an
@@ -143,18 +155,17 @@ audit. The command path exists, but no committed real-infrastructure pass
 artifact currently proves the complete scenario. Status remains
 `MANUAL_GATED`.
 
-Production readiness remains unproven. Current gaps include repeatable
-control-plane deployment evidence, clean control-plane restart proof, clean VPS
-bootstrap proof, managed gateway, public incident evidence, Safe ActionPlane,
+Production readiness remains unproven. Current gaps include clean control-plane
+VM and restart proof, clean VPS bootstrap proof, managed gateway, public
+incident evidence, Safe ActionPlane,
 CLI MCP, complete Dev VPS E2E, release hardening, supply-chain evidence, and
 measured disaster recovery.
 
 ## Ordered next work
 
-V3-012 is the next ordered task: add one supported development deployment
-package and configuration examples. V3-013 then adds clean-VM/restart evidence.
-M1 has not passed. Per-step resumable BootstrapJob transitions and remote
-partial-install resume remain V3-014.
+V3-013 is the next ordered task: add clean-VM control-plane and independent
+restart evidence. M1 has not passed. Per-step resumable BootstrapJob
+transitions and remote partial-install resume remain V3-014.
 IncidentEvidence is Phase 5, Safe ActionPlane is Phase 6, CLI MCP is Phase 7,
 and production gates remain later roadmap work.
 

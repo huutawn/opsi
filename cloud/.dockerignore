@@ -1,0 +1,16 @@
+.git
+*.local.json
+*.local.yaml
+*.db
+*.sqlite
+*.log
+**/*_test.go
+**/testdata
+coverage
+tmp
+.tmp
+dist
+release
+bin
+opsi-cloud
+opsi-bootstrap-worker

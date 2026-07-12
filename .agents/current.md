@@ -35,6 +35,11 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
   marker makes exact restart-safe repeats idempotent and conflicting tuples fail
   closed. Raw initial PAT material is written only to an operator-selected
   mode-0600 file and is never printed or audited.
+- Opsi has one supported development control-plane deployment path: Docker
+  Compose starts PostgreSQL, Opsi Cloud, one Bootstrap Worker, and Caddy. The
+  package uses named database and Cloud-data volumes, startup health ordering,
+  uniform restart policies, bounded Docker logs, placeholder-only examples,
+  and gitignored runtime configuration and initial PAT files.
 - Agent owns deployment, service runtime, secrets, telemetry, factual incidents,
   local audit, and K3s/containerd execution.
 - Bootstrap Worker is a long-running, single-concurrency daemon. It polls Cloud,
@@ -49,9 +54,9 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 
 ## Next Ordered Work
 
-V3-011 implements the explicit first-owner/project admin command in code and
-tests. V3-012 and V3-013 remain, so M1 has not passed. Per-step resumable
-bootstrap transitions remain V3-014.
+V3-013 must prove clean-VM control-plane deployment and independent service
+restart, so M1 has not passed. Per-step resumable bootstrap transitions remain
+V3-014.
 IncidentEvidence is Phase 5, Safe ActionPlane
 Phase 6, CLI MCP Phase 7, and production acceptance later.
 

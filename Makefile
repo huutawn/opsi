@@ -8,8 +8,9 @@ GOTOOLCHAIN ?= local
 UI_NPM ?= npm
 RUN :=
 PROXY :=
+DEV_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/dev-control-plane/.env -f deploy/dev-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck ui-build ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release
+.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck ui-build ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -121,3 +122,23 @@ smoke-release:
 	$(PROXY) ./release/opsi version
 	$(PROXY) ./release/opsi-agent --version
 	$(PROXY) ./release/opsi-cloud --version
+
+dev-control-plane-validate:
+	@command -v docker >/dev/null 2>&1 || { echo "Docker is required"; exit 1; }
+	@docker compose version >/dev/null 2>&1 || { echo "Docker Compose plugin is required"; exit 1; }
+	@for file in deploy/dev-control-plane/.env deploy/dev-control-plane/config/cloud.json deploy/dev-control-plane/config/bootstrap-worker.json; do \
+		test -f "$$file" || { echo "missing runtime file: $$file"; exit 1; }; \
+	done
+	@for file in deploy/dev-control-plane/.env deploy/dev-control-plane/config/cloud.json deploy/dev-control-plane/config/bootstrap-worker.json; do \
+		if rg -q 'REPLACE_WITH_|EXAMPLE_SECRET|CHANGE_ME' "$$file"; then echo "placeholder remains in $$file"; exit 1; fi; \
+	done
+	@$(DEV_CONTROL_PLANE_COMPOSE) config --quiet
+
+dev-control-plane-build: dev-control-plane-validate
+	$(DEV_CONTROL_PLANE_COMPOSE) build
+
+dev-control-plane-up: dev-control-plane-validate
+	$(DEV_CONTROL_PLANE_COMPOSE) up -d
+
+dev-control-plane-down:
+	$(DEV_CONTROL_PLANE_COMPOSE) down

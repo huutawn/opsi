@@ -1,0 +1,11 @@
+{
+  "cloud_url": "http://cloud:9800",
+  "bootstrap_worker_token": "REPLACE_WITH_SAME_RANDOM_BOOTSTRAP_WORKER_TOKEN_AS_CLOUD_CONFIG",
+  "worker_id": "opsi-dev-bootstrap-worker-1",
+  "poll_interval": "3s",
+  "agent_install_url": "https://example.invalid/REPLACE_WITH_AGENT_BINARY_PATH",
+  "agent_install_sha256": "REPLACE_WITH_AGENT_BINARY_SHA256",
+  "ssh_known_hosts_path": "",
+  "production": false,
+  "timeout": "10m"
+}
