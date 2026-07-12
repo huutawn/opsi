@@ -107,6 +107,17 @@ Safe ActionPlane client.
   retry, dead-letter, and manual retry semantics. The PostgreSQL restart test is
   mandatory in `make verify-postgres`; execution still requires
   `OPSI_TEST_DATABASE_URL`.
+- The existing Cloud binary exposes the local operator command
+  `opsi-cloud admin bootstrap-owner`. It requires PostgreSQL and transactionally
+  creates or reuses the normalized user, organization, canonical project plus
+  default environment/runtime, Owner memberships, OAuth identity and/or initial
+  PAT hash, durable `first_owner` state, and a redacted audit event.
+- Exact repeats return the same IDs without issuing another PAT. Conflicting
+  owner tuples, project owners, or OAuth identities fail closed. Browser OAuth
+  login now resolves the prelinked provider subject instead of authorizing by
+  callback email alone. Initial PAT plaintext is never printed or logged and is
+  finalized only to an explicitly requested non-overwritten mode-0600 file.
+- The command is not an HTTP endpoint and never runs during Cloud startup.
 
 Cloud has no AI runtime and does not own Kubernetes execution or raw runtime
 evidence.
@@ -133,16 +144,16 @@ artifact currently proves the complete scenario. Status remains
 `MANUAL_GATED`.
 
 Production readiness remains unproven. Current gaps include repeatable
-control-plane deployment evidence, automatic bootstrap leasing, clean VPS
+control-plane deployment evidence, clean control-plane restart proof, clean VPS
 bootstrap proof, managed gateway, public incident evidence, Safe ActionPlane,
 CLI MCP, complete Dev VPS E2E, release hardening, supply-chain evidence, and
 measured disaster recovery.
 
 ## Ordered next work
 
-V3-011 is the next ordered task: add the idempotent first-owner/project admin
-command. V3-012 and V3-013 then complete the remaining control-plane milestone
-work. M1 has not passed. Per-step resumable BootstrapJob transitions and remote
+V3-012 is the next ordered task: add one supported development deployment
+package and configuration examples. V3-013 then adds clean-VM/restart evidence.
+M1 has not passed. Per-step resumable BootstrapJob transitions and remote
 partial-install resume remain V3-014.
 IncidentEvidence is Phase 5, Safe ActionPlane is Phase 6, CLI MCP is Phase 7,
 and production gates remain later roadmap work.

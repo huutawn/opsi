@@ -25,6 +25,10 @@ is storage-only and is never execution authority.
   Cloud runtime metadata, MCP output, or AI context.
 - Secret values are supplied to Kubernetes through stdin/API data, not process
   command arguments.
+- The local `opsi-cloud admin bootstrap-owner` command accepts no raw PAT flag.
+  It generates the initial PAT with CSPRNG, stores only the existing bcrypt hash
+  format, and writes plaintext once to a non-existing operator-selected file
+  created with mode `0600`. Exact repeats never issue or reconstruct the PAT.
 
 ## Authorization and audit
 
@@ -33,6 +37,10 @@ is storage-only and is never execution authority.
   at the owning boundary.
 - Sensitive actions and denials write redacted audit records. The Postgres Cloud
   path uses append-only protections for control-plane audit.
+- First-owner provisioning takes a PostgreSQL transaction-scoped advisory lock,
+  writes a durable singleton marker, and atomically persists identity,
+  memberships, linkage, project defaults, and redacted local-admin audit.
+  Conflicting bootstrap identities and OAuth subjects fail closed.
 - Retryable mutations require request identity/idempotency; authorization must
   not be inferred from user-supplied role text alone when auth is enabled.
 

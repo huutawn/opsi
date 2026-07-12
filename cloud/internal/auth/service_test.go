@@ -66,10 +66,13 @@ func TestVerifyPATRejectsExpiredRevokedAndWrongToken(t *testing.T) {
 
 func TestPATIssueRotateAndRevoke(t *testing.T) {
 	now := time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC)
-	store := &MemoryStore{Candidates: []Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: "proj", Role: "Owner"}}}
+	store := &MemoryStore{
+		Candidates:      []Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: "proj", Role: "Owner"}},
+		OAuthIdentities: map[string]string{"github\x001234": "u"},
+	}
 	svc := Service{Store: store, Now: func() time.Time { return now }}
 
-	issued, err := svc.IssuePATForEmail(context.Background(), "u@example.test", "proj", time.Hour)
+	issued, err := svc.IssuePATForOAuth(context.Background(), "github", "1234", "proj", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,5 +102,23 @@ func TestPATIssueRotateAndRevoke(t *testing.T) {
 	}
 	if _, err := svc.VerifyPAT(context.Background(), VerifyRequest{Token: rotated.Token, ProjectID: "proj"}); err != nil {
 		t.Fatalf("new token should remain valid: %v", err)
+	}
+}
+
+func TestIssuePATForOAuthRequiresPrelinkedProviderSubject(t *testing.T) {
+	store := &MemoryStore{
+		Candidates:      []Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: "proj", Role: "Owner"}},
+		OAuthIdentities: map[string]string{"github\x001234": "u"},
+	}
+	svc := Service{Store: store}
+	issued, err := svc.IssuePATForOAuth(context.Background(), "github", "1234", "proj", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.Session.UserID != "u" || issued.Token == "" {
+		t.Fatalf("unexpected OAuth issue result: %+v", issued.Session)
+	}
+	if _, err := svc.IssuePATForOAuth(context.Background(), "github", "different", "proj", time.Hour); !errors.Is(err, ErrOAuthIdentity) {
+		t.Fatalf("expected unlinked subject rejection, got %v", err)
 	}
 }

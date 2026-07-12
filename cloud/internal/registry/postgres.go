@@ -35,6 +35,24 @@ func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string)
 		return s.getProject(ctx, id)
 	}
 	now := s.clock()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Project{}, err
+	}
+	defer tx.Rollback()
+	project, err := CreateProjectInTx(ctx, tx, orgID, name, slug, createdBy, now)
+	if err != nil {
+		return Project{}, err
+	}
+	if err := insertIdempotency(ctx, tx, scope, key, "project", project.ID); err != nil {
+		return Project{}, err
+	}
+	return project, tx.Commit()
+}
+
+// CreateProjectInTx is the canonical Postgres project creation path, including
+// the default environment and runtime required by downstream bootstrap flows.
+func CreateProjectInTx(ctx context.Context, tx *sql.Tx, orgID, name, slug, createdBy string, now time.Time) (Project, error) {
 	project := Project{ID: newID("proj"), OrgID: orgID, Name: name, Slug: slug, Status: ProjectNoNodes, CreatedBy: createdBy, CreatedAt: now, UpdatedAt: now}
 	if project.Name == "" {
 		project.Name = project.ID
@@ -44,11 +62,6 @@ func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string)
 	}
 	env := Environment{ID: newID("env"), OrgID: orgID, ProjectID: project.ID, Name: "default", Type: "dev", Status: "active", CreatedAt: now, UpdatedAt: now}
 	runtime := Runtime{ID: newID("rt"), OrgID: orgID, ProjectID: project.ID, EnvironmentID: env.ID, Name: "default", Type: "k3s", Status: RuntimeNoNodes, CreatedAt: now, UpdatedAt: now}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return Project{}, err
-	}
-	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id, org_id, name, slug, status, created_by, created_at, updated_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8)`, project.ID, project.OrgID, project.Name, project.Slug, project.Status, project.CreatedBy, project.CreatedAt, project.UpdatedAt); err != nil {
 		return Project{}, err
 	}
@@ -58,10 +71,7 @@ func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO runtimes(id, org_id, project_id, environment_id, name, type, status, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, runtime.ID, runtime.OrgID, runtime.ProjectID, runtime.EnvironmentID, runtime.Name, runtime.Type, runtime.Status, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
 		return Project{}, err
 	}
-	if err := insertIdempotency(ctx, tx, scope, key, "project", project.ID); err != nil {
-		return Project{}, err
-	}
-	return project, tx.Commit()
+	return project, nil
 }
 
 func (s PostgresService) ListProjects(orgID string) ([]Project, error) {

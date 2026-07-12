@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
@@ -134,6 +135,10 @@ type authGrant struct {
 	ExpiresAt time.Time
 }
 
+type oauthProfile struct {
+	Subject string
+}
+
 func (s *Server) handleBrowserAuthStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -198,23 +203,23 @@ func (s *Server) handleBrowserAuthCallback(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusUnauthorized, "auth state expired or invalid")
 		return
 	}
-	email, err := s.exchangeOAuthCode(r.Context(), code)
+	profile, err := s.exchangeOAuthCode(r.Context(), code)
 	if err != nil {
 		s.auditAuth("", "", pending.ProjectID, "auth_failure", "failure", map[string]any{"reason": err.Error()})
 		writeError(w, http.StatusUnauthorized, "OAuth provider login failed")
 		return
 	}
-	issued, err := s.Auth.IssuePATForEmail(r.Context(), email, pending.ProjectID, 90*24*time.Hour)
+	issued, err := s.Auth.IssuePATForOAuth(r.Context(), strings.ToLower(strings.TrimSpace(s.Config.Auth.Provider)), profile.Subject, pending.ProjectID, 90*24*time.Hour)
 	if err != nil {
-		s.auditAuth("", "", pending.ProjectID, "token_issued", "failure", map[string]any{"email": email, "reason": err.Error()})
-		writeError(w, http.StatusForbidden, "project membership not found")
+		s.auditAuth("", "", pending.ProjectID, "token_issued", "failure", map[string]any{"provider": s.Config.Auth.Provider, "reason": err.Error()})
+		writeError(w, http.StatusForbidden, "OAuth identity or project membership not found")
 		return
 	}
 	grant := randomToken("grant")
 	s.authMu.Lock()
 	s.authGrants[grant] = authGrant{Token: issued.Token, Session: issued.Session, ExpiresAt: time.Now().UTC().Add(90 * time.Second)}
 	s.authMu.Unlock()
-	s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": s.Config.Auth.Provider, "email": email})
+	s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": s.Config.Auth.Provider})
 	cb, _ := url.Parse(pending.LocalCallback)
 	q := cb.Query()
 	q.Set("code", grant)
@@ -294,7 +299,7 @@ func (s *Server) handlePATRevoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "session": result})
 }
 
-func (s *Server) exchangeOAuthCode(ctx context.Context, code string) (string, error) {
+func (s *Server) exchangeOAuthCode(ctx context.Context, code string) (oauthProfile, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -303,51 +308,74 @@ func (s *Server) exchangeOAuthCode(ctx context.Context, code string) (string, er
 	form.Set("redirect_uri", s.Config.Auth.RedirectURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Config.Auth.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return oauthProfile{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return oauthProfile{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("token exchange status %d", resp.StatusCode)
+		return oauthProfile{}, fmt.Errorf("token exchange status %d", resp.StatusCode)
 	}
 	var tokenResp struct {
 		AccessToken string `json:"access_token"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tokenResp); err != nil {
-		return "", err
+		return oauthProfile{}, err
 	}
 	if tokenResp.AccessToken == "" {
-		return "", fmt.Errorf("missing access token")
+		return oauthProfile{}, fmt.Errorf("missing access token")
 	}
 	userReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.Config.Auth.UserInfoURL, nil)
 	if err != nil {
-		return "", err
+		return oauthProfile{}, err
 	}
 	userReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
 	userReq.Header.Set("Accept", "application/json")
 	userResp, err := http.DefaultClient.Do(userReq)
 	if err != nil {
-		return "", err
+		return oauthProfile{}, err
 	}
 	defer userResp.Body.Close()
 	if userResp.StatusCode < 200 || userResp.StatusCode >= 300 {
-		return "", fmt.Errorf("userinfo status %d", userResp.StatusCode)
+		return oauthProfile{}, fmt.Errorf("userinfo status %d", userResp.StatusCode)
 	}
 	var user struct {
-		Email string `json:"email"`
+		Sub json.RawMessage `json:"sub"`
+		ID  json.RawMessage `json:"id"`
 	}
 	if err := json.NewDecoder(io.LimitReader(userResp.Body, 1<<20)).Decode(&user); err != nil {
-		return "", err
+		return oauthProfile{}, err
 	}
-	if user.Email == "" {
-		return "", fmt.Errorf("userinfo email missing")
+	subject := oauthSubject(user.Sub)
+	if subject == "" {
+		subject = oauthSubject(user.ID)
 	}
-	return user.Email, nil
+	if subject == "" {
+		return oauthProfile{}, fmt.Errorf("userinfo subject missing")
+	}
+	if len(subject) > 255 || strings.IndexFunc(subject, unicode.IsControl) >= 0 {
+		return oauthProfile{}, fmt.Errorf("userinfo subject invalid")
+	}
+	return oauthProfile{Subject: subject}, nil
+}
+
+func oauthSubject(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return strings.TrimSpace(value)
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) == nil {
+		return number.String()
+	}
+	return ""
 }
 
 func (s *Server) authConfigured() bool {

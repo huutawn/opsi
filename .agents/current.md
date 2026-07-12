@@ -29,6 +29,12 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 - Cloud owns identity/project/membership, registration, bootstrap/deployment job
   envelopes, OTP, audit/control-plane metadata, and Postgres durability where
   configured. It does not own runtime execution or raw runtime evidence.
+- `opsi-cloud admin bootstrap-owner` transactionally creates or reuses the
+  normalized first user, organization, canonical project, Owner memberships,
+  OAuth identity and/or initial PAT hash in PostgreSQL. A durable singleton
+  marker makes exact restart-safe repeats idempotent and conflicting tuples fail
+  closed. Raw initial PAT material is written only to an operator-selected
+  mode-0600 file and is never printed or audited.
 - Agent owns deployment, service runtime, secrets, telemetry, factual incidents,
   local audit, and K3s/containerd execution.
 - Bootstrap Worker is a long-running, single-concurrency daemon. It polls Cloud,
@@ -43,9 +49,9 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 
 ## Next Ordered Work
 
-V3-010 implements restart-safe bootstrap lease/retry semantics in code and
-tests. V3-011 is the next ordered task. M1 has not passed because V3-011 through
-V3-013 remain. Per-step resumable bootstrap transitions remain V3-014.
+V3-011 implements the explicit first-owner/project admin command in code and
+tests. V3-012 and V3-013 remain, so M1 has not passed. Per-step resumable
+bootstrap transitions remain V3-014.
 IncidentEvidence is Phase 5, Safe ActionPlane
 Phase 6, CLI MCP Phase 7, and production acceptance later.
 

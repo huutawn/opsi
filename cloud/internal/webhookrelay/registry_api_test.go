@@ -177,7 +177,7 @@ func TestBrowserAuthFlowUsesOneTimeGrantAndAuditsWithoutPAT(t *testing.T) {
 			if r.Header.Get("Authorization") != "Bearer provider-token" {
 				t.Fatalf("provider auth = %q", r.Header.Get("Authorization"))
 			}
-			_, _ = w.Write([]byte(`{"email":"u@example.test"}`))
+			_, _ = w.Write([]byte(`{"id":12345678,"email":"u@example.test"}`))
 		default:
 			t.Fatalf("provider path = %s", r.URL.Path)
 		}
@@ -197,7 +197,10 @@ func TestBrowserAuthFlowUsesOneTimeGrantAndAuditsWithoutPAT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &auth.MemoryStore{Candidates: []auth.Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: project.ID, Role: "Owner"}}}
+	store := &auth.MemoryStore{
+		Candidates:      []auth.Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: project.ID, Role: "Owner"}},
+		OAuthIdentities: map[string]string{"generic\x0012345678": "u"},
+	}
 	server.Auth = &auth.Service{Store: store}
 	handler := server.Handler()
 
@@ -263,6 +266,58 @@ func TestBrowserAuthFlowUsesOneTimeGrantAndAuditsWithoutPAT(t *testing.T) {
 	data, _ := json.Marshal(events)
 	if strings.Contains(string(data), "opsi_pat_") || strings.Contains(string(data), "provider-token") {
 		t.Fatalf("audit leaked credential: %s", data)
+	}
+}
+
+func TestBrowserAuthCallbackRejectsEmailWithoutStableSubject(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			_, _ = w.Write([]byte(`{"access_token":"provider-token"}`))
+		case "/userinfo":
+			_, _ = w.Write([]byte(`{"email":"u@example.test"}`))
+		default:
+			t.Fatalf("provider path = %s", r.URL.Path)
+		}
+	}))
+	defer provider.Close()
+
+	server := NewServer(Config{Auth: AuthConfig{
+		Provider: "generic", ClientID: "client", ClientSecret: "secret",
+		AuthURL: provider.URL + "/authorize", TokenURL: provider.URL + "/token",
+		UserInfoURL: provider.URL + "/userinfo", RedirectURL: "https://cloud.example.test/v1/auth/browser/callback",
+	}})
+	project, err := server.Registry.CreateProject("org", "Demo", "demo", "u", "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Auth = &auth.Service{Store: &auth.MemoryStore{
+		Candidates: []auth.Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: project.ID, Role: "Owner"}},
+	}}
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/browser/start", bytes.NewReader([]byte(`{"local_callback":"http://127.0.0.1:9780/api/local/session/callback","local_state":"local-state","project_id":"`+project.ID+`"}`)))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", w.Code, w.Body.String())
+	}
+	var start struct {
+		AuthURL string `json:"auth_url"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&start); err != nil {
+		t.Fatal(err)
+	}
+	authURL, err := url.Parse(start.AuthURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/auth/browser/callback?code=provider-code&state="+url.QueryEscape(authURL.Query().Get("state")), nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "opsi_pat_") {
+		t.Fatalf("email-only callback status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

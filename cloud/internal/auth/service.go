@@ -12,10 +12,11 @@ import (
 )
 
 var (
-	ErrInvalidToken = errors.New("pat invalid")
-	ErrExpired      = errors.New("pat expired")
-	ErrRevoked      = errors.New("pat revoked")
-	ErrNoMembership = errors.New("project membership not found")
+	ErrInvalidToken  = errors.New("pat invalid")
+	ErrExpired       = errors.New("pat expired")
+	ErrRevoked       = errors.New("pat revoked")
+	ErrNoMembership  = errors.New("project membership not found")
+	ErrOAuthIdentity = errors.New("oauth identity not linked")
 )
 
 type VerifyRequest struct {
@@ -56,9 +57,12 @@ type OrgStore interface {
 }
 
 type LifecycleStore interface {
-	IssuePATForEmail(ctx context.Context, email, projectID, tokenHash string, expiresAt time.Time) (Candidate, error)
 	IssuePATForUser(ctx context.Context, userID, projectID, tokenHash string, expiresAt time.Time) (Candidate, error)
 	RevokePAT(ctx context.Context, tokenID string) error
+}
+
+type OAuthStore interface {
+	OAuthUser(ctx context.Context, provider, subject string) (string, error)
 }
 
 type IssueResult struct {
@@ -133,16 +137,23 @@ func (s Service) VerifyOrgPAT(ctx context.Context, req VerifyRequest) (VerifyRes
 	return VerifyResult{}, ErrInvalidToken
 }
 
-func (s Service) IssuePATForEmail(ctx context.Context, email, projectID string, ttl time.Duration) (IssueResult, error) {
-	store, ok := s.Store.(LifecycleStore)
-	if !ok || email == "" {
-		return IssueResult{}, ErrNoMembership
+func (s Service) IssuePATForOAuth(ctx context.Context, provider, subject, projectID string, ttl time.Duration) (IssueResult, error) {
+	store, ok := s.Store.(interface {
+		LifecycleStore
+		OAuthStore
+	})
+	if !ok || provider == "" || subject == "" {
+		return IssueResult{}, ErrOAuthIdentity
+	}
+	userID, err := store.OAuthUser(ctx, provider, subject)
+	if err != nil {
+		return IssueResult{}, err
 	}
 	token, hash, expiresAt, err := s.newToken(ttl)
 	if err != nil {
 		return IssueResult{}, err
 	}
-	candidate, err := store.IssuePATForEmail(ctx, email, projectID, hash, expiresAt)
+	candidate, err := store.IssuePATForUser(ctx, userID, projectID, hash, expiresAt)
 	if err != nil {
 		return IssueResult{}, err
 	}
@@ -194,7 +205,7 @@ func HashPAT(token string) (string, error) {
 	return string(hash), nil
 }
 
-func (s Service) newToken(ttl time.Duration) (string, string, time.Time, error) {
+func NewPAT(ttl time.Duration, now time.Time) (string, string, time.Time, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", "", time.Time{}, err
@@ -207,7 +218,11 @@ func (s Service) newToken(ttl time.Duration) (string, string, time.Time, error) 
 	if ttl <= 0 {
 		ttl = 90 * 24 * time.Hour
 	}
-	return token, hash, s.now().Add(ttl), nil
+	return token, hash, now.UTC().Add(ttl), nil
+}
+
+func (s Service) newToken(ttl time.Duration) (string, string, time.Time, error) {
+	return NewPAT(ttl, s.now())
 }
 
 func (s Service) now() time.Time {
@@ -218,7 +233,8 @@ func (s Service) now() time.Time {
 }
 
 type MemoryStore struct {
-	Candidates []Candidate
+	Candidates      []Candidate
+	OAuthIdentities map[string]string
 }
 
 func (s MemoryStore) PATCandidates(_ context.Context, projectID string) ([]Candidate, error) {
@@ -229,23 +245,6 @@ func (s MemoryStore) PATCandidates(_ context.Context, projectID string) ([]Candi
 		}
 	}
 	return out, nil
-}
-
-func (s *MemoryStore) IssuePATForEmail(_ context.Context, email, projectID, tokenHash string, expiresAt time.Time) (Candidate, error) {
-	for _, candidate := range s.Candidates {
-		if candidate.Email == email || candidate.UserID == email {
-			if projectID == "" || candidate.ProjectID == projectID {
-				candidate.ID = fmt.Sprintf("pat_%d", len(s.Candidates)+1)
-				candidate.Email = firstNonEmpty(candidate.Email, email)
-				candidate.Hash = tokenHash
-				candidate.ExpiresAt = expiresAt
-				candidate.Revoked = false
-				s.Candidates = append(s.Candidates, candidate)
-				return candidate, nil
-			}
-		}
-	}
-	return Candidate{}, ErrNoMembership
 }
 
 func (s *MemoryStore) IssuePATForUser(_ context.Context, userID, projectID, tokenHash string, expiresAt time.Time) (Candidate, error) {
@@ -282,13 +281,11 @@ func (s MemoryStore) OrgPATCandidates(_ context.Context, orgID string) ([]Candid
 	return out, nil
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
+func (s MemoryStore) OAuthUser(_ context.Context, provider, subject string) (string, error) {
+	if userID := s.OAuthIdentities[provider+"\x00"+subject]; userID != "" {
+		return userID, nil
 	}
-	return ""
+	return "", ErrOAuthIdentity
 }
 
 func normalizeRole(role string) string {

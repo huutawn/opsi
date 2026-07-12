@@ -12,6 +12,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			email TEXT UNIQUE NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT`,
 		`CREATE TABLE IF NOT EXISTS organizations (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -441,7 +442,31 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			revoked BOOLEAN NOT NULL DEFAULT false,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		`ALTER TABLE personal_access_tokens ADD COLUMN IF NOT EXISTS purpose TEXT`,
 		`CREATE INDEX IF NOT EXISTS personal_access_tokens_user_id_idx ON personal_access_tokens(user_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS personal_access_tokens_user_purpose_idx ON personal_access_tokens(user_id, purpose) WHERE purpose IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS oauth_identities (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			provider TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			UNIQUE (provider, subject),
+			UNIQUE (user_id, provider)
+		)`,
+		`CREATE INDEX IF NOT EXISTS oauth_identities_user_idx ON oauth_identities(user_id)`,
+		`CREATE TABLE IF NOT EXISTS cloud_admin_bootstrap_state (
+			key TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id),
+			organization_id TEXT NOT NULL REFERENCES organizations(id),
+			project_id TEXT NOT NULL REFERENCES projects(id),
+			normalized_email TEXT NOT NULL,
+			org_slug TEXT NOT NULL,
+			project_slug TEXT NOT NULL,
+			completed_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS otp_requests (
 			id TEXT PRIMARY KEY,
 			project_id TEXT NOT NULL,

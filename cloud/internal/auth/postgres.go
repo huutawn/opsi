@@ -13,6 +13,15 @@ type PostgresStore struct {
 	DB *sql.DB
 }
 
+func (s PostgresStore) OAuthUser(ctx context.Context, provider, subject string) (string, error) {
+	var userID string
+	err := s.DB.QueryRowContext(ctx, `SELECT user_id FROM oauth_identities WHERE provider=$1 AND subject=$2`, provider, subject).Scan(&userID)
+	if err == sql.ErrNoRows {
+		return "", ErrOAuthIdentity
+	}
+	return userID, err
+}
+
 func (s PostgresStore) PATCandidates(ctx context.Context, projectID string) ([]Candidate, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT p.id, p.user_id, u.email, COALESCE(pr.org_id, ''), m.project_id, m.role, p.token_hash, p.expires_at, p.revoked
@@ -58,22 +67,6 @@ WHERE m.org_id = $1 AND m.status = 'active'`, orgID)
 		candidates = append(candidates, candidate)
 	}
 	return candidates, rows.Err()
-}
-
-func (s PostgresStore) IssuePATForEmail(ctx context.Context, email, projectID, tokenHash string, expiresAt time.Time) (Candidate, error) {
-	rows, err := s.DB.QueryContext(ctx, `
-SELECT u.id, u.email, COALESCE(pr.org_id, ''), m.project_id, m.role
-FROM users u
-JOIN project_memberships m ON m.user_id = u.id
-JOIN projects pr ON pr.id = m.project_id
-WHERE lower(u.email) = lower($1) AND ($2 = '' OR m.project_id = $2)
-ORDER BY m.created_at
-LIMIT 1`, email, projectID)
-	if err != nil {
-		return Candidate{}, err
-	}
-	defer rows.Close()
-	return s.issueFromRows(ctx, rows, tokenHash, expiresAt)
 }
 
 func (s PostgresStore) IssuePATForUser(ctx context.Context, userID, projectID, tokenHash string, expiresAt time.Time) (Candidate, error) {
