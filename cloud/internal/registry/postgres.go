@@ -23,6 +23,8 @@ const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runt
 
 const nodeLifecycleSelectSQL = `SELECT id, org_id, project_id, runtime_id, action, status, target_node_id, target_node_name, node_id, COALESCE(agent_id,''), COALESCE(requested_by,''), COALESCE(idempotency_key,''), confirm_remove, COALESCE(lease_token,''), lease_expires_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), verified, finished_at, created_at, updated_at FROM node_lifecycle_jobs`
 
+const bootstrapSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, created_at, updated_at FROM bootstrap_sessions`
+
 func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string) (Project, error) {
 	ctx := context.Background()
 	scope := "project:" + orgID
@@ -717,22 +719,121 @@ func (s PostgresService) UpdateBootstrapSession(projectID, sessionID, status, me
 	return s.GetBootstrapSession(projectID, sessionID)
 }
 
-func (s PostgresService) GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error) {
+func (s PostgresService) LeaseNextBootstrapSession(workerID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error) {
+	if err := ValidateBootstrapWorkerID(workerID); err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
+	if leaseDuration <= 0 {
+		return BootstrapSessionLease{}, false, errors.New("bootstrap lease duration must be positive")
+	}
+	token, tokenHash, err := newBootstrapLeaseToken()
+	if err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
 	ctx := context.Background()
-	if err := s.expireBootstraps(ctx); err != nil {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
+	defer tx.Rollback()
+	session, err := scanBootstrapSession(tx.QueryRowContext(ctx, bootstrapSelectSQL+` WHERE status IN ('created','pending') AND lease_owner IS NULL ORDER BY created_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT 1`))
+	if errors.Is(err, sql.ErrNoRows) {
+		return BootstrapSessionLease{}, false, nil
+	}
+	if err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
+	now = now.UTC()
+	expiresAt := now.Add(leaseDuration)
+	if _, err := tx.ExecContext(ctx, `UPDATE bootstrap_sessions SET status='validating', lease_owner=$1, lease_token_hash=$2, lease_expires_at=$3, leased_at=$4, started_at=COALESCE(started_at,$4), updated_at=$4 WHERE id=$5`, workerID, tokenHash, expiresAt, now, session.ID); err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) VALUES($1,$2,$3,$4,NULLIF($5,''),'info','validating','bootstrap session leased by worker',10,$6)`, newID("evt"), session.OrgID, session.ProjectID, session.ID, session.NodeID, now); err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
+	session.Status = "validating"
+	session.LeaseOwner = workerID
+	session.LeaseTokenHash = tokenHash
+	session.LeaseExpiresAt = &expiresAt
+	session.LeasedAt = &now
+	session.UpdatedAt = now
+	if session.StartedAt == nil {
+		session.StartedAt = &now
+	}
+	return BootstrapSessionLease{Session: session, LeaseToken: token, LeaseExpiresAt: expiresAt}, true, nil
+}
+
+func (s PostgresService) GetBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken string, now time.Time) (BootstrapSession, error) {
+	session, err := s.GetBootstrapSession(projectID, sessionID)
+	if err != nil {
 		return BootstrapSession{}, err
 	}
-	var b BootstrapSession
-	var started, finished sql.NullTime
-	err := s.DB.QueryRowContext(ctx, `SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, created_at, updated_at FROM bootstrap_sessions WHERE project_id = $1 AND id = $2`, projectID, sessionID).Scan(&b.ID, &b.OrgID, &b.ProjectID, &b.EnvironmentID, &b.RuntimeID, &b.NodeID, &b.CreatedBy, &b.Role, &b.Status, &b.IdempotencyKey, &b.PublicHost, &b.SSHPort, &b.SSHUsername, &b.AuthMethod, &b.ExpiresAt, &started, &finished, &b.CreatedAt, &b.UpdatedAt)
+	if err := validateBootstrapLease(session, workerID, leaseToken, now); err != nil {
+		return BootstrapSession{}, err
+	}
+	return session, nil
+}
+
+func (s PostgresService) UpdateBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken, status, message string, now time.Time) (BootstrapSession, error) {
+	if !validBootstrapStatus(status) {
+		return BootstrapSession{}, APIError{Status: 400, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap status is invalid"}
+	}
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	defer tx.Rollback()
+	session, err := scanBootstrapSession(tx.QueryRowContext(ctx, bootstrapSelectSQL+` WHERE project_id=$1 AND id=$2 FOR UPDATE`, projectID, sessionID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return BootstrapSession{}, ErrNotFound
 	}
 	if err != nil {
 		return BootstrapSession{}, err
 	}
-	b.StartedAt = nullTimePtr(started)
-	b.FinishedAt = nullTimePtr(finished)
+	if err := validateBootstrapLease(session, workerID, leaseToken, now); err != nil {
+		return BootstrapSession{}, err
+	}
+	now = now.UTC()
+	finishedAt := session.FinishedAt
+	leaseHash := any(session.LeaseTokenHash)
+	leaseExpiresAt := any(session.LeaseExpiresAt)
+	if !isActiveBootstrap(status) {
+		finishedAt = &now
+		leaseHash = nil
+		leaseExpiresAt = nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE bootstrap_sessions SET status=$1, finished_at=$2, lease_token_hash=$3, lease_expires_at=$4, updated_at=$5 WHERE id=$6`, status, finishedAt, leaseHash, leaseExpiresAt, now, sessionID); err != nil {
+		return BootstrapSession{}, err
+	}
+	level := "info"
+	if status == "failed" {
+		level = "error"
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) VALUES($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,$10)`, newID("evt"), session.OrgID, session.ProjectID, session.ID, session.NodeID, level, status, RedactString(message), bootstrapProgress(status), now); err != nil {
+		return BootstrapSession{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BootstrapSession{}, err
+	}
+	return s.GetBootstrapSession(projectID, sessionID)
+}
+
+func (s PostgresService) GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error) {
+	ctx := context.Background()
+	if err := s.expireBootstraps(ctx); err != nil {
+		return BootstrapSession{}, err
+	}
+	b, err := scanBootstrapSession(s.DB.QueryRowContext(ctx, bootstrapSelectSQL+` WHERE project_id = $1 AND id = $2`, projectID, sessionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return BootstrapSession{}, ErrNotFound
+	}
+	if err != nil {
+		return BootstrapSession{}, err
+	}
 	return b, nil
 }
 
@@ -744,20 +845,17 @@ func (s PostgresService) ListBootstrapSessions(projectID string) ([]BootstrapSes
 	if err := s.expireBootstraps(ctx); err != nil {
 		return nil, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, created_at, updated_at FROM bootstrap_sessions WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
+	rows, err := s.DB.QueryContext(ctx, bootstrapSelectSQL+` WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []BootstrapSession
 	for rows.Next() {
-		var b BootstrapSession
-		var started, finished sql.NullTime
-		if err := rows.Scan(&b.ID, &b.OrgID, &b.ProjectID, &b.EnvironmentID, &b.RuntimeID, &b.NodeID, &b.CreatedBy, &b.Role, &b.Status, &b.IdempotencyKey, &b.PublicHost, &b.SSHPort, &b.SSHUsername, &b.AuthMethod, &b.ExpiresAt, &started, &finished, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		b, err := scanBootstrapSession(rows)
+		if err != nil {
 			return nil, err
 		}
-		b.StartedAt = nullTimePtr(started)
-		b.FinishedAt = nullTimePtr(finished)
 		out = append(out, b)
 	}
 	return out, rows.Err()
@@ -1146,6 +1244,17 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+func scanBootstrapSession(row rowScanner) (BootstrapSession, error) {
+	var b BootstrapSession
+	var started, finished, leaseExpiresAt, leasedAt sql.NullTime
+	err := row.Scan(&b.ID, &b.OrgID, &b.ProjectID, &b.EnvironmentID, &b.RuntimeID, &b.NodeID, &b.CreatedBy, &b.Role, &b.Status, &b.IdempotencyKey, &b.PublicHost, &b.SSHPort, &b.SSHUsername, &b.AuthMethod, &b.ExpiresAt, &started, &finished, &b.LeaseOwner, &b.LeaseTokenHash, &leaseExpiresAt, &leasedAt, &b.CreatedAt, &b.UpdatedAt)
+	b.StartedAt = nullTimePtr(started)
+	b.FinishedAt = nullTimePtr(finished)
+	b.LeaseExpiresAt = nullTimePtr(leaseExpiresAt)
+	b.LeasedAt = nullTimePtr(leasedAt)
+	return b, err
+}
+
 func scanService(row rowScanner) (ServiceRecord, error) {
 	var r ServiceRecord
 	var watchPaths, requests, limits, bindings string
@@ -1407,7 +1516,7 @@ func (s PostgresService) expireBootstraps(ctx context.Context) error {
 		return err
 	}
 	for _, e := range sessions {
-		if _, err := s.DB.ExecContext(ctx, `UPDATE bootstrap_sessions SET status = 'expired', finished_at = $1, updated_at = $1 WHERE id = $2`, now, e.id); err != nil {
+		if _, err := s.DB.ExecContext(ctx, `UPDATE bootstrap_sessions SET status = 'expired', lease_token_hash = NULL, lease_expires_at = NULL, finished_at = $1, updated_at = $1 WHERE id = $2`, now, e.id); err != nil {
 			return err
 		}
 		if _, err := s.DB.ExecContext(ctx, `INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) VALUES($1,$2,$3,$4,NULLIF($5,''),'warn','expired','bootstrap session expired',100,$6)`, newID("evt"), e.orgID, e.projectID, e.id, e.nodeID, now); err != nil {

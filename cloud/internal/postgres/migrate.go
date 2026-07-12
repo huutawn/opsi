@@ -162,6 +162,11 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			UNIQUE (project_id, idempotency_key)
 		)`,
 		`CREATE INDEX IF NOT EXISTS bootstrap_sessions_project_status_idx ON bootstrap_sessions(project_id, status, created_at)`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS lease_owner TEXT`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS lease_token_hash TEXT`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS leased_at TIMESTAMPTZ`,
+		`CREATE INDEX IF NOT EXISTS bootstrap_sessions_lease_queue_idx ON bootstrap_sessions(status, created_at, id) WHERE lease_owner IS NULL`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_events (
 			id TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

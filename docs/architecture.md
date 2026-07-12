@@ -55,6 +55,13 @@ Cloud may relay versioned deployment/bootstrap work to an authenticated Agent.
 The work is not complete merely because Cloud metadata changed; Agent must
 perform and report the runtime operation.
 
+Bootstrap Worker is a long-running, single-concurrency Cloud-side worker. It
+polls `POST /internal/bootstrap/sessions/lease`; the registry atomically claims
+the oldest pending session and stores only a hash of the one-time lease token.
+Worker status, progress, and finish calls require both worker identity and the
+raw lease token. Lease heartbeat, renewal, recovery, retry, and dead-letter
+semantics are not implemented until V3-010.
+
 ### 1.3 Current CLI/local backend boundary
 
 The production-oriented Browser boundary is localhost `/api/local/...` served by

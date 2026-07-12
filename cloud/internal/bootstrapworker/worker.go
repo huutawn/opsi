@@ -1,12 +1,11 @@
 package bootstrapworker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,10 +17,18 @@ import (
 
 var ErrRuntimeUnsupported = errors.New("bootstrap target mode unsupported")
 
+const (
+	defaultPollInterval = 3 * time.Second
+	minPollInterval     = 500 * time.Millisecond
+	maxPollInterval     = 5 * time.Minute
+	defaultJobTimeout   = 10 * time.Minute
+)
+
 type Config struct {
 	CloudURL             string         `json:"cloud_url"`
 	BootstrapWorkerToken string         `json:"bootstrap_worker_token"`
-	SessionID            string         `json:"session_id"`
+	WorkerID             string         `json:"worker_id"`
+	PollInterval         time.Duration  `json:"-"`
 	AgentInstallURL      string         `json:"agent_install_url"`
 	AgentInstallSHA256   string         `json:"agent_install_sha256"`
 	SSHKnownHostsPath    string         `json:"ssh_known_hosts_path"`
@@ -29,12 +36,14 @@ type Config struct {
 	Timeout              time.Duration  `json:"-"`
 	HTTPClient           *http.Client   `json:"-"`
 	Executor             RemoteExecutor `json:"-"`
+	Logger               *slog.Logger   `json:"-"`
 }
 
 type fileConfig struct {
 	CloudURL             string `json:"cloud_url"`
 	BootstrapWorkerToken string `json:"bootstrap_worker_token"`
-	SessionID            string `json:"session_id"`
+	WorkerID             string `json:"worker_id"`
+	PollInterval         string `json:"poll_interval"`
 	AgentInstallURL      string `json:"agent_install_url"`
 	AgentInstallSHA256   string `json:"agent_install_sha256"`
 	SSHKnownHostsPath    string `json:"ssh_known_hosts_path"`
@@ -59,6 +68,12 @@ type Bundle struct {
 	} `json:"ssh"`
 }
 
+type Lease struct {
+	Bundle         Bundle    `json:"bundle"`
+	LeaseToken     string    `json:"lease_token"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -68,7 +83,22 @@ func LoadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return Config{}, fmt.Errorf("parse bootstrap worker config: %w", err)
 	}
-	cfg := Config{CloudURL: raw.CloudURL, BootstrapWorkerToken: raw.BootstrapWorkerToken, SessionID: raw.SessionID, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err == nil {
+		if _, ok := fields["session_id"]; ok {
+			return Config{}, errors.New("session_id is no longer supported; bootstrap workers lease sessions automatically")
+		}
+	}
+	cfg := Config{CloudURL: raw.CloudURL, BootstrapWorkerToken: raw.BootstrapWorkerToken, WorkerID: strings.TrimSpace(raw.WorkerID), AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
+	if raw.PollInterval != "" {
+		cfg.PollInterval, err = time.ParseDuration(raw.PollInterval)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse poll_interval: %w", err)
+		}
+		if cfg.PollInterval <= 0 {
+			return Config{}, errors.New("poll_interval must be positive")
+		}
+	}
 	if raw.Timeout != "" {
 		cfg.Timeout, err = time.ParseDuration(raw.Timeout)
 		if err != nil {
@@ -95,8 +125,14 @@ func (c Config) Validate() error {
 	if c.Production && len(c.BootstrapWorkerToken) < 32 {
 		return errors.New("production requires bootstrap_worker_token with at least 32 bytes")
 	}
-	if c.SessionID == "" {
-		return errors.New("session_id is required")
+	if err := registry.ValidateBootstrapWorkerID(strings.TrimSpace(c.WorkerID)); err != nil {
+		return err
+	}
+	if c.PollInterval == 0 {
+		c.PollInterval = defaultPollInterval
+	}
+	if c.PollInterval < minPollInterval || c.PollInterval > maxPollInterval {
+		return fmt.Errorf("poll_interval must be between %s and %s", minPollInterval, maxPollInterval)
 	}
 	if c.Production && c.SSHKnownHostsPath == "" {
 		return errors.New("production requires ssh_known_hosts_path")
@@ -107,24 +143,29 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func RunOnce(ctx context.Context, cfg Config) error {
-	return NewInstaller(cfg).RunOnce(ctx)
+func Run(ctx context.Context, cfg Config) error {
+	return NewWorker(cfg).Run(ctx)
 }
 
 type CloudClient interface {
-	Take(context.Context) (Bundle, error)
-	Progress(context.Context, string, string, string) error
-	Finish(context.Context, string, string, string) error
-	WaitForHeartbeat(context.Context, Bundle) error
+	LeaseNext(context.Context) (Lease, bool, error)
+	Progress(context.Context, Lease, string, string) error
+	Finish(context.Context, Lease, string, string) error
+	WaitForHeartbeat(context.Context, Lease) error
 }
 
-type Installer struct {
+type Worker struct {
 	cfg      Config
 	client   CloudClient
 	executor RemoteExecutor
+	logger   *slog.Logger
 }
 
-func NewInstaller(cfg Config) Installer {
+func NewWorker(cfg Config) Worker {
+	cfg.WorkerID = strings.TrimSpace(cfg.WorkerID)
+	if cfg.PollInterval == 0 {
+		cfg.PollInterval = defaultPollInterval
+	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -133,66 +174,150 @@ func NewInstaller(cfg Config) Installer {
 	if executor == nil {
 		executor = SSHExecutor{KnownHostsPath: cfg.SSHKnownHostsPath}
 	}
-	return Installer{cfg: cfg, client: httpCloudClient{client: httpClient, cfg: cfg}, executor: executor}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return Worker{cfg: cfg, client: httpCloudClient{client: httpClient, cfg: cfg}, executor: executor, logger: logger}
 }
 
-func (i Installer) RunOnce(ctx context.Context) error {
-	cfg := i.cfg
+func (w Worker) Run(ctx context.Context) error {
+	cfg := w.cfg
+	cfg.WorkerID = strings.TrimSpace(cfg.WorkerID)
+	if cfg.PollInterval == 0 {
+		cfg.PollInterval = defaultPollInterval
+	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	w.cfg = cfg
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		lease, found, err := w.client.LeaseNext(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if isFatalCloudError(err) {
+				return err
+			}
+			w.logger.Warn("bootstrap lease poll failed", "worker_id", cfg.WorkerID, "error", redactForConfig(cfg, "", err.Error()))
+			if !waitForPoll(ctx, cfg.PollInterval) {
+				return nil
+			}
+			continue
+		}
+		if !found {
+			if !waitForPoll(ctx, cfg.PollInterval) {
+				return nil
+			}
+			continue
+		}
+		if lease.LeaseToken == "" || lease.LeaseExpiresAt.IsZero() {
+			return errors.New("invalid bootstrap lease protocol response")
+		}
+		if err := w.processLease(ctx, lease); err != nil {
+			if isFatalCloudError(err) {
+				return err
+			}
+			w.logger.Warn("bootstrap session failed", "worker_id", cfg.WorkerID, "session_id", lease.Bundle.SessionID, "project_id", lease.Bundle.ProjectID, "error", redactForLease(cfg, lease, err.Error()))
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+	}
+}
+
+func (w Worker) processLease(parent context.Context, lease Lease) error {
+	cfg := w.cfg
 	timeout := cfg.Timeout
 	if timeout == 0 {
-		timeout = 10 * time.Minute
+		timeout = defaultJobTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-
-	bundle, err := i.client.Take(ctx)
-	if err != nil {
-		return err
-	}
+	bundle := lease.Bundle
 	defer func() {
 		bundle.AgentRegistrationToken = ""
 		bundle.SSH.PrivateKey = ""
 		bundle.SSH.Password = ""
 	}()
 	if err := ValidateBundle(bundle); err != nil {
-		_ = i.client.Finish(context.WithoutCancel(ctx), bundle.ProjectID, "failed", "INVALID_BOOTSTRAP_TARGET: "+redactForBundle(bundle, err.Error()))
+		_ = w.finishLease(ctx, lease, "failed", "INVALID_BOOTSTRAP_TARGET: "+redactForBundle(bundle, err.Error()))
 		return err
 	}
 	plan, err := BuildBootstrapPlan(cfg, bundle)
 	if err != nil {
-		_ = i.client.Finish(context.WithoutCancel(ctx), bundle.ProjectID, "failed", redactForBundle(bundle, err.Error()))
+		_ = w.finishLease(ctx, lease, "failed", redactForBundle(bundle, err.Error()))
 		return err
 	}
 
 	target := RemoteTarget{Host: bundle.PublicHost, Port: bundle.SSHPort, Username: bundle.SSH.Username, Password: bundle.SSH.Password}
-	_ = i.client.Progress(ctx, bundle.ProjectID, "connecting", "connecting to target over SSH")
-	session, err := i.executor.Connect(ctx, target)
+	if err := w.client.Progress(ctx, lease, "connecting", "connecting to target over SSH"); isFatalCloudError(err) {
+		return err
+	}
+	session, err := w.executor.Connect(ctx, target)
 	if err != nil {
-		msg := "BOOTSTRAP_CONNECT_FAILED: " + redactForBundle(bundle, err.Error())
-		_ = i.client.Finish(context.WithoutCancel(ctx), bundle.ProjectID, "failed", msg)
+		if parent.Err() != nil {
+			_ = w.finishLease(ctx, lease, "failed", "BOOTSTRAP_WORKER_SHUTDOWN")
+			return errors.New("BOOTSTRAP_WORKER_SHUTDOWN")
+		}
+		msg := "BOOTSTRAP_CONNECT_FAILED: " + redactForLease(cfg, lease, err.Error())
+		_ = w.finishLease(ctx, lease, "failed", msg)
 		return errors.New(msg)
 	}
 	defer session.Close()
 
 	for _, step := range plan.Steps {
-		_ = i.client.Progress(ctx, bundle.ProjectID, step.Status, step.Message)
+		if err := w.client.Progress(ctx, lease, step.Status, step.Message); isFatalCloudError(err) {
+			return err
+		}
 		result, err := session.Run(ctx, step.Command)
 		if err != nil || result.ExitCode != 0 {
-			msg := redactForBundle(bundle, fmt.Sprintf("%s failed: %s %s %v", step.Status, result.Stdout, result.Stderr, err))
-			_ = i.client.Finish(context.WithoutCancel(ctx), bundle.ProjectID, "failed", msg)
+			if parent.Err() != nil {
+				_ = w.finishLease(ctx, lease, "failed", "BOOTSTRAP_WORKER_SHUTDOWN")
+				return errors.New("BOOTSTRAP_WORKER_SHUTDOWN")
+			}
+			msg := redactForLease(cfg, lease, fmt.Sprintf("%s failed: %s %s %v", step.Status, result.Stdout, result.Stderr, err))
+			_ = w.finishLease(ctx, lease, "failed", msg)
 			return errors.New(msg)
 		}
 	}
-	_ = i.client.Progress(ctx, bundle.ProjectID, "verifying_agent", "waiting for healthy Agent heartbeat")
-	if err := i.client.WaitForHeartbeat(ctx, bundle); err != nil {
-		msg := "BOOTSTRAP_HEARTBEAT_VERIFY_FAILED: " + redactForBundle(bundle, err.Error())
-		_ = i.client.Finish(context.WithoutCancel(ctx), bundle.ProjectID, "failed", msg)
+	if err := w.client.Progress(ctx, lease, "verifying_agent", "waiting for healthy Agent heartbeat"); isFatalCloudError(err) {
+		return err
+	}
+	if err := w.client.WaitForHeartbeat(ctx, lease); err != nil {
+		if isFatalCloudError(err) {
+			return err
+		}
+		if parent.Err() != nil {
+			_ = w.finishLease(ctx, lease, "failed", "BOOTSTRAP_WORKER_SHUTDOWN")
+			return errors.New("BOOTSTRAP_WORKER_SHUTDOWN")
+		}
+		msg := "BOOTSTRAP_HEARTBEAT_VERIFY_FAILED: " + redactForLease(cfg, lease, err.Error())
+		_ = w.finishLease(ctx, lease, "failed", msg)
 		return errors.New(msg)
 	}
-	return i.client.Finish(context.WithoutCancel(ctx), bundle.ProjectID, "completed", "bootstrap completed after verified Agent heartbeat")
+	return w.finishLease(ctx, lease, "completed", "bootstrap completed after verified Agent heartbeat")
+}
+
+func (w Worker) finishLease(ctx context.Context, lease Lease, status, message string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	return w.client.Finish(cleanupCtx, lease, status, redactForLease(w.cfg, lease, message))
+}
+
+func waitForPoll(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func ValidateBundle(bundle Bundle) error {
@@ -358,129 +483,3 @@ EOF
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --now opsi-agent
 `
-
-type httpCloudClient struct {
-	client *http.Client
-	cfg    Config
-}
-
-func (h httpCloudClient) Take(ctx context.Context) (Bundle, error) {
-	return take(ctx, h.client, h.cfg)
-}
-
-func (h httpCloudClient) Progress(ctx context.Context, projectID, status, message string) error {
-	return progress(ctx, h.client, h.cfg, projectID, status, message)
-}
-
-func (h httpCloudClient) Finish(ctx context.Context, projectID, status, message string) error {
-	return finish(ctx, h.client, h.cfg, projectID, status, message)
-}
-
-func (h httpCloudClient) WaitForHeartbeat(ctx context.Context, bundle Bundle) error {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		status, err := bootstrapStatus(ctx, h.client, h.cfg, bundle.ProjectID)
-		if err != nil {
-			return err
-		}
-		switch status {
-		case "verifying":
-			return nil
-		case "failed", "cancelled", "expired":
-			return fmt.Errorf("bootstrap session became %s before heartbeat verification", status)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
-	}
-}
-
-func take(ctx context.Context, client *http.Client, cfg Config) (Bundle, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.CloudURL, "/")+"/internal/bootstrap/sessions/"+url.PathEscape(cfg.SessionID)+"/take", nil)
-	if err != nil {
-		return Bundle{}, err
-	}
-	req.Header.Set("X-Bootstrap-Worker-Token", cfg.BootstrapWorkerToken)
-	resp, err := client.Do(req)
-	if err != nil {
-		return Bundle{}, fmt.Errorf("take bootstrap session: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return Bundle{}, fmt.Errorf("take bootstrap session: %s", safeBody(resp.Body))
-	}
-	var bundle Bundle
-	if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
-		return Bundle{}, fmt.Errorf("decode bootstrap bundle: %w", err)
-	}
-	return bundle, nil
-}
-
-func progress(ctx context.Context, client *http.Client, cfg Config, projectID, status, message string) error {
-	return postWorkerState(ctx, client, cfg, "progress", projectID, status, message)
-}
-
-func finish(ctx context.Context, client *http.Client, cfg Config, projectID, status, message string) error {
-	return postWorkerState(ctx, client, cfg, "finish", projectID, status, message)
-}
-
-func postWorkerState(ctx context.Context, client *http.Client, cfg Config, action, projectID, status, message string) error {
-	body, _ := json.Marshal(map[string]string{"project_id": projectID, "status": status, "message": registry.RedactString(message)})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.CloudURL, "/")+"/internal/bootstrap/sessions/"+url.PathEscape(cfg.SessionID)+"/"+action, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Bootstrap-Worker-Token", cfg.BootstrapWorkerToken)
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("finish bootstrap session: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s bootstrap session: %s", action, safeBody(resp.Body))
-	}
-	return nil
-}
-
-func bootstrapStatus(ctx context.Context, client *http.Client, cfg Config, projectID string) (string, error) {
-	endpoint := strings.TrimRight(cfg.CloudURL, "/") + "/internal/bootstrap/sessions/" + url.PathEscape(cfg.SessionID) + "/status?project_id=" + url.QueryEscape(projectID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("X-Bootstrap-Worker-Token", cfg.BootstrapWorkerToken)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("get bootstrap session: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("get bootstrap session: %s", safeBody(resp.Body))
-	}
-	var out struct {
-		Status string `json:"status"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
-	}
-	return out.Status, nil
-}
-
-func safeBody(r io.Reader) string {
-	data, _ := io.ReadAll(io.LimitReader(r, 4096))
-	return registry.RedactString(string(data))
-}
-
-func redactForBundle(bundle Bundle, value string) string {
-	value = registry.RedactString(value)
-	for _, secret := range []string{bundle.SSH.Password, bundle.SSH.PrivateKey, bundle.AgentRegistrationToken} {
-		if secret != "" {
-			value = strings.ReplaceAll(value, secret, "[REDACTED]")
-		}
-	}
-	return value
-}

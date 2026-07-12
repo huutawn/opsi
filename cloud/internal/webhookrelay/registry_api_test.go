@@ -768,29 +768,39 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 		t.Fatalf("worker before server status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/take", nil)
+	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewReader([]byte(`{"worker_id":"worker-1"}`)))
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("unauth worker take status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("unauth worker lease status=%d body=%s", w.Code, w.Body.String())
 	}
 	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/take", nil)
 	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("old worker take status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewReader([]byte(`{"worker_id":"worker-1"}`)))
+	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("worker take status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("worker lease status=%d body=%s", w.Code, w.Body.String())
 	}
 	if !bytes.Contains(w.Body.Bytes(), []byte("secret")) {
 		t.Fatalf("worker bundle missing password: %s", w.Body.String())
 	}
 	var bundle struct {
-		AgentRegistrationToken string `json:"agent_registration_token"`
+		Bundle struct {
+			AgentRegistrationToken string `json:"agent_registration_token"`
+		} `json:"bundle"`
+		LeaseToken string `json:"lease_token"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&bundle); err != nil {
 		t.Fatal(err)
 	}
-	if bundle.AgentRegistrationToken == "" {
+	if bundle.Bundle.AgentRegistrationToken == "" || bundle.LeaseToken == "" {
 		t.Fatal("missing agent registration token")
 	}
 	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/readiness", nil)
@@ -802,6 +812,8 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	}
 	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/progress", bytes.NewReader([]byte(`{"project_id":"`+projectID+`","status":"connecting","message":"password=secret token=abc private_key=leak kubeconfig=leak pat=leak app_secret=leak"}`)))
 	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	req.Header.Set("X-Bootstrap-Worker-ID", "worker-1")
+	req.Header.Set("X-Bootstrap-Lease-Token", bundle.LeaseToken)
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -809,20 +821,22 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	}
 	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/progress", bytes.NewReader([]byte(`{"project_id":"`+projectID+`","status":"installing_k3s","message":"installing k3s"}`)))
 	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	req.Header.Set("X-Bootstrap-Worker-ID", "worker-1")
+	req.Header.Set("X-Bootstrap-Lease-Token", bundle.LeaseToken)
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("bootstrap installing_k3s status=%d body=%s", w.Code, w.Body.String())
 	}
-	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/take", nil)
+	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewReader([]byte(`{"worker_id":"worker-1"}`)))
 	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusGone {
-		t.Fatalf("worker second take status=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("worker second lease status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.Bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusCreated {
@@ -914,7 +928,7 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("worker after server status=%d body=%s", w.Code, w.Body.String())
 	}
-	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.Bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
@@ -1035,6 +1049,8 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 
 	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/finish", bytes.NewReader([]byte(`{"project_id":"`+projectID+`","status":"succeeded","message":"password=secret token=abc"}`)))
 	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	req.Header.Set("X-Bootstrap-Worker-ID", "worker-1")
+	req.Header.Set("X-Bootstrap-Lease-Token", bundle.LeaseToken)
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

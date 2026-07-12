@@ -3,6 +3,7 @@ package registry
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -248,8 +249,18 @@ type BootstrapSession struct {
 	ExpiresAt      time.Time  `json:"expires_at"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	LeaseOwner     string     `json:"lease_owner,omitempty"`
+	LeaseTokenHash string     `json:"-"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	LeasedAt       *time.Time `json:"leased_at,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type BootstrapSessionLease struct {
+	Session        BootstrapSession `json:"session"`
+	LeaseToken     string           `json:"lease_token"`
+	LeaseExpiresAt time.Time        `json:"lease_expires_at"`
 }
 
 type BootstrapEvent struct {
@@ -516,6 +527,9 @@ type API interface {
 	CompleteNodeLifecycle(projectID, nodeID, jobID, requestID string, result NodeLifecycleResult) (NodeLifecycleJob, error)
 	CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error)
 	UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error)
+	LeaseNextBootstrapSession(workerID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error)
+	GetBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken string, now time.Time) (BootstrapSession, error)
+	UpdateBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken, status, message string, now time.Time) (BootstrapSession, error)
 	GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error)
 	ListBootstrapSessions(projectID string) ([]BootstrapSession, error)
 	BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent, error)
@@ -1059,6 +1073,91 @@ func (s *Service) UpdateBootstrapSession(projectID, sessionID, status, message s
 	}
 	if !isActiveBootstrap(status) {
 		session.FinishedAt = &now
+	}
+	s.bootstraps[sessionID] = session
+	level := "info"
+	if status == "failed" {
+		level = "error"
+	}
+	s.events[sessionID] = append(s.events[sessionID], BootstrapEvent{ID: newID("evt"), OrgID: session.OrgID, ProjectID: session.ProjectID, SessionID: sessionID, NodeID: session.NodeID, Level: level, Step: status, MessageRedacted: RedactString(message), ProgressPercent: bootstrapProgress(status), CreatedAt: now})
+	s.refreshProjectLocked(projectID)
+	return session, nil
+}
+
+func (s *Service) LeaseNextBootstrapSession(workerID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error) {
+	if err := ValidateBootstrapWorkerID(workerID); err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
+	if leaseDuration <= 0 {
+		return BootstrapSessionLease{}, false, errors.New("bootstrap lease duration must be positive")
+	}
+	token, tokenHash, err := newBootstrapLeaseToken()
+	if err != nil {
+		return BootstrapSessionLease{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var selected BootstrapSession
+	for _, session := range s.bootstraps {
+		if (session.Status != "created" && session.Status != "pending") || session.LeaseTokenHash != "" {
+			continue
+		}
+		if selected.ID == "" || session.CreatedAt.Before(selected.CreatedAt) || (session.CreatedAt.Equal(selected.CreatedAt) && session.ID < selected.ID) {
+			selected = session
+		}
+	}
+	if selected.ID == "" {
+		return BootstrapSessionLease{}, false, nil
+	}
+	now = now.UTC()
+	expiresAt := now.Add(leaseDuration)
+	selected.Status = "validating"
+	selected.LeaseOwner = workerID
+	selected.LeaseTokenHash = tokenHash
+	selected.LeaseExpiresAt = &expiresAt
+	selected.LeasedAt = &now
+	selected.UpdatedAt = now
+	if selected.StartedAt == nil {
+		selected.StartedAt = &now
+	}
+	s.bootstraps[selected.ID] = selected
+	s.events[selected.ID] = append(s.events[selected.ID], BootstrapEvent{ID: newID("evt"), OrgID: selected.OrgID, ProjectID: selected.ProjectID, SessionID: selected.ID, NodeID: selected.NodeID, Level: "info", Step: "validating", MessageRedacted: "bootstrap session leased by worker", ProgressPercent: bootstrapProgress("validating"), CreatedAt: now})
+	return BootstrapSessionLease{Session: selected, LeaseToken: token, LeaseExpiresAt: expiresAt}, true, nil
+}
+
+func (s *Service) GetBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken string, now time.Time) (BootstrapSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.bootstraps[sessionID]
+	if !ok || session.ProjectID != projectID {
+		return BootstrapSession{}, ErrNotFound
+	}
+	if err := validateBootstrapLease(session, workerID, leaseToken, now); err != nil {
+		return BootstrapSession{}, err
+	}
+	return session, nil
+}
+
+func (s *Service) UpdateBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken, status, message string, now time.Time) (BootstrapSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.bootstraps[sessionID]
+	if !ok || session.ProjectID != projectID {
+		return BootstrapSession{}, ErrNotFound
+	}
+	if err := validateBootstrapLease(session, workerID, leaseToken, now); err != nil {
+		return BootstrapSession{}, err
+	}
+	if !validBootstrapStatus(status) {
+		return BootstrapSession{}, APIError{Status: 400, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap status is invalid"}
+	}
+	now = now.UTC()
+	session.Status = status
+	session.UpdatedAt = now
+	if !isActiveBootstrap(status) {
+		session.FinishedAt = &now
+		session.LeaseTokenHash = ""
+		session.LeaseExpiresAt = nil
 	}
 	s.bootstraps[sessionID] = session
 	level := "info"
@@ -1726,6 +1825,8 @@ func (s *Service) expireBootstrapsLocked() {
 		session.Status = "expired"
 		session.UpdatedAt = now
 		session.FinishedAt = &now
+		session.LeaseTokenHash = ""
+		session.LeaseExpiresAt = nil
 		s.bootstraps[id] = session
 		s.events[id] = append(s.events[id], BootstrapEvent{ID: newID("evt"), OrgID: session.OrgID, ProjectID: session.ProjectID, SessionID: id, NodeID: session.NodeID, Level: "warn", Step: "expired", MessageRedacted: "bootstrap session expired", ProgressPercent: 100, CreatedAt: now})
 		s.refreshProjectLocked(session.ProjectID)
@@ -1743,6 +1844,45 @@ func isActiveBootstrap(status string) bool {
 
 func validBootstrapStatus(status string) bool {
 	return isActiveBootstrap(status) || status == "completed" || status == "succeeded" || status == "failed" || status == "cancelled" || status == "expired"
+}
+
+var bootstrapWorkerIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func ValidateBootstrapWorkerID(workerID string) error {
+	if workerID == "" {
+		return APIError{Status: 400, Code: "BOOTSTRAP_WORKER_ID_REQUIRED", Message: "worker_id is required"}
+	}
+	if len(workerID) > 128 || !bootstrapWorkerIDPattern.MatchString(workerID) {
+		return APIError{Status: 400, Code: "BOOTSTRAP_WORKER_ID_INVALID", Message: "worker_id must be at most 128 characters and contain only letters, numbers, dot, underscore, or hyphen"}
+	}
+	return nil
+}
+
+func newBootstrapLeaseToken() (string, string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", "", fmt.Errorf("generate bootstrap lease token: %w", err)
+	}
+	token := hex.EncodeToString(raw[:])
+	sum := sha256.Sum256([]byte(token))
+	return token, hex.EncodeToString(sum[:]), nil
+}
+
+func validateBootstrapLease(session BootstrapSession, workerID, leaseToken string, now time.Time) error {
+	if session.LeaseOwner != workerID {
+		return APIError{Status: 403, Code: "BOOTSTRAP_LEASE_OWNER_MISMATCH", Message: "bootstrap lease owner does not match worker"}
+	}
+	if session.LeaseTokenHash == "" || leaseToken == "" {
+		return APIError{Status: 403, Code: "BOOTSTRAP_LEASE_INVALID", Message: "bootstrap lease token is invalid"}
+	}
+	sum := sha256.Sum256([]byte(leaseToken))
+	if subtle.ConstantTimeCompare([]byte(session.LeaseTokenHash), []byte(hex.EncodeToString(sum[:]))) != 1 {
+		return APIError{Status: 403, Code: "BOOTSTRAP_LEASE_INVALID", Message: "bootstrap lease token is invalid"}
+	}
+	if session.LeaseExpiresAt == nil || !now.UTC().Before(*session.LeaseExpiresAt) {
+		return APIError{Status: 409, Code: "BOOTSTRAP_LEASE_EXPIRED", Message: "bootstrap lease has expired"}
+	}
+	return nil
 }
 
 func bootstrapProgress(status string) int {

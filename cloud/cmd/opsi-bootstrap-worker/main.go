@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -45,11 +44,8 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := bootstrapworker.RunOnce(ctx, cfg); err != nil {
+	if err := bootstrapworker.Run(ctx, cfg); err != nil {
 		logger.Error("bootstrap worker stopped", "error", registry.RedactString(err.Error()))
-		if errors.Is(err, bootstrapworker.ErrRuntimeUnsupported) {
-			os.Exit(2)
-		}
 		os.Exit(1)
 	}
 }

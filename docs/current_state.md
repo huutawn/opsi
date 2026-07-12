@@ -87,8 +87,16 @@ Safe ActionPlane client.
 - Agent registration/rotation/revocation, HMAC request validation, bootstrap and
   deployment rate limits, durable deployment leases/retry/dead-letter state,
   and append-only Cloud audit protections for the Postgres path.
-- A narrow Ubuntu first-server bootstrap worker operation exists through
-  `RunOnce(session_id)`. It is not yet a continuous poll/lease daemon.
+- Bootstrap Worker is now a long-running, single-concurrency daemon. It polls
+  Cloud and atomically leases the oldest pending bootstrap session without an
+  operator-provided session ID. Worker status, progress, and finish requests
+  require the lease owner and raw lease token; storage retains only its hash.
+- Worker configuration no longer accepts fixed `session_id`. The existing SSH,
+  K3s, Agent install, registration, and Agent heartbeat verification sequence is
+  unchanged after lease acquisition.
+- Durable lease heartbeat, renewal, expired-lease recovery, retry counters,
+  backoff, and dead-letter handling remain unimplemented until V3-010. A worker
+  crash after one-time credential handoff may still strand the session.
 
 Cloud has no AI runtime and does not own Kubernetes execution or raw runtime
 evidence.
@@ -122,8 +130,9 @@ measured disaster recovery.
 
 ## Ordered next work
 
-Phase 2 starts at V3-009: convert Bootstrap Worker from `RunOnce(session_id)` to
-a poll/lease daemon. V3-010 through V3-013 complete the control-plane milestone.
+V3-010 is the next ordered task: add durable bootstrap lease heartbeat,
+recovery, retry, and dead-letter behavior. V3-011 through V3-013 then complete
+the remaining control-plane milestone work. M1 has not passed.
 IncidentEvidence is Phase 5, Safe ActionPlane is Phase 6, CLI MCP is Phase 7,
 and production gates remain later roadmap work.
 

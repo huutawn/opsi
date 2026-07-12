@@ -1,235 +1,378 @@
 package bootstrapworker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestConfigValidation(t *testing.T) {
-	if err := (Config{CloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), SessionID: "boot-1", AgentInstallURL: "https://downloads.example/opsi-agent", SSHKnownHostsPath: "/etc/ssh/ssh_known_hosts", Production: true}).Validate(); err != nil {
-		t.Fatalf("valid production config failed: %v", err)
+	valid := Config{CloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, AgentInstallURL: "https://downloads.example/opsi-agent", SSHKnownHostsPath: "/etc/ssh/ssh_known_hosts", Production: true}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid daemon config failed: %v", err)
 	}
-	if err := (Config{CloudURL: "http://cloud.example", BootstrapWorkerToken: "short", SessionID: "boot-1", Production: true}).Validate(); err == nil {
-		t.Fatal("missing production config did not fail closed")
+	for name, mutate := range map[string]func(*Config){
+		"missing worker id": func(c *Config) { c.WorkerID = "" },
+		"invalid worker id": func(c *Config) { c.WorkerID = "bad worker/id" },
+		"small poll":        func(c *Config) { c.PollInterval = time.Millisecond },
+		"large poll":        func(c *Config) { c.PollInterval = 6 * time.Minute },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := valid
+			mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid config passed")
+			}
+		})
+	}
+	if err := (Config{CloudURL: "http://cloud.example", BootstrapWorkerToken: "short", WorkerID: "worker-1", Production: true}).Validate(); err == nil {
+		t.Fatal("production guardrails did not fail closed")
 	}
 }
 
-func TestRunOnceSupportedCompletesAfterHeartbeatVerification(t *testing.T) {
-	env := newWorkerHarness(t, supportedBundle())
-	err := RunOnce(context.Background(), Config{CloudURL: env.server.URL, BootstrapWorkerToken: "worker-secret", SessionID: "boot-1", AgentInstallURL: "https://downloads.example/opsi-agent", Executor: env.executor})
-	if err != nil {
-		t.Fatalf("RunOnce returned error: %v", err)
+func TestLoadConfigDefaultsAndRejectsLegacySessionID(t *testing.T) {
+	dir := t.TempDir()
+	validPath := filepath.Join(dir, "valid.json")
+	if err := os.WriteFile(validPath, []byte(`{"cloud_url":"https://cloud.example","bootstrap_worker_token":"secret","worker_id":"  worker-1  ","agent_install_url":"https://downloads.example/agent"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	wantStages := []string{"connecting", "preflight", "installing_k3s", "installing_agent", "registering_agent", "verifying_agent", "completed"}
-	if !reflect.DeepEqual(env.stages, wantStages) {
-		t.Fatalf("stages=%v want=%v", env.stages, wantStages)
+	cfg, err := LoadConfig(validPath)
+	if err != nil || cfg.WorkerID != "worker-1" || cfg.PollInterval != defaultPollInterval {
+		t.Fatalf("loaded cfg=%+v err=%v", cfg, err)
 	}
-	if !env.statusPolled {
-		t.Fatal("worker completed without polling heartbeat/session status")
+	legacyPath := filepath.Join(dir, "legacy.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"session_id":"boot-1"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if env.completedBeforeVerify {
-		t.Fatal("worker completed before heartbeat verification")
+	if _, err := LoadConfig(legacyPath); err == nil || !strings.Contains(err.Error(), "session_id is no longer supported") {
+		t.Fatalf("legacy session_id error=%v", err)
 	}
-	if errors.Is(err, ErrRuntimeUnsupported) {
-		t.Fatal("supported bundle returned ErrRuntimeUnsupported")
+	invalidPollPath := filepath.Join(dir, "invalid-poll.json")
+	if err := os.WriteFile(invalidPollPath, []byte(`{"worker_id":"worker-1","poll_interval":"0s"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(invalidPollPath); err == nil || !strings.Contains(err.Error(), "poll_interval must be positive") {
+		t.Fatalf("invalid poll error=%v", err)
 	}
 }
 
-func TestRunOnceFailureModesFinishFailed(t *testing.T) {
-	tests := []struct {
-		name      string
-		failStage string
-		connect   bool
-		want      string
-	}{
-		{name: "connect", connect: true, want: "BOOTSTRAP_CONNECT_FAILED"},
-		{name: "preflight", failStage: "preflight", want: "preflight failed"},
-		{name: "k3s", failStage: "installing_k3s", want: "installing_k3s failed"},
-		{name: "agent install", failStage: "installing_agent", want: "installing_agent failed"},
-		{name: "agent register", failStage: "registering_agent", want: "registering_agent failed"},
-		{name: "heartbeat", failStage: "heartbeat", want: "BOOTSTRAP_HEARTBEAT_VERIFY_FAILED"},
+func TestRunAutomaticallyPicksUpWorkAfterNoContent(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	h.emptyBefore = 1
+	runUntilFinishes(t, h, 1)
+	if h.leaseRequests < 2 || h.finishes[0].status != "completed" {
+		t.Fatalf("lease requests=%d finishes=%+v", h.leaseRequests, h.finishes)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			env := newWorkerHarness(t, supportedBundle())
-			env.executor.connectErr = tt.connect
-			env.executor.failStage = tt.failStage
-			env.heartbeatFails = tt.failStage == "heartbeat"
-			cfg := Config{CloudURL: env.server.URL, BootstrapWorkerToken: "worker-secret", SessionID: "boot-1", AgentInstallURL: "https://downloads.example/opsi-agent", Executor: env.executor}
-			if env.heartbeatFails {
-				cfg.Timeout = 30 * time.Millisecond
+}
+
+func TestRunRetriesTemporaryCloudFailureButStopsOnUnauthorized(t *testing.T) {
+	t.Run("temporary", func(t *testing.T) {
+		h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+		h.leaseFailures = 1
+		runUntilFinishes(t, h, 1)
+		if h.requests() < 2 {
+			t.Fatalf("temporary failure was not retried: %d requests", h.requests())
+		}
+	})
+	t.Run("unauthorized", func(t *testing.T) {
+		h := newDaemonHarness(t, nil)
+		h.leaseErrorStatus = http.StatusUnauthorized
+		if err := Run(context.Background(), h.config()); err == nil {
+			t.Fatal("unauthorized lease did not stop daemon")
+		}
+	})
+}
+
+func TestRunProcessesLeasesSequentially(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1"), testLease("boot-2", "host-2")})
+	h.executor.blockHost = "host-1"
+	h.executor.started = make(chan struct{})
+	h.executor.release = make(chan struct{})
+	go func() {
+		<-h.executor.started
+		if got := h.requests(); got != 1 {
+			t.Errorf("worker requested job 2 while job 1 was active: requests=%d", got)
+		}
+		close(h.executor.release)
+	}()
+	runUntilFinishes(t, h, 2)
+	if h.maxActive != 1 || len(h.finishes) != 2 {
+		t.Fatalf("max active=%d finishes=%+v", h.maxActive, h.finishes)
+	}
+}
+
+func TestRunCancellationDuringJobReportsShutdownAndReturnsNil(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	h.executor.blockHost = "host-1"
+	h.executor.started = make(chan struct{})
+	h.executor.release = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, h.config()) }()
+	<-h.executor.started
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active cancellation did not stop worker")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.finishes) != 1 || h.finishes[0].status != "failed" || h.finishes[0].message != "BOOTSTRAP_WORKER_SHUTDOWN" {
+		t.Fatalf("shutdown finish=%+v", h.finishes)
+	}
+}
+
+func TestRunContinuesAfterJobFailureAndUnsupportedBundle(t *testing.T) {
+	for _, unsupported := range []bool{false, true} {
+		t.Run(map[bool]string{false: "preflight failure", true: "unsupported role"}[unsupported], func(t *testing.T) {
+			first := testLease("boot-1", "host-1")
+			if unsupported {
+				first.Bundle.Role = "worker"
 			}
-			err := RunOnce(context.Background(), cfg)
-			if err == nil {
-				t.Fatal("expected error")
+			h := newDaemonHarness(t, []Lease{first, testLease("boot-2", "host-2")})
+			if !unsupported {
+				h.executor.failHost = "host-1"
 			}
-			if env.finishStatus != "failed" || !strings.Contains(env.finishMessage, tt.want) {
-				t.Fatalf("finish=%q %q want failed containing %q", env.finishStatus, env.finishMessage, tt.want)
+			runUntilFinishes(t, h, 2)
+			if h.finishes[0].status != "failed" || h.finishes[1].status != "completed" {
+				t.Fatalf("finishes=%+v", h.finishes)
 			}
 		})
 	}
 }
 
-func TestRunOnceRedactsSecretsInProgressFinishAndErrors(t *testing.T) {
-	bundle := supportedBundle()
-	env := newWorkerHarness(t, bundle)
-	env.executor.failStage = "preflight"
-	env.executor.secretOutput = true
-	err := RunOnce(context.Background(), Config{CloudURL: env.server.URL, BootstrapWorkerToken: "worker-secret", SessionID: "boot-1", AgentInstallURL: "https://downloads.example/opsi-agent", Executor: env.executor})
-	if err == nil {
-		t.Fatal("expected error")
+func TestRunNoWorkDoesNotHotLoopAndCancelsPromptly(t *testing.T) {
+	h := newDaemonHarness(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, h.config()) }()
+	time.Sleep(650 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle cancellation did not stop worker")
 	}
-	all := err.Error() + " " + env.finishMessage + " " + strings.Join(env.progressMessages, " ")
-	for _, secret := range []string{"ssh-secret", "areg-secret", "private-key-secret", "agent-secret", "pat-secret", "kubeconfig-secret", "app-secret"} {
+	if h.requests() > 2 {
+		t.Fatalf("empty polling hot-looped: %d requests", h.requests())
+	}
+}
+
+func TestRunRedactsSecretsIncludingLeaseAndWorkerTokens(t *testing.T) {
+	lease := testLease("boot-1", "host-1")
+	lease.Bundle.SSH.PrivateKey = "private-key-secret"
+	h := newDaemonHarness(t, []Lease{lease})
+	h.executor.failHost = "host-1"
+	h.executor.secretOutput = true
+	var logs bytes.Buffer
+	h.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	runUntilFinishes(t, h, 1)
+	all := logs.String() + h.finishes[0].message
+	for _, secret := range []string{"ssh-secret", "areg-secret", "private-key-secret", "agent-secret", "pat-secret", "kubeconfig-secret", "app-secret", "lease-secret-boot-1", "worker-secret"} {
 		if strings.Contains(all, secret) {
-			t.Fatalf("secret leaked in worker output: %s", all)
+			t.Fatalf("secret %q leaked in %q", secret, all)
 		}
 	}
 }
 
-func TestUnsupportedAndMissingConfigFailClosed(t *testing.T) {
-	privateKey := supportedBundle()
-	privateKey.SSH.AuthMethod = "private_key"
-	privateKey.SSH.Password = ""
-	privateKey.SSH.PrivateKey = "private-key-secret"
-	if err := ValidateBundle(privateKey); !errors.Is(err, ErrRuntimeUnsupported) {
-		t.Fatalf("private-key mode should be typed unsupported, got %v", err)
-	}
-	worker := supportedBundle()
-	worker.Role = "worker"
-	if _, err := BuildBootstrapPlan(Config{AgentInstallURL: "https://downloads.example/opsi-agent"}, worker); !errors.Is(err, ErrRuntimeUnsupported) {
-		t.Fatalf("worker role should be typed unsupported, got %v", err)
-	}
-	if _, err := BuildBootstrapPlan(Config{}, supportedBundle()); err == nil || !strings.Contains(err.Error(), "agent_install_url") {
-		t.Fatalf("missing agent install config should fail closed, got %v", err)
-	}
-}
-
-func TestValidateBundleInvalidTargetFailsClosed(t *testing.T) {
-	b := supportedBundle()
+func TestValidateBundleInvalidAndUnsupportedTargets(t *testing.T) {
+	b := testLease("boot-1", "host-1").Bundle
 	b.PublicHost = ""
 	if err := ValidateBundle(b); err == nil || !strings.Contains(err.Error(), "public_host") {
-		t.Fatalf("expected invalid target error, got %v", err)
+		t.Fatalf("invalid target error=%v", err)
+	}
+	b = testLease("boot-1", "host-1").Bundle
+	b.SSH.AuthMethod, b.SSH.Password, b.SSH.PrivateKey = "private_key", "", "private-key-secret"
+	if err := ValidateBundle(b); !errors.Is(err, ErrRuntimeUnsupported) {
+		t.Fatalf("private key error=%v", err)
 	}
 }
 
-type workerHarness struct {
-	server                *httptest.Server
-	executor              *fakeExecutor
-	stages                []string
-	progressMessages      []string
-	finishStatus          string
-	finishMessage         string
-	statusPolled          bool
-	heartbeatFails        bool
-	completedBeforeVerify bool
+type finishRecord struct{ sessionID, status, message string }
+
+type daemonHarness struct {
+	mu               sync.Mutex
+	server           *httptest.Server
+	executor         *fakeExecutor
+	logger           *slog.Logger
+	leases           []Lease
+	emptyBefore      int
+	leaseFailures    int
+	leaseErrorStatus int
+	leaseRequests    int
+	active           int
+	maxActive        int
+	finishes         []finishRecord
+	cancel           context.CancelFunc
 }
 
-func newWorkerHarness(t *testing.T, bundle Bundle) *workerHarness {
+func newDaemonHarness(t *testing.T, leases []Lease) *daemonHarness {
 	t.Helper()
-	env := &workerHarness{executor: &fakeExecutor{}}
-	env.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Bootstrap-Worker-Token") != "worker-secret" {
-			w.WriteHeader(http.StatusUnauthorized)
+	h := &daemonHarness{leases: append([]Lease(nil), leases...), executor: &fakeExecutor{h: nil}}
+	h.executor.h = h
+	h.server = httptest.NewServer(http.HandlerFunc(h.serveHTTP))
+	t.Cleanup(h.server.Close)
+	return h
+}
+
+func (h *daemonHarness) config() Config {
+	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, AgentInstallURL: "https://downloads.example/opsi-agent", Executor: h.executor, Logger: h.logger}
+}
+
+func (h *daemonHarness) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Bootstrap-Worker-Token") != "worker-secret" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch {
+	case r.URL.Path == "/internal/bootstrap/sessions/lease":
+		h.leaseRequests++
+		if h.leaseErrorStatus != 0 {
+			w.WriteHeader(h.leaseErrorStatus)
 			return
 		}
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/take"):
-			_ = json.NewEncoder(w).Encode(bundle)
-		case strings.HasSuffix(r.URL.Path, "/progress"):
-			var req map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			env.stages = append(env.stages, req["status"])
-			env.progressMessages = append(env.progressMessages, req["message"])
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": req["status"]})
-		case strings.HasSuffix(r.URL.Path, "/status"):
-			env.statusPolled = true
-			status := "verifying"
-			if env.heartbeatFails {
-				status = "waiting_agent"
-			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
-		case strings.HasSuffix(r.URL.Path, "/finish"):
-			if !env.statusPolled && env.finishStatus == "" {
-				env.completedBeforeVerify = true
-			}
-			var req map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			env.finishStatus, env.finishMessage = req["status"], req["message"]
-			env.stages = append(env.stages, req["status"])
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": req["status"]})
-		default:
-			w.WriteHeader(http.StatusNotFound)
+		if h.leaseFailures > 0 {
+			h.leaseFailures--
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
 		}
-	}))
-	t.Cleanup(env.server.Close)
-	return env
+		if h.emptyBefore > 0 {
+			h.emptyBefore--
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if len(h.leases) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		lease := h.leases[0]
+		h.leases = h.leases[1:]
+		_ = json.NewEncoder(w).Encode(lease)
+	case strings.HasSuffix(r.URL.Path, "/status"):
+		h.requireLeaseHeaders(w, r)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "verifying"})
+	case strings.HasSuffix(r.URL.Path, "/progress"):
+		h.requireLeaseHeaders(w, r)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	case strings.HasSuffix(r.URL.Path, "/finish"):
+		h.requireLeaseHeaders(w, r)
+		var req map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		parts := strings.Split(r.URL.Path, "/")
+		h.finishes = append(h.finishes, finishRecord{sessionID: parts[4], status: req["status"], message: req["message"]})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": req["status"]})
+		if h.cancel != nil && len(h.leases) == 0 {
+			h.cancel()
+		}
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
 }
 
-func supportedBundle() Bundle {
+func (h *daemonHarness) requireLeaseHeaders(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Bootstrap-Worker-ID") != "worker-1" || !strings.HasPrefix(r.Header.Get("X-Bootstrap-Lease-Token"), "lease-secret-") {
+		w.WriteHeader(http.StatusForbidden)
+	}
+}
+
+func (h *daemonHarness) requests() int { h.mu.Lock(); defer h.mu.Unlock(); return h.leaseRequests }
+
+func runUntilFinishes(t *testing.T, h *daemonHarness, count int) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, h.config()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("worker did not finish expected leases")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.finishes) != count {
+		t.Fatalf("finish count=%d want=%d", len(h.finishes), count)
+	}
+}
+
+func testLease(sessionID, host string) Lease {
 	var b Bundle
-	b.SessionID = "boot-1"
-	b.ProjectID = "proj-1"
-	b.NodeID = "node-1"
-	b.PublicHost = "203.0.113.10"
-	b.SSHPort = 22
-	b.Role = "first_server"
+	b.SessionID, b.ProjectID, b.NodeID = sessionID, "proj-1", "node-"+sessionID
+	b.PublicHost, b.SSHPort, b.Role = host, 22, "first_server"
 	b.AgentRegistrationToken = "areg-secret"
-	b.SSH.AuthMethod = "password"
-	b.SSH.Username = "root"
-	b.SSH.Password = "ssh-secret"
-	return b
+	b.SSH.AuthMethod, b.SSH.Username, b.SSH.Password = "password", "root", "ssh-secret"
+	return Lease{Bundle: b, LeaseToken: "lease-secret-" + sessionID, LeaseExpiresAt: time.Now().Add(time.Hour)}
 }
 
 type fakeExecutor struct {
-	connectErr   bool
-	failStage    string
+	h            *daemonHarness
+	failHost     string
 	secretOutput bool
+	blockHost    string
+	started      chan struct{}
+	release      chan struct{}
 }
 
-func (f *fakeExecutor) Connect(context.Context, RemoteTarget) (RemoteSession, error) {
-	if f.connectErr {
-		return nil, errors.New("dial tcp: password=ssh-secret")
+func (f *fakeExecutor) Connect(_ context.Context, target RemoteTarget) (RemoteSession, error) {
+	f.h.mu.Lock()
+	f.h.active++
+	if f.h.active > f.h.maxActive {
+		f.h.maxActive = f.h.active
 	}
-	return &fakeSession{executor: f}, nil
+	f.h.mu.Unlock()
+	return &fakeSession{executor: f, host: target.Host}, nil
 }
 
 type fakeSession struct {
 	executor *fakeExecutor
+	host     string
 }
 
-func (s *fakeSession) Run(_ context.Context, spec CommandSpec) (CommandResult, error) {
-	stage := stageForScript(spec.Script)
-	if s.executor.failStage == stage {
-		out := "failed"
+func (s *fakeSession) Run(ctx context.Context, spec CommandSpec) (CommandResult, error) {
+	if s.executor.blockHost == s.host && spec.Script == preflightScript {
+		close(s.executor.started)
+		select {
+		case <-ctx.Done():
+			return CommandResult{ExitCode: 255}, ctx.Err()
+		case <-s.executor.release:
+		}
+	}
+	if s.executor.failHost == s.host && spec.Script == preflightScript {
+		out := "preflight failed"
 		if s.executor.secretOutput {
-			out = "password=ssh-secret token=areg-secret private_key=private-key-secret agent_token=agent-secret pat=pat-secret kubeconfig=kubeconfig-secret app_secret=app-secret"
+			out = "password=ssh-secret token=areg-secret private_key=private-key-secret agent_token=agent-secret pat=pat-secret kubeconfig=kubeconfig-secret app_secret=app-secret lease-secret-boot-1 worker-secret"
 		}
 		return CommandResult{ExitCode: 1, Stdout: out, Stderr: out}, errors.New(out)
 	}
 	return CommandResult{}, nil
 }
 
-func (s *fakeSession) Close() error { return nil }
-
-func stageForScript(script string) string {
-	switch script {
-	case preflightScript:
-		return "preflight"
-	case installK3sScript:
-		return "installing_k3s"
-	case installAgentScript:
-		return "installing_agent"
-	case registerAgentScript:
-		return "registering_agent"
-	default:
-		return "unknown"
-	}
+func (s *fakeSession) Close() error {
+	s.executor.h.mu.Lock()
+	s.executor.h.active--
+	s.executor.h.mu.Unlock()
+	return nil
 }

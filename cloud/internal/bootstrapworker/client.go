@@ -1,0 +1,178 @@
+package bootstrapworker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
+)
+
+type httpCloudClient struct {
+	client *http.Client
+	cfg    Config
+}
+
+func (h httpCloudClient) LeaseNext(ctx context.Context) (Lease, bool, error) {
+	body, _ := json.Marshal(map[string]string{"worker_id": h.cfg.WorkerID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(h.cfg.CloudURL, "/")+"/internal/bootstrap/sessions/lease", bytes.NewReader(body))
+	if err != nil {
+		return Lease{}, false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bootstrap-Worker-Token", h.cfg.BootstrapWorkerToken)
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return Lease{}, false, fmt.Errorf("lease bootstrap session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		return Lease{}, false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return Lease{}, false, cloudResponseError(resp.StatusCode, "lease bootstrap session", safeBody(resp.Body))
+	}
+	var lease Lease
+	if err := json.NewDecoder(resp.Body).Decode(&lease); err != nil {
+		return Lease{}, false, fmt.Errorf("invalid bootstrap lease protocol response: %w", err)
+	}
+	return lease, true, nil
+}
+
+func (h httpCloudClient) Progress(ctx context.Context, lease Lease, status, message string) error {
+	return h.postState(ctx, lease, "progress", status, message)
+}
+
+func (h httpCloudClient) Finish(ctx context.Context, lease Lease, status, message string) error {
+	return h.postState(ctx, lease, "finish", status, message)
+}
+
+func (h httpCloudClient) postState(ctx context.Context, lease Lease, action, status, message string) error {
+	body, _ := json.Marshal(map[string]string{"project_id": lease.Bundle.ProjectID, "status": status, "message": registry.RedactString(message)})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(h.cfg.CloudURL, "/")+"/internal/bootstrap/sessions/"+url.PathEscape(lease.Bundle.SessionID)+"/"+action, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bootstrap-Worker-Token", h.cfg.BootstrapWorkerToken)
+	setLeaseHeaders(req, h.cfg, lease)
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s bootstrap session: %w", action, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return cloudResponseError(resp.StatusCode, action+" bootstrap session", safeBody(resp.Body))
+	}
+	return nil
+}
+
+func (h httpCloudClient) WaitForHeartbeat(ctx context.Context, lease Lease) error {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		status, err := h.bootstrapStatus(ctx, lease)
+		if err != nil {
+			return err
+		}
+		switch status {
+		case "verifying":
+			return nil
+		case "failed", "cancelled", "expired":
+			return fmt.Errorf("bootstrap session became %s before heartbeat verification", status)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h httpCloudClient) bootstrapStatus(ctx context.Context, lease Lease) (string, error) {
+	endpoint := strings.TrimRight(h.cfg.CloudURL, "/") + "/internal/bootstrap/sessions/" + url.PathEscape(lease.Bundle.SessionID) + "/status?project_id=" + url.QueryEscape(lease.Bundle.ProjectID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-Bootstrap-Worker-Token", h.cfg.BootstrapWorkerToken)
+	setLeaseHeaders(req, h.cfg, lease)
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("get bootstrap session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", cloudResponseError(resp.StatusCode, "get bootstrap session", safeBody(resp.Body))
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	return out.Status, nil
+}
+
+func setLeaseHeaders(req *http.Request, cfg Config, lease Lease) {
+	req.Header.Set("X-Bootstrap-Worker-ID", cfg.WorkerID)
+	req.Header.Set("X-Bootstrap-Lease-Token", lease.LeaseToken)
+}
+
+type cloudError struct {
+	status int
+	msg    string
+}
+
+func (e cloudError) Error() string { return e.msg }
+
+func cloudResponseError(status int, operation, body string) error {
+	return cloudError{status: status, msg: operation + ": " + body}
+}
+
+func isFatalCloudError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var responseErr cloudError
+	if errors.As(err, &responseErr) {
+		return responseErr.status == http.StatusUnauthorized || responseErr.status == http.StatusForbidden || responseErr.status < 500
+	}
+	return strings.Contains(err.Error(), "invalid bootstrap lease protocol response")
+}
+
+func safeBody(r io.Reader) string {
+	data, _ := io.ReadAll(io.LimitReader(r, 4096))
+	return registry.RedactString(string(data))
+}
+
+func redactForBundle(bundle Bundle, value string) string {
+	value = registry.RedactString(value)
+	for _, secret := range []string{bundle.SSH.Password, bundle.SSH.PrivateKey, bundle.AgentRegistrationToken} {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
+	}
+	return value
+}
+
+func redactForConfig(cfg Config, leaseToken, value string) string {
+	value = registry.RedactString(value)
+	for _, secret := range []string{cfg.BootstrapWorkerToken, leaseToken} {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
+	}
+	return value
+}
+
+func redactForLease(cfg Config, lease Lease, value string) string {
+	return redactForConfig(cfg, lease.LeaseToken, redactForBundle(lease.Bundle, value))
+}
