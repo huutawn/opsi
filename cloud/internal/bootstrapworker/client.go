@@ -47,15 +47,31 @@ func (h httpCloudClient) LeaseNext(ctx context.Context) (Lease, bool, error) {
 }
 
 func (h httpCloudClient) Progress(ctx context.Context, lease Lease, status, message string) error {
-	return h.postState(ctx, lease, "progress", status, message)
+	return h.postState(ctx, lease, "progress", finishRequest{Status: status, Message: message})
 }
 
-func (h httpCloudClient) Finish(ctx context.Context, lease Lease, status, message string) error {
-	return h.postState(ctx, lease, "finish", status, message)
+func (h httpCloudClient) Finish(ctx context.Context, lease Lease, result FinishResult) error {
+	req := finishRequest{Status: result.Status, Message: result.Message}
+	if result.Failure != nil {
+		req.FailureCode = result.Failure.Code
+		req.Message = result.Failure.Message
+		req.Retryable = result.Failure.Retryable
+	}
+	return h.postState(ctx, lease, "finish", req)
 }
 
-func (h httpCloudClient) postState(ctx context.Context, lease Lease, action, status, message string) error {
-	body, _ := json.Marshal(map[string]string{"project_id": lease.Bundle.ProjectID, "status": status, "message": registry.RedactString(message)})
+type finishRequest struct {
+	ProjectID   string `json:"project_id"`
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	FailureCode string `json:"failure_code,omitempty"`
+	Retryable   bool   `json:"retryable,omitempty"`
+}
+
+func (h httpCloudClient) postState(ctx context.Context, lease Lease, action string, state finishRequest) error {
+	state.ProjectID = lease.Bundle.ProjectID
+	state.Message = registry.RedactString(state.Message)
+	body, _ := json.Marshal(state)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(h.cfg.CloudURL, "/")+"/internal/bootstrap/sessions/"+url.PathEscape(lease.Bundle.SessionID)+"/"+action, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -72,6 +88,33 @@ func (h httpCloudClient) postState(ctx context.Context, lease Lease, action, sta
 		return cloudResponseError(resp.StatusCode, action+" bootstrap session", safeBody(resp.Body))
 	}
 	return nil
+}
+
+func (h httpCloudClient) HeartbeatLease(ctx context.Context, lease Lease) (time.Time, error) {
+	body, _ := json.Marshal(map[string]string{"project_id": lease.Bundle.ProjectID})
+	endpoint := strings.TrimRight(h.cfg.CloudURL, "/") + "/internal/bootstrap/sessions/" + url.PathEscape(lease.Bundle.SessionID) + "/lease-heartbeat"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return time.Time{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bootstrap-Worker-Token", h.cfg.BootstrapWorkerToken)
+	setLeaseHeaders(req, h.cfg, lease)
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("heartbeat bootstrap lease: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return time.Time{}, cloudResponseError(resp.StatusCode, "heartbeat bootstrap lease", safeBody(resp.Body))
+	}
+	var out struct {
+		LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.LeaseExpiresAt.IsZero() {
+		return time.Time{}, fmt.Errorf("invalid bootstrap heartbeat protocol response")
+	}
+	return out.LeaseExpiresAt, nil
 }
 
 func (h httpCloudClient) WaitForHeartbeat(ctx context.Context, lease Lease) error {
@@ -127,14 +170,15 @@ func setLeaseHeaders(req *http.Request, cfg Config, lease Lease) {
 }
 
 type cloudError struct {
-	status int
-	msg    string
+	status    int
+	operation string
+	msg       string
 }
 
 func (e cloudError) Error() string { return e.msg }
 
 func cloudResponseError(status int, operation, body string) error {
-	return cloudError{status: status, msg: operation + ": " + body}
+	return cloudError{status: status, operation: operation, msg: operation + ": " + body}
 }
 
 func isFatalCloudError(err error) bool {
@@ -143,9 +187,26 @@ func isFatalCloudError(err error) bool {
 	}
 	var responseErr cloudError
 	if errors.As(err, &responseErr) {
-		return responseErr.status == http.StatusUnauthorized || responseErr.status == http.StatusForbidden || responseErr.status < 500
+		switch responseErr.status {
+		case http.StatusUnauthorized, http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnprocessableEntity:
+			return true
+		}
+		return false
 	}
-	return strings.Contains(err.Error(), "invalid bootstrap lease protocol response")
+	return strings.Contains(err.Error(), "invalid bootstrap") && strings.Contains(err.Error(), "protocol response")
+}
+
+func isDaemonFatalCloudError(err error) bool {
+	if isFatalCloudError(err) {
+		return true
+	}
+	var responseErr cloudError
+	return errors.As(err, &responseErr) && responseErr.operation == "lease bootstrap session" && responseErr.status == http.StatusForbidden
+}
+
+func isLeaseLossError(err error) bool {
+	var responseErr cloudError
+	return errors.As(err, &responseErr) && responseErr.operation != "lease bootstrap session" && (responseErr.status == http.StatusForbidden || responseErr.status == http.StatusConflict || responseErr.status == http.StatusGone)
 }
 
 func safeBody(r io.Reader) string {

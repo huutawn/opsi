@@ -17,7 +17,7 @@ type BootstrapCredential struct {
 
 type CredentialVault interface {
 	Put(sessionID string, credential BootstrapCredential, ttl time.Duration)
-	Take(sessionID string) (BootstrapCredential, bool)
+	GetForBootstrapLease(sessionID string) (BootstrapCredential, bool)
 	Delete(sessionID string)
 	Len() int
 }
@@ -41,10 +41,15 @@ func (s *CredentialStore) Put(sessionID string, credential BootstrapCredential, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeExpiredLocked()
+	if previous, ok := s.items[sessionID]; ok {
+		zeroBootstrapCredential(&previous.value)
+	}
+	credential.PrivateKey = append([]byte(nil), credential.PrivateKey...)
+	credential.Password = append([]byte(nil), credential.Password...)
 	s.items[sessionID] = credentialEnvelope{value: credential, expiresAt: s.clock().Add(ttl)}
 }
 
-func (s *CredentialStore) Take(sessionID string) (BootstrapCredential, bool) {
+func (s *CredentialStore) GetForBootstrapLease(sessionID string) (BootstrapCredential, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeExpiredLocked()
@@ -52,13 +57,18 @@ func (s *CredentialStore) Take(sessionID string) (BootstrapCredential, bool) {
 	if !ok {
 		return BootstrapCredential{}, false
 	}
-	delete(s.items, sessionID)
-	return envelope.value, true
+	credential := envelope.value
+	credential.PrivateKey = append([]byte(nil), credential.PrivateKey...)
+	credential.Password = append([]byte(nil), credential.Password...)
+	return credential, true
 }
 
 func (s *CredentialStore) Delete(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if envelope, ok := s.items[sessionID]; ok {
+		zeroBootstrapCredential(&envelope.value)
+	}
 	delete(s.items, sessionID)
 }
 
@@ -73,9 +83,21 @@ func (s *CredentialStore) purgeExpiredLocked() {
 	now := s.clock()
 	for id, envelope := range s.items {
 		if now.After(envelope.expiresAt) {
+			zeroBootstrapCredential(&envelope.value)
 			delete(s.items, id)
 		}
 	}
+}
+
+func zeroBootstrapCredential(credential *BootstrapCredential) {
+	for i := range credential.PrivateKey {
+		credential.PrivateKey[i] = 0
+	}
+	for i := range credential.Password {
+		credential.Password[i] = 0
+	}
+	credential.PrivateKey = nil
+	credential.Password = nil
 }
 
 func (s *CredentialStore) clock() time.Time {
@@ -96,7 +118,7 @@ type BootstrapRegistration struct {
 
 type RegistrationVault interface {
 	Put(sessionID, orgID, projectID, nodeID, token string, ttl time.Duration)
-	TakeForWorker(sessionID string) (BootstrapRegistration, bool)
+	GetForBootstrapLease(sessionID string) (BootstrapRegistration, bool)
 	Exchange(token string) (BootstrapRegistration, bool)
 	DeleteSession(sessionID string)
 }
@@ -116,12 +138,15 @@ func (s *RegistrationTokenStore) Put(sessionID, orgID, projectID, nodeID, token 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeExpiredLocked()
+	if previous, ok := s.bySession[sessionID]; ok {
+		delete(s.byHash, tokenHash(previous.Token))
+	}
 	reg := BootstrapRegistration{SessionID: sessionID, OrgID: orgID, ProjectID: projectID, NodeID: nodeID, Token: token, ExpiresAt: s.clock().Add(ttl)}
 	s.bySession[sessionID] = reg
 	s.byHash[tokenHash(token)] = reg
 }
 
-func (s *RegistrationTokenStore) TakeForWorker(sessionID string) (BootstrapRegistration, bool) {
+func (s *RegistrationTokenStore) GetForBootstrapLease(sessionID string) (BootstrapRegistration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeExpiredLocked()
@@ -129,7 +154,6 @@ func (s *RegistrationTokenStore) TakeForWorker(sessionID string) (BootstrapRegis
 	if !ok {
 		return BootstrapRegistration{}, false
 	}
-	delete(s.bySession, sessionID)
 	return reg, true
 }
 

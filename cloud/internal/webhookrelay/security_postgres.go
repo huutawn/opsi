@@ -81,17 +81,11 @@ func (s postgresCredentialVault) Put(sessionID string, credential BootstrapCrede
 		sessionID, ciphertext, nonce, time.Now().UTC().Add(ttl))
 }
 
-func (s postgresCredentialVault) Take(sessionID string) (BootstrapCredential, bool) {
+func (s postgresCredentialVault) GetForBootstrapLease(sessionID string) (BootstrapCredential, bool) {
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return BootstrapCredential{}, false
-	}
-	defer tx.Rollback()
 	var ciphertext, nonce []byte
-	err = tx.QueryRowContext(ctx, `UPDATE bootstrap_credentials SET consumed_at = now()
-		WHERE session_id = $1 AND consumed_at IS NULL AND expires_at > now()
-		RETURNING ciphertext, nonce`, sessionID).Scan(&ciphertext, &nonce)
+	err := s.db.QueryRowContext(ctx, `SELECT ciphertext, nonce FROM bootstrap_credentials
+		WHERE session_id = $1 AND expires_at > now()`, sessionID).Scan(&ciphertext, &nonce)
 	if err != nil {
 		return BootstrapCredential{}, false
 	}
@@ -99,7 +93,7 @@ func (s postgresCredentialVault) Take(sessionID string) (BootstrapCredential, bo
 	if err := s.open(ciphertext, nonce, &credential); err != nil {
 		return BootstrapCredential{}, false
 	}
-	return credential, tx.Commit() == nil
+	return credential, true
 }
 
 func (s postgresCredentialVault) Delete(sessionID string) {
@@ -127,12 +121,11 @@ func (s postgresRegistrationVault) Put(sessionID, orgID, projectID, nodeID, toke
 		sessionID, orgID, projectID, nodeID, tokenHash(token), ciphertext, nonce, time.Now().UTC().Add(ttl))
 }
 
-func (s postgresRegistrationVault) TakeForWorker(sessionID string) (BootstrapRegistration, bool) {
+func (s postgresRegistrationVault) GetForBootstrapLease(sessionID string) (BootstrapRegistration, bool) {
 	var reg BootstrapRegistration
 	var ciphertext, nonce []byte
-	err := s.db.QueryRowContext(context.Background(), `UPDATE bootstrap_registration_tokens SET worker_consumed_at = now()
-		WHERE session_id = $1 AND worker_consumed_at IS NULL AND expires_at > now()
-		RETURNING session_id, org_id, project_id, node_id, token_ciphertext, token_nonce, expires_at`, sessionID).Scan(&reg.SessionID, &reg.OrgID, &reg.ProjectID, &reg.NodeID, &ciphertext, &nonce, &reg.ExpiresAt)
+	err := s.db.QueryRowContext(context.Background(), `SELECT session_id, org_id, project_id, node_id, token_ciphertext, token_nonce, expires_at
+		FROM bootstrap_registration_tokens WHERE session_id = $1 AND expires_at > now()`, sessionID).Scan(&reg.SessionID, &reg.OrgID, &reg.ProjectID, &reg.NodeID, &ciphertext, &nonce, &reg.ExpiresAt)
 	if err != nil {
 		return BootstrapRegistration{}, false
 	}

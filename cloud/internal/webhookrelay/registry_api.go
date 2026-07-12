@@ -301,6 +301,7 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_BOOTSTRAP_CREDENTIAL", Message: err.Error(), RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
+		defer clearBootstrapCredential(&credential)
 		value, err := s.Registry.CreateBootstrapSession(projectID, req.Role, req.PublicHost, req.SSHUsername, credential.AuthMethod, principal.UserID, r.Header.Get("Idempotency-Key"), req.SSHPort)
 		if err == nil {
 			s.observer.Inc("bootstrap_sessions_total")
@@ -319,6 +320,51 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 	if len(parts) == 3 && parts[2] == "bootstrap-sessions" && r.Method == http.MethodGet {
 		value, err := s.Registry.ListBootstrapSessions(projectID)
 		writeRegistryResult(w, r, map[string]any{"sessions": value}, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 5 && parts[2] == "bootstrap-sessions" && parts[4] == "retry" && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if principal.Role != "owner" && principal.Role != "admin" {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RBAC_DENIED", "bootstrap_session", parts[3], "denied", map[string]any{"role": principal.Role, "error_code": "BOOTSTRAP_RETRY_FORBIDDEN"})
+			s.observer.Inc("rbac_denied_total")
+			writeRegistryError(w, registry.APIError{Status: http.StatusForbidden, Code: "BOOTSTRAP_RETRY_FORBIDDEN", Message: "only Owner or Admin can retry a bootstrap session", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		current, err := s.Registry.GetBootstrapSession(projectID, parts[3])
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		if current.Status != registry.BootstrapDeadLetter {
+			result, retryErr := s.Registry.ManualRetryBootstrapSession(projectID, parts[3], r.Header.Get("Idempotency-Key"), s.clock())
+			if retryErr == nil && !result.Applied {
+				writeJSON(w, http.StatusAccepted, result.Session)
+				return
+			}
+			if retryErr != nil {
+				writeRegistryFailure(w, r, retryErr)
+				return
+			}
+			writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_NOT_DEAD_LETTER", Message: "bootstrap session is not dead-lettered", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		credential, ok := s.credentials.GetForBootstrapLease(parts[3])
+		clearBootstrapCredential(&credential)
+		if !ok {
+			writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_RETRY_CREDENTIAL_UNAVAILABLE", Message: "bootstrap credential is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		result, err := s.Registry.ManualRetryBootstrapSession(projectID, parts[3], r.Header.Get("Idempotency-Key"), s.clock())
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		if result.Applied {
+			s.Registry.Audit(result.Session.OrgID, projectID, principal.UserID, "BOOTSTRAP_MANUAL_RETRY_REQUESTED", "bootstrap_session", result.Session.ID, "success", map[string]any{"previous_attempt_count": current.AttemptCount, "attempt_count": 0, "manual_retry_generation": r.Header.Get("Idempotency-Key")})
+		}
+		writeJSON(w, http.StatusAccepted, result.Session)
 		return
 	}
 	if len(parts) == 4 && parts[2] == "bootstrap-sessions" && r.Method == http.MethodGet {
@@ -487,6 +533,10 @@ func bootstrapCredential(method, username, privateKey, password, k3sToken string
 	default:
 		return BootstrapCredential{}, errors.New("auth_method must be private_key or password")
 	}
+}
+
+func clearBootstrapCredential(credential *BootstrapCredential) {
+	zeroBootstrapCredential(credential)
 }
 
 func bearerToken(r *http.Request) string {

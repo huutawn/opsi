@@ -57,10 +57,17 @@ perform and report the runtime operation.
 
 Bootstrap Worker is a long-running, single-concurrency Cloud-side worker. It
 polls `POST /internal/bootstrap/sessions/lease`; the registry atomically claims
-the oldest pending session and stores only a hash of the one-time lease token.
-Worker status, progress, and finish calls require both worker identity and the
-raw lease token. Lease heartbeat, renewal, recovery, retry, and dead-letter
-semantics are not implemented until V3-010.
+the oldest eligible pending or due retry session, increments its attempt count,
+and stores only a hash of the one-time lease token. The worker renews active
+leases through authenticated heartbeat requests. Progress and finish calls also
+require worker identity and the raw lease token.
+
+Cloud recovers expired leases before polling. Retryable outcomes receive
+persisted bounded backoff; exhausted or permanent outcomes enter
+`dead_letter`. Credential retrieval remains durable across attempts and
+registration tokens rotate per attempt. Owner/Admin manual retry is
+project-scoped and idempotent. The worker still processes at most one session,
+and V3-014 owns any future per-step resumable BootstrapJob state machine.
 
 ### 1.3 Current CLI/local backend boundary
 

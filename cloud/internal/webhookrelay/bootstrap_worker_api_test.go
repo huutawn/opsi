@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 func TestBootstrapWorkerLeaseAndLeaseBoundMutations(t *testing.T) {
@@ -80,7 +82,7 @@ func TestBootstrapWorkerLeaseAndLeaseBoundMutations(t *testing.T) {
 		t.Fatalf("valid finish status=%d body=%s", w.Code, w.Body.String())
 	}
 	stored, err := server.Registry.GetBootstrapSession(project.ID, session.ID)
-	if err != nil || stored.LeaseTokenHash != "" || stored.LeaseExpiresAt != nil || stored.LeaseOwner != "worker-1" {
+	if err != nil || stored.LeaseTokenHash != "" || stored.LeaseExpiresAt != nil || stored.LeaseOwner != "" {
 		t.Fatalf("terminal lease state=%+v err=%v", stored, err)
 	}
 }
@@ -113,5 +115,173 @@ func TestConcurrentBootstrapLeaseRequestsReceiveOneSession(t *testing.T) {
 	}
 	if counts[http.StatusOK] != 1 || counts[http.StatusNoContent] != 1 {
 		t.Fatalf("concurrent lease statuses=%v", counts)
+	}
+}
+
+func TestBootstrapLeaseHeartbeatEndpointExtendsLeaseAndRejectsStaleLease(t *testing.T) {
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
+	now := time.Now().UTC()
+	server.now = func() time.Time { return now }
+	project, _ := server.Registry.CreateProject("org-1", "Demo", "demo", "", "project-key")
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
+	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-initial", time.Hour)
+	handler := server.Handler()
+
+	leaseReq := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewBufferString(`{"worker_id":"worker-1"}`))
+	leaseReq.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	leaseResp := httptest.NewRecorder()
+	handler.ServeHTTP(leaseResp, leaseReq)
+	var lease struct {
+		LeaseToken     string    `json:"lease_token"`
+		LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	}
+	if leaseResp.Code != http.StatusOK || json.NewDecoder(leaseResp.Body).Decode(&lease) != nil {
+		t.Fatalf("lease status=%d body=%s", leaseResp.Code, leaseResp.Body.String())
+	}
+	now = now.Add(20 * time.Second)
+	heartbeat := func(workerID, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/lease-heartbeat", bytes.NewBufferString(`{"project_id":"`+project.ID+`"}`))
+		req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+		req.Header.Set("X-Bootstrap-Worker-ID", workerID)
+		req.Header.Set("X-Bootstrap-Lease-Token", token)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	w := heartbeat("worker-1", lease.LeaseToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("heartbeat status=%d body=%s", w.Code, w.Body.String())
+	}
+	stored, _ := server.Registry.GetBootstrapSession(project.ID, session.ID)
+	if stored.AttemptCount != 1 || stored.LeaseHeartbeatAt == nil || stored.LeaseExpiresAt == nil || !stored.LeaseExpiresAt.After(lease.LeaseExpiresAt) {
+		t.Fatalf("stored=%+v", stored)
+	}
+	if w := heartbeat("worker-2", lease.LeaseToken); w.Code != http.StatusForbidden {
+		t.Fatalf("wrong owner status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := heartbeat("worker-1", "wrong"); w.Code != http.StatusForbidden {
+		t.Fatalf("wrong token status=%d body=%s", w.Code, w.Body.String())
+	}
+	now = stored.LeaseExpiresAt.Add(time.Nanosecond)
+	if w := heartbeat("worker-1", lease.LeaseToken); w.Code != http.StatusGone {
+		t.Fatalf("expired heartbeat status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, err := server.Registry.RecoverExpiredBootstrapLeases(now); err != nil {
+		t.Fatal(err)
+	}
+	if w := heartbeat("worker-1", lease.LeaseToken); w.Code != http.StatusConflict {
+		t.Fatalf("inactive heartbeat status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestBootstrapCredentialAndRegistrationTokenSurviveRetryAttempt(t *testing.T) {
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
+	now := time.Now().UTC()
+	server.now = func() time.Time { return now }
+	project, _ := server.Registry.CreateProject("org-1", "Demo", "demo", "", "project-key")
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
+	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-initial", time.Hour)
+	handler := server.Handler()
+
+	lease := func() struct {
+		Bundle struct {
+			AgentRegistrationToken string `json:"agent_registration_token"`
+			SSH                    struct {
+				Password string `json:"password"`
+			} `json:"ssh"`
+		} `json:"bundle"`
+		LeaseToken string `json:"lease_token"`
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewBufferString(`{"worker_id":"worker-1"}`))
+		req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("lease status=%d body=%s", w.Code, w.Body.String())
+		}
+		var out struct {
+			Bundle struct {
+				AgentRegistrationToken string `json:"agent_registration_token"`
+				SSH                    struct {
+					Password string `json:"password"`
+				} `json:"ssh"`
+			} `json:"bundle"`
+			LeaseToken string `json:"lease_token"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	first := lease()
+	if first.Bundle.SSH.Password != "ssh-secret" || server.credentials.Len() != 1 {
+		t.Fatalf("credential was destructively consumed: bundle=%+v len=%d", first.Bundle, server.credentials.Len())
+	}
+	if _, ok := server.registrations.Exchange(first.Bundle.AgentRegistrationToken); !ok {
+		t.Fatal("first-attempt registration token was not usable")
+	}
+	finish := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/finish", bytes.NewBufferString(`{"project_id":"`+project.ID+`","status":"failed","failure_code":"BOOTSTRAP_CONNECT_FAILED","message":"temporary timeout","retryable":true}`))
+	finish.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	finish.Header.Set("X-Bootstrap-Worker-ID", "worker-1")
+	finish.Header.Set("X-Bootstrap-Lease-Token", first.LeaseToken)
+	finishResp := httptest.NewRecorder()
+	handler.ServeHTTP(finishResp, finish)
+	if finishResp.Code != http.StatusOK {
+		t.Fatalf("finish status=%d body=%s", finishResp.Code, finishResp.Body.String())
+	}
+	retrying, _ := server.Registry.GetBootstrapSession(project.ID, session.ID)
+	now = retrying.NextAttemptAt.Add(time.Nanosecond)
+	second := lease()
+	if second.Bundle.SSH.Password != "ssh-secret" || second.Bundle.AgentRegistrationToken == first.Bundle.AgentRegistrationToken {
+		t.Fatalf("retry bundle=%+v first_token=%q", second.Bundle, first.Bundle.AgentRegistrationToken)
+	}
+	if _, ok := server.registrations.Exchange(first.Bundle.AgentRegistrationToken); ok {
+		t.Fatal("registration token from the prior attempt remained valid")
+	}
+	if _, ok := server.registrations.Exchange(second.Bundle.AgentRegistrationToken); !ok {
+		t.Fatal("registration token for the retry attempt was not usable")
+	}
+	complete := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/finish", bytes.NewBufferString(`{"project_id":"`+project.ID+`","status":"completed"}`))
+	complete.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	complete.Header.Set("X-Bootstrap-Worker-ID", "worker-1")
+	complete.Header.Set("X-Bootstrap-Lease-Token", second.LeaseToken)
+	completeResp := httptest.NewRecorder()
+	handler.ServeHTTP(completeResp, complete)
+	if completeResp.Code != http.StatusOK || server.credentials.Len() != 0 {
+		t.Fatalf("completion status=%d credential_len=%d body=%s", completeResp.Code, server.credentials.Len(), completeResp.Body.String())
+	}
+}
+
+func TestBootstrapPermanentFailureDeadLetterCleansSecrets(t *testing.T) {
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
+	project, _ := server.Registry.CreateProject("org-1", "Demo", "demo", "", "project-key")
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
+	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-initial", time.Hour)
+	handler := server.Handler()
+	leaseReq := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewBufferString(`{"worker_id":"worker-1"}`))
+	leaseReq.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	leaseResp := httptest.NewRecorder()
+	handler.ServeHTTP(leaseResp, leaseReq)
+	var lease struct {
+		LeaseToken string `json:"lease_token"`
+	}
+	if leaseResp.Code != http.StatusOK || json.NewDecoder(leaseResp.Body).Decode(&lease) != nil {
+		t.Fatalf("lease status=%d body=%s", leaseResp.Code, leaseResp.Body.String())
+	}
+	finish := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/finish", bytes.NewBufferString(`{"project_id":"`+project.ID+`","status":"failed","failure_code":"TARGET_OS_UNSUPPORTED","message":"unsupported target","retryable":false}`))
+	finish.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	finish.Header.Set("X-Bootstrap-Worker-ID", "worker-1")
+	finish.Header.Set("X-Bootstrap-Lease-Token", lease.LeaseToken)
+	finishResp := httptest.NewRecorder()
+	handler.ServeHTTP(finishResp, finish)
+	stored, _ := server.Registry.GetBootstrapSession(project.ID, session.ID)
+	if finishResp.Code != http.StatusOK || stored.Status != registry.BootstrapDeadLetter || server.credentials.Len() != 0 {
+		t.Fatalf("finish=%d stored=%+v credential_len=%d body=%s", finishResp.Code, stored, server.credentials.Len(), finishResp.Body.String())
+	}
+	if _, ok := server.registrations.GetForBootstrapLease(session.ID); ok {
+		t.Fatal("registration token remained after dead-letter cleanup")
 	}
 }

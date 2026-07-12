@@ -18,25 +18,34 @@ import (
 var ErrRuntimeUnsupported = errors.New("bootstrap target mode unsupported")
 
 const (
-	defaultPollInterval = 3 * time.Second
-	minPollInterval     = 500 * time.Millisecond
-	maxPollInterval     = 5 * time.Minute
-	defaultJobTimeout   = 10 * time.Minute
+	defaultPollInterval           = 3 * time.Second
+	minPollInterval               = 500 * time.Millisecond
+	maxPollInterval               = 5 * time.Minute
+	defaultJobTimeout             = 10 * time.Minute
+	defaultHeartbeatInterval      = 25 * time.Second
+	defaultHeartbeatRetryInterval = 2 * time.Second
+	defaultLeaseSafetyMargin      = 10 * time.Second
+	defaultDaemonBackoff          = time.Second
+	maximumDaemonBackoff          = 30 * time.Second
 )
 
 type Config struct {
-	CloudURL             string         `json:"cloud_url"`
-	BootstrapWorkerToken string         `json:"bootstrap_worker_token"`
-	WorkerID             string         `json:"worker_id"`
-	PollInterval         time.Duration  `json:"-"`
-	AgentInstallURL      string         `json:"agent_install_url"`
-	AgentInstallSHA256   string         `json:"agent_install_sha256"`
-	SSHKnownHostsPath    string         `json:"ssh_known_hosts_path"`
-	Production           bool           `json:"production"`
-	Timeout              time.Duration  `json:"-"`
-	HTTPClient           *http.Client   `json:"-"`
-	Executor             RemoteExecutor `json:"-"`
-	Logger               *slog.Logger   `json:"-"`
+	CloudURL               string           `json:"cloud_url"`
+	BootstrapWorkerToken   string           `json:"bootstrap_worker_token"`
+	WorkerID               string           `json:"worker_id"`
+	PollInterval           time.Duration    `json:"-"`
+	AgentInstallURL        string           `json:"agent_install_url"`
+	AgentInstallSHA256     string           `json:"agent_install_sha256"`
+	SSHKnownHostsPath      string           `json:"ssh_known_hosts_path"`
+	Production             bool             `json:"production"`
+	Timeout                time.Duration    `json:"-"`
+	HTTPClient             *http.Client     `json:"-"`
+	Executor               RemoteExecutor   `json:"-"`
+	Logger                 *slog.Logger     `json:"-"`
+	HeartbeatInterval      time.Duration    `json:"-"`
+	HeartbeatRetryInterval time.Duration    `json:"-"`
+	LeaseSafetyMargin      time.Duration    `json:"-"`
+	Now                    func() time.Time `json:"-"`
 }
 
 type fileConfig struct {
@@ -72,6 +81,18 @@ type Lease struct {
 	Bundle         Bundle    `json:"bundle"`
 	LeaseToken     string    `json:"lease_token"`
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+type JobFailure struct {
+	Code      string
+	Message   string
+	Retryable bool
+}
+
+type FinishResult struct {
+	Status  string
+	Message string
+	Failure *JobFailure
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -149,8 +170,9 @@ func Run(ctx context.Context, cfg Config) error {
 
 type CloudClient interface {
 	LeaseNext(context.Context) (Lease, bool, error)
+	HeartbeatLease(context.Context, Lease) (time.Time, error)
 	Progress(context.Context, Lease, string, string) error
-	Finish(context.Context, Lease, string, string) error
+	Finish(context.Context, Lease, FinishResult) error
 	WaitForHeartbeat(context.Context, Lease) error
 }
 
@@ -165,6 +187,18 @@ func NewWorker(cfg Config) Worker {
 	cfg.WorkerID = strings.TrimSpace(cfg.WorkerID)
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = defaultPollInterval
+	}
+	if cfg.HeartbeatInterval == 0 {
+		cfg.HeartbeatInterval = defaultHeartbeatInterval
+	}
+	if cfg.HeartbeatRetryInterval == 0 {
+		cfg.HeartbeatRetryInterval = defaultHeartbeatRetryInterval
+	}
+	if cfg.LeaseSafetyMargin == 0 {
+		cfg.LeaseSafetyMargin = defaultLeaseSafetyMargin
+	}
+	if cfg.Now == nil {
+		cfg.Now = func() time.Time { return time.Now().UTC() }
 	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -191,6 +225,7 @@ func (w Worker) Run(ctx context.Context) error {
 		return err
 	}
 	w.cfg = cfg
+	backoff := defaultDaemonBackoff
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -200,15 +235,20 @@ func (w Worker) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			if isFatalCloudError(err) {
+			if isDaemonFatalCloudError(err) {
 				return err
 			}
 			w.logger.Warn("bootstrap lease poll failed", "worker_id", cfg.WorkerID, "error", redactForConfig(cfg, "", err.Error()))
-			if !waitForPoll(ctx, cfg.PollInterval) {
+			if !waitForPoll(ctx, backoff) {
 				return nil
+			}
+			backoff *= 2
+			if backoff > maximumDaemonBackoff {
+				backoff = maximumDaemonBackoff
 			}
 			continue
 		}
+		backoff = defaultDaemonBackoff
 		if !found {
 			if !waitForPoll(ctx, cfg.PollInterval) {
 				return nil
@@ -236,8 +276,26 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 	if timeout == 0 {
 		timeout = defaultJobTimeout
 	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
+	timeoutCtx, timeoutCancel := context.WithTimeout(parent, timeout)
+	defer timeoutCancel()
+	ctx, cancel := context.WithCancelCause(timeoutCtx)
+	defer cancel(nil)
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		w.heartbeatLoop(heartbeatCtx, lease, cancel)
+	}()
+	stopHeartbeatAndWait := func() {
+		stopHeartbeat()
+		<-heartbeatDone
+	}
+	heartbeatStopped := false
+	defer func() {
+		if !heartbeatStopped {
+			stopHeartbeatAndWait()
+		}
+	}()
 	bundle := lease.Bundle
 	defer func() {
 		bundle.AgentRegistrationToken = ""
@@ -245,68 +303,174 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 		bundle.SSH.Password = ""
 	}()
 	if err := ValidateBundle(bundle); err != nil {
-		_ = w.finishLease(ctx, lease, "failed", "INVALID_BOOTSTRAP_TARGET: "+redactForBundle(bundle, err.Error()))
-		return err
+		stopHeartbeatAndWait()
+		heartbeatStopped = true
+		failure := classifyValidationFailure(err)
+		return w.reportFailure(ctx, lease, failure)
 	}
 	plan, err := BuildBootstrapPlan(cfg, bundle)
 	if err != nil {
-		_ = w.finishLease(ctx, lease, "failed", redactForBundle(bundle, err.Error()))
-		return err
+		stopHeartbeatAndWait()
+		heartbeatStopped = true
+		failure := classifyPlanFailure(err)
+		return w.reportFailure(ctx, lease, failure)
 	}
 
 	target := RemoteTarget{Host: bundle.PublicHost, Port: bundle.SSHPort, Username: bundle.SSH.Username, Password: bundle.SSH.Password}
-	if err := w.client.Progress(ctx, lease, "connecting", "connecting to target over SSH"); isFatalCloudError(err) {
-		return err
+	if err := w.client.Progress(ctx, lease, "connecting", "connecting to target over SSH"); err != nil {
+		if isFatalCloudError(err) || isLeaseLossError(err) {
+			return err
+		}
 	}
 	session, err := w.executor.Connect(ctx, target)
 	if err != nil {
+		stopHeartbeatAndWait()
+		heartbeatStopped = true
 		if parent.Err() != nil {
-			_ = w.finishLease(ctx, lease, "failed", "BOOTSTRAP_WORKER_SHUTDOWN")
-			return errors.New("BOOTSTRAP_WORKER_SHUTDOWN")
+			failure := JobFailure{Code: "BOOTSTRAP_WORKER_SHUTDOWN", Message: "bootstrap worker shut down", Retryable: true}
+			return w.reportFailure(ctx, lease, failure)
 		}
-		msg := "BOOTSTRAP_CONNECT_FAILED: " + redactForLease(cfg, lease, err.Error())
-		_ = w.finishLease(ctx, lease, "failed", msg)
-		return errors.New(msg)
+		if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
+			return cause
+		}
+		failure := JobFailure{Code: "BOOTSTRAP_CONNECT_FAILED", Message: boundedFailureMessage(redactForLease(cfg, lease, err.Error())), Retryable: true}
+		return w.reportFailure(ctx, lease, failure)
 	}
 	defer session.Close()
 
 	for _, step := range plan.Steps {
-		if err := w.client.Progress(ctx, lease, step.Status, step.Message); isFatalCloudError(err) {
-			return err
+		if err := w.client.Progress(ctx, lease, step.Status, step.Message); err != nil {
+			if isFatalCloudError(err) || isLeaseLossError(err) {
+				return err
+			}
 		}
 		result, err := session.Run(ctx, step.Command)
 		if err != nil || result.ExitCode != 0 {
+			stopHeartbeatAndWait()
+			heartbeatStopped = true
 			if parent.Err() != nil {
-				_ = w.finishLease(ctx, lease, "failed", "BOOTSTRAP_WORKER_SHUTDOWN")
-				return errors.New("BOOTSTRAP_WORKER_SHUTDOWN")
+				failure := JobFailure{Code: "BOOTSTRAP_WORKER_SHUTDOWN", Message: "bootstrap worker shut down", Retryable: true}
+				return w.reportFailure(ctx, lease, failure)
 			}
-			msg := redactForLease(cfg, lease, fmt.Sprintf("%s failed: %s %s %v", step.Status, result.Stdout, result.Stderr, err))
-			_ = w.finishLease(ctx, lease, "failed", msg)
-			return errors.New(msg)
+			if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
+				return cause
+			}
+			failure := classifyStepFailure(step.Status, redactForLease(cfg, lease, fmt.Sprintf("%s failed: %s %s %v", step.Status, result.Stdout, result.Stderr, err)))
+			return w.reportFailure(ctx, lease, failure)
 		}
 	}
-	if err := w.client.Progress(ctx, lease, "verifying_agent", "waiting for healthy Agent heartbeat"); isFatalCloudError(err) {
-		return err
-	}
-	if err := w.client.WaitForHeartbeat(ctx, lease); err != nil {
-		if isFatalCloudError(err) {
+	if err := w.client.Progress(ctx, lease, "verifying_agent", "waiting for healthy Agent heartbeat"); err != nil {
+		if isFatalCloudError(err) || isLeaseLossError(err) {
 			return err
 		}
-		if parent.Err() != nil {
-			_ = w.finishLease(ctx, lease, "failed", "BOOTSTRAP_WORKER_SHUTDOWN")
-			return errors.New("BOOTSTRAP_WORKER_SHUTDOWN")
-		}
-		msg := "BOOTSTRAP_HEARTBEAT_VERIFY_FAILED: " + redactForLease(cfg, lease, err.Error())
-		_ = w.finishLease(ctx, lease, "failed", msg)
-		return errors.New(msg)
 	}
-	return w.finishLease(ctx, lease, "completed", "bootstrap completed after verified Agent heartbeat")
+	if err := w.client.WaitForHeartbeat(ctx, lease); err != nil {
+		if isFatalCloudError(err) || isLeaseLossError(err) {
+			return err
+		}
+		stopHeartbeatAndWait()
+		heartbeatStopped = true
+		if parent.Err() != nil {
+			failure := JobFailure{Code: "BOOTSTRAP_WORKER_SHUTDOWN", Message: "bootstrap worker shut down", Retryable: true}
+			return w.reportFailure(ctx, lease, failure)
+		}
+		if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
+			return cause
+		}
+		failure := JobFailure{Code: "BOOTSTRAP_CLOUD_TEMPORARY", Message: boundedFailureMessage(redactForLease(cfg, lease, err.Error())), Retryable: true}
+		return w.reportFailure(ctx, lease, failure)
+	}
+	stopHeartbeatAndWait()
+	heartbeatStopped = true
+	return w.finishLease(ctx, lease, FinishResult{Status: "completed", Message: "bootstrap completed after verified Agent heartbeat"})
 }
 
-func (w Worker) finishLease(ctx context.Context, lease Lease, status, message string) error {
+func (w Worker) finishLease(ctx context.Context, lease Lease, result FinishResult) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	return w.client.Finish(cleanupCtx, lease, status, redactForLease(w.cfg, lease, message))
+	result.Message = redactForLease(w.cfg, lease, result.Message)
+	if result.Failure != nil {
+		result.Failure.Message = boundedFailureMessage(redactForLease(w.cfg, lease, result.Failure.Message))
+	}
+	return w.client.Finish(cleanupCtx, lease, result)
+}
+
+func (w Worker) reportFailure(ctx context.Context, lease Lease, failure JobFailure) error {
+	if err := w.finishLease(ctx, lease, FinishResult{Status: "failed", Failure: &failure}); err != nil {
+		return err
+	}
+	return errors.New(failure.Code)
+}
+
+func (w Worker) heartbeatLoop(ctx context.Context, lease Lease, cancel context.CancelCauseFunc) {
+	expiresAt := lease.LeaseExpiresAt
+	delay := w.cfg.HeartbeatInterval
+	for {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		renewedUntil, err := w.client.HeartbeatLease(ctx, lease)
+		if err == nil {
+			expiresAt = renewedUntil
+			delay = w.cfg.HeartbeatInterval
+			continue
+		}
+		if isFatalCloudError(err) {
+			cancel(err)
+			return
+		}
+		if isLeaseLossError(err) {
+			cancel(fmt.Errorf("BOOTSTRAP_LEASE_LOST: %w", err))
+			return
+		}
+		if !w.now().Before(expiresAt.Add(-w.cfg.LeaseSafetyMargin)) {
+			cancel(errors.New("BOOTSTRAP_LEASE_LOST: heartbeat renewal deadline exceeded"))
+			return
+		}
+		delay = w.cfg.HeartbeatRetryInterval
+	}
+}
+
+func (w Worker) now() time.Time { return w.cfg.Now().UTC() }
+
+func classifyValidationFailure(err error) JobFailure {
+	code := "INVALID_BOOTSTRAP_TARGET"
+	if errors.Is(err, ErrRuntimeUnsupported) && strings.Contains(err.Error(), "private key") {
+		code = "SSH_AUTH_METHOD_UNSUPPORTED"
+	}
+	return JobFailure{Code: code, Message: boundedFailureMessage(err.Error())}
+}
+
+func classifyPlanFailure(err error) JobFailure {
+	code := "AGENT_INSTALL_URL_INVALID"
+	if errors.Is(err, ErrRuntimeUnsupported) {
+		code = "BOOTSTRAP_ROLE_UNSUPPORTED"
+	}
+	return JobFailure{Code: code, Message: boundedFailureMessage(err.Error())}
+}
+
+func classifyStepFailure(status, message string) JobFailure {
+	code, retryable := "BOOTSTRAP_CLOUD_TEMPORARY", true
+	if status == "preflight" {
+		code, retryable = "TARGET_OS_UNSUPPORTED", false
+	} else if status == "installing_agent" && strings.Contains(strings.ToLower(message), "checksum") {
+		code, retryable = "AGENT_INSTALL_CHECKSUM_MISMATCH", false
+	} else if status == "registering_agent" && strings.Contains(message, "409") {
+		code, retryable = "AGENT_ALREADY_REGISTERED", false
+	}
+	return JobFailure{Code: code, Message: boundedFailureMessage(message), Retryable: retryable}
+}
+
+func boundedFailureMessage(message string) string {
+	message = strings.TrimSpace(registry.RedactString(message))
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	return message
 }
 
 func waitForPoll(ctx context.Context, interval time.Duration) bool {

@@ -88,15 +88,25 @@ Safe ActionPlane client.
   deployment rate limits, durable deployment leases/retry/dead-letter state,
   and append-only Cloud audit protections for the Postgres path.
 - Bootstrap Worker is now a long-running, single-concurrency daemon. It polls
-  Cloud and atomically leases the oldest pending bootstrap session without an
-  operator-provided session ID. Worker status, progress, and finish requests
-  require the lease owner and raw lease token; storage retains only its hash.
+  Cloud and atomically leases the oldest eligible pending or due retry session
+  without an operator-provided session ID. Each lease increments a server-owned
+  bounded attempt count. Worker progress, heartbeat, and finish requests require
+  the lease owner and raw lease token; storage retains only its hash.
 - Worker configuration no longer accepts fixed `session_id`. The existing SSH,
   K3s, Agent install, registration, and Agent heartbeat verification sequence is
   unchanged after lease acquisition.
-- Durable lease heartbeat, renewal, expired-lease recovery, retry counters,
-  backoff, and dead-letter handling remain unimplemented until V3-010. A worker
-  crash after one-time credential handoff may still strand the session.
+- Active leases are renewed with authenticated heartbeats. Expired leases are
+  recovered before polling, retryable failures use persisted exponential
+  backoff, and exhausted or permanent failures enter `dead_letter`. Owner/Admin
+  may request an idempotent manual retry when a valid bootstrap credential is
+  available.
+- Credential retrieval is non-destructive across attempts. Agent registration
+  tokens rotate per attempt for the same session and node, and terminal session
+  handling deletes credential and unused registration material.
+- In-memory and PostgreSQL repositories share lease, heartbeat, recovery,
+  retry, dead-letter, and manual retry semantics. The PostgreSQL restart test is
+  mandatory in `make verify-postgres`; execution still requires
+  `OPSI_TEST_DATABASE_URL`.
 
 Cloud has no AI runtime and does not own Kubernetes execution or raw runtime
 evidence.
@@ -130,9 +140,10 @@ measured disaster recovery.
 
 ## Ordered next work
 
-V3-010 is the next ordered task: add durable bootstrap lease heartbeat,
-recovery, retry, and dead-letter behavior. V3-011 through V3-013 then complete
-the remaining control-plane milestone work. M1 has not passed.
+V3-011 is the next ordered task: add the idempotent first-owner/project admin
+command. V3-012 and V3-013 then complete the remaining control-plane milestone
+work. M1 has not passed. Per-step resumable BootstrapJob transitions and remote
+partial-install resume remain V3-014.
 IncidentEvidence is Phase 5, Safe ActionPlane is Phase 6, CLI MCP is Phase 7,
 and production gates remain later roadmap work.
 

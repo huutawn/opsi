@@ -111,6 +111,126 @@ func TestRunProcessesLeasesSequentially(t *testing.T) {
 	}
 }
 
+func TestLongRunningJobSendsMultipleHeartbeatsAndStopsAfterCompletion(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	h.heartbeatNotify = make(chan struct{}, 4)
+	h.executor.blockHost = "host-1"
+	h.executor.started = make(chan struct{})
+	h.executor.release = make(chan struct{})
+	go func() {
+		<-h.executor.started
+		<-h.heartbeatNotify
+		<-h.heartbeatNotify
+		close(h.executor.release)
+	}()
+	runUntilFinishes(t, h, 1)
+	h.mu.Lock()
+	count := h.heartbeatRequests
+	h.mu.Unlock()
+	if count < 2 {
+		t.Fatalf("heartbeat requests=%d want at least 2", count)
+	}
+	time.Sleep(50 * time.Millisecond)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.heartbeatRequests != count {
+		t.Fatalf("heartbeat loop continued after completion: before=%d after=%d", count, h.heartbeatRequests)
+	}
+}
+
+func TestDefinitiveHeartbeatLeaseLossCancelsRemoteWorkWithoutFinish(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	h.heartbeatErrorStatus = http.StatusGone
+	h.executor.blockHost = "host-1"
+	h.executor.started = make(chan struct{})
+	h.executor.release = make(chan struct{})
+	h.executor.canceled = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, h.config()) }()
+	<-h.executor.started
+	select {
+	case <-h.executor.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("lease loss did not cancel remote executor")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.finishes) != 0 {
+		t.Fatalf("stale lease reported finish: %+v", h.finishes)
+	}
+}
+
+func TestHeartbeatWorkerAuthenticationFailureStopsDaemon(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	h.heartbeatErrorStatus = http.StatusUnauthorized
+	h.executor.blockHost = "host-1"
+	h.executor.started = make(chan struct{})
+	h.executor.release = make(chan struct{})
+	h.executor.canceled = make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- Run(context.Background(), h.config()) }()
+	<-h.executor.started
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("worker authentication failure did not stop daemon")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker authentication failure did not stop promptly")
+	}
+}
+
+func TestTemporaryHeartbeatFailureRecoversBeforeExpiry(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	h.heartbeatFailures = 2
+	h.heartbeatNotify = make(chan struct{}, 8)
+	h.executor.blockHost = "host-1"
+	h.executor.started = make(chan struct{})
+	h.executor.release = make(chan struct{})
+	go func() {
+		<-h.executor.started
+		<-h.heartbeatNotify
+		<-h.heartbeatNotify
+		<-h.heartbeatNotify
+		close(h.executor.release)
+	}()
+	runUntilFinishes(t, h, 1)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.heartbeatRequests < 3 || len(h.finishes) != 1 || h.finishes[0].status != "completed" {
+		t.Fatalf("heartbeats=%d finishes=%+v", h.heartbeatRequests, h.finishes)
+	}
+}
+
+func TestHeartbeatFailureBeyondSafetyDeadlineCancelsJob(t *testing.T) {
+	lease := testLease("boot-1", "host-1")
+	lease.LeaseExpiresAt = time.Now().Add(80 * time.Millisecond)
+	h := newDaemonHarness(t, []Lease{lease})
+	h.heartbeatErrorStatus = http.StatusServiceUnavailable
+	h.executor.blockHost = "host-1"
+	h.executor.started = make(chan struct{})
+	h.executor.release = make(chan struct{})
+	h.executor.canceled = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, h.config()) }()
+	<-h.executor.started
+	select {
+	case <-h.executor.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat safety deadline did not cancel job")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunCancellationDuringJobReportsShutdownAndReturnsNil(t *testing.T) {
 	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
 	h.executor.blockHost = "host-1"
@@ -131,7 +251,7 @@ func TestRunCancellationDuringJobReportsShutdownAndReturnsNil(t *testing.T) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.finishes) != 1 || h.finishes[0].status != "failed" || h.finishes[0].message != "BOOTSTRAP_WORKER_SHUTDOWN" {
+	if len(h.finishes) != 1 || h.finishes[0].status != "failed" || h.finishes[0].failureCode != "BOOTSTRAP_WORKER_SHUTDOWN" || !h.finishes[0].retryable {
 		t.Fatalf("shutdown finish=%+v", h.finishes)
 	}
 }
@@ -151,7 +271,19 @@ func TestRunContinuesAfterJobFailureAndUnsupportedBundle(t *testing.T) {
 			if h.finishes[0].status != "failed" || h.finishes[1].status != "completed" {
 				t.Fatalf("finishes=%+v", h.finishes)
 			}
+			if unsupported && (h.finishes[0].failureCode != "BOOTSTRAP_ROLE_UNSUPPORTED" || h.finishes[0].retryable) {
+				t.Fatalf("unsupported classification=%+v", h.finishes[0])
+			}
 		})
+	}
+}
+
+func TestBootstrapConnectFailureIsRetryable(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	h.executor.failConnectHost = "host-1"
+	runUntilFinishes(t, h, 1)
+	if h.finishes[0].failureCode != "BOOTSTRAP_CONNECT_FAILED" || !h.finishes[0].retryable {
+		t.Fatalf("connect classification=%+v", h.finishes[0])
 	}
 }
 
@@ -205,22 +337,29 @@ func TestValidateBundleInvalidAndUnsupportedTargets(t *testing.T) {
 	}
 }
 
-type finishRecord struct{ sessionID, status, message string }
+type finishRecord struct {
+	sessionID, status, message, failureCode string
+	retryable                               bool
+}
 
 type daemonHarness struct {
-	mu               sync.Mutex
-	server           *httptest.Server
-	executor         *fakeExecutor
-	logger           *slog.Logger
-	leases           []Lease
-	emptyBefore      int
-	leaseFailures    int
-	leaseErrorStatus int
-	leaseRequests    int
-	active           int
-	maxActive        int
-	finishes         []finishRecord
-	cancel           context.CancelFunc
+	mu                   sync.Mutex
+	server               *httptest.Server
+	executor             *fakeExecutor
+	logger               *slog.Logger
+	leases               []Lease
+	emptyBefore          int
+	leaseFailures        int
+	leaseErrorStatus     int
+	leaseRequests        int
+	heartbeatRequests    int
+	heartbeatFailures    int
+	heartbeatErrorStatus int
+	heartbeatNotify      chan struct{}
+	active               int
+	maxActive            int
+	finishes             []finishRecord
+	cancel               context.CancelFunc
 }
 
 func newDaemonHarness(t *testing.T, leases []Lease) *daemonHarness {
@@ -233,7 +372,7 @@ func newDaemonHarness(t *testing.T, leases []Lease) *daemonHarness {
 }
 
 func (h *daemonHarness) config() Config {
-	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, AgentInstallURL: "https://downloads.example/opsi-agent", Executor: h.executor, Logger: h.logger}
+	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, AgentInstallURL: "https://downloads.example/opsi-agent", Executor: h.executor, Logger: h.logger, HeartbeatInterval: 20 * time.Millisecond, HeartbeatRetryInterval: 5 * time.Millisecond, LeaseSafetyMargin: 10 * time.Millisecond}
 }
 
 func (h *daemonHarness) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -273,13 +412,37 @@ func (h *daemonHarness) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(r.URL.Path, "/progress"):
 		h.requireLeaseHeaders(w, r)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	case strings.HasSuffix(r.URL.Path, "/lease-heartbeat"):
+		h.requireLeaseHeaders(w, r)
+		h.heartbeatRequests++
+		if h.heartbeatNotify != nil {
+			select {
+			case h.heartbeatNotify <- struct{}{}:
+			default:
+			}
+		}
+		if h.heartbeatErrorStatus != 0 {
+			w.WriteHeader(h.heartbeatErrorStatus)
+			return
+		}
+		if h.heartbeatFailures > 0 {
+			h.heartbeatFailures--
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"session_id": "boot-1", "lease_expires_at": time.Now().Add(time.Second)})
 	case strings.HasSuffix(r.URL.Path, "/finish"):
 		h.requireLeaseHeaders(w, r)
-		var req map[string]string
+		var req struct {
+			Status      string `json:"status"`
+			Message     string `json:"message"`
+			FailureCode string `json:"failure_code"`
+			Retryable   bool   `json:"retryable"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		parts := strings.Split(r.URL.Path, "/")
-		h.finishes = append(h.finishes, finishRecord{sessionID: parts[4], status: req["status"], message: req["message"]})
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": req["status"]})
+		h.finishes = append(h.finishes, finishRecord{sessionID: parts[4], status: req.Status, message: req.Message, failureCode: req.FailureCode, retryable: req.Retryable})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": req.Status})
 		if h.cancel != nil && len(h.leases) == 0 {
 			h.cancel()
 		}
@@ -328,15 +491,21 @@ func testLease(sessionID, host string) Lease {
 }
 
 type fakeExecutor struct {
-	h            *daemonHarness
-	failHost     string
-	secretOutput bool
-	blockHost    string
-	started      chan struct{}
-	release      chan struct{}
+	h               *daemonHarness
+	failHost        string
+	failConnectHost string
+	secretOutput    bool
+	blockHost       string
+	started         chan struct{}
+	release         chan struct{}
+	canceled        chan struct{}
+	cancelOnce      sync.Once
 }
 
 func (f *fakeExecutor) Connect(_ context.Context, target RemoteTarget) (RemoteSession, error) {
+	if f.failConnectHost == target.Host {
+		return nil, errors.New("temporary network timeout")
+	}
 	f.h.mu.Lock()
 	f.h.active++
 	if f.h.active > f.h.maxActive {
@@ -356,6 +525,11 @@ func (s *fakeSession) Run(ctx context.Context, spec CommandSpec) (CommandResult,
 		close(s.executor.started)
 		select {
 		case <-ctx.Done():
+			s.executor.cancelOnce.Do(func() {
+				if s.executor.canceled != nil {
+					close(s.executor.canceled)
+				}
+			})
 			return CommandResult{ExitCode: 255}, ctx.Err()
 		case <-s.executor.release:
 		}

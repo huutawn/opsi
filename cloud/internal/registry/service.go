@@ -51,6 +51,10 @@ const (
 	DeploymentRolledBack   = "rolled_back"
 	DeploymentDeadLetter   = "dead_letter"
 
+	BootstrapPending    = "pending"
+	BootstrapRetryWait  = "retry_wait"
+	BootstrapDeadLetter = "dead_letter"
+
 	EventDeploymentQueued       = "DEPLOYMENT_QUEUED"
 	EventDeploymentPlanCreated  = "DEPLOYMENT_PLAN_CREATED"
 	EventAgentJobAccepted       = "AGENT_JOB_ACCEPTED"
@@ -74,6 +78,9 @@ var ErrNotFound = errors.New("not found")
 const (
 	defaultDeploymentLeaseDuration = 5 * time.Minute
 	defaultDeploymentMaxAttempts   = 3
+	defaultBootstrapMaxAttempts    = 3
+	bootstrapRetryBaseDelay        = 5 * time.Second
+	bootstrapRetryMaximumDelay     = 5 * time.Minute
 )
 
 type APIError struct {
@@ -232,35 +239,60 @@ type Agent struct {
 }
 
 type BootstrapSession struct {
-	ID             string     `json:"id"`
-	OrgID          string     `json:"org_id"`
-	ProjectID      string     `json:"project_id"`
-	EnvironmentID  string     `json:"environment_id"`
-	RuntimeID      string     `json:"runtime_id"`
-	NodeID         string     `json:"node_id,omitempty"`
-	CreatedBy      string     `json:"created_by,omitempty"`
-	Role           string     `json:"role"`
-	Status         string     `json:"status"`
-	IdempotencyKey string     `json:"idempotency_key"`
-	PublicHost     string     `json:"public_host,omitempty"`
-	SSHPort        int        `json:"ssh_port,omitempty"`
-	SSHUsername    string     `json:"ssh_username,omitempty"`
-	AuthMethod     string     `json:"auth_method,omitempty"`
-	ExpiresAt      time.Time  `json:"expires_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	LeaseOwner     string     `json:"lease_owner,omitempty"`
-	LeaseTokenHash string     `json:"-"`
-	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
-	LeasedAt       *time.Time `json:"leased_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID                  string     `json:"id"`
+	OrgID               string     `json:"org_id"`
+	ProjectID           string     `json:"project_id"`
+	EnvironmentID       string     `json:"environment_id"`
+	RuntimeID           string     `json:"runtime_id"`
+	NodeID              string     `json:"node_id,omitempty"`
+	CreatedBy           string     `json:"created_by,omitempty"`
+	Role                string     `json:"role"`
+	Status              string     `json:"status"`
+	IdempotencyKey      string     `json:"idempotency_key"`
+	PublicHost          string     `json:"public_host,omitempty"`
+	SSHPort             int        `json:"ssh_port,omitempty"`
+	SSHUsername         string     `json:"ssh_username,omitempty"`
+	AuthMethod          string     `json:"auth_method,omitempty"`
+	ExpiresAt           time.Time  `json:"expires_at"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	FinishedAt          *time.Time `json:"finished_at,omitempty"`
+	LeaseOwner          string     `json:"lease_owner,omitempty"`
+	LeaseTokenHash      string     `json:"-"`
+	LeaseExpiresAt      *time.Time `json:"lease_expires_at,omitempty"`
+	LeasedAt            *time.Time `json:"leased_at,omitempty"`
+	AttemptCount        int        `json:"attempt_count"`
+	MaxAttempts         int        `json:"max_attempts"`
+	NextAttemptAt       *time.Time `json:"next_attempt_at,omitempty"`
+	LeaseHeartbeatAt    *time.Time `json:"lease_heartbeat_at,omitempty"`
+	LastFailureCode     string     `json:"last_failure_code,omitempty"`
+	LastFailureRedacted string     `json:"last_failure_message_redacted,omitempty"`
+	DeadLetteredAt      *time.Time `json:"dead_lettered_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 type BootstrapSessionLease struct {
 	Session        BootstrapSession `json:"session"`
 	LeaseToken     string           `json:"lease_token"`
 	LeaseExpiresAt time.Time        `json:"lease_expires_at"`
+}
+
+type BootstrapFinishResult struct {
+	Status          string
+	FailureCode     string
+	MessageRedacted string
+	Retryable       bool
+}
+
+type BootstrapRecoverySummary struct {
+	Recovered    []BootstrapSession
+	DeadLettered []BootstrapSession
+	Expired      []BootstrapSession
+}
+
+type BootstrapManualRetryResult struct {
+	Session BootstrapSession
+	Applied bool
 }
 
 type BootstrapEvent struct {
@@ -528,8 +560,12 @@ type API interface {
 	CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error)
 	UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error)
 	LeaseNextBootstrapSession(workerID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error)
+	RenewBootstrapLease(projectID, sessionID, workerID, rawLeaseToken string, now time.Time, leaseDuration time.Duration) (BootstrapSession, error)
+	RecoverExpiredBootstrapLeases(now time.Time) (BootstrapRecoverySummary, error)
 	GetBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken string, now time.Time) (BootstrapSession, error)
 	UpdateBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken, status, message string, now time.Time) (BootstrapSession, error)
+	FinishBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken string, result BootstrapFinishResult, now time.Time) (BootstrapSession, error)
+	ManualRetryBootstrapSession(projectID, sessionID, idempotencyKey string, now time.Time) (BootstrapManualRetryResult, error)
 	GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error)
 	ListBootstrapSessions(projectID string) ([]BootstrapSession, error)
 	BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent, error)
@@ -1042,7 +1078,7 @@ func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, 
 		return BootstrapSession{}, err
 	}
 	node := Node{ID: newID("node"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: publicHost, Role: roleForNode(role), Status: NodePending, PublicHost: publicHost, K3SRole: k3sRoleForBootstrap(role), CreatedAt: now, UpdatedAt: now}
-	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: "pending", IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now}
+	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: BootstrapPending, IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), MaxAttempts: defaultBootstrapMaxAttempts, CreatedAt: now, UpdatedAt: now}
 	event := BootstrapEvent{ID: newID("evt"), OrgID: project.OrgID, ProjectID: project.ID, SessionID: session.ID, NodeID: node.ID, Level: "info", Step: "pending", MessageRedacted: "bootstrap session pending worker", ProgressPercent: 0, CreatedAt: now}
 	runtime.Status = RuntimeProvisioning
 	runtime.UpdatedAt = now
@@ -1062,10 +1098,16 @@ func (s *Service) UpdateBootstrapSession(projectID, sessionID, status, message s
 	if !ok || session.ProjectID != projectID {
 		return BootstrapSession{}, ErrNotFound
 	}
+	if isTerminalBootstrap(session.Status) {
+		return BootstrapSession{}, APIError{Status: 409, Code: "BOOTSTRAP_TERMINAL", Message: "terminal bootstrap session cannot change state"}
+	}
 	if !validBootstrapStatus(status) {
 		return BootstrapSession{}, APIError{Status: 400, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap status is invalid"}
 	}
 	now := s.clock()
+	if status == "waiting_agent" && (!isLeasedBootstrapStatus(session.Status) || session.LeaseExpiresAt == nil || !session.LeaseExpiresAt.After(now)) {
+		return BootstrapSession{}, APIError{Status: 410, Code: "BOOTSTRAP_LEASE_EXPIRED", Message: "bootstrap lease is not active"}
+	}
 	session.Status = status
 	session.UpdatedAt = now
 	if (status == "validating" || status == "preflight") && session.StartedAt == nil {
@@ -1097,9 +1139,11 @@ func (s *Service) LeaseNextBootstrapSession(workerID string, now time.Time, leas
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.recoverExpiredBootstrapLeasesLocked(now.UTC())
 	var selected BootstrapSession
 	for _, session := range s.bootstraps {
-		if (session.Status != "created" && session.Status != "pending") || session.LeaseTokenHash != "" {
+		eligible := session.Status == "created" || session.Status == BootstrapPending || (session.Status == BootstrapRetryWait && session.NextAttemptAt != nil && !session.NextAttemptAt.After(now))
+		if !eligible || session.LeaseTokenHash != "" || !now.Before(session.ExpiresAt) {
 			continue
 		}
 		if selected.ID == "" || session.CreatedAt.Before(selected.CreatedAt) || (session.CreatedAt.Equal(selected.CreatedAt) && session.ID < selected.ID) {
@@ -1116,6 +1160,12 @@ func (s *Service) LeaseNextBootstrapSession(workerID string, now time.Time, leas
 	selected.LeaseTokenHash = tokenHash
 	selected.LeaseExpiresAt = &expiresAt
 	selected.LeasedAt = &now
+	selected.LeaseHeartbeatAt = &now
+	selected.NextAttemptAt = nil
+	selected.AttemptCount++
+	if selected.MaxAttempts <= 0 {
+		selected.MaxAttempts = defaultBootstrapMaxAttempts
+	}
 	selected.UpdatedAt = now
 	if selected.StartedAt == nil {
 		selected.StartedAt = &now
@@ -1148,17 +1198,12 @@ func (s *Service) UpdateBootstrapSessionForLease(projectID, sessionID, workerID,
 	if err := validateBootstrapLease(session, workerID, leaseToken, now); err != nil {
 		return BootstrapSession{}, err
 	}
-	if !validBootstrapStatus(status) {
+	if !isLeasedBootstrapStatus(status) {
 		return BootstrapSession{}, APIError{Status: 400, Code: "INVALID_BOOTSTRAP_STATUS", Message: "bootstrap status is invalid"}
 	}
 	now = now.UTC()
 	session.Status = status
 	session.UpdatedAt = now
-	if !isActiveBootstrap(status) {
-		session.FinishedAt = &now
-		session.LeaseTokenHash = ""
-		session.LeaseExpiresAt = nil
-	}
 	s.bootstraps[sessionID] = session
 	level := "info"
 	if status == "failed" {
@@ -1818,15 +1863,15 @@ func (s *Service) healthyServerCountLocked(projectID string) int {
 
 func (s *Service) expireBootstrapsLocked() {
 	now := s.clock()
+	s.recoverExpiredBootstrapLeasesLocked(now)
 	for id, session := range s.bootstraps {
-		if !isActiveBootstrap(session.Status) || !now.After(session.ExpiresAt) {
+		if !isActiveBootstrap(session.Status) || isLeasedBootstrapStatus(session.Status) || now.Before(session.ExpiresAt) {
 			continue
 		}
 		session.Status = "expired"
 		session.UpdatedAt = now
 		session.FinishedAt = &now
-		session.LeaseTokenHash = ""
-		session.LeaseExpiresAt = nil
+		clearBootstrapLease(&session)
 		s.bootstraps[id] = session
 		s.events[id] = append(s.events[id], BootstrapEvent{ID: newID("evt"), OrgID: session.OrgID, ProjectID: session.ProjectID, SessionID: id, NodeID: session.NodeID, Level: "warn", Step: "expired", MessageRedacted: "bootstrap session expired", ProgressPercent: 100, CreatedAt: now})
 		s.refreshProjectLocked(session.ProjectID)
@@ -1835,7 +1880,7 @@ func (s *Service) expireBootstrapsLocked() {
 
 func isActiveBootstrap(status string) bool {
 	switch status {
-	case "created", "pending", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
+	case "created", BootstrapPending, BootstrapRetryWait, "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
 		return true
 	default:
 		return false
@@ -1843,7 +1888,25 @@ func isActiveBootstrap(status string) bool {
 }
 
 func validBootstrapStatus(status string) bool {
-	return isActiveBootstrap(status) || status == "completed" || status == "succeeded" || status == "failed" || status == "cancelled" || status == "expired"
+	return isActiveBootstrap(status) || isTerminalBootstrap(status) || status == "failed"
+}
+
+func isLeasedBootstrapStatus(status string) bool {
+	switch status {
+	case "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTerminalBootstrap(status string) bool {
+	switch status {
+	case "completed", "succeeded", "cancelled", "expired", BootstrapDeadLetter:
+		return true
+	default:
+		return false
+	}
 }
 
 var bootstrapWorkerIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -1869,25 +1932,31 @@ func newBootstrapLeaseToken() (string, string, error) {
 }
 
 func validateBootstrapLease(session BootstrapSession, workerID, leaseToken string, now time.Time) error {
+	if !isLeasedBootstrapStatus(session.Status) || session.LeaseTokenHash == "" || session.LeaseExpiresAt == nil {
+		return APIError{Status: 409, Code: "BOOTSTRAP_LEASE_INACTIVE", Message: "bootstrap session no longer has an active lease"}
+	}
+	if !now.UTC().Before(session.ExpiresAt) {
+		return APIError{Status: 410, Code: "BOOTSTRAP_SESSION_EXPIRED", Message: "bootstrap session has expired"}
+	}
 	if session.LeaseOwner != workerID {
 		return APIError{Status: 403, Code: "BOOTSTRAP_LEASE_OWNER_MISMATCH", Message: "bootstrap lease owner does not match worker"}
 	}
-	if session.LeaseTokenHash == "" || leaseToken == "" {
+	if leaseToken == "" {
 		return APIError{Status: 403, Code: "BOOTSTRAP_LEASE_INVALID", Message: "bootstrap lease token is invalid"}
 	}
 	sum := sha256.Sum256([]byte(leaseToken))
 	if subtle.ConstantTimeCompare([]byte(session.LeaseTokenHash), []byte(hex.EncodeToString(sum[:]))) != 1 {
 		return APIError{Status: 403, Code: "BOOTSTRAP_LEASE_INVALID", Message: "bootstrap lease token is invalid"}
 	}
-	if session.LeaseExpiresAt == nil || !now.UTC().Before(*session.LeaseExpiresAt) {
-		return APIError{Status: 409, Code: "BOOTSTRAP_LEASE_EXPIRED", Message: "bootstrap lease has expired"}
+	if !now.UTC().Before(*session.LeaseExpiresAt) {
+		return APIError{Status: 410, Code: "BOOTSTRAP_LEASE_EXPIRED", Message: "bootstrap lease has expired"}
 	}
 	return nil
 }
 
 func bootstrapProgress(status string) int {
 	switch status {
-	case "pending", "created":
+	case BootstrapPending, BootstrapRetryWait, "created":
 		return 0
 	case "preflight", "validating":
 		return 10
@@ -1901,7 +1970,7 @@ func bootstrapProgress(status string) int {
 		return 80
 	case "verifying_agent", "verifying":
 		return 90
-	case "completed", "succeeded", "failed", "cancelled", "expired":
+	case "completed", "succeeded", "failed", "cancelled", "expired", BootstrapDeadLetter:
 		return 100
 	default:
 		return 0

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
@@ -1079,6 +1080,67 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	}
 	if bytes.Contains(w.Body.Bytes(), []byte("password=secret")) || bytes.Contains(w.Body.Bytes(), []byte("token=abc")) || bytes.Contains(w.Body.Bytes(), []byte("private_key=leak")) || bytes.Contains(w.Body.Bytes(), []byte("kubeconfig=leak")) || bytes.Contains(w.Body.Bytes(), []byte("pat=leak")) || bytes.Contains(w.Body.Bytes(), []byte("app_secret=leak")) {
 		t.Fatalf("bootstrap audit leaked secret: %s", w.Body.String())
+	}
+}
+
+func TestBootstrapManualRetryOwnerAdminIdempotencyAndPreconditions(t *testing.T) {
+	ownerHash, _ := auth.HashPAT("owner_pat")
+	adminHash, _ := auth.HashPAT("admin_pat")
+	developerHash, _ := auth.HashPAT("developer_pat")
+	viewerHash, _ := auth.HashPAT("viewer_pat")
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
+	project, err := server.Registry.CreateProject("org-1", "Demo", "demo", "", "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{
+		{UserID: "owner", OrgID: "org-1", ProjectID: project.ID, Role: "Owner", Hash: ownerHash},
+		{UserID: "admin", OrgID: "org-1", ProjectID: project.ID, Role: "Admin", Hash: adminHash},
+		{UserID: "developer", OrgID: "org-1", ProjectID: project.ID, Role: "Developer", Hash: developerHash},
+		{UserID: "viewer", OrgID: "org-1", ProjectID: project.ID, Role: "Viewer", Hash: viewerHash},
+	}}}
+	session, err := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-key", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	lease, ok, err := server.Registry.LeaseNextBootstrapSession("worker-1", now, time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("lease ok=%v err=%v", ok, err)
+	}
+	dead, err := server.Registry.FinishBootstrapSessionForLease(project.ID, session.ID, "worker-1", lease.LeaseToken, registry.BootstrapFinishResult{Status: "failed", FailureCode: "SSH_AUTH_METHOD_UNSUPPORTED", MessageRedacted: "unsupported"}, now.Add(time.Second))
+	if err != nil || dead.Status != registry.BootstrapDeadLetter {
+		t.Fatalf("dead=%+v err=%v", dead, err)
+	}
+	handler := server.Handler()
+	retry := func(token, key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/bootstrap-sessions/"+session.ID+"/retry", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Request-ID", "req-"+key)
+		req.Header.Set("Idempotency-Key", key)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	for _, token := range []string{"viewer_pat", "developer_pat"} {
+		if w := retry(token, "denied-"+token); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "BOOTSTRAP_RETRY_FORBIDDEN") {
+			t.Fatalf("denied token=%s status=%d body=%s", token, w.Code, w.Body.String())
+		}
+	}
+	if w := retry("owner_pat", "missing-credential"); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "BOOTSTRAP_RETRY_CREDENTIAL_UNAVAILABLE") {
+		t.Fatalf("missing credential status=%d body=%s", w.Code, w.Body.String())
+	}
+	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
+	first := retry("admin_pat", "retry-1")
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("manual retry status=%d body=%s", first.Code, first.Body.String())
+	}
+	duplicate := retry("admin_pat", "retry-1")
+	if duplicate.Code != http.StatusAccepted || duplicate.Body.String() != first.Body.String() {
+		t.Fatalf("duplicate status=%d body=%s first=%s", duplicate.Code, duplicate.Body.String(), first.Body.String())
+	}
+	if w := retry("owner_pat", "retry-2"); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "BOOTSTRAP_NOT_DEAD_LETTER") {
+		t.Fatalf("non-dead-letter status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

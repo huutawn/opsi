@@ -32,17 +32,21 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 - Agent owns deployment, service runtime, secrets, telemetry, factual incidents,
   local audit, and K3s/containerd execution.
 - Bootstrap Worker is a long-running, single-concurrency daemon. It polls Cloud,
-  atomically leases the oldest pending bootstrap session, and binds status,
-  progress, and finish calls to the worker identity and one-time lease token.
+  atomically leases the oldest eligible bootstrap session, increments a bounded
+  attempt count, renews the lease with authenticated heartbeats, and binds
+  progress and finish calls to the worker identity and one-time lease token.
 - Worker configuration no longer accepts a fixed `session_id`. Durable lease
-  heartbeat, expired-lease recovery, retries, backoff, and dead-letter handling
-  remain V3-010; a crash after credential handoff may still strand a session.
+  recovery persists retry backoff and moves exhausted or permanent failures to
+  `dead_letter`. Credential handoff is non-destructive across retry attempts;
+  registration tokens rotate per attempt. Owner/Admin manual retry is
+  idempotent and requires an available credential.
 
 ## Next Ordered Work
 
-V3-009 provides automatic initial bootstrap leasing. V3-010 is the next ordered
-task and adds durable lease heartbeat, recovery, retry, backoff, and dead-letter
-semantics. M1 has not passed. IncidentEvidence is Phase 5, Safe ActionPlane
+V3-010 implements restart-safe bootstrap lease/retry semantics in code and
+tests. V3-011 is the next ordered task. M1 has not passed because V3-011 through
+V3-013 remain. Per-step resumable bootstrap transitions remain V3-014.
+IncidentEvidence is Phase 5, Safe ActionPlane
 Phase 6, CLI MCP Phase 7, and production acceptance later.
 
 ## Verification

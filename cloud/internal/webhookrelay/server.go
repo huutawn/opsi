@@ -35,12 +35,20 @@ type Server struct {
 	authMu        sync.Mutex
 	oauthStates   map[string]oauthState
 	authGrants    map[string]authGrant
+	now           func() time.Time
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
 	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter(), observer: NewObserver(), alerts: NewAlertManager(cfg.Alerts), oauthStates: map[string]oauthState{}, authGrants: map[string]authGrant{}}
+}
+
+func (s *Server) clock() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (s *Server) SetSecurityStores(credentials CredentialVault, registrations RegistrationVault, limits RateLimiter) {

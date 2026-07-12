@@ -27,11 +27,13 @@ test:
 verify-postgres:
 	@test -n "$$OPSI_TEST_DATABASE_URL" || { echo "OPSI_TEST_DATABASE_URL required for Postgres tests"; exit 1; }
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresBootstrapLeaseIsAtomicAcrossWorkers$$' | grep -qx 'TestPostgresBootstrapLeaseIsAtomicAcrossWorkers'
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart$$' | grep -qx 'TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart'
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresDeploymentJobRestartRetryDeadLetterAndIdempotency$$' | grep -qx 'TestPostgresDeploymentJobRestartRetryDeadLetterAndIdempotency'
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/webhookrelay -list '^TestPostgresQueuePersistsSanitizedJobsWhenDatabaseAvailable$$' | grep -qx 'TestPostgresQueuePersistsSanitizedJobsWhenDatabaseAvailable'
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/webhookrelay -list '^TestPostgresRelayRetryScheduleSurvivesRestart$$' | grep -qx 'TestPostgresRelayRetryScheduleSurvivesRestart'
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresDeploymentJobRestartRetryDeadLetterAndIdempotency$$' -count=1
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresBootstrapLeaseIsAtomicAcrossWorkers$$' -count=1
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart$$' -count=1
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/webhookrelay -run '^TestPostgres(QueuePersistsSanitizedJobsWhenDatabaseAvailable|RelayRetryScheduleSurvivesRestart)$$' -count=1
 
 verify-dr:
