@@ -3,17 +3,22 @@ package bootstrapworker
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 func TestConfigValidation(t *testing.T) {
@@ -377,34 +382,230 @@ func TestValidateBundleInvalidAndUnsupportedTargets(t *testing.T) {
 	}
 }
 
+func TestBootstrapResumeExecutesFromDurableCheckpoint(t *testing.T) {
+	stepIDs := registry.BootstrapStepIDs(registry.FirstServerBootstrapPlanVersion)
+	for nextIndex := 0; nextIndex <= len(stepIDs); nextIndex++ {
+		t.Run(fmt.Sprintf("index_%d", nextIndex), func(t *testing.T) {
+			h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+			if nextIndex > 0 {
+				h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], nextIndex)
+			}
+			runUntilFinishes(t, h, 1)
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			var ran []string
+			for _, script := range h.executor.runScripts {
+				ran = append(ran, stepIDForScript(script))
+			}
+			if want := stepIDs[nextIndex:]; !slices.Equal(ran, want) {
+				t.Fatalf("ran=%v want=%v", ran, want)
+			}
+			if nextIndex == len(stepIDs) && h.executor.connects != 0 {
+				t.Fatalf("completed plan opened SSH %d times", h.executor.connects)
+			}
+			if h.statusRequests == 0 || h.finishes[0].status != "completed" {
+				t.Fatalf("heartbeat checks=%d finishes=%+v", h.statusRequests, h.finishes)
+			}
+		})
+	}
+}
+
+func TestBootstrapCheckpointsAfterEachSuccessfulStep(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	runUntilFinishes(t, h, 1)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	want := []string{
+		"checkpoint:",
+		"run:preflight", "checkpoint:preflight",
+		"run:install_k3s", "checkpoint:install_k3s",
+		"run:install_agent", "checkpoint:install_agent",
+		"run:register_agent", "checkpoint:register_agent",
+	}
+	if !slices.Equal(h.events, want) {
+		t.Fatalf("events=%v want=%v", h.events, want)
+	}
+}
+
+func TestBootstrapStepAndCheckpointFailuresPreserveResumePoint(t *testing.T) {
+	t.Run("remote step", func(t *testing.T) {
+		h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+		h.executor.failScript = installK3sScript
+		runUntilFinishes(t, h, 1)
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if len(h.checkpointRequests) != 2 || h.checkpointRequests[1].NextStepIndex != 1 {
+			t.Fatalf("checkpoint requests=%+v", h.checkpointRequests)
+		}
+		if len(h.executor.runScripts) != 2 {
+			t.Fatalf("run count=%d", len(h.executor.runScripts))
+		}
+	})
+	t.Run("checkpoint acknowledgement", func(t *testing.T) {
+		h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+		h.checkpointFailureAt = 2
+		h.checkpointErrorStatus = http.StatusInternalServerError
+		runUntilFinishes(t, h, 1)
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if len(h.executor.runScripts) != 2 {
+			t.Fatalf("worker ran beyond unacknowledged step: %d", len(h.executor.runScripts))
+		}
+		if saved := h.checkpoints["boot-1"]; saved.NextStepIndex != 1 || saved.LastCompletedStep != "preflight" {
+			t.Fatalf("saved checkpoint=%+v", saved)
+		}
+		finish := h.finishes[0]
+		if finish.failureCode != "BOOTSTRAP_CLOUD_TEMPORARY" || !finish.retryable {
+			t.Fatalf("finish=%+v", finish)
+		}
+	})
+}
+
+func TestBootstrapLeaseLossAfterStepStopsWithoutFinish(t *testing.T) {
+	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+	h.checkpointFailureAt = 1
+	h.checkpointErrorStatus = http.StatusGone
+	h.checkpointErrorCode = "BOOTSTRAP_LEASE_EXPIRED"
+	worker := NewWorker(h.config())
+	err := worker.processLease(context.Background(), h.leases[0])
+	if !isLeaseLossError(err) {
+		t.Fatalf("lease loss err=%v", err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.executor.runScripts) != 1 || len(h.finishes) != 0 {
+		t.Fatalf("runs=%d finishes=%+v", len(h.executor.runScripts), h.finishes)
+	}
+}
+
+func TestBootstrapInvalidOrMismatchedCheckpointFailsClosed(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		mutate func(*registry.BootstrapCheckpoint)
+		code   string
+	}{
+		"plan mismatch":          {mutate: func(c *registry.BootstrapCheckpoint) { c.PlanFingerprint = strings.Repeat("b", 64) }, code: "BOOTSTRAP_PLAN_MISMATCH"},
+		"invalid index":          {mutate: func(c *registry.BootstrapCheckpoint) { c.NextStepIndex = 5; c.LastCompletedStep = "register_agent" }, code: "BOOTSTRAP_CHECKPOINT_INVALID"},
+		"invalid completed step": {mutate: func(c *registry.BootstrapCheckpoint) { c.LastCompletedStep = "preflight" }, code: "BOOTSTRAP_CHECKPOINT_INVALID"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+			checkpoint := checkpointForHarness(t, h, h.leases[0], 2)
+			testCase.mutate(&checkpoint)
+			h.leases[0].Bundle.Checkpoint = checkpoint
+			runUntilFinishes(t, h, 1)
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if h.executor.connects != 0 || h.finishes[0].failureCode != testCase.code || h.finishes[0].retryable {
+				t.Fatalf("connects=%d finish=%+v", h.executor.connects, h.finishes[0])
+			}
+		})
+	}
+}
+
+func TestBootstrapPlanFingerprintIsStableAndSecretFree(t *testing.T) {
+	h := newDaemonHarness(t, nil)
+	cfg := h.config()
+	bundle := testLease("boot-1", "host-1").Bundle
+	plan, err := BuildBootstrapPlan(cfg, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := BootstrapPlanFingerprint(cfg, plan)
+	if len(fingerprint) != 64 || fingerprint != strings.ToLower(fingerprint) {
+		t.Fatalf("fingerprint=%q", fingerprint)
+	}
+	if _, err := hex.DecodeString(fingerprint); err != nil {
+		t.Fatalf("fingerprint is not hex: %v", err)
+	}
+	if again := BootstrapPlanFingerprint(cfg, plan); again != fingerprint {
+		t.Fatalf("fingerprint changed: %q != %q", again, fingerprint)
+	}
+	bundle.AgentRegistrationToken = "different-registration-secret"
+	secretPlan, err := BuildBootstrapPlan(cfg, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := BootstrapPlanFingerprint(cfg, secretPlan); got != fingerprint {
+		t.Fatalf("secret changed fingerprint: %q != %q", got, fingerprint)
+	}
+	changedPlan := plan
+	changedPlan.Steps = append([]BootstrapStep(nil), plan.Steps...)
+	changedPlan.Steps[0].Command.Script += "\n# changed"
+	if got := BootstrapPlanFingerprint(cfg, changedPlan); got == fingerprint {
+		t.Fatal("command change did not change fingerprint")
+	}
+	for name, mutate := range map[string]func(*Config){
+		"agent install URL": func(c *Config) { c.AgentInstallURL += "-changed" },
+		"agent checksum":    func(c *Config) { c.AgentInstallSHA256 = strings.Repeat("b", 64) },
+		"agent Cloud URL":   func(c *Config) { c.AgentCloudURL = "https://other-cloud.example" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changedConfig := cfg
+			mutate(&changedConfig)
+			changed, err := BuildBootstrapPlan(changedConfig, bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := BootstrapPlanFingerprint(changedConfig, changed); got == fingerprint {
+				t.Fatalf("%s change did not change fingerprint", name)
+			}
+		})
+	}
+}
+
+func checkpointForHarness(t *testing.T, h *daemonHarness, lease Lease, nextIndex int) registry.BootstrapCheckpoint {
+	t.Helper()
+	plan, err := BuildBootstrapPlan(h.config(), lease.Bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := registry.BootstrapCheckpoint{
+		SchemaVersion:   registry.BootstrapCheckpointSchemaVersion,
+		PlanVersion:     plan.Version,
+		PlanFingerprint: BootstrapPlanFingerprint(h.config(), plan),
+		NextStepIndex:   nextIndex,
+	}
+	if nextIndex > 0 {
+		checkpoint.LastCompletedStep = plan.Steps[nextIndex-1].ID
+	}
+	return checkpoint
+}
+
 type finishRecord struct {
 	sessionID, status, message, failureCode string
 	retryable                               bool
 }
 
 type daemonHarness struct {
-	mu                   sync.Mutex
-	server               *httptest.Server
-	executor             *fakeExecutor
-	logger               *slog.Logger
-	leases               []Lease
-	emptyBefore          int
-	leaseFailures        int
-	leaseErrorStatus     int
-	leaseRequests        int
-	heartbeatRequests    int
-	heartbeatFailures    int
-	heartbeatErrorStatus int
-	heartbeatNotify      chan struct{}
-	active               int
-	maxActive            int
-	finishes             []finishRecord
-	cancel               context.CancelFunc
+	mu                    sync.Mutex
+	server                *httptest.Server
+	executor              *fakeExecutor
+	logger                *slog.Logger
+	leases                []Lease
+	emptyBefore           int
+	leaseFailures         int
+	leaseErrorStatus      int
+	leaseRequests         int
+	heartbeatRequests     int
+	heartbeatFailures     int
+	heartbeatErrorStatus  int
+	heartbeatNotify       chan struct{}
+	checkpointFailureAt   int
+	checkpointErrorStatus int
+	checkpointErrorCode   string
+	checkpoints           map[string]registry.BootstrapCheckpoint
+	checkpointRequests    []registry.BootstrapCheckpoint
+	statusRequests        int
+	events                []string
+	active                int
+	maxActive             int
+	finishes              []finishRecord
+	cancel                context.CancelFunc
 }
 
 func newDaemonHarness(t *testing.T, leases []Lease) *daemonHarness {
 	t.Helper()
-	h := &daemonHarness{leases: append([]Lease(nil), leases...), executor: &fakeExecutor{h: nil}}
+	h := &daemonHarness{leases: append([]Lease(nil), leases...), checkpoints: map[string]registry.BootstrapCheckpoint{}, executor: &fakeExecutor{h: nil}}
 	h.executor.h = h
 	h.server = httptest.NewServer(http.HandlerFunc(h.serveHTTP))
 	t.Cleanup(h.server.Close)
@@ -448,10 +649,31 @@ func (h *daemonHarness) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(lease)
 	case strings.HasSuffix(r.URL.Path, "/status"):
 		h.requireLeaseHeaders(w, r)
+		h.statusRequests++
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "verifying"})
 	case strings.HasSuffix(r.URL.Path, "/progress"):
 		h.requireLeaseHeaders(w, r)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	case strings.HasSuffix(r.URL.Path, "/checkpoint"):
+		h.requireLeaseHeaders(w, r)
+		var req struct {
+			ProjectID string `json:"project_id"`
+			registry.BootstrapCheckpoint
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		h.checkpointRequests = append(h.checkpointRequests, req.BootstrapCheckpoint)
+		h.events = append(h.events, "checkpoint:"+req.LastCompletedStep)
+		if h.checkpointErrorStatus != 0 && req.NextStepIndex == h.checkpointFailureAt {
+			w.WriteHeader(h.checkpointErrorStatus)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error_code": h.checkpointErrorCode, "message": "checkpoint rejected"})
+			return
+		}
+		parts := strings.Split(r.URL.Path, "/")
+		checkpoint := req.BootstrapCheckpoint
+		now := time.Now().UTC()
+		checkpoint.UpdatedAt = &now
+		h.checkpoints[parts[4]] = checkpoint
+		_ = json.NewEncoder(w).Encode(checkpoint)
 	case strings.HasSuffix(r.URL.Path, "/lease-heartbeat"):
 		h.requireLeaseHeaders(w, r)
 		h.heartbeatRequests++
@@ -540,6 +762,9 @@ type fakeExecutor struct {
 	release         chan struct{}
 	canceled        chan struct{}
 	cancelOnce      sync.Once
+	connects        int
+	runScripts      []string
+	failScript      string
 }
 
 func (f *fakeExecutor) Connect(_ context.Context, target RemoteTarget) (RemoteSession, error) {
@@ -547,6 +772,7 @@ func (f *fakeExecutor) Connect(_ context.Context, target RemoteTarget) (RemoteSe
 		return nil, errors.New("temporary network timeout")
 	}
 	f.h.mu.Lock()
+	f.connects++
 	f.h.active++
 	if f.h.active > f.h.maxActive {
 		f.h.maxActive = f.h.active
@@ -561,6 +787,10 @@ type fakeSession struct {
 }
 
 func (s *fakeSession) Run(ctx context.Context, spec CommandSpec) (CommandResult, error) {
+	s.executor.h.mu.Lock()
+	s.executor.runScripts = append(s.executor.runScripts, spec.Script)
+	s.executor.h.events = append(s.executor.h.events, "run:"+stepIDForScript(spec.Script))
+	s.executor.h.mu.Unlock()
 	if s.executor.blockHost == s.host && spec.Script == preflightScript {
 		close(s.executor.started)
 		select {
@@ -581,6 +811,9 @@ func (s *fakeSession) Run(ctx context.Context, spec CommandSpec) (CommandResult,
 		}
 		return CommandResult{ExitCode: 1, Stdout: out, Stderr: out}, errors.New(out)
 	}
+	if s.executor.failScript == spec.Script {
+		return CommandResult{ExitCode: 1, Stderr: "step failed"}, errors.New("step failed")
+	}
 	return CommandResult{}, nil
 }
 
@@ -589,4 +822,19 @@ func (s *fakeSession) Close() error {
 	s.executor.h.active--
 	s.executor.h.mu.Unlock()
 	return nil
+}
+
+func stepIDForScript(script string) string {
+	switch script {
+	case preflightScript:
+		return "preflight"
+	case installK3sScript:
+		return "install_k3s"
+	case installAgentScript:
+		return "install_agent"
+	case registerAgentScript:
+		return "register_agent"
+	default:
+		return "unknown"
+	}
 }

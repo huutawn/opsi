@@ -485,5 +485,5 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	return MigrateBootstrapCheckpoint(ctx, db)
 }

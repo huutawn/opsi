@@ -23,7 +23,7 @@ const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runt
 
 const nodeLifecycleSelectSQL = `SELECT id, org_id, project_id, runtime_id, action, status, target_node_id, target_node_name, node_id, COALESCE(agent_id,''), COALESCE(requested_by,''), COALESCE(idempotency_key,''), confirm_remove, COALESCE(lease_token,''), lease_expires_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), verified, finished_at, created_at, updated_at FROM node_lifecycle_jobs`
 
-const bootstrapSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, created_at, updated_at FROM bootstrap_sessions`
+const bootstrapSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, created_at, updated_at FROM bootstrap_sessions`
 
 func (s PostgresService) CreateProject(orgID, name, slug, createdBy, key string) (Project, error) {
 	ctx := context.Background()
@@ -672,7 +672,7 @@ func (s PostgresService) CreateBootstrapSession(projectID, role, publicHost, use
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(id, org_id, project_id, environment_id, runtime_id, name, role, status, public_host, k3s_role, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, node.ID, node.OrgID, node.ProjectID, node.EnvironmentID, node.RuntimeID, node.Name, node.Role, node.Status, node.PublicHost, node.K3SRole, node.CreatedAt, node.UpdatedAt); err != nil {
 		return BootstrapSession{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_sessions(id, org_id, project_id, environment_id, runtime_id, node_id, created_by, role, status, idempotency_key, public_host, ssh_port, ssh_username, auth_method, expires_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, session.ID, session.OrgID, session.ProjectID, session.EnvironmentID, session.RuntimeID, session.NodeID, session.CreatedBy, session.Role, session.Status, session.IdempotencyKey, session.PublicHost, session.SSHPort, session.SSHUsername, session.AuthMethod, session.ExpiresAt, session.CreatedAt, session.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_sessions(id, org_id, project_id, environment_id, runtime_id, node_id, created_by, role, status, idempotency_key, public_host, ssh_port, ssh_username, auth_method, expires_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`, session.ID, session.OrgID, session.ProjectID, session.EnvironmentID, session.RuntimeID, session.NodeID, session.CreatedBy, session.Role, session.Status, session.IdempotencyKey, session.PublicHost, session.SSHPort, session.SSHUsername, session.AuthMethod, session.ExpiresAt, session.Checkpoint.SchemaVersion, session.Checkpoint.PlanVersion, session.Checkpoint.PlanFingerprint, session.Checkpoint.NextStepIndex, session.Checkpoint.LastCompletedStep, session.Checkpoint.UpdatedAt, session.CreatedAt, session.UpdatedAt); err != nil {
 		return BootstrapSession{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) VALUES($1,$2,$3,$4,$5,'info','pending','bootstrap session pending worker',0,$6)`, newID("evt"), session.OrgID, session.ProjectID, session.ID, session.NodeID, now); err != nil {
@@ -1265,8 +1265,8 @@ type rowScanner interface {
 
 func scanBootstrapSession(row rowScanner) (BootstrapSession, error) {
 	var b BootstrapSession
-	var started, finished, leaseExpiresAt, leasedAt, nextAttemptAt, leaseHeartbeatAt, deadLetteredAt sql.NullTime
-	err := row.Scan(&b.ID, &b.OrgID, &b.ProjectID, &b.EnvironmentID, &b.RuntimeID, &b.NodeID, &b.CreatedBy, &b.Role, &b.Status, &b.IdempotencyKey, &b.PublicHost, &b.SSHPort, &b.SSHUsername, &b.AuthMethod, &b.ExpiresAt, &started, &finished, &b.LeaseOwner, &b.LeaseTokenHash, &leaseExpiresAt, &leasedAt, &b.AttemptCount, &b.MaxAttempts, &nextAttemptAt, &leaseHeartbeatAt, &b.LastFailureCode, &b.LastFailureRedacted, &deadLetteredAt, &b.CreatedAt, &b.UpdatedAt)
+	var started, finished, leaseExpiresAt, leasedAt, nextAttemptAt, leaseHeartbeatAt, deadLetteredAt, checkpointUpdatedAt sql.NullTime
+	err := row.Scan(&b.ID, &b.OrgID, &b.ProjectID, &b.EnvironmentID, &b.RuntimeID, &b.NodeID, &b.CreatedBy, &b.Role, &b.Status, &b.IdempotencyKey, &b.PublicHost, &b.SSHPort, &b.SSHUsername, &b.AuthMethod, &b.ExpiresAt, &started, &finished, &b.LeaseOwner, &b.LeaseTokenHash, &leaseExpiresAt, &leasedAt, &b.AttemptCount, &b.MaxAttempts, &nextAttemptAt, &leaseHeartbeatAt, &b.LastFailureCode, &b.LastFailureRedacted, &deadLetteredAt, &b.Checkpoint.SchemaVersion, &b.Checkpoint.PlanVersion, &b.Checkpoint.PlanFingerprint, &b.Checkpoint.NextStepIndex, &b.Checkpoint.LastCompletedStep, &checkpointUpdatedAt, &b.CreatedAt, &b.UpdatedAt)
 	b.StartedAt = nullTimePtr(started)
 	b.FinishedAt = nullTimePtr(finished)
 	b.LeaseExpiresAt = nullTimePtr(leaseExpiresAt)
@@ -1274,6 +1274,7 @@ func scanBootstrapSession(row rowScanner) (BootstrapSession, error) {
 	b.NextAttemptAt = nullTimePtr(nextAttemptAt)
 	b.LeaseHeartbeatAt = nullTimePtr(leaseHeartbeatAt)
 	b.DeadLetteredAt = nullTimePtr(deadLetteredAt)
+	b.Checkpoint.UpdatedAt = nullTimePtr(checkpointUpdatedAt)
 	return b, err
 }
 

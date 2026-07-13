@@ -24,7 +24,9 @@ There is no password login and no public self-sign-up endpoint.
 
 ## Bootstrap Worker
 
-`opsi-bootstrap-worker` is a separate daemon built from the same module. It leases one pending bootstrap session, retrieves the short-lived SSH credential and Agent registration token, connects to the target server, installs K3s and the Opsi Agent, registers the Agent, writes its configuration, starts its systemd service, renews the lease while working, and reports progress/failure back to Cloud.
+`opsi-bootstrap-worker` is a separate daemon built from the same module. It leases one pending bootstrap session, retrieves the short-lived SSH credential and Agent registration token, builds the deterministic `first-server-v1` plan, verifies its SHA-256 fingerprint, and resumes from the durable Cloud checkpoint. The stable remote step IDs are `preflight`, `install_k3s`, `install_agent`, and `register_agent`; Agent heartbeat verification follows after all four are acknowledged.
+
+Step execution is at-least-once: a remote step runs, Cloud durably acknowledges the next-step checkpoint, and only then may the worker continue. If acknowledgement fails, the worker schedules the existing retry path without advancing locally, so that step may run again. A fully checkpointed plan skips SSH and proceeds directly to Agent heartbeat verification. P05 still owns installer idempotency, artifact/transport hardening, K3s pinning, and the canonical systemd layout.
 
 The worker has two Cloud URLs:
 

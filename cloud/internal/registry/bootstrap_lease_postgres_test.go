@@ -219,3 +219,128 @@ func TestPostgresBootstrapConcurrentRecoveryIsAtomic(t *testing.T) {
 		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
 }
+
+func TestPostgresBootstrapCheckpointTransitionsAndDurability(t *testing.T) {
+	db, repo, projectID, session, now := newPostgresBootstrapCheckpointFixture(t)
+	stored, err := repo.GetBootstrapSession(projectID, session.ID)
+	if err != nil || !bootstrapCheckpointEmpty(stored.Checkpoint) {
+		t.Fatalf("uninitialized checkpoint=%+v err=%v", stored.Checkpoint, err)
+	}
+	lease, ok, err := repo.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	if err != nil || !ok || lease.Session.ID != session.ID {
+		t.Fatalf("lease=%+v ok=%v err=%v", lease, ok, err)
+	}
+	initialized, err := repo.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(0), now.Add(time.Second))
+	if err != nil || initialized.Checkpoint.UpdatedAt == nil {
+		t.Fatalf("initialized=%+v err=%v", initialized.Checkpoint, err)
+	}
+	var initializedEvents int
+	if err := db.QueryRow(`SELECT count(*) FROM bootstrap_events WHERE session_id=$1 AND step='BOOTSTRAP_CHECKPOINT_INITIALIZED'`, session.ID).Scan(&initializedEvents); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := repo.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(0), now.Add(2*time.Second))
+	if err != nil || !replayed.Checkpoint.UpdatedAt.Equal(*initialized.Checkpoint.UpdatedAt) {
+		t.Fatalf("replayed=%+v err=%v", replayed.Checkpoint, err)
+	}
+	var initializedEventsAfterReplay int
+	_ = db.QueryRow(`SELECT count(*) FROM bootstrap_events WHERE session_id=$1 AND step='BOOTSTRAP_CHECKPOINT_INITIALIZED'`, session.ID).Scan(&initializedEventsAfterReplay)
+	if initializedEvents != 1 || initializedEventsAfterReplay != initializedEvents {
+		t.Fatalf("initialized events=%d after replay=%d", initializedEvents, initializedEventsAfterReplay)
+	}
+
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, advanceErr := (PostgresService{DB: db}).UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(1), now.Add(3*time.Second))
+			results <- advanceErr
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for advanceErr := range results {
+		if advanceErr != nil {
+			t.Fatal(advanceErr)
+		}
+	}
+	var advanceEvents int
+	if err := db.QueryRow(`SELECT count(*) FROM bootstrap_events WHERE session_id=$1 AND step='BOOTSTRAP_CHECKPOINT_ADVANCED'`, session.ID).Scan(&advanceEvents); err != nil {
+		t.Fatal(err)
+	}
+	if advanceEvents != 1 {
+		t.Fatalf("advance events=%d want=1", advanceEvents)
+	}
+	stored, err = repo.GetBootstrapSession(projectID, session.ID)
+	if err != nil || stored.Checkpoint.NextStepIndex != 1 || stored.Checkpoint.LastCompletedStep != "preflight" || stored.Checkpoint.UpdatedAt == nil {
+		t.Fatalf("stored checkpoint=%+v err=%v", stored.Checkpoint, err)
+	}
+	if !stored.Checkpoint.UpdatedAt.Equal(now.Add(3 * time.Second).UTC().Truncate(time.Microsecond)) {
+		t.Fatalf("checkpoint timestamp=%s", stored.Checkpoint.UpdatedAt)
+	}
+	if _, err := repo.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(0), now.Add(4*time.Second)); apiErrorCode(err) != "BOOTSTRAP_CHECKPOINT_INVALID" {
+		t.Fatalf("regression err=%v", err)
+	}
+	if _, err := repo.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(3), now.Add(4*time.Second)); apiErrorCode(err) != "BOOTSTRAP_CHECKPOINT_INVALID" {
+		t.Fatalf("jump err=%v", err)
+	}
+	failed, err := repo.FinishBootstrapSessionForLease(projectID, session.ID, "worker-1", lease.LeaseToken, BootstrapFinishResult{Status: "failed", FailureCode: "BOOTSTRAP_CLOUD_TEMPORARY", MessageRedacted: "temporary", Retryable: true}, now.Add(5*time.Second))
+	if err != nil || failed.Checkpoint.NextStepIndex != 1 {
+		t.Fatalf("failed=%+v err=%v", failed, err)
+	}
+	second, ok, err := repo.LeaseNextBootstrapSession("worker-2", *failed.NextAttemptAt, 90*time.Second)
+	if err != nil || !ok || second.Session.Checkpoint.NextStepIndex != 1 {
+		t.Fatalf("second=%+v ok=%v err=%v", second, ok, err)
+	}
+	if _, err := repo.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-2", second.LeaseToken, testBootstrapCheckpoint(2), second.LeaseExpiresAt); apiErrorCode(err) != "BOOTSTRAP_LEASE_EXPIRED" {
+		t.Fatalf("expired update err=%v", err)
+	}
+	summary, err := repo.RecoverExpiredBootstrapLeases(second.LeaseExpiresAt)
+	if err != nil || len(summary.Recovered) != 1 || summary.Recovered[0].Checkpoint.NextStepIndex != 1 {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+}
+
+func newPostgresBootstrapCheckpointFixture(t *testing.T) (*sql.DB, PostgresService, string, BootstrapSession, time.Time) {
+	t.Helper()
+	dsn := requirePostgresTestDSN(t, "bootstrap checkpoint")
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := postgres.Migrate(context.Background(), db); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	suffix := strings.ToLower(newID("bootcheckpoint"))
+	orgID, userID := "org-"+suffix, "user-"+suffix
+	if _, err := db.Exec(`INSERT INTO users(id,email) VALUES($1,$2)`, userID, userID+"@example.test"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO organizations(id,name,slug) VALUES($1,'Bootstrap Checkpoint',$2)`, orgID, "bootstrap-checkpoint-"+suffix); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM projects WHERE org_id=$1`, orgID)
+		_, _ = db.Exec(`DELETE FROM organizations WHERE id=$1`, orgID)
+		_, _ = db.Exec(`DELETE FROM users WHERE id=$1`, userID)
+		_ = db.Close()
+	})
+	now := time.Now().UTC()
+	repo := PostgresService{DB: db, Now: func() time.Time { return now }}
+	project, err := repo.CreateProject(orgID, "Bootstrap Checkpoint", "bootstrap-checkpoint-"+suffix, userID, "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := repo.CreateBootstrapSession(project.ID, "first_server", "203.0.113.40", "root", "password", userID, "boot-key", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE bootstrap_sessions SET created_at=TIMESTAMPTZ '1970-01-01 00:00:00+00' WHERE id=$1`, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	return db, repo, project.ID, session, now
+}

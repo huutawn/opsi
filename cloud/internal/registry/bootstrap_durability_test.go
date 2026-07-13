@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -152,6 +153,134 @@ func TestBootstrapRetryDelayIsBounded(t *testing.T) {
 	if bootstrapRetryDelay(1) != 5*time.Second || bootstrapRetryDelay(2) != 10*time.Second || bootstrapRetryDelay(100) != 5*time.Minute {
 		t.Fatalf("unexpected retry delays: %s %s %s", bootstrapRetryDelay(1), bootstrapRetryDelay(2), bootstrapRetryDelay(100))
 	}
+}
+
+func TestBootstrapCheckpointTransitionsAndLeaseValidation(t *testing.T) {
+	service, projectID, session := newBootstrapDurabilityFixture(t)
+	now := service.clock()
+	lease, ok, err := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("lease ok=%v err=%v", ok, err)
+	}
+	initial := testBootstrapCheckpoint(0)
+	initialized, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, initial, now.Add(time.Second))
+	if err != nil || initialized.Checkpoint.NextStepIndex != 0 || initialized.Checkpoint.UpdatedAt == nil {
+		t.Fatalf("initialized=%+v err=%v", initialized.Checkpoint, err)
+	}
+	eventsAfterInitialize := len(service.events[session.ID])
+	replayed, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, initial, now.Add(2*time.Second))
+	if err != nil || len(service.events[session.ID]) != eventsAfterInitialize || !replayed.Checkpoint.UpdatedAt.Equal(*initialized.Checkpoint.UpdatedAt) {
+		t.Fatalf("replay=%+v events=%d err=%v", replayed.Checkpoint, len(service.events[session.ID]), err)
+	}
+	different := initial
+	different.PlanFingerprint = strings.Repeat("b", 64)
+	if _, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, different, now.Add(2*time.Second)); apiErrorCode(err) != "BOOTSTRAP_PLAN_MISMATCH" {
+		t.Fatalf("different initialization err=%v", err)
+	}
+	advancedRequest := testBootstrapCheckpoint(1)
+	advanced, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, advancedRequest, now.Add(3*time.Second))
+	if err != nil || advanced.Checkpoint.NextStepIndex != 1 || advanced.Checkpoint.LastCompletedStep != "preflight" {
+		t.Fatalf("advanced=%+v err=%v", advanced.Checkpoint, err)
+	}
+	eventsAfterAdvance := len(service.events[session.ID])
+	advanceTime := *advanced.Checkpoint.UpdatedAt
+	advancedReplay, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, advancedRequest, now.Add(4*time.Second))
+	if err != nil || len(service.events[session.ID]) != eventsAfterAdvance || !advancedReplay.Checkpoint.UpdatedAt.Equal(advanceTime) {
+		t.Fatalf("advance replay=%+v events=%d err=%v", advancedReplay.Checkpoint, len(service.events[session.ID]), err)
+	}
+
+	for name, checkpoint := range map[string]BootstrapCheckpoint{
+		"regression":            testBootstrapCheckpoint(0),
+		"jump":                  testBootstrapCheckpoint(3),
+		"plan version mismatch": func() BootstrapCheckpoint { c := testBootstrapCheckpoint(2); c.PlanVersion = "other-v1"; return c }(),
+		"fingerprint mismatch": func() BootstrapCheckpoint {
+			c := testBootstrapCheckpoint(2)
+			c.PlanFingerprint = strings.Repeat("b", 64)
+			return c
+		}(),
+		"schema mismatch": func() BootstrapCheckpoint { c := testBootstrapCheckpoint(2); c.SchemaVersion = 2; return c }(),
+		"negative index":  func() BootstrapCheckpoint { c := testBootstrapCheckpoint(0); c.NextStepIndex = -1; return c }(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, checkpoint, now.Add(5*time.Second)); apiErrorCode(err) != "BOOTSTRAP_CHECKPOINT_INVALID" && apiErrorCode(err) != "BOOTSTRAP_PLAN_MISMATCH" {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+	if _, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-2", lease.LeaseToken, testBootstrapCheckpoint(2), now.Add(5*time.Second)); apiErrorCode(err) != "BOOTSTRAP_LEASE_OWNER_MISMATCH" {
+		t.Fatalf("wrong worker err=%v", err)
+	}
+	if _, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", "wrong", testBootstrapCheckpoint(2), now.Add(5*time.Second)); apiErrorCode(err) != "BOOTSTRAP_LEASE_INVALID" {
+		t.Fatalf("wrong token err=%v", err)
+	}
+	if _, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(2), lease.LeaseExpiresAt); apiErrorCode(err) != "BOOTSTRAP_LEASE_EXPIRED" {
+		t.Fatalf("expired lease err=%v", err)
+	}
+}
+
+func TestBootstrapCheckpointSurvivesRetryRecoveryNewWorkerAndFinish(t *testing.T) {
+	service, projectID, session := newBootstrapDurabilityFixture(t)
+	now := service.clock()
+	first, _, _ := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	_, _ = service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", first.LeaseToken, testBootstrapCheckpoint(0), now.Add(time.Second))
+	checkpointed, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", first.LeaseToken, testBootstrapCheckpoint(2), now.Add(2*time.Second))
+	if apiErrorCode(err) != "BOOTSTRAP_CHECKPOINT_INVALID" {
+		t.Fatalf("jump should fail err=%v checkpoint=%+v", err, checkpointed.Checkpoint)
+	}
+	_, _ = service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", first.LeaseToken, testBootstrapCheckpoint(1), now.Add(2*time.Second))
+	checkpointed, err = service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", first.LeaseToken, testBootstrapCheckpoint(2), now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := service.FinishBootstrapSessionForLease(projectID, session.ID, "worker-1", first.LeaseToken, BootstrapFinishResult{Status: "failed", FailureCode: "BOOTSTRAP_CLOUD_TEMPORARY", MessageRedacted: "temporary", Retryable: true}, now.Add(4*time.Second))
+	if err != nil || failed.Checkpoint != checkpointed.Checkpoint {
+		t.Fatalf("retry checkpoint=%+v err=%v", failed.Checkpoint, err)
+	}
+	second, ok, err := service.LeaseNextBootstrapSession("worker-2", *failed.NextAttemptAt, 90*time.Second)
+	if err != nil || !ok || second.Session.Checkpoint.NextStepIndex != 2 {
+		t.Fatalf("second lease=%+v ok=%v err=%v", second, ok, err)
+	}
+	summary, err := service.RecoverExpiredBootstrapLeases(second.LeaseExpiresAt)
+	if err != nil || len(summary.Recovered) != 1 || summary.Recovered[0].Checkpoint.NextStepIndex != 2 {
+		t.Fatalf("recovery=%+v err=%v", summary, err)
+	}
+	third, ok, err := service.LeaseNextBootstrapSession("worker-3", *summary.Recovered[0].NextAttemptAt, 90*time.Second)
+	if err != nil || !ok || third.Session.Checkpoint.NextStepIndex != 2 {
+		t.Fatalf("third lease=%+v ok=%v err=%v", third, ok, err)
+	}
+	finished, err := service.FinishBootstrapSessionForLease(projectID, session.ID, "worker-3", third.LeaseToken, BootstrapFinishResult{Status: "completed"}, summary.Recovered[0].NextAttemptAt.Add(time.Second))
+	if err != nil || finished.Checkpoint.NextStepIndex != 2 {
+		t.Fatalf("finished=%+v err=%v", finished, err)
+	}
+}
+
+func TestBootstrapCheckpointSurvivesManualRetry(t *testing.T) {
+	service, projectID, session := newBootstrapDurabilityFixture(t)
+	now := service.clock()
+	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	_, _ = service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(0), now.Add(time.Second))
+	checkpointed, _ := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(1), now.Add(2*time.Second))
+	dead, err := service.FinishBootstrapSessionForLease(projectID, session.ID, "worker-1", lease.LeaseToken, BootstrapFinishResult{Status: "failed", FailureCode: "BOOTSTRAP_PLAN_MISMATCH", MessageRedacted: "plan mismatch", Retryable: false}, now.Add(3*time.Second))
+	if err != nil || dead.Status != BootstrapDeadLetter {
+		t.Fatalf("dead=%+v err=%v", dead, err)
+	}
+	retried, err := service.ManualRetryBootstrapSession(projectID, session.ID, "retry-checkpoint", now.Add(4*time.Second))
+	if err != nil || retried.Session.Checkpoint != checkpointed.Checkpoint {
+		t.Fatalf("manual retry checkpoint=%+v err=%v", retried.Session.Checkpoint, err)
+	}
+}
+
+func testBootstrapCheckpoint(nextIndex int) BootstrapCheckpoint {
+	checkpoint := BootstrapCheckpoint{
+		SchemaVersion:   BootstrapCheckpointSchemaVersion,
+		PlanVersion:     FirstServerBootstrapPlanVersion,
+		PlanFingerprint: strings.Repeat("a", 64),
+		NextStepIndex:   nextIndex,
+	}
+	if nextIndex > 0 && nextIndex <= len(BootstrapStepIDs(FirstServerBootstrapPlanVersion)) {
+		checkpoint.LastCompletedStep = BootstrapStepIDs(FirstServerBootstrapPlanVersion)[nextIndex-1]
+	}
+	return checkpoint
 }
 
 func newBootstrapDurabilityFixture(t *testing.T) (*Service, string, BootstrapSession) {

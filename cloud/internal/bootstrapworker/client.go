@@ -50,6 +50,34 @@ func (h httpCloudClient) Progress(ctx context.Context, lease Lease, status, mess
 	return h.postState(ctx, lease, "progress", finishRequest{Status: status, Message: message})
 }
 
+func (h httpCloudClient) Checkpoint(ctx context.Context, lease Lease, checkpoint registry.BootstrapCheckpoint) (registry.BootstrapCheckpoint, error) {
+	body, _ := json.Marshal(struct {
+		ProjectID string `json:"project_id"`
+		registry.BootstrapCheckpoint
+	}{ProjectID: lease.Bundle.ProjectID, BootstrapCheckpoint: checkpoint})
+	endpoint := strings.TrimRight(h.cfg.CloudURL, "/") + "/internal/bootstrap/sessions/" + url.PathEscape(lease.Bundle.SessionID) + "/checkpoint"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return registry.BootstrapCheckpoint{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bootstrap-Worker-Token", h.cfg.BootstrapWorkerToken)
+	setLeaseHeaders(req, h.cfg, lease)
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return registry.BootstrapCheckpoint{}, fmt.Errorf("checkpoint bootstrap session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return registry.BootstrapCheckpoint{}, cloudResponseError(resp.StatusCode, "checkpoint bootstrap session", safeBody(resp.Body))
+	}
+	var saved registry.BootstrapCheckpoint
+	if err := json.NewDecoder(resp.Body).Decode(&saved); err != nil {
+		return registry.BootstrapCheckpoint{}, fmt.Errorf("invalid bootstrap checkpoint protocol response: %w", err)
+	}
+	return saved, nil
+}
+
 func (h httpCloudClient) Finish(ctx context.Context, lease Lease, result FinishResult) error {
 	req := finishRequest{Status: result.Status, Message: result.Message}
 	if result.Failure != nil {
@@ -172,13 +200,26 @@ func setLeaseHeaders(req *http.Request, cfg Config, lease Lease) {
 type cloudError struct {
 	status    int
 	operation string
+	code      string
 	msg       string
 }
 
 func (e cloudError) Error() string { return e.msg }
 
 func cloudResponseError(status int, operation, body string) error {
-	return cloudError{status: status, operation: operation, msg: operation + ": " + body}
+	var payload struct {
+		Code string `json:"error_code"`
+	}
+	_ = json.Unmarshal([]byte(body), &payload)
+	return cloudError{status: status, operation: operation, code: payload.Code, msg: operation + ": " + body}
+}
+
+func cloudErrorCode(err error) string {
+	var responseErr cloudError
+	if errors.As(err, &responseErr) {
+		return responseErr.code
+	}
+	return ""
 }
 
 func isFatalCloudError(err error) bool {
@@ -206,7 +247,19 @@ func isDaemonFatalCloudError(err error) bool {
 
 func isLeaseLossError(err error) bool {
 	var responseErr cloudError
-	return errors.As(err, &responseErr) && responseErr.operation != "lease bootstrap session" && (responseErr.status == http.StatusForbidden || responseErr.status == http.StatusConflict || responseErr.status == http.StatusGone)
+	if !errors.As(err, &responseErr) || responseErr.operation == "lease bootstrap session" {
+		return false
+	}
+	if responseErr.status == http.StatusForbidden || responseErr.status == http.StatusGone {
+		return true
+	}
+	if responseErr.status != http.StatusConflict {
+		return false
+	}
+	if responseErr.code == "" {
+		return responseErr.operation != "checkpoint bootstrap session"
+	}
+	return strings.HasPrefix(responseErr.code, "BOOTSTRAP_LEASE_") || responseErr.code == "BOOTSTRAP_SESSION_EXPIRED"
 }
 
 func safeBody(r io.Reader) string {

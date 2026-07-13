@@ -1,7 +1,9 @@
 package registry
 
 import (
+	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -45,6 +47,131 @@ func (s *Service) RecoverExpiredBootstrapLeases(now time.Time) (BootstrapRecover
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.recoverExpiredBootstrapLeasesLocked(now.UTC()), nil
+}
+
+func (s *Service) UpdateBootstrapCheckpointForLease(projectID, sessionID, workerID, leaseToken string, checkpoint BootstrapCheckpoint, now time.Time) (BootstrapSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.bootstraps[sessionID]
+	if !ok || session.ProjectID != projectID {
+		return BootstrapSession{}, ErrNotFound
+	}
+	if err := validateBootstrapLease(session, workerID, leaseToken, now); err != nil {
+		return BootstrapSession{}, err
+	}
+	replay, err := validateBootstrapCheckpointTransition(session.Checkpoint, checkpoint)
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	if replay {
+		return session, nil
+	}
+	now = now.UTC().Truncate(time.Microsecond)
+	checkpoint.UpdatedAt = &now
+	session.Checkpoint = checkpoint
+	session.UpdatedAt = now
+	s.bootstraps[sessionID] = session
+	step := "BOOTSTRAP_CHECKPOINT_INITIALIZED"
+	if checkpoint.NextStepIndex > 0 {
+		step = "BOOTSTRAP_CHECKPOINT_ADVANCED"
+	}
+	s.appendBootstrapDurabilityEventLocked(session, "info", step, "bootstrap checkpoint persisted", now)
+	return session, nil
+}
+
+func validateBootstrapCheckpointTransition(current, requested BootstrapCheckpoint) (bool, error) {
+	currentInitialized := bootstrapCheckpointInitialized(current)
+	if !currentInitialized && !bootstrapCheckpointEmpty(current) {
+		return false, bootstrapCheckpointConflict("stored bootstrap checkpoint is invalid")
+	}
+	if currentInitialized && requested.SchemaVersion != current.SchemaVersion {
+		return false, bootstrapCheckpointConflict("bootstrap checkpoint schema version does not match")
+	}
+	if err := validateBootstrapCheckpointFormat(requested); err != nil {
+		return false, err
+	}
+	if !currentInitialized {
+		if requested.NextStepIndex != 0 || requested.LastCompletedStep != "" {
+			return false, bootstrapCheckpointConflict("bootstrap checkpoint must initialize at step zero")
+		}
+		return false, nil
+	}
+	if err := validateStoredBootstrapCheckpoint(current); err != nil {
+		return false, err
+	}
+	if requested.PlanVersion != current.PlanVersion || requested.PlanFingerprint != current.PlanFingerprint {
+		return false, APIError{Status: 409, Code: "BOOTSTRAP_PLAN_MISMATCH", Message: "bootstrap plan does not match the persisted checkpoint"}
+	}
+	if requested.NextStepIndex == current.NextStepIndex && requested.LastCompletedStep == current.LastCompletedStep {
+		return true, nil
+	}
+	if requested.NextStepIndex < current.NextStepIndex {
+		return false, bootstrapCheckpointConflict("bootstrap checkpoint cannot regress")
+	}
+	if requested.NextStepIndex > current.NextStepIndex+1 {
+		return false, bootstrapCheckpointConflict("bootstrap checkpoint cannot skip steps")
+	}
+	if requested.NextStepIndex != current.NextStepIndex+1 {
+		return false, bootstrapCheckpointConflict("bootstrap checkpoint transition is invalid")
+	}
+	return false, nil
+}
+
+func validateBootstrapCheckpointFormat(checkpoint BootstrapCheckpoint) error {
+	if checkpoint.SchemaVersion != BootstrapCheckpointSchemaVersion {
+		return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint schema version is invalid"}
+	}
+	if strings.TrimSpace(checkpoint.PlanVersion) == "" {
+		return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint plan version is required"}
+	}
+	if !validBootstrapPlanFingerprint(checkpoint.PlanFingerprint) {
+		return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint plan fingerprint must be 64 lowercase hexadecimal characters"}
+	}
+	if checkpoint.NextStepIndex < 0 {
+		return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint next step index cannot be negative"}
+	}
+	if checkpoint.NextStepIndex == 0 && checkpoint.LastCompletedStep != "" {
+		return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint at step zero cannot have a completed step"}
+	}
+	if checkpoint.NextStepIndex > 0 && checkpoint.LastCompletedStep == "" {
+		return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint completed step is required"}
+	}
+	if stepIDs := BootstrapStepIDs(checkpoint.PlanVersion); len(stepIDs) > 0 {
+		if checkpoint.NextStepIndex > len(stepIDs) {
+			return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint next step index exceeds the plan"}
+		}
+		if checkpoint.NextStepIndex > 0 && checkpoint.LastCompletedStep != stepIDs[checkpoint.NextStepIndex-1] {
+			return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint completed step does not match the plan"}
+		}
+	}
+	return nil
+}
+
+func validateStoredBootstrapCheckpoint(checkpoint BootstrapCheckpoint) error {
+	if err := validateBootstrapCheckpointFormat(checkpoint); err != nil {
+		return bootstrapCheckpointConflict("stored bootstrap checkpoint is invalid")
+	}
+	return nil
+}
+
+func bootstrapCheckpointInitialized(checkpoint BootstrapCheckpoint) bool {
+	return checkpoint.SchemaVersion != 0
+}
+
+func bootstrapCheckpointEmpty(checkpoint BootstrapCheckpoint) bool {
+	return checkpoint.SchemaVersion == 0 && checkpoint.PlanVersion == "" && checkpoint.PlanFingerprint == "" && checkpoint.NextStepIndex == 0 && checkpoint.LastCompletedStep == "" && checkpoint.UpdatedAt == nil
+}
+
+func validBootstrapPlanFingerprint(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func bootstrapCheckpointConflict(message string) APIError {
+	return APIError{Status: 409, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: message}
 }
 
 func (s *Service) recoverExpiredBootstrapLeasesLocked(now time.Time) BootstrapRecoverySummary {

@@ -239,36 +239,58 @@ type Agent struct {
 }
 
 type BootstrapSession struct {
-	ID                  string     `json:"id"`
-	OrgID               string     `json:"org_id"`
-	ProjectID           string     `json:"project_id"`
-	EnvironmentID       string     `json:"environment_id"`
-	RuntimeID           string     `json:"runtime_id"`
-	NodeID              string     `json:"node_id,omitempty"`
-	CreatedBy           string     `json:"created_by,omitempty"`
-	Role                string     `json:"role"`
-	Status              string     `json:"status"`
-	IdempotencyKey      string     `json:"idempotency_key"`
-	PublicHost          string     `json:"public_host,omitempty"`
-	SSHPort             int        `json:"ssh_port,omitempty"`
-	SSHUsername         string     `json:"ssh_username,omitempty"`
-	AuthMethod          string     `json:"auth_method,omitempty"`
-	ExpiresAt           time.Time  `json:"expires_at"`
-	StartedAt           *time.Time `json:"started_at,omitempty"`
-	FinishedAt          *time.Time `json:"finished_at,omitempty"`
-	LeaseOwner          string     `json:"lease_owner,omitempty"`
-	LeaseTokenHash      string     `json:"-"`
-	LeaseExpiresAt      *time.Time `json:"lease_expires_at,omitempty"`
-	LeasedAt            *time.Time `json:"leased_at,omitempty"`
-	AttemptCount        int        `json:"attempt_count"`
-	MaxAttempts         int        `json:"max_attempts"`
-	NextAttemptAt       *time.Time `json:"next_attempt_at,omitempty"`
-	LeaseHeartbeatAt    *time.Time `json:"lease_heartbeat_at,omitempty"`
-	LastFailureCode     string     `json:"last_failure_code,omitempty"`
-	LastFailureRedacted string     `json:"last_failure_message_redacted,omitempty"`
-	DeadLetteredAt      *time.Time `json:"dead_lettered_at,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	ID                  string              `json:"id"`
+	OrgID               string              `json:"org_id"`
+	ProjectID           string              `json:"project_id"`
+	EnvironmentID       string              `json:"environment_id"`
+	RuntimeID           string              `json:"runtime_id"`
+	NodeID              string              `json:"node_id,omitempty"`
+	CreatedBy           string              `json:"created_by,omitempty"`
+	Role                string              `json:"role"`
+	Status              string              `json:"status"`
+	IdempotencyKey      string              `json:"idempotency_key"`
+	PublicHost          string              `json:"public_host,omitempty"`
+	SSHPort             int                 `json:"ssh_port,omitempty"`
+	SSHUsername         string              `json:"ssh_username,omitempty"`
+	AuthMethod          string              `json:"auth_method,omitempty"`
+	ExpiresAt           time.Time           `json:"expires_at"`
+	StartedAt           *time.Time          `json:"started_at,omitempty"`
+	FinishedAt          *time.Time          `json:"finished_at,omitempty"`
+	LeaseOwner          string              `json:"lease_owner,omitempty"`
+	LeaseTokenHash      string              `json:"-"`
+	LeaseExpiresAt      *time.Time          `json:"lease_expires_at,omitempty"`
+	LeasedAt            *time.Time          `json:"leased_at,omitempty"`
+	AttemptCount        int                 `json:"attempt_count"`
+	MaxAttempts         int                 `json:"max_attempts"`
+	NextAttemptAt       *time.Time          `json:"next_attempt_at,omitempty"`
+	LeaseHeartbeatAt    *time.Time          `json:"lease_heartbeat_at,omitempty"`
+	LastFailureCode     string              `json:"last_failure_code,omitempty"`
+	LastFailureRedacted string              `json:"last_failure_message_redacted,omitempty"`
+	DeadLetteredAt      *time.Time          `json:"dead_lettered_at,omitempty"`
+	Checkpoint          BootstrapCheckpoint `json:"checkpoint"`
+	CreatedAt           time.Time           `json:"created_at"`
+	UpdatedAt           time.Time           `json:"updated_at"`
+}
+
+const (
+	BootstrapCheckpointSchemaVersion = 1
+	FirstServerBootstrapPlanVersion  = "first-server-v1"
+)
+
+type BootstrapCheckpoint struct {
+	SchemaVersion     int        `json:"schema_version"`
+	PlanVersion       string     `json:"plan_version"`
+	PlanFingerprint   string     `json:"plan_fingerprint"`
+	NextStepIndex     int        `json:"next_step_index"`
+	LastCompletedStep string     `json:"last_completed_step,omitempty"`
+	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+}
+
+func BootstrapStepIDs(planVersion string) []string {
+	if planVersion != FirstServerBootstrapPlanVersion {
+		return nil
+	}
+	return []string{"preflight", "install_k3s", "install_agent", "register_agent"}
 }
 
 type BootstrapSessionLease struct {
@@ -564,6 +586,7 @@ type API interface {
 	RecoverExpiredBootstrapLeases(now time.Time) (BootstrapRecoverySummary, error)
 	GetBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken string, now time.Time) (BootstrapSession, error)
 	UpdateBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken, status, message string, now time.Time) (BootstrapSession, error)
+	UpdateBootstrapCheckpointForLease(projectID, sessionID, workerID, leaseToken string, checkpoint BootstrapCheckpoint, now time.Time) (BootstrapSession, error)
 	FinishBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken string, result BootstrapFinishResult, now time.Time) (BootstrapSession, error)
 	ManualRetryBootstrapSession(projectID, sessionID, idempotencyKey string, now time.Time) (BootstrapManualRetryResult, error)
 	GetBootstrapSession(projectID, sessionID string) (BootstrapSession, error)

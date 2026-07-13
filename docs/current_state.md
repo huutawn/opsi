@@ -116,6 +116,21 @@ Safe ActionPlane client.
   without an operator-provided session ID. Each lease increments a server-owned
   bounded attempt count. Worker progress, heartbeat, and finish requests require
   the lease owner and raw lease token; storage retains only its hash.
+- Bootstrap sessions now carry a durable checkpoint independent of status,
+  progress events, lease owner, and attempt count. The authoritative
+  `first-server-v1` plan uses stable step IDs `preflight`, `install_k3s`,
+  `install_agent`, and `register_agent`, plus a deterministic SHA-256
+  fingerprint over the version, ordered step command hashes, Agent artifact
+  URL/checksum, and Agent Cloud URL.
+- Fresh workers initialize checkpoint index zero. After each successful remote
+  step, Cloud persists the next index under the active lease before another
+  step may run. Retry, manual retry, lease recovery, and a new worker lease keep
+  the checkpoint and resume from the next unacknowledged step. A session with
+  all four steps checkpointed skips SSH and waits for Agent heartbeat directly.
+- Bootstrap resume semantics are at-least-once. If a remote step succeeds but
+  checkpoint acknowledgement fails, no later step runs and the successful step
+  may execute again on retry. P05 still owns installer idempotency and hardening;
+  this snapshot does not prove K3s or Agent installation idempotency.
 - Worker configuration no longer accepts fixed `session_id`. The existing SSH,
   K3s, Agent install, registration, and Agent heartbeat verification sequence is
   unchanged after lease acquisition.
@@ -138,6 +153,11 @@ Safe ActionPlane client.
   retry, dead-letter, and manual retry semantics. The PostgreSQL restart test is
   mandatory in `make verify-postgres`; execution still requires
   `OPSI_TEST_DATABASE_URL`.
+- P04-focused in-memory, worker, HTTP, PostgreSQL, concurrent transition, and
+  pre-P04 row migration-upgrade tests pass. The repository-wide Cloud gate is
+  not green because `TestOTPRequiresPATAndUsesAuthenticatedEmail` fails with
+  `pat invalid`; the same failure is reproducible from the clean P03 HEAD, so it
+  is recorded as a baseline blocker rather than P04 evidence.
 - The existing Cloud binary exposes the local operator command
   `opsi-cloud admin bootstrap-owner`. It requires PostgreSQL and transactionally
   creates or reuses the normalized user, organization, canonical project plus
@@ -213,9 +233,11 @@ E2E, release hardening, supply-chain evidence, and measured disaster recovery.
 ## Ordered next work
 
 P03 Agent executable and deterministic local release artifact code is complete.
-P04 resumable BootstrapJob state is next, followed by P05 supply-chain,
-transport, installer, checksum, HTTPS, K3s pinning, and canonical systemd layout
-hardening, then P06 clean target VPS proof. GitHub App control-plane work,
+P04 durable checkpoint/resume behavior is implemented, but its closure remains
+blocked by the pre-existing full-Cloud OTP/PAT regression gate. P05 is the next
+implementation phase for supply-chain, transport, installer, checksum, HTTPS,
+K3s pinning, and canonical systemd layout hardening. P06 clean target VPS proof
+remains `UNPROVEN`; there is no clean target VPS evidence. GitHub App control-plane work,
 OIDC-bound trusted artifact delivery, runtime delivery, and the later
 evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
 of truth is `docs/opsi_roadmap_v4.md`.

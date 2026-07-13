@@ -2,6 +2,7 @@ package bootstrapworker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -64,14 +65,15 @@ type fileConfig struct {
 }
 
 type Bundle struct {
-	SessionID                string    `json:"session_id"`
-	ProjectID                string    `json:"project_id"`
-	NodeID                   string    `json:"node_id"`
-	PublicHost               string    `json:"public_host"`
-	SSHPort                  int       `json:"ssh_port"`
-	Role                     string    `json:"role"`
-	AgentRegistrationToken   string    `json:"agent_registration_token"`
-	AgentRegistrationExpires time.Time `json:"agent_registration_expires"`
+	SessionID                string                       `json:"session_id"`
+	ProjectID                string                       `json:"project_id"`
+	NodeID                   string                       `json:"node_id"`
+	PublicHost               string                       `json:"public_host"`
+	SSHPort                  int                          `json:"ssh_port"`
+	Role                     string                       `json:"role"`
+	AgentRegistrationToken   string                       `json:"agent_registration_token"`
+	AgentRegistrationExpires time.Time                    `json:"agent_registration_expires"`
+	Checkpoint               registry.BootstrapCheckpoint `json:"checkpoint"`
 	SSH                      struct {
 		AuthMethod string `json:"auth_method"`
 		Username   string `json:"username"`
@@ -208,6 +210,7 @@ type CloudClient interface {
 	LeaseNext(context.Context) (Lease, bool, error)
 	HeartbeatLease(context.Context, Lease) (time.Time, error)
 	Progress(context.Context, Lease, string, string) error
+	Checkpoint(context.Context, Lease, registry.BootstrapCheckpoint) (registry.BootstrapCheckpoint, error)
 	Finish(context.Context, Lease, FinishResult) error
 	WaitForHeartbeat(context.Context, Lease) error
 }
@@ -351,37 +354,39 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 		failure := classifyPlanFailure(err)
 		return w.reportFailure(ctx, lease, failure)
 	}
-
-	target := RemoteTarget{Host: bundle.PublicHost, Port: bundle.SSHPort, Username: bundle.SSH.Username, Password: bundle.SSH.Password, PrivateKey: bundle.SSH.PrivateKey}
-	if err := w.client.Progress(ctx, lease, "connecting", "connecting to target over SSH"); err != nil {
-		if isFatalCloudError(err) || isLeaseLossError(err) {
-			return err
+	fingerprint := BootstrapPlanFingerprint(cfg, plan)
+	checkpoint := bundle.Checkpoint
+	if !checkpointInitialized(checkpoint) {
+		checkpoint, err = w.client.Checkpoint(ctx, lease, registry.BootstrapCheckpoint{
+			SchemaVersion:   registry.BootstrapCheckpointSchemaVersion,
+			PlanVersion:     plan.Version,
+			PlanFingerprint: fingerprint,
+			NextStepIndex:   0,
+		})
+		if err != nil {
+			stopHeartbeatAndWait()
+			heartbeatStopped = true
+			if isFatalCloudError(err) || isLeaseLossError(err) {
+				return err
+			}
+			return w.reportFailure(ctx, lease, classifyCheckpointFailure(err))
 		}
 	}
-	session, err := w.executor.Connect(ctx, target)
-	if err != nil {
+	if err := ValidateBootstrapCheckpoint(plan, fingerprint, checkpoint); err != nil {
 		stopHeartbeatAndWait()
 		heartbeatStopped = true
-		if parent.Err() != nil {
-			failure := JobFailure{Code: "BOOTSTRAP_WORKER_SHUTDOWN", Message: "bootstrap worker shut down", Retryable: true}
-			return w.reportFailure(ctx, lease, failure)
-		}
-		if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
-			return cause
-		}
-		failure := classifyConnectFailure(redactForLease(cfg, lease, err.Error()))
-		return w.reportFailure(ctx, lease, failure)
+		return w.reportFailure(ctx, lease, classifyCheckpointFailure(err))
 	}
-	defer session.Close()
 
-	for _, step := range plan.Steps {
-		if err := w.client.Progress(ctx, lease, step.Status, step.Message); err != nil {
+	if checkpoint.NextStepIndex < len(plan.Steps) {
+		target := RemoteTarget{Host: bundle.PublicHost, Port: bundle.SSHPort, Username: bundle.SSH.Username, Password: bundle.SSH.Password, PrivateKey: bundle.SSH.PrivateKey}
+		if err := w.client.Progress(ctx, lease, "connecting", "connecting to target over SSH"); err != nil {
 			if isFatalCloudError(err) || isLeaseLossError(err) {
 				return err
 			}
 		}
-		result, err := session.Run(ctx, step.Command)
-		if err != nil || result.ExitCode != 0 {
+		session, err := w.executor.Connect(ctx, target)
+		if err != nil {
 			stopHeartbeatAndWait()
 			heartbeatStopped = true
 			if parent.Err() != nil {
@@ -391,8 +396,54 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 			if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
 				return cause
 			}
-			failure := classifyStepFailure(step.Status, redactForLease(cfg, lease, fmt.Sprintf("%s failed: %s %s %v", step.Status, result.Stdout, result.Stderr, err)))
+			failure := classifyConnectFailure(redactForLease(cfg, lease, err.Error()))
 			return w.reportFailure(ctx, lease, failure)
+		}
+		defer session.Close()
+
+		for index := checkpoint.NextStepIndex; index < len(plan.Steps); index++ {
+			step := plan.Steps[index]
+			if err := w.client.Progress(ctx, lease, step.Status, step.Message); err != nil {
+				if isFatalCloudError(err) || isLeaseLossError(err) {
+					return err
+				}
+			}
+			result, err := session.Run(ctx, step.Command)
+			if err != nil || result.ExitCode != 0 {
+				stopHeartbeatAndWait()
+				heartbeatStopped = true
+				if parent.Err() != nil {
+					failure := JobFailure{Code: "BOOTSTRAP_WORKER_SHUTDOWN", Message: "bootstrap worker shut down", Retryable: true}
+					return w.reportFailure(ctx, lease, failure)
+				}
+				if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
+					return cause
+				}
+				failure := classifyStepFailure(step.Status, redactForLease(cfg, lease, fmt.Sprintf("%s failed: %s %s %v", step.Status, result.Stdout, result.Stderr, err)))
+				return w.reportFailure(ctx, lease, failure)
+			}
+			requested := checkpoint
+			requested.NextStepIndex = index + 1
+			requested.LastCompletedStep = step.ID
+			requested.UpdatedAt = nil
+			persisted, err := w.client.Checkpoint(ctx, lease, requested)
+			if err != nil {
+				stopHeartbeatAndWait()
+				heartbeatStopped = true
+				if isFatalCloudError(err) || isLeaseLossError(err) {
+					return err
+				}
+				return w.reportFailure(ctx, lease, classifyCheckpointFailure(err))
+			}
+			if err := ValidateBootstrapCheckpoint(plan, fingerprint, persisted); err != nil || persisted.NextStepIndex != index+1 {
+				stopHeartbeatAndWait()
+				heartbeatStopped = true
+				if err == nil {
+					err = fmt.Errorf("%w: Cloud returned an unexpected checkpoint index", ErrBootstrapCheckpointInvalid)
+				}
+				return w.reportFailure(ctx, lease, classifyCheckpointFailure(err))
+			}
+			checkpoint = persisted
 		}
 	}
 	if err := w.client.Progress(ctx, lease, "verifying_agent", "waiting for healthy Agent heartbeat"); err != nil {
@@ -489,6 +540,21 @@ func classifyPlanFailure(err error) JobFailure {
 	return JobFailure{Code: code, Message: boundedFailureMessage(err.Error())}
 }
 
+var (
+	ErrBootstrapPlanMismatch      = errors.New("bootstrap plan mismatch")
+	ErrBootstrapCheckpointInvalid = errors.New("bootstrap checkpoint invalid")
+)
+
+func classifyCheckpointFailure(err error) JobFailure {
+	if errors.Is(err, ErrBootstrapPlanMismatch) || cloudErrorCode(err) == "BOOTSTRAP_PLAN_MISMATCH" {
+		return JobFailure{Code: "BOOTSTRAP_PLAN_MISMATCH", Message: "persisted bootstrap checkpoint belongs to a different plan", Retryable: false}
+	}
+	if errors.Is(err, ErrBootstrapCheckpointInvalid) || cloudErrorCode(err) == "BOOTSTRAP_CHECKPOINT_INVALID" {
+		return JobFailure{Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "persisted bootstrap checkpoint is invalid", Retryable: false}
+	}
+	return JobFailure{Code: "BOOTSTRAP_CLOUD_TEMPORARY", Message: "bootstrap checkpoint acknowledgement failed", Retryable: true}
+}
+
 func classifyConnectFailure(message string) JobFailure {
 	lower := strings.ToLower(message)
 	switch {
@@ -564,10 +630,12 @@ func ValidateBundle(bundle Bundle) error {
 }
 
 type BootstrapPlan struct {
-	Steps []BootstrapStep
+	Version string
+	Steps   []BootstrapStep
 }
 
 type BootstrapStep struct {
+	ID      string
 	Status  string
 	Message string
 	Command CommandSpec
@@ -600,12 +668,76 @@ func BuildBootstrapPlan(cfg Config, bundle Bundle) (BootstrapPlan, error) {
 		"OPSI_REMOTE_USERNAME": bundle.SSH.Username,
 	}
 	secretEnv := map[string]string{"OPSI_AGENT_REGISTRATION_TOKEN": bundle.AgentRegistrationToken}
-	return BootstrapPlan{Steps: []BootstrapStep{
-		{Status: "preflight", Message: "checking Ubuntu target prerequisites", Command: CommandSpec{Script: preflightScript, Env: env}},
-		{Status: "installing_k3s", Message: "installing K3s server", Command: CommandSpec{Script: installK3sScript, Env: env}},
-		{Status: "installing_agent", Message: "installing Opsi Agent binary", Command: CommandSpec{Script: installAgentScript, Env: env}},
-		{Status: "registering_agent", Message: "registering and starting Opsi Agent", Command: CommandSpec{Script: registerAgentScript, Env: env, SensitiveEnv: secretEnv}},
+	stepIDs := registry.BootstrapStepIDs(registry.FirstServerBootstrapPlanVersion)
+	return BootstrapPlan{Version: registry.FirstServerBootstrapPlanVersion, Steps: []BootstrapStep{
+		{ID: stepIDs[0], Status: "preflight", Message: "checking Ubuntu target prerequisites", Command: CommandSpec{Script: preflightScript, Env: env}},
+		{ID: stepIDs[1], Status: "installing_k3s", Message: "installing K3s server", Command: CommandSpec{Script: installK3sScript, Env: env}},
+		{ID: stepIDs[2], Status: "installing_agent", Message: "installing Opsi Agent binary", Command: CommandSpec{Script: installAgentScript, Env: env}},
+		{ID: stepIDs[3], Status: "registering_agent", Message: "registering and starting Opsi Agent", Command: CommandSpec{Script: registerAgentScript, Env: env, SensitiveEnv: secretEnv}},
 	}}, nil
+}
+
+func BootstrapPlanFingerprint(cfg Config, plan BootstrapPlan) string {
+	type fingerprintStep struct {
+		ID            string `json:"id"`
+		CommandSHA256 string `json:"command_sha256"`
+	}
+	type fingerprintPayload struct {
+		PlanVersion        string            `json:"plan_version"`
+		Steps              []fingerprintStep `json:"steps"`
+		AgentInstallURL    string            `json:"agent_install_url"`
+		AgentInstallSHA256 string            `json:"agent_install_sha256"`
+		AgentCloudURL      string            `json:"agent_cloud_url"`
+	}
+	steps := make([]fingerprintStep, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		command := step.Command
+		command.SensitiveEnv = nil
+		steps = append(steps, fingerprintStep{ID: step.ID, CommandSHA256: bootstrapSHA256Hex([]byte(renderScript(command)))})
+	}
+	agentCloudURL := cfg.AgentCloudURL
+	if agentCloudURL == "" {
+		agentCloudURL = cfg.CloudURL
+	}
+	payload, _ := json.Marshal(fingerprintPayload{
+		PlanVersion:        plan.Version,
+		Steps:              steps,
+		AgentInstallURL:    cfg.AgentInstallURL,
+		AgentInstallSHA256: cfg.AgentInstallSHA256,
+		AgentCloudURL:      strings.TrimRight(agentCloudURL, "/"),
+	})
+	return bootstrapSHA256Hex(payload)
+}
+
+func ValidateBootstrapCheckpoint(plan BootstrapPlan, fingerprint string, checkpoint registry.BootstrapCheckpoint) error {
+	if checkpoint.SchemaVersion != registry.BootstrapCheckpointSchemaVersion {
+		return fmt.Errorf("%w: schema version", ErrBootstrapCheckpointInvalid)
+	}
+	if checkpoint.PlanVersion != plan.Version || checkpoint.PlanFingerprint != fingerprint {
+		return ErrBootstrapPlanMismatch
+	}
+	if checkpoint.NextStepIndex < 0 || checkpoint.NextStepIndex > len(plan.Steps) {
+		return fmt.Errorf("%w: next step index", ErrBootstrapCheckpointInvalid)
+	}
+	if checkpoint.NextStepIndex == 0 {
+		if checkpoint.LastCompletedStep != "" {
+			return fmt.Errorf("%w: completed step at index zero", ErrBootstrapCheckpointInvalid)
+		}
+		return nil
+	}
+	if checkpoint.LastCompletedStep != plan.Steps[checkpoint.NextStepIndex-1].ID {
+		return fmt.Errorf("%w: completed step", ErrBootstrapCheckpointInvalid)
+	}
+	return nil
+}
+
+func checkpointInitialized(checkpoint registry.BootstrapCheckpoint) bool {
+	return checkpoint.SchemaVersion != 0
+}
+
+func bootstrapSHA256Hex(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
 }
 
 func parseHTTPURL(raw string) (*url.URL, error) {

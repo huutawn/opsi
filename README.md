@@ -21,6 +21,9 @@ delivery is defined by
 - Opsi does not currently render or manage Ingress, Gateway, domains, or TLS.
 - P01 code is complete. Its clean control-plane VPS checkpoint is
   `DEFERRED / UNPROVEN` because no clean Ubuntu VPS was available.
+- Bootstrap sessions persist a durable per-step checkpoint and workers resume
+  the `first-server-v1` plan from the next unacknowledged step. Execution is
+  at-least-once; P05 still owns installer idempotency and hardening.
 - Production readiness and complete real VPS/GitHub evidence remain unproven.
 
 The roadmap target is user-owned AI through a future local CLI MCP bridge. AI
@@ -91,8 +94,10 @@ currently proves the complete scenario. See
 
 P01 development control-plane code is complete, while checkpoint `CP-VPS-1`
 remains `DEFERRED / UNPROVEN`. P02 documentation is retained. P03 Agent
-executable and deterministic Linux release artifact code is complete; P04
-resumable BootstrapJob work is next. GitHub App, OIDC, trusted OCI delivery,
-managed runtime exposure, IncidentEvidence, Safe ActionPlane, CLI MCP, and
-production gates remain ordered future work and must not be inferred as
-implemented.
+executable and deterministic Linux release artifact code is complete. P04
+durable BootstrapJob checkpoint/resume behavior is implemented and its focused
+unit, race, PostgreSQL, and migration-upgrade tests pass. The full Cloud gate is
+still blocked by the pre-existing OTP/PAT test failure documented in the
+roadmap, so P04 is not marked code-complete. P05 is the next implementation
+phase; P06 clean target VPS proof remains `UNPROVEN`. Later roadmap capabilities
+must not be inferred as implemented.

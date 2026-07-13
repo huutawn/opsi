@@ -3,8 +3,10 @@ package webhookrelay
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -84,6 +86,108 @@ func TestBootstrapWorkerLeaseAndLeaseBoundMutations(t *testing.T) {
 	stored, err := server.Registry.GetBootstrapSession(project.ID, session.ID)
 	if err != nil || stored.LeaseTokenHash != "" || stored.LeaseExpiresAt != nil || stored.LeaseOwner != "" {
 		t.Fatalf("terminal lease state=%+v err=%v", stored, err)
+	}
+}
+
+func TestBootstrapWorkerCheckpointAPIAndLeaseResponse(t *testing.T) {
+	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
+	now := time.Now().UTC()
+	server.now = func() time.Time { return now }
+	project, _ := server.Registry.CreateProject("org-1", "Checkpoint", "checkpoint", "", "project-checkpoint")
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.40", "root", "password", "", "boot-checkpoint", 22)
+	server.credentials.Put(session.ID, BootstrapCredential{AuthMethod: "password", Username: "root", Password: []byte("ssh-secret")}, time.Hour)
+	server.registrations.Put(session.ID, session.OrgID, session.ProjectID, session.NodeID, "areg-secret", time.Hour)
+	handler := server.Handler()
+	request := func(body string, headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/checkpoint", bytes.NewBufferString(body))
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	body := func(index int, last, fingerprint string) string {
+		return `{"project_id":"` + project.ID + `","schema_version":1,"plan_version":"first-server-v1","plan_fingerprint":"` + fingerprint + `","next_step_index":` + fmt.Sprint(index) + `,"last_completed_step":"` + last + `"}`
+	}
+	if w := request(body(0, "", strings.Repeat("a", 64)), nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := request(body(0, "", strings.Repeat("a", 64)), map[string]string{"X-Bootstrap-Worker-Token": "wrong"}); w.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid token status=%d body=%s", w.Code, w.Body.String())
+	}
+	leaseReq := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewBufferString(`{"worker_id":"worker-1"}`))
+	leaseReq.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	leaseResp := httptest.NewRecorder()
+	handler.ServeHTTP(leaseResp, leaseReq)
+	var lease struct {
+		LeaseToken     string    `json:"lease_token"`
+		LeaseExpiresAt time.Time `json:"lease_expires_at"`
+		Bundle         struct {
+			Checkpoint registry.BootstrapCheckpoint `json:"checkpoint"`
+		} `json:"bundle"`
+	}
+	if leaseResp.Code != http.StatusOK || json.NewDecoder(leaseResp.Body).Decode(&lease) != nil {
+		t.Fatalf("lease status=%d body=%s", leaseResp.Code, leaseResp.Body.String())
+	}
+	if lease.Bundle.Checkpoint.SchemaVersion != 0 {
+		t.Fatalf("fresh checkpoint=%+v", lease.Bundle.Checkpoint)
+	}
+	workerAuth := map[string]string{"X-Bootstrap-Worker-Token": "worker-secret", "X-Bootstrap-Worker-ID": "worker-1", "X-Bootstrap-Lease-Token": lease.LeaseToken}
+	if w := request(body(0, "", strings.Repeat("a", 64)), map[string]string{"X-Bootstrap-Worker-Token": "worker-secret", "X-Bootstrap-Lease-Token": lease.LeaseToken}); w.Code != http.StatusForbidden {
+		t.Fatalf("missing worker id status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := request(body(0, "", strings.Repeat("a", 64)), map[string]string{"X-Bootstrap-Worker-Token": "worker-secret", "X-Bootstrap-Worker-ID": "worker-1", "X-Bootstrap-Lease-Token": "wrong"}); w.Code != http.StatusForbidden {
+		t.Fatalf("wrong lease token status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := request(body(0, "", "INVALID"), workerAuth); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid fingerprint status=%d body=%s", w.Code, w.Body.String())
+	}
+	initialized := request(body(0, "", strings.Repeat("a", 64)), workerAuth)
+	if initialized.Code != http.StatusOK || strings.Contains(initialized.Body.String(), "command") || strings.Contains(initialized.Body.String(), "ssh-secret") || strings.Contains(initialized.Body.String(), "areg-secret") {
+		t.Fatalf("initialization status=%d body=%s", initialized.Code, initialized.Body.String())
+	}
+	advanced := request(body(1, "preflight", strings.Repeat("a", 64)), workerAuth)
+	if advanced.Code != http.StatusOK {
+		t.Fatalf("advance status=%d body=%s", advanced.Code, advanced.Body.String())
+	}
+	events, _ := server.Registry.BootstrapEvents(project.ID, session.ID)
+	replayed := request(body(1, "preflight", strings.Repeat("a", 64)), workerAuth)
+	eventsAfterReplay, _ := server.Registry.BootstrapEvents(project.ID, session.ID)
+	if replayed.Code != http.StatusOK || len(eventsAfterReplay) != len(events) {
+		t.Fatalf("replay status=%d events=%d/%d", replayed.Code, len(events), len(eventsAfterReplay))
+	}
+	if w := request(body(0, "", strings.Repeat("a", 64)), workerAuth); w.Code != http.StatusConflict {
+		t.Fatalf("regression status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := request(body(2, "install_k3s", strings.Repeat("b", 64)), workerAuth); w.Code != http.StatusConflict {
+		t.Fatalf("plan mismatch status=%d body=%s", w.Code, w.Body.String())
+	}
+	finish := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/finish", bytes.NewBufferString(`{"project_id":"`+project.ID+`","status":"failed","failure_code":"BOOTSTRAP_CLOUD_TEMPORARY","message":"temporary","retryable":true}`))
+	for key, value := range workerAuth {
+		finish.Header.Set(key, value)
+	}
+	finishResp := httptest.NewRecorder()
+	handler.ServeHTTP(finishResp, finish)
+	retrying, _ := server.Registry.GetBootstrapSession(project.ID, session.ID)
+	now = *retrying.NextAttemptAt
+	leaseReq = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewBufferString(`{"worker_id":"worker-2"}`))
+	leaseReq.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	leaseResp = httptest.NewRecorder()
+	handler.ServeHTTP(leaseResp, leaseReq)
+	var resumed struct {
+		LeaseToken string `json:"lease_token"`
+		Bundle     struct {
+			Checkpoint registry.BootstrapCheckpoint `json:"checkpoint"`
+		} `json:"bundle"`
+	}
+	if leaseResp.Code != http.StatusOK || json.NewDecoder(leaseResp.Body).Decode(&resumed) != nil || resumed.Bundle.Checkpoint.NextStepIndex != 1 {
+		t.Fatalf("resumed lease status=%d body=%s checkpoint=%+v", leaseResp.Code, leaseResp.Body.String(), resumed.Bundle.Checkpoint)
+	}
+	now = now.Add(bootstrapLeaseDuration + time.Nanosecond)
+	expiredAuth := map[string]string{"X-Bootstrap-Worker-Token": "worker-secret", "X-Bootstrap-Worker-ID": "worker-2", "X-Bootstrap-Lease-Token": resumed.LeaseToken}
+	if w := request(body(2, "install_k3s", strings.Repeat("a", 64)), expiredAuth); w.Code != http.StatusGone {
+		t.Fatalf("expired lease status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

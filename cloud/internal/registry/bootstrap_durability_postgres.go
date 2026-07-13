@@ -26,7 +26,7 @@ func (s PostgresService) RenewBootstrapLease(projectID, sessionID, workerID, raw
 		  AND expires_at > $1
 		  AND status IN ('preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')
 		RETURNING *
-	) SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, created_at, updated_at FROM renewed`, now, expiresAt, projectID, sessionID, workerID, tokenHash))
+	) SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, created_at, updated_at FROM renewed`, now, expiresAt, projectID, sessionID, workerID, tokenHash))
 	if err == nil {
 		return updated, nil
 	}
@@ -58,6 +58,73 @@ func (s PostgresService) RecoverExpiredBootstrapLeases(now time.Time) (Bootstrap
 		return BootstrapRecoverySummary{}, err
 	}
 	return summary, tx.Commit()
+}
+
+func (s PostgresService) UpdateBootstrapCheckpointForLease(projectID, sessionID, workerID, leaseToken string, checkpoint BootstrapCheckpoint, now time.Time) (BootstrapSession, error) {
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	defer tx.Rollback()
+	session, err := scanBootstrapSession(tx.QueryRowContext(ctx, bootstrapSelectSQL+` WHERE project_id=$1 AND id=$2 FOR UPDATE`, projectID, sessionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return BootstrapSession{}, ErrNotFound
+	}
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	if err := validateBootstrapLease(session, workerID, leaseToken, now); err != nil {
+		return BootstrapSession{}, err
+	}
+	replay, err := validateBootstrapCheckpointTransition(session.Checkpoint, checkpoint)
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	if replay {
+		if err := tx.Commit(); err != nil {
+			return BootstrapSession{}, err
+		}
+		return session, nil
+	}
+	now = now.UTC().Truncate(time.Microsecond)
+	sum := sha256.Sum256([]byte(leaseToken))
+	tokenHash := hex.EncodeToString(sum[:])
+	result, err := tx.ExecContext(ctx, `UPDATE bootstrap_sessions
+		SET checkpoint_schema_version=$1, checkpoint_plan_version=$2, checkpoint_plan_fingerprint=$3,
+			checkpoint_next_step_index=$4, checkpoint_last_completed_step=$5, checkpoint_updated_at=$6, updated_at=$6
+		WHERE id=$7 AND project_id=$8 AND lease_owner=$9 AND lease_token_hash=$10
+			AND lease_expires_at > $6 AND expires_at > $6
+			AND status IN ('preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')
+			AND checkpoint_schema_version=$11 AND checkpoint_plan_version=$12 AND checkpoint_plan_fingerprint=$13
+			AND checkpoint_next_step_index=$14 AND checkpoint_last_completed_step=$15`,
+		checkpoint.SchemaVersion, checkpoint.PlanVersion, checkpoint.PlanFingerprint, checkpoint.NextStepIndex, checkpoint.LastCompletedStep, now,
+		sessionID, projectID, workerID, tokenHash,
+		session.Checkpoint.SchemaVersion, session.Checkpoint.PlanVersion, session.Checkpoint.PlanFingerprint, session.Checkpoint.NextStepIndex, session.Checkpoint.LastCompletedStep)
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return BootstrapSession{}, err
+	}
+	if rows != 1 {
+		return BootstrapSession{}, APIError{Status: 409, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint transition lost its active lease or current state"}
+	}
+	checkpoint.UpdatedAt = &now
+	session.Checkpoint = checkpoint
+	session.UpdatedAt = now
+	step := "BOOTSTRAP_CHECKPOINT_INITIALIZED"
+	if checkpoint.NextStepIndex > 0 {
+		step = "BOOTSTRAP_CHECKPOINT_ADVANCED"
+	}
+	if err := insertBootstrapEvent(ctx, tx, session, "info", step, "bootstrap checkpoint persisted", now); err != nil {
+		return BootstrapSession{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BootstrapSession{}, err
+	}
+	return session, nil
 }
 
 func recoverExpiredBootstrapLeasesPostgres(ctx context.Context, tx *sql.Tx, now time.Time) (BootstrapRecoverySummary, error) {

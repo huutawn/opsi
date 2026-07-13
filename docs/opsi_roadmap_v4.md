@@ -282,14 +282,31 @@ VPS/installer proof: `UNPROVEN`.
 
 #### P04 - Resumable BootstrapJob state machine
 
-Status: `NEXT`.
+Status: `IMPLEMENTED / FULL CLOUD GATE BLOCKED`.
 
-- Persist per-step transitions.
-- Resume idempotently.
-- Handle checkpoints safely across lease changes.
-- Retry after Worker or Cloud restart.
+PostgreSQL integration: `PASS` on PostgreSQL 17.
+
+P04 closure is not marked `CODE COMPLETE` because the required full Cloud suite
+still fails `TestOTPRequiresPATAndUsesAuthenticatedEmail` with `pat invalid`.
+That failure is reproducible from the clean P03 HEAD and is outside the P04
+checkpoint path; focused P04 unit, race, PostgreSQL, and migration-upgrade tests
+pass.
+
+- Durable schema-v1 checkpoint fields are persisted independently from status,
+  progress, events, lease ownership, and attempt count.
+- `first-server-v1` uses stable step IDs `preflight`, `install_k3s`,
+  `install_agent`, and `register_agent` with a deterministic SHA-256 plan
+  fingerprint.
+- Execution is at-least-once: Cloud acknowledgement follows each successful
+  remote step, and acknowledgement failure prevents the next step.
+- Retry, manual retry, expired-lease recovery, and a new worker lease retain the
+  checkpoint and resume from `next_step_index`.
+- P05 is the next implementation phase, but the P04 full-Cloud closure gate must
+  still be cleared.
 
 #### P05 - Bootstrap supply-chain and transport hardening
+
+Status: `NEXT`.
 
 - Pin the K3s version.
 - Verify installer and artifacts.
@@ -300,6 +317,8 @@ Status: `NEXT`.
   upgrade/rollback behavior.
 
 #### P06 - Clean target VPS bootstrap proof
+
+Status: `UNPROVEN`.
 
 Checkpoint: `[VPS CHECKPOINT]`
 
@@ -558,7 +577,7 @@ Opsi must not be described as production-ready before P32 passes.
 | Checkpoint | Task | Required environment | Current status |
 |---|---|---|---|
 | CP-VPS-1 | P01 clean development control-plane install and restart | Clean Ubuntu control-plane VPS | `DEFERRED / UNPROVEN` |
-| CP-VPS-2 | P06 bootstrap and failure/recovery matrix | Clean Ubuntu target VPS | `NOT_RUN` |
+| CP-VPS-2 | P06 bootstrap and failure/recovery matrix | Clean Ubuntu target VPS | `UNPROVEN` |
 | CP-GH-VPS-1 | P10 real GitHub App and public HTTPS | GitHub plus VPS | `NOT_RUN` |
 | CP-GH-RUNNER-1 | P13 OIDC BuildRecord and public GHCR | GitHub-hosted runner | `NOT_RUN` |
 | CP-CD-1 | P20 main branch digest deployment | GitHub plus VPS | `NOT_RUN` |
