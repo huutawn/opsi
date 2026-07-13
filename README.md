@@ -2,7 +2,10 @@
 
 Opsi is a local-first operations control-plane prototype. Current implementation
 truth lives in `docs/current_state.md`; target requirements live in
-`docs/opsi_srs.md`; capability evidence lives in `docs/status_matrix.md`.
+`docs/opsi_srs.md`; capability evidence lives in `docs/status_matrix.md`; the
+single canonical active roadmap is `docs/opsi_roadmap_v4.md`. Trusted artifact
+delivery is defined by
+`docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
 
 ## Current M0 boundary
 
@@ -11,13 +14,35 @@ truth lives in `docs/current_state.md`; target requirements live in
 - Active incidents support factual list/get/resolve only.
 - `IncidentEvidence v1`, Safe ActionPlane, and the CLI-side MCP bridge are not
   implemented.
+- Agent currently supports Git-source clone/build deployment and rejects
+  image-source deployment before runtime execution.
+- GitHub App authorization/installation, GitHub Actions OIDC, `BuildRecord`,
+  digest deployment, `DeploymentPolicy`, and PR previews are not implemented.
 - Opsi does not currently render or manage Ingress, Gateway, domains, or TLS.
-- Production readiness and a complete clean VPS/K3s pass remain unproven.
+- P01 code is complete. Its clean control-plane VPS checkpoint is
+  `DEFERRED / UNPROVEN` because no clean Ubuntu VPS was available.
+- Production readiness and complete real VPS/GitHub evidence remain unproven.
 
 The roadmap target is user-owned AI through a future local CLI MCP bridge. AI
 will read redacted evidence and propose typed actions; deterministic Agent policy
 and a separate human approval channel remain authoritative. MCP will not expose
 execute or approve tools.
+
+The production delivery target is separate from that AI boundary:
+
+```text
+GitHub Actions build/test
+-> OCI registry
+-> image@sha256:<digest>
+-> Opsi Cloud BuildRecord and DeploymentPolicy
+-> DeploymentJob
+-> Agent deploys the immutable digest
+```
+
+Git commit SHA remains provenance and source identity, not the runtime artifact.
+The existing Git clone/build path remains a legacy/manual development path
+during migration; the trusted OCI artifact flow is target architecture, not a
+current capability.
 
 ## Build and test
 
@@ -64,7 +89,9 @@ currently proves the complete scenario. See
 
 ## Roadmap order
 
-M0 ends with V3-008 documentation truth. After review, Phase 2 starts at V3-009:
-convert Bootstrap Worker from `RunOnce(session_id)` to a poll/lease daemon.
-IncidentEvidence, Safe ActionPlane, CLI MCP, and production gates remain later
-ordered work.
+P01 development control-plane code is complete, while checkpoint `CP-VPS-1`
+remains `DEFERRED / UNPROVEN`. P02 is the current documentation task: adopt
+`docs/opsi_roadmap_v4.md` and ADR-004 without changing runtime behavior. P03 is
+the next implementation task. GitHub App, OIDC, trusted OCI delivery, managed
+runtime exposure, IncidentEvidence, Safe ActionPlane, CLI MCP, and production
+gates remain ordered future work and must not be inferred as implemented.

@@ -1,8 +1,9 @@
 # Opsi Security Story
 
-Status: active boundary summary, last updated 2026-07-12. Detailed requirements
+Status: active boundary summary, last updated 2026-07-13. Detailed requirements
 are in `docs/opsi_srs.md`; implementation status is in
-`docs/status_matrix.md`.
+`docs/status_matrix.md`; trusted artifact target architecture is in
+`docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
 
 ## Current trust model
 
@@ -14,6 +15,12 @@ bootstrap/deployment envelopes, OTP, and durable control-plane metadata.
 Cloud has no AI runtime, model/provider integration, prompt path, or RCA fallback.
 Agent has no AI analyzer or RCA-backed executor. Historical RCA/mitigation data
 is storage-only and is never execution authority.
+
+Cloud currently has generic browser OAuth mediation and a webhook route with
+per-route SHA-256 HMAC verification. These are not evidence of GitHub App user
+authorization, App installation authentication, installation/repository event
+ownership, or GitHub Actions OIDC. Agent currently supports Git-source
+clone/build deployment and rejects image-source deployment.
 
 ## Credentials and secrets
 
@@ -44,6 +51,41 @@ is storage-only and is never execution authority.
 - Retryable mutations require request identity/idempotency; authorization must
   not be inferred from user-supplied role text alone when auth is enabled.
 
+## Trusted artifact delivery target
+
+This section is target architecture and is not implemented at the current
+snapshot.
+
+- GitHub App user authorization uses App Client ID/Secret, state, and PKCE to
+  bind an Opsi identity to a GitHub numeric user ID.
+- GitHub App installation authorization uses App ID/private key and short-lived
+  installation tokens for mapped installation/repository metadata or configured
+  status/check operations.
+- GitHub webhooks require a valid per-App signature plus validated event and
+  delivery identity. Webhook verification does not prove build identity.
+- GitHub Actions authenticates to the `BuildRecord` boundary with a short-lived
+  OIDC JWT. Cloud validates JWKS/signature, issuer, audience, expiry,
+  not-before, repository/owner IDs, ref, SHA, event, run ID/attempt, workflow,
+  and `job_workflow_ref`.
+- Cloud binds every security-relevant `BuildRecord` body value to the verified
+  OIDC claims, configured repository/service mapping, workflow/event/ref policy,
+  and registry repository allowlist. JSON body values alone are untrusted.
+- OIDC replay protection and repository/run/attempt idempotency fail closed.
+- The authoritative production runtime artifact is the immutable
+  `registry/repository@sha256:<digest>`. Mutable tags, including `latest`, are
+  prohibited as production deployment identity.
+- GitHub runner registry push authority and Agent registry pull authority are
+  separate least-privilege credentials. Neither is a GitHub OAuth credential;
+  an installation token is not a long-lived Agent pull credential.
+- Same-repository pull requests may build. Preview deployment requires policy,
+  isolation, no production credentials, and TTL cleanup. Fork pull requests
+  fail closed by default and untrusted fork code receives no write token or
+  production secret.
+- `DeploymentPolicy` is configured in advance by an authorized user. An allowed
+  trusted branch deployment does not require human approval per run. Trusted CD
+  is not an AI action, AI cannot approve it, and automatic rollback remains
+  inside the already authorized deployment transaction.
+
 ## Future user-owned AI boundary
 
 The planned AI bridge is local and user-owned through `opsi mcp serve`. It is not
@@ -67,13 +109,18 @@ implemented at M0.
 
 ## Data minimization
 
-Cloud must not persist raw logs, raw metric streams, app secret values,
-kubeconfig, private source code, or unrestricted manifests. Future
+Cloud may store bounded `BuildRecord` metadata, repository ID, commit SHA, image
+digest, workflow/run identifiers, deployment result metadata, and provenance
+references. Cloud must not persist source repository contents, Docker build
+context, raw build logs, raw runtime logs, raw metric streams, app secret values,
+registry password plaintext, kubeconfig, or unrestricted manifests. Future
 `IncidentEvidence v1` remains Agent-owned and contains only bounded facts,
 redacted excerpts, hashes, and sanitization/prompt-injection metadata.
 
 ## Current security limitations
 
 Production readiness remains unproven. Missing evidence includes the complete
-clean VPS pass, managed gateway security, public evidence API, Safe ActionPlane,
-CLI MCP hardening, release provenance, and repeated recovery/acceptance runs.
+clean VPS pass, GitHub App/OIDC trust, digest artifact delivery, managed gateway
+security, public evidence API, Safe ActionPlane, CLI MCP hardening, release
+provenance, and repeated recovery/acceptance runs. P01 clean control-plane VPS
+checkpoint `CP-VPS-1` is `DEFERRED / UNPROVEN`; no pass evidence exists.

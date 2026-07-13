@@ -3,11 +3,12 @@
 | Metadata | Value |
 |---|---|
 | Title | Opsi Software Requirements Specification |
-| Version | 5.0 |
+| Version | 6.0 |
 | Status | Active target contract; current implementation is tracked separately in `docs/status_matrix.md` |
-| Last updated | 2026-07-12 |
-| Supersedes | SRS v4.0 current direction; SRS v3.2 remains archived |
-| Canonical roadmap | `docs/opsi_roadmap_v3/00_MASTER_ROADMAP.md` and `docs/opsi_roadmap_v3/12_EXECUTION_BACKLOG.md` |
+| Last updated | 2026-07-13 |
+| Supersedes | SRS v5.0 delivery direction; SRS v3.2 remains archived |
+| Canonical roadmap | `docs/opsi_roadmap_v4.md` |
+| Trusted artifact decision | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
 This SRS defines the intended Production MVP. It is not evidence that a
 requirement is implemented. Only `docs/current_state.md` and
@@ -27,6 +28,12 @@ artifacts, describe implementation status.
 - Agent retains an internal bounded sanitized incident context builder. Opsi has
   no public `IncidentEvidence v1` API.
 - Opsi has no Safe ActionPlane, no CLI MCP bridge, and no managed gateway.
+- Agent supports Git-source clone/build deployment and rejects image-source
+  deployment before runtime execution.
+- GitHub App user authorization, installation authentication, GitHub Actions
+  OIDC, repository/service mapping for trusted delivery, `BuildRecord`,
+  digest-only deployment, `DeploymentPolicy`, and PR previews are not
+  implemented.
 - User-provided deployment manifests may define their own Service, Ingress,
   Gateway, TLS, or lifecycle resources; Opsi does not render or own them.
 - Historical incident columns `rca_result` and `mitigation_actions_json` are
@@ -37,11 +44,16 @@ artifacts, describe implementation status.
 
 ### 1.2 Production MVP target
 
-Production MVP follows roadmap v3: repeatable control-plane deployment, clean
-VPS bootstrap, exact Git SHA delivery, Opsi-rendered Deployment/Service/Traefik
-exposure, deterministic incident evidence, a typed Safe ActionPlane, a
-user-owned CLI-side MCP bridge, protected end-to-end proof, and production
-hardening/recovery gates.
+Production MVP follows roadmap v4: repeatable control-plane deployment, clean
+VPS bootstrap, GitHub App identity and installation trust, GitHub Actions OIDC,
+OCI build delivery through an OIDC-bound `BuildRecord`, digest-only Agent
+deployment, Opsi-rendered Deployment/Service/Traefik exposure, deterministic
+incident evidence, a typed Safe ActionPlane, a user-owned CLI-side MCP bridge,
+protected end-to-end proof, and production hardening/recovery gates.
+
+Git commit SHA is provenance and source identity. The authoritative runtime
+artifact is `registry/repository@sha256:<digest>`. Mutable tags may aid human
+navigation but must not be the production deployment identity.
 
 ### 1.3 Post-v1 and future scope
 
@@ -80,6 +92,8 @@ after approval.
 Cloud owns:
 
 - organization, project, membership, and RBAC metadata;
+- GitHub installation and repository identity plus project/service mapping;
+- verified `BuildRecord`, `DeploymentPolicy`, and deployment routing metadata;
 - bootstrap jobs and Agent registration;
 - deployment job relay and sanitized result metadata;
 - audit/control-plane metadata;
@@ -90,8 +104,10 @@ Cloud must not own:
 
 - an LLM provider, model key, prompt, or AI conversation;
 - raw runtime logs or raw metric streams;
+- source repository contents, Docker build context, or raw build logs;
 - Kubernetes execution;
-- application secret values, kubeconfig, or device private keys;
+- application secret values, registry password plaintext, kubeconfig, or device
+  private keys;
 - RCA generation;
 - `ActionPlan` execution.
 
@@ -125,7 +141,7 @@ or AI approval decision.
 
 ## 4. Local-first request paths
 
-Current production-oriented paths are:
+Current implementation paths are:
 
 ```text
 Browser -> CLI local backend -> Cloud metadata APIs
@@ -136,6 +152,19 @@ Agent -> K3s/containerd and local SQLite/runtime stores
 
 Core Browser workflows must use `/api/local/...`. Cloud may coordinate metadata
 and job envelopes but must not become the runtime execution plane.
+
+The target production delivery path, which is not implemented at this snapshot,
+is:
+
+```text
+GitHub Actions build/test
+-> OCI registry image@sha256:<digest>
+-> OIDC-authenticated Cloud BuildRecord
+-> DeploymentPolicy and repository/service routing
+-> durable DeploymentJob
+-> eligible healthy Agent
+-> K3s/containerd digest deployment
+```
 
 ## 5. AI and MCP target requirements
 
@@ -281,25 +310,136 @@ stale, replayed, started, succeeded, failed, and rolled-back outcomes.
 
 ### DEPLOY-01 — Current deployment truth
 
-Git-based deployment exists. User-provided manifests may define their own
-runtime resources. Opsi does not currently generate or manage Ingress, Gateway
-API routes, domains, or TLS certificates. The removed `IngressEnabled` option
-must fail fast if found in old config. A public endpoint value must not be
-interpreted as proof of an Opsi-managed gateway.
+Git-based deployment exists: Agent can clone and build source and apply
+user-provided runtime resources. Image-source deployment is currently rejected.
+This is a legacy/manual development path during migration, not the production
+target. Opsi does not currently generate or manage Ingress, Gateway API routes,
+domains, or TLS certificates. The removed `IngressEnabled` option must fail fast
+if found in old config. A public endpoint value must not be interpreted as proof
+of an Opsi-managed gateway.
 
-### GATEWAY-01 — Phase 4 target
+### GITHUB-APP-01 — User, installation, and webhook trust
 
-Phase 4 must support exact Git SHA delivery, an Opsi-rendered Deployment,
-ClusterIP Service, and Traefik Ingress from a typed `ExposureSpec`, including
-hostname/path conflict checks, readiness, and rollback. This is `NOT_IMPLEMENTED`
-at M0.
+- GitHub App user authorization must use the App Client ID/Client Secret, state,
+  and PKCE to log in or link identity. GitHub numeric user ID is the external
+  subject.
+- GitHub App installation authorization must use App ID and private key to mint
+  short-lived installation access tokens for installation/repository metadata
+  and configured status/check operations.
+- GitHub webhooks must be verified with the per-App webhook secret and event
+  delivery identity before processing.
+- User authorization, installation authorization, and webhook verification are
+  separate trust paths. None is OCI registry authentication or GitHub Actions
+  workload identity.
+
+### GITHUB-OIDC-01 — GitHub Actions workload identity
+
+Cloud must verify GitHub OIDC signature/JWKS and at least `iss`, `aud`, `exp`,
+`nbf`, `repository_id`, `repository_owner_id`, `ref`, `sha`, `event_name`,
+`run_id`, `run_attempt`, `workflow`, and `job_workflow_ref`. Verification must
+include replay protection, bounded JWKS refresh, workflow allowlist, allowed
+events/refs, repository mapping, and claim/body binding.
+
+OIDC does not replace a GitHub App installation token, an OCI registry, or
+registry push/pull authentication. It is not artifact storage.
+
+### BUILD-RECORD-01 — Trusted build metadata
+
+GitHub Actions must submit a versioned OIDC-bound `BuildRecord` containing
+repository ID, commit SHA, ref, event, run ID, run attempt, workflow identity,
+image repository, image digest, and optional provenance digest. Cloud must:
+
+- compare repository, SHA, ref, event, run, attempt, and workflow body values
+  with verified OIDC claims;
+- fail closed on mismatch;
+- enforce idempotency by repository/run/attempt;
+- map the repository through installation, project, and service ownership;
+- store bounded metadata and provenance references only;
+- never store source contents, Docker build context, or raw build logs.
+
+### ARTIFACT-DEPLOY-01 — Digest-only production delivery
+
+Production deployment must use the complete immutable reference
+`registry/repository@sha256:<digest>`. Git commit SHA remains provenance and
+source identity. A mutable tag such as `latest` must not be accepted as the
+authoritative production identity. Readable tags may coexist, but Agent must
+pull and deploy the digest.
+
+For an image-source job, Agent must not clone or build source. It must validate
+the allowed repository and digest, pull with scoped registry credentials,
+deploy the immutable artifact, and return a sanitized result.
+
+### REPOSITORY-MAPPING-01 — Service ownership and routing
+
+The canonical mapping is:
+
+```text
+GitHub installation
+-> GitHub repository ID
+-> Opsi project
+-> Opsi service
+-> environment
+-> runtime
+-> eligible healthy Agent
+```
+
+Repository identity belongs to the service and must not be bound directly to an
+Agent ID or VPS. Agent is a replaceable runtime target selected after policy,
+environment/runtime, eligibility, and health checks.
+
+### TRUSTED-CD-POLICY-01 — DeploymentPolicy and ActionPlane separation
+
+An appropriately authorized user must configure `DeploymentPolicy` before
+automatic delivery. The policy must allowlist repository, workflow, event, ref,
+environment/runtime, and registry repository. An allowed trusted branch event
+may create an idempotent durable `DeploymentJob` without a separate human
+approval for every run.
+
+Trusted CD is not an AI action. It must not create or rely on an AI
+`ActionPlan`, `ApprovalChallenge`, or `ApprovalGrant`. Every AI-originated
+mutation continues to require the Safe ActionPlane and separate human approval.
+AI must not approve a CD deployment. Automatic rollback is part of the already
+authorized deployment transaction and does not require a new AI action solely
+to restore the last known good digest.
+
+### PR-PREVIEW-01 — Pull request security
+
+- A same-repository pull request may build.
+- Preview deployment requires explicit policy permission.
+- Fork pull requests fail closed by default.
+- Untrusted fork code must not receive a write token or production secret.
+- Preview environments must be isolated and have enforced TTL cleanup.
+- Pull request approval is not production approval.
+- Production accepts only allowlisted ref/event/workflow combinations.
+
+### REGISTRY-01 — OCI registry boundary
+
+GitHub runner push authority and Agent pull authority must use separate,
+least-privilege registry authentication with explicit lifecycle and rotation.
+Registry credentials are not GitHub OAuth credentials. Cloud must not store a
+registry password in plaintext, and a GitHub App installation token must not be
+used as a long-lived Agent pull credential.
+
+### GATEWAY-01 — Managed runtime target
+
+P17-P19 must support an Opsi-rendered Deployment, ClusterIP Service, and
+Traefik Ingress from a typed `ExposureSpec`, including named application
+container selection, hostname/path conflict checks, readiness, reconciliation,
+last-known-good digest, and automatic rollback. This is `NOT_IMPLEMENTED` at the
+current snapshot.
 
 ## 9. Security and data requirements
 
 - Cloud stores PATs as bcrypt hashes; CLI stores the usable PAT in OS keychain.
 - Secret reveal requires Owner plus OTP/TOTP and must return no-store responses.
-- Cloud must not persist raw logs, raw metrics, app secrets, kubeconfig, source
-  code, or long-lived runtime payloads.
+- Cloud may persist bounded `BuildRecord` metadata, repository ID, commit SHA,
+  image digest, workflow/run identifiers, deployment result metadata, and
+  provenance references.
+- Cloud must not persist raw logs, raw metrics, raw build logs, app secrets,
+  registry password plaintext, kubeconfig, source repository contents, Docker
+  build context, or long-lived runtime payloads.
+- Webhook signatures, OIDC claims, request-body bindings, replay keys, artifact
+  digest, and registry repository policy must fail closed on mismatch.
 - Audit metadata must be project-scoped and redacted; Cloud PostgreSQL audit is
   append-only at the application/database boundary where implemented.
 - Blocking/remote operations must use bounded timeouts, cancellation, retries,
@@ -316,10 +456,12 @@ Allowed status values are `DONE`, `PARTIAL`, `CONTRACT_ONLY`, `DOC_ONLY`,
 `DONE` requires code, tests, configuration where applicable, an executable
 verification command, and truthful documentation. Real-infrastructure work
 remains `MANUAL_GATED` until a redacted pass artifact is committed and reviewed.
-Production readiness remains unproven until roadmap v3 release/DR acceptance
-gates pass.
+P01 code completion does not prove its clean control-plane VPS checkpoint. That
+checkpoint remains `DEFERRED / UNPROVEN` until a real clean Ubuntu VPS run
+produces reviewed evidence. Production readiness remains unproven until roadmap
+v4 P32 and every mandatory manual checkpoint pass.
 
-## 11. Requirement migration from SRS v4
+## 11. Requirement migration from SRS v5
 
 Stable IDs retain their semantics where possible. Old AI/RCA requirements are
 superseded rather than silently reused.
@@ -328,7 +470,7 @@ superseded rather than silently reused.
 |---|---|---|---|
 | FR1 local-first boundary | Retained | SYS-OWN-01 through SYS-OWN-03; Section 4 | Same local-first semantics with corrected ownership |
 | FR2 identity/project registry | Retained | SYS-OWN-01; Section 9 | Cloud identity and metadata ownership remains valid |
-| FR4 deployment management | Retained and narrowed | DEPLOY-01; GATEWAY-01 | Current Git deploy is separate from planned managed gateway |
+| FR4 deployment management | Replaced target, current behavior retained | DEPLOY-01; ARTIFACT-DEPLOY-01; REPOSITORY-MAPPING-01; TRUSTED-CD-POLICY-01; GATEWAY-01 | Current Git build remains legacy/manual; production target is immutable OCI digest delivery |
 | FR6 secrets/OTP/TOTP | Retained | Section 9 | Same security semantics |
 | FR7 telemetry/logs | Retained | INC-01; INC-02; Section 9 | Facts remain local and become evidence later |
 | FR8.1 incident detection | Retained | INC-01 | Deterministic factual incident lifecycle remains active |
@@ -341,7 +483,10 @@ superseded rather than silently reused.
 
 ## 12. Milestone order
 
-M0 ends with truthful deletion and documentation. Phase 2 begins with V3-009,
-which converts the Bootstrap Worker from `RunOnce(session_id)` to a poll/lease
-daemon. IncidentEvidence is Phase 5, Safe ActionPlane is Phase 6, CLI MCP is
-Phase 7, and production acceptance follows the later hardening/release phases.
+P01 development control-plane code is complete, while clean control-plane VPS
+checkpoint `CP-VPS-1` remains `DEFERRED / UNPROVEN`. P02 establishes roadmap v4
+and ADR-004 only. P03-P06 complete the bootstrap foundation; P07-P10 establish
+GitHub App control-plane trust; P11-P21 establish trusted artifact delivery and
+runtime CD; P22-P25 establish evidence, Safe ActionPlane, and CLI MCP; P26 proves
+development acceptance twice; P27-P32 are mandatory production hardening and
+acceptance gates. The authoritative order is `docs/opsi_roadmap_v4.md`.

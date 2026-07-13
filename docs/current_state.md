@@ -3,15 +3,16 @@
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-12 |
+| Last updated | 2026-07-13 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
-| Canonical roadmap | `docs/opsi_roadmap_v3/12_EXECUTION_BACKLOG.md` |
+| Canonical roadmap | `docs/opsi_roadmap_v4.md` |
+| Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
 ## M0 boundary state
 
-Phase 1 tasks V3-001 through V3-007 removed the old AI/RCA execution boundary
-and source artifacts. At this snapshot:
+Earlier baseline work removed the old AI/RCA execution boundary and source
+artifacts. At this snapshot:
 
 - Cloud has no AI runtime, provider configuration, Gemini integration, fixture
   RCA, prompt path, or `/v1/ai/*` route.
@@ -23,6 +24,9 @@ and source artifacts. At this snapshot:
   storage compatibility but are not read, exposed, or executed.
 - `IncidentEvidence v1`, Safe ActionPlane, and `opsi mcp serve` are not
   implemented.
+- GitHub App user authorization, installation authentication, GitHub Actions
+  OIDC, `BuildRecord`, digest-based deployment, `DeploymentPolicy`, and pull
+  request preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
   certificate directories, databases, logs, and generated output.
@@ -83,6 +87,10 @@ Safe ActionPlane client.
   deployment job envelopes, webhook relay, audit, and support metadata.
 - GitHub webhook routes require a per-route secret and Cloud verifies the
   SHA-256 HMAC before accepting and sanitizing the payload.
+- The current browser login path is generic OAuth mediation. The current
+  webhook HMAC route is not evidence of GitHub App user authorization,
+  installation-token support, installation/repository event ownership, or the
+  target per-App webhook control plane.
 - Postgres-backed registry/relay/audit/idempotency/bootstrap/PAT/OTP state when
   configured; development/test modes may use in-memory implementations where
   production validation permits.
@@ -144,8 +152,10 @@ does not expose worker-internal, alert-internal, or metrics endpoints.
 
 The committed configuration examples contain placeholders only. Runtime
 environment, Cloud/Worker configuration, secret directory, and initial PAT
-files are gitignored. This package is development-only; V3-013 must still prove
-clean-VM deployment and independent service restart. M1 has not passed.
+files are gitignored. This package is development-only. P01 code is complete,
+but clean control-plane VPS checkpoint `CP-VPS-1` was not run because no clean
+Ubuntu VPS was available. Its status is `DEFERRED / UNPROVEN`; no VPS evidence
+exists, and the checkpoint remains a blocker before production acceptance.
 
 Git-based deployment exists and can apply user-provided manifests. Such a
 manifest may contain its own Service, Ingress, Gateway, TLS, lifecycle, or
@@ -153,9 +163,22 @@ shutdown configuration; those resources are user-owned input, not an
 Opsi-managed gateway. `IngressEnabled` was removed from active contracts/config,
 with a fail-fast error retained for old configuration.
 
-Phase 4 work for exact Git SHA delivery plus Opsi-rendered Deployment,
-ClusterIP Service, Traefik `ExposureSpec`, conflict checks, readiness, and
-rollback has not started.
+The migration target is:
+
+```text
+legacy/manual Git build
+-> trusted OCI artifact delivery
+```
+
+The target flow uses GitHub Actions build/test, an OCI registry, an OIDC-bound
+`BuildRecord`, `DeploymentPolicy`, a durable `DeploymentJob`, and Agent
+deployment of `registry/repository@sha256:<digest>`. Git commit SHA remains
+source identity and provenance, not the runtime artifact. This target has not
+started: image-source deployment remains rejected, and the current Git-source
+clone/build path remains implemented for legacy/manual development use.
+
+Opsi-rendered Deployment/ClusterIP Service, managed Traefik `ExposureSpec`,
+conflict checks, readiness, and rollback also have not started.
 
 ## E2E and production evidence
 
@@ -167,18 +190,18 @@ artifact currently proves the complete scenario. Status remains
 `MANUAL_GATED`.
 
 Production readiness remains unproven. Current gaps include clean control-plane
-VM and restart proof, clean VPS bootstrap proof, managed gateway, public
-incident evidence, Safe ActionPlane,
-CLI MCP, complete Dev VPS E2E, release hardening, supply-chain evidence, and
-measured disaster recovery.
+VM and restart proof, clean VPS bootstrap proof, GitHub App identity and
+installation trust, Actions OIDC, trusted OCI artifact delivery, managed
+gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
+E2E, release hardening, supply-chain evidence, and measured disaster recovery.
 
 ## Ordered next work
 
-V3-013 is the next ordered task: add clean-VM control-plane and independent
-restart evidence. M1 has not passed. Per-step resumable BootstrapJob
-transitions and remote partial-install resume remain V3-014.
-IncidentEvidence is Phase 5, Safe ActionPlane is Phase 6, CLI MCP is Phase 7,
-and production gates remain later roadmap work.
+P02 is the current documentation-only task and does not change implementation.
+P03 restores the deterministic Agent release artifact, followed by resumable
+bootstrap, GitHub App control-plane work, OIDC-bound trusted artifact delivery,
+runtime delivery, and the later evidence/ActionPlane/MCP phases. The ordered
+source of truth is `docs/opsi_roadmap_v4.md`.
 
 ## Verification commands
 

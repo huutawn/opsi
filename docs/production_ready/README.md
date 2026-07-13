@@ -7,8 +7,8 @@ tree. No file under this directory currently proves production acceptance.
 
 Active planning and acceptance sources are:
 
-- `docs/opsi_roadmap_v3/09_PRODUCTION_HARDENING.md`;
-- `docs/opsi_roadmap_v3/10_RELEASE_DR_ACCEPTANCE.md`;
+- `docs/opsi_roadmap_v4.md`;
+- `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`;
 - `docs/status_matrix.md`;
 - protected runbooks under `docs/runbooks/`.
 
