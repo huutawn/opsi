@@ -1,23 +1,4 @@
 {
-  "ttl": "24h",
-  "database_url": "",
-  "otp": {
-    "dev_echo": false,
-    "outbox_path": "./opsi-otp-outbox.log"
-  },
-  "smtp": {
-    "host": "",
-    "port": "587",
-    "username": "",
-    "password": "",
-    "from": "opsi@example.com"
-  },
-  "alerts": {
-    "webhook_url": "",
-    "min_severity": "medium",
-    "outbox_path": "./opsi-alert-outbox.log",
-    "internal_token": ""
-  },
   "routes": [
     {
       "project_id": "dev-project",
@@ -26,7 +7,8 @@
       "service_type": "backend",
       "repo_url": "https://github.com/example/app.git",
       "repo_full_name": "example/app",
-      "branch": "main"
+      "branch": "main",
+      "webhook_secret": "REPLACE_WITH_RANDOM_32_BYTE_WEBHOOK_SECRET"
     }
   ]
 }

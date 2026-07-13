@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -71,64 +72,161 @@ type Duration time.Duration
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{TTL: Duration(24 * time.Hour)}
-	if path == "" {
-		return cfg, nil
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return Config{}, fmt.Errorf("read cloud config: %w", err)
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return Config{}, fmt.Errorf("parse cloud config: %w", err)
+		}
 	}
-	data, err := os.ReadFile(path)
+	if err := applyEnvOverrides(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func applyEnvOverrides(cfg *Config) error {
+	if err := applyDurationEnv("OPSI_CLOUD_TTL", &cfg.TTL); err != nil {
+		return err
+	}
+	applyStringEnv("OPSI_CLOUD_DATABASE_URL", &cfg.DatabaseURL)
+	applyStringEnv("OPSI_CLOUD_PUBLIC_BASE_URL", &cfg.PublicBaseURL)
+	if err := applyBoolEnv("OPSI_CLOUD_PRODUCTION", &cfg.Production); err != nil {
+		return err
+	}
+	if err := applyBoolEnv("OPSI_CLOUD_ENABLE_DEBUG_UI", &cfg.EnableDebugUI); err != nil {
+		return err
+	}
+	if err := applyBoolEnv("OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES", &cfg.RequireAgentSignatures); err != nil {
+		return err
+	}
+	if err := applyBoolEnv("OPSI_CLOUD_OTP_DEV_ECHO", &cfg.OTP.DevEcho); err != nil {
+		return err
+	}
+	applyStringEnv("OPSI_CLOUD_OTP_OUTBOX_PATH", &cfg.OTP.OutboxPath)
+	applyStringEnv("OPSI_CLOUD_SMTP_HOST", &cfg.SMTP.Host)
+	applyStringEnv("OPSI_CLOUD_SMTP_PORT", &cfg.SMTP.Port)
+	applyStringEnv("OPSI_CLOUD_SMTP_USERNAME", &cfg.SMTP.Username)
+	applyStringEnv("OPSI_CLOUD_SMTP_PASSWORD", &cfg.SMTP.Password)
+	applyStringEnv("OPSI_CLOUD_SMTP_FROM", &cfg.SMTP.From)
+	applyStringEnv("OPSI_CLOUD_ALERTS_WEBHOOK_URL", &cfg.Alerts.WebhookURL)
+	applyStringEnv("OPSI_CLOUD_ALERTS_MIN_SEVERITY", &cfg.Alerts.MinSeverity)
+	applyStringEnv("OPSI_CLOUD_ALERTS_OUTBOX_PATH", &cfg.Alerts.OutboxPath)
+	applyStringEnv("OPSI_CLOUD_ALERTS_INTERNAL_TOKEN", &cfg.Alerts.InternalToken)
+	applyStringEnv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN", &cfg.BootstrapWorkerToken)
+	applyStringEnv("OPSI_CLOUD_BOOTSTRAP_SECRET_KEY", &cfg.BootstrapSecretKey)
+	applyStringEnv("OPSI_CLOUD_AUTH_PROVIDER", &cfg.Auth.Provider)
+	applyStringEnv("OPSI_CLOUD_AUTH_CLIENT_ID", &cfg.Auth.ClientID)
+	applyStringEnv("OPSI_CLOUD_AUTH_CLIENT_SECRET", &cfg.Auth.ClientSecret)
+	applyStringEnv("OPSI_CLOUD_AUTH_AUTH_URL", &cfg.Auth.AuthURL)
+	applyStringEnv("OPSI_CLOUD_AUTH_TOKEN_URL", &cfg.Auth.TokenURL)
+	applyStringEnv("OPSI_CLOUD_AUTH_USERINFO_URL", &cfg.Auth.UserInfoURL)
+	applyStringEnv("OPSI_CLOUD_AUTH_REDIRECT_URL", &cfg.Auth.RedirectURL)
+	applyCSVEnv("OPSI_CLOUD_AUTH_SCOPES", &cfg.Auth.Scopes)
+	applyCSVEnv("OPSI_CLOUD_AGENT_TOKENS", &cfg.AgentTokens)
+	return nil
+}
+
+func applyStringEnv(name string, target *string) {
+	if value, ok := os.LookupEnv(name); ok {
+		*target = value
+	}
+}
+
+func applyBoolEnv(name string, target *bool) error {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
 	if err != nil {
-		return Config{}, fmt.Errorf("read cloud config: %w", err)
+		return fmt.Errorf("%s must be a valid boolean", name)
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("parse cloud config: %w", err)
+	*target = parsed
+	return nil
+}
+
+func applyDurationEnv(name string, target *Duration) error {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
 	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid duration", name)
+	}
+	*target = Duration(parsed)
+	return nil
+}
+
+func applyCSVEnv(name string, target *[]string) {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return
+	}
+	items := make([]string, 0)
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	*target = items
+}
+
+func validateConfig(cfg *Config) error {
 	if time.Duration(cfg.TTL) <= 0 {
 		cfg.TTL = Duration(24 * time.Hour)
 	}
 	if time.Duration(cfg.TTL) > 24*time.Hour {
-		return Config{}, fmt.Errorf("ttl must be <= 24h")
+		return fmt.Errorf("ttl must be <= 24h")
 	}
 	for i, route := range cfg.Routes {
 		if route.ProjectID == "" || route.ServiceID == "" || route.RepoFullName == "" || route.Branch == "" {
-			return Config{}, fmt.Errorf("routes[%d] requires project_id, service_id, repo_full_name and branch", i)
+			return fmt.Errorf("routes[%d] requires project_id, service_id, repo_full_name and branch", i)
 		}
 		if len(route.WebhookSecret) < 32 {
-			return Config{}, fmt.Errorf("routes[%d].webhook_secret must contain at least 32 bytes", i)
+			return fmt.Errorf("routes[%d].webhook_secret must contain at least 32 bytes", i)
 		}
 	}
 	if cfg.Production {
 		if cfg.DatabaseURL == "" {
-			return Config{}, fmt.Errorf("production requires database_url")
+			return fmt.Errorf("production requires database_url")
 		}
 		if len(cfg.BootstrapWorkerToken) < 32 {
-			return Config{}, fmt.Errorf("production requires bootstrap_worker_token with at least 32 bytes")
+			return fmt.Errorf("production requires bootstrap_worker_token with at least 32 bytes")
 		}
 		if len(cfg.BootstrapSecretKey) < 32 {
-			return Config{}, fmt.Errorf("production requires bootstrap_secret_key with at least 32 bytes")
+			return fmt.Errorf("production requires bootstrap_secret_key with at least 32 bytes")
 		}
 		if len(cfg.Alerts.InternalToken) < 32 {
-			return Config{}, fmt.Errorf("production requires alerts.internal_token with at least 32 bytes")
+			return fmt.Errorf("production requires alerts.internal_token with at least 32 bytes")
 		}
 		if cfg.OTP.DevEcho {
-			return Config{}, fmt.Errorf("production forbids otp.dev_echo")
+			return fmt.Errorf("production forbids otp.dev_echo")
 		}
 		if cfg.OTP.OutboxPath != "" {
-			return Config{}, fmt.Errorf("production forbids otp.outbox_path")
+			return fmt.Errorf("production forbids otp.outbox_path")
 		}
 		if cfg.SMTP.Host == "" || cfg.SMTP.Port == "" || cfg.SMTP.From == "" {
-			return Config{}, fmt.Errorf("production requires smtp host, port and from")
+			return fmt.Errorf("production requires smtp host, port and from")
 		}
 		if cfg.EnableDebugUI {
-			return Config{}, fmt.Errorf("production forbids enable_debug_ui")
+			return fmt.Errorf("production forbids enable_debug_ui")
 		}
 		if cfg.Auth.Provider == "" || cfg.Auth.ClientID == "" || cfg.Auth.ClientSecret == "" || cfg.Auth.AuthURL == "" || cfg.Auth.TokenURL == "" || cfg.Auth.UserInfoURL == "" || cfg.Auth.RedirectURL == "" {
-			return Config{}, fmt.Errorf("production requires auth OAuth config")
+			return fmt.Errorf("production requires auth OAuth config")
 		}
 		if cfg.PublicBaseURL == "" || !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
-			return Config{}, fmt.Errorf("production requires an https public_base_url")
+			return fmt.Errorf("production requires an https public_base_url")
 		}
 		cfg.RequireAgentSignatures = true
 	}
-	return cfg, nil
+	return nil
 }
 
 func (d Duration) MarshalJSON() ([]byte, error) {
