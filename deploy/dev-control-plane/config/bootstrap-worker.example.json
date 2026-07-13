@@ -4,9 +4,12 @@
   "bootstrap_worker_token": "REPLACE_WITH_SAME_RANDOM_BOOTSTRAP_WORKER_TOKEN_AS_CLOUD_CONFIG",
   "worker_id": "opsi-dev-bootstrap-worker-1",
   "poll_interval": "3s",
+  "k3s_version": "REPLACE_WITH_PINNED_K3S_VERSION",
+  "k3s_installer_url": "https://get.k3s.io",
+  "k3s_installer_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "agent_install_url": "https://example.invalid/REPLACE_WITH_AGENT_BINARY_PATH",
-  "agent_install_sha256": "REPLACE_WITH_AGENT_BINARY_SHA256",
-  "ssh_known_hosts_path": "",
+  "agent_install_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "ssh_known_hosts_path": "/etc/opsi/ssh_known_hosts",
   "production": false,
   "timeout": "10m"
 }

@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+const FirstServerBootstrapPlanVersionV2 = "first-server-v2"
+
+var firstServerBootstrapPlanV2StepIDs = [...]string{"preflight", "install_k3s", "install_agent", "register_agent"}
+
+func FirstServerBootstrapPlanV2StepIDs() []string {
+	return append([]string(nil), firstServerBootstrapPlanV2StepIDs[:]...)
+}
+
 func bootstrapRetryDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
@@ -136,7 +144,7 @@ func validateBootstrapCheckpointFormat(checkpoint BootstrapCheckpoint) error {
 	if checkpoint.NextStepIndex > 0 && checkpoint.LastCompletedStep == "" {
 		return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint completed step is required"}
 	}
-	if stepIDs := BootstrapStepIDs(checkpoint.PlanVersion); len(stepIDs) > 0 {
+	if stepIDs := bootstrapCheckpointStepIDs(checkpoint.PlanVersion); len(stepIDs) > 0 {
 		if checkpoint.NextStepIndex > len(stepIDs) {
 			return APIError{Status: 400, Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "bootstrap checkpoint next step index exceeds the plan"}
 		}
@@ -145,6 +153,13 @@ func validateBootstrapCheckpointFormat(checkpoint BootstrapCheckpoint) error {
 		}
 	}
 	return nil
+}
+
+func bootstrapCheckpointStepIDs(planVersion string) []string {
+	if planVersion == FirstServerBootstrapPlanVersionV2 {
+		return FirstServerBootstrapPlanV2StepIDs()
+	}
+	return BootstrapStepIDs(planVersion)
 }
 
 func validateStoredBootstrapCheckpoint(checkpoint BootstrapCheckpoint) error {

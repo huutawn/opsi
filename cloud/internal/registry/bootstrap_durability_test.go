@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -215,6 +216,33 @@ func TestBootstrapCheckpointTransitionsAndLeaseValidation(t *testing.T) {
 	}
 	if _, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(2), lease.LeaseExpiresAt); apiErrorCode(err) != "BOOTSTRAP_LEASE_EXPIRED" {
 		t.Fatalf("expired lease err=%v", err)
+	}
+}
+
+func TestBootstrapCheckpointMetadataPreservesV1AndAcceptsV2(t *testing.T) {
+	if FirstServerBootstrapPlanVersion != "first-server-v1" {
+		t.Fatalf("v1 metadata changed: %q", FirstServerBootstrapPlanVersion)
+	}
+	want := []string{"preflight", "install_k3s", "install_agent", "register_agent"}
+	if got := FirstServerBootstrapPlanV2StepIDs(); !slices.Equal(got, want) {
+		t.Fatalf("v2 step IDs=%v", got)
+	}
+	v2 := BootstrapCheckpoint{
+		SchemaVersion:     BootstrapCheckpointSchemaVersion,
+		PlanVersion:       FirstServerBootstrapPlanVersionV2,
+		PlanFingerprint:   strings.Repeat("b", 64),
+		NextStepIndex:     2,
+		LastCompletedStep: "install_k3s",
+	}
+	if err := validateBootstrapCheckpointFormat(v2); err != nil {
+		t.Fatalf("v2 checkpoint rejected: %v", err)
+	}
+	v1 := testBootstrapCheckpoint(1)
+	requested := v2
+	requested.NextStepIndex = 1
+	requested.LastCompletedStep = "preflight"
+	if _, err := validateBootstrapCheckpointTransition(v1, requested); apiErrorCode(err) != "BOOTSTRAP_PLAN_MISMATCH" {
+		t.Fatalf("v1 to v2 transition err=%v", err)
 	}
 }
 

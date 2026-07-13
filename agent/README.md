@@ -55,20 +55,21 @@ been tested against this artifact on a VPS.
 
 ## Systemd Runtime
 
-Production Agent is intended to run as a native systemd service, not as a Docker container. A unit template is available at `packaging/systemd/opsi-agent.service`. The template currently describes this versioned layout:
+Production Agent is intended to run as a native systemd service, not as a Docker container. `packaging/systemd/opsi-agent.service` is the canonical unit and a Bootstrap Worker parity test prevents its embedded install asset from diverging. The checksum-addressed layout is:
 
 ```text
-/opt/opsi/agent/releases/<version>/opsi-agent
-/opt/opsi/agent/current -> /opt/opsi/agent/releases/<version>
+/opt/opsi/agent/releases/<agent-sha256>/opsi-agent
+/opt/opsi/agent/current -> releases/<agent-sha256>
+/opt/opsi/agent/previous -> releases/<previous-sha256>  # optional
 /etc/opsi/agent.yaml
 /var/lib/opsi/
 ```
 
-Rollback is a symlink switch back to a previous release followed by `systemctl restart opsi-agent`.
-
-Bootstrap installation commands do not yet use the same layout. P05 owns the
-canonical versioned systemd install layout and upgrade/rollback integration;
-P03 does not change Bootstrap Worker or the unit template.
+`install_agent` only verifies and stages a release. `register_agent` atomically
+updates `previous` and `current`, installs the unit/config atomically, restarts
+the service, checks the local health endpoint, and restores the previous release
+if the new one is unhealthy. This behavior has unit/contract coverage but has
+not been proven on a clean target VPS; that evidence belongs to P06.
 
 ## Phase 2 Deployment
 

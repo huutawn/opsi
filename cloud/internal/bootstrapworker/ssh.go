@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,11 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+)
+
+var (
+	ErrSSHHostKeyVerificationRequired = errors.New("SSH host-key verification requires a known_hosts file")
+	ErrSSHHostKeyVerificationFailed   = errors.New("SSH host-key verification failed")
 )
 
 type RemoteTarget struct {
@@ -52,13 +58,21 @@ func (e SSHExecutor) Connect(ctx context.Context, target RemoteTarget) (RemoteSe
 	if target.Port == 0 {
 		target.Port = 22
 	}
-	hostKeyCallback := ssh.InsecureIgnoreHostKey()
-	if e.KnownHostsPath != "" {
-		cb, err := knownhosts.New(e.KnownHostsPath)
-		if err != nil {
-			return nil, err
+	if e.KnownHostsPath == "" {
+		return nil, ErrSSHHostKeyVerificationRequired
+	}
+	if err := validateKnownHostsFile(e.KnownHostsPath, false); err != nil {
+		return nil, fmt.Errorf("%w: known_hosts file is invalid", ErrSSHHostKeyVerificationFailed)
+	}
+	knownHostsCallback, err := knownhosts.New(e.KnownHostsPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: known_hosts file could not be loaded", ErrSSHHostKeyVerificationFailed)
+	}
+	hostKeyCallback := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if err := knownHostsCallback(hostname, remote, key); err != nil {
+			return ErrSSHHostKeyVerificationFailed
 		}
-		hostKeyCallback = cb
+		return nil
 	}
 	authMethods, err := sshAuthMethods(target)
 	if err != nil {
@@ -81,6 +95,26 @@ func (e SSHExecutor) Connect(ctx context.Context, target RemoteTarget) (RemoteSe
 		return nil, err
 	}
 	return sshSession{client: ssh.NewClient(c, chans, reqs)}, nil
+}
+
+func validateKnownHostsFile(path string, requireNonEmpty bool) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("known_hosts path must not be a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("known_hosts path must be a regular file")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return errors.New("known_hosts file must not be group/world writable")
+	}
+	if requireNonEmpty && info.Size() == 0 {
+		return errors.New("known_hosts file must not be empty")
+	}
+	return nil
 }
 
 func sshAuthMethods(target RemoteTarget) ([]ssh.AuthMethod, error) {

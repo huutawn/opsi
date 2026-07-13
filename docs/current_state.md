@@ -72,9 +72,9 @@ policy/approval/executor contract.
 
 The Agent release artifact is not hosted over HTTPS, and Bootstrap Worker has
 not been exercised against the real artifact. Target VPS evidence remains
-`UNPROVEN`. The current systemd unit layout and Bootstrap installation commands
-are not yet canonicalized; P05 owns the versioned systemd install layout and
-upgrade/rollback integration.
+`UNPROVEN`. P05 now uses the canonical checksum-addressed Agent layout and
+systemd unit with atomic activation and tested rollback contracts, but P06 must
+still prove the behavior on a clean target VPS.
 
 ## Implemented CLI/local backend slice
 
@@ -118,22 +118,27 @@ Safe ActionPlane client.
   the lease owner and raw lease token; storage retains only its hash.
 - Bootstrap sessions now carry a durable checkpoint independent of status,
   progress events, lease owner, and attempt count. The authoritative
-  `first-server-v1` plan uses stable step IDs `preflight`, `install_k3s`,
+  `first-server-v2` plan uses stable step IDs `preflight`, `install_k3s`,
   `install_agent`, and `register_agent`, plus a deterministic SHA-256
-  fingerprint over the version, ordered step command hashes, Agent artifact
-  URL/checksum, and Agent Cloud URL.
+  fingerprint over the version, ordered step command hashes, K3s pin/installer,
+  Agent artifact URL/checksum, Agent Cloud URL, and canonical systemd unit.
 - Fresh workers initialize checkpoint index zero. After each successful remote
   step, Cloud persists the next index under the active lease before another
   step may run. Retry, manual retry, lease recovery, and a new worker lease keep
-  the checkpoint and resume from the next unacknowledged step. A session with
+  the checkpoint and resume from the next unacknowledged step. New sessions use
+  `first-server-v2`; unfinished `first-server-v1` checkpoints fail closed and
+  require a new session. A session with
   all four steps checkpointed skips SSH and waits for Agent heartbeat directly.
 - Bootstrap resume semantics are at-least-once. If a remote step succeeds but
   checkpoint acknowledgement fails, no later step runs and the successful step
-  may execute again on retry. P05 still owns installer idempotency and hardening;
-  this snapshot does not prove K3s or Agent installation idempotency.
-- Worker configuration no longer accepts fixed `session_id`. The existing SSH,
-  K3s, Agent install, registration, and Agent heartbeat verification sequence is
-  unchanged after lease acquisition.
+  may execute again on retry. P05 adds idempotent K3s version detection and
+  verified upgrade, checksum-addressed Agent staging, atomic activation,
+  registration-marker replay, and rollback contracts. Real VPS behavior remains
+  unproven.
+- Worker configuration no longer accepts fixed `session_id`. It requires an
+  operator-pinned K3s version, installer URL/SHA-256, Agent artifact URL/SHA-256,
+  and an Agent-reachable Cloud URL. Production requires HTTPS and a trusted,
+  non-empty, non-writable `known_hosts` file; SSH has no insecure fallback.
 - Bootstrap accepts password or unencrypted SSH private-key credentials. Worker
   control traffic uses `cloud_url`, while the installed Agent receives the
   separately configured, target-reachable `agent_cloud_url`.
@@ -158,6 +163,12 @@ Safe ActionPlane client.
   not green because `TestOTPRequiresPATAndUsesAuthenticatedEmail` fails with
   `pat invalid`; the same failure is reproducible from the clean P03 HEAD, so it
   is recorded as a baseline blocker rather than P04 evidence.
+- P05-focused Bootstrap Worker/Registry tests and race tests pass. Full Agent
+  tests pass. Development Compose build and isolated four-service health smoke
+  pass. Full Cloud still fails only the same pre-existing OTP/PAT baseline.
+- Registration replay is idempotent after config/marker persistence. A narrow
+  crash window remains if Cloud consumes the token before those files are
+  installed; P06 must fault-inject around this boundary.
 - The existing Cloud binary exposes the local operator command
   `opsi-cloud admin bootstrap-owner`. It requires PostgreSQL and transactionally
   creates or reuses the normalized user, organization, canonical project plus
@@ -234,9 +245,9 @@ E2E, release hardening, supply-chain evidence, and measured disaster recovery.
 
 P03 Agent executable and deterministic local release artifact code is complete.
 P04 durable checkpoint/resume behavior is implemented, but its closure remains
-blocked by the pre-existing full-Cloud OTP/PAT regression gate. P05 is the next
-implementation phase for supply-chain, transport, installer, checksum, HTTPS,
-K3s pinning, and canonical systemd layout hardening. P06 clean target VPS proof
+blocked by the pre-existing full-Cloud OTP/PAT regression gate. P05 supply-chain,
+transport, installer, checksum, HTTPS, K3s pinning, and canonical systemd layout
+hardening is implemented with focused/race and development smoke evidence. P06 clean target VPS proof
 remains `UNPROVEN`; there is no clean target VPS evidence. GitHub App control-plane work,
 OIDC-bound trusted artifact delivery, runtime delivery, and the later
 evidence/ActionPlane/MCP phases remain ordered future work. The ordered source

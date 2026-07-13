@@ -2,14 +2,11 @@ package bootstrapworker
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -37,6 +34,9 @@ type Config struct {
 	BootstrapWorkerToken   string           `json:"bootstrap_worker_token"`
 	WorkerID               string           `json:"worker_id"`
 	PollInterval           time.Duration    `json:"-"`
+	K3sVersion             string           `json:"k3s_version"`
+	K3sInstallerURL        string           `json:"k3s_installer_url"`
+	K3sInstallerSHA256     string           `json:"k3s_installer_sha256"`
 	AgentInstallURL        string           `json:"agent_install_url"`
 	AgentInstallSHA256     string           `json:"agent_install_sha256"`
 	SSHKnownHostsPath      string           `json:"ssh_known_hosts_path"`
@@ -57,6 +57,9 @@ type fileConfig struct {
 	BootstrapWorkerToken string `json:"bootstrap_worker_token"`
 	WorkerID             string `json:"worker_id"`
 	PollInterval         string `json:"poll_interval"`
+	K3sVersion           string `json:"k3s_version"`
+	K3sInstallerURL      string `json:"k3s_installer_url"`
+	K3sInstallerSHA256   string `json:"k3s_installer_sha256"`
 	AgentInstallURL      string `json:"agent_install_url"`
 	AgentInstallSHA256   string `json:"agent_install_sha256"`
 	SSHKnownHostsPath    string `json:"ssh_known_hosts_path"`
@@ -115,7 +118,7 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, errors.New("session_id is no longer supported; bootstrap workers lease sessions automatically")
 		}
 	}
-	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, BootstrapWorkerToken: raw.BootstrapWorkerToken, WorkerID: strings.TrimSpace(raw.WorkerID), AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
+	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, BootstrapWorkerToken: raw.BootstrapWorkerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
 	if cfg.AgentCloudURL == "" {
 		cfg.AgentCloudURL = cfg.CloudURL
 	}
@@ -148,6 +151,9 @@ func (c Config) Validate() error {
 	if c.Production && u.Scheme != "https" {
 		return errors.New("production requires https cloud_url")
 	}
+	if c.Production && (u.Hostname() == "example.invalid" || isPlaceholderValue(c.CloudURL)) {
+		return errors.New("production cloud_url must not use a placeholder")
+	}
 	agentCloudURL := c.AgentCloudURL
 	if agentCloudURL == "" {
 		agentCloudURL = c.CloudURL
@@ -158,6 +164,9 @@ func (c Config) Validate() error {
 	}
 	if c.Production && agentURL.Scheme != "https" {
 		return errors.New("production requires https agent_cloud_url")
+	}
+	if c.Production && (agentURL.Hostname() == "example.invalid" || isPlaceholderValue(agentCloudURL)) {
+		return errors.New("production agent_cloud_url must not use a placeholder")
 	}
 	if c.BootstrapWorkerToken == "" {
 		return errors.New("bootstrap_worker_token is required")
@@ -174,27 +183,42 @@ func (c Config) Validate() error {
 	if c.PollInterval < minPollInterval || c.PollInterval > maxPollInterval {
 		return fmt.Errorf("poll_interval must be between %s and %s", minPollInterval, maxPollInterval)
 	}
-	if c.Production && c.SSHKnownHostsPath == "" {
+	if c.Production && strings.TrimSpace(c.SSHKnownHostsPath) == "" {
 		return errors.New("production requires ssh_known_hosts_path")
 	}
 	if c.SSHKnownHostsPath != "" {
-		info, err := os.Stat(c.SSHKnownHostsPath)
-		if err != nil {
+		if err := validateKnownHostsFile(c.SSHKnownHostsPath, c.Production); err != nil {
 			return fmt.Errorf("ssh_known_hosts_path: %w", err)
 		}
-		if !info.Mode().IsRegular() {
-			return errors.New("ssh_known_hosts_path must be a regular file")
+	}
+	if err := validateK3sVersion(c.K3sVersion); err != nil {
+		return fmt.Errorf("k3s_version: %w", err)
+	}
+	for name, raw := range map[string]string{
+		"k3s_installer_url": c.K3sInstallerURL,
+		"agent_install_url": c.AgentInstallURL,
+	} {
+		u, err := parseHTTPURL(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if c.Production && u.Scheme != "https" {
+			return fmt.Errorf("production requires https %s", name)
+		}
+		if c.Production && (u.Hostname() == "example.invalid" || isPlaceholderValue(raw)) {
+			return fmt.Errorf("production %s must not use a placeholder", name)
 		}
 	}
-	installURL, err := parseHTTPURL(c.AgentInstallURL)
-	if err != nil {
-		return fmt.Errorf("agent_install_url: %w", err)
-	}
-	if c.Production && installURL.Scheme != "https" {
-		return errors.New("production requires https agent_install_url")
-	}
-	if err := validateSHA256(c.AgentInstallSHA256); err != nil {
-		return fmt.Errorf("agent_install_sha256: %w", err)
+	for name, digest := range map[string]string{
+		"k3s_installer_sha256": c.K3sInstallerSHA256,
+		"agent_install_sha256": c.AgentInstallSHA256,
+	} {
+		if err := validateSHA256(digest); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if c.Production && (digest == strings.Repeat("0", 64) || isPlaceholderValue(digest)) {
+			return fmt.Errorf("production %s must not use a placeholder", name)
+		}
 	}
 	if c.Timeout < 0 {
 		return errors.New("timeout must be positive")
@@ -396,7 +420,8 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 			if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
 				return cause
 			}
-			failure := classifyConnectFailure(redactForLease(cfg, lease, err.Error()))
+			failure := classifyConnectFailure(err)
+			failure.Message = redactForLease(cfg, lease, failure.Message)
 			return w.reportFailure(ctx, lease, failure)
 		}
 		defer session.Close()
@@ -532,53 +557,6 @@ func classifyValidationFailure(err error) JobFailure {
 	return JobFailure{Code: code, Message: boundedFailureMessage(err.Error())}
 }
 
-func classifyPlanFailure(err error) JobFailure {
-	code := "AGENT_INSTALL_URL_INVALID"
-	if errors.Is(err, ErrRuntimeUnsupported) {
-		code = "BOOTSTRAP_ROLE_UNSUPPORTED"
-	}
-	return JobFailure{Code: code, Message: boundedFailureMessage(err.Error())}
-}
-
-var (
-	ErrBootstrapPlanMismatch      = errors.New("bootstrap plan mismatch")
-	ErrBootstrapCheckpointInvalid = errors.New("bootstrap checkpoint invalid")
-)
-
-func classifyCheckpointFailure(err error) JobFailure {
-	if errors.Is(err, ErrBootstrapPlanMismatch) || cloudErrorCode(err) == "BOOTSTRAP_PLAN_MISMATCH" {
-		return JobFailure{Code: "BOOTSTRAP_PLAN_MISMATCH", Message: "persisted bootstrap checkpoint belongs to a different plan", Retryable: false}
-	}
-	if errors.Is(err, ErrBootstrapCheckpointInvalid) || cloudErrorCode(err) == "BOOTSTRAP_CHECKPOINT_INVALID" {
-		return JobFailure{Code: "BOOTSTRAP_CHECKPOINT_INVALID", Message: "persisted bootstrap checkpoint is invalid", Retryable: false}
-	}
-	return JobFailure{Code: "BOOTSTRAP_CLOUD_TEMPORARY", Message: "bootstrap checkpoint acknowledgement failed", Retryable: true}
-}
-
-func classifyConnectFailure(message string) JobFailure {
-	lower := strings.ToLower(message)
-	switch {
-	case strings.Contains(lower, "parse ssh private key"):
-		return JobFailure{Code: "SSH_PRIVATE_KEY_INVALID", Message: boundedFailureMessage(message), Retryable: false}
-	case strings.Contains(lower, "knownhosts: key mismatch") || strings.Contains(lower, "knownhosts: key is unknown"):
-		return JobFailure{Code: "SSH_HOST_KEY_VERIFICATION_FAILED", Message: boundedFailureMessage(message), Retryable: false}
-	default:
-		return JobFailure{Code: "BOOTSTRAP_CONNECT_FAILED", Message: boundedFailureMessage(message), Retryable: true}
-	}
-}
-
-func classifyStepFailure(status, message string) JobFailure {
-	code, retryable := "BOOTSTRAP_CLOUD_TEMPORARY", true
-	if status == "preflight" {
-		code, retryable = "TARGET_OS_UNSUPPORTED", false
-	} else if status == "installing_agent" && strings.Contains(strings.ToLower(message), "checksum") {
-		code, retryable = "AGENT_INSTALL_CHECKSUM_MISMATCH", false
-	} else if status == "registering_agent" && strings.Contains(message, "409") {
-		code, retryable = "AGENT_ALREADY_REGISTERED", false
-	}
-	return JobFailure{Code: code, Message: boundedFailureMessage(message), Retryable: retryable}
-}
-
 func boundedFailureMessage(message string) string {
 	message = strings.TrimSpace(registry.RedactString(message))
 	if len(message) > 512 {
@@ -598,266 +576,6 @@ func waitForPoll(ctx context.Context, interval time.Duration) bool {
 	}
 }
 
-func ValidateBundle(bundle Bundle) error {
-	if bundle.SessionID == "" || bundle.ProjectID == "" || bundle.NodeID == "" {
-		return errors.New("bootstrap bundle is missing required ids")
-	}
-	if bundle.PublicHost == "" {
-		return errors.New("public_host is required")
-	}
-	if bundle.SSHPort < 0 || bundle.SSHPort > 65535 {
-		return errors.New("ssh_port is invalid")
-	}
-	if bundle.SSH.Username == "" {
-		return errors.New("ssh username is required")
-	}
-	switch bundle.SSH.AuthMethod {
-	case "password":
-		if bundle.SSH.Password == "" || bundle.SSH.PrivateKey != "" {
-			return errors.New("ssh password credential is missing")
-		}
-	case "private_key":
-		if bundle.SSH.PrivateKey == "" || bundle.SSH.Password != "" {
-			return errors.New("ssh private key credential is missing")
-		}
-	default:
-		return errors.New("ssh auth_method is invalid")
-	}
-	if bundle.AgentRegistrationToken == "" {
-		return errors.New("agent registration token is missing")
-	}
-	return nil
-}
-
-type BootstrapPlan struct {
-	Version string
-	Steps   []BootstrapStep
-}
-
-type BootstrapStep struct {
-	ID      string
-	Status  string
-	Message string
-	Command CommandSpec
-}
-
-func BuildBootstrapPlan(cfg Config, bundle Bundle) (BootstrapPlan, error) {
-	if bundle.Role != "" && bundle.Role != "first_server" {
-		return BootstrapPlan{}, fmt.Errorf("%w: only first_server bootstrap is implemented", ErrRuntimeUnsupported)
-	}
-	u, err := parseHTTPURL(cfg.AgentInstallURL)
-	if err != nil {
-		return BootstrapPlan{}, fmt.Errorf("agent_install_url: %w", err)
-	}
-	if cfg.Production && u.Scheme != "https" {
-		return BootstrapPlan{}, errors.New("production requires https agent_install_url")
-	}
-	if err := validateSHA256(cfg.AgentInstallSHA256); err != nil {
-		return BootstrapPlan{}, fmt.Errorf("agent_install_sha256: %w", err)
-	}
-	agentCloudURL := cfg.AgentCloudURL
-	if agentCloudURL == "" {
-		agentCloudURL = cfg.CloudURL
-	}
-	env := map[string]string{
-		"OPSI_CLOUD_URL":       strings.TrimRight(agentCloudURL, "/"),
-		"OPSI_NODE_ID":         bundle.NodeID,
-		"OPSI_PROJECT_ID":      bundle.ProjectID,
-		"OPSI_AGENT_URL":       cfg.AgentInstallURL,
-		"OPSI_AGENT_SHA256":    cfg.AgentInstallSHA256,
-		"OPSI_REMOTE_USERNAME": bundle.SSH.Username,
-	}
-	secretEnv := map[string]string{"OPSI_AGENT_REGISTRATION_TOKEN": bundle.AgentRegistrationToken}
-	stepIDs := registry.BootstrapStepIDs(registry.FirstServerBootstrapPlanVersion)
-	return BootstrapPlan{Version: registry.FirstServerBootstrapPlanVersion, Steps: []BootstrapStep{
-		{ID: stepIDs[0], Status: "preflight", Message: "checking Ubuntu target prerequisites", Command: CommandSpec{Script: preflightScript, Env: env}},
-		{ID: stepIDs[1], Status: "installing_k3s", Message: "installing K3s server", Command: CommandSpec{Script: installK3sScript, Env: env}},
-		{ID: stepIDs[2], Status: "installing_agent", Message: "installing Opsi Agent binary", Command: CommandSpec{Script: installAgentScript, Env: env}},
-		{ID: stepIDs[3], Status: "registering_agent", Message: "registering and starting Opsi Agent", Command: CommandSpec{Script: registerAgentScript, Env: env, SensitiveEnv: secretEnv}},
-	}}, nil
-}
-
-func BootstrapPlanFingerprint(cfg Config, plan BootstrapPlan) string {
-	type fingerprintStep struct {
-		ID            string `json:"id"`
-		CommandSHA256 string `json:"command_sha256"`
-	}
-	type fingerprintPayload struct {
-		PlanVersion        string            `json:"plan_version"`
-		Steps              []fingerprintStep `json:"steps"`
-		AgentInstallURL    string            `json:"agent_install_url"`
-		AgentInstallSHA256 string            `json:"agent_install_sha256"`
-		AgentCloudURL      string            `json:"agent_cloud_url"`
-	}
-	steps := make([]fingerprintStep, 0, len(plan.Steps))
-	for _, step := range plan.Steps {
-		command := step.Command
-		command.SensitiveEnv = nil
-		steps = append(steps, fingerprintStep{ID: step.ID, CommandSHA256: bootstrapSHA256Hex([]byte(renderScript(command)))})
-	}
-	agentCloudURL := cfg.AgentCloudURL
-	if agentCloudURL == "" {
-		agentCloudURL = cfg.CloudURL
-	}
-	payload, _ := json.Marshal(fingerprintPayload{
-		PlanVersion:        plan.Version,
-		Steps:              steps,
-		AgentInstallURL:    cfg.AgentInstallURL,
-		AgentInstallSHA256: cfg.AgentInstallSHA256,
-		AgentCloudURL:      strings.TrimRight(agentCloudURL, "/"),
-	})
-	return bootstrapSHA256Hex(payload)
-}
-
-func ValidateBootstrapCheckpoint(plan BootstrapPlan, fingerprint string, checkpoint registry.BootstrapCheckpoint) error {
-	if checkpoint.SchemaVersion != registry.BootstrapCheckpointSchemaVersion {
-		return fmt.Errorf("%w: schema version", ErrBootstrapCheckpointInvalid)
-	}
-	if checkpoint.PlanVersion != plan.Version || checkpoint.PlanFingerprint != fingerprint {
-		return ErrBootstrapPlanMismatch
-	}
-	if checkpoint.NextStepIndex < 0 || checkpoint.NextStepIndex > len(plan.Steps) {
-		return fmt.Errorf("%w: next step index", ErrBootstrapCheckpointInvalid)
-	}
-	if checkpoint.NextStepIndex == 0 {
-		if checkpoint.LastCompletedStep != "" {
-			return fmt.Errorf("%w: completed step at index zero", ErrBootstrapCheckpointInvalid)
-		}
-		return nil
-	}
-	if checkpoint.LastCompletedStep != plan.Steps[checkpoint.NextStepIndex-1].ID {
-		return fmt.Errorf("%w: completed step", ErrBootstrapCheckpointInvalid)
-	}
-	return nil
-}
-
 func checkpointInitialized(checkpoint registry.BootstrapCheckpoint) bool {
 	return checkpoint.SchemaVersion != 0
 }
-
-func bootstrapSHA256Hex(value []byte) string {
-	sum := sha256.Sum256(value)
-	return hex.EncodeToString(sum[:])
-}
-
-func parseHTTPURL(raw string) (*url.URL, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, errors.New("is required")
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return nil, errors.New("must be an absolute HTTP(S) URL")
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, errors.New("must use http or https")
-	}
-	if u.User != nil || u.Fragment != "" {
-		return nil, errors.New("must not contain user info or a fragment")
-	}
-	return u, nil
-}
-
-func validateSHA256(raw string) error {
-	if len(raw) != 64 {
-		return errors.New("must contain exactly 64 hexadecimal characters")
-	}
-	if _, err := hex.DecodeString(raw); err != nil {
-		return errors.New("must be hexadecimal")
-	}
-	return nil
-}
-
-const preflightScript = `
-set -eu
-. /etc/os-release
-test "${ID:-}" = ubuntu
-command -v curl >/dev/null
-command -v systemctl >/dev/null
-if [ "${OPSI_REMOTE_USERNAME}" != root ]; then command -v sudo >/dev/null && sudo -n true; fi
-`
-
-const installK3sScript = `
-set -eu
-SUDO=""
-if [ "${OPSI_REMOTE_USERNAME}" != root ]; then SUDO="sudo -n"; fi
-if ! command -v k3s >/dev/null 2>&1; then
-	if [ "${OPSI_REMOTE_USERNAME}" = root ]; then
-		curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640' sh -
-	else
-		curl -sfL https://get.k3s.io | sudo -n env INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640' sh -
-	fi
-fi
-$SUDO systemctl enable --now k3s
-$SUDO k3s kubectl get nodes
-`
-
-const installAgentScript = `
-set -eu
-SUDO=""
-if [ "${OPSI_REMOTE_USERNAME}" != root ]; then SUDO="sudo -n"; fi
-$SUDO install -d -m 0755 /opt/opsi/bin
-tmp="$(mktemp)"
-curl -fsSL "${OPSI_AGENT_URL}" -o "$tmp"
-if [ -n "${OPSI_AGENT_SHA256}" ]; then echo "${OPSI_AGENT_SHA256}  $tmp" | sha256sum -c -; fi
-$SUDO install -m 0755 "$tmp" /opt/opsi/bin/opsi-agent
-rm -f "$tmp"
-`
-
-const registerAgentScript = `
-set -eu
-SUDO=""
-if [ "${OPSI_REMOTE_USERNAME}" != root ]; then SUDO="sudo -n"; fi
-fingerprint="bootstrap-${OPSI_NODE_ID}"
-payload=$(printf '{"registration_token":"%s","public_key_fingerprint":"%s","version":"bootstrap","capabilities":{"deploy":true,"node_lifecycle":true}}' "$OPSI_AGENT_REGISTRATION_TOKEN" "$fingerprint")
-response=$(curl -fsS -X POST "${OPSI_CLOUD_URL}/v1/agents/register" -H 'content-type: application/json' --data "$payload")
-agent_token=$(printf '%s' "$response" | sed -n 's/.*"agent_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-test -n "$agent_token"
-$SUDO install -d -m 0750 /etc/opsi /var/lib/opsi
-$SUDO tee /etc/opsi/agent.yaml >/dev/null <<EOF
-node_id: ${OPSI_NODE_ID}
-mode: dev
-listen_addr: 127.0.0.1:9443
-health_addr: 127.0.0.1:9080
-cloud_endpoint: ${OPSI_CLOUD_URL}
-sqlite_path: /var/lib/opsi/opsi-agent.sqlite
-auth:
-  enabled: true
-  verify_cache_ttl: 15m
-cloud_relay:
-  enabled: true
-  project_id: ${OPSI_PROJECT_ID}
-  agent_token: ${agent_token}
-  poll_interval: 2s
-  long_poll_wait: 30s
-  heartbeat_interval: 10s
-  sign_requests: true
-deployment:
-  project_id: ${OPSI_PROJECT_ID}
-  builder_mode: containerd
-  build_root: /tmp/opsi-builds
-telemetry:
-  enabled: true
-secret:
-  namespace: default
-  kubectl_path: kubectl
-  totp_namespace: default
-  encryption_at_rest_confirmed: false
-EOF
-$SUDO chmod 0600 /etc/opsi/agent.yaml
-$SUDO tee /etc/systemd/system/opsi-agent.service >/dev/null <<EOF
-[Unit]
-Description=Opsi Agent
-After=network-online.target k3s.service
-Wants=network-online.target
-
-[Service]
-ExecStart=/opt/opsi/bin/opsi-agent --config /etc/opsi/agent.yaml
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable --now opsi-agent
-`

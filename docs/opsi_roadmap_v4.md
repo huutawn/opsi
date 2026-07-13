@@ -301,26 +301,46 @@ pass.
   remote step, and acknowledgement failure prevents the next step.
 - Retry, manual retry, expired-lease recovery, and a new worker lease retain the
   checkpoint and resume from `next_step_index`.
-- P05 is the next implementation phase, but the P04 full-Cloud closure gate must
-  still be cleared.
+- P05 is implemented with focused evidence, but the independent P04 full-Cloud
+  closure gate must still be cleared.
 
 #### P05 - Bootstrap supply-chain and transport hardening
 
-Status: `NEXT`.
+Status: `IMPLEMENTED / CLEAN TARGET VPS EVIDENCE UNPROVEN`.
 
-- Pin the K3s version.
-- Verify installer and artifacts.
-- Enforce SSH known-host verification.
-- Require Agent-to-Cloud HTTPS.
-- Make install and upgrade behavior idempotent.
-- Establish the canonical versioned systemd install layout and integrate
-  upgrade/rollback behavior.
+- New bootstrap work uses `first-server-v2` with unchanged stable step IDs.
+  V1 metadata remains readable, while unfinished v1 checkpoints fail closed and
+  require a new session.
+- K3s version, installer URL, and installer SHA-256 are operator-pinned. The
+  installer is downloaded, verified before execution, and never selected via a
+  latest lookup or `curl | sh` pipeline.
+- SSH has no insecure host-key callback. Missing, unknown, mismatched, symlinked,
+  or group/world-writable trust files fail closed.
+- Agent artifacts are staged under `/opt/opsi/agent/releases/<sha256>` and then
+  atomically activated through `current`; `previous` supports rollback when the
+  new service is unhealthy.
+- The packaging systemd unit is canonical and parity-tested. Config, marker,
+  unit, and symlink updates are atomic.
+- A root-owned registration identity marker makes replay idempotent after
+  config/marker persistence. A narrow crash window remains after Cloud consumes
+  the token but before those files are installed; P06 must fault-inject here.
+- Focused/race tests, full Agent tests, config validation, Compose build, and an
+  isolated four-service health smoke pass. Full Cloud still fails only the
+  pre-existing `TestOTPRequiresPATAndUsesAuthenticatedEmail` `pat invalid`
+  baseline.
+- No real VPS, real K3s install, reboot, or real upgrade/rollback evidence was
+  produced in P05. Production readiness remains unproven.
 
 #### P06 - Clean target VPS bootstrap proof
 
 Status: `UNPROVEN`.
 
 Checkpoint: `[VPS CHECKPOINT]`
+
+Required preparation: a clean Ubuntu target VPS, an HTTPS control-plane endpoint
+reachable from that target, a real Agent artifact served over HTTPS with its
+SHA-256, a pinned K3s version plus verified installer SHA-256, and a trusted
+`known_hosts` entry for the target.
 
 Test on a real clean Ubuntu target:
 

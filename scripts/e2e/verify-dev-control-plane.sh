@@ -9,7 +9,7 @@ readonly WORKER_CONFIG="$DEPLOY_DIR/config/bootstrap-worker.json"
 readonly SECRETS_DIR="$DEPLOY_DIR/secrets"
 readonly PAT_FILE="$SECRETS_DIR/initial-owner.pat"
 readonly EXPECTED_BRANCH="${OPSI_V3_013_BRANCH:-developer}"
-readonly REQUIRED_BASE_COMMIT="${OPSI_V3_013_BASE_COMMIT:-a26ecc8}"
+readonly REQUIRED_BASE_COMMIT="${OPSI_V3_013_BASE_COMMIT:-6dfcf75f30f8bd8b3bdf840176b86840cda9bd3b}"
 readonly HTTP_PORT="${OPSI_DEV_HTTP_PORT:-18080}"
 readonly DEADLINE_SECONDS="${OPSI_V3_013_DEADLINE_SECONDS:-120}"
 readonly COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$DEPLOY_DIR/compose.yaml")
@@ -219,12 +219,17 @@ cloud_dst.write_text(json.dumps(cloud, indent=2) + "\n")
 
 worker = json.loads(worker_src.read_text())
 worker["bootstrap_worker_token"] = worker_token
+worker["k3s_version"] = "v0.0.0+k3s0"
+worker["k3s_installer_sha256"] = "0" * 64
 worker["agent_install_url"] = "https://example.invalid/opsi-agent"
 worker["agent_install_sha256"] = "0" * 64
 worker_dst.write_text(json.dumps(worker, indent=2) + "\n")
 PY
+  : >"$SECRETS_DIR/ssh_known_hosts"
   chmod 0600 "$ENV_FILE" "$CLOUD_CONFIG" "$WORKER_CONFIG"
+  chmod 0640 "$SECRETS_DIR/ssh_known_hosts"
   [[ "$(stat -c '%a' "$SECRETS_DIR")" == "700" ]] || fail "secrets directory mode is not 0700"
+  [[ "$(stat -c '%a' "$SECRETS_DIR/ssh_known_hosts")" == "640" ]] || fail "ssh_known_hosts mode is not 0640"
 }
 
 assert_service_list() {

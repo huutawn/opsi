@@ -15,9 +15,11 @@ DEPLOY = ROOT / "deploy" / "dev-control-plane"
 ENV_PATH = DEPLOY / ".env"
 CLOUD_PATH = DEPLOY / "config" / "cloud.json"
 WORKER_PATH = DEPLOY / "config" / "bootstrap-worker.json"
+KNOWN_HOSTS_PATH = DEPLOY / "secrets" / "ssh_known_hosts"
 PLACEHOLDER_PREFIXES = ("REPLACE_WITH_",)
 PLACEHOLDER_VALUES = {"CHANGE_ME", "EXAMPLE_SECRET"}
-SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+K3S_VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$")
 
 CLOUD_ENV_NAMES = (
     "OPSI_CLOUD_TTL",
@@ -149,6 +151,21 @@ def validate_permissions(path: pathlib.Path) -> None:
         fail(f"{path.relative_to(ROOT)} must not be readable or writable by group/other (use chmod 0600)")
 
 
+def validate_known_hosts_file(path: pathlib.Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"missing runtime file: {path.relative_to(ROOT)}")
+    if stat.S_ISLNK(info.st_mode):
+        fail(f"{path.relative_to(ROOT)} must not be a symlink")
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{path.relative_to(ROOT)} must be a regular file")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        fail(f"{path.relative_to(ROOT)} must not be group/world writable")
+    return info.st_size > 0
+
+
 def main() -> int:
     env_text = read_text(ENV_PATH)
     cloud_text = read_text(CLOUD_PATH)
@@ -242,22 +259,44 @@ def main() -> int:
     if internal_cloud.hostname != "cloud" or internal_cloud.port != 9800:
         fail("bootstrap-worker.cloud_url must target http://cloud:9800 inside Compose")
 
+    warning_reasons: list[str] = []
+    k3s_version = require_string(worker, "k3s_version", "bootstrap-worker")
+    if not K3S_VERSION.fullmatch(k3s_version):
+        fail("bootstrap-worker.k3s_version must match vX.Y.Z+k3sN")
+    if k3s_version == "v0.0.0+k3s0":
+        warning_reasons.append("K3s version is pinned")
+
+    parse_http_url(require_string(worker, "k3s_installer_url", "bootstrap-worker"), "bootstrap-worker.k3s_installer_url")
+    k3s_digest = require_string(worker, "k3s_installer_sha256", "bootstrap-worker")
+    if not SHA256.fullmatch(k3s_digest):
+        fail("bootstrap-worker.k3s_installer_sha256 must be exactly 64 lowercase hexadecimal characters")
+    if k3s_digest == "0" * 64:
+        warning_reasons.append("K3s installer checksum is real")
+
     agent_cloud = parse_http_url(require_string(worker, "agent_cloud_url", "bootstrap-worker"), "bootstrap-worker.agent_cloud_url")
     install_url = parse_http_url(require_string(worker, "agent_install_url", "bootstrap-worker"), "bootstrap-worker.agent_install_url")
-    if install_url.hostname == "example.invalid":
-        print(
-            "warning: agent_install_url is a placeholder; control-plane smoke tests can run, but remote bootstrap cannot install the Agent",
-            file=sys.stderr,
-        )
+    agent_artifact_ready = install_url.hostname != "example.invalid"
     digest = require_string(worker, "agent_install_sha256", "bootstrap-worker")
     if not SHA256.fullmatch(digest):
-        fail("bootstrap-worker.agent_install_sha256 must be exactly 64 hexadecimal characters")
+        fail("bootstrap-worker.agent_install_sha256 must be exactly 64 lowercase hexadecimal characters")
+    if digest == "0" * 64:
+        agent_artifact_ready = False
+    if not agent_artifact_ready:
+        warning_reasons.append("Agent artifact URL/checksum are real")
+
+    known_hosts_config = require_string(worker, "ssh_known_hosts_path", "bootstrap-worker")
+    if known_hosts_config != "/etc/opsi/ssh_known_hosts":
+        fail("bootstrap-worker.ssh_known_hosts_path must be /etc/opsi/ssh_known_hosts")
+    if not validate_known_hosts_file(KNOWN_HOSTS_PATH):
+        warning_reasons.append("known_hosts contains the target host key")
 
     if agent_cloud.hostname in {"127.0.0.1", "localhost", "::1", "cloud"}:
-        print(
-            "warning: agent_cloud_url is local/internal; control-plane smoke tests can run, but a remote VPS bootstrap cannot register its Agent",
-            file=sys.stderr,
-        )
+        warning_reasons.append("agent_cloud_url is reachable from the target")
+
+    if warning_reasons:
+        print("warning: remote bootstrap cannot run until:", file=sys.stderr)
+        for reason in warning_reasons:
+            print(f"- {reason}", file=sys.stderr)
 
     print("development control-plane configuration is structurally valid")
     return 0

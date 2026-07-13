@@ -26,15 +26,33 @@ func TestConfigValidation(t *testing.T) {
 	if err := os.WriteFile(knownHosts, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	valid := Config{CloudURL: "https://cloud-internal.example", AgentCloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), SSHKnownHostsPath: knownHosts, Production: true}
+	valid := Config{CloudURL: "https://cloud-internal.example", AgentCloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), SSHKnownHostsPath: knownHosts, Production: true}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid daemon config failed: %v", err)
 	}
 	for name, mutate := range map[string]func(*Config){
-		"missing worker id": func(c *Config) { c.WorkerID = "" },
-		"invalid worker id": func(c *Config) { c.WorkerID = "bad worker/id" },
-		"small poll":        func(c *Config) { c.PollInterval = time.Millisecond },
-		"large poll":        func(c *Config) { c.PollInterval = 6 * time.Minute },
+		"missing worker id":       func(c *Config) { c.WorkerID = "" },
+		"invalid worker id":       func(c *Config) { c.WorkerID = "bad worker/id" },
+		"missing K3s version":     func(c *Config) { c.K3sVersion = "" },
+		"invalid K3s version":     func(c *Config) { c.K3sVersion = "latest;sh" },
+		"invalid installer URL":   func(c *Config) { c.K3sInstallerURL = "ftp://get.k3s.io" },
+		"invalid installer SHA":   func(c *Config) { c.K3sInstallerSHA256 = strings.Repeat("A", 64) },
+		"HTTP installer":          func(c *Config) { c.K3sInstallerURL = "http://get.k3s.io" },
+		"HTTP Agent artifact":     func(c *Config) { c.AgentInstallURL = "http://downloads.example/opsi-agent" },
+		"HTTP Agent Cloud":        func(c *Config) { c.AgentCloudURL = "http://cloud.example" },
+		"zero installer checksum": func(c *Config) { c.K3sInstallerSHA256 = strings.Repeat("0", 64) },
+		"zero Agent checksum":     func(c *Config) { c.AgentInstallSHA256 = strings.Repeat("0", 64) },
+		"placeholder hostname":    func(c *Config) { c.AgentInstallURL = "https://example.invalid/opsi-agent" },
+		"missing known hosts":     func(c *Config) { c.SSHKnownHostsPath = "" },
+		"empty known hosts": func(c *Config) {
+			empty := filepath.Join(t.TempDir(), "known_hosts")
+			if err := os.WriteFile(empty, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c.SSHKnownHostsPath = empty
+		},
+		"small poll": func(c *Config) { c.PollInterval = time.Millisecond },
+		"large poll": func(c *Config) { c.PollInterval = 6 * time.Minute },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := valid
@@ -49,14 +67,44 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestDevelopmentSmokeConfigAllowsNonfunctionalRemoteValues(t *testing.T) {
+	cfg := Config{
+		CloudURL:             "http://cloud:9800",
+		AgentCloudURL:        "http://127.0.0.1:8080",
+		BootstrapWorkerToken: "development-worker-token",
+		WorkerID:             "worker-1",
+		PollInterval:         time.Second,
+		K3sVersion:           "v0.0.0+k3s0",
+		K3sInstallerURL:      "https://get.k3s.io",
+		K3sInstallerSHA256:   strings.Repeat("0", 64),
+		AgentInstallURL:      "https://example.invalid/opsi-agent",
+		AgentInstallSHA256:   strings.Repeat("0", 64),
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("development smoke config failed: %v", err)
+	}
+	if _, err := BuildBootstrapPlan(cfg, testLease("boot-1", "host-1").Bundle); err == nil {
+		t.Fatal("nonfunctional remote values allowed a real bootstrap plan")
+	}
+}
+
+func TestConfigErrorsDoNotExposeWorkerToken(t *testing.T) {
+	secret := "worker-token-must-not-appear"
+	cfg := Config{CloudURL: "http://cloud:9800", BootstrapWorkerToken: secret, WorkerID: "worker-1", PollInterval: time.Second, K3sVersion: "invalid"}
+	err := cfg.Validate()
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("validation error leaked token: %v", err)
+	}
+}
+
 func TestLoadConfigDefaultsAndRejectsLegacySessionID(t *testing.T) {
 	dir := t.TempDir()
 	validPath := filepath.Join(dir, "valid.json")
-	if err := os.WriteFile(validPath, []byte(`{"cloud_url":"http://cloud:9800","agent_cloud_url":"https://cloud.example","bootstrap_worker_token":"secret","worker_id":"  worker-1  ","agent_install_url":"https://downloads.example/agent"}`), 0o600); err != nil {
+	if err := os.WriteFile(validPath, []byte(`{"cloud_url":"http://cloud:9800","agent_cloud_url":"https://cloud.example","bootstrap_worker_token":"secret","worker_id":"  worker-1  ","k3s_version":"  v1.32.5+k3s1  ","k3s_installer_url":"https://get.k3s.io","k3s_installer_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","agent_install_url":"https://downloads.example/agent","agent_install_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(validPath)
-	if err != nil || cfg.WorkerID != "worker-1" || cfg.PollInterval != defaultPollInterval || cfg.AgentCloudURL != "https://cloud.example" {
+	if err != nil || cfg.WorkerID != "worker-1" || cfg.K3sVersion != "v1.32.5+k3s1" || cfg.PollInterval != defaultPollInterval || cfg.AgentCloudURL != "https://cloud.example" {
 		t.Fatalf("loaded cfg=%+v err=%v", cfg, err)
 	}
 	legacyPath := filepath.Join(dir, "legacy.json")
@@ -79,6 +127,9 @@ func TestBootstrapPlanUsesAgentReachableCloudURL(t *testing.T) {
 	cfg := Config{
 		CloudURL:           "http://cloud:9800",
 		AgentCloudURL:      "https://cloud.example",
+		K3sVersion:         "v1.32.5+k3s1",
+		K3sInstallerURL:    "https://get.k3s.io",
+		K3sInstallerSHA256: strings.Repeat("b", 64),
 		AgentInstallURL:    "https://downloads.example/opsi-agent",
 		AgentInstallSHA256: strings.Repeat("a", 64),
 	}
@@ -93,16 +144,17 @@ func TestBootstrapPlanUsesAgentReachableCloudURL(t *testing.T) {
 }
 
 func TestClassifyConnectFailureDoesNotRetryInvalidSSHIdentity(t *testing.T) {
-	for _, message := range []string{
-		"parse ssh private key: invalid format",
-		"knownhosts: key mismatch",
+	for _, err := range []error{
+		errors.New("parse ssh private key: invalid format"),
+		ErrSSHHostKeyVerificationRequired,
+		ErrSSHHostKeyVerificationFailed,
 	} {
-		failure := classifyConnectFailure(message)
+		failure := classifyConnectFailure(err)
 		if failure.Retryable {
-			t.Fatalf("failure %q should not be retryable: %+v", message, failure)
+			t.Fatalf("failure %q should not be retryable: %+v", err, failure)
 		}
 	}
-	if failure := classifyConnectFailure("dial tcp: i/o timeout"); !failure.Retryable || failure.Code != "BOOTSTRAP_CONNECT_FAILED" {
+	if failure := classifyConnectFailure(errors.New("dial tcp: i/o timeout")); !failure.Retryable || failure.Code != "BOOTSTRAP_CONNECT_FAILED" {
 		t.Fatalf("temporary network failure classification=%+v", failure)
 	}
 }
@@ -535,6 +587,9 @@ func TestBootstrapPlanFingerprintIsStableAndSecretFree(t *testing.T) {
 		t.Fatal("command change did not change fingerprint")
 	}
 	for name, mutate := range map[string]func(*Config){
+		"K3s version":       func(c *Config) { c.K3sVersion = "v1.32.6+k3s1" },
+		"K3s installer URL": func(c *Config) { c.K3sInstallerURL += "/changed" },
+		"K3s checksum":      func(c *Config) { c.K3sInstallerSHA256 = strings.Repeat("c", 64) },
 		"agent install URL": func(c *Config) { c.AgentInstallURL += "-changed" },
 		"agent checksum":    func(c *Config) { c.AgentInstallSHA256 = strings.Repeat("b", 64) },
 		"agent Cloud URL":   func(c *Config) { c.AgentCloudURL = "https://other-cloud.example" },
@@ -613,7 +668,7 @@ func newDaemonHarness(t *testing.T, leases []Lease) *daemonHarness {
 }
 
 func (h *daemonHarness) config() Config {
-	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), Executor: h.executor, Logger: h.logger, HeartbeatInterval: 20 * time.Millisecond, HeartbeatRetryInterval: 5 * time.Millisecond, LeaseSafetyMargin: 10 * time.Millisecond}
+	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), Executor: h.executor, Logger: h.logger, HeartbeatInterval: 20 * time.Millisecond, HeartbeatRetryInterval: 5 * time.Millisecond, LeaseSafetyMargin: 10 * time.Millisecond}
 }
 
 func (h *daemonHarness) serveHTTP(w http.ResponseWriter, r *http.Request) {

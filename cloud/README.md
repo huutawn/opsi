@@ -24,16 +24,18 @@ There is no password login and no public self-sign-up endpoint.
 
 ## Bootstrap Worker
 
-`opsi-bootstrap-worker` is a separate daemon built from the same module. It leases one pending bootstrap session, retrieves the short-lived SSH credential and Agent registration token, builds the deterministic `first-server-v1` plan, verifies its SHA-256 fingerprint, and resumes from the durable Cloud checkpoint. The stable remote step IDs are `preflight`, `install_k3s`, `install_agent`, and `register_agent`; Agent heartbeat verification follows after all four are acknowledged.
+`opsi-bootstrap-worker` is a separate daemon built from the same module. It leases one pending bootstrap session, retrieves the short-lived SSH credential and Agent registration token, builds deterministic `first-server-v2`, verifies its SHA-256 fingerprint, and resumes from the durable Cloud checkpoint. The stable remote step IDs remain `preflight`, `install_k3s`, `install_agent`, and `register_agent`; Agent heartbeat verification follows after all four are acknowledged. Metadata for `first-server-v1` remains readable, but an unfinished v1 checkpoint fails with `BOOTSTRAP_PLAN_MISMATCH`; the operator must create a new bootstrap session.
 
-Step execution is at-least-once: a remote step runs, Cloud durably acknowledges the next-step checkpoint, and only then may the worker continue. If acknowledgement fails, the worker schedules the existing retry path without advancing locally, so that step may run again. A fully checkpointed plan skips SSH and proceeds directly to Agent heartbeat verification. P05 still owns installer idempotency, artifact/transport hardening, K3s pinning, and the canonical systemd layout.
+Step execution is at-least-once: a remote step runs, Cloud durably acknowledges the next-step checkpoint, and only then may the worker continue. K3s uses an operator-pinned version and verified installer checksum. Agent artifacts are staged under `/opt/opsi/agent/releases/<sha256>`, activated atomically through `current`, and rolled back through `previous` when the new service is unhealthy. A root-owned registration identity marker prevents a completed registration script from POSTing again after checkpoint acknowledgement loss.
+
+The registration flow still has one documented crash window: Cloud may consume the one-time registration token before the remote config and marker are durably installed. P05 does not add server-side credential replay; P06 must fault-inject around this boundary.
 
 The worker has two Cloud URLs:
 
 - `cloud_url`: internal worker-to-Cloud control URL, such as `http://cloud:9800` inside Docker Compose.
 - `agent_cloud_url`: URL reachable from the target VPS and later used by the installed Agent. For a remote VPS this must be a public/private-routable HTTPS URL, not a Docker service name or `127.0.0.1`.
 
-Password and unencrypted SSH private-key authentication are supported. Production requires a known-hosts file and HTTPS URLs.
+Password and unencrypted SSH private-key authentication are supported. SSH never falls back to insecure host-key acceptance. Operators must provide a trusted regular `known_hosts` file; production also requires it to be non-empty and requires HTTPS for K3s, Agent artifact, Cloud, and Agent-facing URLs. K3s version and both installer/artifact SHA-256 values must be explicitly pinned; the worker does not discover latest versions.
 
 ## Build and test
 
@@ -47,5 +49,10 @@ Run configuration validation without starting either daemon:
 
 ```bash
 go run ./cmd/opsi-cloud --check --config config.example.json
-go run ./cmd/opsi-bootstrap-worker --check --config ../deploy/dev-control-plane/config/bootstrap-worker.example.json
+go run ./cmd/opsi-bootstrap-worker --check --config ../deploy/dev-control-plane/config/bootstrap-worker.json
 ```
+
+The Bootstrap Worker example intentionally contains operator placeholders. The
+development workflow generates the ignored runtime JSON, substitutes a
+syntactically valid nonfunctional K3s pin, and reports warnings until real P06
+inputs are supplied.
