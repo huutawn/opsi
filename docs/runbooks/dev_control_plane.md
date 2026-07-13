@@ -96,9 +96,12 @@ sudo chmod 0700 deploy/dev-control-plane/secrets
 Replace every `REPLACE_WITH_`, `EXAMPLE_SECRET`, and `CHANGE_ME` value in the
 three runtime files. Use independently generated random values except that:
 
-- the PostgreSQL password in `.env` and `cloud.json` must match;
-- `bootstrap_worker_token` must match in both JSON files;
-- `public_base_url` must match the reverse-proxy address used by the CLI/browser;
+- the PostgreSQL password in `.env` must match the password embedded in
+  `OPSI_CLOUD_DATABASE_URL`;
+- `OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN` in `.env` must match
+  `bootstrap_worker_token` in `bootstrap-worker.json`;
+- `OPSI_CLOUD_PUBLIC_BASE_URL` must match the reverse-proxy address used by the
+  CLI/browser;
 - `bootstrap-worker.json.cloud_url` is the internal Docker URL used by the
   worker (`http://cloud:9800` in this package);
 - `bootstrap-worker.json.agent_cloud_url` must be reachable from every target
@@ -119,10 +122,13 @@ make dev-control-plane-validate
 make dev-control-plane-build
 ```
 
-Validation parses both JSON files, checks restrictive file modes, cross-checks
-the PostgreSQL password and Bootstrap Worker token, validates the Agent binary
-URL/SHA-256, and rejects exposing this HTTP-only development package on a
-non-loopback bind address. It does not print secret values.
+Cloud scalar configuration is read from `.env` and explicitly injected by
+Compose. `cloud.json` remains mounted for `routes`; Cloud does not read `.env`
+itself. Validation parses the runtime files, checks restrictive file modes,
+cross-checks the PostgreSQL password and Bootstrap Worker token, validates the
+Agent binary URL/SHA-256, and rejects exposing this HTTP-only development
+package on a non-loopback bind address. Empty SMTP and OAuth values are valid
+for development smoke tests. Validation does not print secret values.
 
 ### Start and inspect health
 

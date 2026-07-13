@@ -29,6 +29,7 @@ opsi-cloud
 **/config.local.toml
 
 # Environment and credential files
+.env
 **/.env
 **/.env.*
 !**/.env.example
@@ -36,7 +37,8 @@ opsi-cloud
 /deploy/dev-control-plane/.env
 /deploy/dev-control-plane/config/cloud.json
 /deploy/dev-control-plane/config/bootstrap-worker.json
-/deploy/dev-control-plane/secrets/**
+/deploy/dev-control-plane/secrets/*
+!**/*.example.json
 
 # Runtime certificates, keys and keystores
 **/certs/

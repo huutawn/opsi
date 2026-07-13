@@ -195,17 +195,26 @@ bootstrap_key = os.environ["V3_BOOTSTRAP_KEY"]
 alert_token = os.environ["V3_ALERT_TOKEN"]
 
 env_text = env_src.read_text()
-env_text = env_text.replace("OPSI_DEV_HTTP_PORT=8080", f"OPSI_DEV_HTTP_PORT={port}")
-env_text = env_text.replace("REPLACE_WITH_RANDOM_PASSWORD", postgres_password)
-env_dst.write_text(env_text)
+replacements = {
+    "OPSI_DEV_HTTP_PORT": port,
+    "POSTGRES_PASSWORD": postgres_password,
+    "OPSI_CLOUD_DATABASE_URL": f"postgres://opsi:{postgres_password}@postgres:5432/opsi?sslmode=disable",
+    "OPSI_CLOUD_PUBLIC_BASE_URL": f"http://127.0.0.1:{port}",
+    "OPSI_CLOUD_ALERTS_INTERNAL_TOKEN": alert_token,
+    "OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN": worker_token,
+    "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY": bootstrap_key,
+}
+lines = []
+for line in env_text.splitlines():
+    key, separator, _ = line.partition("=")
+    if separator and key in replacements:
+        line = f"{key}={replacements[key]}"
+    lines.append(line)
+env_dst.write_text("\n".join(lines) + "\n")
 
 cloud = json.loads(cloud_src.read_text())
-cloud["database_url"] = f"postgres://opsi:{postgres_password}@postgres:5432/opsi?sslmode=disable"
-cloud["public_base_url"] = f"http://127.0.0.1:{port}"
-cloud["bootstrap_worker_token"] = worker_token
-cloud["bootstrap_secret_key"] = bootstrap_key
-cloud["alerts"]["internal_token"] = alert_token
-cloud["auth"]["provider"] = "github"
+if not isinstance(cloud.get("routes"), list):
+    raise SystemExit("cloud example must contain routes")
 cloud_dst.write_text(json.dumps(cloud, indent=2) + "\n")
 
 worker = json.loads(worker_src.read_text())
@@ -215,9 +224,6 @@ worker["agent_install_sha256"] = "0" * 64
 worker_dst.write_text(json.dumps(worker, indent=2) + "\n")
 PY
   chmod 0600 "$ENV_FILE" "$CLOUD_CONFIG" "$WORKER_CONFIG"
-  if grep -E -q 'REPLACE_WITH_|CHANGE_ME|EXAMPLE_SECRET' "$ENV_FILE" "$CLOUD_CONFIG" "$WORKER_CONFIG"; then
-    fail "runtime configuration still contains a placeholder"
-  fi
   [[ "$(stat -c '%a' "$SECRETS_DIR")" == "700" ]] || fail "secrets directory mode is not 0700"
 }
 
@@ -445,19 +451,17 @@ scan_secrets() {
   capture_compose_logs
   git -C "$REPO_ROOT" diff >"$git_diff"
   git -C "$REPO_ROOT" status --short >"$git_status"
-  python3 - "$ENV_FILE" "$CLOUD_CONFIG" "$PAT_FILE" "$tmp_dir" "$evidence_tmp" <<'PY'
-import json
+  python3 - "$ENV_FILE" "$PAT_FILE" "$tmp_dir" "$evidence_tmp" <<'PY'
 import pathlib
 import sys
 
-env_path, cloud_path, pat_path, tmp_dir, evidence_path = map(pathlib.Path, sys.argv[1:])
+env_path, pat_path, tmp_dir, evidence_path = map(pathlib.Path, sys.argv[1:])
 env_values = dict(line.split("=", 1) for line in env_path.read_text().splitlines() if "=" in line)
-cloud = json.loads(cloud_path.read_text())
 secrets = {
     "postgres_password": env_values["POSTGRES_PASSWORD"].encode(),
-    "bootstrap_worker_token": cloud["bootstrap_worker_token"].encode(),
-    "bootstrap_secret_key": cloud["bootstrap_secret_key"].encode(),
-    "alert_token": cloud["alerts"]["internal_token"].encode(),
+    "bootstrap_worker_token": env_values["OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN"].encode(),
+    "bootstrap_secret_key": env_values["OPSI_CLOUD_BOOTSTRAP_SECRET_KEY"].encode(),
+    "alert_token": env_values["OPSI_CLOUD_ALERTS_INTERNAL_TOKEN"].encode(),
     "initial_pat": pat_path.read_bytes().strip(),
 }
 targets = [path for path in tmp_dir.rglob("*") if path.is_file()] + [evidence_path]
@@ -566,8 +570,8 @@ run_verification() {
   preflight
   create_temp_state
   generate_runtime_config
-  assert_service_list
   record_command "Compose validation" make dev-control-plane-validate
+  assert_service_list
   record_command "Image build" make dev-control-plane-build
   record_command "Initial start" make dev-control-plane-up
   wait_all_healthy

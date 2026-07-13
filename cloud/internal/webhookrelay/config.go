@@ -19,7 +19,6 @@ type Config struct {
 	SMTP                   SMTPConfig  `json:"smtp"`
 	Alerts                 AlertConfig `json:"alerts"`
 	Routes                 []Route     `json:"routes"`
-	AgentTokens            []string    `json:"agent_tokens"`
 	BootstrapWorkerToken   string      `json:"bootstrap_worker_token"`
 	BootstrapSecretKey     string      `json:"bootstrap_secret_key"`
 	RequireAgentSignatures bool        `json:"require_agent_signatures"`
@@ -128,7 +127,6 @@ func applyEnvOverrides(cfg *Config) error {
 	applyStringEnv("OPSI_CLOUD_AUTH_USERINFO_URL", &cfg.Auth.UserInfoURL)
 	applyStringEnv("OPSI_CLOUD_AUTH_REDIRECT_URL", &cfg.Auth.RedirectURL)
 	applyCSVEnv("OPSI_CLOUD_AUTH_SCOPES", &cfg.Auth.Scopes)
-	applyCSVEnv("OPSI_CLOUD_AGENT_TOKENS", &cfg.AgentTokens)
 	return nil
 }
 

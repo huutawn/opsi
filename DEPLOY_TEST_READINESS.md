@@ -84,11 +84,15 @@ There is no password login and no public self-sign-up flow.
 
 Create protected runtime files from the examples and set mode `0600`. At minimum, replace:
 
-- PostgreSQL password in both `.env` and `cloud.json`;
-- matching `bootstrap_worker_token` in Cloud and Worker configs;
-- `bootstrap_secret_key` and `alerts.internal_token`;
+- PostgreSQL password in `.env` and the password in `OPSI_CLOUD_DATABASE_URL`;
+- `OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN` in `.env` and the matching Worker token;
+- `OPSI_CLOUD_BOOTSTRAP_SECRET_KEY` and `OPSI_CLOUD_ALERTS_INTERNAL_TOKEN`;
 - `agent_install_url` and its exact 64-character SHA-256;
 - `agent_cloud_url` with a URL reachable from the target VPS for a real bootstrap test.
+
+Compose injects Cloud scalar configuration from `.env`; `cloud.json` retains
+the route list. SMTP and generic OAuth values may remain empty for a private
+development smoke test.
 
 For browser login, also configure the OAuth provider and prelink the first Owner subject. For emailed OTP, configure SMTP. For each GitHub route, configure a unique webhook secret of at least 32 bytes and set the same value in GitHub.
 

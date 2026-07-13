@@ -39,7 +39,6 @@ var cloudEnvNames = []string{
 	"OPSI_CLOUD_AUTH_USERINFO_URL",
 	"OPSI_CLOUD_AUTH_REDIRECT_URL",
 	"OPSI_CLOUD_AUTH_SCOPES",
-	"OPSI_CLOUD_AGENT_TOKENS",
 }
 
 func clearCloudEnv(t *testing.T) {
@@ -111,6 +110,13 @@ func TestLoadConfigProductionRequiresSMTPAndForbidsOTPOutbox(t *testing.T) {
 	}
 	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "forbids otp.outbox_path") {
 		t.Fatalf("production OTP outbox error=%v", err)
+	}
+	withoutAuth := strings.Replace(validProductionConfig, `,"auth":{"provider":"generic","client_id":"client","client_secret":"secret-client","auth_url":"https://auth.example.test/authorize","token_url":"https://auth.example.test/token","user_info_url":"https://auth.example.test/userinfo","redirect_url":"https://cloud.example.test/v1/auth/browser/callback"}`, "", 1)
+	if err := os.WriteFile(path, []byte(`{`+withoutAuth+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "requires auth") {
+		t.Fatalf("missing auth error=%v", err)
 	}
 }
 
@@ -239,7 +245,6 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 		"OPSI_CLOUD_AUTH_USERINFO_URL":        "https://auth.example.test/userinfo",
 		"OPSI_CLOUD_AUTH_REDIRECT_URL":        "http://cloud.example.test/callback",
 		"OPSI_CLOUD_AUTH_SCOPES":              "openid, profile",
-		"OPSI_CLOUD_AGENT_TOKENS":             "agent-one, agent-two",
 	}
 	for name, value := range values {
 		t.Setenv(name, value)
@@ -272,7 +277,6 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 			OutboxPath:    "/tmp/alerts.log",
 			InternalToken: "alert-token",
 		},
-		AgentTokens:          []string{"agent-one", "agent-two"},
 		BootstrapWorkerToken: "worker-token",
 		BootstrapSecretKey:   "bootstrap-key",
 		Auth: AuthConfig{
@@ -337,16 +341,42 @@ func TestLoadConfigSplitsOAuthScopesEnvironment(t *testing.T) {
 	}
 }
 
-func TestLoadConfigSplitsAgentTokensEnvironment(t *testing.T) {
+func TestLoadConfigDevelopmentAllowsEmptySMTPAndOAuth(t *testing.T) {
 	clearCloudEnv(t)
-	t.Setenv("OPSI_CLOUD_AGENT_TOKENS", " token-one, token-two, ,token-three ")
+	path := filepath.Join(t.TempDir(), "cloud.json")
+	data := `{"smtp":{"host":"smtp.example.test","port":"587","username":"user","password":"secret","from":"opsi@example.test"},"auth":{"provider":"generic","client_id":"client","client_secret":"secret","auth_url":"https://auth.example.test/authorize","token_url":"https://auth.example.test/token","user_info_url":"https://auth.example.test/userinfo","redirect_url":"http://cloud.example.test/callback","scopes":["openid"]}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"OPSI_CLOUD_SMTP_HOST",
+		"OPSI_CLOUD_SMTP_PORT",
+		"OPSI_CLOUD_SMTP_USERNAME",
+		"OPSI_CLOUD_SMTP_PASSWORD",
+		"OPSI_CLOUD_SMTP_FROM",
+		"OPSI_CLOUD_AUTH_PROVIDER",
+		"OPSI_CLOUD_AUTH_CLIENT_ID",
+		"OPSI_CLOUD_AUTH_CLIENT_SECRET",
+		"OPSI_CLOUD_AUTH_AUTH_URL",
+		"OPSI_CLOUD_AUTH_TOKEN_URL",
+		"OPSI_CLOUD_AUTH_USERINFO_URL",
+		"OPSI_CLOUD_AUTH_REDIRECT_URL",
+		"OPSI_CLOUD_AUTH_SCOPES",
+	} {
+		t.Setenv(name, "")
+	}
 
-	cfg, err := LoadConfig("")
+	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(cfg.AgentTokens, []string{"token-one", "token-two", "token-three"}) {
-		t.Fatalf("agent tokens=%q", cfg.AgentTokens)
+	if cfg.SMTP != (SMTPConfig{}) {
+		t.Fatalf("SMTP config=%#v", cfg.SMTP)
+	}
+	if cfg.Auth.Provider != "" || cfg.Auth.ClientID != "" || cfg.Auth.ClientSecret != "" ||
+		cfg.Auth.AuthURL != "" || cfg.Auth.TokenURL != "" || cfg.Auth.UserInfoURL != "" ||
+		cfg.Auth.RedirectURL != "" || len(cfg.Auth.Scopes) != 0 {
+		t.Fatalf("auth config=%#v", cfg.Auth)
 	}
 }
 
@@ -372,7 +402,6 @@ func TestLoadConfigEnvironmentErrorDoesNotLeakSecrets(t *testing.T) {
 		"OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN": "secret-worker-token",
 		"OPSI_CLOUD_BOOTSTRAP_SECRET_KEY":   "secret-bootstrap-key",
 		"OPSI_CLOUD_AUTH_CLIENT_SECRET":     "secret-oauth-client",
-		"OPSI_CLOUD_AGENT_TOKENS":           "secret-agent-token",
 	}
 	for name, value := range secrets {
 		t.Setenv(name, value)

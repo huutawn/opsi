@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import re
 import stat
@@ -16,8 +15,39 @@ DEPLOY = ROOT / "deploy" / "dev-control-plane"
 ENV_PATH = DEPLOY / ".env"
 CLOUD_PATH = DEPLOY / "config" / "cloud.json"
 WORKER_PATH = DEPLOY / "config" / "bootstrap-worker.json"
-PLACEHOLDER = re.compile(r"REPLACE_WITH_|EXAMPLE_SECRET|CHANGE_ME")
+PLACEHOLDER_PREFIXES = ("REPLACE_WITH_",)
+PLACEHOLDER_VALUES = {"CHANGE_ME", "EXAMPLE_SECRET"}
 SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+CLOUD_ENV_NAMES = (
+    "OPSI_CLOUD_TTL",
+    "OPSI_CLOUD_DATABASE_URL",
+    "OPSI_CLOUD_PUBLIC_BASE_URL",
+    "OPSI_CLOUD_PRODUCTION",
+    "OPSI_CLOUD_ENABLE_DEBUG_UI",
+    "OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES",
+    "OPSI_CLOUD_OTP_DEV_ECHO",
+    "OPSI_CLOUD_OTP_OUTBOX_PATH",
+    "OPSI_CLOUD_SMTP_HOST",
+    "OPSI_CLOUD_SMTP_PORT",
+    "OPSI_CLOUD_SMTP_USERNAME",
+    "OPSI_CLOUD_SMTP_PASSWORD",
+    "OPSI_CLOUD_SMTP_FROM",
+    "OPSI_CLOUD_ALERTS_WEBHOOK_URL",
+    "OPSI_CLOUD_ALERTS_MIN_SEVERITY",
+    "OPSI_CLOUD_ALERTS_OUTBOX_PATH",
+    "OPSI_CLOUD_ALERTS_INTERNAL_TOKEN",
+    "OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN",
+    "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY",
+    "OPSI_CLOUD_AUTH_PROVIDER",
+    "OPSI_CLOUD_AUTH_CLIENT_ID",
+    "OPSI_CLOUD_AUTH_CLIENT_SECRET",
+    "OPSI_CLOUD_AUTH_AUTH_URL",
+    "OPSI_CLOUD_AUTH_TOKEN_URL",
+    "OPSI_CLOUD_AUTH_USERINFO_URL",
+    "OPSI_CLOUD_AUTH_REDIRECT_URL",
+    "OPSI_CLOUD_AUTH_SCOPES",
+)
 
 
 class ValidationError(Exception):
@@ -63,6 +93,33 @@ def parse_json(path: pathlib.Path, text: str) -> dict[str, object]:
     return value
 
 
+def is_placeholder(value: str) -> bool:
+    candidate = value.strip()
+    parts = re.split(r"[/@:?#=&]", candidate)
+    return any(
+        part in PLACEHOLDER_VALUES or part.startswith(PLACEHOLDER_PREFIXES)
+        for part in parts
+    )
+
+
+def contains_placeholder(value: object) -> bool:
+    if isinstance(value, str):
+        return is_placeholder(value)
+    if isinstance(value, list):
+        return any(contains_placeholder(item) for item in value)
+    if isinstance(value, dict):
+        return any(contains_placeholder(item) for item in value.values())
+    return False
+
+
+def parse_bool(value: str, name: str) -> bool:
+    if value in {"1", "t", "T", "true", "TRUE", "True"}:
+        return True
+    if value in {"0", "f", "F", "false", "FALSE", "False"}:
+        return False
+    fail(f"{name} must be a valid boolean")
+
+
 def require_string(mapping: dict[str, object], key: str, source: str) -> str:
     value = mapping.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -96,19 +153,42 @@ def main() -> int:
     env_text = read_text(ENV_PATH)
     cloud_text = read_text(CLOUD_PATH)
     worker_text = read_text(WORKER_PATH)
-    for path, text in ((ENV_PATH, env_text), (CLOUD_PATH, cloud_text), (WORKER_PATH, worker_text)):
-        if PLACEHOLDER.search(text):
-            fail(f"placeholder remains in {path.relative_to(ROOT)}")
+    for path in (ENV_PATH, CLOUD_PATH, WORKER_PATH):
         validate_permissions(path)
 
     env = parse_env(env_text)
     cloud = parse_json(CLOUD_PATH, cloud_text)
     worker = parse_json(WORKER_PATH, worker_text)
 
-    if bool(cloud.get("production")) or bool(worker.get("production")):
+    if any(is_placeholder(value) for value in env.values()):
+        fail(f"placeholder remains in {ENV_PATH.relative_to(ROOT)}")
+    for path, value in ((CLOUD_PATH, cloud), (WORKER_PATH, worker)):
+        if contains_placeholder(value):
+            fail(f"placeholder remains in {path.relative_to(ROOT)}")
+
+    for name in CLOUD_ENV_NAMES:
+        if name not in env:
+            fail(f".env is missing {name}")
+
+    cloud_production = parse_bool(env["OPSI_CLOUD_PRODUCTION"], "OPSI_CLOUD_PRODUCTION")
+    worker_production = worker.get("production", False)
+    if not isinstance(worker_production, bool):
+        fail("bootstrap-worker.production must be a boolean")
+    if cloud_production or worker_production:
         fail("deploy/dev-control-plane is an HTTP-only development package; production mode requires a separate HTTPS deployment")
 
-    for name in ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "OPSI_DEV_BIND_ADDRESS", "OPSI_DEV_HTTP_PORT"):
+    for name in (
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "OPSI_DEV_BIND_ADDRESS",
+        "OPSI_DEV_HTTP_PORT",
+        "OPSI_CLOUD_DATABASE_URL",
+        "OPSI_CLOUD_PUBLIC_BASE_URL",
+        "OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN",
+        "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY",
+        "OPSI_CLOUD_ALERTS_INTERNAL_TOKEN",
+    ):
         if not env.get(name):
             fail(f".env is missing {name}")
 
@@ -121,7 +201,9 @@ def main() -> int:
     if not 1 <= port <= 65535:
         fail("OPSI_DEV_HTTP_PORT must be between 1 and 65535")
 
-    database_url = require_string(cloud, "database_url", "cloud")
+    database_url = env.get("OPSI_CLOUD_DATABASE_URL", "")
+    if not database_url:
+        fail(".env is missing OPSI_CLOUD_DATABASE_URL")
     db = urlparse(database_url)
     if db.scheme not in {"postgres", "postgresql"} or db.hostname != "postgres" or db.port != 5432:
         fail("cloud.database_url must target the Compose postgres service on port 5432")
@@ -133,22 +215,28 @@ def main() -> int:
         fail("POSTGRES_DB does not match cloud.database_url")
     require_secret(env["POSTGRES_PASSWORD"], "POSTGRES_PASSWORD")
 
-    public_base_url = require_string(cloud, "public_base_url", "cloud").rstrip("/")
+    public_base_url = env.get("OPSI_CLOUD_PUBLIC_BASE_URL", "").rstrip("/")
+    if not public_base_url:
+        fail(".env is missing OPSI_CLOUD_PUBLIC_BASE_URL")
     expected_public_url = f"http://127.0.0.1:{port}"
     if public_base_url != expected_public_url:
         fail(f"cloud.public_base_url must be {expected_public_url} for this development package")
 
-    cloud_worker_token = require_string(cloud, "bootstrap_worker_token", "cloud")
+    cloud_worker_token = env.get("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN", "")
+    if not cloud_worker_token:
+        fail(".env is missing OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN")
     worker_token = require_string(worker, "bootstrap_worker_token", "bootstrap-worker")
     if cloud_worker_token != worker_token:
         fail("bootstrap_worker_token does not match between Cloud and Bootstrap Worker")
     require_secret(cloud_worker_token, "bootstrap_worker_token")
-    require_secret(require_string(cloud, "bootstrap_secret_key", "cloud"), "bootstrap_secret_key")
-
-    alerts = cloud.get("alerts")
-    if not isinstance(alerts, dict):
-        fail("cloud.alerts must be an object")
-    require_secret(require_string(alerts, "internal_token", "cloud.alerts"), "alerts.internal_token")
+    require_secret(
+        env.get("OPSI_CLOUD_BOOTSTRAP_SECRET_KEY", ""),
+        "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY",
+    )
+    require_secret(
+        env.get("OPSI_CLOUD_ALERTS_INTERNAL_TOKEN", ""),
+        "OPSI_CLOUD_ALERTS_INTERNAL_TOKEN",
+    )
 
     internal_cloud = parse_http_url(require_string(worker, "cloud_url", "bootstrap-worker"), "bootstrap-worker.cloud_url")
     if internal_cloud.hostname != "cloud" or internal_cloud.port != 9800:
