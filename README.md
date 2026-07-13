@@ -90,8 +90,9 @@ currently proves the complete scenario. See
 ## Roadmap order
 
 P01 development control-plane code is complete, while checkpoint `CP-VPS-1`
-remains `DEFERRED / UNPROVEN`. P02 is the current documentation task: adopt
-`docs/opsi_roadmap_v4.md` and ADR-004 without changing runtime behavior. P03 is
-the next implementation task. GitHub App, OIDC, trusted OCI delivery, managed
-runtime exposure, IncidentEvidence, Safe ActionPlane, CLI MCP, and production
-gates remain ordered future work and must not be inferred as implemented.
+remains `DEFERRED / UNPROVEN`. P02 documentation is retained. P03 Agent
+executable and deterministic Linux release artifact code is complete; P04
+resumable BootstrapJob work is next. GitHub App, OIDC, trusted OCI delivery,
+managed runtime exposure, IncidentEvidence, Safe ActionPlane, CLI MCP, and
+production gates remain ordered future work and must not be inferred as
+implemented.

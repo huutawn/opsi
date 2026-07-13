@@ -1,5 +1,10 @@
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
+GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf '%040d' 0)
+AGENT_VERSION ?= $(VERSION)
+AGENT_COMMIT ?= $(GIT_COMMIT)
+AGENT_RELEASE_DIR ?= dist/agent
+AGENT_LDFLAGS := -X main.version=$(AGENT_VERSION) -X main.commit=$(AGENT_COMMIT)
 GO_VERSION ?= 1.26.4
 NODE_VERSION ?= 24.16.0
 NPM_VERSION ?= 11.17.0
@@ -10,7 +15,7 @@ RUN :=
 PROXY :=
 DEV_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/dev-control-plane/.env -f deploy/dev-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm ui-build ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres build agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm ui-build ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -72,10 +77,16 @@ verify-dev-control-plane-clean-vm:
 
 build:
 	$(RUN) mkdir -p bin
-	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-agent ./cmd/opsi-agent
+	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(AGENT_LDFLAGS)" -o ../bin/opsi-agent ./cmd/opsi-agent
 	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi ./cmd/opsi
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-cloud ./cmd/opsi-cloud
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker
+
+agent-release:
+	$(RUN) env AGENT_VERSION="$(AGENT_VERSION)" AGENT_COMMIT="$(AGENT_COMMIT)" OUT_DIR="$(AGENT_RELEASE_DIR)" GOCACHE="$(GOCACHE)" GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/build-agent-release.sh
+
+verify-agent-release:
+	$(RUN) env GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/verify-agent-release.sh
 
 ui-build:
 	cd cli/ui && $(RUN) $(UI_NPM) ci

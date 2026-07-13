@@ -5,20 +5,22 @@ Agent is the execution brain that runs on the user's VPS. It provides config loa
 ## Build
 
 ```bash
- go build ./cmd/opsi-agent
+go build ./cmd/opsi-agent
 ```
 
 ## Test
 
 ```bash
- go test ./...
- go test -cover ./...
+go test ./...
+go test -cover ./...
 ```
 
 ## Run locally
 
 ```bash
- go run ./cmd/opsi-agent --config config.example.yaml
+go run ./cmd/opsi-agent --config config.example.yaml
+go run ./cmd/opsi-agent --config config.example.yaml --check
+go run ./cmd/opsi-agent --version
 ```
 
 Generate local development certificates first if TLS paths are enabled:
@@ -29,9 +31,31 @@ Generate local development certificates first if TLS paths are enabled:
 
 For local deployment smoke tests without containerd/K3s, keep `deployment.dry_run: true` in `config.example.yaml`. Production single-node K3s deployments use `git`, `nerdctl --namespace k8s.io build`, `kubectl apply`, `kubectl set image`, and `kubectl rollout status/undo`. Docker remains available with `deployment.builder_mode: docker` for compatibility or registry-oriented flows.
 
+## Linux release artifact
+
+From the repository root:
+
+```bash
+make agent-release
+make verify-agent-release
+```
+
+`make agent-release` writes a direct Linux amd64 executable plus deterministic
+metadata to:
+
+```text
+dist/agent/opsi-agent-linux-amd64
+dist/agent/checksums.txt
+dist/agent/release.json
+```
+
+The release artifact is built with explicit version and full commit metadata.
+It has not been published or hosted over HTTPS, and Bootstrap Worker has not
+been tested against this artifact on a VPS.
+
 ## Systemd Runtime
 
-Production Agent is intended to run as a native systemd service, not as a Docker container. A unit template is available at `packaging/systemd/opsi-agent.service`. Expected layout:
+Production Agent is intended to run as a native systemd service, not as a Docker container. A unit template is available at `packaging/systemd/opsi-agent.service`. The template currently describes this versioned layout:
 
 ```text
 /opt/opsi/agent/releases/<version>/opsi-agent
@@ -41,6 +65,10 @@ Production Agent is intended to run as a native systemd service, not as a Docker
 ```
 
 Rollback is a symlink switch back to a previous release followed by `systemctl restart opsi-agent`.
+
+Bootstrap installation commands do not yet use the same layout. P05 owns the
+canonical versioned systemd install layout and upgrade/rollback integration;
+P03 does not change Bootstrap Worker or the unit template.
 
 ## Phase 2 Deployment
 

@@ -39,6 +39,14 @@ bindings live under `contracts/`; business logic remains in the owning domain.
 
 ## Implemented Agent slice
 
+- The `opsi-agent` executable is restored as the single entrypoint over the
+  existing `config.Load` and `server.Run` composition. It requires `--config`
+  for runtime, supports config-only validation, and reports injected version
+  plus full commit metadata without requiring configuration.
+- A deterministic Linux amd64 release builder produces the direct executable,
+  `checksums.txt`, and stable `release.json` SHA-256 metadata. A local verifier
+  rebuilds twice with separate Go caches and compares the binary and metadata
+  byte-for-byte within the same source tree and Go toolchain.
 - Status, deployment, service management, telemetry, secret, and incident gRPC
   services; HTTP health; TLS 1.3 configuration with optional client certificate
   verification.
@@ -61,6 +69,12 @@ bindings live under `contracts/`; business logic remains in the owning domain.
 
 Agent does not currently provide public incident evidence or a unified action
 policy/approval/executor contract.
+
+The Agent release artifact is not hosted over HTTPS, and Bootstrap Worker has
+not been exercised against the real artifact. Target VPS evidence remains
+`UNPROVEN`. The current systemd unit layout and Bootstrap installation commands
+are not yet canonicalized; P05 owns the versioned systemd install layout and
+upgrade/rollback integration.
 
 ## Implemented CLI/local backend slice
 
@@ -191,17 +205,20 @@ artifact currently proves the complete scenario. Status remains
 
 Production readiness remains unproven. Current gaps include clean control-plane
 VM and restart proof, clean VPS bootstrap proof, GitHub App identity and
-installation trust, Actions OIDC, trusted OCI artifact delivery, managed
+installation trust, hosted and hardened Agent delivery, Actions OIDC, trusted
+OCI artifact delivery, managed
 gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
 E2E, release hardening, supply-chain evidence, and measured disaster recovery.
 
 ## Ordered next work
 
-P02 is the current documentation-only task and does not change implementation.
-P03 restores the deterministic Agent release artifact, followed by resumable
-bootstrap, GitHub App control-plane work, OIDC-bound trusted artifact delivery,
-runtime delivery, and the later evidence/ActionPlane/MCP phases. The ordered
-source of truth is `docs/opsi_roadmap_v4.md`.
+P03 Agent executable and deterministic local release artifact code is complete.
+P04 resumable BootstrapJob state is next, followed by P05 supply-chain,
+transport, installer, checksum, HTTPS, K3s pinning, and canonical systemd layout
+hardening, then P06 clean target VPS proof. GitHub App control-plane work,
+OIDC-bound trusted artifact delivery, runtime delivery, and the later
+evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
+of truth is `docs/opsi_roadmap_v4.md`.
 
 ## Verification commands
 
@@ -209,6 +226,11 @@ From repository root:
 
 ```bash
 make test
+make build
+make agent-release
+make verify-agent-release
+make release
+make smoke-release
 make verify-e2e-k3s-selfcheck
 make source-hygiene
 make package-source

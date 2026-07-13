@@ -34,8 +34,9 @@ separate Safe ActionPlane and human `ApprovalGrant` flow.
 
 ## 2. Current-state warning
 
-The trusted artifact flow in this roadmap is target architecture and is not
-implemented by P02.
+The trusted OCI artifact flow in this roadmap remains target architecture. P03
+restores the Agent executable and a direct Linux release artifact only; it does
+not implement application artifact delivery, Cloud routing, or CD.
 
 Current implementation facts remain:
 
@@ -266,13 +267,22 @@ Status: `DOC_ONLY` after the required documentation checks and commit.
 
 #### P03 - Restore Agent executable and deterministic release artifact
 
-- Restore or complete the Agent entrypoint.
-- Build a Linux amd64 binary.
-- Embed version metadata.
-- Publish a SHA-256 manifest.
-- Remove placeholder Agent URLs from real bootstrap configuration.
+Status: `CODE COMPLETE`.
+
+VPS/installer proof: `UNPROVEN`.
+
+- The Agent entrypoint composes the existing config loader and runtime without
+  copying `agent/internal/server` behavior.
+- The direct Linux amd64 binary embeds explicit version and full commit
+  metadata and is accompanied by deterministic SHA-256 and JSON manifests.
+- Local verification rebuilds with separate Go caches and compares the binary,
+  checksum, and manifest byte-for-byte in the same toolchain.
+- The artifact is not published or hosted over HTTPS. Bootstrap Worker was not
+  changed or tested against it, and no VPS evidence was created.
 
 #### P04 - Resumable BootstrapJob state machine
+
+Status: `NEXT`.
 
 - Persist per-step transitions.
 - Resume idempotently.
@@ -286,6 +296,8 @@ Status: `DOC_ONLY` after the required documentation checks and commit.
 - Enforce SSH known-host verification.
 - Require Agent-to-Cloud HTTPS.
 - Make install and upgrade behavior idempotent.
+- Establish the canonical versioned systemd install layout and integrate
+  upgrade/rollback behavior.
 
 #### P06 - Clean target VPS bootstrap proof
 
