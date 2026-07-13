@@ -785,13 +785,13 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 		t.Fatalf("k3s token status=%d body=%s", w.Code, w.Body.String())
 	}
 	privateKeyMarker := "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"private_key","ssh_private_key":"`+privateKeyMarker+`\nsecret\n-----END OPENSSH PRIVATE KEY-----"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/bootstrap-sessions", bytes.NewReader([]byte(`{"role":"first_server","public_host":"203.0.113.10","ssh_username":"root","auth_method":"private_key","ssh_private_key":"`+privateKeyMarker+`\nsecret\n-----END OPENSSH PRIVATE KEY-----","ssh_password":"unexpected"}`)))
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	req.Header.Set("Idempotency-Key", "boot-private-key")
 	req.Header.Set("X-Request-ID", "req-boot-private-key")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest || !bytes.Contains(w.Body.Bytes(), []byte("ssh_private_key cannot be stored by Cloud")) {
+	if w.Code != http.StatusBadRequest || !bytes.Contains(w.Body.Bytes(), []byte("private_key auth requires ssh_private_key only")) {
 		t.Fatalf("private key bootstrap status=%d body=%s", w.Code, w.Body.String())
 	}
 
@@ -1270,4 +1270,16 @@ func createProjectWithToken(t *testing.T, handler http.Handler, orgID, token, ke
 		t.Fatal(err)
 	}
 	return project.ID
+}
+
+func TestBootstrapCredentialAcceptsPrivateKeyWithoutLoggingIt(t *testing.T) {
+	key := "-----BEGIN OPENSSH " + "PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----"
+	credential, err := bootstrapCredential("private_key", "ubuntu", key, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearBootstrapCredential(&credential)
+	if credential.AuthMethod != "private_key" || credential.Username != "ubuntu" || string(credential.PrivateKey) != key || len(credential.Password) != 0 {
+		t.Fatalf("unexpected private-key credential metadata: method=%q user=%q private_key_bytes=%d password_bytes=%d", credential.AuthMethod, credential.Username, len(credential.PrivateKey), len(credential.Password))
+	}
 }

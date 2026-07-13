@@ -133,12 +133,7 @@ smoke-release:
 dev-control-plane-validate:
 	@command -v docker >/dev/null 2>&1 || { echo "Docker is required"; exit 1; }
 	@docker compose version >/dev/null 2>&1 || { echo "Docker Compose plugin is required"; exit 1; }
-	@for file in deploy/dev-control-plane/.env deploy/dev-control-plane/config/cloud.json deploy/dev-control-plane/config/bootstrap-worker.json; do \
-		test -f "$$file" || { echo "missing runtime file: $$file"; exit 1; }; \
-	done
-	@for file in deploy/dev-control-plane/.env deploy/dev-control-plane/config/cloud.json deploy/dev-control-plane/config/bootstrap-worker.json; do \
-		if rg -q 'REPLACE_WITH_|EXAMPLE_SECRET|CHANGE_ME' "$$file"; then echo "placeholder remains in $$file"; exit 1; fi; \
-	done
+	@./scripts/validate-dev-control-plane.py
 	@$(DEV_CONTROL_PLANE_COMPOSE) config --quiet
 
 dev-control-plane-build: dev-control-plane-validate

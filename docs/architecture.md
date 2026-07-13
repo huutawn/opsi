@@ -69,6 +69,11 @@ registration tokens rotate per attempt. Owner/Admin manual retry is
 project-scoped and idempotent. The worker still processes at most one session,
 and V3-014 owns any future per-step resumable BootstrapJob state machine.
 
+The worker uses a private control-plane URL for lease traffic and a distinct
+Agent-reachable Cloud URL when installing a remote Agent. Bootstrap credential
+handoff supports passwords and unencrypted SSH private keys; production requires
+known-host verification and encrypted PostgreSQL credential storage.
+
 ### 1.3 Current CLI/local backend boundary
 
 The production-oriented Browser boundary is localhost `/api/local/...` served by

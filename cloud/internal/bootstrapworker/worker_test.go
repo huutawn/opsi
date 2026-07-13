@@ -17,7 +17,11 @@ import (
 )
 
 func TestConfigValidation(t *testing.T) {
-	valid := Config{CloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, AgentInstallURL: "https://downloads.example/opsi-agent", SSHKnownHostsPath: "/etc/ssh/ssh_known_hosts", Production: true}
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHosts, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	valid := Config{CloudURL: "https://cloud-internal.example", AgentCloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), SSHKnownHostsPath: knownHosts, Production: true}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid daemon config failed: %v", err)
 	}
@@ -43,11 +47,11 @@ func TestConfigValidation(t *testing.T) {
 func TestLoadConfigDefaultsAndRejectsLegacySessionID(t *testing.T) {
 	dir := t.TempDir()
 	validPath := filepath.Join(dir, "valid.json")
-	if err := os.WriteFile(validPath, []byte(`{"cloud_url":"https://cloud.example","bootstrap_worker_token":"secret","worker_id":"  worker-1  ","agent_install_url":"https://downloads.example/agent"}`), 0o600); err != nil {
+	if err := os.WriteFile(validPath, []byte(`{"cloud_url":"http://cloud:9800","agent_cloud_url":"https://cloud.example","bootstrap_worker_token":"secret","worker_id":"  worker-1  ","agent_install_url":"https://downloads.example/agent"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(validPath)
-	if err != nil || cfg.WorkerID != "worker-1" || cfg.PollInterval != defaultPollInterval {
+	if err != nil || cfg.WorkerID != "worker-1" || cfg.PollInterval != defaultPollInterval || cfg.AgentCloudURL != "https://cloud.example" {
 		t.Fatalf("loaded cfg=%+v err=%v", cfg, err)
 	}
 	legacyPath := filepath.Join(dir, "legacy.json")
@@ -63,6 +67,38 @@ func TestLoadConfigDefaultsAndRejectsLegacySessionID(t *testing.T) {
 	}
 	if _, err := LoadConfig(invalidPollPath); err == nil || !strings.Contains(err.Error(), "poll_interval must be positive") {
 		t.Fatalf("invalid poll error=%v", err)
+	}
+}
+
+func TestBootstrapPlanUsesAgentReachableCloudURL(t *testing.T) {
+	cfg := Config{
+		CloudURL:           "http://cloud:9800",
+		AgentCloudURL:      "https://cloud.example",
+		AgentInstallURL:    "https://downloads.example/opsi-agent",
+		AgentInstallSHA256: strings.Repeat("a", 64),
+	}
+	bundle := testLease("boot-1", "host-1").Bundle
+	plan, err := BuildBootstrapPlan(cfg, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.Steps[len(plan.Steps)-1].Command.Env["OPSI_CLOUD_URL"]; got != "https://cloud.example" {
+		t.Fatalf("OPSI_CLOUD_URL=%q", got)
+	}
+}
+
+func TestClassifyConnectFailureDoesNotRetryInvalidSSHIdentity(t *testing.T) {
+	for _, message := range []string{
+		"parse ssh private key: invalid format",
+		"knownhosts: key mismatch",
+	} {
+		failure := classifyConnectFailure(message)
+		if failure.Retryable {
+			t.Fatalf("failure %q should not be retryable: %+v", message, failure)
+		}
+	}
+	if failure := classifyConnectFailure("dial tcp: i/o timeout"); !failure.Retryable || failure.Code != "BOOTSTRAP_CONNECT_FAILED" {
+		t.Fatalf("temporary network failure classification=%+v", failure)
 	}
 }
 
@@ -332,8 +368,12 @@ func TestValidateBundleInvalidAndUnsupportedTargets(t *testing.T) {
 	}
 	b = testLease("boot-1", "host-1").Bundle
 	b.SSH.AuthMethod, b.SSH.Password, b.SSH.PrivateKey = "private_key", "", "private-key-secret"
-	if err := ValidateBundle(b); !errors.Is(err, ErrRuntimeUnsupported) {
-		t.Fatalf("private key error=%v", err)
+	if err := ValidateBundle(b); err != nil {
+		t.Fatalf("private key should be accepted: %v", err)
+	}
+	b.SSH.PrivateKey = ""
+	if err := ValidateBundle(b); err == nil || !strings.Contains(err.Error(), "private key credential") {
+		t.Fatalf("missing private key error=%v", err)
 	}
 }
 
@@ -372,7 +412,7 @@ func newDaemonHarness(t *testing.T, leases []Lease) *daemonHarness {
 }
 
 func (h *daemonHarness) config() Config {
-	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, AgentInstallURL: "https://downloads.example/opsi-agent", Executor: h.executor, Logger: h.logger, HeartbeatInterval: 20 * time.Millisecond, HeartbeatRetryInterval: 5 * time.Millisecond, LeaseSafetyMargin: 10 * time.Millisecond}
+	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), Executor: h.executor, Logger: h.logger, HeartbeatInterval: 20 * time.Millisecond, HeartbeatRetryInterval: 5 * time.Millisecond, LeaseSafetyMargin: 10 * time.Millisecond}
 }
 
 func (h *daemonHarness) serveHTTP(w http.ResponseWriter, r *http.Request) {

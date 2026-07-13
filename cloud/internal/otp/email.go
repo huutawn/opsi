@@ -26,7 +26,7 @@ func (s SMTPSender) SendOTP(ctx context.Context, req Request, code string, expir
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if req.UserID == "" {
+	if req.Email == "" {
 		return fmt.Errorf("otp user email is required")
 	}
 	addr := s.Config.Host
@@ -38,7 +38,7 @@ func (s SMTPSender) SendOTP(ctx context.Context, req Request, code string, expir
 	}
 	message := strings.Join([]string{
 		"From: " + s.Config.From,
-		"To: " + req.UserID,
+		"To: " + req.Email,
 		"Subject: Opsi OTP code",
 		"Content-Type: text/plain; charset=utf-8",
 		"",
@@ -48,7 +48,7 @@ func (s SMTPSender) SendOTP(ctx context.Context, req Request, code string, expir
 	if s.Config.Username != "" || s.Config.Password != "" {
 		auth = smtp.PlainAuth("", s.Config.Username, s.Config.Password, s.Config.Host)
 	}
-	return smtp.SendMail(addr, auth, s.Config.From, []string{req.UserID}, []byte(message))
+	return smtp.SendMail(addr, auth, s.Config.From, []string{req.Email}, []byte(message))
 }
 
 type FileOutboxSender struct {
@@ -65,7 +65,7 @@ func (s FileOutboxSender) SendOTP(ctx context.Context, req Request, code string,
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
 		return err
 	}
-	line := fmt.Sprintf("%s project=%s user=%s purpose=%s expires_at=%s code=%s\n", time.Now().UTC().Format(time.RFC3339), req.ProjectID, req.UserID, req.Purpose, expiresAt.UTC().Format(time.RFC3339), code)
+	line := fmt.Sprintf("%s project=%s user=%s email=%s purpose=%s expires_at=%s code=%s\n", time.Now().UTC().Format(time.RFC3339), req.ProjectID, req.UserID, req.Email, req.Purpose, expiresAt.UTC().Format(time.RFC3339), code)
 	file, err := os.OpenFile(s.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err

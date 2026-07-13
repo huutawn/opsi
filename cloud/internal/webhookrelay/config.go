@@ -57,13 +57,14 @@ type AuthConfig struct {
 }
 
 type Route struct {
-	ProjectID    string `json:"project_id"`
-	ServiceID    string `json:"service_id"`
-	ServiceName  string `json:"service_name"`
-	ServiceType  string `json:"service_type"`
-	RepoURL      string `json:"repo_url"`
-	RepoFullName string `json:"repo_full_name"`
-	Branch       string `json:"branch"`
+	ProjectID     string `json:"project_id"`
+	ServiceID     string `json:"service_id"`
+	ServiceName   string `json:"service_name"`
+	ServiceType   string `json:"service_type"`
+	RepoURL       string `json:"repo_url"`
+	RepoFullName  string `json:"repo_full_name"`
+	Branch        string `json:"branch"`
+	WebhookSecret string `json:"webhook_secret"`
 }
 
 type Duration time.Duration
@@ -86,6 +87,14 @@ func LoadConfig(path string) (Config, error) {
 	if time.Duration(cfg.TTL) > 24*time.Hour {
 		return Config{}, fmt.Errorf("ttl must be <= 24h")
 	}
+	for i, route := range cfg.Routes {
+		if route.ProjectID == "" || route.ServiceID == "" || route.RepoFullName == "" || route.Branch == "" {
+			return Config{}, fmt.Errorf("routes[%d] requires project_id, service_id, repo_full_name and branch", i)
+		}
+		if len(route.WebhookSecret) < 32 {
+			return Config{}, fmt.Errorf("routes[%d].webhook_secret must contain at least 32 bytes", i)
+		}
+	}
 	if cfg.Production {
 		if cfg.DatabaseURL == "" {
 			return Config{}, fmt.Errorf("production requires database_url")
@@ -102,14 +111,20 @@ func LoadConfig(path string) (Config, error) {
 		if cfg.OTP.DevEcho {
 			return Config{}, fmt.Errorf("production forbids otp.dev_echo")
 		}
+		if cfg.OTP.OutboxPath != "" {
+			return Config{}, fmt.Errorf("production forbids otp.outbox_path")
+		}
+		if cfg.SMTP.Host == "" || cfg.SMTP.Port == "" || cfg.SMTP.From == "" {
+			return Config{}, fmt.Errorf("production requires smtp host, port and from")
+		}
 		if cfg.EnableDebugUI {
 			return Config{}, fmt.Errorf("production forbids enable_debug_ui")
 		}
 		if cfg.Auth.Provider == "" || cfg.Auth.ClientID == "" || cfg.Auth.ClientSecret == "" || cfg.Auth.AuthURL == "" || cfg.Auth.TokenURL == "" || cfg.Auth.UserInfoURL == "" || cfg.Auth.RedirectURL == "" {
 			return Config{}, fmt.Errorf("production requires auth OAuth config")
 		}
-		if cfg.PublicBaseURL != "" && !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
-			return Config{}, fmt.Errorf("production requires public_base_url to use https")
+		if cfg.PublicBaseURL == "" || !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
+			return Config{}, fmt.Errorf("production requires an https public_base_url")
 		}
 		cfg.RequireAgentSignatures = true
 	}

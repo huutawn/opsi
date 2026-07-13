@@ -23,6 +23,7 @@ var (
 type Request struct {
 	ProjectID string
 	UserID    string
+	Email     string
 	Purpose   string
 }
 

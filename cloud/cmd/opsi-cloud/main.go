@@ -86,6 +86,7 @@ func serveCloud(addr string, cfg webhookrelay.Config, stderr io.Writer) error {
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
 		relay.Registry = registry.PostgresService{DB: db}
 		relay.OTP.Store = otp.PostgresStore{DB: db}
+		relay.SetHealthCheck(db.PingContext)
 		if cfg.BootstrapSecretKey != "" {
 			credentials, err := webhookrelay.NewPostgresCredentialVault(db, cfg.BootstrapSecretKey)
 			if err != nil {
@@ -104,7 +105,15 @@ func serveCloud(addr string, cfg webhookrelay.Config, stderr io.Writer) error {
 		relay.OTP.Sender = otp.FileOutboxSender{Path: cfg.OTP.OutboxPath}
 	}
 
-	server := &http.Server{Addr: addr, Handler: relay.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           relay.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      45 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 1)

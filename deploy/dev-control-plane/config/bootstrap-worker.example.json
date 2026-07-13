@@ -1,5 +1,6 @@
 {
   "cloud_url": "http://cloud:9800",
+  "agent_cloud_url": "http://127.0.0.1:8080",
   "bootstrap_worker_token": "REPLACE_WITH_SAME_RANDOM_BOOTSTRAP_WORKER_TOKEN_AS_CLOUD_CONFIG",
   "worker_id": "opsi-dev-bootstrap-worker-1",
   "poll_interval": "3s",

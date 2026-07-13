@@ -1,65 +1,49 @@
 # Opsi Cloud
 
-Cloud is the relay and identity boundary. Current code includes the Phase 2 in-memory Webhook Relay runtime consumed by Agent long-poll clients, plus production-minimum PAT verify and OTP runtime backed by Postgres when `database_url` is configured.
+Opsi Cloud is the durable control-plane and identity boundary. It does not run workloads or store raw Agent logs/metrics. With PostgreSQL configured it owns organization/project membership, PAT/OAuth identity linkage, OTP requests, node/Agent registration, bootstrap/deployment queues, webhook relay metadata, idempotency, rate limits, and append-only audit events.
 
-## Phase 1 Auth Contract
+## Authentication currently implemented
 
-### Login
+- **Initial owner bootstrap:** local operator command `opsi-cloud admin bootstrap-owner`; creates the first user, organization, project, Owner membership, and optionally a one-time PAT file and/or prelinked OAuth subject.
+- **PAT:** bearer token verification scoped to a project or organization; bcrypt hashes only; expiry and revocation; issue through OAuth; client-safe rotate flow; revoke endpoint.
+- **Browser OAuth:** authorization-code mediation through `/v1/auth/browser/start`, `/callback`, and `/redeem`. The provider subject must already be linked to a user; provider email alone is not trusted.
+- **OTP:** PAT-authenticated `/v1/otp/request` and `/v1/otp/verify`; the recipient email is derived from the verified PAT identity, with salted hashes, five-minute expiry, one-time use, rate limiting, SMTP or file outbox.
+- **Agent auth:** one-time registration token exchange, then a scoped bearer credential stored as a bcrypt hash. Production also requires an HMAC timestamp/signature on Agent requests.
+- **Bootstrap worker auth:** shared worker token plus worker ID and per-lease token for internal bootstrap endpoints.
+- **Internal alert auth:** dedicated internal token.
 
-Implemented endpoint:
+There is no password login and no public self-sign-up endpoint.
 
-```http
-POST /v1/auth/login
-```
+## Main runtime responsibilities
 
-Returns a Personal Access Token once. Cloud must store only a bcrypt hash.
+- Registry APIs for organizations, projects, memberships, nodes, services, bootstrap sessions, deployments, and node lifecycle jobs.
+- Durable PostgreSQL migrations and stores when `database_url` is set.
+- GitHub webhook intake with route-specific SHA-256 HMAC verification, followed by a bounded sanitized relay to an authenticated Agent. Every configured route requires a webhook secret of at least 32 bytes.
+- Bootstrap session credential handoff. PostgreSQL mode encrypts SSH credentials and one-time Agent registration tokens with AES-GCM using `bootstrap_secret_key`.
+- Health and Prometheus metrics endpoints.
 
-### Verify PAT
+## Bootstrap Worker
 
-Future endpoint:
+`opsi-bootstrap-worker` is a separate daemon built from the same module. It leases one pending bootstrap session, retrieves the short-lived SSH credential and Agent registration token, connects to the target server, installs K3s and the Opsi Agent, registers the Agent, writes its configuration, starts its systemd service, renews the lease while working, and reports progress/failure back to Cloud.
 
-```http
-POST /v1/auth/pat/verify
-```
+The worker has two Cloud URLs:
 
-Request shape:
+- `cloud_url`: internal worker-to-Cloud control URL, such as `http://cloud:9800` inside Docker Compose.
+- `agent_cloud_url`: URL reachable from the target VPS and later used by the installed Agent. For a remote VPS this must be a public/private-routable HTTPS URL, not a Docker service name or `127.0.0.1`.
 
-```json
-{
-  "token": "plain-token-presented-by-agent",
-  "project_id": "dev-project"
-}
-```
+Password and unencrypted SSH private-key authentication are supported. Production requires a known-hosts file and HTTPS URLs.
 
-Response shape:
-
-```json
-{
-  "user_id": "uuid",
-  "role": "Owner",
-  "expires_at": "2026-09-16T00:00:00Z",
-  "revoked": false
-}
-```
-
-PAT verification compares the presented token against bcrypt hashes in `personal_access_tokens` and returns the project role from `project_memberships`. Cloud still needs OAuth login and PAT issuance/revoke endpoints.
-
-### OTP Delivery
-
-`POST /v1/otp/request` and `POST /v1/otp/verify` are implemented. OTP codes are salted and hashed, expire after 5 minutes, verify once, and are rate-limited per user. Configure SMTP for email delivery, or `otp.outbox_path` for a local file outbox. Codes are not returned by the API unless `otp.dev_echo` is enabled.
-
-## Build/Test
+## Build and test
 
 ```bash
- go test ./...
- go build ./cmd/opsi-cloud
- go run ./cmd/opsi-cloud --config config.example.json --addr 127.0.0.1:9800
+go test ./...
+go build ./cmd/opsi-cloud
+go build ./cmd/opsi-bootstrap-worker
 ```
 
-## Phase 2 Webhook Relay Contract
+Run configuration validation without starting either daemon:
 
-Contract source: `../contracts/cloud/v1/webhook_relay.md`.
-
-Cloud receives GitHub push webhooks at `POST /v1/webhooks/github`, maps repo/branch to `project_id` + `service_id`, keeps the signed envelope for at most 24 hours, and exposes `GET /v1/agents/{agent_id}/webhooks/next?project_id=...&wait=30s` for Agent long-poll. Agent validates `X-Hub-Signature-256` locally with its configured `deployment.webhook_secret` before deployment.
-
-The current runtime keeps relay envelopes in process memory and purges by TTL. It is suitable for local/dev validation of the Phase 2 contract; production Cloud still needs a durable queue/provider implementation with the same endpoint shape.
+```bash
+go run ./cmd/opsi-cloud --check --config config.example.json
+go run ./cmd/opsi-bootstrap-worker --check --config ../deploy/dev-control-plane/config/bootstrap-worker.example.json
+```

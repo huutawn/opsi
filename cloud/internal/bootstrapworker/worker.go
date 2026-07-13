@@ -2,6 +2,7 @@ package bootstrapworker
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ const (
 
 type Config struct {
 	CloudURL               string           `json:"cloud_url"`
+	AgentCloudURL          string           `json:"agent_cloud_url"`
 	BootstrapWorkerToken   string           `json:"bootstrap_worker_token"`
 	WorkerID               string           `json:"worker_id"`
 	PollInterval           time.Duration    `json:"-"`
@@ -50,6 +52,7 @@ type Config struct {
 
 type fileConfig struct {
 	CloudURL             string `json:"cloud_url"`
+	AgentCloudURL        string `json:"agent_cloud_url"`
 	BootstrapWorkerToken string `json:"bootstrap_worker_token"`
 	WorkerID             string `json:"worker_id"`
 	PollInterval         string `json:"poll_interval"`
@@ -110,7 +113,10 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, errors.New("session_id is no longer supported; bootstrap workers lease sessions automatically")
 		}
 	}
-	cfg := Config{CloudURL: raw.CloudURL, BootstrapWorkerToken: raw.BootstrapWorkerToken, WorkerID: strings.TrimSpace(raw.WorkerID), AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
+	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, BootstrapWorkerToken: raw.BootstrapWorkerToken, WorkerID: strings.TrimSpace(raw.WorkerID), AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
+	if cfg.AgentCloudURL == "" {
+		cfg.AgentCloudURL = cfg.CloudURL
+	}
 	if raw.PollInterval != "" {
 		cfg.PollInterval, err = time.ParseDuration(raw.PollInterval)
 		if err != nil {
@@ -133,12 +139,23 @@ func (c Config) Validate() error {
 	if c.CloudURL == "" {
 		return errors.New("cloud_url is required")
 	}
-	u, err := url.Parse(c.CloudURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return errors.New("cloud_url must be an absolute URL")
+	u, err := parseHTTPURL(c.CloudURL)
+	if err != nil {
+		return fmt.Errorf("cloud_url: %w", err)
 	}
 	if c.Production && u.Scheme != "https" {
 		return errors.New("production requires https cloud_url")
+	}
+	agentCloudURL := c.AgentCloudURL
+	if agentCloudURL == "" {
+		agentCloudURL = c.CloudURL
+	}
+	agentURL, err := parseHTTPURL(agentCloudURL)
+	if err != nil {
+		return fmt.Errorf("agent_cloud_url: %w", err)
+	}
+	if c.Production && agentURL.Scheme != "https" {
+		return errors.New("production requires https agent_cloud_url")
 	}
 	if c.BootstrapWorkerToken == "" {
 		return errors.New("bootstrap_worker_token is required")
@@ -157,6 +174,25 @@ func (c Config) Validate() error {
 	}
 	if c.Production && c.SSHKnownHostsPath == "" {
 		return errors.New("production requires ssh_known_hosts_path")
+	}
+	if c.SSHKnownHostsPath != "" {
+		info, err := os.Stat(c.SSHKnownHostsPath)
+		if err != nil {
+			return fmt.Errorf("ssh_known_hosts_path: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("ssh_known_hosts_path must be a regular file")
+		}
+	}
+	installURL, err := parseHTTPURL(c.AgentInstallURL)
+	if err != nil {
+		return fmt.Errorf("agent_install_url: %w", err)
+	}
+	if c.Production && installURL.Scheme != "https" {
+		return errors.New("production requires https agent_install_url")
+	}
+	if err := validateSHA256(c.AgentInstallSHA256); err != nil {
+		return fmt.Errorf("agent_install_sha256: %w", err)
 	}
 	if c.Timeout < 0 {
 		return errors.New("timeout must be positive")
@@ -316,7 +352,7 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 		return w.reportFailure(ctx, lease, failure)
 	}
 
-	target := RemoteTarget{Host: bundle.PublicHost, Port: bundle.SSHPort, Username: bundle.SSH.Username, Password: bundle.SSH.Password}
+	target := RemoteTarget{Host: bundle.PublicHost, Port: bundle.SSHPort, Username: bundle.SSH.Username, Password: bundle.SSH.Password, PrivateKey: bundle.SSH.PrivateKey}
 	if err := w.client.Progress(ctx, lease, "connecting", "connecting to target over SSH"); err != nil {
 		if isFatalCloudError(err) || isLeaseLossError(err) {
 			return err
@@ -333,7 +369,7 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 		if cause := context.Cause(ctx); cause != nil && cause != context.DeadlineExceeded {
 			return cause
 		}
-		failure := JobFailure{Code: "BOOTSTRAP_CONNECT_FAILED", Message: boundedFailureMessage(redactForLease(cfg, lease, err.Error())), Retryable: true}
+		failure := classifyConnectFailure(redactForLease(cfg, lease, err.Error()))
 		return w.reportFailure(ctx, lease, failure)
 	}
 	defer session.Close()
@@ -453,6 +489,18 @@ func classifyPlanFailure(err error) JobFailure {
 	return JobFailure{Code: code, Message: boundedFailureMessage(err.Error())}
 }
 
+func classifyConnectFailure(message string) JobFailure {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "parse ssh private key"):
+		return JobFailure{Code: "SSH_PRIVATE_KEY_INVALID", Message: boundedFailureMessage(message), Retryable: false}
+	case strings.Contains(lower, "knownhosts: key mismatch") || strings.Contains(lower, "knownhosts: key is unknown"):
+		return JobFailure{Code: "SSH_HOST_KEY_VERIFICATION_FAILED", Message: boundedFailureMessage(message), Retryable: false}
+	default:
+		return JobFailure{Code: "BOOTSTRAP_CONNECT_FAILED", Message: boundedFailureMessage(message), Retryable: true}
+	}
+}
+
 func classifyStepFailure(status, message string) JobFailure {
 	code, retryable := "BOOTSTRAP_CLOUD_TEMPORARY", true
 	if status == "preflight" {
@@ -499,11 +547,13 @@ func ValidateBundle(bundle Bundle) error {
 	}
 	switch bundle.SSH.AuthMethod {
 	case "password":
-		if bundle.SSH.Password == "" {
+		if bundle.SSH.Password == "" || bundle.SSH.PrivateKey != "" {
 			return errors.New("ssh password credential is missing")
 		}
 	case "private_key":
-		return fmt.Errorf("%w: ssh private key bootstrap is not supported by Cloud credential handoff", ErrRuntimeUnsupported)
+		if bundle.SSH.PrivateKey == "" || bundle.SSH.Password != "" {
+			return errors.New("ssh private key credential is missing")
+		}
 	default:
 		return errors.New("ssh auth_method is invalid")
 	}
@@ -527,18 +577,22 @@ func BuildBootstrapPlan(cfg Config, bundle Bundle) (BootstrapPlan, error) {
 	if bundle.Role != "" && bundle.Role != "first_server" {
 		return BootstrapPlan{}, fmt.Errorf("%w: only first_server bootstrap is implemented", ErrRuntimeUnsupported)
 	}
-	if cfg.AgentInstallURL == "" {
-		return BootstrapPlan{}, errors.New("agent_install_url is required for bootstrap runtime install")
-	}
-	u, err := url.Parse(cfg.AgentInstallURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return BootstrapPlan{}, errors.New("agent_install_url must be an absolute URL")
+	u, err := parseHTTPURL(cfg.AgentInstallURL)
+	if err != nil {
+		return BootstrapPlan{}, fmt.Errorf("agent_install_url: %w", err)
 	}
 	if cfg.Production && u.Scheme != "https" {
 		return BootstrapPlan{}, errors.New("production requires https agent_install_url")
 	}
+	if err := validateSHA256(cfg.AgentInstallSHA256); err != nil {
+		return BootstrapPlan{}, fmt.Errorf("agent_install_sha256: %w", err)
+	}
+	agentCloudURL := cfg.AgentCloudURL
+	if agentCloudURL == "" {
+		agentCloudURL = cfg.CloudURL
+	}
 	env := map[string]string{
-		"OPSI_CLOUD_URL":       strings.TrimRight(cfg.CloudURL, "/"),
+		"OPSI_CLOUD_URL":       strings.TrimRight(agentCloudURL, "/"),
 		"OPSI_NODE_ID":         bundle.NodeID,
 		"OPSI_PROJECT_ID":      bundle.ProjectID,
 		"OPSI_AGENT_URL":       cfg.AgentInstallURL,
@@ -552,6 +606,33 @@ func BuildBootstrapPlan(cfg Config, bundle Bundle) (BootstrapPlan, error) {
 		{Status: "installing_agent", Message: "installing Opsi Agent binary", Command: CommandSpec{Script: installAgentScript, Env: env}},
 		{Status: "registering_agent", Message: "registering and starting Opsi Agent", Command: CommandSpec{Script: registerAgentScript, Env: env, SensitiveEnv: secretEnv}},
 	}}, nil
+}
+
+func parseHTTPURL(raw string) (*url.URL, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, errors.New("is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil, errors.New("must be an absolute HTTP(S) URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, errors.New("must use http or https")
+	}
+	if u.User != nil || u.Fragment != "" {
+		return nil, errors.New("must not contain user info or a fragment")
+	}
+	return u, nil
+}
+
+func validateSHA256(raw string) error {
+	if len(raw) != 64 {
+		return errors.New("must contain exactly 64 hexadecimal characters")
+	}
+	if _, err := hex.DecodeString(raw); err != nil {
+		return errors.New("must be hexadecimal")
+	}
+	return nil
 }
 
 const preflightScript = `
@@ -608,7 +689,8 @@ health_addr: 127.0.0.1:9080
 cloud_endpoint: ${OPSI_CLOUD_URL}
 sqlite_path: /var/lib/opsi/opsi-agent.sqlite
 auth:
-  enabled: false
+  enabled: true
+  verify_cache_ttl: 15m
 cloud_relay:
   enabled: true
   project_id: ${OPSI_PROJECT_ID}

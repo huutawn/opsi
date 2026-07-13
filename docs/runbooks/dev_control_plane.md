@@ -76,6 +76,10 @@ cp deploy/dev-control-plane/config/bootstrap-worker.example.json \
    deploy/dev-control-plane/config/bootstrap-worker.json
 
 mkdir -p deploy/dev-control-plane/secrets
+chmod 0600 \
+  deploy/dev-control-plane/.env \
+  deploy/dev-control-plane/config/cloud.json \
+  deploy/dev-control-plane/config/bootstrap-worker.json
 chmod 0700 deploy/dev-control-plane/secrets
 ```
 
@@ -94,10 +98,19 @@ three runtime files. Use independently generated random values except that:
 
 - the PostgreSQL password in `.env` and `cloud.json` must match;
 - `bootstrap_worker_token` must match in both JSON files;
-- `public_base_url` must match the reverse-proxy bind address and port.
+- `public_base_url` must match the reverse-proxy address used by the CLI/browser;
+- `bootstrap-worker.json.cloud_url` is the internal Docker URL used by the
+  worker (`http://cloud:9800` in this package);
+- `bootstrap-worker.json.agent_cloud_url` must be reachable from every target
+  VPS because it is written into the installed Agent configuration. A Docker
+  service name and `127.0.0.1` are invalid for a remote target.
 
 The Agent URL and SHA-256 are operator-supplied development release inputs.
 This package does not claim that Agent release signing is implemented.
+
+The Bootstrap Worker accepts SSH password or unencrypted private-key
+credentials. In production mode, configure `ssh_known_hosts_path`; the default
+development mode does not verify the target host key.
 
 ### Validate and build
 
@@ -106,8 +119,10 @@ make dev-control-plane-validate
 make dev-control-plane-build
 ```
 
-Validation reports only the path of a file containing a placeholder; it does
-not print configuration or secret values.
+Validation parses both JSON files, checks restrictive file modes, cross-checks
+the PostgreSQL password and Bootstrap Worker token, validates the Agent binary
+URL/SHA-256, and rejects exposing this HTTP-only development package on a
+non-loopback bind address. It does not print secret values.
 
 ### Start and inspect health
 
@@ -125,7 +140,27 @@ curl --fail \
 
 If the bind address or port changed, use the values from `.env` for the health
 request. Cloud performs its existing PostgreSQL schema migration during startup
-after PostgreSQL becomes healthy.
+after PostgreSQL becomes healthy. `/health` also returns `503` if PostgreSQL is
+no longer reachable.
+
+The committed Caddy policy intentionally does not expose `/internal/*`,
+`/api/internal/*`, or `/metrics`. The Bootstrap Worker and observability stack
+must use the internal `cloud:9800` service address.
+
+### Access from a cloud VM
+
+This Compose package is HTTP-only and binds to `127.0.0.1` by default. For an
+initial control-plane test, keep that bind and use an SSH tunnel:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@control-plane-vm
+```
+
+Do not change `OPSI_DEV_BIND_ADDRESS` to `0.0.0.0` on an Internet-facing VM
+without replacing the development Caddy configuration with a real hostname,
+automatic HTTPS, and firewall rules. A remote Agent bootstrap additionally
+requires a routable HTTPS `agent_cloud_url`; an SSH tunnel used only by the
+operator is not reachable by the Agent.
 
 ### Bootstrap the first Owner
 

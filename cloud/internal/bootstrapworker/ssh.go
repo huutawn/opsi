@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"strconv"
@@ -15,10 +16,11 @@ import (
 )
 
 type RemoteTarget struct {
-	Host     string
-	Port     int
-	Username string
-	Password string
+	Host       string
+	Port       int
+	Username   string
+	Password   string
+	PrivateKey string
 }
 
 type CommandSpec struct {
@@ -58,9 +60,13 @@ func (e SSHExecutor) Connect(ctx context.Context, target RemoteTarget) (RemoteSe
 		}
 		hostKeyCallback = cb
 	}
+	authMethods, err := sshAuthMethods(target)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &ssh.ClientConfig{
 		User:            target.Username,
-		Auth:            []ssh.AuthMethod{ssh.Password(target.Password)},
+		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         15 * time.Second,
 	}
@@ -75,6 +81,23 @@ func (e SSHExecutor) Connect(ctx context.Context, target RemoteTarget) (RemoteSe
 		return nil, err
 	}
 	return sshSession{client: ssh.NewClient(c, chans, reqs)}, nil
+}
+
+func sshAuthMethods(target RemoteTarget) ([]ssh.AuthMethod, error) {
+	switch {
+	case target.PrivateKey != "" && target.Password != "":
+		return nil, errors.New("ssh target must use exactly one authentication method")
+	case target.PrivateKey != "":
+		signer, err := ssh.ParsePrivateKey([]byte(target.PrivateKey))
+		if err != nil {
+			return nil, fmt.Errorf("parse ssh private key: %w", err)
+		}
+		return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
+	case target.Password != "":
+		return []ssh.AuthMethod{ssh.Password(target.Password)}, nil
+	default:
+		return nil, errors.New("ssh credential is required")
+	}
 }
 
 type sshSession struct {

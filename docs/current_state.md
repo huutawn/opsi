@@ -81,6 +81,8 @@ Safe ActionPlane client.
 - Organization/project/membership metadata, RBAC, PAT verification and browser
   OAuth grant mediation, OTP, Agent/node registration, bootstrap sessions,
   deployment job envelopes, webhook relay, audit, and support metadata.
+- GitHub webhook routes require a per-route secret and Cloud verifies the
+  SHA-256 HMAC before accepting and sanitizing the payload.
 - Postgres-backed registry/relay/audit/idempotency/bootstrap/PAT/OTP state when
   configured; development/test modes may use in-memory implementations where
   production validation permits.
@@ -95,6 +97,13 @@ Safe ActionPlane client.
 - Worker configuration no longer accepts fixed `session_id`. The existing SSH,
   K3s, Agent install, registration, and Agent heartbeat verification sequence is
   unchanged after lease acquisition.
+- Bootstrap accepts password or unencrypted SSH private-key credentials. Worker
+  control traffic uses `cloud_url`, while the installed Agent receives the
+  separately configured, target-reachable `agent_cloud_url`.
+- Bootstrap-generated Agent configuration enables Cloud PAT verification even
+  though the Agent gRPC listener remains loopback-only. Cloud OTP request and
+  verification endpoints require the same project PAT and derive the delivery
+  email from the verified identity rather than trusting request input.
 - Active leases are renewed with authenticated heartbeats. Expired leases are
   recovered before polling, retryable failures use persisted exponential
   backoff, and exhausted or permanent failures enter `dead_letter`. Owner/Admin
@@ -129,7 +138,9 @@ Compose. The package starts PostgreSQL, Opsi Cloud, one Bootstrap Worker, and a
 Caddy reverse proxy. PostgreSQL data and Cloud OTP/alert outboxes use named
 volumes. All four services have health checks, `unless-stopped` restart policy,
 and bounded Docker logs. Cloud performs the existing schema migration during
-controlled startup after PostgreSQL becomes healthy.
+controlled startup after PostgreSQL becomes healthy, and Cloud health fails
+closed if PostgreSQL later becomes unavailable. The development reverse proxy
+does not expose worker-internal, alert-internal, or metrics endpoints.
 
 The committed configuration examples contain placeholders only. Runtime
 environment, Cloud/Worker configuration, secret directory, and initial PAT

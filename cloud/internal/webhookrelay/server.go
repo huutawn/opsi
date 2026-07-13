@@ -33,6 +33,7 @@ type Server struct {
 	limits        RateLimiter
 	observer      *Observer
 	alerts        *AlertManager
+	healthCheck   func(context.Context) error
 	authMu        sync.Mutex
 	oauthStates   map[string]oauthState
 	authGrants    map[string]authGrant
@@ -62,6 +63,10 @@ func (s *Server) SetSecurityStores(credentials CredentialVault, registrations Re
 	if limits != nil {
 		s.limits = limits
 	}
+}
+
+func (s *Server) SetHealthCheck(check func(context.Context) error) {
+	s.healthCheck = check
 }
 
 func (s *Server) Handler() http.Handler {
@@ -414,7 +419,15 @@ func base64Raw(data []byte) string {
 	return base64.RawURLEncoding.EncodeToString(data)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if s.healthCheck != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.healthCheck(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable"})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "queued_webhooks": s.Queue.Len()})
 }
 
@@ -439,6 +452,11 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no relay route for repo/branch")
 		return
 	}
+	signature := firstNonEmpty(r.Header.Get("X-Hub-Signature-256"), r.Header.Get("X-Hub-Signature"))
+	if !validGitHubWebhookSignature(route.WebhookSecret, body, signature) {
+		writeError(w, http.StatusUnauthorized, "github webhook signature is invalid")
+		return
+	}
 	now := time.Now().UTC()
 	ttl := time.Duration(s.Config.TTL)
 	if ttl <= 0 || ttl > 24*time.Hour {
@@ -456,7 +474,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		Branch:         branch,
 		TriggeredBy:    push.Pusher.Name,
 		Body:           string(body),
-		Signature:      firstNonEmpty(r.Header.Get("X-Hub-Signature-256"), r.Header.Get("X-Hub-Signature")),
+		Signature:      signature,
 		IdempotencyKey: firstNonEmpty(r.Header.Get("X-GitHub-Delivery"), sha256Hex(body)),
 		ReceivedAt:     now,
 		ExpiresAt:      now.Add(ttl),
@@ -466,6 +484,19 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": env.ID, "expires_at": env.ExpiresAt})
+}
+
+func validGitHubWebhookSignature(secret string, body []byte, signature string) bool {
+	if len(secret) < 32 || len(body) == 0 || !strings.HasPrefix(signature, "sha256=") {
+		return false
+	}
+	provided, err := hex.DecodeString(strings.TrimPrefix(signature, "sha256="))
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return hmac.Equal(mac.Sum(nil), provided)
 }
 
 func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) {
@@ -709,6 +740,22 @@ func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid otp request")
 		return
 	}
+	principal, ok := s.authorizeProject(w, r, req.ProjectID)
+	if !ok {
+		return
+	}
+	if s.Auth != nil {
+		if req.UserID != "" && req.UserID != principal.UserID {
+			writeError(w, http.StatusForbidden, "otp user does not match authenticated user")
+			return
+		}
+		req.UserID = principal.UserID
+		req.Email = principal.Email
+		if req.Email == "" {
+			writeError(w, http.StatusUnprocessableEntity, "authenticated user has no email address")
+			return
+		}
+	}
 	resp, err := s.OTP.RequestOTP(r.Context(), req)
 	if err != nil {
 		if err == otp.ErrRateLimited {
@@ -740,6 +787,17 @@ func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid otp verify request")
 		return
+	}
+	principal, ok := s.authorizeProject(w, r, req.ProjectID)
+	if !ok {
+		return
+	}
+	if s.Auth != nil {
+		if req.UserID != "" && req.UserID != principal.UserID {
+			writeError(w, http.StatusForbidden, "otp user does not match authenticated user")
+			return
+		}
+		req.UserID = principal.UserID
 	}
 	err := s.OTP.VerifyOTP(r.Context(), req.RequestID, req.ProjectID, req.UserID, req.Purpose, req.Code)
 	if err != nil {
