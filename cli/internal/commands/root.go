@@ -1,13 +1,23 @@
 package commands
 
 import (
+	"io"
+	"net"
+	"net/http"
+
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
+	"github.com/opsi-dev/opsi/cli/internal/repository"
 	"github.com/spf13/cobra"
 )
 
 type Options struct {
 	Version         string
 	KeychainFactory func() (keychain.Store, error)
+	HTTPClient      *http.Client
+	GitRunner       repository.CommandRunner
+	BrowserOpener   func(string) error
+	Listen          func(network, address string) (net.Listener, error)
+	Random          io.Reader
 }
 
 func NewRootCommand(options Options) *cobra.Command {
@@ -37,6 +47,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.AddCommand(newSecretCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newIncidentCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newLoginCommand(options.KeychainFactory))
+	root.AddCommand(newInitCommand(&configPath, options))
 	root.AddCommand(newStartCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(&cobra.Command{
 		Use:   "version",

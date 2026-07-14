@@ -23,7 +23,10 @@ delivery is defined by
   separate `/v1/webhooks/github-app` endpoint verifies the App-wide secret and
   atomically persists typed installation/repository events and delivery IDs in
   PostgreSQL. Numeric repository IDs are claimed by one Opsi project and may
-  bind multiple service keys within that project. GitHub Actions OIDC,
+  bind multiple service keys within that project. `opsi init` now matches a
+  safe local GitHub origin against Cloud metadata, claims the numeric repository
+  ID, creates the P09 service binding, and atomically writes a secret-free
+  `.opsi/opsi-cd.yaml` plus a manual bootstrap-only workflow. GitHub Actions OIDC,
   `BuildRecord`, digest deployment, `DeploymentPolicy`, and PR previews are not
   implemented.
 - Opsi does not currently render or manage Ingress, Gateway, domains, or TLS.
@@ -124,5 +127,7 @@ authentication/webhook code are complete, while live GitHub verification
 remains `UNPROVEN`. P09 durable installation/repository inventory, secure
 installation claim, single-project repository ownership, and monorepo service
 bindings are implemented with local/PostgreSQL evidence; live P09 GitHub proof
-remains `UNPROVEN`. P10 repository bootstrap is next.
+remains `UNPROVEN`. P10 repository bootstrap code and local tests are complete;
+its real GitHub App checkpoint remains `UNPROVEN`. P11 remains blocked until
+that checkpoint is run or explicitly recorded as deferred.
 Production readiness must not be inferred.

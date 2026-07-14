@@ -412,18 +412,35 @@ Live GitHub App checkpoint: `UNPROVEN`.
 
 #### P10 - `opsi init` and repository bootstrap
 
-Status: `NEXT`.
+Status: `CODE COMPLETE`.
 
-- Create `.opsi/opsi-cd.yaml`.
-- Create or propose `.github/workflows/opsi-cd.yaml`.
-- Require user review before commit.
-- Never silently modify a repository.
+Live GitHub App checkpoint: `UNPROVEN`.
 
-Checkpoint: `[GITHUB/VPS CHECKPOINT]` using a real GitHub App and public HTTPS.
+- Add a bounded no-redirect CLI Cloud client using the OS-keychain PAT and safe
+  HTTPS/loopback URL policy.
+- Detect supported GitHub.com origins without credential-helper enumeration;
+  use `owner/repo` only for metadata matching and numeric Cloud repository ID
+  as authoritative identity.
+- Optionally run the P09 installation-claim flow through a crypto-random,
+  one-time `127.0.0.1` callback, then refresh installation/repository inventory.
+- Validate the existing service and binding conflicts, claim the repository,
+  and create the P09 service binding without targeting Agent, Node, or VPS.
+- Deterministically create secret-free `.opsi/opsi-cd.yaml` and a manual-only
+  `.github/workflows/opsi-cd.yaml`; support idempotent rerun, JSON dry-run,
+  explicit `--force --yes`, atomic writes, and two-file rollback.
+- Local focused, race, full CLI, build, and fake Cloud/Git integration evidence
+  is required. No real GitHub App, Cloud VPS, SSH, Actions OIDC, BuildRecord,
+  image build/push, Agent deployment, or CD is part of P10.
+
+Checkpoint: `[GITHUB/VPS CHECKPOINT]` using a real GitHub App and public HTTPS;
+current status is `UNPROVEN`.
 
 ### Phase D - Trusted build and artifact delivery
 
 #### P11 - GitHub Actions OIDC verifier
+
+Entry condition: P10 live checkpoint must be run or explicitly recorded as
+deferred before P11 implementation begins.
 
 - Verify JWKS, issuer, audience, expiry, and not-before.
 - Enforce replay protection and claim policy.
@@ -631,7 +648,7 @@ Opsi must not be described as production-ready before P32 passes.
 |---|---|---|---|
 | CP-VPS-1 | P01 clean development control-plane install and restart | Clean Ubuntu control-plane VPS | `DEFERRED / UNPROVEN` |
 | CP-VPS-2 | P06 bootstrap and failure/recovery matrix | Clean Ubuntu target VPS | `DEFERRED / UNPROVEN` |
-| CP-GH-VPS-1 | P10 real GitHub App and public HTTPS | GitHub plus VPS | `NOT_RUN` |
+| CP-GH-VPS-1 | P10 real GitHub App and public HTTPS | GitHub plus VPS | `UNPROVEN` |
 | CP-GH-RUNNER-1 | P13 OIDC BuildRecord and public GHCR | GitHub-hosted runner | `NOT_RUN` |
 | CP-CD-1 | P20 main branch digest deployment | GitHub plus VPS | `NOT_RUN` |
 | CP-PR-1 | P21 preview policy and TTL | GitHub plus VPS | `NOT_RUN` |

@@ -26,7 +26,9 @@ artifacts. At this snapshot:
   implemented.
 - GitHub App user authorization, installation authentication/webhook intake,
   durable installation/repository inventory, secure installation claim, and
-  project/service mapping are implemented. GitHub Actions OIDC, `BuildRecord`, digest-based deployment,
+  project/service mapping are implemented. `opsi init` now performs safe local
+  GitHub origin matching, numeric repository claim, service binding, and atomic
+  repository bootstrap file generation. GitHub Actions OIDC, `BuildRecord`, digest-based deployment,
   `DeploymentPolicy`, and pull request preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
@@ -79,8 +81,19 @@ still prove the behavior on a clean target VPS.
 
 ## Implemented CLI/local backend slice
 
-- Cobra commands for login, start, status, deploy, sync, service, secret, and
+- Cobra commands for login, init, start, status, deploy, sync, service, secret, and
   incident list/get/resolve.
+- `opsi init` uses a bounded no-redirect Cloud HTTP client and OS-keychain PAT,
+  detects only supported GitHub.com origins without reading credential helpers,
+  and treats local `owner/repo` only as metadata for selecting a numeric Cloud
+  repository ID. A missing repository can use the P09 OAuth installation-claim
+  flow through a one-time loopback callback.
+- Repository bootstrap validates service/binding conflicts and both output
+  files before repository-claim or binding mutation. It supports idempotent
+  reruns, secret-free JSON dry-run, explicit `--force --yes`, atomic writes, and
+  two-file rollback. The generated CD config contains build/deployment intent
+  only; the generated workflow is manual bootstrap status and does not request
+  OIDC, build, push, call Cloud, or deploy.
 - OS-keychain PAT storage and Agent gRPC TLS/client-certificate/certificate-pin
   support.
 - `opsi start` localhost server with short local sessions, `/api/local/...`
@@ -265,7 +278,7 @@ artifact currently proves the complete scenario. Status remains
 
 Production readiness remains unproven. Current gaps include clean control-plane
 VM and restart proof, clean VPS bootstrap proof, live GitHub App installation
-and user-auth verification, repository bootstrap, hosted and hardened Agent
+and user-auth/repository-bootstrap verification, hosted and hardened Agent
 delivery, Actions OIDC, trusted
 OCI artifact delivery, managed
 gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
@@ -284,8 +297,10 @@ App user authorization code and P08 installation authentication/webhooks are
 code complete, while real GitHub verification is `UNPROVEN`. P09 durable
 inventory, verified installation claim, single-project repository ownership,
 and service binding are implemented with local and PostgreSQL tests; P09 live
-GitHub verification remains `UNPROVEN`. P10 `opsi init` and repository bootstrap
-are next;
+GitHub verification remains `UNPROVEN`. P10 `opsi init` repository bootstrap is
+`CODE COMPLETE` with local tests, while its live GitHub checkpoint remains
+`UNPROVEN`. P11 is blocked until that checkpoint is run or explicitly recorded
+as deferred;
 OIDC-bound trusted artifact delivery, runtime delivery, and the later
 evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
 of truth is `docs/opsi_roadmap_v4.md`.
