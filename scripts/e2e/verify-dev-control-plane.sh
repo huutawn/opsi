@@ -8,6 +8,7 @@ readonly CLOUD_CONFIG="$DEPLOY_DIR/config/cloud.json"
 readonly WORKER_CONFIG="$DEPLOY_DIR/config/bootstrap-worker.json"
 readonly SECRETS_DIR="$DEPLOY_DIR/secrets"
 readonly PAT_FILE="$SECRETS_DIR/initial-owner.pat"
+readonly GITHUB_APP_KEY_FILE="$SECRETS_DIR/github-app-private-key.pem"
 readonly EXPECTED_BRANCH="${OPSI_V3_013_BRANCH:-developer}"
 readonly REQUIRED_BASE_COMMIT="${OPSI_V3_013_BASE_COMMIT:-6dfcf75f30f8bd8b3bdf840176b86840cda9bd3b}"
 readonly HTTP_PORT="${OPSI_DEV_HTTP_PORT:-18080}"
@@ -203,6 +204,9 @@ replacements = {
     "OPSI_CLOUD_GITHUB_APP_CLIENT_ID": "",
     "OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET": "",
     "OPSI_CLOUD_GITHUB_APP_CALLBACK_URL": f"http://127.0.0.1:{port}/v1/auth/browser/callback",
+    "OPSI_CLOUD_GITHUB_APP_ID": "",
+    "OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH": "",
+    "OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET": "",
     "OPSI_CLOUD_ALERTS_INTERNAL_TOKEN": alert_token,
     "OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN": worker_token,
     "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY": bootstrap_key,
@@ -229,10 +233,13 @@ worker["agent_install_sha256"] = "0" * 64
 worker_dst.write_text(json.dumps(worker, indent=2) + "\n")
 PY
   : >"$SECRETS_DIR/ssh_known_hosts"
+  : >"$GITHUB_APP_KEY_FILE"
   chmod 0600 "$ENV_FILE" "$CLOUD_CONFIG" "$WORKER_CONFIG"
+  chmod 0600 "$GITHUB_APP_KEY_FILE"
   chmod 0640 "$SECRETS_DIR/ssh_known_hosts"
   [[ "$(stat -c '%a' "$SECRETS_DIR")" == "700" ]] || fail "secrets directory mode is not 0700"
   [[ "$(stat -c '%a' "$SECRETS_DIR/ssh_known_hosts")" == "640" ]] || fail "ssh_known_hosts mode is not 0640"
+  [[ "$(stat -c '%a' "$GITHUB_APP_KEY_FILE")" == "600" ]] || fail "GitHub App key placeholder mode is not 0600"
 }
 
 assert_service_list() {

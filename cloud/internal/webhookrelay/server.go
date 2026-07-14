@@ -22,29 +22,32 @@ import (
 )
 
 type Server struct {
-	Queue         RelayQueue
-	Config        Config
-	OTP           *otp.Service
-	Auth          *auth.Service
-	HTTPClient    *http.Client
-	Registry      registry.API
-	credentials   CredentialVault
-	registrations RegistrationVault
-	limits        RateLimiter
-	observer      *Observer
-	alerts        *AlertManager
-	healthCheck   func(context.Context) error
-	authMu        sync.Mutex
-	oauthStates   map[string]oauthState
-	authGrants    map[string]authGrant
-	now           func() time.Time
-	random        io.Reader
+	Queue              RelayQueue
+	Config             Config
+	OTP                *otp.Service
+	Auth               *auth.Service
+	HTTPClient         *http.Client
+	Registry           registry.API
+	credentials        CredentialVault
+	registrations      RegistrationVault
+	limits             RateLimiter
+	observer           *Observer
+	alerts             *AlertManager
+	healthCheck        func(context.Context) error
+	githubAppClient    *GitHubAppClient
+	githubAppEventSink GitHubAppEventSink
+	githubReplay       *githubReplayStore
+	authMu             sync.Mutex
+	oauthStates        map[string]oauthState
+	authGrants         map[string]authGrant
+	now                func() time.Time
+	random             io.Reader
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
-	return &Server{
+	server := &Server{
 		Queue:         NewQueue(),
 		Config:        cfg,
 		OTP:           service,
@@ -59,6 +62,8 @@ func NewServer(cfg Config) *Server {
 		authGrants:    map[string]authGrant{},
 		random:        rand.Reader,
 	}
+	server.githubReplay = newGitHubReplayStore(githubReplayMaxEntries, githubReplayTTL, server.clock)
+	return server
 }
 
 func (s *Server) clock() time.Time {
@@ -84,11 +89,16 @@ func (s *Server) SetHealthCheck(check func(context.Context) error) {
 	s.healthCheck = check
 }
 
+func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
+	s.githubAppClient = client
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
+	mux.HandleFunc("/v1/webhooks/github-app", s.handleGitHubAppWebhook)
 	mux.HandleFunc("/v1/auth/pat/verify", s.handlePATVerify)
 	mux.HandleFunc("/v1/auth/browser/start", s.handleBrowserAuthStart)
 	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)

@@ -54,12 +54,17 @@ services:
       OPSI_CLOUD_GITHUB_APP_CLIENT_ID: ${OPSI_CLOUD_GITHUB_APP_CLIENT_ID}
       OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET: ${OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET}
       OPSI_CLOUD_GITHUB_APP_CALLBACK_URL: ${OPSI_CLOUD_GITHUB_APP_CALLBACK_URL}
+      OPSI_CLOUD_GITHUB_APP_ID: ${OPSI_CLOUD_GITHUB_APP_ID}
+      OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH: ${OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH}
+      OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET: ${OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./config/cloud.json:/etc/opsi/cloud.json:ro,Z
+      - ./secrets/github-app-private-key.pem:/run/secrets/github-app-private-key.pem:ro,Z
       - ./secrets:/run/opsi-secrets:Z
+      - ./secrets/github-app-private-key.pem:/run/opsi-secrets/github-app-private-key.pem:ro,Z
       - cloud-data:/var/lib/opsi
     read_only: true
     tmpfs:

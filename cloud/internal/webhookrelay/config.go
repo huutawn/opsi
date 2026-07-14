@@ -53,9 +53,16 @@ type AlertConfig struct {
 }
 
 type GitHubAppConfig struct {
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	CallbackURL  string `json:"callback_url"`
+	ClientID       string `json:"client_id"`
+	ClientSecret   string `json:"client_secret"`
+	CallbackURL    string `json:"callback_url"`
+	AppID          int64  `json:"app_id"`
+	PrivateKeyPath string `json:"private_key_path"`
+	WebhookSecret  string `json:"webhook_secret"`
+}
+
+func (c GitHubAppConfig) InstallationEnabled() bool {
+	return c.AppID != 0 || c.PrivateKeyPath != "" || c.WebhookSecret != ""
 }
 
 type Route struct {
@@ -138,6 +145,11 @@ func applyEnvOverrides(cfg *Config) error {
 	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CLIENT_ID", &cfg.GitHubApp.ClientID)
 	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET", &cfg.GitHubApp.ClientSecret)
 	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL", &cfg.GitHubApp.CallbackURL)
+	if err := applyInt64Env("OPSI_CLOUD_GITHUB_APP_ID", &cfg.GitHubApp.AppID); err != nil {
+		return err
+	}
+	applyStringEnv("OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH", &cfg.GitHubApp.PrivateKeyPath)
+	applyStringEnv("OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET", &cfg.GitHubApp.WebhookSecret)
 	return nil
 }
 
@@ -155,6 +167,23 @@ func applyBoolEnv(name string, target *bool) error {
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return fmt.Errorf("%s must be a valid boolean", name)
+	}
+	*target = parsed
+	return nil
+}
+
+func applyInt64Env(name string, target *int64) error {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	if value == "" {
+		*target = 0
+		return nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return fmt.Errorf("%s must be a positive base-10 integer", name)
 	}
 	*target = parsed
 	return nil
@@ -250,11 +279,11 @@ func validateGitHubAppConfig(cfg *Config) error {
 		return fmt.Errorf("github_app.client_id and github_app.client_secret must be configured together")
 	}
 
-	enabled := github.ClientID != ""
-	if cfg.Production && !enabled {
+	userAuthorizationEnabled := github.ClientID != ""
+	if cfg.Production && !userAuthorizationEnabled {
 		return fmt.Errorf("production requires github_app client_id, client_secret and callback_url")
 	}
-	if enabled && github.CallbackURL == "" {
+	if userAuthorizationEnabled && github.CallbackURL == "" {
 		return fmt.Errorf("github_app.callback_url is required when GitHub user authorization is enabled")
 	}
 	if github.CallbackURL != "" {
@@ -275,7 +304,43 @@ func validateGitHubAppConfig(cfg *Config) error {
 	if cfg.Production && github.CallbackURL == "" {
 		return fmt.Errorf("production requires github_app client_id, client_secret and callback_url")
 	}
+
+	github.WebhookSecret = trimOneTrailingNewline(github.WebhookSecret)
+	if github.AppID < 0 {
+		return fmt.Errorf("github_app.app_id must be a positive integer")
+	}
+	installationEnabled := github.InstallationEnabled()
+	if installationEnabled {
+		if github.AppID <= 0 || github.PrivateKeyPath == "" || github.WebhookSecret == "" {
+			return fmt.Errorf("github_app app_id, private_key_path and webhook_secret must be configured together")
+		}
+		if strings.TrimSpace(github.PrivateKeyPath) != github.PrivateKeyPath {
+			return fmt.Errorf("github_app.private_key_path must not contain leading or trailing whitespace")
+		}
+		if strings.TrimSpace(github.WebhookSecret) != github.WebhookSecret {
+			return fmt.Errorf("github_app.webhook_secret must not contain leading or trailing whitespace")
+		}
+		if strings.IndexFunc(github.WebhookSecret, unicode.IsControl) >= 0 {
+			return fmt.Errorf("github_app.webhook_secret must not contain control characters")
+		}
+		if len([]byte(github.WebhookSecret)) < 32 {
+			return fmt.Errorf("github_app.webhook_secret must contain at least 32 bytes")
+		}
+		if err := validateGitHubAppPrivateKeyFile(github.PrivateKeyPath); err != nil {
+			return err
+		}
+	}
+	if cfg.Production && !installationEnabled {
+		return fmt.Errorf("production requires github_app app_id, private_key_path and webhook_secret")
+	}
 	return nil
+}
+
+func trimOneTrailingNewline(value string) string {
+	if strings.HasSuffix(value, "\r\n") {
+		return strings.TrimSuffix(value, "\r\n")
+	}
+	return strings.TrimSuffix(value, "\n")
 }
 
 func validateGitHubCallbackURL(raw string, production bool) (*url.URL, error) {

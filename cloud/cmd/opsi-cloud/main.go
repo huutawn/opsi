@@ -57,20 +57,32 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	var githubAppClient *webhookrelay.GitHubAppClient
+	if cfg.GitHubApp.InstallationEnabled() {
+		githubAppClient, err = webhookrelay.NewGitHubAppClient(cfg.GitHubApp, nil, nil)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
 	if *check {
 		fmt.Fprintln(stdout, "configuration valid")
 		return 0
 	}
-	if err := serveCloud(*addr, cfg, stderr); err != nil {
+	if err := serveCloud(*addr, cfg, githubAppClient, stderr); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	return 0
 }
 
-func serveCloud(addr string, cfg webhookrelay.Config, stderr io.Writer) error {
+func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookrelay.GitHubAppClient, stderr io.Writer) error {
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	relay := webhookrelay.NewServer(cfg)
+	if githubAppClient != nil {
+		relay.SetGitHubAppClient(githubAppClient)
+		logger.Info("GitHub App signer loaded", "app_id", cfg.GitHubApp.AppID)
+	}
 	var db *sql.DB
 	var err error
 	if cfg.DatabaseURL != "" {

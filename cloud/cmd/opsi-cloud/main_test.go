@@ -2,6 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +49,54 @@ func TestVersionAndCheckRemainAvailable(t *testing.T) {
 	stderr.Reset()
 	if code := run([]string{"--check"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "configuration valid") {
 		t.Fatalf("check exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestCheckLoadsGitHubAppPrivateKey(t *testing.T) {
+	for _, name := range []string{
+		"OPSI_CLOUD_GITHUB_APP_CLIENT_ID",
+		"OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET",
+		"OPSI_CLOUD_GITHUB_APP_CALLBACK_URL",
+		"OPSI_CLOUD_GITHUB_APP_ID",
+		"OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH",
+		"OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET",
+	} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "github-app.pem")
+	configPath := filepath.Join(dir, "cloud.json")
+	writeConfig := func() {
+		data := fmt.Sprintf(`{"github_app":{"app_id":12345,"private_key_path":%q,"webhook_secret":"12345678901234567890123456789012"}}`, keyPath)
+		if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig()
+	invalidContent := "sensitive-invalid-private-key-content"
+	if err := os.WriteFile(keyPath, []byte(invalidContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--check", "--config", configPath}, &stdout, &stderr); code != 1 || strings.Contains(stderr.String(), invalidContent) {
+		t.Fatalf("invalid key check exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--check", "--config", configPath}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "configuration valid") {
+		t.Fatalf("valid key check exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 

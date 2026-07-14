@@ -372,15 +372,25 @@ Live GitHub App checkpoint: `UNPROVEN`.
 
 #### P08 - GitHub App installation authentication and webhooks
 
-Status: `NEXT`.
+Status: `CODE COMPLETE`.
+
+Live GitHub App checkpoint: `UNPROVEN`.
 
 - Configure App ID.
-- Handle the App private key safely.
-- Create installation JWTs and installation access tokens.
-- Verify webhook signatures.
-- Process installation and repository events.
+- Load an RSA PKCS#1 or RSA-in-PKCS#8 private key once from a protected
+  read-only file; key replacement requires a Cloud restart.
+- Create RS256 App JWTs and in-memory cached installation access tokens.
+- Verify the App-wide webhook secret on `/v1/webhooks/github-app` without
+  changing the legacy route-specific push webhook.
+- Parse typed installation and repository events with numeric IDs as identity.
+- Protect delivery IDs with a bounded 24-hour in-memory replay store.
+- Keep the durable event sink and installation/repository mapping for P09;
+  supported mutations return `503` while no sink is configured.
+- No real GitHub App, installation token, or webhook was exercised in P08.
 
 #### P09 - Repository and service mapping
+
+Status: `NEXT`.
 
 - Store installation identity.
 - Store GitHub repository ID.

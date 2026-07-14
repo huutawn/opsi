@@ -16,11 +16,13 @@ ENV_PATH = DEPLOY / ".env"
 CLOUD_PATH = DEPLOY / "config" / "cloud.json"
 WORKER_PATH = DEPLOY / "config" / "bootstrap-worker.json"
 KNOWN_HOSTS_PATH = DEPLOY / "secrets" / "ssh_known_hosts"
+GITHUB_APP_KEY_PATH = DEPLOY / "secrets" / "github-app-private-key.pem"
 PLACEHOLDER_PREFIXES = ("REPLACE_WITH_",)
 PLACEHOLDER_VALUES = {"CHANGE_ME", "EXAMPLE_SECRET"}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 K3S_VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$")
 GITHUB_CALLBACK_PATH = "/v1/auth/browser/callback"
+GITHUB_APP_CONTAINER_KEY_PATH = "/run/secrets/github-app-private-key.pem"
 LEGACY_CLOUD_AUTH_ENV_PREFIX = "OPSI_CLOUD_" + "AUTH_"
 
 CLOUD_ENV_NAMES = (
@@ -46,6 +48,9 @@ CLOUD_ENV_NAMES = (
     "OPSI_CLOUD_GITHUB_APP_CLIENT_ID",
     "OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET",
     "OPSI_CLOUD_GITHUB_APP_CALLBACK_URL",
+    "OPSI_CLOUD_GITHUB_APP_ID",
+    "OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH",
+    "OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET",
 )
 
 
@@ -167,38 +172,57 @@ def validate_github_app_config(env: dict[str, str], production: bool, public_bas
         fail("production requires GitHub App Client ID, Client Secret, and callback URL")
     if client_id and not callback_url:
         fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL is required when GitHub user authorization is enabled")
-    if not callback_url:
-        return
-
-    callback = urlparse(callback_url)
-    if not callback.scheme or not callback.hostname:
-        fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL must be an absolute URL")
-    try:
-        callback.port
-    except ValueError:
-        fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL contains an invalid port")
-    if callback.username or callback.password or "?" in callback_url or "#" in callback_url:
-        fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL must not contain user info, query, or fragment")
-    if callback.path != GITHUB_CALLBACK_PATH:
-        fail(f"OPSI_CLOUD_GITHUB_APP_CALLBACK_URL path must be {GITHUB_CALLBACK_PATH}")
-    if production:
-        if callback.scheme != "https":
-            fail("production GitHub App callback URL must use HTTPS")
-        public = urlparse(public_base_url)
+    if callback_url:
+        callback = urlparse(callback_url)
+        if not callback.scheme or not callback.hostname:
+            fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL must be an absolute URL")
         try:
-            public.port
+            callback.port
         except ValueError:
-            fail("cloud.public_base_url contains an invalid port")
-        if (
-            public.scheme != callback.scheme
-            or public.hostname != callback.hostname
-            or effective_port(public) != effective_port(callback)
-        ):
-            fail("production GitHub App callback URL must match cloud.public_base_url scheme and host")
-    elif callback.scheme == "http" and callback.hostname not in {"127.0.0.1", "localhost"}:
-        fail("development GitHub App callback URL must use HTTPS or loopback HTTP")
-    elif callback.scheme not in {"http", "https"}:
-        fail("GitHub App callback URL must use HTTP(S)")
+            fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL contains an invalid port")
+        if callback.username or callback.password or "?" in callback_url or "#" in callback_url:
+            fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL must not contain user info, query, or fragment")
+        if callback.path != GITHUB_CALLBACK_PATH:
+            fail(f"OPSI_CLOUD_GITHUB_APP_CALLBACK_URL path must be {GITHUB_CALLBACK_PATH}")
+        if production:
+            if callback.scheme != "https":
+                fail("production GitHub App callback URL must use HTTPS")
+            public = urlparse(public_base_url)
+            try:
+                public.port
+            except ValueError:
+                fail("cloud.public_base_url contains an invalid port")
+            if (
+                public.scheme != callback.scheme
+                or public.hostname != callback.hostname
+                or effective_port(public) != effective_port(callback)
+            ):
+                fail("production GitHub App callback URL must match cloud.public_base_url scheme and host")
+        elif callback.scheme == "http" and callback.hostname not in {"127.0.0.1", "localhost"}:
+            fail("development GitHub App callback URL must use HTTPS or loopback HTTP")
+        elif callback.scheme not in {"http", "https"}:
+            fail("GitHub App callback URL must use HTTP(S)")
+
+    app_id = env.get("OPSI_CLOUD_GITHUB_APP_ID", "")
+    private_key_path = env.get("OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH", "")
+    webhook_secret = env.get("OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET", "")
+    installation_fields = (bool(app_id), bool(private_key_path), bool(webhook_secret))
+    installation_enabled = any(installation_fields)
+    if installation_enabled and not all(installation_fields):
+        fail("GitHub App ID, private-key path, and webhook secret must be configured together")
+    if production and not installation_enabled:
+        fail("production requires GitHub App installation authentication and webhook configuration")
+    if not installation_enabled:
+        return
+    try:
+        parsed_app_id = int(app_id, 10)
+    except ValueError:
+        fail("OPSI_CLOUD_GITHUB_APP_ID must be a positive integer")
+    if parsed_app_id <= 0:
+        fail("OPSI_CLOUD_GITHUB_APP_ID must be a positive integer")
+    if private_key_path != GITHUB_APP_CONTAINER_KEY_PATH:
+        fail(f"OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH must be {GITHUB_APP_CONTAINER_KEY_PATH}")
+    require_secret(webhook_secret, "OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET")
 
 
 def validate_permissions(path: pathlib.Path) -> None:
@@ -220,6 +244,23 @@ def validate_known_hosts_file(path: pathlib.Path) -> bool:
     if mode & 0o022:
         fail(f"{path.relative_to(ROOT)} must not be group/world writable")
     return info.st_size > 0
+
+
+def validate_github_app_key_file(path: pathlib.Path, enabled: bool) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"missing runtime file: {path.relative_to(ROOT)}")
+    if stat.S_ISLNK(info.st_mode):
+        fail(f"{path.relative_to(ROOT)} must not be a symlink")
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{path.relative_to(ROOT)} must be a regular file")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        fail(f"{path.relative_to(ROOT)} must not be group/world writable")
+    if stat.S_IMODE(info.st_mode) & 0o015:
+        fail(f"{path.relative_to(ROOT)} must not grant group execute or world access")
+    if enabled and info.st_size == 0:
+        fail(f"{path.relative_to(ROOT)} must not be empty when GitHub App installation integration is enabled")
 
 
 def main() -> int:
@@ -255,6 +296,10 @@ def main() -> int:
         env,
         cloud_production,
         env.get("OPSI_CLOUD_PUBLIC_BASE_URL", ""),
+    )
+    validate_github_app_key_file(
+        GITHUB_APP_KEY_PATH,
+        bool(env.get("OPSI_CLOUD_GITHUB_APP_ID", "")),
     )
     worker_production = worker.get("production", False)
     if not isinstance(worker_production, bool):

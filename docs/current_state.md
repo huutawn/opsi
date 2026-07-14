@@ -24,7 +24,8 @@ artifacts. At this snapshot:
   storage compatibility but are not read, exposed, or executed.
 - `IncidentEvidence v1`, Safe ActionPlane, and `opsi mcp serve` are not
   implemented.
-- GitHub App user authorization is implemented. Installation authentication,
+- GitHub App user authorization and P08 installation authentication/webhook
+  intake are implemented. Durable installation/repository mapping,
   GitHub Actions OIDC, `BuildRecord`, digest-based deployment,
   `DeploymentPolicy`, and pull request preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
@@ -110,9 +111,17 @@ Safe ActionPlane client.
   persisted, audited, or returned to the CLI. Pending state and local grants
   remain in memory and are lost on Cloud restart. The flow has focused test
   coverage but no live GitHub App verification.
-- The current webhook HMAC route is not GitHub App installation-token support,
-  installation/repository event ownership, or the target per-App webhook
-  control plane.
+- GitHub App installation authentication loads an RSA PKCS#1 or RSA-in-PKCS#8
+  private key once from a protected read-only file, creates RS256 App JWTs with
+  a one-minute `iat` backdate and nine-minute expiry, and requests installation
+  access tokens from the fixed GitHub endpoint. Tokens are cached only in
+  memory per installation and refreshed with a two-minute safety window.
+- `/v1/webhooks/github-app` verifies the App-wide SHA-256 webhook secret before
+  decoding and emits typed installation/repository events using numeric IDs as
+  identity. Its 24-hour, 10,000-entry replay state is in memory and lost on
+  restart. P08 intentionally provides no durable sink: supported mutations
+  return `503` until P09 injects one. The legacy `/v1/webhooks/github` route and
+  `routes[].webhook_secret` behavior remain unchanged.
 - Postgres-backed registry/relay/audit/idempotency/bootstrap/PAT/OTP state when
   configured; development/test modes may use in-memory implementations where
   production validation permits.
@@ -243,8 +252,9 @@ artifact currently proves the complete scenario. Status remains
 `MANUAL_GATED`.
 
 Production readiness remains unproven. Current gaps include clean control-plane
-VM and restart proof, clean VPS bootstrap proof, GitHub App installation trust
-and live user-auth verification, hosted and hardened Agent delivery, Actions OIDC, trusted
+VM and restart proof, clean VPS bootstrap proof, live GitHub App installation
+and user-auth verification, durable repository mapping, hosted and hardened
+Agent delivery, Actions OIDC, trusted
 OCI artifact delivery, managed
 gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
 E2E, release hardening, supply-chain evidence, and measured disaster recovery.
@@ -257,8 +267,9 @@ blocked by the pre-existing full-Cloud OTP/PAT regression gate. P05 supply-chain
 transport, installer, checksum, HTTPS, K3s pinning, and canonical systemd layout
 hardening is implemented with focused/race and development smoke evidence. P06 clean target VPS proof
 remains `DEFERRED / UNPROVEN`; there is no clean target VPS evidence. P07 GitHub
-App user authorization code is complete with focused tests, while real GitHub
-verification is `UNPROVEN`. P08 installation authentication and webhooks are next;
+App user authorization code and P08 installation authentication/webhooks are
+code complete, while real GitHub verification is `UNPROVEN`. P09 durable
+installation/repository mapping is next;
 OIDC-bound trusted artifact delivery, runtime delivery, and the later
 evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
 of truth is `docs/opsi_roadmap_v4.md`.
