@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -544,22 +545,28 @@ type Readiness struct {
 }
 
 type Service struct {
-	mu           sync.Mutex
-	projects     map[string]Project
-	envs         map[string]Environment
-	runtimes     map[string]Runtime
-	nodes        map[string]Node
-	agents       map[string]Agent
-	bootstraps   map[string]BootstrapSession
-	events       map[string][]BootstrapEvent
-	services     map[string]ServiceRecord
-	deployments  map[string]DeploymentJob
-	lifecycles   map[string]NodeLifecycleJob
-	deployEvents map[string][]DeploymentEvent
-	deployLocks  map[string]deploymentLock
-	audit        []AuditEvent
-	idempotency  map[string]any
-	now          func() time.Time
+	mu                      sync.Mutex
+	projects                map[string]Project
+	envs                    map[string]Environment
+	runtimes                map[string]Runtime
+	nodes                   map[string]Node
+	agents                  map[string]Agent
+	bootstraps              map[string]BootstrapSession
+	events                  map[string][]BootstrapEvent
+	services                map[string]ServiceRecord
+	deployments             map[string]DeploymentJob
+	lifecycles              map[string]NodeLifecycleJob
+	deployEvents            map[string][]DeploymentEvent
+	deployLocks             map[string]deploymentLock
+	audit                   []AuditEvent
+	idempotency             map[string]any
+	githubInstallations     map[int64]GitHubInstallation
+	githubRepositories      map[int64]GitHubRepository
+	githubInstallationLinks map[string]GitHubInstallationProjectLink
+	githubRepositoryClaims  map[int64]GitHubRepositoryClaim
+	githubServiceBindings   map[string]GitHubServiceBinding
+	githubWebhookDeliveries map[string]GitHubWebhookDelivery
+	now                     func() time.Time
 }
 
 type API interface {
@@ -601,25 +608,44 @@ type API interface {
 	ListDeployments(projectID string) ([]DeploymentJob, error)
 	DeploymentEvents(projectID, deploymentID string) ([]DeploymentEvent, error)
 	ListAudit(projectID string) ([]AuditEvent, error)
+	UpsertGitHubInstallation(installation GitHubInstallation) (GitHubInstallation, error)
+	UpsertGitHubRepository(repository GitHubRepository) (GitHubRepository, error)
+	MarkGitHubInstallationStatus(installationID int64, status string, suspended bool) error
+	MarkGitHubRepositoryStatus(repositoryID int64, status string) error
+	RecordGitHubWebhookEvent(ctx context.Context, event GitHubWebhookMutation) (bool, error)
+	ListGitHubInstallations(projectID string) ([]GitHubInstallation, error)
+	ListGitHubRepositories(projectID string) ([]GitHubRepository, error)
+	ClaimGitHubInstallation(projectID string, installationID int64, userID string) (GitHubInstallationProjectLink, error)
+	ClaimGitHubRepository(projectID string, repositoryID int64, userID string) (GitHubRepositoryClaim, error)
+	ReleaseGitHubRepository(projectID string, repositoryID int64, userID string) error
+	CreateGitHubServiceBinding(projectID string, draft GitHubServiceBindingDraft) (GitHubServiceBinding, error)
+	RemoveGitHubServiceBinding(projectID, bindingID, userID string) error
+	ListGitHubServiceBindings(projectID string) ([]GitHubServiceBinding, error)
 	Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any)
 }
 
 func NewService() *Service {
 	return &Service{
-		projects:     map[string]Project{},
-		envs:         map[string]Environment{},
-		runtimes:     map[string]Runtime{},
-		nodes:        map[string]Node{},
-		agents:       map[string]Agent{},
-		bootstraps:   map[string]BootstrapSession{},
-		events:       map[string][]BootstrapEvent{},
-		services:     map[string]ServiceRecord{},
-		deployments:  map[string]DeploymentJob{},
-		lifecycles:   map[string]NodeLifecycleJob{},
-		deployEvents: map[string][]DeploymentEvent{},
-		deployLocks:  map[string]deploymentLock{},
-		audit:        []AuditEvent{},
-		idempotency:  map[string]any{},
+		projects:                map[string]Project{},
+		envs:                    map[string]Environment{},
+		runtimes:                map[string]Runtime{},
+		nodes:                   map[string]Node{},
+		agents:                  map[string]Agent{},
+		bootstraps:              map[string]BootstrapSession{},
+		events:                  map[string][]BootstrapEvent{},
+		services:                map[string]ServiceRecord{},
+		deployments:             map[string]DeploymentJob{},
+		lifecycles:              map[string]NodeLifecycleJob{},
+		deployEvents:            map[string][]DeploymentEvent{},
+		deployLocks:             map[string]deploymentLock{},
+		audit:                   []AuditEvent{},
+		idempotency:             map[string]any{},
+		githubInstallations:     map[int64]GitHubInstallation{},
+		githubRepositories:      map[int64]GitHubRepository{},
+		githubInstallationLinks: map[string]GitHubInstallationProjectLink{},
+		githubRepositoryClaims:  map[int64]GitHubRepositoryClaim{},
+		githubServiceBindings:   map[string]GitHubServiceBinding{},
+		githubWebhookDeliveries: map[string]GitHubWebhookDelivery{},
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,124 @@ func (s *Server) handleRegistryAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func (s *Server) handleGitHubInstallationsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "github_installation", projectID, "owner", "admin", "developer", "viewer", "support") {
+		return
+	}
+	installations, err := s.Registry.ListGitHubInstallations(projectID)
+	writeRegistryResult(w, r, map[string]any{"installations": installations}, err, http.StatusOK)
+}
+
+func (s *Server) handleGitHubRepositoriesAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "github_repository", projectID, "owner", "admin", "developer", "viewer", "support") {
+		return
+	}
+	repositories, err := s.Registry.ListGitHubRepositories(projectID)
+	writeRegistryResult(w, r, map[string]any{"repositories": repositories}, err, http.StatusOK)
+}
+
+func (s *Server) handleGitHubRepositoryClaimAPI(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "github_repository", r.PathValue("repository_id"), "owner", "admin") {
+		return
+	}
+	repositoryID, err := strconv.ParseInt(r.PathValue("repository_id"), 10, 64)
+	if err != nil || repositoryID <= 0 {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "GITHUB_REPOSITORY_ID_INVALID", Message: "repository_id must be a positive integer", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		claim, err := s.Registry.ClaimGitHubRepository(projectID, repositoryID, principal.UserID)
+		writeRegistryResult(w, r, claim, err, http.StatusOK)
+	case http.MethodDelete:
+		if err := s.Registry.ReleaseGitHubRepository(projectID, repositoryID, principal.UserID); err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"released": true})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleGitHubBindingsAPI(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if !s.requireRole(w, r, principal, projectID, "github_service_binding", projectID, "owner", "admin", "developer", "viewer", "support") {
+			return
+		}
+		bindings, err := s.Registry.ListGitHubServiceBindings(projectID)
+		writeRegistryResult(w, r, map[string]any{"bindings": bindings}, err, http.StatusOK)
+	case http.MethodPost:
+		if !s.requireRole(w, r, principal, projectID, "github_service_binding", projectID, "owner", "admin") {
+			return
+		}
+		var draft registry.GitHubServiceBindingDraft
+		if !decodeJSON(w, r, &draft) {
+			return
+		}
+		draft.CreatedBy = principal.UserID
+		binding, err := s.Registry.CreateGitHubServiceBinding(projectID, draft)
+		writeRegistryResult(w, r, binding, err, http.StatusCreated)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleGitHubBindingAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "github_service_binding", r.PathValue("binding_id"), "owner", "admin") {
+		return
+	}
+	if err := s.Registry.RemoveGitHubServiceBinding(projectID, r.PathValue("binding_id"), principal.UserID); err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"removed": true})
+}
+
+func (s *Server) authorizeGitHubProject(w http.ResponseWriter, r *http.Request, projectID string) (auth.VerifyResult, bool) {
+	if s.Auth == nil {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "AUTH_UNAVAILABLE", Message: "PAT authentication is not configured", RequestID: r.Header.Get("X-Request-ID")})
+		return auth.VerifyResult{}, false
+	}
+	token := bearerToken(r)
+	if token == "" {
+		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "AUTH_REQUIRED", Message: "Authorization bearer token is required", RequestID: r.Header.Get("X-Request-ID")})
+		return auth.VerifyResult{}, false
+	}
+	principal, err := s.Auth.VerifyPAT(r.Context(), auth.VerifyRequest{Token: token, ProjectID: projectID})
+	if err != nil {
+		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "AUTH_INVALID", Message: "Authorization bearer token is invalid", RequestID: r.Header.Get("X-Request-ID")})
+		return auth.VerifyResult{}, false
+	}
+	return principal, true
 }
 
 func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID string, principal auth.VerifyResult) {
@@ -571,6 +690,10 @@ func writeRegistryFailure(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	if errors.Is(err, registry.ErrNotFound) {
 		writeRegistryError(w, registry.APIError{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "Resource was not found.", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	if errors.Is(err, registry.ErrGitHubEventConflict) {
+		writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "GITHUB_EVENT_CONFLICT", Message: "GitHub numeric identity conflicts with stored inventory", RequestID: r.Header.Get("X-Request-ID")})
 		return
 	}
 	writeRegistryError(w, registry.APIError{Status: http.StatusInternalServerError, Code: "INTERNAL", Message: "Internal server error.", RequestID: r.Header.Get("X-Request-ID")})

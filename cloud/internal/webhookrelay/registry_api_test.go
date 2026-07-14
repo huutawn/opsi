@@ -1278,3 +1278,133 @@ func TestBootstrapCredentialAcceptsPrivateKeyWithoutLoggingIt(t *testing.T) {
 		t.Fatalf("unexpected private-key credential metadata: method=%q user=%q private_key_bytes=%d password_bytes=%d", credential.AuthMethod, credential.Username, len(credential.PrivateKey), len(credential.Password))
 	}
 }
+
+func TestGitHubInventoryClaimBindingAPIAndRBAC(t *testing.T) {
+	server, projectID, token, store := installationClaimServer(t, "owner", roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("GitHub network should not be called by inventory APIs")
+		return nil, nil
+	}))
+	installation := registry.GitHubInstallation{InstallationID: 7001, AccountID: 8001, AccountLogin: "example", AccountType: "Organization", Status: registry.GitHubInstallationActive}
+	repository := registry.GitHubRepository{RepositoryID: 9001, InstallationID: installation.InstallationID, OwnerID: 8001, OwnerLogin: "example", Name: "mono", FullName: "example/mono", Private: true, DefaultBranch: "main", Status: registry.GitHubRepositoryActive}
+	if _, err := server.Registry.UpsertGitHubInstallation(installation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.UpsertGitHubRepository(repository); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.ClaimGitHubInstallation(projectID, installation.InstallationID, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	service, err := server.Registry.CreateService(projectID, registry.ServiceDraft{Name: "api"}, "service-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, role := range []string{"owner", "admin", "developer", "viewer", "support"} {
+		store.Candidates[0].Role = role
+		response := serveGitHubAPI(server, token, http.MethodGet, "/v1/projects/"+projectID+"/github/installations", "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("role=%s installations status=%d body=%s", role, response.Code, response.Body.String())
+		}
+		response = serveGitHubAPI(server, token, http.MethodGet, "/v1/projects/"+projectID+"/github/repositories", "")
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"repository_id":9001`) {
+			t.Fatalf("role=%s repositories status=%d body=%s", role, response.Code, response.Body.String())
+		}
+	}
+	for _, role := range []string{"viewer", "developer", "support"} {
+		store.Candidates[0].Role = role
+		response := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/repositories/9001/claim", "{}")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("role=%s claim status=%d body=%s", role, response.Code, response.Body.String())
+		}
+		response = serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", `{"service_id":"`+service.ID+`","repository_id":9001,"service_key":"api"}`)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("role=%s binding status=%d body=%s", role, response.Code, response.Body.String())
+		}
+	}
+
+	store.Candidates[0].Role = "owner"
+	claimResponse := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/repositories/9001/claim", "{}")
+	if claimResponse.Code != http.StatusOK {
+		t.Fatalf("claim status=%d body=%s", claimResponse.Code, claimResponse.Body.String())
+	}
+	invalidKey := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", `{"service_id":"`+service.ID+`","repository_id":9001,"service_key":"Invalid"}`)
+	if invalidKey.Code != http.StatusBadRequest {
+		t.Fatalf("invalid key status=%d body=%s", invalidKey.Code, invalidKey.Body.String())
+	}
+	invalidPath := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", `{"service_id":"`+service.ID+`","repository_id":9001,"service_key":"api","config_path":"../opsi.yaml"}`)
+	if invalidPath.Code != http.StatusBadRequest {
+		t.Fatalf("invalid path status=%d body=%s", invalidPath.Code, invalidPath.Body.String())
+	}
+	bindingResponse := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", `{"service_id":"`+service.ID+`","repository_id":9001,"service_key":"api"}`)
+	if bindingResponse.Code != http.StatusCreated {
+		t.Fatalf("binding status=%d body=%s", bindingResponse.Code, bindingResponse.Body.String())
+	}
+	var binding registry.GitHubServiceBinding
+	if err := json.Unmarshal(bindingResponse.Body.Bytes(), &binding); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", `{"service_id":"`+service.ID+`","repository_id":9001,"service_key":"api"}`)
+	var duplicateBinding registry.GitHubServiceBinding
+	if duplicate.Code != http.StatusCreated || json.Unmarshal(duplicate.Body.Bytes(), &duplicateBinding) != nil || duplicateBinding.ID != binding.ID {
+		t.Fatalf("duplicate status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	release := serveGitHubAPI(server, token, http.MethodDelete, "/v1/projects/"+projectID+"/github/repositories/9001/claim", "")
+	if release.Code != http.StatusConflict {
+		t.Fatalf("release with binding status=%d body=%s", release.Code, release.Body.String())
+	}
+	removePath := "/v1/projects/" + projectID + "/github/bindings/" + binding.ID
+	for range 2 {
+		remove := serveGitHubAPI(server, token, http.MethodDelete, removePath, "")
+		if remove.Code != http.StatusOK {
+			t.Fatalf("remove status=%d body=%s", remove.Code, remove.Body.String())
+		}
+	}
+	release = serveGitHubAPI(server, token, http.MethodDelete, "/v1/projects/"+projectID+"/github/repositories/9001/claim", "")
+	if release.Code != http.StatusOK {
+		t.Fatalf("release status=%d body=%s", release.Code, release.Body.String())
+	}
+
+	inactive := repository
+	inactive.RepositoryID, inactive.Status = 9002, registry.GitHubRepositoryRemoved
+	if _, err := server.Registry.UpsertGitHubRepository(inactive); err != nil {
+		t.Fatal(err)
+	}
+	response := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/repositories/9002/claim", "{}")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("inactive claim status=%d body=%s", response.Code, response.Body.String())
+	}
+	archived := repository
+	archived.RepositoryID, archived.Archived = 9003, true
+	if _, err := server.Registry.UpsertGitHubRepository(archived); err != nil {
+		t.Fatal(err)
+	}
+	response = serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/repositories/9003/claim", "{}")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("archived claim status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	otherProject, err := server.Registry.CreateProject("org", "Other", "other", "user-2", "other-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherInstallation := registry.GitHubInstallation{InstallationID: 7002, AccountID: 8002, AccountLogin: "private-other", AccountType: "Organization", Status: registry.GitHubInstallationActive}
+	otherRepository := registry.GitHubRepository{RepositoryID: 9010, InstallationID: 7002, OwnerID: 8002, OwnerLogin: "private-other", Name: "secret", FullName: "private-other/secret", DefaultBranch: "main", Status: registry.GitHubRepositoryActive}
+	_, _ = server.Registry.UpsertGitHubInstallation(otherInstallation)
+	_, _ = server.Registry.UpsertGitHubRepository(otherRepository)
+	_, _ = server.Registry.ClaimGitHubInstallation(otherProject.ID, otherInstallation.InstallationID, "user-2")
+	response = serveGitHubAPI(server, token, http.MethodGet, "/v1/projects/"+projectID+"/github/repositories", "")
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "private-other") || strings.Contains(response.Body.String(), "9010") {
+		t.Fatalf("cross-project inventory leaked: %s", response.Body.String())
+	}
+}
+
+func serveGitHubAPI(server *Server, token, method, path, body string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}

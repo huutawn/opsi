@@ -122,3 +122,18 @@ func TestIssuePATForOAuthRequiresPrelinkedProviderSubject(t *testing.T) {
 		t.Fatalf("expected unlinked subject rejection, got %v", err)
 	}
 }
+
+func TestResolveOAuthUserIsReadOnlyAndRequiresPrelinkedIdentity(t *testing.T) {
+	store := &MemoryStore{OAuthIdentities: map[string]string{"github\x0012345": "user-1"}}
+	service := Service{Store: store}
+	userID, err := service.ResolveOAuthUser(context.Background(), "github", "12345")
+	if err != nil || userID != "user-1" {
+		t.Fatalf("userID=%q err=%v", userID, err)
+	}
+	if len(store.Candidates) != 0 {
+		t.Fatalf("read-only resolution issued PAT candidates: %+v", store.Candidates)
+	}
+	if _, err := service.ResolveOAuthUser(context.Background(), "github", "missing"); !errors.Is(err, ErrOAuthIdentity) {
+		t.Fatalf("missing identity err=%v", err)
+	}
+}

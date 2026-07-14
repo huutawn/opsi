@@ -2,17 +2,23 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/opsi-dev/opsi/cloud/internal/adminbootstrap"
+	"github.com/opsi-dev/opsi/cloud/internal/webhookrelay"
 )
 
 func TestBootstrapOwnerHelpListsIdentityFlags(t *testing.T) {
@@ -164,5 +170,30 @@ func TestBootstrapOutputNeverContainsPATMaterial(t *testing.T) {
 	writeBootstrapOwnerResult(&output, adminbootstrap.Result{UserID: "u", OrganizationID: "o", ProjectID: "p", MembershipRole: "Owner", PATCreated: true}, "/tmp/initial-owner.pat")
 	if strings.Contains(output.String(), "opsi_pat_") {
 		t.Fatalf("human output leaked PAT: %s", output.String())
+	}
+}
+
+func TestConfigureGitHubAppEventSinkWiresSupportedMutationsAndFailsClosed(t *testing.T) {
+	secret := strings.Repeat("s", 32)
+	cfg := webhookrelay.Config{GitHubApp: webhookrelay.GitHubAppConfig{AppID: 123, WebhookSecret: secret}}
+	server := webhookrelay.NewServer(cfg)
+	if err := configureGitHubAppEventSink(server, cfg); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"action":"created","installation":{"id":101,"account":{"id":202,"login":"example","type":"Organization"}}}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/webhooks/github-app", bytes.NewReader(body))
+	request.Header.Set("X-GitHub-Event", "installation")
+	request.Header.Set("X-GitHub-Delivery", "main-wiring")
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	server.Registry = nil
+	if err := configureGitHubAppEventSink(server, cfg); err == nil {
+		t.Fatal("enabled GitHub installation integration accepted nil registry")
 	}
 }

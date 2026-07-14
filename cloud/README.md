@@ -8,6 +8,7 @@ Opsi Cloud is the durable control-plane and identity boundary. It does not run w
 - **PAT:** bearer token verification scoped to a project or organization; bcrypt hashes only; expiry and revocation; issue through prelinked GitHub identity; client-safe rotate flow; revoke endpoint.
 - **GitHub App user authorization:** authorization-code mediation through `/v1/auth/browser/start`, `/callback`, and `/redeem`, using fixed GitHub endpoints, PKCE S256, five-minute one-time state, and provider `github`. The subject is the canonical decimal form of the positive numeric GitHub user ID. The identity must already be linked to an Opsi user; login/email are never used as fallback identity and no user or membership is created automatically.
 - **GitHub App installation authentication:** an RSA PKCS#1 or RSA-in-PKCS#8 private key is loaded once from an absolute, non-symlink, non-writable regular file. Cloud creates nine-minute RS256 App JWTs and obtains installation access tokens from the fixed GitHub API endpoint. Installation tokens are cached only in memory and refreshed when fewer than two minutes remain.
+- **GitHub installation claim:** PAT-authenticated Owner/Admin starts a purpose-bound OAuth flow for one project and numeric installation ID. The callback compares GitHub `/user` with the prelinked Opsi identity, proves installation visibility through `/user/installations`, syncs visible repositories, and returns only a 90-second one-time local grant. Setup/query `installation_id`, account login, and repository full name are not proof.
 - **OTP:** PAT-authenticated `/v1/otp/request` and `/v1/otp/verify`; the recipient email is derived from the verified PAT identity, with salted hashes, five-minute expiry, one-time use, rate limiting, SMTP or file outbox.
 - **Agent auth:** one-time registration token exchange, then a scoped bearer credential stored as a bcrypt hash. Production also requires an HMAC timestamp/signature on Agent requests.
 - **Bootstrap worker auth:** shared worker token plus worker ID and per-lease token for internal bootstrap endpoints.
@@ -15,19 +16,23 @@ Opsi Cloud is the durable control-plane and identity boundary. It does not run w
 
 There is no password login and no public self-sign-up endpoint.
 
-The GitHub user access token is held only long enough to request GitHub `/user`;
-it is not persisted, audited, or returned to the CLI. Pending browser login
-state and local one-time grants are in memory, so a Cloud restart invalidates
-them. The App private key is not hot-reloaded; replacement requires a Cloud
-restart. Installation tokens and the 24-hour bounded webhook replay ledger are
-also in memory. The flow has not yet been exercised against a real GitHub App.
+The GitHub user access token is held only for the callback's `/user`,
+`/user/installations`, and visible-repository requests; it is not persisted,
+audited, or returned to the CLI. For a user-account installation, account ID
+must equal the numeric GitHub user ID. For an organization installation, MVP
+proof means only that the token can see the installation; it does not prove the
+user is a GitHub organization owner. Pending OAuth state and local one-time
+grants are in memory, so a Cloud restart invalidates them. The App private key
+is not hot-reloaded; replacement requires a Cloud restart. Installation tokens
+remain in memory. The flow has not yet been exercised against a real GitHub App.
 
 ## Main runtime responsibilities
 
-- Registry APIs for organizations, projects, memberships, nodes, services, bootstrap sessions, deployments, and node lifecycle jobs.
+- Registry APIs for organizations, projects, memberships, nodes, services, bootstrap sessions, deployments, node lifecycle jobs, GitHub inventory, repository claims, and service bindings.
 - Durable PostgreSQL migrations and stores when `database_url` is set.
 - Legacy GitHub push intake at `/v1/webhooks/github` retains route-specific SHA-256 HMAC verification and sanitized Agent relay behavior. Every configured route requires its own webhook secret of at least 32 bytes.
-- GitHub App intake at `/v1/webhooks/github-app` uses the separate App-wide webhook secret, verifies `X-Hub-Signature-256` before JSON decoding, and parses typed `installation`, `installation_repositories`, and `repository` mutations. Unknown events/actions are ignored with `202`; supported mutations return `503` until P09 injects a durable event sink. Replay protection is bounded to 10,000 in-memory delivery IDs and is lost on restart.
+- GitHub App intake at `/v1/webhooks/github-app` uses the separate App-wide webhook secret, verifies `X-Hub-Signature-256` before JSON decoding, and parses typed `installation`, `installation_repositories`, and `repository` mutations. Unknown events/actions are ignored with `202`. Supported mutations atomically insert the delivery ID and apply inventory changes in one registry transaction; PostgreSQL uniqueness deduplicates delivery after Cloud restart. The bounded P08 in-memory replay store remains as the fast in-process layer.
+- Numeric GitHub installation, account, repository, and owner IDs are authoritative. Installations and repositories are statused rather than physically deleted. One active repository claim belongs to one project; a repository may bind multiple services in that project through distinct service keys, while each service has at most one active GitHub binding. Bindings never target Agent, Node, runtime, or VPS identity.
 - Bootstrap session credential handoff. PostgreSQL mode encrypts SSH credentials and one-time Agent registration tokens with AES-GCM using `bootstrap_secret_key`.
 - Health and Prometheus metrics endpoints.
 

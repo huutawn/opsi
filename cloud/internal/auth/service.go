@@ -161,6 +161,21 @@ func (s Service) IssuePATForOAuth(ctx context.Context, provider, subject, projec
 	return IssueResult{Token: token, Session: session, ExpiresAt: expiresAt}, nil
 }
 
+func (s Service) ResolveOAuthUser(ctx context.Context, provider, subject string) (string, error) {
+	store, ok := s.Store.(OAuthStore)
+	if !ok || provider == "" || subject == "" {
+		return "", ErrOAuthIdentity
+	}
+	userID, err := store.OAuthUser(ctx, provider, subject)
+	if err != nil {
+		return "", err
+	}
+	if userID == "" {
+		return "", ErrOAuthIdentity
+	}
+	return userID, nil
+}
+
 func (s Service) RotatePAT(ctx context.Context, token, projectID string, ttl time.Duration) (IssueResult, VerifyResult, error) {
 	current, err := s.VerifyPAT(ctx, VerifyRequest{Token: token, ProjectID: projectID})
 	if err != nil {

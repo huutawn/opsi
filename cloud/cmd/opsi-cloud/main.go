@@ -111,6 +111,9 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 			relay.SetSecurityStores(credentials, registrations, webhookrelay.NewPostgresRateLimiter(db))
 		}
 	}
+	if err := configureGitHubAppEventSink(relay, cfg); err != nil {
+		return err
+	}
 	if cfg.SMTP.Host != "" {
 		relay.OTP.Sender = otp.SMTPSender{Config: otp.SMTPConfig{Host: cfg.SMTP.Host, Port: cfg.SMTP.Port, Username: cfg.SMTP.Username, Password: cfg.SMTP.Password, From: cfg.SMTP.From}}
 	} else if cfg.OTP.OutboxPath != "" {
@@ -145,5 +148,16 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 			return fmt.Errorf("server failed: %w", err)
 		}
 	}
+	return nil
+}
+
+func configureGitHubAppEventSink(relay *webhookrelay.Server, cfg webhookrelay.Config) error {
+	if !cfg.GitHubApp.InstallationEnabled() {
+		return nil
+	}
+	if relay == nil || relay.Registry == nil {
+		return fmt.Errorf("configure GitHub App event sink: registry is unavailable")
+	}
+	relay.SetGitHubAppEventSink(webhookrelay.RegistryGitHubAppEventSink{Registry: relay.Registry})
 	return nil
 }

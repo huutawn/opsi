@@ -27,6 +27,7 @@ const (
 var (
 	ErrGitHubEventSinkUnavailable = errors.New("GitHub App event sink unavailable")
 	ErrGitHubEventConflict        = errors.New("GitHub App event conflict")
+	ErrGitHubEventDuplicate       = errors.New("GitHub App event duplicate")
 )
 
 type GitHubAppEventSink interface {
@@ -231,6 +232,11 @@ func (s *Server) handleGitHubAppWebhook(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.githubAppEventSink.HandleGitHubAppEvent(r.Context(), event); err != nil {
+		if errors.Is(err, ErrGitHubEventDuplicate) {
+			s.githubReplay.complete(deliveryID)
+			writeJSON(w, http.StatusOK, map[string]any{"status": "duplicate", "duplicate": true})
+			return
+		}
 		s.githubReplay.release(deliveryID)
 		switch {
 		case errors.Is(err, ErrGitHubEventSinkUnavailable):

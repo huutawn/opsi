@@ -11,9 +11,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,6 +23,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 const (
@@ -302,4 +306,151 @@ func (c *GitHubAppClient) requestInstallationToken(ctx context.Context, installa
 		return installationToken{}, fmt.Errorf("parse installation token for installation %d: invalid expiry", installationID)
 	}
 	return installationToken{Token: payload.Token, ExpiresAt: expiresAt.UTC()}, nil
+}
+
+var errGitHubInstallationAccessDenied = errors.New("github installation access denied")
+
+type githubUserInstallationPayload struct {
+	ID          int64   `json:"id"`
+	SuspendedAt *string `json:"suspended_at"`
+	Account     *struct {
+		ID    int64  `json:"id"`
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"account"`
+}
+
+func (s *Server) verifyGitHubInstallationAccess(ctx context.Context, accessToken string, installationID, githubUserID int64) (registry.GitHubInstallation, []registry.GitHubRepository, error) {
+	installation, err := s.findGitHubUserInstallation(ctx, accessToken, installationID)
+	if err != nil {
+		return registry.GitHubInstallation{}, nil, err
+	}
+	if installation.Account.Type == "User" && installation.Account.ID != githubUserID {
+		return registry.GitHubInstallation{}, nil, errGitHubInstallationAccessDenied
+	}
+	if installation.Account.Type != "User" && installation.Account.Type != "Organization" {
+		return registry.GitHubInstallation{}, nil, errGitHubInstallationAccessDenied
+	}
+	status, suspended := registry.GitHubInstallationActive, false
+	if installation.SuspendedAt != nil {
+		status, suspended = registry.GitHubInstallationSuspended, true
+	}
+	now := s.clock()
+	verified := registry.GitHubInstallation{InstallationID: installation.ID, AccountID: installation.Account.ID, AccountLogin: installation.Account.Login, AccountType: installation.Account.Type, Status: status, Suspended: suspended, CreatedAt: now, UpdatedAt: now}
+	repositories, err := s.listGitHubUserInstallationRepositories(ctx, accessToken, installationID)
+	if err != nil {
+		return registry.GitHubInstallation{}, nil, err
+	}
+	return verified, repositories, nil
+}
+
+func (s *Server) findGitHubUserInstallation(ctx context.Context, accessToken string, installationID int64) (githubUserInstallationPayload, error) {
+	seen := map[int64]struct{}{}
+	for page := 1; page <= 20; page++ {
+		var response struct {
+			TotalCount    int                             `json:"total_count"`
+			Installations []githubUserInstallationPayload `json:"installations"`
+		}
+		if err := s.githubUserAPIJSON(ctx, accessToken, githubUserInstallationsURL, page, &response); err != nil {
+			return githubUserInstallationPayload{}, err
+		}
+		if response.TotalCount < 0 || response.Installations == nil || response.TotalCount < len(seen)+len(response.Installations) {
+			return githubUserInstallationPayload{}, errors.New("github installation pagination is invalid")
+		}
+		for _, installation := range response.Installations {
+			if installation.ID <= 0 || installation.Account == nil || installation.Account.ID <= 0 || !validMetadata(installation.Account.Login, 255, true) || !validMetadata(installation.Account.Type, 64, true) {
+				return githubUserInstallationPayload{}, errors.New("github installation response is invalid")
+			}
+			if _, duplicate := seen[installation.ID]; duplicate {
+				return githubUserInstallationPayload{}, errors.New("github installation pagination is invalid")
+			}
+			seen[installation.ID] = struct{}{}
+			if installation.ID == installationID {
+				return installation, nil
+			}
+		}
+		if len(seen) >= response.TotalCount {
+			return githubUserInstallationPayload{}, errGitHubInstallationAccessDenied
+		}
+		if len(response.Installations) == 0 || page == 20 {
+			return githubUserInstallationPayload{}, errors.New("github installation pagination exceeds limit")
+		}
+	}
+	return githubUserInstallationPayload{}, errors.New("github installation pagination exceeds limit")
+}
+
+func (s *Server) listGitHubUserInstallationRepositories(ctx context.Context, accessToken string, installationID int64) ([]registry.GitHubRepository, error) {
+	endpoint := githubUserInstallationsURL + "/" + strconv.FormatInt(installationID, 10) + "/repositories"
+	seen := map[int64]struct{}{}
+	var repositories []registry.GitHubRepository
+	for page := 1; page <= 20; page++ {
+		var response struct {
+			TotalCount   int                       `json:"total_count"`
+			Repositories []githubRepositoryPayload `json:"repositories"`
+		}
+		if err := s.githubUserAPIJSON(ctx, accessToken, endpoint, page, &response); err != nil {
+			return nil, err
+		}
+		if response.TotalCount < 0 || response.Repositories == nil || response.TotalCount < len(seen)+len(response.Repositories) {
+			return nil, errors.New("github repository pagination is invalid")
+		}
+		for _, payload := range response.Repositories {
+			repository, err := parseGitHubRepository(payload)
+			if err != nil {
+				return nil, errors.New("github repository response is invalid")
+			}
+			if _, duplicate := seen[repository.ID]; duplicate {
+				return nil, errors.New("github repository pagination is invalid")
+			}
+			seen[repository.ID] = struct{}{}
+			value := registryRepository(installationID, repository)
+			value.Status = registry.GitHubRepositoryActive
+			repositories = append(repositories, value)
+		}
+		if len(seen) >= response.TotalCount {
+			return repositories, nil
+		}
+		if len(response.Repositories) == 0 || page == 20 {
+			return nil, errors.New("github repository pagination exceeds limit")
+		}
+	}
+	return nil, errors.New("github repository pagination exceeds limit")
+}
+
+func (s *Server) githubUserAPIJSON(ctx context.Context, accessToken, endpoint string, page int, target any) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "api.github.com" {
+		return errors.New("github user API endpoint is invalid")
+	}
+	query := parsed.Query()
+	query.Set("per_page", "100")
+	query.Set("page", strconv.Itoa(page))
+	parsed.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return errors.New("github user API request creation failed")
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
+	request.Header.Set("User-Agent", githubUserAgent)
+	response, err := s.githubHTTPClient().Do(request)
+	if err != nil {
+		return errors.New("github user API request failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound {
+		return errGitHubInstallationAccessDenied
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("github user API status %d", response.StatusCode)
+	}
+	body, err := readBoundedResponse(response.Body)
+	if err != nil {
+		return errors.New("github user API response exceeds limit")
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return errors.New("github user API response is invalid")
+	}
+	return nil
 }

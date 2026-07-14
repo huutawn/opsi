@@ -22,45 +22,47 @@ import (
 )
 
 type Server struct {
-	Queue              RelayQueue
-	Config             Config
-	OTP                *otp.Service
-	Auth               *auth.Service
-	HTTPClient         *http.Client
-	Registry           registry.API
-	credentials        CredentialVault
-	registrations      RegistrationVault
-	limits             RateLimiter
-	observer           *Observer
-	alerts             *AlertManager
-	healthCheck        func(context.Context) error
-	githubAppClient    *GitHubAppClient
-	githubAppEventSink GitHubAppEventSink
-	githubReplay       *githubReplayStore
-	authMu             sync.Mutex
-	oauthStates        map[string]oauthState
-	authGrants         map[string]authGrant
-	now                func() time.Time
-	random             io.Reader
+	Queue                   RelayQueue
+	Config                  Config
+	OTP                     *otp.Service
+	Auth                    *auth.Service
+	HTTPClient              *http.Client
+	Registry                registry.API
+	credentials             CredentialVault
+	registrations           RegistrationVault
+	limits                  RateLimiter
+	observer                *Observer
+	alerts                  *AlertManager
+	healthCheck             func(context.Context) error
+	githubAppClient         *GitHubAppClient
+	githubAppEventSink      GitHubAppEventSink
+	githubReplay            *githubReplayStore
+	authMu                  sync.Mutex
+	oauthStates             map[string]oauthState
+	authGrants              map[string]authGrant
+	installationClaimGrants map[string]installationClaimGrant
+	now                     func() time.Time
+	random                  io.Reader
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
 	server := &Server{
-		Queue:         NewQueue(),
-		Config:        cfg,
-		OTP:           service,
-		HTTPClient:    newGitHubHTTPClient(),
-		Registry:      registry.NewService(),
-		credentials:   NewCredentialStore(),
-		registrations: NewRegistrationTokenStore(),
-		limits:        newRateLimiter(),
-		observer:      NewObserver(),
-		alerts:        NewAlertManager(cfg.Alerts),
-		oauthStates:   map[string]oauthState{},
-		authGrants:    map[string]authGrant{},
-		random:        rand.Reader,
+		Queue:                   NewQueue(),
+		Config:                  cfg,
+		OTP:                     service,
+		HTTPClient:              newGitHubHTTPClient(),
+		Registry:                registry.NewService(),
+		credentials:             NewCredentialStore(),
+		registrations:           NewRegistrationTokenStore(),
+		limits:                  newRateLimiter(),
+		observer:                NewObserver(),
+		alerts:                  NewAlertManager(cfg.Alerts),
+		oauthStates:             map[string]oauthState{},
+		authGrants:              map[string]authGrant{},
+		installationClaimGrants: map[string]installationClaimGrant{},
+		random:                  rand.Reader,
 	}
 	server.githubReplay = newGitHubReplayStore(githubReplayMaxEntries, githubReplayTTL, server.clock)
 	return server
@@ -103,6 +105,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/auth/browser/start", s.handleBrowserAuthStart)
 	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)
 	mux.HandleFunc("/v1/auth/browser/redeem", s.handleBrowserAuthRedeem)
+	mux.HandleFunc("/v1/projects/{project_id}/github/installations/{installation_id}/claim/start", s.handleInstallationClaimStart)
+	mux.HandleFunc("/v1/github/installations/claim/redeem", s.handleInstallationClaimRedeem)
+	mux.HandleFunc("/v1/projects/{project_id}/github/installations", s.handleGitHubInstallationsAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/github/repositories", s.handleGitHubRepositoriesAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/github/repositories/{repository_id}/claim", s.handleGitHubRepositoryClaimAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/github/bindings", s.handleGitHubBindingsAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/github/bindings/{binding_id}", s.handleGitHubBindingAPI)
 	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
 	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)

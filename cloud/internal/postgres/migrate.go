@@ -479,6 +479,86 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		`CREATE INDEX IF NOT EXISTS otp_requests_user_created_idx ON otp_requests(user_id, created_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS control_services_id_project_uidx ON control_services(id, project_id)`,
+		`CREATE TABLE IF NOT EXISTS github_installations (
+			installation_id BIGINT PRIMARY KEY CHECK (installation_id > 0),
+			account_id BIGINT NOT NULL CHECK (account_id > 0),
+			account_login TEXT NOT NULL,
+			account_type TEXT NOT NULL,
+			status TEXT NOT NULL CHECK (status IN ('active','suspended','deleted')),
+			suspended BOOLEAN NOT NULL DEFAULT false,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			CHECK ((status = 'suspended') = suspended)
+		)`,
+		`CREATE TABLE IF NOT EXISTS github_repositories (
+			repository_id BIGINT PRIMARY KEY CHECK (repository_id > 0),
+			installation_id BIGINT NOT NULL CHECK (installation_id > 0) REFERENCES github_installations(installation_id),
+			owner_id BIGINT NOT NULL CHECK (owner_id > 0),
+			owner_login TEXT NOT NULL,
+			name TEXT NOT NULL,
+			full_name TEXT NOT NULL,
+			private BOOLEAN NOT NULL,
+			archived BOOLEAN NOT NULL,
+			disabled BOOLEAN NOT NULL,
+			default_branch TEXT NOT NULL,
+			status TEXT NOT NULL CHECK (status IN ('active','removed','deleted')),
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			UNIQUE (repository_id, installation_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS github_repositories_installation_idx ON github_repositories(installation_id, repository_id)`,
+		`CREATE TABLE IF NOT EXISTS github_installation_project_links (
+			installation_id BIGINT NOT NULL CHECK (installation_id > 0) REFERENCES github_installations(installation_id),
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			claimed_by TEXT NOT NULL REFERENCES users(id),
+			status TEXT NOT NULL CHECK (status IN ('active','revoked')),
+			claimed_at TIMESTAMPTZ NOT NULL,
+			revoked_at TIMESTAMPTZ,
+			PRIMARY KEY (installation_id, project_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS github_installation_project_links_project_idx ON github_installation_project_links(project_id, installation_id) WHERE status = 'active'`,
+		`CREATE TABLE IF NOT EXISTS github_repository_claims (
+			repository_id BIGINT PRIMARY KEY CHECK (repository_id > 0),
+			installation_id BIGINT NOT NULL CHECK (installation_id > 0),
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			claimed_by TEXT NOT NULL REFERENCES users(id),
+			status TEXT NOT NULL CHECK (status IN ('active','revoked')),
+			claimed_at TIMESTAMPTZ NOT NULL,
+			released_at TIMESTAMPTZ,
+			UNIQUE (repository_id, installation_id, project_id),
+			FOREIGN KEY (repository_id, installation_id) REFERENCES github_repositories(repository_id, installation_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS github_repository_claims_active_repository_uidx ON github_repository_claims(repository_id) WHERE status = 'active'`,
+		`CREATE INDEX IF NOT EXISTS github_repository_claims_project_idx ON github_repository_claims(project_id, repository_id)`,
+		`CREATE TABLE IF NOT EXISTS github_service_bindings (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			service_id TEXT NOT NULL,
+			repository_id BIGINT NOT NULL CHECK (repository_id > 0),
+			installation_id BIGINT NOT NULL CHECK (installation_id > 0),
+			service_key TEXT NOT NULL,
+			config_path TEXT NOT NULL CHECK (config_path <> '' AND config_path !~ '^/'),
+			status TEXT NOT NULL CHECK (status IN ('active','revoked')),
+			created_by TEXT NOT NULL REFERENCES users(id),
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			removed_at TIMESTAMPTZ,
+			FOREIGN KEY (service_id, project_id) REFERENCES control_services(id, project_id) ON DELETE CASCADE,
+			FOREIGN KEY (repository_id, installation_id) REFERENCES github_repositories(repository_id, installation_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS github_service_bindings_active_service_uidx ON github_service_bindings(service_id) WHERE status = 'active'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS github_service_bindings_active_repository_key_uidx ON github_service_bindings(repository_id, service_key) WHERE status = 'active'`,
+		`CREATE INDEX IF NOT EXISTS github_service_bindings_project_idx ON github_service_bindings(project_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
+			delivery_id TEXT PRIMARY KEY CHECK (delivery_id <> ''),
+			event TEXT NOT NULL,
+			action TEXT NOT NULL,
+			installation_id BIGINT CHECK (installation_id > 0),
+			repository_id BIGINT CHECK (repository_id > 0),
+			received_at TIMESTAMPTZ NOT NULL,
+			processed_at TIMESTAMPTZ NOT NULL
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {

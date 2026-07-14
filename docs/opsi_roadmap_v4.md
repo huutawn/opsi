@@ -381,21 +381,38 @@ Live GitHub App checkpoint: `UNPROVEN`.
   changing the legacy route-specific push webhook.
 - Parse typed installation and repository events with numeric IDs as identity.
 - Protect delivery IDs with a bounded 24-hour in-memory replay store.
-- Keep the durable event sink and installation/repository mapping for P09;
-  supported mutations return `503` while no sink is configured.
+- P09 now supplies the durable registry sink and installation/repository
+  mapping; P08's in-memory replay store remains the fast process-local layer.
 - No real GitHub App, installation token, or webhook was exercised in P08.
 
 #### P09 - Repository and service mapping
 
-Status: `NEXT`.
+Status: `CODE COMPLETE`.
 
-- Store installation identity.
-- Store GitHub repository ID.
-- Map project and service ownership.
-- Enforce RBAC and ownership.
-- Do not bind a repository to an Agent.
+Live GitHub App checkpoint: `UNPROVEN`.
+
+- Persist numeric installation/account and repository/owner identities in
+  PostgreSQL without physically deleting GitHub history.
+- Atomically persist webhook delivery ID and mutation; deduplicate delivery
+  after Cloud restart while retaining the P08 in-memory replay layer.
+- Verify installation claim with a GitHub App user access token: compare the
+  numeric `/user` ID with the prelinked Opsi identity, require installation
+  visibility, and sync only repositories visible to that token. Setup/query
+  `installation_id` is not trusted as proof and the user token is not stored.
+- Treat organization installation visibility as access proof for this MVP, not
+  proof that the user is a GitHub organization owner.
+- Allow one active project claim per numeric repository ID. Rename and transfer
+  metadata do not replace repository identity or binding history.
+- Bind a claimed repository to multiple services in the same project through
+  validated service keys; each service has at most one active GitHub binding.
+- Enforce PAT read roles and Owner/Admin mutation roles. Do not bind repository
+  ownership to Agent, Node, runtime, VPS address, or deployment routing.
+- Local, race, migration-upgrade, and PostgreSQL 17 tests pass. No real GitHub
+  App user token, installation, repository, or webhook was exercised in P09.
 
 #### P10 - `opsi init` and repository bootstrap
+
+Status: `NEXT`.
 
 - Create `.opsi/opsi-cd.yaml`.
 - Create or propose `.github/workflows/opsi-cd.yaml`.

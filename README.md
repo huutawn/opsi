@@ -21,9 +21,11 @@ delivery is defined by
   installation authentication now loads an RSA private key from a read-only
   file, signs RS256 App JWTs, and caches installation tokens in memory. The
   separate `/v1/webhooks/github-app` endpoint verifies the App-wide secret and
-  parses typed installation/repository events, but the durable event sink and
-  repository mapping belong to P09. GitHub Actions OIDC, `BuildRecord`, digest
-  deployment, `DeploymentPolicy`, and PR previews are not implemented.
+  atomically persists typed installation/repository events and delivery IDs in
+  PostgreSQL. Numeric repository IDs are claimed by one Opsi project and may
+  bind multiple service keys within that project. GitHub Actions OIDC,
+  `BuildRecord`, digest deployment, `DeploymentPolicy`, and PR previews are not
+  implemented.
 - Opsi does not currently render or manage Ingress, Gateway, domains, or TLS.
 - P01 code is complete. Its clean control-plane VPS checkpoint is
   `DEFERRED / UNPROVEN` because no clean Ubuntu VPS was available.
@@ -32,11 +34,15 @@ delivery is defined by
   require a new bootstrap session. Verified K3s/Agent installation and Agent
   registration replay are idempotent for at-least-once step execution.
 - Production readiness and complete real VPS/GitHub evidence remain unproven.
-- GitHub user access tokens are used only for the callback's `/user` request and
-  are not persisted or returned to the CLI. Pending browser login state remains
-  in memory and is lost when Cloud restarts. Installation tokens and webhook
-  replay state are also in memory; key replacement requires a Cloud restart.
-  No real GitHub App login, installation-token request, or App webhook has been
+- GitHub user access tokens are used only during login or installation-claim
+  callbacks and are not persisted or returned to the CLI. Installation claims
+  compare the numeric GitHub `/user` identity with the prelinked Opsi identity,
+  then require the requested installation to appear in `/user/installations`.
+  Organization visibility proves token access for this MVP, not GitHub
+  organization-owner status. Pending OAuth state and local grants remain in
+  memory and are lost when Cloud restarts. Installation tokens remain in
+  memory, while webhook delivery deduplication is durable in PostgreSQL and the
+  P08 in-memory replay layer remains enabled. No real GitHub App flow has been
   tested yet.
 
 The roadmap target is user-owned AI through a future local CLI MCP bridge. AI
@@ -112,9 +118,11 @@ durable BootstrapJob checkpoint/resume behavior is implemented and its focused
 unit, race, PostgreSQL, and migration-upgrade tests pass. P05 hardened pinned
 K3s installation, SSH host-key verification, checksum-addressed Agent releases,
 canonical systemd activation/rollback, and registration replay. Focused/race
-tests and development Docker smoke pass. The full Cloud gate is still blocked
-by the pre-existing OTP/PAT failure. P06 clean target VPS proof remains
+tests and development Docker smoke pass. P06 clean target VPS proof remains
 `DEFERRED / UNPROVEN`. P07 GitHub App user authorization and P08 installation
 authentication/webhook code are complete, while live GitHub verification
-remains `UNPROVEN`. P09 durable installation/repository mapping is next.
+remains `UNPROVEN`. P09 durable installation/repository inventory, secure
+installation claim, single-project repository ownership, and monorepo service
+bindings are implemented with local/PostgreSQL evidence; live P09 GitHub proof
+remains `UNPROVEN`. P10 repository bootstrap is next.
 Production readiness must not be inferred.

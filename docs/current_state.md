@@ -24,9 +24,9 @@ artifacts. At this snapshot:
   storage compatibility but are not read, exposed, or executed.
 - `IncidentEvidence v1`, Safe ActionPlane, and `opsi mcp serve` are not
   implemented.
-- GitHub App user authorization and P08 installation authentication/webhook
-  intake are implemented. Durable installation/repository mapping,
-  GitHub Actions OIDC, `BuildRecord`, digest-based deployment,
+- GitHub App user authorization, installation authentication/webhook intake,
+  durable installation/repository inventory, secure installation claim, and
+  project/service mapping are implemented. GitHub Actions OIDC, `BuildRecord`, digest-based deployment,
   `DeploymentPolicy`, and pull request preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
@@ -107,10 +107,16 @@ Safe ActionPlane client.
   fixed to `github`; subject is the canonical decimal positive numeric GitHub
   user ID. The identity must be prelinked, and Cloud does not trust login/email
   or create an Opsi user or membership during login.
-- GitHub user access tokens exist only during the callback request and are not
-  persisted, audited, or returned to the CLI. Pending state and local grants
-  remain in memory and are lost on Cloud restart. The flow has focused test
-  coverage but no live GitHub App verification.
+- GitHub user access tokens exist only during login or installation-claim
+  callback requests and are not persisted, audited, or returned to the CLI.
+  Installation claim state binds purpose, actor, project, numeric installation,
+  local callback/state, PKCE verifier, and expiry. Callback verification
+  compares the numeric `/user` ID with the prelinked Opsi identity, requires the
+  installation in `/user/installations`, and syncs only repositories visible to
+  that token. Missing repositories are not marked removed. Organization
+  visibility proves installation access for this MVP, not organization-owner
+  status. Pending state and local grants remain in memory and are lost on Cloud
+  restart. The flow has focused test coverage but no live GitHub App verification.
 - GitHub App installation authentication loads an RSA PKCS#1 or RSA-in-PKCS#8
   private key once from a protected read-only file, creates RS256 App JWTs with
   a one-minute `iat` backdate and nine-minute expiry, and requests installation
@@ -118,10 +124,18 @@ Safe ActionPlane client.
   memory per installation and refreshed with a two-minute safety window.
 - `/v1/webhooks/github-app` verifies the App-wide SHA-256 webhook secret before
   decoding and emits typed installation/repository events using numeric IDs as
-  identity. Its 24-hour, 10,000-entry replay state is in memory and lost on
-  restart. P08 intentionally provides no durable sink: supported mutations
-  return `503` until P09 injects one. The legacy `/v1/webhooks/github` route and
-  `routes[].webhook_secret` behavior remain unchanged.
+  identity. P09 wires the registry sink when installation integration is
+  enabled. PostgreSQL atomically inserts each delivery ID, applies the mutation,
+  and records non-sensitive audit metadata; duplicate delivery IDs remain
+  idempotent after Cloud restart. The 24-hour, 10,000-entry P08 replay store is
+  retained as the fast in-memory layer. The legacy `/v1/webhooks/github` route
+  and `routes[].webhook_secret` behavior remain unchanged.
+- PostgreSQL and in-memory registries store installation/repository lifecycle
+  status without physical deletion, link a verified installation to a project,
+  enforce one active project claim per repository, and bind monorepo service
+  keys only to services in that project. Each service has at most one active
+  GitHub binding; repository ownership never binds directly to Agent, Node,
+  runtime, or VPS identity.
 - Postgres-backed registry/relay/audit/idempotency/bootstrap/PAT/OTP state when
   configured; development/test modes may use in-memory implementations where
   production validation permits.
@@ -251,8 +265,8 @@ artifact currently proves the complete scenario. Status remains
 
 Production readiness remains unproven. Current gaps include clean control-plane
 VM and restart proof, clean VPS bootstrap proof, live GitHub App installation
-and user-auth verification, durable repository mapping, hosted and hardened
-Agent delivery, Actions OIDC, trusted
+and user-auth verification, repository bootstrap, hosted and hardened Agent
+delivery, Actions OIDC, trusted
 OCI artifact delivery, managed
 gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
 E2E, release hardening, supply-chain evidence, and measured disaster recovery.
@@ -268,7 +282,10 @@ hardening is implemented with focused/race and development smoke evidence. P06 c
 remains `DEFERRED / UNPROVEN`; there is no clean target VPS evidence. P07 GitHub
 App user authorization code and P08 installation authentication/webhooks are
 code complete, while real GitHub verification is `UNPROVEN`. P09 durable
-installation/repository mapping is next;
+inventory, verified installation claim, single-project repository ownership,
+and service binding are implemented with local and PostgreSQL tests; P09 live
+GitHub verification remains `UNPROVEN`. P10 `opsi init` and repository bootstrap
+are next;
 OIDC-bound trusted artifact delivery, runtime delivery, and the later
 evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
 of truth is `docs/opsi_roadmap_v4.md`.

@@ -17,35 +17,57 @@ import (
 	"unicode"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 const (
-	githubAuthorizeURL = "https://github.com/login/oauth/authorize"
-	githubTokenURL     = "https://github.com/login/oauth/access_token"
-	githubUserURL      = "https://api.github.com/user"
-	githubProvider     = "github"
-	githubAPIVersion   = "2022-11-28"
+	githubAuthorizeURL         = "https://github.com/login/oauth/authorize"
+	githubTokenURL             = "https://github.com/login/oauth/access_token"
+	githubUserURL              = "https://api.github.com/user"
+	githubUserInstallationsURL = "https://api.github.com/user/installations"
+	githubProvider             = "github"
+	githubAPIVersion           = "2022-11-28"
 
 	githubUserAgent        = "opsi-cloud"
-	githubResponseLimit    = 1 << 20
+	githubResponseLimit    = 2 << 20
 	githubTokenLengthLimit = 16 << 10
 	oauthStateTTL          = 5 * time.Minute
 	authGrantTTL           = 90 * time.Second
 	secureTokenBytes       = 32
 )
 
+type oauthStatePurpose string
+
+const (
+	oauthPurposeLogin             oauthStatePurpose = "login"
+	oauthPurposeInstallationClaim oauthStatePurpose = "installation_claim"
+)
+
 type oauthState struct {
-	LocalCallback string
-	LocalState    string
-	ProjectID     string
-	CodeVerifier  string
-	ExpiresAt     time.Time
+	Purpose        oauthStatePurpose
+	ActorUserID    string
+	LocalCallback  string
+	LocalState     string
+	ProjectID      string
+	InstallationID int64
+	CodeVerifier   string
+	ExpiresAt      time.Time
 }
 
 type authGrant struct {
+	Purpose   oauthStatePurpose
 	Token     string
 	Session   auth.VerifyResult
 	ExpiresAt time.Time
+}
+
+type installationClaimGrant struct {
+	Purpose            oauthStatePurpose
+	LocalState         string
+	Installation       registry.GitHubInstallation
+	ProjectLink        registry.GitHubInstallationProjectLink
+	RepositoriesSynced int
+	ExpiresAt          time.Time
 }
 
 func newGitHubHTTPClient() *http.Client {
@@ -98,6 +120,7 @@ func (s *Server) handleBrowserAuthStart(w http.ResponseWriter, r *http.Request) 
 	expiresAt := s.clock().Add(oauthStateTTL)
 	s.authMu.Lock()
 	s.oauthStates[state] = oauthState{
+		Purpose:       oauthPurposeLogin,
 		LocalCallback: request.LocalCallback,
 		LocalState:    request.LocalState,
 		ProjectID:     request.ProjectID,
@@ -152,7 +175,17 @@ func (s *Server) handleBrowserAuthCallback(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusUnauthorized, "auth state expired or invalid")
 		return
 	}
+	switch pending.Purpose {
+	case oauthPurposeLogin:
+		s.completeBrowserLogin(w, r, pending, code)
+	case oauthPurposeInstallationClaim:
+		s.completeInstallationClaim(w, r, pending, code)
+	default:
+		writeError(w, http.StatusUnauthorized, "auth state purpose is invalid")
+	}
+}
 
+func (s *Server) completeBrowserLogin(w http.ResponseWriter, r *http.Request, pending oauthState, code string) {
 	subject, err := s.exchangeGitHubUser(r.Context(), code, pending.CodeVerifier)
 	if err != nil {
 		s.auditAuth("", "", pending.ProjectID, "auth_failure", "failure", map[string]any{
@@ -183,6 +216,7 @@ func (s *Server) handleBrowserAuthCallback(w http.ResponseWriter, r *http.Reques
 
 	s.authMu.Lock()
 	s.authGrants[grantCode] = authGrant{
+		Purpose:   oauthPurposeLogin,
 		Token:     issued.Token,
 		Session:   issued.Session,
 		ExpiresAt: s.clock().Add(authGrantTTL),
@@ -196,6 +230,153 @@ func (s *Server) handleBrowserAuthCallback(w http.ResponseWriter, r *http.Reques
 	query.Set("state", pending.LocalState)
 	callback.RawQuery = query.Encode()
 	http.Redirect(w, r, callback.String(), http.StatusFound)
+}
+
+func (s *Server) handleInstallationClaimStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok {
+		return
+	}
+	if !s.requireRole(w, r, principal, projectID, "github_installation", r.PathValue("installation_id"), "owner", "admin") {
+		return
+	}
+	if !s.githubUserAuthorizationEnabled() {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "GITHUB_USER_AUTH_UNAVAILABLE", Message: "GitHub user authorization is not configured", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	installationID, err := strconv.ParseInt(r.PathValue("installation_id"), 10, 64)
+	if err != nil || installationID <= 0 {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "GITHUB_INSTALLATION_ID_INVALID", Message: "installation_id must be a positive integer", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	var request struct {
+		LocalCallback string `json:"local_callback"`
+		LocalState    string `json:"local_state"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, githubResponseLimit)).Decode(&request); err != nil {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_JSON", Message: "Request body is not valid JSON", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	if !localCallbackAllowed(request.LocalCallback) || request.LocalState == "" || len(request.LocalState) > 4096 || strings.IndexFunc(request.LocalState, unicode.IsControl) >= 0 {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "GITHUB_CLAIM_CALLBACK_INVALID", Message: "local callback or state is invalid", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	verifier, err := secureRandomValue(s.randomSource(), secureTokenBytes)
+	if err != nil {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "GITHUB_CLAIM_STATE_UNAVAILABLE", Message: "claim state generation failed"})
+		return
+	}
+	state, err := secureRandomValue(s.randomSource(), secureTokenBytes)
+	if err != nil {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "GITHUB_CLAIM_STATE_UNAVAILABLE", Message: "claim state generation failed"})
+		return
+	}
+	expiresAt := s.clock().Add(oauthStateTTL)
+	s.authMu.Lock()
+	s.oauthStates[state] = oauthState{Purpose: oauthPurposeInstallationClaim, ActorUserID: principal.UserID, LocalCallback: request.LocalCallback, LocalState: request.LocalState, ProjectID: projectID, InstallationID: installationID, CodeVerifier: verifier, ExpiresAt: expiresAt}
+	s.authMu.Unlock()
+	authorizationURL, _ := url.Parse(githubAuthorizeURL)
+	query := authorizationURL.Query()
+	query.Set("response_type", "code")
+	query.Set("client_id", s.Config.GitHubApp.ClientID)
+	query.Set("redirect_uri", s.Config.GitHubApp.CallbackURL)
+	query.Set("state", state)
+	query.Set("code_challenge", pkceChallenge(verifier))
+	query.Set("code_challenge_method", "S256")
+	authorizationURL.RawQuery = query.Encode()
+	writeJSON(w, http.StatusOK, map[string]any{"authorization_url": authorizationURL.String(), "expires_at": expiresAt})
+}
+
+func (s *Server) completeInstallationClaim(w http.ResponseWriter, r *http.Request, pending oauthState, code string) {
+	if s.Auth == nil || s.Registry == nil {
+		writeError(w, http.StatusServiceUnavailable, "installation claim service is unavailable")
+		return
+	}
+	accessToken, err := s.exchangeGitHubToken(r.Context(), code, pending.CodeVerifier)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "GitHub installation verification failed")
+		return
+	}
+	githubUserID, err := s.githubUserID(r.Context(), accessToken)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "GitHub installation verification failed")
+		return
+	}
+	resolvedUserID, err := s.Auth.ResolveOAuthUser(r.Context(), githubProvider, strconv.FormatInt(githubUserID, 10))
+	if err != nil || resolvedUserID != pending.ActorUserID {
+		writeError(w, http.StatusForbidden, "GitHub identity does not match the authenticated Opsi user")
+		return
+	}
+	installation, repositories, err := s.verifyGitHubInstallationAccess(r.Context(), accessToken, pending.InstallationID, githubUserID)
+	if err != nil {
+		if errors.Is(err, errGitHubInstallationAccessDenied) {
+			writeError(w, http.StatusForbidden, "GitHub user cannot access the requested installation")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "GitHub installation verification failed")
+		return
+	}
+	installation, err = s.Registry.UpsertGitHubInstallation(installation)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	for _, repository := range repositories {
+		if _, err := s.Registry.UpsertGitHubRepository(repository); err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+	}
+	link, err := s.Registry.ClaimGitHubInstallation(pending.ProjectID, pending.InstallationID, pending.ActorUserID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	grantCode, err := secureRandomValue(s.randomSource(), secureTokenBytes)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "installation claim grant generation failed")
+		return
+	}
+	s.authMu.Lock()
+	s.installationClaimGrants[grantCode] = installationClaimGrant{Purpose: oauthPurposeInstallationClaim, LocalState: pending.LocalState, Installation: installation, ProjectLink: link, RepositoriesSynced: len(repositories), ExpiresAt: s.clock().Add(authGrantTTL)}
+	s.authMu.Unlock()
+	callback, _ := url.Parse(pending.LocalCallback)
+	query := callback.Query()
+	query.Set("grant", grantCode)
+	query.Set("state", pending.LocalState)
+	callback.RawQuery = query.Encode()
+	http.Redirect(w, r, callback.String(), http.StatusFound)
+}
+
+func (s *Server) handleInstallationClaimRedeem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		Grant string `json:"grant"`
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, githubResponseLimit)).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid installation claim redeem request")
+		return
+	}
+	s.authMu.Lock()
+	grant, ok := s.installationClaimGrants[request.Grant]
+	if ok {
+		delete(s.installationClaimGrants, request.Grant)
+	}
+	s.authMu.Unlock()
+	if !ok || grant.Purpose != oauthPurposeInstallationClaim || request.State == "" || request.State != grant.LocalState || !s.clock().Before(grant.ExpiresAt) {
+		writeError(w, http.StatusUnauthorized, "installation claim grant expired or invalid")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"installation": grant.Installation, "project_link": grant.ProjectLink, "repositories_synced": grant.RepositoriesSynced})
 }
 
 func (s *Server) handleBrowserAuthRedeem(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +397,7 @@ func (s *Server) handleBrowserAuthRedeem(w http.ResponseWriter, r *http.Request)
 		delete(s.authGrants, request.Code)
 	}
 	s.authMu.Unlock()
-	if !ok || !s.clock().Before(grant.ExpiresAt) {
+	if !ok || grant.Purpose != oauthPurposeLogin || !s.clock().Before(grant.ExpiresAt) {
 		writeError(w, http.StatusUnauthorized, "auth grant expired or invalid")
 		return
 	}
@@ -228,7 +409,11 @@ func (s *Server) exchangeGitHubUser(ctx context.Context, code, verifier string) 
 	if err != nil {
 		return "", err
 	}
-	return s.githubUserSubject(ctx, accessToken)
+	userID, err := s.githubUserID(ctx, accessToken)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(userID, 10), nil
 }
 
 func (s *Server) exchangeGitHubToken(ctx context.Context, code, verifier string) (string, error) {
@@ -275,9 +460,17 @@ func (s *Server) exchangeGitHubToken(ctx context.Context, code, verifier string)
 }
 
 func (s *Server) githubUserSubject(ctx context.Context, accessToken string) (string, error) {
+	userID, err := s.githubUserID(ctx, accessToken)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(userID, 10), nil
+}
+
+func (s *Server) githubUserID(ctx context.Context, accessToken string) (int64, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, githubUserURL, nil)
 	if err != nil {
-		return "", errors.New("github user request creation failed")
+		return 0, errors.New("github user request creation failed")
 	}
 	request.Header.Set("Authorization", "Bearer "+accessToken)
 	request.Header.Set("Accept", "application/vnd.github+json")
@@ -285,27 +478,27 @@ func (s *Server) githubUserSubject(ctx context.Context, accessToken string) (str
 	request.Header.Set("User-Agent", githubUserAgent)
 	response, err := s.githubHTTPClient().Do(request)
 	if err != nil {
-		return "", errors.New("github user request failed")
+		return 0, errors.New("github user request failed")
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("github user request status %d", response.StatusCode)
+		return 0, fmt.Errorf("github user request status %d", response.StatusCode)
 	}
 	body, err := readBoundedResponse(response.Body)
 	if err != nil {
-		return "", errors.New("github user response exceeds limit")
+		return 0, errors.New("github user response exceeds limit")
 	}
 	var user struct {
 		ID json.RawMessage `json:"id"`
 	}
 	if err := json.Unmarshal(body, &user); err != nil {
-		return "", errors.New("github user response is invalid")
+		return 0, errors.New("github user response is invalid")
 	}
 	id, err := strconv.ParseInt(string(user.ID), 10, 64)
 	if err != nil || id <= 0 {
-		return "", errors.New("github user response has invalid numeric id")
+		return 0, errors.New("github user response has invalid numeric id")
 	}
-	return strconv.FormatInt(id, 10), nil
+	return id, nil
 }
 
 func (s *Server) consumeOAuthState(state string) (oauthState, bool) {

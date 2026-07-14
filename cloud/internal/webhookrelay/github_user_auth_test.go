@@ -10,12 +10,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 const (
@@ -547,6 +549,324 @@ func TestBrowserAuthGrantExpires(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("expired grant status=%d body=%s", response.Code, response.Body.String())
 	}
+}
+
+type installationClaimStartResponse struct {
+	AuthorizationURL string    `json:"authorization_url"`
+	ExpiresAt        time.Time `json:"expires_at"`
+}
+
+func TestInstallationClaimStartRequiresPATRoleAndBindsPurpose(t *testing.T) {
+	server, projectID, token, store := installationClaimServer(t, "owner", successfulInstallationClaimTransport(t, "Organization", 222, []int64{333}))
+	path := "/v1/projects/" + projectID + "/github/installations/101/claim/start"
+	body := `{"local_callback":"http://127.0.0.1:49152/callback","local_state":"opaque-cli-state"}`
+
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("missing PAT status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	store.Candidates[0].Role = "viewer"
+	request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("viewer status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	store.Candidates[0].Role = "owner"
+	request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("owner status=%d body=%s", response.Code, response.Body.String())
+	}
+	var started installationClaimStartResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	authorizationURL, err := url.Parse(started.AuthorizationURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := authorizationURL.Query().Get("state")
+	server.authMu.Lock()
+	pending := server.oauthStates[state]
+	server.authMu.Unlock()
+	if pending.Purpose != oauthPurposeInstallationClaim || pending.ActorUserID != "user-1" || pending.ProjectID != projectID || pending.InstallationID != 101 || pending.LocalState != "opaque-cli-state" || pending.CodeVerifier == "" {
+		t.Fatalf("pending=%+v", pending)
+	}
+}
+
+func TestInstallationClaimCallbackVerifiesIdentitySyncsRepositoriesAndUsesOneTimeGrant(t *testing.T) {
+	server, projectID, token, store := installationClaimServer(t, "owner", successfulInstallationClaimTransport(t, "Organization", 222, []int64{333}))
+	oldInstallation := registry.GitHubInstallation{InstallationID: 101, AccountID: 222, AccountLogin: "old", AccountType: "Organization", Status: registry.GitHubInstallationActive}
+	if _, err := server.Registry.UpsertGitHubInstallation(oldInstallation); err != nil {
+		t.Fatal(err)
+	}
+	oldRepository := registry.GitHubRepository{RepositoryID: 999, InstallationID: 101, OwnerID: 222, OwnerLogin: "example", Name: "old", FullName: "example/old", DefaultBranch: "main", Status: registry.GitHubRepositoryActive}
+	if _, err := server.Registry.UpsertGitHubRepository(oldRepository); err != nil {
+		t.Fatal(err)
+	}
+	started := startInstallationClaim(t, server, projectID, token, 101)
+	authorizationURL, _ := url.Parse(started.AuthorizationURL)
+	callback := callbackRequest(server, authorizationURL.Query().Get("state"), "claim-code")
+	if callback.Code != http.StatusFound {
+		t.Fatalf("callback status=%d body=%s", callback.Code, callback.Body.String())
+	}
+	location, err := url.Parse(callback.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := location.Query().Get("grant")
+	if grant == "" || location.Query().Get("state") != "opaque-cli-state" || strings.Contains(location.RawQuery, testGitHubAccessToken) {
+		t.Fatalf("redirect=%s", location.String())
+	}
+	if len(store.Candidates) != 1 {
+		t.Fatalf("claim flow issued PAT candidates: %+v", store.Candidates)
+	}
+
+	loginRedeem := httptest.NewRequest(http.MethodPost, "/v1/auth/browser/redeem", strings.NewReader(`{"code":"`+grant+`"}`))
+	loginResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(loginResponse, loginRedeem)
+	if loginResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("claim grant crossed into login redeem: status=%d", loginResponse.Code)
+	}
+
+	redeemBody := `{"grant":"` + grant + `","state":"opaque-cli-state"}`
+	redeem := httptest.NewRequest(http.MethodPost, "/v1/github/installations/claim/redeem", strings.NewReader(redeemBody))
+	redeemResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(redeemResponse, redeem)
+	if redeemResponse.Code != http.StatusOK || strings.Contains(redeemResponse.Body.String(), testGitHubAccessToken) || strings.Contains(redeemResponse.Body.String(), "opsi_pat_") {
+		t.Fatalf("redeem status=%d body=%s", redeemResponse.Code, redeemResponse.Body.String())
+	}
+	var result struct {
+		Installation       registry.GitHubInstallation            `json:"installation"`
+		ProjectLink        registry.GitHubInstallationProjectLink `json:"project_link"`
+		RepositoriesSynced int                                    `json:"repositories_synced"`
+	}
+	if err := json.Unmarshal(redeemResponse.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Installation.InstallationID != 101 || result.ProjectLink.ProjectID != projectID || result.RepositoriesSynced != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	redeem = httptest.NewRequest(http.MethodPost, "/v1/github/installations/claim/redeem", strings.NewReader(redeemBody))
+	redeemResponse = httptest.NewRecorder()
+	server.Handler().ServeHTTP(redeemResponse, redeem)
+	if redeemResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("grant reused status=%d", redeemResponse.Code)
+	}
+	repositories, err := server.Registry.ListGitHubRepositories(projectID)
+	if err != nil || len(repositories) != 2 {
+		t.Fatalf("repositories=%+v err=%v", repositories, err)
+	}
+}
+
+func TestInstallationClaimGrantExpiresAndLoginGrantCannotCrossRedeem(t *testing.T) {
+	server, projectID, token, _ := installationClaimServer(t, "owner", successfulInstallationClaimTransport(t, "Organization", 222, nil))
+	started := startInstallationClaim(t, server, projectID, token, 101)
+	authorizationURL, _ := url.Parse(started.AuthorizationURL)
+	callback := callbackRequest(server, authorizationURL.Query().Get("state"), "claim-code")
+	location, _ := url.Parse(callback.Header().Get("Location"))
+	grantCode := location.Query().Get("grant")
+	server.authMu.Lock()
+	grant := server.installationClaimGrants[grantCode]
+	grant.ExpiresAt = server.clock().Add(-time.Second)
+	server.installationClaimGrants[grantCode] = grant
+	server.authMu.Unlock()
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/github/installations/claim/redeem", strings.NewReader(`{"grant":"`+grantCode+`","state":"opaque-cli-state"}`)))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expired claim grant status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	loginServer, loginProjectID, _ := linkedGitHubServer(t, successfulGitHubTransport(t))
+	_, loginAuthorizationURL, _ := startBrowserAuth(t, loginServer, loginProjectID)
+	loginCallback := callbackRequest(loginServer, loginAuthorizationURL.Query().Get("state"), "login-code")
+	loginLocation, _ := url.Parse(loginCallback.Header().Get("Location"))
+	loginCode := loginLocation.Query().Get("code")
+	response = httptest.NewRecorder()
+	loginServer.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/github/installations/claim/redeem", strings.NewReader(`{"grant":"`+loginCode+`","state":"local-state"}`)))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("login grant crossed into claim redeem: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestInstallationClaimCallbackRejectsIdentityAndInstallationProofFailures(t *testing.T) {
+	t.Run("Opsi identity mismatch", func(t *testing.T) {
+		server, projectID, token, store := installationClaimServer(t, "owner", successfulInstallationClaimTransport(t, "Organization", 222, nil))
+		store.OAuthIdentities[githubProvider+"\x00"+testGitHubUserID] = "another-user"
+		response := completeInstallationClaimRequest(t, server, projectID, token)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+	t.Run("installation absent", func(t *testing.T) {
+		transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.Path {
+			case "/login/oauth/access_token":
+				return githubJSONResponse(request, http.StatusOK, `{"access_token":"`+testGitHubAccessToken+`"}`), nil
+			case "/user":
+				return githubJSONResponse(request, http.StatusOK, `{"id":`+testGitHubUserID+`}`), nil
+			case "/user/installations":
+				return githubJSONResponse(request, http.StatusOK, `{"total_count":0,"installations":[]}`), nil
+			default:
+				t.Fatalf("unexpected URL %s", request.URL)
+				return nil, nil
+			}
+		})
+		server, projectID, token, _ := installationClaimServer(t, "owner", transport)
+		response := completeInstallationClaimRequest(t, server, projectID, token)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+	t.Run("user installation account mismatch", func(t *testing.T) {
+		server, projectID, token, _ := installationClaimServer(t, "owner", successfulInstallationClaimTransport(t, "User", 999999, nil))
+		response := completeInstallationClaimRequest(t, server, projectID, token)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+}
+
+func TestInstallationClaimPaginationAndFailureSanitization(t *testing.T) {
+	t.Run("target on second page", func(t *testing.T) {
+		server := configuredGitHubServer()
+		server.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			page, _ := strconv.Atoi(request.URL.Query().Get("page"))
+			installations := make([]map[string]any, 0, 100)
+			if page == 1 {
+				for id := int64(1); id <= 100; id++ {
+					installations = append(installations, map[string]any{"id": id, "account": map[string]any{"id": id + 1000, "login": "owner", "type": "Organization"}})
+				}
+			} else {
+				installations = append(installations, map[string]any{"id": int64(101), "account": map[string]any{"id": int64(222), "login": "example", "type": "Organization"}})
+			}
+			body, _ := json.Marshal(map[string]any{"total_count": 101, "installations": installations})
+			return githubJSONResponse(request, http.StatusOK, string(body)), nil
+		})
+		installation, err := server.findGitHubUserInstallation(context.Background(), testGitHubAccessToken, 101)
+		if err != nil || installation.ID != 101 {
+			t.Fatalf("installation=%+v err=%v", installation, err)
+		}
+	})
+	t.Run("over twenty pages fails closed", func(t *testing.T) {
+		server := configuredGitHubServer()
+		server.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			page, _ := strconv.Atoi(request.URL.Query().Get("page"))
+			installations := make([]map[string]any, 0, 100)
+			for offset := 0; offset < 100; offset++ {
+				id := int64((page-1)*100 + offset + 1)
+				installations = append(installations, map[string]any{"id": id, "account": map[string]any{"id": id + 3000, "login": "owner", "type": "Organization"}})
+			}
+			body, _ := json.Marshal(map[string]any{"total_count": 2001, "installations": installations})
+			return githubJSONResponse(request, http.StatusOK, string(body)), nil
+		})
+		if _, err := server.findGitHubUserInstallation(context.Background(), testGitHubAccessToken, 2001); err == nil {
+			t.Fatal("pagination beyond twenty pages succeeded")
+		}
+	})
+	t.Run("GitHub body and token are not reflected", func(t *testing.T) {
+		secretBody := `{"secret":"remote-sensitive-body"}`
+		transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.Path {
+			case "/login/oauth/access_token":
+				return githubJSONResponse(request, http.StatusOK, `{"access_token":"`+testGitHubAccessToken+`"}`), nil
+			case "/user":
+				return githubJSONResponse(request, http.StatusOK, `{"id":`+testGitHubUserID+`}`), nil
+			default:
+				return githubJSONResponse(request, http.StatusInternalServerError, secretBody), nil
+			}
+		})
+		server, projectID, token, _ := installationClaimServer(t, "owner", transport)
+		response := completeInstallationClaimRequest(t, server, projectID, token)
+		if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "remote-sensitive-body") || strings.Contains(response.Body.String(), testGitHubAccessToken) {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+}
+
+func installationClaimServer(t *testing.T, role string, transport http.RoundTripper) (*Server, string, string, *auth.MemoryStore) {
+	t.Helper()
+	server := configuredGitHubServer()
+	project, err := server.Registry.CreateProject("org", "Demo", "demo", "user-1", "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "claim-pat"
+	hash, err := auth.HashPAT(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &auth.MemoryStore{
+		Candidates:      []auth.Candidate{{ID: "pat-1", UserID: "user-1", OrgID: "org", ProjectID: project.ID, Role: role, Hash: hash, ExpiresAt: time.Now().Add(time.Hour)}},
+		OAuthIdentities: map[string]string{githubProvider + "\x00" + testGitHubUserID: "user-1"},
+	}
+	server.Auth = &auth.Service{Store: store}
+	server.HTTPClient = newGitHubHTTPClient()
+	server.HTTPClient.Transport = transport
+	return server, project.ID, token, store
+}
+
+func successfulInstallationClaimTransport(t *testing.T, accountType string, accountID int64, repositoryIDs []int64) http.RoundTripper {
+	t.Helper()
+	return roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/login/oauth/access_token" && request.Header.Get("Authorization") != "Bearer "+testGitHubAccessToken {
+			t.Fatalf("authorization=%q for %s", request.Header.Get("Authorization"), request.URL)
+		}
+		switch request.URL.Path {
+		case "/login/oauth/access_token":
+			return githubJSONResponse(request, http.StatusOK, `{"access_token":"`+testGitHubAccessToken+`"}`), nil
+		case "/user":
+			return githubJSONResponse(request, http.StatusOK, `{"id":`+testGitHubUserID+`}`), nil
+		case "/user/installations":
+			body, _ := json.Marshal(map[string]any{"total_count": 1, "installations": []map[string]any{{"id": int64(101), "account": map[string]any{"id": accountID, "login": "example", "type": accountType}}}})
+			return githubJSONResponse(request, http.StatusOK, string(body)), nil
+		case "/user/installations/101/repositories":
+			repositories := make([]map[string]any, 0, len(repositoryIDs))
+			for _, repositoryID := range repositoryIDs {
+				repositories = append(repositories, map[string]any{"id": repositoryID, "node_id": "R_1", "name": "repo-" + strconv.FormatInt(repositoryID, 10), "full_name": "example/repo-" + strconv.FormatInt(repositoryID, 10), "private": true, "archived": false, "disabled": false, "default_branch": "main", "owner": map[string]any{"id": accountID, "login": "example"}})
+			}
+			body, _ := json.Marshal(map[string]any{"total_count": len(repositories), "repositories": repositories})
+			return githubJSONResponse(request, http.StatusOK, string(body)), nil
+		default:
+			t.Fatalf("unexpected GitHub URL %s", request.URL)
+			return nil, nil
+		}
+	})
+}
+
+func startInstallationClaim(t *testing.T, server *Server, projectID, token string, installationID int64) installationClaimStartResponse {
+	t.Helper()
+	path := "/v1/projects/" + projectID + "/github/installations/" + strconv.FormatInt(installationID, 10) + "/claim/start"
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"local_callback":"http://127.0.0.1:49152/callback","local_state":"opaque-cli-state"}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("claim start status=%d body=%s", response.Code, response.Body.String())
+	}
+	var started installationClaimStartResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	return started
+}
+
+func completeInstallationClaimRequest(t *testing.T, server *Server, projectID, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	started := startInstallationClaim(t, server, projectID, token, 101)
+	authorizationURL, err := url.Parse(started.AuthorizationURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return callbackRequest(server, authorizationURL.Query().Get("state"), "claim-code")
 }
 
 func TestDefaultGitHubHTTPClientHasTimeoutAndRejectsRedirects(t *testing.T) {
