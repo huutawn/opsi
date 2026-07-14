@@ -16,8 +16,10 @@ delivery is defined by
   implemented.
 - Agent currently supports Git-source clone/build deployment and rejects
   image-source deployment before runtime execution.
-- GitHub App authorization/installation, GitHub Actions OIDC, `BuildRecord`,
-  digest deployment, `DeploymentPolicy`, and PR previews are not implemented.
+- GitHub App user authorization is implemented with fixed GitHub endpoints,
+  PKCE S256, one-time state, and a prelinked numeric GitHub user ID. GitHub App
+  installation authentication, GitHub Actions OIDC, `BuildRecord`, digest
+  deployment, `DeploymentPolicy`, and PR previews are not implemented.
 - Opsi does not currently render or manage Ingress, Gateway, domains, or TLS.
 - P01 code is complete. Its clean control-plane VPS checkpoint is
   `DEFERRED / UNPROVEN` because no clean Ubuntu VPS was available.
@@ -26,6 +28,10 @@ delivery is defined by
   require a new bootstrap session. Verified K3s/Agent installation and Agent
   registration replay are idempotent for at-least-once step execution.
 - Production readiness and complete real VPS/GitHub evidence remain unproven.
+- GitHub user access tokens are used only for the callback's `/user` request and
+  are not persisted or returned to the CLI. Pending browser login state remains
+  in memory and is lost when Cloud restarts. No real GitHub App login has been
+  tested yet.
 
 The roadmap target is user-owned AI through a future local CLI MCP bridge. AI
 will read redacted evidence and propose typed actions; deterministic Agent policy
@@ -102,4 +108,7 @@ K3s installation, SSH host-key verification, checksum-addressed Agent releases,
 canonical systemd activation/rollback, and registration replay. Focused/race
 tests and development Docker smoke pass. The full Cloud gate is still blocked
 by the pre-existing OTP/PAT failure. P06 clean target VPS proof remains
-`UNPROVEN`, so production readiness must not be inferred.
+`DEFERRED / UNPROVEN`. P07 GitHub App user authorization code and focused tests
+are complete, while live GitHub verification remains `UNPROVEN`; P08
+installation authentication and webhooks are next. Production readiness must
+not be inferred.

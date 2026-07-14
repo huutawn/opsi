@@ -169,37 +169,33 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 }
 
 func TestBrowserAuthFlowUsesOneTimeGrantAndAuditsWithoutPAT(t *testing.T) {
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/token":
-			_, _ = w.Write([]byte(`{"access_token":"provider-token"}`))
-		case "/userinfo":
+	server := NewServer(Config{GitHubApp: GitHubAppConfig{
+		ClientID:     "client",
+		ClientSecret: "secret",
+		CallbackURL:  "https://cloud.example.test/v1/auth/browser/callback",
+	}})
+	server.HTTPClient = newGitHubHTTPClient()
+	server.HTTPClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case githubTokenURL:
+			return githubJSONResponse(r, http.StatusOK, `{"access_token":"provider-token"}`), nil
+		case githubUserURL:
 			if r.Header.Get("Authorization") != "Bearer provider-token" {
 				t.Fatalf("provider auth = %q", r.Header.Get("Authorization"))
 			}
-			_, _ = w.Write([]byte(`{"id":12345678,"email":"u@example.test"}`))
+			return githubJSONResponse(r, http.StatusOK, `{"id":12345678,"email":"u@example.test"}`), nil
 		default:
-			t.Fatalf("provider path = %s", r.URL.Path)
+			t.Fatalf("provider URL = %s", r.URL)
+			return nil, nil
 		}
-	}))
-	defer provider.Close()
-
-	server := NewServer(Config{Auth: AuthConfig{
-		Provider:     "generic",
-		ClientID:     "client",
-		ClientSecret: "secret",
-		AuthURL:      provider.URL + "/authorize",
-		TokenURL:     provider.URL + "/token",
-		UserInfoURL:  provider.URL + "/userinfo",
-		RedirectURL:  "https://cloud.example.test/v1/auth/browser/callback",
-	}})
+	})
 	project, err := server.Registry.CreateProject("org", "Demo", "demo", "u", "project-key")
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := &auth.MemoryStore{
 		Candidates:      []auth.Candidate{{ID: "membership", UserID: "u", Email: "u@example.test", OrgID: "org", ProjectID: project.ID, Role: "Owner"}},
-		OAuthIdentities: map[string]string{"generic\x0012345678": "u"},
+		OAuthIdentities: map[string]string{"github\x0012345678": "u"},
 	}
 	server.Auth = &auth.Service{Store: store}
 	handler := server.Handler()
@@ -270,23 +266,22 @@ func TestBrowserAuthFlowUsesOneTimeGrantAndAuditsWithoutPAT(t *testing.T) {
 }
 
 func TestBrowserAuthCallbackRejectsEmailWithoutStableSubject(t *testing.T) {
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/token":
-			_, _ = w.Write([]byte(`{"access_token":"provider-token"}`))
-		case "/userinfo":
-			_, _ = w.Write([]byte(`{"email":"u@example.test"}`))
-		default:
-			t.Fatalf("provider path = %s", r.URL.Path)
-		}
-	}))
-	defer provider.Close()
-
-	server := NewServer(Config{Auth: AuthConfig{
-		Provider: "generic", ClientID: "client", ClientSecret: "secret",
-		AuthURL: provider.URL + "/authorize", TokenURL: provider.URL + "/token",
-		UserInfoURL: provider.URL + "/userinfo", RedirectURL: "https://cloud.example.test/v1/auth/browser/callback",
+	server := NewServer(Config{GitHubApp: GitHubAppConfig{
+		ClientID: "client", ClientSecret: "secret",
+		CallbackURL: "https://cloud.example.test/v1/auth/browser/callback",
 	}})
+	server.HTTPClient = newGitHubHTTPClient()
+	server.HTTPClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case githubTokenURL:
+			return githubJSONResponse(r, http.StatusOK, `{"access_token":"provider-token"}`), nil
+		case githubUserURL:
+			return githubJSONResponse(r, http.StatusOK, `{"email":"u@example.test"}`), nil
+		default:
+			t.Fatalf("provider URL = %s", r.URL)
+			return nil, nil
+		}
+	})
 	project, err := server.Registry.CreateProject("org", "Demo", "demo", "u", "project-key")
 	if err != nil {
 		t.Fatal(err)

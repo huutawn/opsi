@@ -66,7 +66,7 @@ func runBootstrapOwner(args []string, stdout, stderr io.Writer) int {
 		Email: *email, DisplayName: *displayName, OrgName: *orgName, OrgSlug: *orgSlug,
 		ProjectName: *projectName, ProjectSlug: *projectSlug, OAuthProvider: *oauthProvider,
 		OAuthSubject: *oauthSubject, IssuePAT: *patOutputFile != "",
-	}, cfg.Auth.Provider)
+	}, "github")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2

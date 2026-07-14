@@ -20,6 +20,8 @@ PLACEHOLDER_PREFIXES = ("REPLACE_WITH_",)
 PLACEHOLDER_VALUES = {"CHANGE_ME", "EXAMPLE_SECRET"}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 K3S_VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$")
+GITHUB_CALLBACK_PATH = "/v1/auth/browser/callback"
+LEGACY_CLOUD_AUTH_ENV_PREFIX = "OPSI_CLOUD_" + "AUTH_"
 
 CLOUD_ENV_NAMES = (
     "OPSI_CLOUD_TTL",
@@ -41,14 +43,9 @@ CLOUD_ENV_NAMES = (
     "OPSI_CLOUD_ALERTS_INTERNAL_TOKEN",
     "OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN",
     "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY",
-    "OPSI_CLOUD_AUTH_PROVIDER",
-    "OPSI_CLOUD_AUTH_CLIENT_ID",
-    "OPSI_CLOUD_AUTH_CLIENT_SECRET",
-    "OPSI_CLOUD_AUTH_AUTH_URL",
-    "OPSI_CLOUD_AUTH_TOKEN_URL",
-    "OPSI_CLOUD_AUTH_USERINFO_URL",
-    "OPSI_CLOUD_AUTH_REDIRECT_URL",
-    "OPSI_CLOUD_AUTH_SCOPES",
+    "OPSI_CLOUD_GITHUB_APP_CLIENT_ID",
+    "OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET",
+    "OPSI_CLOUD_GITHUB_APP_CALLBACK_URL",
 )
 
 
@@ -145,6 +142,65 @@ def parse_http_url(raw: str, name: str, https_only: bool = False):
     return parsed
 
 
+def effective_port(parsed) -> int | None:
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return None
+
+
+def validate_github_app_config(env: dict[str, str], production: bool, public_base_url: str) -> None:
+    client_id = env.get("OPSI_CLOUD_GITHUB_APP_CLIENT_ID", "").strip()
+    client_secret = env.get("OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET", "")
+    callback_url = env.get("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL", "")
+
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in client_id):
+        fail("OPSI_CLOUD_GITHUB_APP_CLIENT_ID must not contain whitespace or control characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in client_secret):
+        fail("OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET must not contain control characters")
+    if bool(client_id) != bool(client_secret):
+        fail("OPSI_CLOUD_GITHUB_APP_CLIENT_ID and OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET must be configured together")
+    if production and (not client_id or not client_secret or not callback_url):
+        fail("production requires GitHub App Client ID, Client Secret, and callback URL")
+    if client_id and not callback_url:
+        fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL is required when GitHub user authorization is enabled")
+    if not callback_url:
+        return
+
+    callback = urlparse(callback_url)
+    if not callback.scheme or not callback.hostname:
+        fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL must be an absolute URL")
+    try:
+        callback.port
+    except ValueError:
+        fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL contains an invalid port")
+    if callback.username or callback.password or "?" in callback_url or "#" in callback_url:
+        fail("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL must not contain user info, query, or fragment")
+    if callback.path != GITHUB_CALLBACK_PATH:
+        fail(f"OPSI_CLOUD_GITHUB_APP_CALLBACK_URL path must be {GITHUB_CALLBACK_PATH}")
+    if production:
+        if callback.scheme != "https":
+            fail("production GitHub App callback URL must use HTTPS")
+        public = urlparse(public_base_url)
+        try:
+            public.port
+        except ValueError:
+            fail("cloud.public_base_url contains an invalid port")
+        if (
+            public.scheme != callback.scheme
+            or public.hostname != callback.hostname
+            or effective_port(public) != effective_port(callback)
+        ):
+            fail("production GitHub App callback URL must match cloud.public_base_url scheme and host")
+    elif callback.scheme == "http" and callback.hostname not in {"127.0.0.1", "localhost"}:
+        fail("development GitHub App callback URL must use HTTPS or loopback HTTP")
+    elif callback.scheme not in {"http", "https"}:
+        fail("GitHub App callback URL must use HTTP(S)")
+
+
 def validate_permissions(path: pathlib.Path) -> None:
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
@@ -177,6 +233,13 @@ def main() -> int:
     cloud = parse_json(CLOUD_PATH, cloud_text)
     worker = parse_json(WORKER_PATH, worker_text)
 
+    legacy_names = sorted(name for name in env if name.startswith(LEGACY_CLOUD_AUTH_ENV_PREFIX))
+    if legacy_names:
+        fail(f"legacy variable {legacy_names[0]} is no longer supported; use OPSI_CLOUD_GITHUB_APP_*")
+    legacy_auth = cloud.get("auth")
+    if isinstance(legacy_auth, dict) and legacy_auth:
+        fail("legacy auth config is no longer supported; use github_app")
+
     if any(is_placeholder(value) for value in env.values()):
         fail(f"placeholder remains in {ENV_PATH.relative_to(ROOT)}")
     for path, value in ((CLOUD_PATH, cloud), (WORKER_PATH, worker)):
@@ -188,6 +251,11 @@ def main() -> int:
             fail(f".env is missing {name}")
 
     cloud_production = parse_bool(env["OPSI_CLOUD_PRODUCTION"], "OPSI_CLOUD_PRODUCTION")
+    validate_github_app_config(
+        env,
+        cloud_production,
+        env.get("OPSI_CLOUD_PUBLIC_BASE_URL", ""),
+    )
     worker_production = worker.get("production", False)
     if not isinstance(worker_production, bool):
         fail("bootstrap-worker.production must be a boolean")

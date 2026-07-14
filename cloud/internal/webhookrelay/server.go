@@ -7,17 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
@@ -29,6 +26,7 @@ type Server struct {
 	Config        Config
 	OTP           *otp.Service
 	Auth          *auth.Service
+	HTTPClient    *http.Client
 	Registry      registry.API
 	credentials   CredentialVault
 	registrations RegistrationVault
@@ -40,12 +38,27 @@ type Server struct {
 	oauthStates   map[string]oauthState
 	authGrants    map[string]authGrant
 	now           func() time.Time
+	random        io.Reader
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
-	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter(), observer: NewObserver(), alerts: NewAlertManager(cfg.Alerts), oauthStates: map[string]oauthState{}, authGrants: map[string]authGrant{}}
+	return &Server{
+		Queue:         NewQueue(),
+		Config:        cfg,
+		OTP:           service,
+		HTTPClient:    newGitHubHTTPClient(),
+		Registry:      registry.NewService(),
+		credentials:   NewCredentialStore(),
+		registrations: NewRegistrationTokenStore(),
+		limits:        newRateLimiter(),
+		observer:      NewObserver(),
+		alerts:        NewAlertManager(cfg.Alerts),
+		oauthStates:   map[string]oauthState{},
+		authGrants:    map[string]authGrant{},
+		random:        rand.Reader,
+	}
 }
 
 func (s *Server) clock() time.Time {
@@ -221,137 +234,6 @@ func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-type oauthState struct {
-	LocalCallback string
-	LocalState    string
-	ProjectID     string
-	ExpiresAt     time.Time
-}
-
-type authGrant struct {
-	Token     string
-	Session   auth.VerifyResult
-	ExpiresAt time.Time
-}
-
-type oauthProfile struct {
-	Subject string
-}
-
-func (s *Server) handleBrowserAuthStart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	if s.Auth == nil || !s.authConfigured() {
-		s.auditAuth("", "", "", "login_started", "failure", map[string]any{"reason": "auth_not_configured"})
-		writeError(w, http.StatusServiceUnavailable, "auth flow is not configured")
-		return
-	}
-	var req struct {
-		LocalCallback string `json:"local_callback"`
-		LocalState    string `json:"local_state"`
-		ProjectID     string `json:"project_id"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid auth start request")
-		return
-	}
-	if !localCallbackAllowed(req.LocalCallback) || req.LocalState == "" {
-		writeError(w, http.StatusBadRequest, "invalid local callback")
-		return
-	}
-	state := randomToken("oauth")
-	expiresAt := time.Now().UTC().Add(5 * time.Minute)
-	s.authMu.Lock()
-	s.oauthStates[state] = oauthState{LocalCallback: req.LocalCallback, LocalState: req.LocalState, ProjectID: req.ProjectID, ExpiresAt: expiresAt}
-	s.authMu.Unlock()
-
-	u, err := url.Parse(s.Config.Auth.AuthURL)
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "auth provider URL is invalid")
-		return
-	}
-	q := u.Query()
-	q.Set("response_type", "code")
-	q.Set("client_id", s.Config.Auth.ClientID)
-	q.Set("redirect_uri", s.Config.Auth.RedirectURL)
-	q.Set("state", state)
-	if len(s.Config.Auth.Scopes) > 0 {
-		q.Set("scope", strings.Join(s.Config.Auth.Scopes, " "))
-	}
-	u.RawQuery = q.Encode()
-	s.auditAuth("", "", req.ProjectID, "login_started", "success", map[string]any{"provider": s.Config.Auth.Provider})
-	writeJSON(w, http.StatusOK, map[string]any{"auth_url": u.String(), "expires_at": expiresAt, "status": "pending"})
-}
-
-func (s *Server) handleBrowserAuthCallback(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	state := r.URL.Query().Get("state")
-	code := r.URL.Query().Get("code")
-	s.authMu.Lock()
-	pending, ok := s.oauthStates[state]
-	if ok {
-		delete(s.oauthStates, state)
-	}
-	s.authMu.Unlock()
-	if !ok || time.Now().UTC().After(pending.ExpiresAt) || code == "" {
-		writeError(w, http.StatusUnauthorized, "auth state expired or invalid")
-		return
-	}
-	profile, err := s.exchangeOAuthCode(r.Context(), code)
-	if err != nil {
-		s.auditAuth("", "", pending.ProjectID, "auth_failure", "failure", map[string]any{"reason": err.Error()})
-		writeError(w, http.StatusUnauthorized, "OAuth provider login failed")
-		return
-	}
-	issued, err := s.Auth.IssuePATForOAuth(r.Context(), strings.ToLower(strings.TrimSpace(s.Config.Auth.Provider)), profile.Subject, pending.ProjectID, 90*24*time.Hour)
-	if err != nil {
-		s.auditAuth("", "", pending.ProjectID, "token_issued", "failure", map[string]any{"provider": s.Config.Auth.Provider, "reason": err.Error()})
-		writeError(w, http.StatusForbidden, "OAuth identity or project membership not found")
-		return
-	}
-	grant := randomToken("grant")
-	s.authMu.Lock()
-	s.authGrants[grant] = authGrant{Token: issued.Token, Session: issued.Session, ExpiresAt: time.Now().UTC().Add(90 * time.Second)}
-	s.authMu.Unlock()
-	s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": s.Config.Auth.Provider})
-	cb, _ := url.Parse(pending.LocalCallback)
-	q := cb.Query()
-	q.Set("code", grant)
-	q.Set("state", pending.LocalState)
-	cb.RawQuery = q.Encode()
-	http.Redirect(w, r, cb.String(), http.StatusFound)
-}
-
-func (s *Server) handleBrowserAuthRedeem(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		Code string `json:"code"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid auth redeem request")
-		return
-	}
-	s.authMu.Lock()
-	grant, ok := s.authGrants[req.Code]
-	if ok {
-		delete(s.authGrants, req.Code)
-	}
-	s.authMu.Unlock()
-	if !ok || time.Now().UTC().After(grant.ExpiresAt) {
-		writeError(w, http.StatusUnauthorized, "auth grant expired or invalid")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"token": grant.Token, "session": grant.Session})
-}
-
 func (s *Server) handlePATRotate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -398,119 +280,14 @@ func (s *Server) handlePATRevoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "session": result})
 }
 
-func (s *Server) exchangeOAuthCode(ctx context.Context, code string) (oauthProfile, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("code", code)
-	form.Set("client_id", s.Config.Auth.ClientID)
-	form.Set("client_secret", s.Config.Auth.ClientSecret)
-	form.Set("redirect_uri", s.Config.Auth.RedirectURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Config.Auth.TokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return oauthProfile{}, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return oauthProfile{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return oauthProfile{}, fmt.Errorf("token exchange status %d", resp.StatusCode)
-	}
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tokenResp); err != nil {
-		return oauthProfile{}, err
-	}
-	if tokenResp.AccessToken == "" {
-		return oauthProfile{}, fmt.Errorf("missing access token")
-	}
-	userReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.Config.Auth.UserInfoURL, nil)
-	if err != nil {
-		return oauthProfile{}, err
-	}
-	userReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
-	userReq.Header.Set("Accept", "application/json")
-	userResp, err := http.DefaultClient.Do(userReq)
-	if err != nil {
-		return oauthProfile{}, err
-	}
-	defer userResp.Body.Close()
-	if userResp.StatusCode < 200 || userResp.StatusCode >= 300 {
-		return oauthProfile{}, fmt.Errorf("userinfo status %d", userResp.StatusCode)
-	}
-	var user struct {
-		Sub json.RawMessage `json:"sub"`
-		ID  json.RawMessage `json:"id"`
-	}
-	if err := json.NewDecoder(io.LimitReader(userResp.Body, 1<<20)).Decode(&user); err != nil {
-		return oauthProfile{}, err
-	}
-	subject := oauthSubject(user.Sub)
-	if subject == "" {
-		subject = oauthSubject(user.ID)
-	}
-	if subject == "" {
-		return oauthProfile{}, fmt.Errorf("userinfo subject missing")
-	}
-	if len(subject) > 255 || strings.IndexFunc(subject, unicode.IsControl) >= 0 {
-		return oauthProfile{}, fmt.Errorf("userinfo subject invalid")
-	}
-	return oauthProfile{Subject: subject}, nil
-}
-
-func oauthSubject(raw json.RawMessage) string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return ""
-	}
-	var value string
-	if json.Unmarshal(raw, &value) == nil {
-		return strings.TrimSpace(value)
-	}
-	var number json.Number
-	if json.Unmarshal(raw, &number) == nil {
-		return number.String()
-	}
-	return ""
-}
-
-func (s *Server) authConfigured() bool {
-	cfg := s.Config.Auth
-	return cfg.ClientID != "" && cfg.ClientSecret != "" && cfg.AuthURL != "" && cfg.TokenURL != "" && cfg.UserInfoURL != "" && cfg.RedirectURL != ""
-}
-
 func (s *Server) auditAuth(orgID, userID, projectID, action, result string, metadata map[string]any) {
 	if s.Registry != nil && orgID != "" {
 		s.Registry.Audit(orgID, projectID, userID, action, "auth", firstNonEmpty(projectID, userID, "auth"), result, metadata)
 	}
 }
 
-func localCallbackAllowed(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	return u.Scheme == "http" && (host == "127.0.0.1" || host == "localhost")
-}
-
 func bearerFromRequest(r *http.Request) string {
 	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-}
-
-func randomToken(prefix string) string {
-	var raw [24]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
-	}
-	return prefix + "_" + base64Raw(raw[:])
-}
-
-func base64Raw(data []byte) string {
-	return base64.RawURLEncoding.EncodeToString(data)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -3,7 +3,7 @@
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-13 |
+| Last updated | 2026-07-14 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v4.md` |
@@ -24,9 +24,9 @@ artifacts. At this snapshot:
   storage compatibility but are not read, exposed, or executed.
 - `IncidentEvidence v1`, Safe ActionPlane, and `opsi mcp serve` are not
   implemented.
-- GitHub App user authorization, installation authentication, GitHub Actions
-  OIDC, `BuildRecord`, digest-based deployment, `DeploymentPolicy`, and pull
-  request preview environments are not implemented.
+- GitHub App user authorization is implemented. Installation authentication,
+  GitHub Actions OIDC, `BuildRecord`, digest-based deployment,
+  `DeploymentPolicy`, and pull request preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
   certificate directories, databases, logs, and generated output.
@@ -96,15 +96,23 @@ Safe ActionPlane client.
 
 ## Implemented Cloud slice
 
-- Organization/project/membership metadata, RBAC, PAT verification and browser
-  OAuth grant mediation, OTP, Agent/node registration, bootstrap sessions,
+- Organization/project/membership metadata, RBAC, PAT verification and GitHub
+  App user authorization grant mediation, OTP, Agent/node registration, bootstrap sessions,
   deployment job envelopes, webhook relay, audit, and support metadata.
 - GitHub webhook routes require a per-route secret and Cloud verifies the
   SHA-256 HMAC before accepting and sanitizing the payload.
-- The current browser login path is generic OAuth mediation. The current
-  webhook HMAC route is not evidence of GitHub App user authorization,
-  installation-token support, installation/repository event ownership, or the
-  target per-App webhook control plane.
+- The browser login path uses fixed GitHub authorization, token, and `/user`
+  endpoints with PKCE S256 and five-minute one-time in-memory state. Provider is
+  fixed to `github`; subject is the canonical decimal positive numeric GitHub
+  user ID. The identity must be prelinked, and Cloud does not trust login/email
+  or create an Opsi user or membership during login.
+- GitHub user access tokens exist only during the callback request and are not
+  persisted, audited, or returned to the CLI. Pending state and local grants
+  remain in memory and are lost on Cloud restart. The flow has focused test
+  coverage but no live GitHub App verification.
+- The current webhook HMAC route is not GitHub App installation-token support,
+  installation/repository event ownership, or the target per-App webhook
+  control plane.
 - Postgres-backed registry/relay/audit/idempotency/bootstrap/PAT/OTP state when
   configured; development/test modes may use in-memory implementations where
   production validation permits.
@@ -235,8 +243,8 @@ artifact currently proves the complete scenario. Status remains
 `MANUAL_GATED`.
 
 Production readiness remains unproven. Current gaps include clean control-plane
-VM and restart proof, clean VPS bootstrap proof, GitHub App identity and
-installation trust, hosted and hardened Agent delivery, Actions OIDC, trusted
+VM and restart proof, clean VPS bootstrap proof, GitHub App installation trust
+and live user-auth verification, hosted and hardened Agent delivery, Actions OIDC, trusted
 OCI artifact delivery, managed
 gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
 E2E, release hardening, supply-chain evidence, and measured disaster recovery.
@@ -248,7 +256,9 @@ P04 durable checkpoint/resume behavior is implemented, but its closure remains
 blocked by the pre-existing full-Cloud OTP/PAT regression gate. P05 supply-chain,
 transport, installer, checksum, HTTPS, K3s pinning, and canonical systemd layout
 hardening is implemented with focused/race and development smoke evidence. P06 clean target VPS proof
-remains `UNPROVEN`; there is no clean target VPS evidence. GitHub App control-plane work,
+remains `DEFERRED / UNPROVEN`; there is no clean target VPS evidence. P07 GitHub
+App user authorization code is complete with focused tests, while real GitHub
+verification is `UNPROVEN`. P08 installation authentication and webhooks are next;
 OIDC-bound trusted artifact delivery, runtime delivery, and the later
 evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
 of truth is `docs/opsi_roadmap_v4.md`.

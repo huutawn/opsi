@@ -5,14 +5,21 @@ Opsi Cloud is the durable control-plane and identity boundary. It does not run w
 ## Authentication currently implemented
 
 - **Initial owner bootstrap:** local operator command `opsi-cloud admin bootstrap-owner`; creates the first user, organization, project, Owner membership, and optionally a one-time PAT file and/or prelinked OAuth subject.
-- **PAT:** bearer token verification scoped to a project or organization; bcrypt hashes only; expiry and revocation; issue through OAuth; client-safe rotate flow; revoke endpoint.
-- **Browser OAuth:** authorization-code mediation through `/v1/auth/browser/start`, `/callback`, and `/redeem`. The provider subject must already be linked to a user; provider email alone is not trusted.
+- **PAT:** bearer token verification scoped to a project or organization; bcrypt hashes only; expiry and revocation; issue through prelinked GitHub identity; client-safe rotate flow; revoke endpoint.
+- **GitHub App user authorization:** authorization-code mediation through `/v1/auth/browser/start`, `/callback`, and `/redeem`, using fixed GitHub endpoints, PKCE S256, five-minute one-time state, and provider `github`. The subject is the canonical decimal form of the positive numeric GitHub user ID. The identity must already be linked to an Opsi user; login/email are never used as fallback identity and no user or membership is created automatically.
 - **OTP:** PAT-authenticated `/v1/otp/request` and `/v1/otp/verify`; the recipient email is derived from the verified PAT identity, with salted hashes, five-minute expiry, one-time use, rate limiting, SMTP or file outbox.
 - **Agent auth:** one-time registration token exchange, then a scoped bearer credential stored as a bcrypt hash. Production also requires an HMAC timestamp/signature on Agent requests.
 - **Bootstrap worker auth:** shared worker token plus worker ID and per-lease token for internal bootstrap endpoints.
 - **Internal alert auth:** dedicated internal token.
 
 There is no password login and no public self-sign-up endpoint.
+
+The GitHub user access token is held only long enough to request GitHub `/user`;
+it is not persisted, audited, or returned to the CLI. Pending browser login
+state and local one-time grants are in memory, so a Cloud restart invalidates
+them. GitHub App installation authentication, App JWTs, installation tokens,
+installation/repository webhooks, and repository mapping are not implemented.
+The flow has not yet been exercised against a real GitHub App.
 
 ## Main runtime responsibilities
 

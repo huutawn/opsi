@@ -3,26 +3,33 @@ package webhookrelay
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+)
+
+const (
+	githubCallbackPath  = "/v1/auth/browser/callback"
+	legacyAuthEnvPrefix = "OPSI_CLOUD_" + "AUTH_"
 )
 
 type Config struct {
-	TTL                    Duration    `json:"ttl"`
-	DatabaseURL            string      `json:"database_url"`
-	PublicBaseURL          string      `json:"public_base_url"`
-	Production             bool        `json:"production"`
-	EnableDebugUI          bool        `json:"enable_debug_ui"`
-	OTP                    OTPConfig   `json:"otp"`
-	SMTP                   SMTPConfig  `json:"smtp"`
-	Alerts                 AlertConfig `json:"alerts"`
-	Routes                 []Route     `json:"routes"`
-	BootstrapWorkerToken   string      `json:"bootstrap_worker_token"`
-	BootstrapSecretKey     string      `json:"bootstrap_secret_key"`
-	RequireAgentSignatures bool        `json:"require_agent_signatures"`
-	Auth                   AuthConfig  `json:"auth"`
+	TTL                    Duration        `json:"ttl"`
+	DatabaseURL            string          `json:"database_url"`
+	PublicBaseURL          string          `json:"public_base_url"`
+	Production             bool            `json:"production"`
+	EnableDebugUI          bool            `json:"enable_debug_ui"`
+	OTP                    OTPConfig       `json:"otp"`
+	SMTP                   SMTPConfig      `json:"smtp"`
+	Alerts                 AlertConfig     `json:"alerts"`
+	Routes                 []Route         `json:"routes"`
+	BootstrapWorkerToken   string          `json:"bootstrap_worker_token"`
+	BootstrapSecretKey     string          `json:"bootstrap_secret_key"`
+	RequireAgentSignatures bool            `json:"require_agent_signatures"`
+	GitHubApp              GitHubAppConfig `json:"github_app"`
 }
 
 type OTPConfig struct {
@@ -45,15 +52,10 @@ type AlertConfig struct {
 	InternalToken string `json:"internal_token"`
 }
 
-type AuthConfig struct {
-	Provider     string   `json:"provider"`
-	ClientID     string   `json:"client_id"`
-	ClientSecret string   `json:"client_secret"`
-	AuthURL      string   `json:"auth_url"`
-	TokenURL     string   `json:"token_url"`
-	UserInfoURL  string   `json:"user_info_url"`
-	RedirectURL  string   `json:"redirect_url"`
-	Scopes       []string `json:"scopes"`
+type GitHubAppConfig struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	CallbackURL  string `json:"callback_url"`
 }
 
 type Route struct {
@@ -70,7 +72,12 @@ type Route struct {
 type Duration time.Duration
 
 func LoadConfig(path string) (Config, error) {
-	cfg := Config{TTL: Duration(24 * time.Hour)}
+	cfg := Config{
+		TTL: Duration(24 * time.Hour),
+		GitHubApp: GitHubAppConfig{
+			CallbackURL: "http://127.0.0.1:8080" + githubCallbackPath,
+		},
+	}
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -78,6 +85,9 @@ func LoadConfig(path string) (Config, error) {
 		}
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return Config{}, fmt.Errorf("parse cloud config: %w", err)
+		}
+		if err := rejectLegacyAuthJSON(data); err != nil {
+			return Config{}, err
 		}
 	}
 	if err := applyEnvOverrides(&cfg); err != nil {
@@ -90,6 +100,12 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func applyEnvOverrides(cfg *Config) error {
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, legacyAuthEnvPrefix) {
+			return fmt.Errorf("%s is no longer supported; use OPSI_CLOUD_GITHUB_APP_*", name)
+		}
+	}
 	if err := applyDurationEnv("OPSI_CLOUD_TTL", &cfg.TTL); err != nil {
 		return err
 	}
@@ -119,14 +135,9 @@ func applyEnvOverrides(cfg *Config) error {
 	applyStringEnv("OPSI_CLOUD_ALERTS_INTERNAL_TOKEN", &cfg.Alerts.InternalToken)
 	applyStringEnv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN", &cfg.BootstrapWorkerToken)
 	applyStringEnv("OPSI_CLOUD_BOOTSTRAP_SECRET_KEY", &cfg.BootstrapSecretKey)
-	applyStringEnv("OPSI_CLOUD_AUTH_PROVIDER", &cfg.Auth.Provider)
-	applyStringEnv("OPSI_CLOUD_AUTH_CLIENT_ID", &cfg.Auth.ClientID)
-	applyStringEnv("OPSI_CLOUD_AUTH_CLIENT_SECRET", &cfg.Auth.ClientSecret)
-	applyStringEnv("OPSI_CLOUD_AUTH_AUTH_URL", &cfg.Auth.AuthURL)
-	applyStringEnv("OPSI_CLOUD_AUTH_TOKEN_URL", &cfg.Auth.TokenURL)
-	applyStringEnv("OPSI_CLOUD_AUTH_USERINFO_URL", &cfg.Auth.UserInfoURL)
-	applyStringEnv("OPSI_CLOUD_AUTH_REDIRECT_URL", &cfg.Auth.RedirectURL)
-	applyCSVEnv("OPSI_CLOUD_AUTH_SCOPES", &cfg.Auth.Scopes)
+	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CLIENT_ID", &cfg.GitHubApp.ClientID)
+	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET", &cfg.GitHubApp.ClientSecret)
+	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL", &cfg.GitHubApp.CallbackURL)
 	return nil
 }
 
@@ -160,20 +171,6 @@ func applyDurationEnv(name string, target *Duration) error {
 	}
 	*target = Duration(parsed)
 	return nil
-}
-
-func applyCSVEnv(name string, target *[]string) {
-	value, ok := os.LookupEnv(name)
-	if !ok {
-		return
-	}
-	items := make([]string, 0)
-	for _, item := range strings.Split(value, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			items = append(items, item)
-		}
-	}
-	*target = items
 }
 
 func validateConfig(cfg *Config) error {
@@ -216,15 +213,115 @@ func validateConfig(cfg *Config) error {
 		if cfg.EnableDebugUI {
 			return fmt.Errorf("production forbids enable_debug_ui")
 		}
-		if cfg.Auth.Provider == "" || cfg.Auth.ClientID == "" || cfg.Auth.ClientSecret == "" || cfg.Auth.AuthURL == "" || cfg.Auth.TokenURL == "" || cfg.Auth.UserInfoURL == "" || cfg.Auth.RedirectURL == "" {
-			return fmt.Errorf("production requires auth OAuth config")
-		}
 		if cfg.PublicBaseURL == "" || !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
 			return fmt.Errorf("production requires an https public_base_url")
 		}
 		cfg.RequireAgentSignatures = true
 	}
+	return validateGitHubAppConfig(cfg)
+}
+
+func rejectLegacyAuthJSON(data []byte) error {
+	var envelope struct {
+		Auth json.RawMessage `json:"auth"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope.Auth) == 0 {
+		return nil
+	}
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal(envelope.Auth, &legacy); err == nil && len(legacy) > 0 {
+		return fmt.Errorf("legacy auth config is no longer supported; use github_app")
+	}
 	return nil
+}
+
+func validateGitHubAppConfig(cfg *Config) error {
+	github := &cfg.GitHubApp
+	github.ClientID = strings.TrimSpace(github.ClientID)
+	if strings.IndexFunc(github.ClientID, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) >= 0 {
+		return fmt.Errorf("github_app.client_id must not contain whitespace or control characters")
+	}
+	if strings.IndexFunc(github.ClientSecret, unicode.IsControl) >= 0 {
+		return fmt.Errorf("github_app.client_secret must not contain control characters")
+	}
+	if (github.ClientID == "") != (github.ClientSecret == "") {
+		return fmt.Errorf("github_app.client_id and github_app.client_secret must be configured together")
+	}
+
+	enabled := github.ClientID != ""
+	if cfg.Production && !enabled {
+		return fmt.Errorf("production requires github_app client_id, client_secret and callback_url")
+	}
+	if enabled && github.CallbackURL == "" {
+		return fmt.Errorf("github_app.callback_url is required when GitHub user authorization is enabled")
+	}
+	if github.CallbackURL != "" {
+		callback, err := validateGitHubCallbackURL(github.CallbackURL, cfg.Production)
+		if err != nil {
+			return err
+		}
+		if cfg.Production {
+			publicURL, err := url.Parse(cfg.PublicBaseURL)
+			if err != nil || publicURL.Scheme != "https" || publicURL.Host == "" {
+				return fmt.Errorf("production requires an https public_base_url")
+			}
+			if !sameURLOrigin(callback, publicURL) {
+				return fmt.Errorf("production github_app.callback_url must match public_base_url scheme and host")
+			}
+		}
+	}
+	if cfg.Production && github.CallbackURL == "" {
+		return fmt.Errorf("production requires github_app client_id, client_secret and callback_url")
+	}
+	return nil
+}
+
+func validateGitHubCallbackURL(raw string, production bool) (*url.URL, error) {
+	callback, err := url.Parse(raw)
+	if err != nil || !callback.IsAbs() || callback.Host == "" {
+		return nil, fmt.Errorf("github_app.callback_url must be an absolute URL")
+	}
+	if callback.User != nil || callback.RawQuery != "" || callback.ForceQuery || callback.Fragment != "" {
+		return nil, fmt.Errorf("github_app.callback_url must not contain user info, query or fragment")
+	}
+	if callback.Path != githubCallbackPath {
+		return nil, fmt.Errorf("github_app.callback_url path must be %s", githubCallbackPath)
+	}
+	if production {
+		if callback.Scheme != "https" {
+			return nil, fmt.Errorf("production github_app.callback_url must use https")
+		}
+		return callback, nil
+	}
+	if callback.Scheme == "https" {
+		return callback, nil
+	}
+	host := strings.ToLower(callback.Hostname())
+	if callback.Scheme != "http" || (host != "127.0.0.1" && host != "localhost") {
+		return nil, fmt.Errorf("development github_app.callback_url must use https or loopback http")
+	}
+	return callback, nil
+}
+
+func sameURLOrigin(left, right *url.URL) bool {
+	return strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) &&
+		effectivePort(left) == effectivePort(right)
+}
+
+func effectivePort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(value.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(value.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }
 
 func (d Duration) MarshalJSON() ([]byte, error) {

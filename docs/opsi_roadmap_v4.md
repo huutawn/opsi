@@ -333,7 +333,7 @@ Status: `IMPLEMENTED / CLEAN TARGET VPS EVIDENCE UNPROVEN`.
 
 #### P06 - Clean target VPS bootstrap proof
 
-Status: `UNPROVEN`.
+Status: `DEFERRED / UNPROVEN`.
 
 Checkpoint: `[VPS CHECKPOINT]`
 
@@ -358,12 +358,21 @@ Test on a real clean Ubuntu target:
 
 #### P07 - GitHub App user authorization
 
+Status: `CODE COMPLETE`.
+
+Live GitHub App checkpoint: `UNPROVEN`.
+
 - Replace generic OAuth with GitHub App user authorization.
 - Use GitHub numeric user ID as the identity subject.
 - Enforce PKCE and state.
 - Validate environment configuration.
+- Keep user identity prelinking mandatory and store no GitHub user token.
+- Pending browser state remains in memory and is invalidated by Cloud restart.
+- Focused P07 tests pass; no real GitHub App or public callback was exercised.
 
 #### P08 - GitHub App installation authentication and webhooks
+
+Status: `NEXT`.
 
 - Configure App ID.
 - Handle the App private key safely.
@@ -597,7 +606,7 @@ Opsi must not be described as production-ready before P32 passes.
 | Checkpoint | Task | Required environment | Current status |
 |---|---|---|---|
 | CP-VPS-1 | P01 clean development control-plane install and restart | Clean Ubuntu control-plane VPS | `DEFERRED / UNPROVEN` |
-| CP-VPS-2 | P06 bootstrap and failure/recovery matrix | Clean Ubuntu target VPS | `UNPROVEN` |
+| CP-VPS-2 | P06 bootstrap and failure/recovery matrix | Clean Ubuntu target VPS | `DEFERRED / UNPROVEN` |
 | CP-GH-VPS-1 | P10 real GitHub App and public HTTPS | GitHub plus VPS | `NOT_RUN` |
 | CP-GH-RUNNER-1 | P13 OIDC BuildRecord and public GHCR | GitHub-hosted runner | `NOT_RUN` |
 | CP-CD-1 | P20 main branch digest deployment | GitHub plus VPS | `NOT_RUN` |
