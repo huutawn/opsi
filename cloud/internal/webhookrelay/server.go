@@ -616,10 +616,34 @@ func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	var req otp.Request
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	var body struct {
+		ProjectID string `json:"project_id"`
+		UserID    string `json:"user_id,omitempty"`
+		Purpose   string `json:"purpose"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid otp request")
 		return
+	}
+	body.ProjectID = strings.TrimSpace(body.ProjectID)
+	body.UserID = strings.TrimSpace(body.UserID)
+	body.Purpose = strings.TrimSpace(body.Purpose)
+	if body.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+	if body.Purpose == "" {
+		writeError(w, http.StatusBadRequest, "purpose is required")
+		return
+	}
+	if s.Auth == nil && body.UserID == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	req := otp.Request{
+		ProjectID: body.ProjectID,
+		UserID:    body.UserID,
+		Purpose:   body.Purpose,
 	}
 	principal, ok := s.authorizeProject(w, r, req.ProjectID)
 	if !ok {

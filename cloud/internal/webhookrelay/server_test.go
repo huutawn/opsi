@@ -167,11 +167,16 @@ func TestQueueIdempotencyRejectsDifferentBody(t *testing.T) {
 
 func TestOTPRequestOmitsCodeWithoutDevEcho(t *testing.T) {
 	server := NewServer(Config{})
-	req := httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"ProjectID":"proj","UserID":"user","Purpose":"secret_reveal"}`)))
+	sender := &captureOTPSender{}
+	server.OTP.Sender = sender
+	req := httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"project_id":"proj","user_id":"user","purpose":"secret_reveal"}`)))
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.req.ProjectID != "proj" || sender.req.UserID != "user" || sender.req.Purpose != "secret_reveal" {
+		t.Fatalf("snake-case OTP request was not decoded correctly: %+v", sender.req)
 	}
 	var body map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
@@ -179,6 +184,64 @@ func TestOTPRequestOmitsCodeWithoutDevEcho(t *testing.T) {
 	}
 	if _, ok := body["code"]; ok {
 		t.Fatalf("code leaked in non-dev response: %v", body)
+	}
+}
+
+func TestOTPRequestValidation(t *testing.T) {
+	hash, err := auth.HashPAT("owner-pat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticatedServer := NewServer(Config{})
+	authenticatedServer.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{{
+		ID: "pat-1", UserID: "user-1", Email: "owner@example.test", OrgID: "org-1", ProjectID: "proj-1", Role: "Owner", Hash: hash,
+	}}}}
+
+	tests := []struct {
+		name       string
+		server     *Server
+		body       string
+		wantDetail string
+	}{
+		{
+			name:       "missing project before PAT authorization",
+			server:     authenticatedServer,
+			body:       `{"purpose":"secret.reveal"}`,
+			wantDetail: "project_id is required",
+		},
+		{
+			name:       "missing purpose",
+			server:     authenticatedServer,
+			body:       `{"project_id":"proj-1"}`,
+			wantDetail: "purpose is required",
+		},
+		{
+			name:       "missing user without auth",
+			server:     NewServer(Config{}),
+			body:       `{"project_id":"proj-1","purpose":"secret.reveal"}`,
+			wantDetail: "user_id is required",
+		},
+		{
+			name:       "malformed JSON",
+			server:     authenticatedServer,
+			body:       `{"project_id":`,
+			wantDetail: "invalid otp request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/otp/request", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer owner-pat")
+			w := httptest.NewRecorder()
+			tt.server.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tt.wantDetail) {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "pat invalid") || strings.Contains(w.Body.String(), "owner-pat") {
+				t.Fatalf("validation response leaked auth details: %s", w.Body.String())
+			}
+		})
 	}
 }
 
@@ -201,6 +264,9 @@ func TestOTPRequiresPATAndUsesAuthenticatedEmail(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated OTP request status=%d body=%s", w.Code, w.Body.String())
 	}
+	if strings.Contains(w.Body.String(), "owner-pat") {
+		t.Fatalf("unauthenticated response leaked PAT: %s", w.Body.String())
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"project_id":"proj-1","user_id":"other-user","purpose":"secret.reveal"}`)))
 	req.Header.Set("Authorization", "Bearer owner-pat")
@@ -209,16 +275,22 @@ func TestOTPRequiresPATAndUsesAuthenticatedEmail(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("cross-user OTP request status=%d body=%s", w.Code, w.Body.String())
 	}
+	if strings.Contains(w.Body.String(), "owner-pat") {
+		t.Fatalf("forbidden response leaked PAT: %s", w.Body.String())
+	}
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"project_id":"proj-1","purpose":"secret.reveal"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"project_id":" proj-1 ","purpose":" secret.reveal ","email":"attacker@example.test"}`)))
 	req.Header.Set("Authorization", "Bearer owner-pat")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("authenticated OTP request status=%d body=%s", w.Code, w.Body.String())
 	}
-	if sender.req.UserID != "user-1" || sender.req.Email != "owner@example.test" || sender.code == "" {
+	if sender.req.ProjectID != "proj-1" || sender.req.UserID != "user-1" || sender.req.Email != "owner@example.test" || sender.req.Purpose != "secret.reveal" || sender.code == "" {
 		t.Fatalf("OTP identity was not derived from PAT: %+v", sender.req)
+	}
+	if strings.Contains(w.Body.String(), "owner-pat") || strings.Contains(w.Body.String(), sender.code) {
+		t.Fatalf("OTP response leaked PAT or OTP code: %s", w.Body.String())
 	}
 	var requested struct {
 		RequestID string `json:"request_id"`
@@ -234,6 +306,9 @@ func TestOTPRequiresPATAndUsesAuthenticatedEmail(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated OTP verify status=%d body=%s", w.Code, w.Body.String())
 	}
+	if strings.Contains(w.Body.String(), "owner-pat") || strings.Contains(w.Body.String(), sender.code) {
+		t.Fatalf("OTP verify error leaked PAT or OTP code: %s", w.Body.String())
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/otp/verify", bytes.NewReader(verifyBody))
 	req.Header.Set("Authorization", "Bearer owner-pat")
@@ -241,6 +316,9 @@ func TestOTPRequiresPATAndUsesAuthenticatedEmail(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("authenticated OTP verify status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "owner-pat") || strings.Contains(w.Body.String(), sender.code) {
+		t.Fatalf("OTP verify response leaked PAT or OTP code: %s", w.Body.String())
 	}
 }
 

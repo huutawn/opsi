@@ -282,15 +282,13 @@ VPS/installer proof: `UNPROVEN`.
 
 #### P04 - Resumable BootstrapJob state machine
 
-Status: `IMPLEMENTED / FULL CLOUD GATE BLOCKED`.
+Status: `CODE COMPLETE`.
 
 PostgreSQL integration: `PASS` on PostgreSQL 17.
 
-P04 closure is not marked `CODE COMPLETE` because the required full Cloud suite
-still fails `TestOTPRequiresPATAndUsesAuthenticatedEmail` with `pat invalid`.
-That failure is reproducible from the clean P03 HEAD and is outside the P04
-checkpoint path; focused P04 unit, race, PostgreSQL, and migration-upgrade tests
-pass.
+P04 closure is code complete. OTP/PAT baseline failure fixed; full Cloud suite
+PASS at this commit. Focused P04 unit, race, PostgreSQL, and migration-upgrade
+tests pass.
 
 - Durable schema-v1 checkpoint fields are persisted independently from status,
   progress, events, lease ownership, and attempt count.
@@ -325,9 +323,8 @@ Status: `IMPLEMENTED / CLEAN TARGET VPS EVIDENCE UNPROVEN`.
   config/marker persistence. A narrow crash window remains after Cloud consumes
   the token but before those files are installed; P06 must fault-inject here.
 - Focused/race tests, full Agent tests, config validation, Compose build, and an
-  isolated four-service health smoke pass. Full Cloud still fails only the
-  pre-existing `TestOTPRequiresPATAndUsesAuthenticatedEmail` `pat invalid`
-  baseline.
+  isolated four-service health smoke pass. OTP/PAT baseline failure fixed; full
+  Cloud suite PASS at this commit.
 - No real VPS, real K3s install, reboot, or real upgrade/rollback evidence was
   produced in P05. Production readiness remains unproven.
 

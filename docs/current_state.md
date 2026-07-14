@@ -176,13 +176,11 @@ Safe ActionPlane client.
   mandatory in `make verify-postgres`; execution still requires
   `OPSI_TEST_DATABASE_URL`.
 - P04-focused in-memory, worker, HTTP, PostgreSQL, concurrent transition, and
-  pre-P04 row migration-upgrade tests pass. The repository-wide Cloud gate is
-  not green because `TestOTPRequiresPATAndUsesAuthenticatedEmail` fails with
-  `pat invalid`; the same failure is reproducible from the clean P03 HEAD, so it
-  is recorded as a baseline blocker rather than P04 evidence.
+  pre-P04 row migration-upgrade tests pass. OTP/PAT baseline failure fixed;
+  full Cloud suite PASS at this commit.
 - P05-focused Bootstrap Worker/Registry tests and race tests pass. Full Agent
   tests pass. Development Compose build and isolated four-service health smoke
-  pass. Full Cloud still fails only the same pre-existing OTP/PAT baseline.
+  pass.
 - Registration replay is idempotent after config/marker persistence. A narrow
   crash window remains if Cloud consumes the token before those files are
   installed; P06 must fault-inject around this boundary.
@@ -262,8 +260,9 @@ E2E, release hardening, supply-chain evidence, and measured disaster recovery.
 ## Ordered next work
 
 P03 Agent executable and deterministic local release artifact code is complete.
-P04 durable checkpoint/resume behavior is implemented, but its closure remains
-blocked by the pre-existing full-Cloud OTP/PAT regression gate. P05 supply-chain,
+P04 durable checkpoint/resume behavior is implemented and its Cloud closure
+gate is green: OTP/PAT baseline failure fixed; full Cloud suite PASS at this
+commit. P05 supply-chain,
 transport, installer, checksum, HTTPS, K3s pinning, and canonical systemd layout
 hardening is implemented with focused/race and development smoke evidence. P06 clean target VPS proof
 remains `DEFERRED / UNPROVEN`; there is no clean target VPS evidence. P07 GitHub
