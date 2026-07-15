@@ -3,7 +3,7 @@
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-14 |
+| Last updated | 2026-07-15 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v4.md` |
@@ -33,6 +33,28 @@ artifacts. At this snapshot:
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
   certificate directories, databases, logs, and generated output.
+
+## R5-001 credential incident and source-package hygiene
+
+The historical root cause was the former canonical `package-source` recipe,
+which ran `tar` over the working-directory `.` with an incomplete exclusion
+list. Git-ignored runtime environment and secret files could therefore enter an
+archive. The Git-aware `scripts/source-package.sh` path was introduced after
+that exposure and is now the only source-package implementation.
+
+The current policy rejects runtime environment/config paths, runtime secret and
+certificate directories, private-key markers, key stores, databases, logs,
+generated output, nested archives, unsafe archive paths, and escaping symlinks.
+It builds from Git tracked plus untracked/non-ignored candidates, validates the
+temporary artifact before publication, and validates the final artifact again.
+Release validation shares the same path/content policy, while `make release`
+recreates `release/` before copying its allowlisted artifacts.
+
+Containment code and local tests do not rotate disclosed credentials. R5-001
+incident status is `OPERATOR_REQUIRED` pending rotation or revocation and
+post-rotation verification for every applicable credential class, plus a
+repository-owner Git history decision. History rewriting is not part of this
+task. See `docs/runbooks/credential-incident.md`.
 
 ## Repository shape
 

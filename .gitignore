@@ -89,29 +89,9 @@ headroom_memory.db
 !.agents/current.md
 !.agents/production_ready_rules.md
 .agents_archive
-docs/*
-!docs/opsi_srs.md
-!docs/architecture.md
-!docs/current_state.md
-!docs/status_matrix.md
-!docs/demo_runbook.md
-!docs/security_story.md
-!docs/future_work.md
-!docs/runbooks/
-docs/runbooks/*
-!docs/runbooks/clean_vps_k3s_e2e.md
-!docs/runbooks/bootstrap_first_owner.md
-!docs/runbooks/dev_control_plane.md
-!docs/evidence/
-docs/evidence/*
+# Runtime evidence stays opt-in; canonical docs, roadmaps, ADRs, and runbooks
+# must remain trackable without adding per-file exceptions.
+/docs/evidence/*
 !docs/evidence/v3-013-clean-vm.md
-!docs/architecture_decisions/
-docs/architecture_decisions/*
-!docs/architecture_decisions/ADR-001-control-plane-boundary.md
-!docs/architecture_decisions/ADR-002-srs-v4-current-direction.md
-!docs/architecture_decisions/ADR-003-user-owned-ai-action-boundary.md
-!docs/production_ready/
-docs/production_ready/*
-!docs/production_ready/README.md
 .agents_active
 k

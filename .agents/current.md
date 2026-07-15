@@ -3,6 +3,19 @@
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 
+## Active Repair Task
+
+- R5-001 is the only active task. R5-002 has not started.
+- The historical archive leak came from the former canonical `package-source`
+  recipe archiving working-directory `.` with incomplete exclusions.
+- Source-package and release containment is implemented through the Git-aware
+  candidate set, shared path/content validation, focused negative tests, and
+  pre-publication archive validation.
+- Incident status remains `OPERATOR_REQUIRED`: external credential rotation or
+  revocation, post-rotation verification, distributed-artifact review, and the
+  repository-owner Git history decision have not been performed by this task.
+- Operator procedure: `docs/runbooks/credential-incident.md`.
+
 ## M0 State
 
 - Phase 1 V3-001 through V3-007 removed Cloud AI runtime, Agent analyzer/fallback

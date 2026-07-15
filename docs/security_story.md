@@ -1,6 +1,6 @@
 # Opsi Security Story
 
-Status: active boundary summary, last updated 2026-07-13. Detailed requirements
+Status: active boundary summary, last updated 2026-07-15. Detailed requirements
 are in `docs/opsi_srs.md`; implementation status is in
 `docs/status_matrix.md`; trusted artifact target architecture is in
 `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
@@ -36,6 +36,21 @@ clone/build deployment and rejects image-source deployment.
   It generates the initial PAT with CSPRNG, stores only the existing bcrypt hash
   format, and writes plaintext once to a non-existing operator-selected file
   created with mode `0600`. Exact repeats never issue or reconstruct the PAT.
+
+## Credential incident status
+
+R5-001 identified that the former canonical `package-source` target archived the
+working-directory `.` directly. Its exclusion list did not cover runtime
+environment files, secret directories, or private-key PEM material. The current
+source-package path instead uses Git tracked plus untracked/non-ignored
+candidates, validates paths and private-key markers before publishing the
+artifact, and validates the completed archive again.
+
+Packaging containment does not revoke credentials already present in an older
+archive. The incident remains `OPERATOR_REQUIRED` until the credential classes
+in `docs/runbooks/credential-incident.md` are rotated or revoked, verified, and
+the repository owner records a Git history cleanup decision. No external
+credential rotation or history rewrite is performed by R5-001.
 
 ## Authorization and audit
 

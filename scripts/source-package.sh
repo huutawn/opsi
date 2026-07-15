@@ -16,6 +16,16 @@ REQUIRED_SOURCE_PATHS=(
   contracts/go/go.mod
   contracts/agent/v1/status.proto
 )
+REQUIRED_RELEASE_PATHS=(
+  opsi
+  opsi-agent
+  opsi-cloud
+  opsi-bootstrap-worker
+  checksums.txt
+  config.examples/agent.config.example.yaml
+  config.examples/cloud.config.example.json
+  docs/demo_runbook.md
+)
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opsi-source-package.XXXXXX")"
 TEMP_ARCHIVE=""
 
@@ -32,6 +42,12 @@ is_env_example() {
   [[ "$base" == ".env.example" || "$base" == ".env.sample" ]]
 }
 
+is_safe_source_secrets_path() {
+  local path="${1#./}"
+  # This directory contains UI source for secret management, not secret files.
+  [[ "$path" == "cli/ui/features/secrets" || "$path" == cli/ui/features/secrets/* ]]
+}
+
 is_forbidden_source_path() {
   local path="${1#./}" base="${1##*/}"
 
@@ -46,7 +62,12 @@ is_forbidden_source_path() {
     .env|*/.env|.env.*|*/.env.*)
       return 0
       ;;
-    certs|certs/*|*/certs|*/certs/*|node_modules|node_modules/*|*/node_modules|*/node_modules/*|.next|.next/*|*/.next|*/.next/*|bin|bin/*|*/bin|*/bin/*|release|release/*|*/release|*/release/*|dist|dist/*|*/dist|*/dist/*|cli/ui/out|cli/ui/out/*)
+    secrets|secrets/*|*/secrets|*/secrets/*)
+      if ! is_safe_source_secrets_path "$path"; then
+        return 0
+      fi
+      ;;
+    certs|certs/*|*/certs|*/certs/*|node_modules|node_modules/*|*/node_modules|*/node_modules/*|.next|.next/*|*/.next|*/.next/*|bin|bin/*|*/bin|*/bin/*|release|release/*|*/release|*/release/*|dist|dist/*|*/dist|*/dist/*|out|out/*|*/out|*/out/*|coverage|coverage/*|*/coverage|*/coverage/*|.tmp|.tmp/*|*/.tmp|*/.tmp/*|tmp|tmp/*|*/tmp|*/tmp/*|.cache|.cache/*|*/.cache|*/.cache/*)
       return 0
       ;;
     id_rsa|*/id_rsa|id_ed25519|*/id_ed25519|kubeconfig|*/kubeconfig|kubeconfig.*|*/kubeconfig.*)
@@ -55,13 +76,13 @@ is_forbidden_source_path() {
   esac
 
   case "$base" in
-    *.key|*.p12|*.pfx|*.jks|*.db|*.sqlite|*.sqlite3|*.sqlite-*|*.log|*.tsbuildinfo)
+    *.key|*.p12|*.pfx|*.jks|*.db|*.db-*|*.sqlite|*.sqlite3|*.sqlite-*|*.log|*.log.*|*.test|*.out|*.coverprofile|*.prof|*.tsbuildinfo)
       return 0
       ;;
     opsi|opsi-agent|opsi-cloud|opsi-bootstrap-worker)
       return 0
       ;;
-    *source*.tar|*source*.tar.gz|*source*.tgz)
+    *.tar|*.tar.gz|*.tgz|*.zip)
       return 0
       ;;
   esac
@@ -96,9 +117,9 @@ normalize_relative_path() {
 }
 
 check_symlink_within() {
-  local base="$1" path="$2" target parent normalized
+  local base="$1" path="$2" target parent normalized base_real resolved
   target="$(readlink -- "$base/$path")"
-  if [[ "$target" == /* ]]; then
+  if [[ "$target" == /* || "$target" == [A-Za-z]:[\\/]* || "$target" == *\\* || "$target" == *$'\n'* || "$target" == *$'\r'* ]]; then
     printf 'unsafe symlink: %s\n' "$path" >&2
     return 1
   fi
@@ -111,6 +132,12 @@ check_symlink_within() {
     return 1
   fi
   if [[ -z "$normalized" ]]; then
+    printf 'unsafe symlink: %s\n' "$path" >&2
+    return 1
+  fi
+  base_real="$(realpath -e -- "$base")"
+  resolved="$(realpath -m -- "$base/$path")"
+  if [[ "$resolved" != "$base_real" && "$resolved" != "$base_real"/* ]]; then
     printf 'unsafe symlink: %s\n' "$path" >&2
     return 1
   fi
@@ -143,7 +170,7 @@ check_tree() {
   candidate_file_list "$list"
 
   while IFS= read -r -d '' path; do
-    if [[ "$path" == *$'\n'* || "$path" == *$'\r'* ]]; then
+    if [[ "$path" == /* || "$path" == [A-Za-z]:[\\/]* || "$path" == *\\* || "$path" == *$'\n'* || "$path" == *$'\r'* ]] || archive_path_has_parent_segment "$path"; then
       printf 'forbidden path: %s\n' "$path" >&2
       failed=1
       continue
@@ -253,12 +280,17 @@ check_archive() {
   fi
 
   while IFS= read -r -d '' kind && IFS= read -r -d '' name && IFS= read -r -d '' link; do
-    if [[ "$name" == /* || "$name" != opsi/* || "$name" == *$'\n'* || "$name" == *$'\r'* ]] || archive_path_has_parent_segment "$name"; then
+    if [[ "$name" == /* || "$name" != opsi/* || "$name" == *\\* || "$name" == *$'\n'* || "$name" == *$'\r'* ]] || archive_path_has_parent_segment "$name"; then
       printf 'unsafe archive path: %s\n' "$name" >&2
       failed=1
       continue
     fi
     relative="${name#opsi/}"
+    if [[ "$relative" == /* || "$relative" == [A-Za-z]:[\\/]* ]]; then
+      printf 'unsafe archive path: %s\n' "$name" >&2
+      failed=1
+      continue
+    fi
     if is_forbidden_source_path "$relative"; then
       printf 'forbidden path: %s\n' "$name" >&2
       failed=1
@@ -267,7 +299,7 @@ check_archive() {
       f|d)
         ;;
       s)
-        if [[ "$link" == /* ]]; then
+        if [[ "$link" == /* || "$link" == [A-Za-z]:[\\/]* || "$link" == *\\* || "$link" == *$'\n'* || "$link" == *$'\r'* ]]; then
           printf 'unsafe symlink: %s\n' "$name" >&2
           failed=1
           continue
@@ -342,16 +374,6 @@ is_forbidden_release_path() {
 check_release() {
   local directory="$1" root path relative failed=0 required
   declare -A found=()
-  local -a required_paths=(
-    opsi
-    opsi-agent
-    opsi-cloud
-    opsi-bootstrap-worker
-    checksums.txt
-    config.examples/agent.config.example.yaml
-    config.examples/cloud.config.example.json
-    docs/demo_runbook.md
-  )
 
   if [[ ! -d "$directory" ]]; then
     printf 'release directory missing: %s\n' "$directory" >&2
@@ -372,13 +394,18 @@ check_release() {
       fi
       continue
     fi
-    if [[ -f "$path" && "$relative" != opsi && "$relative" != opsi-agent && "$relative" != opsi-cloud && "$relative" != opsi-bootstrap-worker ]] && LC_ALL=C grep -a -q -E -- "$PRIVATE_KEY_PATTERN" "$path"; then
+    if [[ ! -f "$path" && ! -d "$path" ]]; then
+      printf 'unsupported release path: %s\n' "$relative" >&2
+      failed=1
+      continue
+    fi
+    if [[ -f "$path" ]] && LC_ALL=C grep -a -q -E -- "$PRIVATE_KEY_PATTERN" "$path"; then
       printf 'private key material found: %s\n' "$relative" >&2
       failed=1
     fi
   done < <(find "$root" -mindepth 1 -print0 | LC_ALL=C sort -z)
 
-  for required in "${required_paths[@]}"; do
+  for required in "${REQUIRED_RELEASE_PATHS[@]}"; do
     if [[ -z "${found[$required]:-}" ]]; then
       printf 'required release path missing: %s\n' "$required" >&2
       failed=1
@@ -387,91 +414,13 @@ check_release() {
   return "$failed"
 }
 
-fixture_tree() {
-  local root="$1" path
-  for path in "${REQUIRED_SOURCE_PATHS[@]}"; do
-    mkdir -p "$root/opsi/$(dirname "$path")"
-    printf 'fixture\n' > "$root/opsi/$path"
-  done
-  mkdir -p "$root/opsi/agent"
-  printf 'endpoint: example.invalid\ncredential: CHANGE_ME\n' > "$root/opsi/agent/config.example.yaml"
-}
-
-fixture_archive() {
-  local root="$1" archive="$2"
-  (
-    cd "$root"
-    find opsi -type f -print0 | LC_ALL=C sort -z | tar --null --no-recursion --files-from=- -cf -
-  ) | gzip -n > "$archive"
-}
-
-expect_archive_failure() {
-  local archive="$1" category="$2" output="$3"
-  if check_archive "$archive" > "$output" 2>&1; then
-    printf 'self-test expected failure: %s\n' "$category" >&2
-    return 1
-  fi
-  if ! grep -q -- "$category" "$output"; then
-    printf 'self-test wrong failure category: %s\n' "$category" >&2
-    return 1
-  fi
-}
-
-self_test() {
-  local temporary fixture archive output
-  temporary="$(mktemp -d "$TEMP_ROOT/self-test.XXXXXX")"
-  fixture="$temporary/fixture"
-  archive="$temporary/fixture.tar.gz"
-  output="$temporary/check.out"
-
-  fixture_tree "$fixture"
-  fixture_archive "$fixture" "$archive"
-  check_archive "$archive"
-
-  mkdir -p "$fixture/opsi/agent"
-  printf 'local: true\n' > "$fixture/opsi/agent/config.local.yaml"
-  fixture_archive "$fixture" "$archive"
-  expect_archive_failure "$archive" 'forbidden path:' "$output"
-  rm -f "$fixture/opsi/agent/config.local.yaml"
-
-  mkdir -p "$fixture/opsi/test"
-  printf '%s%s\n' '-----BEGIN ' 'PRIVATE KEY-----' > "$fixture/opsi/test/key-marker.txt"
-  fixture_archive "$fixture" "$archive"
-  expect_archive_failure "$archive" 'private key material found:' "$output"
-  rm -f "$fixture/opsi/test/key-marker.txt"
-
-  mkdir -p "$fixture/opsi/cli/ui/out"
-  printf 'generated\n' > "$fixture/opsi/cli/ui/out/index.html"
-  fixture_archive "$fixture" "$archive"
-  expect_archive_failure "$archive" 'forbidden path:' "$output"
-  rm -rf "$fixture/opsi/cli/ui/out"
-
-  printf 'runtime state\n' > "$fixture/opsi/agent/opsi-agent.sqlite"
-  fixture_archive "$fixture" "$archive"
-  expect_archive_failure "$archive" 'forbidden path:' "$output"
-  rm -f "$fixture/opsi/agent/opsi-agent.sqlite"
-
-  python3 - "$archive" <<'PY'
-import io
-import sys
-import tarfile
-
-with tarfile.open(sys.argv[1], "w:gz") as archive:
-    payload = b"escape\n"
-    member = tarfile.TarInfo("../escape")
-    member.size = len(payload)
-    archive.addfile(member, io.BytesIO(payload))
-PY
-  expect_archive_failure "$archive" 'unsafe archive path:' "$output"
-
-  fixture_archive "$fixture" "$archive"
-  check_archive "$archive"
-  printf 'source package self-test passed\n'
-}
-
 usage() {
   printf 'usage: %s check-tree | build <archive> | check <archive> | check-release <directory> | self-test\n' "$0" >&2
 }
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 case "${1:-}" in
   check-tree)
@@ -492,7 +441,7 @@ case "${1:-}" in
     ;;
   self-test)
     [[ "$#" -eq 1 ]] || { usage; exit 2; }
-    self_test
+    bash "$SCRIPT_DIR/source-package-test.sh"
     ;;
   *)
     usage
