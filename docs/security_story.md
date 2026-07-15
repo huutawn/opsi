@@ -52,6 +52,33 @@ in `docs/runbooks/credential-incident.md` are rotated or revoked, verified, and
 the repository owner records a Git history cleanup decision. No external
 credential rotation or history rewrite is performed by R5-001.
 
+## Production-like control-plane edge
+
+R5-002 keeps the HTTP development Compose profile separate and adds
+`deploy/staging-control-plane` for production-like configuration. The staging
+profile requires HTTPS public identity, a same-origin HTTPS GitHub callback,
+production mode, Agent request signatures, PostgreSQL, disabled OTP development
+output, disabled debug UI, authenticated Bootstrap Worker access, and
+non-placeholder runtime secrets.
+
+Caddy terminates origin TLS from an individually mounted certificate/private
+key pair and fails startup when either file is unavailable. It runs non-root on
+unprivileged container ports; only the proxy publishes host 80/443. PostgreSQL,
+Cloud, and Worker are not directly published. The public route boundary rejects
+internal worker routes, alert internal routes, API-internal routes, metrics,
+trailing-slash variants, and encoded paths before proxying.
+
+Cloud and Worker support file-backed internal secrets so staging Compose does
+not place those values in command arguments or duplicate the Worker token in
+JSON. Compose mounts only each service's required secrets. Runtime files,
+certificate/key material, and generated configuration are gitignored and
+source-package policy rejects them.
+
+This repository state is not live TLS evidence. Cloudflare Flexible and Always
+Use HTTPS do not protect Cloudflare-to-origin traffic. Full (strict), a valid
+origin certificate, direct-origin restriction, and live callback/webhook and
+restart checks remain operator work in R5-003 and are `UNPROVEN`.
+
 ## Authorization and audit
 
 - Every operation is project-scoped. Owner/Administrator lifecycle actions,
@@ -135,7 +162,8 @@ redacted excerpts, hashes, and sanitization/prompt-injection metadata.
 ## Current security limitations
 
 Production readiness remains unproven. Missing evidence includes the complete
-clean VPS pass, GitHub App/OIDC trust, digest artifact delivery, managed gateway
+clean VPS pass, live origin TLS, Cloudflare Full (strict), direct-origin
+restriction, GitHub App/OIDC trust, digest artifact delivery, managed gateway
 security, public evidence API, Safe ActionPlane, CLI MCP hardening, release
 provenance, and repeated recovery/acceptance runs. P01 clean control-plane VPS
 checkpoint `CP-VPS-1` is `DEFERRED / UNPROVEN`; no pass evidence exists.

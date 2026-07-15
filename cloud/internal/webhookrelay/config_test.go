@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const validProductionPrefix = `"production":true,"database_url":"postgres://secret-db.example.test/opsi","public_base_url":"https://cloud.example.test","bootstrap_worker_token":"secret-worker-token-123456789012","bootstrap_secret_key":"secret-bootstrap-key-12345678901","alerts":{"internal_token":"secret-alert-token-1234567890123"},"smtp":{"host":"smtp.example.test","port":"587","from":"opsi@example.test"}`
+const validProductionPrefix = `"production":true,"require_agent_signatures":true,"database_url":"postgres://secret-db.example.test/opsi","public_base_url":"https://cloud.example.test","bootstrap_worker_token":"secret-worker-token-123456789012","bootstrap_secret_key":"secret-bootstrap-key-12345678901","alerts":{"internal_token":"secret-alert-token-1234567890123"},"smtp":{"host":"smtp.example.test","port":"587","from":"opsi@example.test"}`
 
 var legacyAuthEnvNames = []string{
 	"OPSI_CLOUD_AUTH_PROVIDER",
@@ -49,6 +49,13 @@ var cloudEnvNames = append([]string{
 	"OPSI_CLOUD_GITHUB_APP_ID",
 	"OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH",
 	"OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET",
+	"OPSI_CLOUD_DATABASE_URL_FILE",
+	"OPSI_CLOUD_SMTP_PASSWORD_FILE",
+	"OPSI_CLOUD_ALERTS_INTERNAL_TOKEN_FILE",
+	"OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE",
+	"OPSI_CLOUD_BOOTSTRAP_SECRET_KEY_FILE",
+	"OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET_FILE",
+	"OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET_FILE",
 }, legacyAuthEnvNames...)
 
 func clearCloudEnv(t *testing.T) {
@@ -103,6 +110,113 @@ func TestLoadConfigProductionRequiresDurableSecurity(t *testing.T) {
 	}
 	if !cfg.RequireAgentSignatures {
 		t.Fatal("production must require agent request signatures")
+	}
+}
+
+func TestLoadConfigProductionRejectsDisabledAgentSignatures(t *testing.T) {
+	clearCloudEnv(t)
+	config := strings.Replace(validProductionConfig(t), `"require_agent_signatures":true`, `"require_agent_signatures":false`, 1)
+	_, err := LoadConfig(writeCloudConfig(t, `{`+config+`}`))
+	if err == nil || !strings.Contains(err.Error(), "require_agent_signatures=true") {
+		t.Fatalf("disabled Agent signatures error=%v", err)
+	}
+}
+
+func TestLoadConfigProductionRejectsPlaceholderSecrets(t *testing.T) {
+	clearCloudEnv(t)
+	for name, config := range map[string]string{
+		"worker token":  strings.Replace(validProductionConfig(t), "secret-worker-token-123456789012", "REPLACE_WITH_RANDOM_WORKER_TOKEN_123", 1),
+		"bootstrap key": strings.Replace(validProductionConfig(t), "secret-bootstrap-key-12345678901", "CHANGE_ME_BOOTSTRAP_KEY_123456789", 1),
+		"public URL":    strings.Replace(validProductionConfig(t), "https://cloud.example.test", "https://example.invalid", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadConfig(writeCloudConfig(t, `{`+config+`}`))
+			if err == nil || !strings.Contains(err.Error(), "placeholder") {
+				t.Fatalf("placeholder config error=%v", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigProductionRejectsPlaceholderRouteSecret(t *testing.T) {
+	clearCloudEnv(t)
+	config := validProductionConfig(t) + `,"routes":[{"project_id":"proj-1","service_id":"svc-1","repo_full_name":"example/api","branch":"main","webhook_secret":"REPLACE_WITH_ROUTE_WEBHOOK_SECRET_123456"}]`
+	_, err := LoadConfig(writeCloudConfig(t, `{`+config+`}`))
+	if err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("placeholder route secret error=%v", err)
+	}
+}
+
+func TestLoadConfigReadsSecretsFromFiles(t *testing.T) {
+	clearCloudEnv(t)
+	writeSecret := func(name, value string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(value+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	t.Setenv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE", writeSecret("worker-token", strings.Repeat("w", 32)))
+	t.Setenv("OPSI_CLOUD_BOOTSTRAP_SECRET_KEY_FILE", writeSecret("bootstrap-key", strings.Repeat("b", 32)))
+	t.Setenv("OPSI_CLOUD_ALERTS_INTERNAL_TOKEN_FILE", writeSecret("alert-token", strings.Repeat("a", 32)))
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BootstrapWorkerToken != strings.Repeat("w", 32) || cfg.BootstrapSecretKey != strings.Repeat("b", 32) || cfg.Alerts.InternalToken != strings.Repeat("a", 32) {
+		t.Fatal("file-backed secrets were not loaded")
+	}
+}
+
+func TestLoadConfigProductionReadsAllFileBackedValues(t *testing.T) {
+	clearCloudEnv(t)
+	writeSecret := func(name, value string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(value+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	values := map[string]string{
+		"OPSI_CLOUD_DATABASE_URL_FILE":              "postgres://file-db.example.test/opsi",
+		"OPSI_CLOUD_SMTP_PASSWORD_FILE":             "smtp-file-password",
+		"OPSI_CLOUD_ALERTS_INTERNAL_TOKEN_FILE":     strings.Repeat("a", 32),
+		"OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE":    strings.Repeat("w", 32),
+		"OPSI_CLOUD_BOOTSTRAP_SECRET_KEY_FILE":      strings.Repeat("b", 32),
+		"OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET_FILE":  strings.Repeat("c", 32),
+		"OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET_FILE": strings.Repeat("h", 32),
+	}
+	for name, value := range values {
+		t.Setenv(name, writeSecret(strings.ToLower(name), value))
+	}
+	cfg, err := LoadConfig(writeCloudConfig(t, `{`+validProductionConfig(t)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseURL != values["OPSI_CLOUD_DATABASE_URL_FILE"] ||
+		cfg.SMTP.Password != values["OPSI_CLOUD_SMTP_PASSWORD_FILE"] ||
+		cfg.Alerts.InternalToken != values["OPSI_CLOUD_ALERTS_INTERNAL_TOKEN_FILE"] ||
+		cfg.BootstrapWorkerToken != values["OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE"] ||
+		cfg.BootstrapSecretKey != values["OPSI_CLOUD_BOOTSTRAP_SECRET_KEY_FILE"] ||
+		cfg.GitHubApp.ClientSecret != values["OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET_FILE"] ||
+		cfg.GitHubApp.WebhookSecret != values["OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET_FILE"] {
+		t.Fatal("production file-backed configuration was not loaded")
+	}
+}
+
+func TestLoadConfigRejectsSecretValueAndFileTogether(t *testing.T) {
+	clearCloudEnv(t)
+	path := filepath.Join(t.TempDir(), "worker-token")
+	if err := os.WriteFile(path, []byte(strings.Repeat("w", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN", strings.Repeat("x", 32))
+	t.Setenv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE", path)
+	_, err := LoadConfig("")
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("value/file conflict error=%v", err)
 	}
 }
 

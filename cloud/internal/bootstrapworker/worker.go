@@ -52,19 +52,20 @@ type Config struct {
 }
 
 type fileConfig struct {
-	CloudURL             string `json:"cloud_url"`
-	AgentCloudURL        string `json:"agent_cloud_url"`
-	BootstrapWorkerToken string `json:"bootstrap_worker_token"`
-	WorkerID             string `json:"worker_id"`
-	PollInterval         string `json:"poll_interval"`
-	K3sVersion           string `json:"k3s_version"`
-	K3sInstallerURL      string `json:"k3s_installer_url"`
-	K3sInstallerSHA256   string `json:"k3s_installer_sha256"`
-	AgentInstallURL      string `json:"agent_install_url"`
-	AgentInstallSHA256   string `json:"agent_install_sha256"`
-	SSHKnownHostsPath    string `json:"ssh_known_hosts_path"`
-	Production           bool   `json:"production"`
-	Timeout              string `json:"timeout"`
+	CloudURL                 string `json:"cloud_url"`
+	AgentCloudURL            string `json:"agent_cloud_url"`
+	BootstrapWorkerToken     string `json:"bootstrap_worker_token"`
+	BootstrapWorkerTokenFile string `json:"bootstrap_worker_token_file"`
+	WorkerID                 string `json:"worker_id"`
+	PollInterval             string `json:"poll_interval"`
+	K3sVersion               string `json:"k3s_version"`
+	K3sInstallerURL          string `json:"k3s_installer_url"`
+	K3sInstallerSHA256       string `json:"k3s_installer_sha256"`
+	AgentInstallURL          string `json:"agent_install_url"`
+	AgentInstallSHA256       string `json:"agent_install_sha256"`
+	SSHKnownHostsPath        string `json:"ssh_known_hosts_path"`
+	Production               bool   `json:"production"`
+	Timeout                  string `json:"timeout"`
 }
 
 type Bundle struct {
@@ -118,7 +119,21 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, errors.New("session_id is no longer supported; bootstrap workers lease sessions automatically")
 		}
 	}
-	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, BootstrapWorkerToken: raw.BootstrapWorkerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
+	if raw.BootstrapWorkerToken != "" && raw.BootstrapWorkerTokenFile != "" {
+		return Config{}, errors.New("bootstrap_worker_token and bootstrap_worker_token_file are mutually exclusive")
+	}
+	workerToken := raw.BootstrapWorkerToken
+	if raw.BootstrapWorkerTokenFile != "" {
+		tokenData, readErr := os.ReadFile(raw.BootstrapWorkerTokenFile)
+		if readErr != nil {
+			return Config{}, fmt.Errorf("read bootstrap_worker_token_file: %w", readErr)
+		}
+		if len(tokenData) > 64*1024 {
+			return Config{}, errors.New("bootstrap_worker_token_file exceeds 65536 bytes")
+		}
+		workerToken = strings.TrimSuffix(strings.TrimSuffix(string(tokenData), "\n"), "\r")
+	}
+	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, BootstrapWorkerToken: workerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
 	if cfg.AgentCloudURL == "" {
 		cfg.AgentCloudURL = cfg.CloudURL
 	}
@@ -148,8 +163,8 @@ func (c Config) Validate() error {
 	if err != nil {
 		return fmt.Errorf("cloud_url: %w", err)
 	}
-	if c.Production && u.Scheme != "https" {
-		return errors.New("production requires https cloud_url")
+	if c.Production && u.Scheme != "https" && !(u.Scheme == "http" && u.Hostname() == "cloud" && u.Port() == "9800") {
+		return errors.New("production requires https cloud_url or the isolated http://cloud:9800 Compose endpoint")
 	}
 	if c.Production && (u.Hostname() == "example.invalid" || isPlaceholderValue(c.CloudURL)) {
 		return errors.New("production cloud_url must not use a placeholder")
@@ -173,6 +188,9 @@ func (c Config) Validate() error {
 	}
 	if c.Production && len(c.BootstrapWorkerToken) < 32 {
 		return errors.New("production requires bootstrap_worker_token with at least 32 bytes")
+	}
+	if c.Production && isPlaceholderValue(c.BootstrapWorkerToken) {
+		return errors.New("production bootstrap_worker_token must not use a placeholder")
 	}
 	if err := registry.ValidateBootstrapWorkerID(strings.TrimSpace(c.WorkerID)); err != nil {
 		return err

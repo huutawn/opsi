@@ -38,6 +38,10 @@ opsi-cloud
 /deploy/dev-control-plane/config/cloud.json
 /deploy/dev-control-plane/config/bootstrap-worker.json
 /deploy/dev-control-plane/secrets/*
+/deploy/staging-control-plane/.env
+/deploy/staging-control-plane/config/cloud.json
+/deploy/staging-control-plane/config/bootstrap-worker.json
+/deploy/staging-control-plane/secrets/*
 !**/*.example.json
 
 # Runtime certificates, keys and keystores

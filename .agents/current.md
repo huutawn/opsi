@@ -5,7 +5,13 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 
 ## Active Repair Task
 
-- R5-001 is the only active task. R5-002 has not started.
+- R5-002 is the only active task. R5-003 has not started.
+- R5-002 adds a separate production-like staging control-plane profile with
+  origin TLS, fail-closed production configuration, isolated service exposure,
+  individual read-only secret mounts, offline validation, and a Cloudflare Full
+  (strict) operator runbook.
+- The development profile remains an independent local HTTP package and its
+  Make targets cannot start the staging Compose project.
 - The historical archive leak came from the former canonical `package-source`
   recipe archiving working-directory `.` with incomplete exclusions.
 - Source-package and release containment is implemented through the Git-aware
@@ -15,6 +21,8 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
   revocation, post-rotation verification, distributed-artifact review, and the
   repository-owner Git history decision have not been performed by this task.
 - Operator procedure: `docs/runbooks/credential-incident.md`.
+- Staging and Full (strict) procedure:
+  `docs/runbooks/staging-control-plane.md`.
 
 ## M0 State
 
@@ -31,6 +39,9 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
   implemented.
 - Opsi does not render or manage Ingress, Gateway API, domains, or TLS. User
   manifests may contain their own resources.
+- The control-plane staging package terminates origin TLS at Caddy. This is
+  deployment infrastructure for Cloud and is not an Agent-managed application
+  gateway capability.
 - Clean VPS/K3s automation checks incident list/get/resolve and resolve audit,
   but no committed real-infrastructure pass artifact exists. Production
   readiness remains unproven.
@@ -53,6 +64,14 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
   package uses named database and Cloud-data volumes, startup health ordering,
   uniform restart policies, bounded Docker logs, placeholder-only examples,
   and gitignored runtime configuration and initial PAT files.
+- A separate `deploy/staging-control-plane` package is code/config validated. It
+  uses production Cloud/Worker flags, HTTPS public identity, PostgreSQL,
+  authenticated worker calls, non-root Cloud/Worker/proxy containers, read-only
+  filesystems, bounded logs, named volumes, an internal backend network, and
+  file-backed runtime secrets. PostgreSQL, Worker, and Cloud publish no host
+  ports; Caddy alone publishes 80/443 and denies internal/metrics paths.
+- Live origin TLS, Cloudflare Full (strict), direct-origin restriction, and
+  restart/persistence evidence remain `UNPROVEN` and belong to R5-003.
 - Agent owns deployment, service runtime, secrets, telemetry, factual incidents,
   local audit, and K3s/containerd execution.
 - Bootstrap Worker is a long-running, single-concurrency daemon. It polls Cloud,
@@ -67,14 +86,14 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 
 ## Next Ordered Work
 
-V3-013 must prove clean-VM control-plane deployment and independent service
-restart, so M1 has not passed. Per-step resumable bootstrap transitions remain
-V3-014.
-IncidentEvidence is Phase 5, Safe ActionPlane
-Phase 6, CLI MCP Phase 7, and production acceptance later.
+R5-003 is the next repair task but has not started. It owns live origin TLS,
+Cloudflare Full (strict), direct-origin restriction, and VPS
+restart/persistence evidence. IncidentEvidence, Safe ActionPlane, CLI MCP, and
+production acceptance remain later ordered work.
 
 ## Verification
 
-Run `make test`, `make verify-e2e-k3s-selfcheck`, `make source-hygiene`,
-`make package-source`, and, when the pinned toolchain/dependency cache permits,
-`make verify`.
+For R5-002 run focused Cloud tests, `make dev-control-plane-validate-source`,
+`make staging-control-plane-validate-source`, `make source-hygiene`, and
+`git diff --check`. Runtime staging validation requires operator-created
+gitignored secrets and is not evidence of a live cutover.

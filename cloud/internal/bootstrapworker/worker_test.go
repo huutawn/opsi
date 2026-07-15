@@ -123,6 +123,47 @@ func TestLoadConfigDefaultsAndRejectsLegacySessionID(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsBootstrapWorkerTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "worker-token")
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("t", 32)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "worker.json")
+	data := fmt.Sprintf(`{"cloud_url":"http://cloud:9800","bootstrap_worker_token_file":%q,"worker_id":"worker-1"}`, tokenPath)
+	if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BootstrapWorkerToken != strings.Repeat("t", 32) {
+		t.Fatal("file-backed worker token was not loaded")
+	}
+}
+
+func TestLoadConfigRejectsInlineAndFileWorkerTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.json")
+	if err := os.WriteFile(path, []byte(`{"bootstrap_worker_token":"inline","bootstrap_worker_token_file":"/run/secrets/token"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("inline/file conflict error=%v", err)
+	}
+}
+
+func TestProductionConfigRejectsPlaceholderWorkerToken(t *testing.T) {
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHosts, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{CloudURL: "http://cloud:9800", AgentCloudURL: "https://cloud.example.test", BootstrapWorkerToken: "REPLACE_WITH_WORKER_TOKEN_123456", WorkerID: "worker-1", PollInterval: time.Second, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), SSHKnownHostsPath: knownHosts, Production: true}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("placeholder token error=%v", err)
+	}
+}
+
 func TestBootstrapPlanUsesAgentReachableCloudURL(t *testing.T) {
 	cfg := Config{
 		CloudURL:           "http://cloud:9800",

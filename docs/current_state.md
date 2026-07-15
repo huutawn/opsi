@@ -250,21 +250,50 @@ evidence.
 
 ## Deployment and gateway truth
 
-Opsi now has one supported development control-plane deployment path: Docker
-Compose. The package starts PostgreSQL, Opsi Cloud, one Bootstrap Worker, and a
-Caddy reverse proxy. PostgreSQL data and Cloud OTP/alert outboxes use named
-volumes. All four services have health checks, `unless-stopped` restart policy,
-and bounded Docker logs. Cloud performs the existing schema migration during
-controlled startup after PostgreSQL becomes healthy, and Cloud health fails
-closed if PostgreSQL later becomes unavailable. The development reverse proxy
-does not expose worker-internal, alert-internal, or metrics endpoints.
+Opsi has separate development and production-like staging control-plane
+profiles. `deploy/dev-control-plane` remains the supported local HTTP
+development package. It starts PostgreSQL, Opsi Cloud, one Bootstrap Worker,
+and Caddy with independent development Make targets and configuration paths.
+
+`deploy/staging-control-plane` is the R5-002 production-like package. Caddy
+terminates origin TLS on an unprivileged container port using an individually
+mounted certificate and private key, while host ports 80/443 are published only
+by the proxy. PostgreSQL, Cloud, and Worker publish no host ports. The backend
+network is internal; Cloud and Worker receive a separate egress network. Cloud,
+Worker, proxy, and PostgreSQL use read-only filesystems where applicable,
+temporary tmpfs mounts, capability drops, no-new-privileges, health checks,
+explicit restart policy, bounded logs, and named persistent volumes. Cloud,
+Worker, and proxy run non-root; the official PostgreSQL entrypoint drops to its
+image user after initialization.
+
+Staging Cloud configuration requires production mode, Agent request signatures,
+PostgreSQL durability, HTTPS public/callback identity, matching callback origin,
+SMTP, disabled OTP development echo/outbox, disabled debug UI, authenticated
+Bootstrap Worker calls, GitHub App installation authentication, and
+non-placeholder secrets. Secret values are file-backed and mounted per service;
+the GitHub App key and origin key are never placed in environment values or
+command arguments. Caddy rejects `/internal`, `/api/internal`, `/metrics`, their
+subpaths/trailing slashes, and encoded paths before proxying.
 
 The committed configuration examples contain placeholders only. Runtime
-environment, Cloud/Worker configuration, secret directory, and initial PAT
-files are gitignored. This package is development-only. P01 code is complete,
-but clean control-plane VPS checkpoint `CP-VPS-1` was not run because no clean
+environment, Cloud/Worker configuration, secret directory, certificate/key
+files, and initial PAT files are gitignored. Both profiles have source-only
+Compose parse targets. Staging also has focused negative validation for
+insecure flags, HTTP identity, callback mismatch, missing/writable TLS mounts,
+placeholder secrets, public backend ports, internal route exposure, and mutable
+`latest` images.
+
+The development package remains development-only. P01 code is complete, but
+clean control-plane VPS checkpoint `CP-VPS-1` was not run because no clean
 Ubuntu VPS was available. Its status is `DEFERRED / UNPROVEN`; no VPS evidence
 exists, and the checkpoint remains a blocker before production acceptance.
+
+R5-002 validates repository source/config only. No live certificate was
+installed, no origin port was opened, no Cloudflare setting changed, and no VPS
+restart/persistence test was run. Live origin TLS, Cloudflare Full (strict),
+direct-origin restriction, and live GitHub callback/webhook evidence remain
+`UNPROVEN` for R5-003. The operator procedure is
+`docs/runbooks/staging-control-plane.md`.
 
 Git-based deployment exists and can apply user-provided manifests. Such a
 manifest may contain its own Service, Ingress, Gateway, TLS, lifecycle, or
@@ -298,8 +327,9 @@ audit. The command path exists, but no committed real-infrastructure pass
 artifact currently proves the complete scenario. Status remains
 `MANUAL_GATED`.
 
-Production readiness remains unproven. Current gaps include clean control-plane
-VM and restart proof, clean VPS bootstrap proof, live GitHub App installation
+Production readiness remains unproven. Current gaps include live staging origin
+TLS, Cloudflare Full (strict), direct-origin restriction, clean control-plane VM
+and restart proof, clean VPS bootstrap proof, live GitHub App installation
 and user-auth/repository-bootstrap verification, hosted and hardened Agent
 delivery, Actions OIDC, trusted
 OCI artifact delivery, managed

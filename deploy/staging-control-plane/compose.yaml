@@ -1,0 +1,203 @@
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-service-hardening: &service-hardening
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  restart: unless-stopped
+  logging: *bounded-logging
+
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - postgres-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /var/run/postgresql:size=16m,mode=0770
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # The official entrypoint needs these only to initialize/chown the named data volume, then drops to postgres.
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    logging: *bounded-logging
+    networks:
+      - backend
+
+  cloud:
+    image: ${OPSI_CLOUD_IMAGE:?set an immutable opsi-cloud image}
+    user: "1000:1000"
+    command: ["--addr", "0.0.0.0:9800", "--config", "/etc/opsi/cloud.json"]
+    environment:
+      OPSI_CLOUD_TTL: ${OPSI_CLOUD_TTL:?set OPSI_CLOUD_TTL}
+      OPSI_CLOUD_DATABASE_URL_FILE: /run/secrets/database-url
+      OPSI_CLOUD_PUBLIC_BASE_URL: ${OPSI_CLOUD_PUBLIC_BASE_URL:?set OPSI_CLOUD_PUBLIC_BASE_URL}
+      OPSI_CLOUD_PRODUCTION: "true"
+      OPSI_CLOUD_ENABLE_DEBUG_UI: "false"
+      OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES: "true"
+      OPSI_CLOUD_OTP_DEV_ECHO: "false"
+      OPSI_CLOUD_OTP_OUTBOX_PATH: ""
+      OPSI_CLOUD_SMTP_HOST: ${OPSI_CLOUD_SMTP_HOST:?set OPSI_CLOUD_SMTP_HOST}
+      OPSI_CLOUD_SMTP_PORT: ${OPSI_CLOUD_SMTP_PORT:?set OPSI_CLOUD_SMTP_PORT}
+      OPSI_CLOUD_SMTP_USERNAME: ${OPSI_CLOUD_SMTP_USERNAME:-}
+      OPSI_CLOUD_SMTP_PASSWORD_FILE: /run/secrets/smtp-password
+      OPSI_CLOUD_SMTP_FROM: ${OPSI_CLOUD_SMTP_FROM:?set OPSI_CLOUD_SMTP_FROM}
+      OPSI_CLOUD_ALERTS_WEBHOOK_URL: ${OPSI_CLOUD_ALERTS_WEBHOOK_URL:-}
+      OPSI_CLOUD_ALERTS_MIN_SEVERITY: ${OPSI_CLOUD_ALERTS_MIN_SEVERITY:-medium}
+      OPSI_CLOUD_ALERTS_OUTBOX_PATH: ""
+      OPSI_CLOUD_ALERTS_INTERNAL_TOKEN_FILE: /run/secrets/alerts-internal-token
+      OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE: /run/secrets/bootstrap-worker-token
+      OPSI_CLOUD_BOOTSTRAP_SECRET_KEY_FILE: /run/secrets/bootstrap-secret-key
+      OPSI_CLOUD_GITHUB_APP_CLIENT_ID: ${OPSI_CLOUD_GITHUB_APP_CLIENT_ID:?set OPSI_CLOUD_GITHUB_APP_CLIENT_ID}
+      OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET_FILE: /run/secrets/github-app-client-secret
+      OPSI_CLOUD_GITHUB_APP_CALLBACK_URL: ${OPSI_CLOUD_GITHUB_APP_CALLBACK_URL:?set OPSI_CLOUD_GITHUB_APP_CALLBACK_URL}
+      OPSI_CLOUD_GITHUB_APP_ID: ${OPSI_CLOUD_GITHUB_APP_ID:?set OPSI_CLOUD_GITHUB_APP_ID}
+      OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app-private-key.pem
+      OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET_FILE: /run/secrets/github-app-webhook-secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config/cloud.json:/etc/opsi/cloud.json:ro,Z
+      - cloud-data:/var/lib/opsi
+    secrets:
+      - database-url
+      - smtp-password
+      - alerts-internal-token
+      - bootstrap-worker-token
+      - bootstrap-secret-key
+      - github-app-client-secret
+      - source: github-app-private-key
+        target: github-app-private-key.pem
+      - github-app-webhook-secret
+    <<: *service-hardening
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9800/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - backend
+      - egress
+
+  bootstrap-worker:
+    image: ${OPSI_BOOTSTRAP_WORKER_IMAGE:?set an immutable bootstrap-worker image}
+    user: "1000:1000"
+    command: ["--config", "/etc/opsi/bootstrap-worker.json"]
+    depends_on:
+      cloud:
+        condition: service_healthy
+    volumes:
+      - ./config/bootstrap-worker.json:/etc/opsi/bootstrap-worker.json:ro,Z
+    secrets:
+      - bootstrap-worker-token
+      - source: ssh-known-hosts
+        target: ssh_known_hosts
+    <<: *service-hardening
+    healthcheck:
+      test: ["CMD", "opsi-bootstrap-worker", "--check", "--config", "/etc/opsi/bootstrap-worker.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - backend
+      - egress
+
+  reverse-proxy:
+    image: caddy:2.10.0-alpine
+    user: "1000:1000"
+    depends_on:
+      cloud:
+        condition: service_healthy
+    ports:
+      - "${OPSI_STAGING_BIND_ADDRESS:-0.0.0.0}:${OPSI_STAGING_HTTP_PORT:-80}:8080"
+      - "${OPSI_STAGING_BIND_ADDRESS:-0.0.0.0}:${OPSI_STAGING_HTTPS_PORT:-443}:8443"
+    environment:
+      XDG_CONFIG_HOME: /tmp/caddy-config
+      XDG_DATA_HOME: /tmp/caddy-data
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro,Z
+    secrets:
+      - source: origin-certificate
+        target: origin-certificate.pem
+      - source: origin-private-key
+        target: origin-private-key.pem
+    <<: *service-hardening
+    cap_add:
+      # The official Caddy binary carries this file capability; retaining it is required with no-new-privileges.
+      - NET_BIND_SERVICE
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    networks:
+      - edge
+      - backend
+
+volumes:
+  postgres-data:
+  cloud-data:
+
+networks:
+  edge:
+  backend:
+    internal: true
+  egress:
+
+secrets:
+  postgres-password:
+    file: ./secrets/postgres-password
+  database-url:
+    file: ./secrets/database-url
+  smtp-password:
+    file: ./secrets/smtp-password
+  alerts-internal-token:
+    file: ./secrets/alerts-internal-token
+  bootstrap-worker-token:
+    file: ./secrets/bootstrap-worker-token
+  bootstrap-secret-key:
+    file: ./secrets/bootstrap-secret-key
+  github-app-client-secret:
+    file: ./secrets/github-app-client-secret
+  github-app-private-key:
+    file: ./secrets/github-app-private-key.pem
+  github-app-webhook-secret:
+    file: ./secrets/github-app-webhook-secret
+  ssh-known-hosts:
+    file: ./secrets/ssh_known_hosts
+  origin-certificate:
+    file: ./secrets/origin-certificate.pem
+  origin-private-key:
+    file: ./secrets/origin-private-key.pem

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import pathlib
 import re
@@ -263,7 +264,39 @@ def validate_github_app_key_file(path: pathlib.Path, enabled: bool) -> None:
         fail(f"{path.relative_to(ROOT)} must not be empty when GitHub App installation integration is enabled")
 
 
-def main() -> int:
+def validate_source() -> int:
+    env = parse_env(read_text(DEPLOY / ".env.example"))
+    cloud = parse_json(DEPLOY / "config" / "cloud.example.json", read_text(DEPLOY / "config" / "cloud.example.json"))
+    worker = parse_json(DEPLOY / "config" / "bootstrap-worker.example.json", read_text(DEPLOY / "config" / "bootstrap-worker.example.json"))
+    compose = read_text(DEPLOY / "compose.yaml")
+    caddy = read_text(DEPLOY / "Caddyfile")
+    if parse_bool(env.get("OPSI_CLOUD_PRODUCTION", ""), "OPSI_CLOUD_PRODUCTION"):
+        fail("development example must keep OPSI_CLOUD_PRODUCTION=false")
+    if parse_bool(env.get("OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES", ""), "OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES"):
+        fail("development example must keep OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES=false")
+    if worker.get("production") is not False:
+        fail("development worker example must keep production=false")
+    public = urlparse(env.get("OPSI_CLOUD_PUBLIC_BASE_URL", ""))
+    if public.scheme != "http" or public.hostname not in {"127.0.0.1", "localhost"}:
+        fail("development public URL must remain loopback HTTP")
+    if "staging-control-plane" in compose or "opsi-staging" in compose:
+        fail("development compose must not reference the staging profile")
+    for service in ("postgres", "cloud", "bootstrap-worker", "reverse-proxy"):
+        if f"  {service}:" not in compose:
+            fail(f"development compose service {service} is missing")
+    for image in re.findall(r"(?m)^    image:\s+(.+)$", compose):
+        if image.strip().lower().endswith(":latest"):
+            fail("development compose must not use latest images")
+    for token in (":80", "/internal/*", "/api/internal/*", "/metrics", "respond @internal 404"):
+        if token not in caddy:
+            fail(f"development Caddy route protection is missing {token}")
+    if not isinstance(cloud.get("routes"), list):
+        fail("development cloud example must define routes as an array")
+    print("development control-plane source configuration is structurally valid")
+    return 0
+
+
+def validate_runtime() -> int:
     env_text = read_text(ENV_PATH)
     cloud_text = read_text(CLOUD_PATH)
     worker_text = read_text(WORKER_PATH)
@@ -413,6 +446,15 @@ def main() -> int:
 
     print("development control-plane configuration is structurally valid")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", action="store_true", help="validate committed examples without reading runtime secrets")
+    args = parser.parse_args()
+    if args.source:
+        return validate_source()
+    return validate_runtime()
 
 
 if __name__ == "__main__":

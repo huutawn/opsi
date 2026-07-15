@@ -1,0 +1,33 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	@health {
+		path /health
+		remote_ip 127.0.0.1 ::1
+	}
+	respond @health 200
+	redir https://{host}{uri} 308
+}
+
+:8443 {
+	tls /run/secrets/origin-certificate.pem /run/secrets/origin-private-key.pem
+
+	# Reject all encoded paths before routing so encoded internal paths cannot bypass deny rules.
+	@encoded_path path_regexp encoded_path (?i)%[0-9a-f]{2}
+	respond @encoded_path 404
+
+	@internal path /internal /internal/* /api/internal /api/internal/* /metrics /metrics/*
+	respond @internal 404
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy cloud:9800
+}

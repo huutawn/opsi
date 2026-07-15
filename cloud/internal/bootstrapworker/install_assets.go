@@ -312,7 +312,10 @@ func validateK3sVersion(raw string) error {
 }
 
 func isPlaceholderValue(raw string) bool {
-	return strings.Contains(strings.ToUpper(raw), "REPLACE_WITH_")
+	normalized := strings.ToUpper(strings.TrimSpace(raw))
+	return strings.Contains(normalized, "REPLACE_WITH_") ||
+		strings.Contains(normalized, "CHANGE_ME") ||
+		strings.Contains(normalized, "EXAMPLE_SECRET")
 }
 
 const curlTransportFunctions = `

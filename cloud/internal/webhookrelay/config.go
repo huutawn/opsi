@@ -14,6 +14,7 @@ import (
 const (
 	githubCallbackPath  = "/v1/auth/browser/callback"
 	legacyAuthEnvPrefix = "OPSI_CLOUD_" + "AUTH_"
+	maxConfigFileBytes  = 64 * 1024
 )
 
 type Config struct {
@@ -116,7 +117,9 @@ func applyEnvOverrides(cfg *Config) error {
 	if err := applyDurationEnv("OPSI_CLOUD_TTL", &cfg.TTL); err != nil {
 		return err
 	}
-	applyStringEnv("OPSI_CLOUD_DATABASE_URL", &cfg.DatabaseURL)
+	if err := applyStringOrFileEnv("OPSI_CLOUD_DATABASE_URL", "OPSI_CLOUD_DATABASE_URL_FILE", &cfg.DatabaseURL); err != nil {
+		return err
+	}
 	applyStringEnv("OPSI_CLOUD_PUBLIC_BASE_URL", &cfg.PublicBaseURL)
 	if err := applyBoolEnv("OPSI_CLOUD_PRODUCTION", &cfg.Production); err != nil {
 		return err
@@ -134,22 +137,34 @@ func applyEnvOverrides(cfg *Config) error {
 	applyStringEnv("OPSI_CLOUD_SMTP_HOST", &cfg.SMTP.Host)
 	applyStringEnv("OPSI_CLOUD_SMTP_PORT", &cfg.SMTP.Port)
 	applyStringEnv("OPSI_CLOUD_SMTP_USERNAME", &cfg.SMTP.Username)
-	applyStringEnv("OPSI_CLOUD_SMTP_PASSWORD", &cfg.SMTP.Password)
+	if err := applyStringOrFileEnv("OPSI_CLOUD_SMTP_PASSWORD", "OPSI_CLOUD_SMTP_PASSWORD_FILE", &cfg.SMTP.Password); err != nil {
+		return err
+	}
 	applyStringEnv("OPSI_CLOUD_SMTP_FROM", &cfg.SMTP.From)
 	applyStringEnv("OPSI_CLOUD_ALERTS_WEBHOOK_URL", &cfg.Alerts.WebhookURL)
 	applyStringEnv("OPSI_CLOUD_ALERTS_MIN_SEVERITY", &cfg.Alerts.MinSeverity)
 	applyStringEnv("OPSI_CLOUD_ALERTS_OUTBOX_PATH", &cfg.Alerts.OutboxPath)
-	applyStringEnv("OPSI_CLOUD_ALERTS_INTERNAL_TOKEN", &cfg.Alerts.InternalToken)
-	applyStringEnv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN", &cfg.BootstrapWorkerToken)
-	applyStringEnv("OPSI_CLOUD_BOOTSTRAP_SECRET_KEY", &cfg.BootstrapSecretKey)
+	if err := applyStringOrFileEnv("OPSI_CLOUD_ALERTS_INTERNAL_TOKEN", "OPSI_CLOUD_ALERTS_INTERNAL_TOKEN_FILE", &cfg.Alerts.InternalToken); err != nil {
+		return err
+	}
+	if err := applyStringOrFileEnv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN", "OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE", &cfg.BootstrapWorkerToken); err != nil {
+		return err
+	}
+	if err := applyStringOrFileEnv("OPSI_CLOUD_BOOTSTRAP_SECRET_KEY", "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY_FILE", &cfg.BootstrapSecretKey); err != nil {
+		return err
+	}
 	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CLIENT_ID", &cfg.GitHubApp.ClientID)
-	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET", &cfg.GitHubApp.ClientSecret)
+	if err := applyStringOrFileEnv("OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET", "OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET_FILE", &cfg.GitHubApp.ClientSecret); err != nil {
+		return err
+	}
 	applyStringEnv("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL", &cfg.GitHubApp.CallbackURL)
 	if err := applyInt64Env("OPSI_CLOUD_GITHUB_APP_ID", &cfg.GitHubApp.AppID); err != nil {
 		return err
 	}
 	applyStringEnv("OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH", &cfg.GitHubApp.PrivateKeyPath)
-	applyStringEnv("OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET", &cfg.GitHubApp.WebhookSecret)
+	if err := applyStringOrFileEnv("OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET", "OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET_FILE", &cfg.GitHubApp.WebhookSecret); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -157,6 +172,33 @@ func applyStringEnv(name string, target *string) {
 	if value, ok := os.LookupEnv(name); ok {
 		*target = value
 	}
+}
+
+func applyStringOrFileEnv(valueName, fileName string, target *string) error {
+	value, valueSet := os.LookupEnv(valueName)
+	path, fileSet := os.LookupEnv(fileName)
+	if valueSet && fileSet {
+		return fmt.Errorf("%s and %s are mutually exclusive", valueName, fileName)
+	}
+	if valueSet {
+		*target = value
+		return nil
+	}
+	if !fileSet {
+		return nil
+	}
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("%s must name a non-empty file path", fileName)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", fileName, err)
+	}
+	if len(data) > maxConfigFileBytes {
+		return fmt.Errorf("%s exceeds %d bytes", fileName, maxConfigFileBytes)
+	}
+	*target = trimOneTrailingNewline(string(data))
+	return nil
 }
 
 func applyBoolEnv(name string, target *bool) error {
@@ -216,6 +258,9 @@ func validateConfig(cfg *Config) error {
 		if len(route.WebhookSecret) < 32 {
 			return fmt.Errorf("routes[%d].webhook_secret must contain at least 32 bytes", i)
 		}
+		if cfg.Production && isProductionPlaceholder(route.WebhookSecret) {
+			return fmt.Errorf("production routes[%d].webhook_secret must not use a placeholder", i)
+		}
 	}
 	if cfg.Production {
 		if cfg.DatabaseURL == "" {
@@ -242,12 +287,43 @@ func validateConfig(cfg *Config) error {
 		if cfg.EnableDebugUI {
 			return fmt.Errorf("production forbids enable_debug_ui")
 		}
+		if !cfg.RequireAgentSignatures {
+			return fmt.Errorf("production requires require_agent_signatures=true")
+		}
 		if cfg.PublicBaseURL == "" || !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
 			return fmt.Errorf("production requires an https public_base_url")
 		}
-		cfg.RequireAgentSignatures = true
+		for name, value := range map[string]string{
+			"database_url":                cfg.DatabaseURL,
+			"public_base_url":             cfg.PublicBaseURL,
+			"bootstrap_worker_token":      cfg.BootstrapWorkerToken,
+			"bootstrap_secret_key":        cfg.BootstrapSecretKey,
+			"alerts.internal_token":       cfg.Alerts.InternalToken,
+			"smtp.host":                   cfg.SMTP.Host,
+			"smtp.username":               cfg.SMTP.Username,
+			"smtp.password":               cfg.SMTP.Password,
+			"smtp.from":                   cfg.SMTP.From,
+			"github_app.client_id":        cfg.GitHubApp.ClientID,
+			"github_app.client_secret":    cfg.GitHubApp.ClientSecret,
+			"github_app.callback_url":     cfg.GitHubApp.CallbackURL,
+			"github_app.webhook_secret":   cfg.GitHubApp.WebhookSecret,
+			"github_app.private_key_path": cfg.GitHubApp.PrivateKeyPath,
+		} {
+			if isProductionPlaceholder(value) {
+				return fmt.Errorf("production %s must not use a placeholder", name)
+			}
+		}
 	}
 	return validateGitHubAppConfig(cfg)
+}
+
+func isProductionPlaceholder(value string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(value))
+	return strings.Contains(normalized, "REPLACE_WITH_") ||
+		strings.Contains(normalized, "CHANGE_ME") ||
+		strings.Contains(normalized, "EXAMPLE_SECRET") ||
+		strings.Contains(strings.ToLower(normalized), "example.invalid") ||
+		(len(normalized) == 64 && strings.Trim(normalized, "0") == "")
 }
 
 func rejectLegacyAuthJSON(data []byte) error {
