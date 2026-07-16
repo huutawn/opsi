@@ -77,15 +77,28 @@ Use a password-manager CLI with stdin/file output, or an editor, for
 `smtp-password`, `github-app-client-secret`, and
 `github-app-webhook-secret`. Do not place values in command arguments or paste
 them into interactive shell history. Create `secrets/database-url` with the
-PostgreSQL password and the internal host `postgres:5432`; keep
-`sslmode=disable` limited to the isolated Compose backend. The Cloudflare-facing
-origin connection is separately protected by Caddy TLS.
+`POSTGRES_USER`, PostgreSQL password, `POSTGRES_DB`, and the internal host
+`postgres:5432`. URL-encode the username, password, and database path when they
+contain reserved URL characters. The runtime validator URL-decodes all three
+values and requires them to match `.env` plus `secrets/postgres-password`
+without printing either value. Keep `sslmode=disable` limited to the isolated
+Compose backend. The Cloudflare-facing origin connection is separately
+protected by Caddy TLS.
 
 Place the GitHub App private key at
 `secrets/github-app-private-key.pem` and the pinned SSH host keys at
 `secrets/ssh_known_hosts`. Each file must be non-empty, non-symlinked, and not
 group/world writable. The same Bootstrap Worker token file is mounted read-only
 into Cloud and Worker; no token is duplicated into JSON.
+
+`bootstrap-worker.json` deliberately sets
+`allow_insecure_internal_cloud_url=true` for the exact
+`http://cloud:9800` control endpoint. Production Worker configuration otherwise
+requires HTTPS. This staging-only exception depends on the Compose `backend`
+network remaining `internal: true` and on Cloud/Worker publishing no host ports;
+the source validator checks those controls. Do not copy this opt-in to another
+deployment merely because it uses the same hostname or port. The installed
+Agent always receives the separate HTTPS `agent_cloud_url`.
 
 Cloud, Worker, and Caddy run as UID/GID 1000. Before validation, ensure their
 JSON files and mounted secret files are readable by that UID. On a root-managed

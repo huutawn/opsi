@@ -7,7 +7,7 @@
 | Last updated | 2026-07-13 |
 | Requirements | `docs/opsi_srs.md` |
 | Implementation truth | `docs/current_state.md`, `docs/status_matrix.md` |
-| Canonical roadmap | `docs/opsi_roadmap_v4.md` |
+| Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact decision | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
 This document deliberately separates the current M0 architecture from the

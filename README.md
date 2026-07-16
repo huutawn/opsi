@@ -3,7 +3,7 @@
 Opsi is a local-first operations control-plane prototype. Current implementation
 truth lives in `docs/current_state.md`; target requirements live in
 `docs/opsi_srs.md`; capability evidence lives in `docs/status_matrix.md`; the
-single canonical active roadmap is `docs/opsi_roadmap_v4.md`. Trusted artifact
+single canonical active roadmap is `docs/opsi_roadmap_v5_production.md`. Trusted artifact
 delivery is defined by
 `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
 

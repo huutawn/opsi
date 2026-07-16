@@ -1,6 +1,7 @@
 {
   "cloud_url": "http://cloud:9800",
   "agent_cloud_url": "https://example.invalid",
+  "allow_insecure_internal_cloud_url": true,
   "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token",
   "worker_id": "opsi-staging-bootstrap-worker-1",
   "poll_interval": "3s",

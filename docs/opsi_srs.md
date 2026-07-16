@@ -7,7 +7,7 @@
 | Status | Active target contract; current implementation is tracked separately in `docs/status_matrix.md` |
 | Last updated | 2026-07-13 |
 | Supersedes | SRS v5.0 delivery direction; SRS v3.2 remains archived |
-| Canonical roadmap | `docs/opsi_roadmap_v4.md` |
+| Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact decision | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
 This SRS defines the intended Production MVP. It is not evidence that a
@@ -483,10 +483,11 @@ superseded rather than silently reused.
 
 ## 12. Milestone order
 
-P01 development control-plane code is complete, while clean control-plane VPS
-checkpoint `CP-VPS-1` remains `DEFERRED / UNPROVEN`. P02 establishes roadmap v4
-and ADR-004 only. P03-P06 complete the bootstrap foundation; P07-P10 establish
-GitHub App control-plane trust; P11-P21 establish trusted artifact delivery and
-runtime CD; P22-P25 establish evidence, Safe ActionPlane, and CLI MCP; P26 proves
-development acceptance twice; P27-P32 are mandatory production hardening and
-acceptance gates. The authoritative order is `docs/opsi_roadmap_v4.md`.
+R5-001 contains the credential incident but remains `OPERATOR_REQUIRED` for
+external rotation and history decisions. R5-002 completes the production-like
+staging source/config gate. R5-003 is the active live control-plane checkpoint;
+R5-004–R5-017 then establish the live Agent baseline, trusted delivery, and
+manual CLI/UI product acceptance. MCP remains blocked until the R5-017 manual
+gate. R5-018–R5-024 cover the instruction/MCP boundary, release hardening,
+upgrade, DR, and final production acceptance. The authoritative order is
+`docs/opsi_roadmap_v5_production.md`.

@@ -378,7 +378,7 @@ Traefik, private registry, or signing as implemented before evidence exists.
 
 P02 verification is documentation-only:
 
-- active documents reference `docs/opsi_roadmap_v4.md` and this ADR;
+- active documents reference `docs/opsi_roadmap_v5_production.md` and this ADR;
 - active documents contain no reference to the absent roadmap v3 directory;
 - current-state documents still describe current Git clone/build behavior and
   image-source rejection;

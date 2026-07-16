@@ -26,46 +26,49 @@ const (
 	defaultLeaseSafetyMargin      = 10 * time.Second
 	defaultDaemonBackoff          = time.Second
 	maximumDaemonBackoff          = 30 * time.Second
+	stagingInternalCloudURL       = "http://cloud:9800"
 )
 
 type Config struct {
-	CloudURL               string           `json:"cloud_url"`
-	AgentCloudURL          string           `json:"agent_cloud_url"`
-	BootstrapWorkerToken   string           `json:"bootstrap_worker_token"`
-	WorkerID               string           `json:"worker_id"`
-	PollInterval           time.Duration    `json:"-"`
-	K3sVersion             string           `json:"k3s_version"`
-	K3sInstallerURL        string           `json:"k3s_installer_url"`
-	K3sInstallerSHA256     string           `json:"k3s_installer_sha256"`
-	AgentInstallURL        string           `json:"agent_install_url"`
-	AgentInstallSHA256     string           `json:"agent_install_sha256"`
-	SSHKnownHostsPath      string           `json:"ssh_known_hosts_path"`
-	Production             bool             `json:"production"`
-	Timeout                time.Duration    `json:"-"`
-	HTTPClient             *http.Client     `json:"-"`
-	Executor               RemoteExecutor   `json:"-"`
-	Logger                 *slog.Logger     `json:"-"`
-	HeartbeatInterval      time.Duration    `json:"-"`
-	HeartbeatRetryInterval time.Duration    `json:"-"`
-	LeaseSafetyMargin      time.Duration    `json:"-"`
-	Now                    func() time.Time `json:"-"`
+	CloudURL                      string           `json:"cloud_url"`
+	AgentCloudURL                 string           `json:"agent_cloud_url"`
+	AllowInsecureInternalCloudURL bool             `json:"allow_insecure_internal_cloud_url"`
+	BootstrapWorkerToken          string           `json:"bootstrap_worker_token"`
+	WorkerID                      string           `json:"worker_id"`
+	PollInterval                  time.Duration    `json:"-"`
+	K3sVersion                    string           `json:"k3s_version"`
+	K3sInstallerURL               string           `json:"k3s_installer_url"`
+	K3sInstallerSHA256            string           `json:"k3s_installer_sha256"`
+	AgentInstallURL               string           `json:"agent_install_url"`
+	AgentInstallSHA256            string           `json:"agent_install_sha256"`
+	SSHKnownHostsPath             string           `json:"ssh_known_hosts_path"`
+	Production                    bool             `json:"production"`
+	Timeout                       time.Duration    `json:"-"`
+	HTTPClient                    *http.Client     `json:"-"`
+	Executor                      RemoteExecutor   `json:"-"`
+	Logger                        *slog.Logger     `json:"-"`
+	HeartbeatInterval             time.Duration    `json:"-"`
+	HeartbeatRetryInterval        time.Duration    `json:"-"`
+	LeaseSafetyMargin             time.Duration    `json:"-"`
+	Now                           func() time.Time `json:"-"`
 }
 
 type fileConfig struct {
-	CloudURL                 string `json:"cloud_url"`
-	AgentCloudURL            string `json:"agent_cloud_url"`
-	BootstrapWorkerToken     string `json:"bootstrap_worker_token"`
-	BootstrapWorkerTokenFile string `json:"bootstrap_worker_token_file"`
-	WorkerID                 string `json:"worker_id"`
-	PollInterval             string `json:"poll_interval"`
-	K3sVersion               string `json:"k3s_version"`
-	K3sInstallerURL          string `json:"k3s_installer_url"`
-	K3sInstallerSHA256       string `json:"k3s_installer_sha256"`
-	AgentInstallURL          string `json:"agent_install_url"`
-	AgentInstallSHA256       string `json:"agent_install_sha256"`
-	SSHKnownHostsPath        string `json:"ssh_known_hosts_path"`
-	Production               bool   `json:"production"`
-	Timeout                  string `json:"timeout"`
+	CloudURL                      string `json:"cloud_url"`
+	AgentCloudURL                 string `json:"agent_cloud_url"`
+	AllowInsecureInternalCloudURL bool   `json:"allow_insecure_internal_cloud_url"`
+	BootstrapWorkerToken          string `json:"bootstrap_worker_token"`
+	BootstrapWorkerTokenFile      string `json:"bootstrap_worker_token_file"`
+	WorkerID                      string `json:"worker_id"`
+	PollInterval                  string `json:"poll_interval"`
+	K3sVersion                    string `json:"k3s_version"`
+	K3sInstallerURL               string `json:"k3s_installer_url"`
+	K3sInstallerSHA256            string `json:"k3s_installer_sha256"`
+	AgentInstallURL               string `json:"agent_install_url"`
+	AgentInstallSHA256            string `json:"agent_install_sha256"`
+	SSHKnownHostsPath             string `json:"ssh_known_hosts_path"`
+	Production                    bool   `json:"production"`
+	Timeout                       string `json:"timeout"`
 }
 
 type Bundle struct {
@@ -133,7 +136,7 @@ func LoadConfig(path string) (Config, error) {
 		}
 		workerToken = strings.TrimSuffix(strings.TrimSuffix(string(tokenData), "\n"), "\r")
 	}
-	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, BootstrapWorkerToken: workerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
+	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, AllowInsecureInternalCloudURL: raw.AllowInsecureInternalCloudURL, BootstrapWorkerToken: workerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
 	if cfg.AgentCloudURL == "" {
 		cfg.AgentCloudURL = cfg.CloudURL
 	}
@@ -163,8 +166,11 @@ func (c Config) Validate() error {
 	if err != nil {
 		return fmt.Errorf("cloud_url: %w", err)
 	}
-	if c.Production && u.Scheme != "https" && !(u.Scheme == "http" && u.Hostname() == "cloud" && u.Port() == "9800") {
-		return errors.New("production requires https cloud_url or the isolated http://cloud:9800 Compose endpoint")
+	if c.AllowInsecureInternalCloudURL && (!c.Production || c.CloudURL != stagingInternalCloudURL) {
+		return fmt.Errorf("allow_insecure_internal_cloud_url is restricted to production staging endpoint %s", stagingInternalCloudURL)
+	}
+	if c.Production && u.Scheme != "https" && !c.AllowInsecureInternalCloudURL {
+		return errors.New("production requires https cloud_url; the staging internal HTTP endpoint requires explicit allow_insecure_internal_cloud_url opt-in")
 	}
 	if c.Production && (u.Hostname() == "example.invalid" || isPlaceholderValue(c.CloudURL)) {
 		return errors.New("production cloud_url must not use a placeholder")

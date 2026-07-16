@@ -82,6 +82,13 @@ class StagingValidatorTests(unittest.TestCase):
         compose = self.compose.replace("    environment:\n      POSTGRES_DB:", "    ports:\n      - \"5432:5432\"\n    environment:\n      POSTGRES_DB:", 1)
         self.assert_source_rejected(compose=compose)
 
+    def test_non_internal_backend_network_rejected(self) -> None:
+        self.assert_source_rejected(compose=self.compose.replace("  backend:\n    internal: true", "  backend:"))
+
+    def test_missing_internal_http_opt_in_rejected(self) -> None:
+        worker = self.worker_text.replace('  "allow_insecure_internal_cloud_url": true,\n', "")
+        self.assert_source_rejected(worker_text=worker)
+
     def test_internal_endpoint_exposure_rejected(self) -> None:
         self.assert_source_rejected(caddy=self.caddy.replace("/api/internal/*", "/api/not-internal/*"))
 
@@ -114,6 +121,24 @@ class StagingValidatorTests(unittest.TestCase):
         env, worker, secrets = self.valid_runtime_fixture()
         validator.validate_runtime_values(env, worker, secrets)
 
+    def test_database_url_password_mismatch_rejected(self) -> None:
+        env, worker, secrets = self.valid_runtime_fixture()
+        secrets["database-url"] = secrets["database-url"].replace("database%2Fpassword", "different-password", 1)
+        with self.assertRaisesRegex(validator.ValidationError, "password must match postgres-password"):
+            validator.validate_runtime_values(env, worker, secrets)
+
+    def test_database_url_username_mismatch_rejected(self) -> None:
+        env, worker, secrets = self.valid_runtime_fixture()
+        secrets["database-url"] = secrets["database-url"].replace("postgres://opsi:", "postgres://other:", 1)
+        with self.assertRaisesRegex(validator.ValidationError, "username must match POSTGRES_USER"):
+            validator.validate_runtime_values(env, worker, secrets)
+
+    def test_database_url_database_mismatch_rejected(self) -> None:
+        env, worker, secrets = self.valid_runtime_fixture()
+        secrets["database-url"] = secrets["database-url"].replace("/opsi?", "/other?")
+        with self.assertRaisesRegex(validator.ValidationError, "database must match POSTGRES_DB"):
+            validator.validate_runtime_values(env, worker, secrets)
+
     def valid_runtime_fixture(self):
         env = validator.parse_env(self.env_text)
         env.update(
@@ -140,10 +165,12 @@ class StagingValidatorTests(unittest.TestCase):
                 "agent_install_sha256": "4" * 64,
             }
         )
+        postgres_password = "database/password?with%encoded+chars-12345"
         secrets = {name: "s" * 40 for name in validator.REQUIRED_SECRET_NAMES}
         secrets.update(
             {
-                "database-url": "postgres://opsi:database-password@postgres:5432/opsi?sslmode=disable",
+                "postgres-password": postgres_password,
+                "database-url": "postgres://opsi:database%2Fpassword%3Fwith%25encoded+chars-12345@postgres:5432/opsi?sslmode=disable",
                 "origin-certificate": "-----BEGIN CERTIFICATE-----\nsanitized-test\n-----END CERTIFICATE-----\n",
                 "origin-private-key": "-----BEGIN " + validator.PRIVATE_KEY_MARKER + "-----\nsanitized-test\n-----END " + validator.PRIVATE_KEY_MARKER + "-----\n",
                 "github-app-private-key": "-----BEGIN " + validator.PRIVATE_KEY_MARKER + "-----\nsanitized-test\n-----END " + validator.PRIVATE_KEY_MARKER + "-----\n",

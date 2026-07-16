@@ -2,14 +2,20 @@
 
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
+Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Repair Task
 
-- R5-002 is the only active task. R5-003 has not started.
-- R5-002 adds a separate production-like staging control-plane profile with
+- R5-003 is the only active task. R5-002 is done at its source/config gate.
+- R5-002 added a separate production-like staging control-plane profile with
   origin TLS, fail-closed production configuration, isolated service exposure,
   individual read-only secret mounts, offline validation, and a Cloudflare Full
   (strict) operator runbook.
+- The staging validator cross-checks the URL-decoded PostgreSQL DSN username,
+  password, and database against the Compose PostgreSQL identity and secret.
+  Production Worker HTTP is fail-closed unless the staging-only internal
+  endpoint is explicitly opted into and the profile validates its isolated
+  backend boundary.
 - The development profile remains an independent local HTTP package and its
   Make targets cannot start the staging Compose project.
 - The historical archive leak came from the former canonical `package-source`
@@ -86,14 +92,16 @@ Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 
 ## Next Ordered Work
 
-R5-003 is the next repair task but has not started. It owns live origin TLS,
-Cloudflare Full (strict), direct-origin restriction, and VPS
-restart/persistence evidence. IncidentEvidence, Safe ActionPlane, CLI MCP, and
-production acceptance remain later ordered work.
+R5-003 is active. It owns live origin TLS, Cloudflare Full (strict),
+direct-origin restriction, and VPS restart/persistence evidence. R5-004 and
+later work must not start until R5-003 is closed or truthfully recorded as
+blocked/deferred under `docs/opsi_roadmap_v5_production.md`.
 
 ## Verification
 
-For R5-002 run focused Cloud tests, `make dev-control-plane-validate-source`,
+R5-002 regression checks are focused Cloud tests,
+`make dev-control-plane-validate-source`,
 `make staging-control-plane-validate-source`, `make source-hygiene`, and
-`git diff --check`. Runtime staging validation requires operator-created
-gitignored secrets and is not evidence of a live cutover.
+`git diff --check`. R5-003 additionally requires operator-run live TLS,
+Cloudflare, restart, persistence, route, and redacted evidence checks; offline
+validation alone is not evidence of a live cutover.

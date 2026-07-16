@@ -2,15 +2,17 @@
 
 | Metadata | Value |
 |---|---|
-| Status | Canonical active roadmap |
+| Status | Superseded by `docs/opsi_roadmap_v5_production.md` |
 | Last updated | 2026-07-13 |
 | Architecture decision | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 | Current implementation truth | `docs/current_state.md` and `docs/status_matrix.md` |
 
-This file is the single canonical active roadmap for Opsi. Requirements and
-target architecture are not implementation evidence. A capability exists only
-when the status matrix cites code, tests, executable checks, and any required
-real-infrastructure evidence.
+This file is retained as historical planning context only. It is not an active
+execution source. The single canonical active roadmap is
+`docs/opsi_roadmap_v5_production.md`. Requirements and target architecture are
+not implementation evidence. A capability exists only when the status matrix
+cites code, tests, executable checks, and any required real-infrastructure
+evidence.
 
 ## 1. Objective
 
@@ -258,7 +260,8 @@ Clean control-plane VPS checkpoint: `DEFERRED / UNPROVEN`.
 
 Status: `DOC_ONLY` after the required documentation checks and commit.
 
-- Establish this file as the canonical roadmap.
+- Historical outcome: this file was established as the canonical roadmap at
+  that revision; roadmap v5 now supersedes it.
 - Adopt `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
 - Align active documentation without changing runtime code or claiming target
   capabilities are implemented.

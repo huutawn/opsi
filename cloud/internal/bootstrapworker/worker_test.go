@@ -22,11 +22,7 @@ import (
 )
 
 func TestConfigValidation(t *testing.T) {
-	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
-	if err := os.WriteFile(knownHosts, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	valid := Config{CloudURL: "https://cloud-internal.example", AgentCloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), SSHKnownHostsPath: knownHosts, Production: true}
+	valid := validProductionWorkerConfig(t)
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid daemon config failed: %v", err)
 	}
@@ -67,6 +63,39 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestProductionHTTPCloudURLRequiresStagingOptIn(t *testing.T) {
+	valid := validProductionWorkerConfig(t)
+	valid.CloudURL = stagingInternalCloudURL
+	if err := valid.Validate(); err == nil || !strings.Contains(err.Error(), "explicit allow_insecure_internal_cloud_url opt-in") {
+		t.Fatalf("production internal HTTP without opt-in error=%v", err)
+	}
+
+	valid.AllowInsecureInternalCloudURL = true
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("staging internal HTTP opt-in failed: %v", err)
+	}
+
+	valid.CloudURL = "http://other:9800"
+	if err := valid.Validate(); err == nil || !strings.Contains(err.Error(), "restricted to production staging endpoint") {
+		t.Fatalf("non-staging HTTP opt-in error=%v", err)
+	}
+
+	valid.CloudURL = stagingInternalCloudURL
+	valid.Production = false
+	if err := valid.Validate(); err == nil || !strings.Contains(err.Error(), "restricted to production staging endpoint") {
+		t.Fatalf("non-production HTTP opt-in error=%v", err)
+	}
+}
+
+func validProductionWorkerConfig(t *testing.T) Config {
+	t.Helper()
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHosts, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Config{CloudURL: "https://cloud-internal.example", AgentCloudURL: "https://cloud.example", BootstrapWorkerToken: strings.Repeat("x", 32), WorkerID: "bootstrap-worker.dev_01", PollInterval: time.Second, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), SSHKnownHostsPath: knownHosts, Production: true}
+}
+
 func TestDevelopmentSmokeConfigAllowsNonfunctionalRemoteValues(t *testing.T) {
 	cfg := Config{
 		CloudURL:             "http://cloud:9800",
@@ -100,11 +129,11 @@ func TestConfigErrorsDoNotExposeWorkerToken(t *testing.T) {
 func TestLoadConfigDefaultsAndRejectsLegacySessionID(t *testing.T) {
 	dir := t.TempDir()
 	validPath := filepath.Join(dir, "valid.json")
-	if err := os.WriteFile(validPath, []byte(`{"cloud_url":"http://cloud:9800","agent_cloud_url":"https://cloud.example","bootstrap_worker_token":"secret","worker_id":"  worker-1  ","k3s_version":"  v1.32.5+k3s1  ","k3s_installer_url":"https://get.k3s.io","k3s_installer_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","agent_install_url":"https://downloads.example/agent","agent_install_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`), 0o600); err != nil {
+	if err := os.WriteFile(validPath, []byte(`{"cloud_url":"http://cloud:9800","agent_cloud_url":"https://cloud.example","allow_insecure_internal_cloud_url":true,"bootstrap_worker_token":"secret","worker_id":"  worker-1  ","k3s_version":"  v1.32.5+k3s1  ","k3s_installer_url":"https://get.k3s.io","k3s_installer_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","agent_install_url":"https://downloads.example/agent","agent_install_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(validPath)
-	if err != nil || cfg.WorkerID != "worker-1" || cfg.K3sVersion != "v1.32.5+k3s1" || cfg.PollInterval != defaultPollInterval || cfg.AgentCloudURL != "https://cloud.example" {
+	if err != nil || cfg.WorkerID != "worker-1" || cfg.K3sVersion != "v1.32.5+k3s1" || cfg.PollInterval != defaultPollInterval || cfg.AgentCloudURL != "https://cloud.example" || !cfg.AllowInsecureInternalCloudURL {
 		t.Fatalf("loaded cfg=%+v err=%v", cfg, err)
 	}
 	legacyPath := filepath.Join(dir, "legacy.json")
@@ -154,11 +183,10 @@ func TestLoadConfigRejectsInlineAndFileWorkerTokens(t *testing.T) {
 }
 
 func TestProductionConfigRejectsPlaceholderWorkerToken(t *testing.T) {
-	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
-	if err := os.WriteFile(knownHosts, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg := Config{CloudURL: "http://cloud:9800", AgentCloudURL: "https://cloud.example.test", BootstrapWorkerToken: "REPLACE_WITH_WORKER_TOKEN_123456", WorkerID: "worker-1", PollInterval: time.Second, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), SSHKnownHostsPath: knownHosts, Production: true}
+	cfg := validProductionWorkerConfig(t)
+	cfg.CloudURL = stagingInternalCloudURL
+	cfg.AllowInsecureInternalCloudURL = true
+	cfg.BootstrapWorkerToken = "REPLACE_WITH_WORKER_TOKEN_123456"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "placeholder") {
 		t.Fatalf("placeholder token error=%v", err)
 	}

@@ -74,6 +74,15 @@ JSON. Compose mounts only each service's required secrets. Runtime files,
 certificate/key material, and generated configuration are gitignored and
 source-package policy rejects them.
 
+Production Worker control traffic requires HTTPS by default. Staging has one
+explicit, narrow exception: `allow_insecure_internal_cloud_url=true` permits
+only `http://cloud:9800`, while the validator separately requires the Compose
+backend network to be internal and Cloud/Worker to remain unpublished. The
+hostname and port alone grant no exception, and the Agent-facing URL remains
+HTTPS. Runtime validation also URL-decodes the PostgreSQL DSN credentials and
+database name and rejects any mismatch with the Compose PostgreSQL identity or
+password secret.
+
 This repository state is not live TLS evidence. Cloudflare Flexible and Always
 Use HTTPS do not protect Cloudflare-to-origin traffic. Full (strict), a valid
 origin certificate, direct-origin restriction, and live callback/webhook and

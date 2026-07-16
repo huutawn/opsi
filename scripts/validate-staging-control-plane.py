@@ -9,7 +9,7 @@ import pathlib
 import re
 import stat
 import sys
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy" / "staging-control-plane"
@@ -153,6 +153,26 @@ def require_hardening(block: str, service: str, require_user: bool) -> None:
             fail(f"{service} is missing {label}")
 
 
+def validate_database_url(env: dict[str, str], secrets: dict[str, str]) -> None:
+    database_url = secrets["database-url"].rstrip("\r\n")
+    database = urlparse(database_url)
+    try:
+        hostname = database.hostname
+        username = unquote(database.username or "")
+        password = unquote(database.password or "")
+    except ValueError:
+        fail("runtime database-url must be a valid PostgreSQL URL")
+    if database.scheme not in {"postgres", "postgresql"} or hostname != "postgres" or is_placeholder(database_url):
+        fail("runtime database-url must target the Compose postgres service and be non-placeholder")
+    if username != env.get("POSTGRES_USER", ""):
+        fail("runtime database-url username must match POSTGRES_USER")
+    database_name = unquote(database.path[1:]) if database.path.startswith("/") else ""
+    if database_name != env.get("POSTGRES_DB", ""):
+        fail("runtime database-url database must match POSTGRES_DB")
+    if password != secrets["postgres-password"].rstrip("\r\n"):
+        fail("runtime database-url password must match postgres-password")
+
+
 def validate_source_texts(
     env_text: str,
     compose: str,
@@ -211,6 +231,11 @@ def validate_source_texts(
         fail("only reverse-proxy may publish public ports")
     for name in ("postgres", "cloud", "bootstrap-worker", "reverse-proxy"):
         require_hardening(blocks[name], name, name in {"cloud", "bootstrap-worker", "reverse-proxy"})
+    if "  backend:\n    internal: true" not in compose:
+        fail("staging backend network must be internal")
+    for name in ("cloud", "bootstrap-worker"):
+        if "      - backend" not in blocks[name]:
+            fail(f"{name} must join the internal backend network")
     if "NET_BIND_SERVICE" not in blocks["reverse-proxy"]:
         fail("reverse-proxy must retain only the official Caddy binary NET_BIND_SERVICE capability")
 
@@ -264,6 +289,8 @@ def validate_source_texts(
         fail("staging bootstrap-worker production must be true")
     if worker.get("cloud_url") != "http://cloud:9800":
         fail("staging worker must use the isolated cloud:9800 backend endpoint")
+    if worker.get("allow_insecure_internal_cloud_url") is not True:
+        fail("staging worker must explicitly opt in to its isolated internal HTTP cloud_url")
     if worker.get("bootstrap_worker_token_file") != "/run/secrets/bootstrap-worker-token":
         fail("staging worker token must come from its read-only secret file")
     if "bootstrap_worker_token" in worker:
@@ -295,6 +322,8 @@ def validate_runtime_values(env: dict[str, str], worker: dict[str, object], secr
     require_https(str(worker.get("agent_cloud_url", "")), "bootstrap-worker.agent_cloud_url", False)
     if worker.get("cloud_url") != "http://cloud:9800":
         fail("runtime bootstrap-worker.cloud_url must use the isolated backend")
+    if worker.get("allow_insecure_internal_cloud_url") is not True:
+        fail("runtime bootstrap-worker must explicitly opt in to its isolated internal HTTP cloud_url")
     if worker.get("bootstrap_worker_token_file") != "/run/secrets/bootstrap-worker-token":
         fail("runtime worker token must be file-backed")
     for name in ("k3s_installer_url", "agent_install_url"):
@@ -321,10 +350,7 @@ def validate_runtime_values(env: dict[str, str], worker: dict[str, object], secr
     smtp_password = secrets["smtp-password"].rstrip("\r\n")
     if not smtp_password or is_placeholder(smtp_password):
         fail("runtime secret smtp-password must be non-empty and non-placeholder")
-    database_url = secrets["database-url"].rstrip("\r\n")
-    database = urlparse(database_url)
-    if database.scheme not in {"postgres", "postgresql"} or database.hostname != "postgres" or is_placeholder(database_url):
-        fail("runtime database-url must target the Compose postgres service and be non-placeholder")
+    validate_database_url(env, secrets)
     if "BEGIN CERTIFICATE" not in secrets["origin-certificate"]:
         fail("runtime origin certificate is not PEM certificate data")
     for name in ("origin-private-key", "github-app-private-key"):

@@ -6,7 +6,7 @@
 | Last updated | 2026-07-15 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
-| Canonical roadmap | `docs/opsi_roadmap_v4.md` |
+| Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
 ## M0 boundary state
@@ -203,8 +203,11 @@ Safe ActionPlane client.
   unproven.
 - Worker configuration no longer accepts fixed `session_id`. It requires an
   operator-pinned K3s version, installer URL/SHA-256, Agent artifact URL/SHA-256,
-  and an Agent-reachable Cloud URL. Production requires HTTPS and a trusted,
-  non-empty, non-writable `known_hosts` file; SSH has no insecure fallback.
+  and an Agent-reachable Cloud URL. Production requires HTTPS by default and a
+  trusted, non-empty, non-writable `known_hosts` file; SSH has no insecure
+  fallback. The staging-only `http://cloud:9800` control URL requires an
+  explicit opt-in that is rejected for every other endpoint or non-production
+  configuration; `agent_cloud_url` remains HTTPS.
 - Bootstrap accepts password or unencrypted SSH private-key credentials. Worker
   control traffic uses `cloud_url`, while the installed Agent receives the
   separately configured, target-reachable `agent_cloud_url`.
@@ -272,8 +275,11 @@ SMTP, disabled OTP development echo/outbox, disabled debug UI, authenticated
 Bootstrap Worker calls, GitHub App installation authentication, and
 non-placeholder secrets. Secret values are file-backed and mounted per service;
 the GitHub App key and origin key are never placed in environment values or
-command arguments. Caddy rejects `/internal`, `/api/internal`, `/metrics`, their
-subpaths/trailing slashes, and encoded paths before proxying.
+command arguments. Runtime validation URL-decodes and cross-checks the
+PostgreSQL DSN username, password, and database against `POSTGRES_USER`, the
+`postgres-password` secret, and `POSTGRES_DB`. Caddy rejects `/internal`,
+`/api/internal`, `/metrics`, their subpaths/trailing slashes, and encoded paths
+before proxying.
 
 The committed configuration examples contain placeholders only. Runtime
 environment, Cloud/Worker configuration, secret directory, certificate/key
@@ -355,7 +361,7 @@ GitHub verification remains `UNPROVEN`. P10 `opsi init` repository bootstrap is
 as deferred;
 OIDC-bound trusted artifact delivery, runtime delivery, and the later
 evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
-of truth is `docs/opsi_roadmap_v4.md`.
+of truth is `docs/opsi_roadmap_v5_production.md`.
 
 ## Verification commands
 
