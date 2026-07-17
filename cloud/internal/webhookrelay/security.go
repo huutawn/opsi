@@ -82,7 +82,7 @@ func (s *CredentialStore) Len() int {
 func (s *CredentialStore) purgeExpiredLocked() {
 	now := s.clock()
 	for id, envelope := range s.items {
-		if now.After(envelope.expiresAt) {
+		if !now.Before(envelope.expiresAt) {
 			zeroBootstrapCredential(&envelope.value)
 			delete(s.items, id)
 		}

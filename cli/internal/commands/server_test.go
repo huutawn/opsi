@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/opsi-dev/opsi/cli/internal/config"
@@ -149,5 +150,87 @@ func TestServerBootstrapRejectsUnsafeCredentialInput(t *testing.T) {
 	err := command.Execute()
 	if err == nil || !strings.Contains(err.Error(), "must not be group or world accessible") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReadProtectedSecretRejectsUnsafeFiles(t *testing.T) {
+	dir := t.TempDir()
+	validPath := filepath.Join(dir, "valid")
+	if err := os.WriteFile(validPath, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(dir, "symlink")
+	if err := os.Symlink(validPath, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	worldReadablePath := filepath.Join(dir, "world-readable")
+	if err := os.WriteFile(worldReadablePath, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	emptyPath := filepath.Join(dir, "empty")
+	if err := os.WriteFile(emptyPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oversizedPath := filepath.Join(dir, "oversized")
+	if err := os.WriteFile(oversizedPath, bytes.Repeat([]byte("x"), maxProtectedSecretBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		message string
+	}{
+		{name: "symlink", path: symlinkPath, message: "must not be a symlink"},
+		{name: "directory", path: dir, message: "must be a regular file"},
+		{name: "group or world mode", path: worldReadablePath, message: "must not be group or world accessible"},
+		{name: "empty", path: emptyPath, message: "is empty"},
+		{name: "oversized", path: oversizedPath, message: "exceeds 1 MiB"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value, err := readProtectedSecret(test.path, "test secret")
+			clearBytes(value)
+			if err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadProtectedSecretSupportsDevStdin(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousStdin := os.Stdin
+	previousStdinFD, err := syscall.Dup(int(os.Stdin.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Dup2(int(reader.Fd()), int(os.Stdin.Fd())); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = reader
+	t.Cleanup(func() {
+		_ = syscall.Dup2(previousStdinFD, int(previousStdin.Fd()))
+		_ = syscall.Close(previousStdinFD)
+		os.Stdin = previousStdin
+		_ = reader.Close()
+	})
+	if _, err := writer.WriteString("stdin-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	value, err := readProtectedSecret("/dev/stdin", "test secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearBytes(value)
+	if string(value) != "stdin-secret" {
+		t.Fatalf("value=%q", value)
 	}
 }

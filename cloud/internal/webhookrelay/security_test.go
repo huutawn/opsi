@@ -1,9 +1,34 @@
 package webhookrelay
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
+
+func TestCredentialExpiresAtBoundaryAndCannotBeLeasedAgain(t *testing.T) {
+	now := time.Date(2026, time.July, 17, 8, 0, 0, 0, time.UTC)
+	store := NewCredentialStore()
+	store.now = func() time.Time { return now }
+	privateKey := []byte("private-key-secret")
+	store.Put("session-1", BootstrapCredential{AuthMethod: "private_key", Username: "ubuntu", PrivateKey: privateKey}, time.Minute)
+
+	leased, ok := store.GetForBootstrapLease("session-1")
+	if !ok || !bytes.Equal(leased.PrivateKey, privateKey) {
+		t.Fatalf("credential was not available before expiry: ok=%v", ok)
+	}
+	zeroBootstrapCredential(&leased)
+	now = now.Add(time.Minute)
+	if _, ok := store.GetForBootstrapLease("session-1"); ok {
+		t.Fatal("credential remained leaseable at its expiry boundary")
+	}
+	if store.Len() != 0 {
+		t.Fatal("expired credential remained in the store")
+	}
+	if _, ok := store.GetForBootstrapLease("session-1"); ok {
+		t.Fatal("expired credential was replayed")
+	}
+}
 
 func TestRegistrationTokenExpiresAtBoundaryAndCannotReplay(t *testing.T) {
 	now := time.Date(2026, time.July, 17, 8, 0, 0, 0, time.UTC)

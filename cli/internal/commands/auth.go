@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
 )
@@ -30,7 +31,7 @@ func readProtectedSecret(path, label string) ([]byte, error) {
 	if path == "" {
 		return nil, fmt.Errorf("%s file is required; secret values are not accepted in argv", label)
 	}
-	file, err := os.Open(path)
+	file, err := openProtectedSecret(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s file: %w", label, err)
 	}
@@ -59,6 +60,20 @@ func readProtectedSecret(path, label string) ([]byte, error) {
 		return nil, errors.New("protected secret file is empty")
 	}
 	return value, nil
+}
+
+func openProtectedSecret(path string) (*os.File, error) {
+	if path == "/dev/stdin" {
+		return os.Open(path)
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, errors.New("protected secret file must not be a symlink")
+		}
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), path), nil
 }
 
 func clearBytes(value []byte) {
