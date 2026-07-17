@@ -8,6 +8,8 @@ func TestMarkNodeOfflineRevokesOldAgentAndUnblocksReplacement(t *testing.T) {
 	if err != nil || len(nodes) != 1 {
 		t.Fatalf("nodes err=%v nodes=%+v", err, nodes)
 	}
+	nodes[0].Name = nodes[0].PublicHost
+	service.nodes[nodes[0].ID] = nodes[0]
 	offline, err := service.MarkNodeOffline(projectID, nodes[0].ID)
 	if err != nil {
 		t.Fatal(err)
@@ -15,8 +17,13 @@ func TestMarkNodeOfflineRevokesOldAgentAndUnblocksReplacement(t *testing.T) {
 	if offline.Status != NodeOffline || offline.FailureCode != "OPERATOR_CONFIRMED_TARGET_RESET" {
 		t.Fatalf("unexpected offline node: %+v", offline)
 	}
-	if _, err := service.CreateBootstrapSession(projectID, "first_server", "203.0.113.11", "ubuntu", "private_key", "user-1", "replacement", 22); err != nil {
+	replacement, err := service.CreateBootstrapSession(projectID, "first_server", "203.0.113.10", "ubuntu", "private_key", "user-1", "replacement", 22)
+	if err != nil {
 		t.Fatalf("replacement bootstrap remained blocked: %v", err)
+	}
+	nodes, err = service.ListNodes(projectID)
+	if err != nil || len(nodes) != 2 || nodes[1].ID != replacement.NodeID || nodes[1].Name == "203.0.113.10" {
+		t.Fatalf("replacement node identity is not distinct: err=%v nodes=%+v", err, nodes)
 	}
 }
 
