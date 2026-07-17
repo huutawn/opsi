@@ -72,6 +72,7 @@ func BuildBootstrapPlan(cfg Config, bundle Bundle) (BootstrapPlan, error) {
 		"OPSI_K3S_INSTALLER_URL":            cfg.K3sInstallerURL,
 		"OPSI_K3S_VERSION":                  strings.TrimSpace(cfg.K3sVersion),
 		"OPSI_NODE_ID":                      bundle.NodeID,
+		"OPSI_AGENT_PUBLIC_HOST":            bundle.PublicHost,
 		"OPSI_PROJECT_ID":                   bundle.ProjectID,
 		"OPSI_REGISTRATION_IDENTITY_SHA256": registrationIdentitySHA256(bundle.NodeID, bundle.ProjectID, agentCloudURL),
 		"OPSI_REMOTE_USERNAME":              bundle.SSH.Username,
@@ -254,6 +255,7 @@ func classifyStepFailure(status, message string) JobFailure {
 		{Code: "AGENT_RELEASE_INTEGRITY_FAILED", Retryable: false},
 		{Code: "AGENT_REGISTRATION_IDENTITY_MISMATCH", Retryable: false},
 		{Code: "AGENT_REGISTRATION_STATE_INVALID", Retryable: false},
+		{Code: "AGENT_TLS_GENERATION_FAILED", Retryable: false},
 		{Code: "AGENT_SERVICE_START_FAILED", Retryable: true},
 		{Code: "AGENT_ROLLBACK_FAILED", Retryable: false},
 	} {
@@ -345,7 +347,7 @@ const preflightScript = `
 set -eu
 . /etc/os-release
 test "${ID:-}" = ubuntu
-for command in curl systemctl sha256sum mktemp install readlink cmp stat; do command -v "$command" >/dev/null; done
+for command in curl systemctl sha256sum mktemp install readlink cmp stat openssl; do command -v "$command" >/dev/null; done
 if [ "${OPSI_REMOTE_USERNAME}" != root ]; then command -v sudo >/dev/null && sudo -n true; fi
 `
 
@@ -494,17 +496,29 @@ else
 	payload="$tmpdir/register.json"
 	response="$tmpdir/register.response"
 	config_tmp="$tmpdir/agent.yaml"
-	printf '{"registration_token":"%s","public_key_fingerprint":"bootstrap-%s","version":"bootstrap","capabilities":{"deploy":true,"node_lifecycle":true}}' "$OPSI_AGENT_REGISTRATION_TOKEN" "$OPSI_NODE_ID" >"$payload"
+	cert_tmp="$tmpdir/server.crt"
+	key_tmp="$tmpdir/server.key"
+	case "$OPSI_AGENT_PUBLIC_HOST" in
+		*[!0-9.]* ) san="DNS:$OPSI_AGENT_PUBLIC_HOST" ;;
+		* ) san="IP:$OPSI_AGENT_PUBLIC_HOST" ;;
+	esac
+	openssl req -x509 -newkey rsa:2048 -sha256 -nodes -keyout "$key_tmp" -out "$cert_tmp" -days 30 -subj "/CN=$OPSI_AGENT_PUBLIC_HOST" -addext "subjectAltName=$san" >/dev/null 2>&1 || fail_code AGENT_TLS_GENERATION_FAILED
+	cert_sha256="$(openssl x509 -in "$cert_tmp" -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+	[ "${#cert_sha256}" = 64 ] || fail_code AGENT_TLS_GENERATION_FAILED
+	printf '{"registration_token":"%s","public_key_fingerprint":"bootstrap-%s","version":"bootstrap","capabilities":{"deploy":true,"node_lifecycle":true},"agent_endpoint":"%s","agent_port":9443,"agent_tls_server_name":"%s","agent_cert_sha256":"%s"}' "$OPSI_AGENT_REGISTRATION_TOKEN" "$OPSI_NODE_ID" "$OPSI_AGENT_PUBLIC_HOST" "$OPSI_AGENT_PUBLIC_HOST" "$cert_sha256" >"$payload"
 	post_json "${OPSI_CLOUD_URL}/v1/agents/register" "$payload" "$response"
 	agent_token="$(sed -n 's/.*"agent_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$response")"
 	[ -n "$agent_token" ] || fail_code AGENT_REGISTRATION_STATE_INVALID
 	cat >"$config_tmp" <<EOF
 node_id: ${OPSI_NODE_ID}
 mode: dev
-listen_addr: 127.0.0.1:9443
+listen_addr: 0.0.0.0:9443
 health_addr: 127.0.0.1:9080
 cloud_endpoint: ${OPSI_CLOUD_URL}
 sqlite_path: /var/lib/opsi/opsi-agent.sqlite
+tls:
+  server_cert_path: /etc/opsi/tls/server.crt
+  server_key_path: /etc/opsi/tls/server.key
 auth:
   enabled: true
   verify_cache_ttl: 15m
@@ -530,6 +544,13 @@ secret:
 EOF
 	"$target_binary" --config "$config_tmp" --check >/dev/null 2>&1 || fail_code AGENT_REGISTRATION_STATE_INVALID
 	$SUDO install -d -m 0750 /etc/opsi /var/lib/opsi
+	$SUDO install -d -m 0700 /etc/opsi/tls
+	cert_stage="/etc/opsi/tls/.server.crt.$$"
+	key_stage="/etc/opsi/tls/.server.key.$$"
+	$SUDO install -m 0644 "$cert_tmp" "$cert_stage"
+	$SUDO install -m 0600 "$key_tmp" "$key_stage"
+	$SUDO mv -f "$cert_stage" /etc/opsi/tls/server.crt
+	$SUDO mv -f "$key_stage" /etc/opsi/tls/server.key
 	config_stage="/etc/opsi/.agent.yaml.$$"
 	$SUDO install -m 0600 "$config_tmp" "$config_stage"
 	$SUDO mv -f "$config_stage" "$config"

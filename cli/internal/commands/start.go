@@ -129,7 +129,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"authenticated":   authenticated,
 			"cloud_connected": "unknown",
-			"agent_connected": "unknown",
+			"agent_connected": probeAgent(r.Context(), cfg, factory),
 			"token_status":    tokenStatus(factory),
 			"local_session":   localSession,
 			"capabilities":    []string{"projects", "nodes", "services", "deployments", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
@@ -138,6 +138,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	mux.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 800*time.Millisecond)
 		defer cancel()
+		ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
 		status, err := agentclient.New(cfg).Status(ctx)
 		w.Header().Set("content-type", "application/json")
 		if err != nil {
@@ -325,9 +326,10 @@ func probeCloud(ctx context.Context, cloudURL string) string {
 	return "failed"
 }
 
-func probeAgent(ctx context.Context, cfg config.Config) string {
+func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error)) string {
 	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
 	defer cancel()
+	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
 	if _, err := agentclient.New(cfg).Status(ctx); err != nil {
 		return "failed"
 	}

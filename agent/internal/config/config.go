@@ -186,6 +186,9 @@ func (c Config) Validate() error {
 	if c.HealthAddr == "" {
 		return errors.New("health_addr is required")
 	}
+	if !isLoopbackAddr(c.HealthAddr) {
+		return errors.New("health_addr must be loopback-only")
+	}
 	if c.Mode == "" {
 		c.Mode = "dev"
 	}

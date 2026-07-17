@@ -8,10 +8,11 @@ import (
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
+	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	"github.com/spf13/cobra"
 )
 
-func newStatusCommand(configPath *string) *cobra.Command {
+func newStatusCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Print Agent status",
@@ -22,6 +23,7 @@ func newStatusCommand(configPath *string) *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 200*time.Millisecond)
 			defer cancel()
+			ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
 
 			status, err := agentclient.New(cfg).Status(ctx)
 			if err != nil {

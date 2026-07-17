@@ -25,6 +25,18 @@ type Service struct {
 	Status    string `json:"status"`
 }
 
+type Node struct {
+	ID                 string `json:"id"`
+	ProjectID          string `json:"project_id"`
+	PublicHost         string `json:"public_host"`
+	AgentID            string `json:"agent_id"`
+	AgentVersion       string `json:"agent_version"`
+	AgentEndpoint      string `json:"agent_endpoint"`
+	AgentPort          int    `json:"agent_port"`
+	AgentTLSServerName string `json:"agent_tls_server_name"`
+	AgentCertSHA256    string `json:"agent_cert_sha256"`
+}
+
 type BootstrapRequest struct {
 	Role          string `json:"role"`
 	PublicHost    string `json:"public_host"`

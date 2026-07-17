@@ -76,6 +76,14 @@ func (c *Client) ListServices(ctx context.Context, projectID string) ([]Service,
 	return response.Services, err
 }
 
+func (c *Client) ListNodes(ctx context.Context, projectID string) ([]Node, error) {
+	var response struct {
+		Nodes []Node `json:"nodes"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "nodes"}, nil, "", &response)
+	return response.Nodes, err
+}
+
 func (c *Client) CreateBootstrapSession(ctx context.Context, projectID string, request BootstrapRequest, idempotencyKey string) (BootstrapSession, error) {
 	var response BootstrapSession
 	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "bootstrap-sessions"}, request, idempotencyKey, &response)

@@ -241,6 +241,10 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		PublicKeyFingerprint string         `json:"public_key_fingerprint"`
 		Version              string         `json:"version"`
 		Capabilities         map[string]any `json:"capabilities"`
+		AgentEndpoint        string         `json:"agent_endpoint"`
+		AgentPort            int            `json:"agent_port"`
+		AgentTLSServerName   string         `json:"agent_tls_server_name"`
+		AgentCertSHA256      string         `json:"agent_cert_sha256"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -265,7 +269,9 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		writeRegistryFailure(w, r, err)
 		return
 	}
-	agent, err := s.Registry.RegisterAgent(reg.ProjectID, reg.NodeID, req.PublicKeyFingerprint, hash, req.Version, "agent-register:"+reg.SessionID, req.Capabilities)
+	agent, err := s.Registry.RegisterAgent(reg.ProjectID, reg.NodeID, req.PublicKeyFingerprint, hash, req.Version, "agent-register:"+reg.SessionID, req.Capabilities, registry.AgentEndpoint{
+		Address: req.AgentEndpoint, Port: req.AgentPort, TLSServerName: req.AgentTLSServerName, CertSHA256: req.AgentCertSHA256,
+	})
 	if err != nil {
 		writeRegistryFailure(w, r, err)
 		return

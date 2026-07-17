@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -15,7 +18,7 @@ type PostgresService struct {
 	Now func() time.Time
 }
 
-const nodeSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, role, status, COALESCE(public_host,''), COALESCE(private_ip,''), COALESCE(provider,''), COALESCE(region,''), COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(arch,''), COALESCE(cpu_cores,0), COALESCE(memory_mb,0), COALESCE(disk_total_gb,0), COALESCE(k3s_role,''), COALESCE(k3s_status,''), COALESCE(k3s_version,''), COALESCE(agent_id,''), COALESCE(agent_version,''), last_seen_at, last_inventory_at, COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), created_at, updated_at FROM nodes`
+const nodeSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, role, status, COALESCE(public_host,''), COALESCE(private_ip,''), COALESCE(provider,''), COALESCE(region,''), COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(arch,''), COALESCE(cpu_cores,0), COALESCE(memory_mb,0), COALESCE(disk_total_gb,0), COALESCE(k3s_role,''), COALESCE(k3s_status,''), COALESCE(k3s_version,''), COALESCE(agent_id,''), COALESCE(agent_version,''), COALESCE(agent_endpoint,''), COALESCE(agent_port,0), COALESCE(agent_tls_server_name,''), COALESCE(agent_cert_sha256,''), last_seen_at, last_inventory_at, COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), created_at, updated_at FROM nodes`
 
 const serviceSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), COALESCE(branch,''), COALESCE(git_sha,''), COALESCE(build_method,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(manifest_path,''), watch_paths::text, COALESCE(container_port,0), COALESCE(health_path,''), COALESCE(replicas_desired,0), COALESCE(resources->'requests','{}'::jsonb)::text, COALESCE(resources->'limits','{}'::jsonb)::text, COALESCE(bindings,'[]'::jsonb)::text, namespace, created_at, updated_at FROM control_services`
 
@@ -305,7 +308,7 @@ func (s PostgresService) UpsertNode(projectID, name, role, status, publicHost, a
 	return node, tx.Commit()
 }
 
-func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any) (Agent, error) {
+func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any, endpoints ...AgentEndpoint) (Agent, error) {
 	ctx := context.Background()
 	scope := "agent:" + projectID + ":" + nodeID
 	if id, ok, err := s.idempotentResource(ctx, scope, key); err != nil || ok {
@@ -327,6 +330,16 @@ func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, credentia
 	if credentialHash == "" {
 		return Agent{}, APIError{Status: 400, Code: "AGENT_CREDENTIAL_REQUIRED", Message: "agent credential hash is required"}
 	}
+	endpoint := AgentEndpoint{}
+	if len(endpoints) > 1 {
+		return Agent{}, APIError{Status: 400, Code: "AGENT_ENDPOINT_INVALID", Message: "only one agent endpoint is allowed"}
+	}
+	if len(endpoints) == 1 {
+		endpoint = endpoints[0]
+		if err := validateAgentEndpoint(node.PublicHost, endpoint); err != nil {
+			return Agent{}, err
+		}
+	}
 	now := s.clock()
 	agent := Agent{ID: newID("agent"), OrgID: node.OrgID, ProjectID: projectID, RuntimeID: node.RuntimeID, NodeID: node.ID, PublicKeyFingerprint: fingerprint, CredentialHash: credentialHash, Version: version, Capabilities: capabilities, Status: "active", LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
 	data, _ := json.Marshal(capabilities)
@@ -338,7 +351,11 @@ func (s PostgresService) RegisterAgent(projectID, nodeID, fingerprint, credentia
 	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(id, org_id, project_id, runtime_id, node_id, public_key_fingerprint, credential_hash, version, capabilities, status, last_seen_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,'active',$10,$11,$12)`, agent.ID, agent.OrgID, agent.ProjectID, agent.RuntimeID, agent.NodeID, agent.PublicKeyFingerprint, agent.CredentialHash, agent.Version, string(data), agent.LastSeenAt, agent.CreatedAt, agent.UpdatedAt); err != nil {
 		return Agent{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET agent_id = $1, agent_version = NULLIF($2,''), status = 'agent_connecting', last_seen_at = $3, updated_at = $3 WHERE id = $4 AND project_id = $5`, agent.ID, version, now, nodeID, projectID); err != nil {
+	if len(endpoints) == 1 {
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET agent_id = $1, agent_version = NULLIF($2,''), agent_endpoint = $3, agent_port = $4, agent_tls_server_name = $5, agent_cert_sha256 = $6, status = 'agent_connecting', last_seen_at = $7, updated_at = $7 WHERE id = $8 AND project_id = $9`, agent.ID, version, endpoint.Address, endpoint.Port, endpoint.TLSServerName, endpoint.CertSHA256, now, nodeID, projectID); err != nil {
+			return Agent{}, err
+		}
+	} else if _, err := tx.ExecContext(ctx, `UPDATE nodes SET agent_id = $1, agent_version = NULLIF($2,''), status = 'agent_connecting', last_seen_at = $3, updated_at = $3 WHERE id = $4 AND project_id = $5`, agent.ID, version, now, nodeID, projectID); err != nil {
 		return Agent{}, err
 	}
 	if err := insertIdempotency(ctx, tx, scope, key, "agent", agent.ID); err != nil {
@@ -1595,12 +1612,36 @@ func scanAgent(row nodeScanner) (Agent, error) {
 func scanNode(row nodeScanner) (Node, error) {
 	var node Node
 	var lastSeen, lastInventory sql.NullTime
-	if err := row.Scan(&node.ID, &node.OrgID, &node.ProjectID, &node.EnvironmentID, &node.RuntimeID, &node.Name, &node.Role, &node.Status, &node.PublicHost, &node.PrivateIP, &node.Provider, &node.Region, &node.OSName, &node.OSVersion, &node.Arch, &node.CPUCores, &node.MemoryMB, &node.DiskTotalGB, &node.K3SRole, &node.K3SStatus, &node.K3SVersion, &node.AgentID, &node.AgentVersion, &lastSeen, &lastInventory, &node.FailureCode, &node.FailureMessageRedacted, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	if err := row.Scan(&node.ID, &node.OrgID, &node.ProjectID, &node.EnvironmentID, &node.RuntimeID, &node.Name, &node.Role, &node.Status, &node.PublicHost, &node.PrivateIP, &node.Provider, &node.Region, &node.OSName, &node.OSVersion, &node.Arch, &node.CPUCores, &node.MemoryMB, &node.DiskTotalGB, &node.K3SRole, &node.K3SStatus, &node.K3SVersion, &node.AgentID, &node.AgentVersion, &node.AgentEndpoint, &node.AgentPort, &node.AgentTLSServerName, &node.AgentCertSHA256, &lastSeen, &lastInventory, &node.FailureCode, &node.FailureMessageRedacted, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		return Node{}, err
 	}
 	node.LastSeenAt = nullTimePtr(lastSeen)
 	node.LastInventoryAt = nullTimePtr(lastInventory)
 	return node, nil
+}
+
+func validateAgentEndpoint(publicHost string, endpoint AgentEndpoint) error {
+	if endpoint.Address == "" || endpoint.TLSServerName == "" || endpoint.Port < 1 || endpoint.Port > 65535 {
+		return APIError{Status: 400, Code: "AGENT_ENDPOINT_INVALID", Message: "agent endpoint, port, and TLS server name are required"}
+	}
+	if !strings.EqualFold(endpoint.Address, publicHost) || !strings.EqualFold(endpoint.TLSServerName, publicHost) {
+		return APIError{Status: 400, Code: "AGENT_ENDPOINT_MISMATCH", Message: "agent endpoint must match the bootstrap public host"}
+	}
+	if ip := net.ParseIP(endpoint.Address); ip != nil && ip.IsLoopback() {
+		return APIError{Status: 400, Code: "AGENT_ENDPOINT_INVALID", Message: "agent endpoint must not be loopback"}
+	}
+	if len(endpoint.CertSHA256) != 64 {
+		return APIError{Status: 400, Code: "AGENT_CERT_PIN_INVALID", Message: "agent certificate SHA-256 is invalid"}
+	}
+	for _, c := range endpoint.CertSHA256 {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return APIError{Status: 400, Code: "AGENT_CERT_PIN_INVALID", Message: "agent certificate SHA-256 is invalid"}
+		}
+	}
+	if host, _, err := net.SplitHostPort(endpoint.Address); err == nil && host != "" {
+		return fmt.Errorf("agent endpoint must not include a port")
+	}
+	return nil
 }
 
 func nullTimePtr(value sql.NullTime) *time.Time {

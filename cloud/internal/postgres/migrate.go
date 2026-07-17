@@ -117,6 +117,10 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			UNIQUE (runtime_id, name)
 		)`,
 		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS k3s_status TEXT`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_endpoint TEXT`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_port INTEGER`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_tls_server_name TEXT`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_cert_sha256 TEXT`,
 		`CREATE INDEX IF NOT EXISTS nodes_project_status_idx ON nodes(project_id, status)`,
 		`CREATE TABLE IF NOT EXISTS agents (
 			id TEXT PRIMARY KEY,

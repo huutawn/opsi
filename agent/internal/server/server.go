@@ -448,6 +448,9 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		logger.Warn("gRPC TLS is not configured; use only for local development")
 	}
 
+	if cfg.Auth.Enabled {
+		grpcOptions = append(grpcOptions, grpc.UnaryInterceptor(statusAuthInterceptor(authVerifier(cfg), firstNonEmpty(cfg.CloudRelay.ProjectID, cfg.Deployment.ProjectID))))
+	}
 	grpcServer := grpc.NewServer(grpcOptions...)
 	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg))
 	authVerifier := authVerifier(cfg)
@@ -640,6 +643,21 @@ func authVerifier(cfg config.Config) secret.AuthVerifier {
 		}
 	}
 	return &secret.HTTPAuthVerifier{Endpoint: cfg.CloudEndpoint, CacheTTL: ttl}
+}
+
+func statusAuthInterceptor(verifier secret.AuthVerifier, projectID string) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if info.FullMethod != "/opsi.agent.v1.StatusService/Status" {
+			return handler(ctx, req)
+		}
+		if verifier == nil || projectID == "" {
+			return nil, status.Error(codes.Unauthenticated, "Agent status authentication is unavailable")
+		}
+		if _, err := verifier.VerifyAuth(ctx, secret.AuthContext{ProjectID: projectID, PAT: bearerToken(ctx)}); err != nil {
+			return nil, status.Error(codes.Unauthenticated, "Agent status authentication failed")
+		}
+		return handler(ctx, req)
+	}
 }
 
 func authorize(ctx context.Context, verifier secret.AuthVerifier, projectID string, allowed ...secret.Role) (secret.AuthContext, error) {

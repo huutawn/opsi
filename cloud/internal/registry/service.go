@@ -153,6 +153,10 @@ type Node struct {
 	K3SVersion             string     `json:"k3s_version,omitempty"`
 	AgentID                string     `json:"agent_id,omitempty"`
 	AgentVersion           string     `json:"agent_version,omitempty"`
+	AgentEndpoint          string     `json:"agent_endpoint,omitempty"`
+	AgentPort              int        `json:"agent_port,omitempty"`
+	AgentTLSServerName     string     `json:"agent_tls_server_name,omitempty"`
+	AgentCertSHA256        string     `json:"agent_cert_sha256,omitempty"`
 	LastSeenAt             *time.Time `json:"last_seen_at,omitempty"`
 	LastInventoryAt        *time.Time `json:"last_inventory_at,omitempty"`
 	FailureCode            string     `json:"failure_code,omitempty"`
@@ -167,6 +171,15 @@ type AgentHeartbeat struct {
 	K3SStatus    string         `json:"k3s_status,omitempty"`
 	NodeReady    bool           `json:"node_ready"`
 	Capacity     NodeCapacity   `json:"capacity,omitempty"`
+}
+
+// AgentEndpoint is public, non-secret connection metadata reported during
+// bootstrap registration and consumed by the authenticated CLI connection flow.
+type AgentEndpoint struct {
+	Address       string `json:"agent_endpoint"`
+	Port          int    `json:"agent_port"`
+	TLSServerName string `json:"agent_tls_server_name"`
+	CertSHA256    string `json:"agent_cert_sha256"`
 }
 
 type NodeCapacity struct {
@@ -576,7 +589,7 @@ type API interface {
 	ListNodes(projectID string) ([]Node, error)
 	NodeDiagnostics(projectID, nodeID string) (NodeDiagnostics, error)
 	UpsertNode(projectID, name, role, status, publicHost, agentID, key string) (Node, error)
-	RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any) (Agent, error)
+	RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any, endpoints ...AgentEndpoint) (Agent, error)
 	RecordAgentHeartbeat(projectID, nodeID string, heartbeat AgentHeartbeat) (Node, error)
 	VerifyAgent(projectID, nodeID, token string) (Agent, error)
 	RotateAgent(projectID, agentID, credentialHash string) (Agent, error)
@@ -819,7 +832,7 @@ func (s *Service) UpsertNode(projectID, name, role, status, publicHost, agentID,
 	return node, nil
 }
 
-func (s *Service) RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any) (Agent, error) {
+func (s *Service) RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any, endpoints ...AgentEndpoint) (Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if got, ok := s.idempotency["agent:"+projectID+":"+nodeID+":"+key].(Agent); ok {
@@ -835,10 +848,26 @@ func (s *Service) RegisterAgent(projectID, nodeID, fingerprint, credentialHash, 
 	if credentialHash == "" {
 		return Agent{}, APIError{Status: 400, Code: "AGENT_CREDENTIAL_REQUIRED", Message: "agent credential hash is required"}
 	}
+	endpoint := AgentEndpoint{}
+	if len(endpoints) > 1 {
+		return Agent{}, APIError{Status: 400, Code: "AGENT_ENDPOINT_INVALID", Message: "only one agent endpoint is allowed"}
+	}
+	if len(endpoints) == 1 {
+		endpoint = endpoints[0]
+		if err := validateAgentEndpoint(node.PublicHost, endpoint); err != nil {
+			return Agent{}, err
+		}
+	}
 	now := s.clock()
 	agent := Agent{ID: newID("agent"), OrgID: node.OrgID, ProjectID: projectID, RuntimeID: node.RuntimeID, NodeID: node.ID, PublicKeyFingerprint: fingerprint, CredentialHash: credentialHash, Version: version, Capabilities: capabilities, Status: "active", LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
 	node.AgentID = agent.ID
 	node.AgentVersion = version
+	if len(endpoints) == 1 {
+		node.AgentEndpoint = endpoint.Address
+		node.AgentPort = endpoint.Port
+		node.AgentTLSServerName = endpoint.TLSServerName
+		node.AgentCertSHA256 = endpoint.CertSHA256
+	}
 	node.Status = NodeAgentConnecting
 	node.LastSeenAt = &now
 	node.UpdatedAt = now

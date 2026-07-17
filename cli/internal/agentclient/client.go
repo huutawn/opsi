@@ -229,6 +229,9 @@ func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, error) {
 
 func transportCredentials(cfg config.Config) (credentials.TransportCredentials, error) {
 	if !cfg.TLS.Enabled() {
+		if !isLoopback(cfg.AgentAddr) {
+			return nil, errors.New("non-loopback Agent connections require TLS certificate pinning")
+		}
 		return insecure.NewCredentials(), nil
 	}
 
@@ -262,6 +265,9 @@ func transportCredentials(cfg config.Config) (credentials.TransportCredentials, 
 
 	if cfg.TLS.PinnedServerCertSHA256 != "" {
 		expected := normalizeFingerprint(cfg.TLS.PinnedServerCertSHA256)
+		if len(expected) != sha256.Size*2 {
+			return nil, errors.New("server certificate pin must be a SHA-256 fingerprint")
+		}
 		tlsCfg.InsecureSkipVerify = cfg.TLS.CACertPath == ""
 		tlsCfg.VerifyConnection = func(state tls.ConnectionState) error {
 			if len(state.PeerCertificates) == 0 {
@@ -272,11 +278,26 @@ func transportCredentials(cfg config.Config) (credentials.TransportCredentials, 
 			if actual != expected {
 				return fmt.Errorf("server certificate pin mismatch")
 			}
+			if err := state.PeerCertificates[0].VerifyHostname(serverName); err != nil {
+				return fmt.Errorf("server certificate name mismatch")
+			}
 			return nil
 		}
 	}
 
 	return credentials.NewTLS(tlsCfg), nil
+}
+
+func isLoopback(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func loadCertPool(path string) (*x509.CertPool, error) {

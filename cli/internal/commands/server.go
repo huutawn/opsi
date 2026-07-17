@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 type serverFlags struct {
 	projectID      string
 	sessionID      string
+	nodeID         string
 	role           string
 	publicHost     string
 	sshPort        int
@@ -34,6 +37,63 @@ func newServerCommand(configPath *string, options Options) *cobra.Command {
 	cmd.AddCommand(newServerBootstrapCommand(configPath, options))
 	cmd.AddCommand(newServerStatusCommand(configPath, options))
 	cmd.AddCommand(newServerEventsCommand(configPath, options))
+	cmd.AddCommand(newServerConnectCommand(configPath, options))
+	return cmd
+}
+
+func newServerConnectCommand(configPath *string, options Options) *cobra.Command {
+	flags := &serverFlags{}
+	cmd := &cobra.Command{
+		Use:   "connect",
+		Short: "Resolve and atomically save a pinned direct Agent connection",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if flags.projectID == "" || flags.nodeID == "" {
+				return errors.New("project-id and node-id are required")
+			}
+			if *configPath == "" {
+				return errors.New("--config is required to save Agent connection metadata")
+			}
+			client, err := newCommandCloudClient(*configPath, options)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+			defer cancel()
+			nodes, err := client.ListNodes(ctx, flags.projectID)
+			if err != nil {
+				return fmt.Errorf("list project nodes: %w", err)
+			}
+			var node *cloudclient.Node
+			for index := range nodes {
+				if nodes[index].ID == flags.nodeID {
+					node = &nodes[index]
+					break
+				}
+			}
+			if node == nil {
+				return errors.New("node was not found in the requested project")
+			}
+			if node.AgentID == "" || node.AgentEndpoint == "" || node.AgentPort < 1 || node.AgentPort > 65535 || node.AgentTLSServerName == "" || len(node.AgentCertSHA256) != 64 {
+				return errors.New("node has no complete direct TLS Agent metadata")
+			}
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+			cfg.AgentAddr = net.JoinHostPort(node.AgentEndpoint, fmt.Sprintf("%d", node.AgentPort))
+			cfg.TLS.PinnedServerCertSHA256 = node.AgentCertSHA256
+			cfg.TLS.ServerName = node.AgentTLSServerName
+			if err := config.Save(filepath.Clean(*configPath), cfg); err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"node_id": node.ID, "agent_id": node.AgentID, "agent_endpoint": node.AgentEndpoint,
+				"agent_port": node.AgentPort, "tls_server_name": node.AgentTLSServerName, "certificate_sha256": node.AgentCertSHA256,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&flags.projectID, "project-id", "", "project id")
+	cmd.Flags().StringVar(&flags.nodeID, "node-id", "", "node id")
 	return cmd
 }
 

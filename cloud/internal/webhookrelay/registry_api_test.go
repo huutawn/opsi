@@ -650,7 +650,7 @@ func createService(t *testing.T, handler http.Handler, projectID string) string 
 
 func registerDeployAgent(t *testing.T, handler http.Handler, projectID, nodeID, key string) string {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/agents", bytes.NewReader([]byte(`{"node_id":"`+nodeID+`","public_key_fingerprint":"sha256:test","version":"v1","capabilities":{"deploy":true}}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/agents", bytes.NewReader([]byte(`{"node_id":"`+nodeID+`","public_key_fingerprint":"sha256:test","version":"v1","capabilities":{"deploy":true},"agent_endpoint":"203.0.113.10","agent_port":9443,"agent_tls_server_name":"203.0.113.10","agent_cert_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)))
 	req.Header.Set("Idempotency-Key", key)
 	req.Header.Set("X-Request-ID", "req-"+key)
 	w := httptest.NewRecorder()
@@ -887,7 +887,7 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 		t.Fatalf("worker second lease status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.Bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1"}`)))
+	req = httptest.NewRequest(http.MethodPost, "/v1/agents/register", bytes.NewReader([]byte(`{"registration_token":"`+bundle.Bundle.AgentRegistrationToken+`","public_key_fingerprint":"sha256:abc","version":"v1","agent_endpoint":"203.0.113.10","agent_port":9443,"agent_tls_server_name":"203.0.113.10","agent_cert_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)))
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusCreated {

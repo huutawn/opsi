@@ -324,6 +324,10 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			PublicKeyFingerprint string         `json:"public_key_fingerprint"`
 			Version              string         `json:"version"`
 			Capabilities         map[string]any `json:"capabilities"`
+			AgentEndpoint        string         `json:"agent_endpoint"`
+			AgentPort            int            `json:"agent_port"`
+			AgentTLSServerName   string         `json:"agent_tls_server_name"`
+			AgentCertSHA256      string         `json:"agent_cert_sha256"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
@@ -339,7 +343,9 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			writeRegistryFailure(w, r, err)
 			return
 		}
-		value, err := s.Registry.RegisterAgent(projectID, req.NodeID, req.PublicKeyFingerprint, hash, req.Version, r.Header.Get("Idempotency-Key"), req.Capabilities)
+		value, err := s.Registry.RegisterAgent(projectID, req.NodeID, req.PublicKeyFingerprint, hash, req.Version, r.Header.Get("Idempotency-Key"), req.Capabilities, registry.AgentEndpoint{
+			Address: req.AgentEndpoint, Port: req.AgentPort, TLSServerName: req.AgentTLSServerName, CertSHA256: req.AgentCertSHA256,
+		})
 		if err == nil {
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "AGENT_REGISTERED", "agent", value.ID, "success", map[string]any{"node_id": value.NodeID})
 		}
