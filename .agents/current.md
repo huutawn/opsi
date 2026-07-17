@@ -6,8 +6,16 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Repair Task
 
-- R5-003 live Cloud cutover and restart/persistence gates passed on 2026-07-17.
-  R5-004 is now the active task; its clean Agent VPS target is still required.
+- R5-004 live clean-VPS bootstrap ran on 2026-07-17 at revision
+  `d3df6b8d2b3a029ea3f589dfb840ff296e7bdbd5`. The final CLI created one
+  durable session and node through Cloud/Worker strict SSH; pinned K3s
+  `v1.36.2+k3s1` and Agent `0.0.0-staging.a0d5315` installed, registered,
+  reached healthy heartbeat, and survived a controlled target reboot.
+- The first live attempt correctly dead-lettered before mutation because Go SSH
+  selected an unpinned ECDSA key while only the operator-confirmed ED25519 key
+  was trusted. Worker now constrains host-key negotiation to algorithms present
+  for that host in `known_hosts`; the same session/idempotency/node completed
+  after the supported credential re-submit and manual retry path.
 - The first R5-003 public-port start was rolled back because Caddy sorted the
   general HTTP redirect before the loopback health response. Raw evidence showed
   `/health` return 308 to `https://127.0.0.1/health`, after which `wget` followed
@@ -103,10 +111,10 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Next Ordered Work
 
-R5-004 owns clean Agent VPS bootstrap, K3s/Agent registration, fault/reboot/
-resume proof, and the shared manual CLI/Local UI flow. The operator must provide
-the separate clean Agent VPS target and local SSH key path; the Cloud VPS must
-not be reused.
+R5-004 remains active only for the live mid-step Worker restart/resume gate.
+The completed healthy node must not be interrupted without a supported fault
+hook or isolated fixture; current code has no production fault-injection hook.
+Do not start R5-005 until that limitation is accepted or safely proven.
 
 ## Verification
 
@@ -114,6 +122,8 @@ R5-002 regression checks are focused Cloud tests,
 `make dev-control-plane-validate-source`,
 `make staging-control-plane-validate-source`, `make source-hygiene`, and
 `git diff --check`. R5-003 additionally passed operator-run live TLS,
-Cloudflare, restart, persistence, route, and redacted evidence checks;
-direct-origin firewall restriction remains separate operator work. Offline
-validation alone is not evidence of a live cutover.
+Cloudflare, restart, persistence, route, and redacted evidence checks. R5-004
+additionally passed protected-input tests, Bootstrap Worker/Cloud race tests,
+full Agent tests, UI build/lint, live bootstrap, Local API/UI parity, Worker
+restart after completion, and target reboot recovery. Direct-origin firewall
+restriction and live mid-step Worker resume remain separate unresolved gates.

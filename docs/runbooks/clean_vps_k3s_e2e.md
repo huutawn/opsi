@@ -87,6 +87,14 @@ action, mitigation approval, action hash, or fallback provider behavior.
 
 ## Current limitations
 
+R5-004 exercised the bootstrap subset on 2026-07-17 through the final CLI,
+Cloud bootstrap session, Bootstrap Worker strict SSH, pinned K3s installer, and
+checksum-addressed Agent artifact. The same session/node reached completed and
+healthy state, Local API/UI read the same timeline, and K3s plus Agent recovered
+after a controlled VPS reboot. A live Worker restart between destructive steps
+was not attempted because there is no safe production fault-injection hook for
+the completed healthy node.
+
 Opsi currently has no public `IncidentEvidence v1`, Safe ActionPlane, CLI MCP
 bridge, or managed gateway. This runbook does not claim those target flows.
 

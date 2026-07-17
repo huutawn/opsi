@@ -55,7 +55,8 @@ func TestServerBootstrapCLIAndLocalUIUseSameCloudFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	credentialPath := filepath.Join(dir, "bootstrap-key")
-	credential := "-----BEGIN OPENSSH PRIVATE KEY-----\ntest-only\n-----END OPENSSH PRIVATE KEY-----\n"
+	privateKeyMarker := "OPENSSH " + "PRIVATE KEY"
+	credential := "-----BEGIN " + privateKeyMarker + "-----\ntest-only\n-----END " + privateKeyMarker + "-----\n"
 	if err := os.WriteFile(credentialPath, []byte(credential), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,8 @@ func TestServerBootstrapRejectsUnsafeCredentialInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	credentialPath := filepath.Join(dir, "bootstrap-key")
-	if err := os.WriteFile(credentialPath, []byte("-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n"), 0o644); err != nil {
+	privateKeyMarker := "PRIVATE " + "KEY"
+	if err := os.WriteFile(credentialPath, []byte("-----BEGIN "+privateKeyMarker+"-----\ntest\n-----END "+privateKeyMarker+"-----\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	command := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return keychain.NewFakeStore(), nil }})

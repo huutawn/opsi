@@ -95,11 +95,11 @@ bindings live under `contracts/`; business logic remains in the owning domain.
 Agent does not currently provide public incident evidence or a unified action
 policy/approval/executor contract.
 
-The Agent release artifact is not hosted over HTTPS, and Bootstrap Worker has
-not been exercised against the real artifact. Target VPS evidence remains
-`UNPROVEN`. P05 now uses the canonical checksum-addressed Agent layout and
-systemd unit with atomic activation and tested rollback contracts, but P06 must
-still prove the behavior on a clean target VPS.
+The pinned Agent artifact is hosted over HTTPS and R5-004 exercised it through
+Bootstrap Worker on a clean Ubuntu 24.04 VPS. Its checksum-addressed release
+layout, atomic `current` symlink, systemd unit, registration, heartbeat, and
+post-reboot recovery passed. A safe live mid-step Worker fault/resume proof is
+still unproven because no production fault-injection hook exists.
 
 ## Implemented CLI/local backend slice
 
@@ -205,15 +205,18 @@ Safe ActionPlane client.
   checkpoint acknowledgement fails, no later step runs and the successful step
   may execute again on retry. P05 adds idempotent K3s version detection and
   verified upgrade, checksum-addressed Agent staging, atomic activation,
-  registration-marker replay, and rollback contracts. Real VPS behavior remains
-  unproven.
+  registration-marker replay, and rollback contracts. R5-004 proved the normal
+  live checkpoint sequence and retry-before-step-zero path; a live restart
+  between destructive steps remains unproven.
 - Worker configuration no longer accepts fixed `session_id`. It requires an
   operator-pinned K3s version, installer URL/SHA-256, Agent artifact URL/SHA-256,
   and an Agent-reachable Cloud URL. Production requires HTTPS by default and a
   trusted, non-empty, non-writable `known_hosts` file; SSH has no insecure
-  fallback. The staging-only `http://cloud:9800` control URL requires an
-  explicit opt-in that is rejected for every other endpoint or non-production
-  configuration; `agent_cloud_url` remains HTTPS.
+  fallback. SSH host-key negotiation is restricted to algorithms actually
+  pinned for the target host, preventing an unpinned ECDSA key from preempting
+  an operator-confirmed ED25519 key. The staging-only `http://cloud:9800`
+  control URL requires an explicit opt-in that is rejected for every other
+  endpoint or non-production configuration; `agent_cloud_url` remains HTTPS.
 - Bootstrap accepts password or unencrypted SSH private-key credentials. Worker
   control traffic uses `cloud_url`, while the installed Agent receives the
   separately configured, target-reachable `agent_cloud_url`.
@@ -241,7 +244,7 @@ Safe ActionPlane client.
   pass.
 - Registration replay is idempotent after config/marker persistence. A narrow
   crash window remains if Cloud consumes the token before those files are
-  installed; P06 must fault-inject around this boundary.
+  installed; a safe isolated fault test is still required around this boundary.
 - The existing Cloud binary exposes the local operator command
   `opsi-cloud admin bootstrap-owner`. It requires PostgreSQL and transactionally
   creates or reuses the normalized user, organization, canonical project plus
@@ -325,6 +328,18 @@ does not claim business-identifier recovery. Direct-origin firewall restriction
 and certificate rotation remain operator work. The procedure is
 `docs/runbooks/staging-control-plane.md`.
 
+R5-004 live evidence ran on a separate clean Ubuntu 24.04 amd64 Agent VPS at
+revision `d3df6b8d2b3a029ea3f589dfb840ff296e7bdbd5`. Final-revision CLI session
+`boot-97705a044b859f66` kept one node identity through a fail-closed initial SSH
+attempt, supported manual retry, successful K3s/Agent installation, Worker
+verification, Worker restart after completion, and controlled target reboot.
+K3s `v1.36.2+k3s1`, containerd `2.3.2-k3s2`, and Agent
+`0.0.0-staging.a0d5315` were factual and healthy after reboot. CLI status,
+Local API bootstrap/session/events, UI-backed node state, and Cloud registry
+agreed on the completed session, checkpoint index four, node, Agent identity,
+and advancing heartbeat. The live mid-step Worker restart/resume scenario was
+not run because the completed healthy node has no safe production fault hook.
+
 Git-based deployment exists and can apply user-provided manifests. Such a
 manifest may contain its own Service, Ingress, Gateway, TLS, lifecycle, or
 shutdown configuration; those resources are user-owned input, not an
@@ -354,14 +369,14 @@ conflict checks, readiness, and rollback also have not started.
 `make verify-e2e-k3s` define the protected clean VPS/K3s command path. The
 incident segment checks factual incident list, detail, resolve, and resolve
 audit. The command path exists, but no committed real-infrastructure pass
-artifact currently proves the complete scenario. Status remains
-`MANUAL_GATED`.
+artifact currently proves the complete scenario. R5-004 proves the bootstrap,
+registration, shared CLI/UI state, and reboot subset; the wider E2E scenario
+remains `MANUAL_GATED`.
 
 Production readiness remains unproven. Current gaps include direct-origin
-restriction and certificate rotation, clean control-plane VM proof, clean VPS
-bootstrap proof, live GitHub App installation
-and user-auth/repository-bootstrap verification, hosted and hardened Agent
-delivery, Actions OIDC, trusted
+restriction and certificate rotation, clean control-plane VM proof, live
+mid-step bootstrap resume, live GitHub App installation and
+user-auth/repository-bootstrap verification, Actions OIDC, trusted
 OCI artifact delivery, managed
 gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
 E2E, release hardening, supply-chain evidence, and measured disaster recovery.
@@ -373,8 +388,9 @@ P04 durable checkpoint/resume behavior is implemented and its Cloud closure
 gate is green: OTP/PAT baseline failure fixed; full Cloud suite PASS at this
 commit. P05 supply-chain,
 transport, installer, checksum, HTTPS, K3s pinning, and canonical systemd layout
-hardening is implemented with focused/race and development smoke evidence. P06 clean target VPS proof
-remains `DEFERRED / UNPROVEN`; there is no clean target VPS evidence. P07 GitHub
+hardening is implemented with focused/race and development smoke evidence. The
+P06 normal clean-target bootstrap and reboot path now has live evidence, while
+mid-step Worker restart/resume remains unproven. P07 GitHub
 App user authorization code and P08 installation authentication/webhooks are
 code complete, while real GitHub verification is `UNPROVEN`. P09 durable
 inventory, verified installation claim, single-project repository ownership,
