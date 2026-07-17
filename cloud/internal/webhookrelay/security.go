@@ -189,12 +189,12 @@ func (s *RegistrationTokenStore) DeleteSession(sessionID string) {
 func (s *RegistrationTokenStore) purgeExpiredLocked() {
 	now := s.clock()
 	for sessionID, reg := range s.bySession {
-		if now.After(reg.ExpiresAt) {
+		if !now.Before(reg.ExpiresAt) {
 			delete(s.bySession, sessionID)
 		}
 	}
 	for hash, reg := range s.byHash {
-		if now.After(reg.ExpiresAt) {
+		if !now.Before(reg.ExpiresAt) {
 			delete(s.byHash, hash)
 		}
 	}

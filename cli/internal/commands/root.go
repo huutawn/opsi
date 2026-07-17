@@ -46,6 +46,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.AddCommand(newServiceCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newSecretCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newIncidentCommand(&configPath, options.KeychainFactory))
+	root.AddCommand(newServerCommand(&configPath, options))
 	root.AddCommand(newLoginCommand(options.KeychainFactory))
 	root.AddCommand(newInitCommand(&configPath, options))
 	root.AddCommand(newStartCommand(&configPath, options.KeychainFactory))

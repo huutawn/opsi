@@ -186,6 +186,15 @@ export type BootstrapSession = {
   status: string;
   public_host?: string;
   role: string;
+  attempt_count?: number;
+  max_attempts?: number;
+  last_failure_code?: string;
+  last_failure_message_redacted?: string;
+  checkpoint?: {
+    plan_version: string;
+    next_step_index: number;
+    last_completed_step?: string;
+  };
   created_at: string;
 };
 

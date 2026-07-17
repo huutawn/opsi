@@ -30,6 +30,40 @@ export OPSI_E2E_SERVICE_SHA=...
 export OPSI_E2E_TOTP_CODE=...
 ```
 
+## Manual CLI And Local UI Flow
+
+The manual CLI and Local UI create the same Cloud bootstrap session through the
+same versioned request shape. The CLI keeps the SSH credential in a protected
+file (or `/dev/stdin`); secret values must not be passed as flags, logged, or
+stored in the evidence directory:
+
+```bash
+opsi --config "$OPSI_E2E_CLI_CONFIG" server bootstrap \
+  --project-id "$OPSI_E2E_PROJECT_ID" \
+  --role first_server \
+  --public-host "$OPSI_E2E_VPS_HOST" \
+  --ssh-username "$OPSI_E2E_VPS_SSH_USER" \
+  --auth-method private_key \
+  --credential-file "$OPSI_E2E_SSH_KEY_PATH"
+opsi --config "$OPSI_E2E_CLI_CONFIG" node status \
+  --project-id "$OPSI_E2E_PROJECT_ID"
+opsi --config "$OPSI_E2E_CLI_CONFIG" node events \
+  --project-id "$OPSI_E2E_PROJECT_ID" --session-id "$OPSI_E2E_SESSION_ID"
+```
+
+The Local UI submits only to the CLI local backend at
+`/api/local/projects/<project>/bootstrap-sessions`; the backend maps that
+request to Cloud's `/api/projects/<project>/bootstrap-sessions` endpoint. The
+UI shows the durable checkpoint, attempt count, redacted failure, and event
+stream. Browser code must not call Cloud directly.
+
+If a PAT is provisioned through the first-owner runbook, store it without
+putting its value in argv:
+
+```bash
+opsi login --pat-file /secure/path/initial-owner.pat
+```
+
 Optional controlled failure revision:
 
 ```bash

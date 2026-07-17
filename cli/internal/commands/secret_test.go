@@ -23,11 +23,19 @@ func TestSecretRevealCommand(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("agent_addr: "+addr+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	patPath := filepath.Join(dir, "pat")
+	totpPath := filepath.Join(dir, "totp")
+	if err := os.WriteFile(patPath, []byte("pat_test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(totpPath, []byte("123456\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return keychain.NewFakeStore(), nil }})
 	buf := bytes.NewBuffer(nil)
 	cmd.SetOut(buf)
-	cmd.SetArgs([]string{"--config", configPath, "secret", "reveal", "--project-id", "proj", "--service-id", "svc", "--name", "db", "--user-id", "owner", "--role", "Owner", "--pat", "pat_test", "--totp", "123456"})
+	cmd.SetArgs([]string{"--config", configPath, "secret", "reveal", "--project-id", "proj", "--service-id", "svc", "--name", "db", "--user-id", "owner", "--role", "Owner", "--pat-file", patPath, "--totp-file", totpPath})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)

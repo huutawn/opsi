@@ -291,7 +291,7 @@ func TestInitMissingPATFailsBeforeNetwork(t *testing.T) {
 	})
 	command.SetArgs([]string{"init", "--project-id", "proj-1", "--service-id", "svc-1", "--service-key", "api"})
 	err := command.Execute()
-	if err == nil || !strings.Contains(err.Error(), "opsi login --pat") || calls.Load() != 0 {
+	if err == nil || !strings.Contains(err.Error(), "opsi login --pat-file") || calls.Load() != 0 {
 		t.Fatalf("error=%v calls=%d", err, calls.Load())
 	}
 }

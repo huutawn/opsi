@@ -76,6 +76,32 @@ func (c *Client) ListServices(ctx context.Context, projectID string) ([]Service,
 	return response.Services, err
 }
 
+func (c *Client) CreateBootstrapSession(ctx context.Context, projectID string, request BootstrapRequest, idempotencyKey string) (BootstrapSession, error) {
+	var response BootstrapSession
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "bootstrap-sessions"}, request, idempotencyKey, &response)
+	return response, err
+}
+
+func (c *Client) ListBootstrapSessions(ctx context.Context, projectID string) ([]BootstrapSession, error) {
+	var response struct {
+		Sessions []BootstrapSession `json:"sessions"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "bootstrap-sessions"}, nil, "", &response)
+	return response.Sessions, err
+}
+
+func (c *Client) GetBootstrapSession(ctx context.Context, projectID, sessionID string) (BootstrapSession, error) {
+	var response BootstrapSession
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "bootstrap-sessions", sessionID}, nil, "", &response)
+	return response, err
+}
+
+func (c *Client) BootstrapEvents(ctx context.Context, projectID, sessionID string) ([]BootstrapEvent, error) {
+	var response []BootstrapEvent
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "bootstrap-sessions", sessionID, "events"}, nil, "", &response)
+	return response, err
+}
+
 func (c *Client) ListGitHubInstallations(ctx context.Context, projectID string) ([]GitHubInstallation, error) {
 	var response struct {
 		Installations []GitHubInstallation `json:"installations"`

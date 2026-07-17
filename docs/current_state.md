@@ -105,6 +105,12 @@ still prove the behavior on a clean target VPS.
 
 - Cobra commands for login, init, start, status, deploy, sync, service, secret, and
   incident list/get/resolve.
+- `opsi server bootstrap` (also available as `opsi node bootstrap`) creates a
+  Cloud bootstrap session from a protected credential file; `server status` and
+  `server events` read the same durable session/checkpoint/event flow used by
+  the Local UI. Secret values are never accepted as command-line arguments.
+- CLI PAT, OTP, and TOTP inputs use protected files or `/dev/stdin`; the old
+  secret-valued argv flags are removed.
 - `opsi init` uses a bounded no-redirect Cloud HTTP client and OS-keychain PAT,
   detects only supported GitHub.com origins without reading credential helpers,
   and treats local `owner/repo` only as metadata for selecting a numeric Cloud
@@ -306,14 +312,17 @@ clean control-plane VPS checkpoint `CP-VPS-1` was not run because no clean
 Ubuntu VPS was available. Its status is `DEFERRED / UNPROVEN`; no VPS evidence
 exists, and the checkpoint remains a blocker before production acceptance.
 
-R5-002 validates repository source/config only. During R5-003, operator runtime
-inputs, immutable images, the Agent artifact, origin certificate metadata, and
-runtime validators passed. The first public-port start was rolled back when the
-Caddy health defect above reproduced; the fixed configuration then passed the
-isolated loopback smoke without taking over ports 80/443. Public direct-origin
-TLS, Cloudflare Full (strict), direct-origin restriction, restart/persistence,
-and live GitHub callback/webhook evidence remain `UNPROVEN` pending an
-operator-approved cutover retry. The procedure is
+R5-003 live evidence was executed on the Cloud VPS at revision
+`d5b2e81c433d287369ad63e99fc4331db68bc420` on 2026-07-17. The fixed staging
+profile passed runtime validation, Origin CA chain and certificate/key checks,
+public 80/443 cutover, Cloudflare Full (strict) public health, TLS hostname
+validation, protected-route denial, dynamic error caching, and redacted log
+marker scans. Reverse proxy, Bootstrap Worker, Cloud, and PostgreSQL were
+restarted independently; Compose down/up without `-v` preserved both named
+volumes and the safe schema/count/hash metadata. The initial live database had
+no business rows, so this evidence proves schema and volume persistence but
+does not claim business-identifier recovery. Direct-origin firewall restriction
+and certificate rotation remain operator work. The procedure is
 `docs/runbooks/staging-control-plane.md`.
 
 Git-based deployment exists and can apply user-provided manifests. Such a
@@ -348,9 +357,9 @@ audit. The command path exists, but no committed real-infrastructure pass
 artifact currently proves the complete scenario. Status remains
 `MANUAL_GATED`.
 
-Production readiness remains unproven. Current gaps include live staging origin
-TLS, Cloudflare Full (strict), direct-origin restriction, clean control-plane VM
-and restart proof, clean VPS bootstrap proof, live GitHub App installation
+Production readiness remains unproven. Current gaps include direct-origin
+restriction and certificate rotation, clean control-plane VM proof, clean VPS
+bootstrap proof, live GitHub App installation
 and user-auth/repository-bootstrap verification, hosted and hardened Agent
 delivery, Actions OIDC, trusted
 OCI artifact delivery, managed

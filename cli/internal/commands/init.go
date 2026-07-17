@@ -119,7 +119,7 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 	}
 	pat, err := store.GetPAT()
 	if err != nil || strings.TrimSpace(pat) == "" {
-		return errors.New("Cloud PAT not found in OS keychain; run opsi login --pat ...")
+		return errors.New("Cloud PAT not found in OS keychain; run opsi login --pat-file PATH")
 	}
 	cliConfig, err := config.Load(configPath)
 	if err != nil {

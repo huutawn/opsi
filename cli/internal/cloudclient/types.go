@@ -1,6 +1,9 @@
 package cloudclient
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type APIError struct {
 	Status  int
@@ -20,6 +23,62 @@ type Service struct {
 	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
 	Status    string `json:"status"`
+}
+
+type BootstrapRequest struct {
+	Role          string `json:"role"`
+	PublicHost    string `json:"public_host"`
+	SSHPort       int    `json:"ssh_port"`
+	SSHUsername   string `json:"ssh_username"`
+	AuthMethod    string `json:"auth_method"`
+	SSHPrivateKey string `json:"ssh_private_key,omitempty"`
+	SSHPassword   string `json:"ssh_password,omitempty"`
+	K3SToken      string `json:"k3s_token,omitempty"`
+}
+
+type BootstrapSession struct {
+	ID                  string              `json:"id"`
+	OrgID               string              `json:"org_id"`
+	ProjectID           string              `json:"project_id"`
+	EnvironmentID       string              `json:"environment_id"`
+	RuntimeID           string              `json:"runtime_id"`
+	NodeID              string              `json:"node_id,omitempty"`
+	Role                string              `json:"role"`
+	Status              string              `json:"status"`
+	PublicHost          string              `json:"public_host,omitempty"`
+	SSHPort             int                 `json:"ssh_port,omitempty"`
+	SSHUsername         string              `json:"ssh_username,omitempty"`
+	AuthMethod          string              `json:"auth_method,omitempty"`
+	ExpiresAt           time.Time           `json:"expires_at"`
+	StartedAt           *time.Time          `json:"started_at,omitempty"`
+	FinishedAt          *time.Time          `json:"finished_at,omitempty"`
+	AttemptCount        int                 `json:"attempt_count"`
+	MaxAttempts         int                 `json:"max_attempts"`
+	LastFailureCode     string              `json:"last_failure_code,omitempty"`
+	LastFailureRedacted string              `json:"last_failure_message_redacted,omitempty"`
+	Checkpoint          BootstrapCheckpoint `json:"checkpoint"`
+	CreatedAt           time.Time           `json:"created_at"`
+	UpdatedAt           time.Time           `json:"updated_at"`
+}
+
+type BootstrapCheckpoint struct {
+	SchemaVersion     int        `json:"schema_version"`
+	PlanVersion       string     `json:"plan_version"`
+	PlanFingerprint   string     `json:"plan_fingerprint"`
+	NextStepIndex     int        `json:"next_step_index"`
+	LastCompletedStep string     `json:"last_completed_step,omitempty"`
+	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+}
+
+type BootstrapEvent struct {
+	ID              string    `json:"id"`
+	SessionID       string    `json:"session_id"`
+	NodeID          string    `json:"node_id,omitempty"`
+	Level           string    `json:"level"`
+	Step            string    `json:"step"`
+	MessageRedacted string    `json:"message_redacted"`
+	ProgressPercent int       `json:"progress_percent"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type GitHubInstallation struct {

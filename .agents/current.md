@@ -6,7 +6,8 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Repair Task
 
-- R5-003 is the only active task. R5-002 is done at its source/config gate.
+- R5-003 live Cloud cutover and restart/persistence gates passed on 2026-07-17.
+  R5-004 is now the active task; its clean Agent VPS target is still required.
 - The first R5-003 public-port start was rolled back because Caddy sorted the
   general HTTP redirect before the loopback health response. Raw evidence showed
   `/health` return 308 to `https://127.0.0.1/health`, after which `wget` followed
@@ -84,9 +85,10 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   filesystems, bounded logs, named volumes, an internal backend network, and
   file-backed runtime secrets. PostgreSQL, Worker, and Cloud publish no host
   ports; Caddy alone publishes 80/443 and denies internal/metrics paths.
-- The fixed Caddy configuration passes isolated Origin CA validation, but public
-  origin TLS, Cloudflare Full (strict), direct-origin restriction, and
-  restart/persistence evidence remain `UNPROVEN` and belong to R5-003.
+- The fixed Caddy configuration passed isolated Origin CA validation and the
+  public staging origin passed Cloudflare Full (strict), TLS, route, restart,
+  and persistence evidence in R5-003. Direct-origin firewall restriction and
+  certificate rotation remain `OPERATOR_REQUIRED`.
 - Agent owns deployment, service runtime, secrets, telemetry, factual incidents,
   local audit, and K3s/containerd execution.
 - Bootstrap Worker is a long-running, single-concurrency daemon. It polls Cloud,
@@ -101,16 +103,17 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Next Ordered Work
 
-R5-003 is active. It owns live origin TLS, Cloudflare Full (strict),
-direct-origin restriction, and VPS restart/persistence evidence. R5-004 and
-later work must not start until R5-003 is closed or truthfully recorded as
-blocked/deferred under `docs/opsi_roadmap_v5_production.md`.
+R5-004 owns clean Agent VPS bootstrap, K3s/Agent registration, fault/reboot/
+resume proof, and the shared manual CLI/Local UI flow. The operator must provide
+the separate clean Agent VPS target and local SSH key path; the Cloud VPS must
+not be reused.
 
 ## Verification
 
 R5-002 regression checks are focused Cloud tests,
 `make dev-control-plane-validate-source`,
 `make staging-control-plane-validate-source`, `make source-hygiene`, and
-`git diff --check`. R5-003 additionally requires operator-run live TLS,
-Cloudflare, restart, persistence, route, and redacted evidence checks; offline
+`git diff --check`. R5-003 additionally passed operator-run live TLS,
+Cloudflare, restart, persistence, route, and redacted evidence checks;
+direct-origin firewall restriction remains separate operator work. Offline
 validation alone is not evidence of a live cutover.

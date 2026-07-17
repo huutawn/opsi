@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
@@ -20,10 +21,10 @@ type secretFlags struct {
 	namespace    string
 	userID       string
 	role         string
-	pat          string
-	otp          string
+	patFile      string
+	otpFile      string
 	otpRequestID string
-	totp         string
+	totpFile     string
 }
 
 func newSecretCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
@@ -54,7 +55,7 @@ func newSecretSetupTOTPCommand(configPath *string, factory func() (keychain.Stor
 			if err != nil {
 				return err
 			}
-			pat, err := resolvePAT(flags.pat, factory)
+			pat, err := resolvePAT(flags.patFile, factory)
 			if err != nil {
 				return err
 			}
@@ -83,13 +84,21 @@ func newSecretMutationCommand(configPath *string, factory func() (keychain.Store
 			if err != nil {
 				return err
 			}
-			pat, err := resolvePAT(flags.pat, factory)
+			pat, err := resolvePAT(flags.patFile, factory)
+			if err != nil {
+				return err
+			}
+			otp, err := resolveProtectedCode(flags.otpFile, "OTP")
+			if err != nil {
+				return err
+			}
+			totp, err := resolveProtectedCode(flags.totpFile, "TOTP")
 			if err != nil {
 				return err
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 			defer cancel()
-			req := &agentv1.SecretRequest{ProjectID: flags.projectID, ServiceID: flags.serviceID, Name: flags.name, Namespace: flags.namespace, UserID: flags.userID, Role: flags.role, PAT: pat, OTPCode: flags.otp, OTPRequestID: flags.otpRequestID, TOTPCode: flags.totp}
+			req := &agentv1.SecretRequest{ProjectID: flags.projectID, ServiceID: flags.serviceID, Name: flags.name, Namespace: flags.namespace, UserID: flags.userID, Role: flags.role, PAT: pat, OTPCode: otp, OTPRequestID: flags.otpRequestID, TOTPCode: totp}
 			resp, err := call(ctx, agentclient.New(cfg), req)
 			if err != nil {
 				return err
@@ -101,9 +110,9 @@ func newSecretMutationCommand(configPath *string, factory func() (keychain.Store
 	cmd.Flags().StringVar(&flags.serviceID, "service-id", "", "service id")
 	cmd.Flags().StringVar(&flags.name, "name", "", "kubernetes secret name")
 	cmd.Flags().StringVar(&flags.namespace, "namespace", "", "kubernetes namespace")
-	cmd.Flags().StringVar(&flags.otp, "otp", "", "cloud OTP code")
+	cmd.Flags().StringVar(&flags.otpFile, "otp-file", "", "protected cloud OTP file; use /dev/stdin for piped input")
 	cmd.Flags().StringVar(&flags.otpRequestID, "otp-request-id", "", "cloud OTP request id")
-	cmd.Flags().StringVar(&flags.totp, "totp", "", "local TOTP code")
+	cmd.Flags().StringVar(&flags.totpFile, "totp-file", "", "protected local TOTP file; use /dev/stdin for piped input")
 	return cmd
 }
 
@@ -111,12 +120,21 @@ func addSecretAuthFlags(cmd *cobra.Command, flags *secretFlags) {
 	cmd.Flags().StringVar(&flags.projectID, "project-id", "", "project id")
 	cmd.Flags().StringVar(&flags.userID, "user-id", "", "user id")
 	cmd.Flags().StringVar(&flags.role, "role", flags.role, "project role: Owner, Developer, Viewer")
-	cmd.Flags().StringVar(&flags.pat, "pat", "", "personal access token; defaults to OS keychain")
+	cmd.Flags().StringVar(&flags.patFile, "pat-file", "", "protected PAT file; defaults to OS keychain")
 }
 
-func resolvePAT(value string, factory func() (keychain.Store, error)) (string, error) {
-	if value != "" {
-		return value, nil
+func resolvePAT(path string, factory func() (keychain.Store, error)) (string, error) {
+	if path != "" {
+		value, err := readProtectedSecret(path, "PAT")
+		if err != nil {
+			return "", err
+		}
+		defer clearBytes(value)
+		pat := strings.TrimSpace(string(value))
+		if pat == "" {
+			return "", fmt.Errorf("PAT file is empty")
+		}
+		return pat, nil
 	}
 	store, err := factory()
 	if err != nil {
@@ -127,7 +145,23 @@ func resolvePAT(value string, factory func() (keychain.Store, error)) (string, e
 		return "", err
 	}
 	if pat == "" {
-		return "", fmt.Errorf("PAT is required; run opsi login or pass --pat")
+		return "", fmt.Errorf("PAT is required; run opsi login --pat-file PATH or configure the OS keychain")
 	}
 	return pat, nil
+}
+
+func resolveProtectedCode(path, label string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	value, err := readProtectedSecret(path, label)
+	if err != nil {
+		return "", err
+	}
+	defer clearBytes(value)
+	code := strings.TrimSpace(string(value))
+	if code == "" {
+		return "", fmt.Errorf("%s file is empty", label)
+	}
+	return code, nil
 }
