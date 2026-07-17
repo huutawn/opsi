@@ -2,6 +2,24 @@ package registry
 
 import "testing"
 
+func TestMarkNodeOfflineRevokesOldAgentAndUnblocksReplacement(t *testing.T) {
+	service, projectID := readyRegistry(t)
+	nodes, err := service.ListNodes(projectID)
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("nodes err=%v nodes=%+v", err, nodes)
+	}
+	offline, err := service.MarkNodeOffline(projectID, nodes[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offline.Status != NodeOffline || offline.FailureCode != "OPERATOR_CONFIRMED_TARGET_RESET" {
+		t.Fatalf("unexpected offline node: %+v", offline)
+	}
+	if _, err := service.CreateBootstrapSession(projectID, "first_server", "203.0.113.11", "ubuntu", "private_key", "user-1", "replacement", 22); err != nil {
+		t.Fatalf("replacement bootstrap remained blocked: %v", err)
+	}
+}
+
 func TestDeploymentIntentCarriesServiceSpecificFields(t *testing.T) {
 	service, projectID := readyRegistry(t)
 	api := createRegistryService(t, service, projectID, "api", "Dockerfile.api", "deploy/api", "svc-api")

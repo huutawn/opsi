@@ -38,6 +38,39 @@ func newServerCommand(configPath *string, options Options) *cobra.Command {
 	cmd.AddCommand(newServerStatusCommand(configPath, options))
 	cmd.AddCommand(newServerEventsCommand(configPath, options))
 	cmd.AddCommand(newServerConnectCommand(configPath, options))
+	cmd.AddCommand(newServerDecommissionCommand(configPath, options))
+	return cmd
+}
+
+func newServerDecommissionCommand(configPath *string, options Options) *cobra.Command {
+	flags := &serverFlags{}
+	var confirmReset bool
+	cmd := &cobra.Command{
+		Use:   "decommission",
+		Short: "Mark a reset server record offline before replacement bootstrap",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if flags.projectID == "" || flags.nodeID == "" {
+				return errors.New("project-id and node-id are required")
+			}
+			if !confirmReset {
+				return errors.New("--confirm-reset is required after the target has been reset")
+			}
+			client, err := newCommandCloudClient(*configPath, options)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+			defer cancel()
+			node, err := client.MarkNodeOffline(ctx, flags.projectID, flags.nodeID, "node-offline:"+flags.nodeID)
+			if err != nil {
+				return fmt.Errorf("mark node offline: %w", err)
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(node)
+		},
+	}
+	cmd.Flags().StringVar(&flags.projectID, "project-id", "", "project id")
+	cmd.Flags().StringVar(&flags.nodeID, "node-id", "", "node id")
+	cmd.Flags().BoolVar(&confirmReset, "confirm-reset", false, "confirm the target was reset outside the Agent")
 	return cmd
 }
 

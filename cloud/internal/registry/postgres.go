@@ -504,6 +504,41 @@ func (s PostgresService) RemoveNode(projectID, nodeID string, force bool) (Node,
 	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node remove must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
 }
 
+func (s PostgresService) MarkNodeOffline(projectID, nodeID string) (Node, error) {
+	ctx := context.Background()
+	node, err := s.getNode(ctx, nodeID)
+	if err != nil {
+		return Node{}, err
+	}
+	if node.ProjectID != projectID {
+		return Node{}, ErrNotFound
+	}
+	now := s.clock()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Node{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET status = $1, failure_code = $2, failure_message_redacted = $3, updated_at = $4 WHERE id = $5 AND project_id = $6`, NodeOffline, "OPERATOR_CONFIRMED_TARGET_RESET", "operator confirmed target reset; record is offline", now, nodeID, projectID); err != nil {
+		return Node{}, err
+	}
+	if node.AgentID != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE agents SET status = 'revoked', updated_at = $1 WHERE id = $2 AND project_id = $3`, now, node.AgentID, projectID); err != nil {
+			return Node{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runtimes SET status = $1, server_node_id = NULL, updated_at = $2 WHERE id = $3 AND server_node_id = $4`, RuntimeNoNodes, now, node.RuntimeID, node.ID); err != nil {
+		return Node{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE projects SET status = $1, updated_at = $2 WHERE id = $3`, ProjectNoNodes, now, projectID); err != nil {
+		return Node{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Node{}, err
+	}
+	return s.getNode(ctx, nodeID)
+}
+
 func (s PostgresService) RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error) {
 	ctx := context.Background()
 	if key != "" {

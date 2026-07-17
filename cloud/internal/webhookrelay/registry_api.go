@@ -277,6 +277,30 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		writeRegistryResult(w, r, value, err, http.StatusOK)
 		return
 	}
+	if len(parts) == 5 && parts[2] == "nodes" && parts[4] == "offline" && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if !s.requireRole(w, r, principal, projectID, "node", parts[3], "owner", "admin") {
+			return
+		}
+		var req struct {
+			ConfirmTargetReset bool `json:"confirm_target_reset"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if !req.ConfirmTargetReset {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "TARGET_RESET_CONFIRMATION_REQUIRED", Message: "confirm_target_reset=true is required", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		value, err := s.Registry.MarkNodeOffline(projectID, parts[3])
+		if err == nil {
+			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "NODE_MARKED_OFFLINE", "node", value.ID, "success", map[string]any{"reason": "operator_confirmed_target_reset"})
+		}
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return
+	}
 	if len(parts) == 5 && parts[2] == "nodes" && (parts[4] == "drain" || parts[4] == "remove") && r.Method == http.MethodPost {
 		if !requireWriteHeaders(w, r) {
 			return

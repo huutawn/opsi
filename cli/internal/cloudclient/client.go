@@ -84,6 +84,14 @@ func (c *Client) ListNodes(ctx context.Context, projectID string) ([]Node, error
 	return response.Nodes, err
 }
 
+func (c *Client) MarkNodeOffline(ctx context.Context, projectID, nodeID, idempotencyKey string) (Node, error) {
+	var response Node
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "nodes", nodeID, "offline"}, struct {
+		ConfirmTargetReset bool `json:"confirm_target_reset"`
+	}{ConfirmTargetReset: true}, idempotencyKey, &response)
+	return response, err
+}
+
 func (c *Client) CreateBootstrapSession(ctx context.Context, projectID string, request BootstrapRequest, idempotencyKey string) (BootstrapSession, error) {
 	var response BootstrapSession
 	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "bootstrap-sessions"}, request, idempotencyKey, &response)

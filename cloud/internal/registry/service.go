@@ -29,6 +29,7 @@ const (
 	NodePending         = "pending"
 	NodeAgentConnecting = "agent_connecting"
 	NodeHealthy         = "healthy"
+	NodeOffline         = "offline"
 	NodeDraining        = "draining"
 	NodeRemoved         = "removed"
 
@@ -596,6 +597,7 @@ type API interface {
 	RevokeAgent(projectID, agentID string) (Agent, error)
 	DrainNode(projectID, nodeID string) (Node, error)
 	RemoveNode(projectID, nodeID string, force bool) (Node, error)
+	MarkNodeOffline(projectID, nodeID string) (Node, error)
 	RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error)
 	LeaseNodeLifecycle(projectID, nodeID string) (NodeLifecycleLease, bool, error)
 	CompleteNodeLifecycle(projectID, nodeID, jobID, requestID string, result NodeLifecycleResult) (NodeLifecycleJob, error)
@@ -1015,6 +1017,38 @@ func (s *Service) RemoveNode(projectID, nodeID string, force bool) (Node, error)
 		return Node{}, APIError{Status: 409, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first"}
 	}
 	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node remove must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
+}
+
+// MarkNodeOffline records an operator-confirmed target reset without claiming
+// that Agent/Kubernetes removal was performed through the old Agent.
+func (s *Service) MarkNodeOffline(projectID, nodeID string) (Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node, ok := s.nodes[nodeID]
+	if !ok || node.ProjectID != projectID {
+		return Node{}, ErrNotFound
+	}
+	now := s.clock()
+	node.Status = NodeOffline
+	node.FailureCode = "OPERATOR_CONFIRMED_TARGET_RESET"
+	node.FailureMessageRedacted = "operator confirmed target reset; record is offline"
+	node.UpdatedAt = now
+	s.nodes[node.ID] = node
+	if node.AgentID != "" {
+		agent := s.agents[node.AgentID]
+		agent.Status = "revoked"
+		agent.UpdatedAt = now
+		s.agents[agent.ID] = agent
+	}
+	runtime := s.runtimes[node.RuntimeID]
+	if runtime.ServerNodeID == node.ID {
+		runtime.ServerNodeID = ""
+		runtime.Status = RuntimeNoNodes
+		runtime.UpdatedAt = now
+		s.runtimes[runtime.ID] = runtime
+	}
+	s.refreshProjectLocked(projectID)
+	return node, nil
 }
 
 func (s *Service) RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error) {
