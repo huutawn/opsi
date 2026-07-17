@@ -2,7 +2,9 @@ package bootstrapworker
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -62,6 +64,18 @@ func TestSSHConnectMatchingHostKeySucceeds(t *testing.T) {
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestSSHConnectUsesPinnedAlgorithmWhenServerOffersMultipleKeys(t *testing.T) {
+	ed25519Signer := newSSHSigner(t)
+	ecdsaSigner := newECDSASigner(t)
+	host, port := startSSHServerWithSigners(t, ecdsaSigner, ed25519Signer)
+	knownHosts := writeKnownHosts(t, net.JoinHostPort(host, strconv.Itoa(port)), ed25519Signer.PublicKey(), 0o600)
+	session, err := (SSHExecutor{KnownHostsPath: knownHosts}).Connect(context.Background(), RemoteTarget{Host: host, Port: port, Username: "root", Password: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = session.Close()
 }
 
 func TestSSHConnectUnknownHostFailsClosed(t *testing.T) {
@@ -157,7 +171,24 @@ func newSSHSigner(t *testing.T) ssh.Signer {
 	return signer
 }
 
+func newECDSASigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
 func startSSHServer(t *testing.T, signer ssh.Signer) (string, int) {
+	return startSSHServerWithSigners(t, signer)
+}
+
+func startSSHServerWithSigners(t *testing.T, signers ...ssh.Signer) (string, int) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -167,7 +198,9 @@ func startSSHServer(t *testing.T, signer ssh.Signer) (string, int) {
 	serverConfig := &ssh.ServerConfig{PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
 		return nil, nil
 	}}
-	serverConfig.AddHostKey(signer)
+	for _, signer := range signers {
+		serverConfig.AddHostKey(signer)
+	}
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {

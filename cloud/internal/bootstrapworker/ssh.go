@@ -3,6 +3,8 @@ package bootstrapworker
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -68,6 +70,10 @@ func (e SSHExecutor) Connect(ctx context.Context, target RemoteTarget) (RemoteSe
 	if err != nil {
 		return nil, fmt.Errorf("%w: known_hosts file could not be loaded", ErrSSHHostKeyVerificationFailed)
 	}
+	hostKeyAlgorithms, err := pinnedHostKeyAlgorithms(knownHostsCallback, target)
+	if err != nil {
+		return nil, err
+	}
 	hostKeyCallback := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		if err := knownHostsCallback(hostname, remote, key); err != nil {
 			return ErrSSHHostKeyVerificationFailed
@@ -79,10 +85,11 @@ func (e SSHExecutor) Connect(ctx context.Context, target RemoteTarget) (RemoteSe
 		return nil, err
 	}
 	cfg := &ssh.ClientConfig{
-		User:            target.Username,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         15 * time.Second,
+		User:              target.Username,
+		Auth:              authMethods,
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		Timeout:           15 * time.Second,
 	}
 	dialer := net.Dialer{Timeout: 15 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(target.Host, strconv.Itoa(target.Port)))
@@ -95,6 +102,38 @@ func (e SSHExecutor) Connect(ctx context.Context, target RemoteTarget) (RemoteSe
 		return nil, err
 	}
 	return sshSession{client: ssh.NewClient(c, chans, reqs)}, nil
+}
+
+func pinnedHostKeyAlgorithms(callback ssh.HostKeyCallback, target RemoteTarget) ([]string, error) {
+	host := net.JoinHostPort(target.Host, strconv.Itoa(target.Port))
+	remote, err := net.ResolveTCPAddr("tcp", host)
+	if err != nil {
+		return nil, fmt.Errorf("%w: known_hosts target could not be resolved", ErrSSHHostKeyVerificationFailed)
+	}
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("%w: generate host-key probe", ErrSSHHostKeyVerificationFailed)
+	}
+	probeKey, err := ssh.NewPublicKey(privateKey.Public())
+	if err != nil {
+		return nil, fmt.Errorf("%w: generate host-key probe", ErrSSHHostKeyVerificationFailed)
+	}
+	probeErr := callback(host, remote, probeKey)
+	var keyErr *knownhosts.KeyError
+	if !errors.As(probeErr, &keyErr) || len(keyErr.Want) == 0 {
+		return nil, fmt.Errorf("%w: no pinned host-key algorithm", ErrSSHHostKeyVerificationFailed)
+	}
+	algorithms := make([]string, 0, len(keyErr.Want))
+	seen := make(map[string]struct{}, len(keyErr.Want))
+	for _, known := range keyErr.Want {
+		algorithm := known.Key.Type()
+		if _, ok := seen[algorithm]; ok {
+			continue
+		}
+		seen[algorithm] = struct{}{}
+		algorithms = append(algorithms, algorithm)
+	}
+	return algorithms, nil
 }
 
 func validateKnownHostsFile(path string, requireNonEmpty bool) error {
