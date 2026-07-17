@@ -3,7 +3,7 @@
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-15 |
+| Last updated | 2026-07-17 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
@@ -289,16 +289,31 @@ insecure flags, HTTP identity, callback mismatch, missing/writable TLS mounts,
 placeholder secrets, public backend ports, internal route exposure, and mutable
 `latest` images.
 
+R5-003 reproduced a live staging proxy health failure before Cloudflare
+cutover. Caddy was running with listeners on 8080/8443, but its container-local
+`/health` request initially returned 308 to `https://127.0.0.1/health`; BusyBox
+`wget` followed to container port 443 and then reported connection refused. The
+root cause was Caddy's normal directive sorting placing `redir` before
+`respond`, despite their textual order. The HTTP listener now uses one `route`
+block to preserve the loopback health response before the general redirect.
+The source validator rejects the former unordered form, and the focused
+loopback smoke verifies container health, HTTP behavior, Origin CA TLS,
+protected routes, hardening, and log markers while keeping the development
+profile running.
+
 The development package remains development-only. P01 code is complete, but
 clean control-plane VPS checkpoint `CP-VPS-1` was not run because no clean
 Ubuntu VPS was available. Its status is `DEFERRED / UNPROVEN`; no VPS evidence
 exists, and the checkpoint remains a blocker before production acceptance.
 
-R5-002 validates repository source/config only. No live certificate was
-installed, no origin port was opened, no Cloudflare setting changed, and no VPS
-restart/persistence test was run. Live origin TLS, Cloudflare Full (strict),
-direct-origin restriction, and live GitHub callback/webhook evidence remain
-`UNPROVEN` for R5-003. The operator procedure is
+R5-002 validates repository source/config only. During R5-003, operator runtime
+inputs, immutable images, the Agent artifact, origin certificate metadata, and
+runtime validators passed. The first public-port start was rolled back when the
+Caddy health defect above reproduced; the fixed configuration then passed the
+isolated loopback smoke without taking over ports 80/443. Public direct-origin
+TLS, Cloudflare Full (strict), direct-origin restriction, restart/persistence,
+and live GitHub callback/webhook evidence remain `UNPROVEN` pending an
+operator-approved cutover retry. The procedure is
 `docs/runbooks/staging-control-plane.md`.
 
 Git-based deployment exists and can apply user-provided manifests. Such a

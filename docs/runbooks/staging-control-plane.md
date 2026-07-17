@@ -174,6 +174,33 @@ The runtime validator reads values only to validate length, placeholders,
 permissions, certificate markers, URL identity, and digest shape. It does not
 print secret contents. Fix every error before start.
 
+### Isolated Caddy smoke
+
+Before a port 80/443 cutover, run the focused Caddy smoke on loopback-only host
+ports while the development profile remains available:
+
+```bash
+OPSI_STAGING_ORIGIN_CA_FILE=/path/to/approved-origin-ca-chain.pem \
+OPSI_STAGING_DIAGNOSTIC_HTTP_PORT=18080 \
+OPSI_STAGING_DIAGNOSTIC_HTTPS_PORT=18443 \
+make verify-staging-control-plane-caddy-smoke
+```
+
+If another service already owns port 18080, choose a different unprivileged
+loopback HTTP port such as 18081. The smoke does not edit `.env`, does not bind
+80/443, and always stops the staging containers without deleting named volumes.
+It requires container-local `/health` to return 200 without a redirect, while a
+host/public request to `/health` and every other HTTP path must return 308. The
+HTTP listener uses a Caddy `route` block so the loopback health response remains
+ordered before the general redirect; without `route`, Caddy directive sorting
+can place `redir` first and make the healthcheck follow to container port 443
+instead of the configured TLS listener on 8443.
+
+The smoke also verifies Origin CA validation on the isolated HTTPS mapping,
+protected and encoded path denial, container health, non-root/read-only
+hardening, the current capability boundary, and absence of known secret or
+placeholder markers in service logs.
+
 ## Start And Check Origin
 
 Start the staging project only after validation:

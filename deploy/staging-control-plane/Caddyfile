@@ -4,12 +4,14 @@
 }
 
 :8080 {
-	@health {
-		path /health
-		remote_ip 127.0.0.1 ::1
+	route {
+		@health {
+			path /health
+			remote_ip 127.0.0.1 ::1
+		}
+		respond @health 200
+		redir https://{host}{uri} 308
 	}
-	respond @health 200
-	redir https://{host}{uri} 308
 }
 
 :8443 {

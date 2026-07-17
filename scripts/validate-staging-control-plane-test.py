@@ -92,6 +92,32 @@ class StagingValidatorTests(unittest.TestCase):
     def test_internal_endpoint_exposure_rejected(self) -> None:
         self.assert_source_rejected(caddy=self.caddy.replace("/api/internal/*", "/api/not-internal/*"))
 
+    def test_http_health_route_ordering_required(self) -> None:
+        ordered = """\
+:8080 {
+\troute {
+\t\t@health {
+\t\t\tpath /health
+\t\t\tremote_ip 127.0.0.1 ::1
+\t\t}
+\t\trespond @health 200
+\t\tredir https://{host}{uri} 308
+\t}
+}
+"""
+        unordered = """\
+:8080 {
+\t@health {
+\t\tpath /health
+\t\tremote_ip 127.0.0.1 ::1
+\t}
+\trespond @health 200
+\tredir https://{host}{uri} 308
+}
+"""
+        self.assertIn(ordered, self.caddy)
+        self.assert_source_rejected(caddy=self.caddy.replace(ordered, unordered, 1))
+
     def test_internal_path_variants_are_denied(self) -> None:
         for target in (
             "/internal",

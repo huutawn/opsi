@@ -120,6 +120,20 @@ def public_path_denied(raw_target: str) -> bool:
     return normalized == "/metrics" or normalized == "/internal" or normalized.startswith("/internal/") or normalized == "/api/internal" or normalized.startswith("/api/internal/")
 
 
+def http_health_route_is_ordered(caddy: str) -> bool:
+    listener = re.search(r"(?ms)^:8080\s*\{(.*?)(?=^:8443\s*\{)", caddy)
+    if not listener:
+        return False
+    block = listener.group(1)
+    route = re.search(r"(?ms)^\s*route\s*\{(.*)\}\s*\}\s*$", block)
+    if not route:
+        return False
+    route_block = route.group(1)
+    health = route_block.find("respond @health 200")
+    redirect = route_block.find("redir https://{host}{uri} 308")
+    return health >= 0 and redirect > health
+
+
 def require_https(raw: str, name: str, allow_placeholder: bool) -> object:
     parsed = urlparse(raw)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
@@ -284,6 +298,8 @@ def validate_source_texts(
             fail(f"public route policy does not deny {target}")
     if ":8080" not in caddy or "remote_ip 127.0.0.1 ::1" not in caddy or "redir https://{host}{uri} 308" not in caddy:
         fail("Caddy HTTP listener must provide health and controlled HTTPS redirect")
+    if not http_health_route_is_ordered(caddy):
+        fail("Caddy HTTP listener must preserve loopback health before HTTPS redirect with route")
 
     if worker.get("production") is not True:
         fail("staging bootstrap-worker production must be true")

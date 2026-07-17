@@ -7,6 +7,14 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 ## Active Repair Task
 
 - R5-003 is the only active task. R5-002 is done at its source/config gate.
+- The first R5-003 public-port start was rolled back because Caddy sorted the
+  general HTTP redirect before the loopback health response. Raw evidence showed
+  `/health` return 308 to `https://127.0.0.1/health`, after which `wget` followed
+  to unused container port 443. Caddy remained running with restart count zero.
+- The staging HTTP listener now uses `route` to preserve health-before-redirect
+  order. The validator rejects the former unordered form, and a focused
+  loopback smoke covers health, redirect isolation, Origin CA TLS, protected
+  paths, hardening, and log markers without stopping the dev profile.
 - R5-002 added a separate production-like staging control-plane profile with
   origin TLS, fail-closed production configuration, isolated service exposure,
   individual read-only secret mounts, offline validation, and a Cloudflare Full
@@ -76,7 +84,8 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   filesystems, bounded logs, named volumes, an internal backend network, and
   file-backed runtime secrets. PostgreSQL, Worker, and Cloud publish no host
   ports; Caddy alone publishes 80/443 and denies internal/metrics paths.
-- Live origin TLS, Cloudflare Full (strict), direct-origin restriction, and
+- The fixed Caddy configuration passes isolated Origin CA validation, but public
+  origin TLS, Cloudflare Full (strict), direct-origin restriction, and
   restart/persistence evidence remain `UNPROVEN` and belong to R5-003.
 - Agent owns deployment, service runtime, secrets, telemetry, factual incidents,
   local audit, and K3s/containerd execution.
