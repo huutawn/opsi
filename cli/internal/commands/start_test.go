@@ -857,7 +857,14 @@ func (s *localTelemetryServer) QueryTelemetry(_ context.Context, req *agentv1.Te
 }
 
 func TestLocalSessionDoesNotExposePAT(t *testing.T) {
-	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Default(), nil))
+	store := keychain.NewFakeStore()
+	const secret = "pat-secret-must-not-reach-browser"
+	if err := store.SetPAT(secret); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Default(), func() (keychain.Store, error) {
+		return store, nil
+	}))
 	defer server.Close()
 	res, err := http.Get(server.URL + "/api/local/session")
 	if err != nil {
@@ -868,8 +875,17 @@ func TestLocalSessionDoesNotExposePAT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(strings.ToLower(string(body)), "pat") {
+	if strings.Contains(string(body), secret) {
 		t.Fatalf("session leaked PAT: %s", body)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"pat", "token", "authorization"} {
+		if _, ok := payload[key]; ok {
+			t.Fatalf("session exposed credential field %q: %s", key, body)
+		}
 	}
 }
 
