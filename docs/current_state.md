@@ -451,6 +451,43 @@ OIDC-bound trusted artifact delivery, runtime delivery, and the later
 evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
 of truth is `docs/opsi_roadmap_v5_production.md`.
 
+## R5-006 repository CD checkpoint
+
+R5-006 implements one repository-owned application path for monorepo CD intent.
+`.opsi/opsi-cd.yaml` v2 is strict and deterministic: it contains only version,
+service keys, build context/Dockerfile/platform, watch/shared paths, dependency
+keys, and production/preview intent. v1 `ServiceBuild` files migrate without
+dropping a service or adding infrastructure identity; unknown fields, invalid
+paths, traversal, escaping symlinks, duplicate keys, missing dependencies, and
+dependency cycles fail closed. `opsi init` now has a local repository mode for
+create, v1 migration, add, update, dry-run, atomic apply, and idempotent repeat;
+the existing GitHub binding path uses the same repository mutation service.
+
+The changed-service resolver runs the fixed argv form
+`git -C ROOT diff --name-status -z BASE HEAD`, parses add/modify/delete/type,
+copy, and rename source/destination paths, matches path components, expands
+shared paths and dependent closure, and emits `opsi.cd.plan/v1` with config and
+plan hashes. Missing/untrusted/shallow bases, failed or bounded/ambiguous diffs,
+unmatched changed paths, and initial builds select every configured service with
+typed reasons; a truly
+empty trusted diff is the only empty plan. CLI `opsi cd plan` and Local API
+`/api/local/repository/plan/preview` use the same DTO and service.
+
+The generated workflow has read-only contents permission, immutable checkout
+SHA, bounded plan/build jobs, deterministic concurrency and fork-safe behavior;
+it performs no OIDC, GHCR push, Cloud call, or deployment. Local UI repository CD
+setup displays all services, previews config/migration/workflow changes, applies
+with local session/idempotency confirmation, and previews affected services with
+the same plan hash as CLI. Live GitHub runner execution remains a later R5-008
+checkpoint.
+
+Capability matrix (R5-006): config v1/v2 parser-validator-writer and atomic
+mutation path: implemented; `opsi init` create/add/update/migrate/dry-run/apply:
+implemented; workflow renderer: deterministic secure changed-service matrix;
+Git adapter: fixed-argv bounded diff parser; Local API: config/mutation/workflow/
+plan preview plus confirmed apply; Local UI: service editor and plan/workflow
+preview with loading/error/retry state.
+
 ## Verification commands
 
 From repository root:

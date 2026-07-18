@@ -5,6 +5,7 @@ import { Empty, Panel, StatePanel, StatusBadge } from "@/components/ui/primitive
 import type { ConsoleController } from "@/features/console/types";
 import { LocalClient } from "@/lib/api/local-client";
 import type { GitHubBinding, GitHubInstallation, GitHubRepository } from "@/lib/contracts/registry";
+import { RepositoryCD } from "@/features/github/repository-cd";
 
 type GitHubState = {
   status: "idle" | "loading" | "ready" | "error";
@@ -188,6 +189,8 @@ export function GitHubView({ console }: { console: ConsoleController }) {
           }}
         />
       </Panel>
+
+      <RepositoryCD />
     </section>
   );
 }

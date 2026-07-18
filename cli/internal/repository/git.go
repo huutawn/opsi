@@ -1,9 +1,11 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os/exec"
 	"path"
@@ -19,7 +21,36 @@ type CommandRunner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	command := exec.CommandContext(ctx, name, args...)
+	var output cappedBuffer
+	output.limit = 8 << 20
+	command.Stdout = &output
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil {
+		return nil, err
+	}
+	if output.overflow {
+		return nil, errors.New("command output exceeded the safety limit")
+	}
+	return output.Bytes(), nil
+}
+
+type cappedBuffer struct {
+	bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func (b *cappedBuffer) Write(value []byte) (int, error) {
+	if len(b.Bytes())+len(value) > b.limit {
+		remaining := b.limit - len(b.Bytes())
+		if remaining > 0 {
+			_, _ = b.Buffer.Write(value[:remaining])
+		}
+		b.overflow = true
+		return len(value), nil
+	}
+	return b.Buffer.Write(value)
 }
 
 type GitHubOrigin struct {
@@ -33,19 +64,29 @@ type LocalRepository struct {
 	Origin GitHubOrigin
 }
 
+func Root(ctx context.Context, runner CommandRunner, repoDir string) (string, error) {
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	output, err := runner.Run(ctx, "git", "-C", repoDir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("detect Git repository root: %w", err)
+	}
+	root, err := cleanGitOutput(output)
+	if err != nil {
+		return "", fmt.Errorf("invalid Git repository root: %w", err)
+	}
+	return filepath.Clean(root), nil
+}
+
 func Detect(ctx context.Context, runner CommandRunner, repoDir string) (LocalRepository, error) {
 	if runner == nil {
 		runner = ExecRunner{}
 	}
-	rootOutput, err := runner.Run(ctx, "git", "-C", repoDir, "rev-parse", "--show-toplevel")
+	root, err := Root(ctx, runner, repoDir)
 	if err != nil {
-		return LocalRepository{}, fmt.Errorf("detect Git repository root: %w", err)
+		return LocalRepository{}, err
 	}
-	root, err := cleanGitOutput(rootOutput)
-	if err != nil {
-		return LocalRepository{}, fmt.Errorf("invalid Git repository root: %w", err)
-	}
-	root = filepath.Clean(root)
 	originOutput, err := runner.Run(ctx, "git", "-C", root, "remote", "get-url", "origin")
 	if err != nil {
 		return LocalRepository{}, fmt.Errorf("read Git origin: %w", err)

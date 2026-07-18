@@ -163,6 +163,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		}
 		_ = json.NewEncoder(w).Encode(status)
 	})
+	registerRepositoryCDRoutes(mux, localSession)
 	mux.HandleFunc("/api/local/", func(w http.ResponseWriter, r *http.Request) {
 		proxyLocalRegistry(w, r, cfg, factory, localSession, authFlow)
 	})

@@ -45,6 +45,9 @@ type initOptions struct {
 	Dockerfile     string
 	Platform       string
 	Branch         string
+	WatchPaths     []string
+	SharedPaths    []string
+	Dependencies   []string
 	PreviewPRs     bool
 	DryRun         bool
 	Force          bool
@@ -99,6 +102,9 @@ func newInitCommand(configPath *string, rootOptions Options) *cobra.Command {
 	flags.StringVar(&options.Dockerfile, "dockerfile", "Dockerfile", "repository-relative Dockerfile path")
 	flags.StringVar(&options.Platform, "platform", "linux/amd64", "build platform")
 	flags.StringVar(&options.Branch, "branch", "", "production branch; defaults to Cloud repository metadata")
+	flags.StringSliceVar(&options.WatchPaths, "watch-path", nil, "additional repository-relative path watched by this service")
+	flags.StringSliceVar(&options.SharedPaths, "shared-path", nil, "repository-relative shared path affecting this service")
+	flags.StringSliceVar(&options.Dependencies, "depends-on", nil, "service key this service depends on")
 	flags.BoolVar(&options.PreviewPRs, "preview-prs", false, "enable preview intent for pull requests")
 	flags.BoolVar(&options.DryRun, "dry-run", false, "print a JSON plan without mutations or file writes")
 	flags.BoolVar(&options.Force, "force", false, "allow overwriting generated files when used with --yes")
@@ -112,6 +118,9 @@ func newInitCommand(configPath *string, rootOptions Options) *cobra.Command {
 func runInit(parent context.Context, output, statusOutput io.Writer, configPath string, dependencies Options, options initOptions) error {
 	if err := validateInitOptions(options); err != nil {
 		return err
+	}
+	if options.ProjectID == "" && options.ServiceID == "" {
+		return runLocalInit(parent, output, dependencies, options)
 	}
 	store, err := dependencies.KeychainFactory()
 	if err != nil {
@@ -203,11 +212,8 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 	if err := repository.ValidateBuildInputs(local.Root, options.BuildContext, options.Dockerfile, options.Platform, branch); err != nil {
 		return err
 	}
-	configBytes, err := repository.RenderConfig(repository.ConfigOptions{ServiceKey: options.ServiceKey, Context: options.BuildContext, Dockerfile: options.Dockerfile, Platform: options.Platform, Branch: branch, PreviewPRs: options.PreviewPRs})
-	if err != nil {
-		return err
-	}
-	filePlan, err := repository.PrepareFiles(local.Root, []repository.FileSpec{{Path: options.ConfigPath, Content: configBytes}, {Path: options.WorkflowPath, Content: repository.RenderWorkflow()}}, options.Force, options.Yes)
+	mutation := repository.MutationRequest{Repository: local.Root, ConfigPath: options.ConfigPath, WorkflowPath: options.WorkflowPath, Force: options.Force, Confirmed: options.Yes, Service: repository.ServiceV2{Key: options.ServiceKey, Build: repository.BuildV2{Context: options.BuildContext, Dockerfile: options.Dockerfile, Platform: options.Platform}, WatchPaths: options.WatchPaths, SharedPaths: options.SharedPaths, Dependencies: options.Dependencies, Deploy: repository.DeployV2{Production: repository.ProductionV2{Enabled: true, Branches: []string{branch}}, Preview: repository.PreviewV2{Enabled: options.PreviewPRs, PullRequests: options.PreviewPRs}}}}
+	mutationPreview, err := (repository.CDService{Runner: dependencies.GitRunner}).PreviewMutation(mutation)
 	if err != nil {
 		return err
 	}
@@ -215,12 +221,17 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 	if err != nil {
 		return err
 	}
-	plan := initPlan{Repository: local.Origin.FullName, RepositoryID: target.RepositoryID, ProjectID: options.ProjectID, ServiceID: options.ServiceID, ServiceKey: options.ServiceKey, InstallationID: options.InstallationID, InstallationClaim: installationClaim, RepositoryClaim: "required", Binding: bindingState, Files: filePlan.Changes}
+	plan := initPlan{Repository: local.Origin.FullName, RepositoryID: target.RepositoryID, ProjectID: options.ProjectID, ServiceID: options.ServiceID, ServiceKey: options.ServiceKey, InstallationID: options.InstallationID, InstallationClaim: installationClaim, RepositoryClaim: "required", Binding: bindingState, Files: mutationPreview.Files}
 	if existingBinding != nil {
 		plan.RepositoryClaim = "already-claimed"
 	}
 	if options.DryRun {
 		return writeJSON(output, plan)
+	}
+	for _, change := range mutationPreview.Files {
+		if change.Action == "updated" && (!options.Force || !options.Yes) {
+			return fmt.Errorf("%s already exists with different managed content; use --force --yes to overwrite", change.Path)
+		}
 	}
 	binding := cloudclient.GitHubBinding{}
 	if existingBinding != nil {
@@ -234,15 +245,53 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 			return err
 		}
 	}
-	if err := repository.WriteFiles(filePlan, repository.WriteOptions{}); err != nil {
+	applied, err := (repository.CDService{Runner: dependencies.GitRunner}).ApplyMutation(mutation)
+	if err != nil {
 		return err
 	}
-	return writeInitSuccess(output, options, local.Origin.FullName, target.RepositoryID, binding, filePlan)
+	return writeInitSuccess(output, options, local.Origin.FullName, target.RepositoryID, binding, repository.FilePlan{Changes: applied.Files})
+}
+
+func runLocalInit(ctx context.Context, output io.Writer, dependencies Options, options initOptions) error {
+	root, err := repository.Root(ctx, dependencies.GitRunner, options.RepoDir)
+	if err != nil {
+		return err
+	}
+	branch := options.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	mutation := repository.MutationRequest{Repository: root, ConfigPath: options.ConfigPath, WorkflowPath: options.WorkflowPath, Force: options.Force, Confirmed: options.Yes, Service: repository.ServiceV2{Key: options.ServiceKey, Build: repository.BuildV2{Context: options.BuildContext, Dockerfile: options.Dockerfile, Platform: options.Platform}, WatchPaths: options.WatchPaths, SharedPaths: options.SharedPaths, Dependencies: options.Dependencies, Deploy: repository.DeployV2{Production: repository.ProductionV2{Enabled: true, Branches: []string{branch}}, Preview: repository.PreviewV2{Enabled: options.PreviewPRs, PullRequests: options.PreviewPRs}}}}
+	service := repository.CDService{Runner: dependencies.GitRunner}
+	preview, err := service.PreviewMutation(mutation)
+	if err != nil {
+		return err
+	}
+	if options.DryRun {
+		return writeJSON(output, preview)
+	}
+	for _, change := range preview.Files {
+		if change.Action == "updated" && (!options.Force || !options.Yes) {
+			return fmt.Errorf("%s already exists with different managed content; use --force --yes to overwrite", change.Path)
+		}
+	}
+	applied, err := service.ApplyMutation(mutation)
+	if err != nil {
+		return err
+	}
+	if options.JSON {
+		return writeJSON(output, applied)
+	}
+	_, err = fmt.Fprintf(output, "Opsi repository initialized: service=%s config_hash=%s\n", options.ServiceKey, applied.ConfigHash)
+	return err
 }
 
 func validateInitOptions(options initOptions) error {
-	if options.ProjectID == "" || options.ServiceID == "" || options.ServiceKey == "" {
-		return errors.New("--project-id, --service-id, and --service-key are required")
+	if options.ServiceKey == "" {
+		return errors.New("--service-key is required")
+	}
+	if (options.ProjectID == "") != (options.ServiceID == "") {
+		return errors.New("--project-id and --service-id must be provided together")
 	}
 	if options.RepositoryID < 0 || options.InstallationID < 0 {
 		return errors.New("repository and installation IDs must be positive integers")

@@ -207,6 +207,38 @@ func TestInitIntegrationAndIdempotentRerun(t *testing.T) {
 	}
 }
 
+func TestInitLocalV2AddUpdateAndIdempotentApply(t *testing.T) {
+	root := createRepository(t)
+	keychainCalls := 0
+	command := func(args ...string) (*bytes.Buffer, error) {
+		output := &bytes.Buffer{}
+		rootCommand := NewRootCommand(Options{Version: "test", GitRunner: initGitRunner{root: root}, KeychainFactory: func() (keychain.Store, error) { keychainCalls++; return nil, errors.New("keychain must not be used") }})
+		rootCommand.SetOut(output)
+		rootCommand.SetArgs(append([]string{"init", "--repo-dir", root}, args...))
+		return output, rootCommand.Execute()
+	}
+	if _, err := command("--service-key", "api"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := command("--service-key", "worker", "--depends-on", "api", "--force", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	output, err := command("--service-key", "worker", "--depends-on", "api", "--force", "--yes", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keychainCalls != 0 || !strings.Contains(output.String(), `"action": "unchanged"`) {
+		t.Fatalf("keychain=%d output=%s", keychainCalls, output.String())
+	}
+	configData, err := os.ReadFile(filepath.Join(root, defaultConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(configData), "- key:") != 2 || !strings.Contains(string(configData), "version: 2") {
+		t.Fatalf("config=%s", configData)
+	}
+}
+
 func TestInitDryRunAndValidationBeforeMutation(t *testing.T) {
 	t.Run("dry-run", func(t *testing.T) {
 		root := createRepository(t)
@@ -249,7 +281,8 @@ func TestInitBindingConflictAndOverwriteSafety(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".opsi"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, defaultConfigPath), []byte("user content\n"), 0o644); err != nil {
+	existingConfig := []byte("apiVersion: cd.opsi.dev/v1alpha1\nkind: ServiceBuild\nmetadata:\n  serviceKey: web\nbuild:\n  context: .\n  dockerfile: Dockerfile\n  platforms: [linux/amd64]\ndeploy:\n  production:\n    branches: [main]\n  preview:\n    pullRequests: false\n")
+	if err := os.WriteFile(filepath.Join(root, defaultConfigPath), existingConfig, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	state := &fakeCloudState{repositoryReady: true}
@@ -271,7 +304,7 @@ func TestInitBindingConflictAndOverwriteSafety(t *testing.T) {
 		t.Fatalf("binding conflict error=%v", err)
 	}
 	content, _ := os.ReadFile(filepath.Join(root, defaultConfigPath))
-	if string(content) != "user content\n" {
+	if string(content) != string(existingConfig) {
 		t.Fatalf("conflict wrote file: %q", content)
 	}
 }
@@ -318,7 +351,8 @@ func TestInitForceYesOverwritesAtomically(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".opsi"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, defaultConfigPath), []byte("old\n"), 0o600); err != nil {
+	legacyConfig := []byte("apiVersion: cd.opsi.dev/v1alpha1\nkind: ServiceBuild\nmetadata:\n  serviceKey: api\nbuild:\n  context: .\n  dockerfile: Dockerfile\n  platforms: [linux/amd64]\ndeploy:\n  production:\n    branches: [main]\n  preview:\n    pullRequests: true\n")
+	if err := os.WriteFile(filepath.Join(root, defaultConfigPath), legacyConfig, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	state := &fakeCloudState{repositoryReady: true}

@@ -31,6 +31,45 @@ export type LocalSessionStatus = {
   capabilities?: string[];
 };
 
+export type RepositoryCDService = {
+  key: string;
+  build: { context: string; dockerfile: string; platform: string };
+  watch_paths: string[];
+  shared_paths: string[];
+  dependencies: string[];
+  deploy: {
+    production: { enabled: boolean; branches: string[] };
+    preview: { enabled: boolean; pull_requests: boolean };
+  };
+};
+
+export type RepositoryCDConfig = { version: 2; services: RepositoryCDService[] };
+
+export type RepositoryMutationPreview = {
+  config: RepositoryCDConfig;
+  migrated_v1: boolean;
+  files: Array<{ path: string; action: "created" | "updated" | "unchanged"; old_sha256?: string; new_sha256: string }>;
+  config_hash: string;
+  config_yaml: string;
+  workflow_yaml: string;
+  config_diff: string;
+  workflow_diff: string;
+};
+
+export type RepositoryCDPlan = {
+  schema_version: string;
+  base: string;
+  head: string;
+  event: "initial" | "push" | "pull_request" | "merge";
+  config_hash: string;
+  plan_hash: string;
+  full_build: boolean;
+  affected_service_keys: string[];
+  reason_codes: string[];
+  services: Array<{ key: string; reasons: Array<{ code: string; explanation: string; path?: string; dependency?: string }> }>;
+  explanation: string;
+};
+
 export class LocalClient {
   private localSession = "";
 
@@ -164,6 +203,32 @@ export class LocalClient {
     return this.call<{ removed: boolean }>(`/api/local/projects/${projectID}/github/bindings/${encodeURIComponent(bindingID)}`, {
       method: "DELETE",
       write: true,
+    });
+  }
+
+  repositoryCDConfig() {
+    return this.call<{ config: RepositoryCDConfig; migrated_v1: boolean; config_hash: string }>("/api/local/repository/config");
+  }
+
+  previewRepositoryMutation(service: RepositoryCDService) {
+    return this.call<RepositoryMutationPreview>("/api/local/repository/config/preview", {
+      method: "POST",
+      body: JSON.stringify({ service }),
+    });
+  }
+
+  applyRepositoryMutation(service: RepositoryCDService) {
+    return this.call<RepositoryMutationPreview>("/api/local/repository/apply", {
+      method: "POST",
+      write: true,
+      body: JSON.stringify({ service, confirm: true }),
+    });
+  }
+
+  previewRepositoryPlan(body: { event: RepositoryCDPlan["event"]; base: string; head: string }) {
+    return this.call<RepositoryCDPlan>("/api/local/repository/plan/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
     });
   }
 

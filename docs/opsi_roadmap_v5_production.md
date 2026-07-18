@@ -187,7 +187,8 @@ parity và durable replay của delivery `installation_repositories: added` đã
 live. GitHub App delivery API chưa có delivery `removed` hoặc `repository` cho
 fixture; chưa có account GitHub thứ hai cho live wrong-user negative. Các bằng
 chứng live này thuộc canonical procedure ở trên nên chặn `DONE`; không thay bằng
-mock. R5-006 chưa bắt đầu.
+mock. R5-006 được thực hiện riêng và không thay đổi trạng thái deferred này của
+R5-005.
 
 ### R5-006 — Monorepo config v2, changed-service resolver và workflow generation
 
@@ -209,6 +210,14 @@ mock. R5-006 chưa bắt đầu.
 **Avoid:** Cloud OIDC endpoint, Agent, arbitrary shell policy, user source upload, committed secrets.
 
 **Gate:** multi-service/migration/diff/security golden tests; CLI/UI preview cùng một plan hash.
+
+**Trạng thái acceptance 2026-07-18:** `DONE / FUNCTIONAL_ACCEPTANCE_PASS` cho
+manual local scope. Config v2 migration/init, bounded changed-service plans,
+CLI/Local API plan-hash parity, deterministic secure workflow YAML, UI preview/
+apply/error states, and disposable Git acceptance (api, worker, shared path,
+dependency closure, rename, missing base, and empty diff) pass. R5-007 OIDC,
+BuildRecord, GHCR push, and deployment remain unstarted; live GitHub runner proof
+is intentionally deferred to R5-008.
 
 ### R5-007 — GitHub Actions OIDC verifier và BuildRecord v1
 
