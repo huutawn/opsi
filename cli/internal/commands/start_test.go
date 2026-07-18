@@ -873,6 +873,88 @@ func TestLocalSessionDoesNotExposePAT(t *testing.T) {
 	}
 }
 
+func TestLocalSessionVerifiesPATBeforeReportingAuthenticated(t *testing.T) {
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("saved-pat"); err != nil {
+		t.Fatal(err)
+	}
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/pat/verify" || r.Header.Get("Authorization") != "Bearer saved-pat" {
+			t.Fatalf("unexpected verification request: path=%s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["project_id"] != "proj-1" {
+			t.Fatalf("verification body=%v err=%v", body, err)
+		}
+		_, _ = w.Write([]byte(`{"user_id":"user-1","project_id":"proj-1","role":"owner"}`))
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/local/session?project_id=proj-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var valid map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&valid); err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if valid["authenticated"] != true || valid["token_status"] != "valid" || valid["cloud_connected"] != "ok" {
+		t.Fatalf("valid session=%v", valid)
+	}
+
+	invalidCloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"pat invalid"}`))
+	}))
+	defer invalidCloud.Close()
+	invalidServer := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: invalidCloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer invalidServer.Close()
+	res, err = http.Get(invalidServer.URL + "/api/local/session?project_id=proj-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invalid map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&invalid); err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if invalid["authenticated"] != false || invalid["token_status"] != "invalid" || invalid["cloud_connected"] != "ok" {
+		t.Fatalf("invalid session=%v", invalid)
+	}
+}
+
+func TestLocalProxySanitizesCloudAuthFailures(t *testing.T) {
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"pat invalid"}`))
+	}))
+	defer cloud.Close()
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("saved-pat"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+	res, err := http.Get(server.URL + "/api/local/projects?org_id=org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized || strings.Contains(string(body), "pat invalid") || !strings.Contains(string(body), "CLOUD_AUTH_REQUIRED") {
+		t.Fatalf("sanitized auth failure status=%d body=%s", res.StatusCode, body)
+	}
+}
+
 func TestLocalBrowserLoginRedeemsToKeychainWithoutBrowserPAT(t *testing.T) {
 	store := keychain.NewFakeStore()
 	var localState string

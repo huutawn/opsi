@@ -95,6 +95,11 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		writeLocalError(w, r, resp.StatusCode, "CLOUD_AUTH_REQUIRED", "Cloud rejected the saved credential; use Login to authenticate again")
+		return
+	}
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)

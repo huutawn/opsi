@@ -157,6 +157,13 @@ live selected-repository remove/add must prove lifecycle delivery. Browser grant
 redemption, installation claim, lifecycle webhooks, repository/binding/init, and
 CLI/UI parity remain the active live gate.
 
+The R5-005 live browser checkpoint exposed a stale-keychain UX defect: Local
+session status treated any stored PAT as authenticated even when Cloud rejected
+it. Local session now verifies the PAT for a supplied project, reports
+valid/invalid/unverified state without returning the credential, sanitizes Cloud
+401/403 responses, and keeps project-ID login available when inventory cannot
+load. Focused CLI tests and UI lint/build cover the recovery path.
+
 ## Verification
 
 R5-002 regression checks are focused Cloud tests,

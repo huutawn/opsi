@@ -128,12 +128,13 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			return
 		}
 		w.Header().Set("content-type", "application/json")
-		authenticated := optionalPAT(factory) != ""
+		projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		authenticated, tokenState, cloudState := localPATStatus(r.Context(), cfg, factory, projectID)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"authenticated":   authenticated,
-			"cloud_connected": "unknown",
+			"cloud_connected": cloudState,
 			"agent_connected": probeAgent(r.Context(), cfg, factory),
-			"token_status":    tokenStatus(factory),
+			"token_status":    tokenState,
 			"local_session":   localSession,
 			"capabilities":    []string{"projects", "nodes", "services", "deployments", "github_app", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
@@ -172,6 +173,10 @@ func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.C
 		ProjectID string `json:"project_id"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+	if strings.TrimSpace(body.ProjectID) == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "enter a project ID before signing in")
+		return
+	}
 	state := newLocalSessionToken()
 	callback := "http://" + r.Host + "/api/local/session/callback"
 	payload, _ := json.Marshal(map[string]any{"local_callback": callback, "local_state": state, "project_id": body.ProjectID})
@@ -312,24 +317,6 @@ func logoutLocalSession(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	writeLocalJSON(w, http.StatusOK, map[string]any{"authenticated": false, "revoked": true})
 }
 
-func probeCloud(ctx context.Context, cloudURL string) string {
-	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cloudURL, "/")+"/health", nil)
-	if err != nil {
-		return "unknown"
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "failed"
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return "ok"
-	}
-	return "failed"
-}
-
 func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error)) string {
 	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
 	defer cancel()
@@ -340,11 +327,52 @@ func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain
 	return "ok"
 }
 
-func tokenStatus(factory func() (keychain.Store, error)) string {
-	if optionalPAT(factory) == "" {
-		return "missing"
+func localPATStatus(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), projectID string) (bool, string, string) {
+	pat := optionalPAT(factory)
+	if pat == "" {
+		return false, "missing", "unknown"
 	}
-	return "present"
+	if projectID == "" {
+		return false, "unverified", "unknown"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	status, err := verifyCloudPAT(ctx, cfg.CloudURL, pat, projectID)
+	if err != nil {
+		return false, "unverified", "failed"
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return false, "invalid", "ok"
+	}
+	if status >= 200 && status < 300 {
+		return true, "valid", "ok"
+	}
+	return false, "unverified", "failed"
+}
+
+func verifyCloudPAT(ctx context.Context, cloudURL, pat, projectID string) (int, error) {
+	payload, _ := json.Marshal(map[string]string{"project_id": projectID})
+	resp, err := postCloudJSON(ctx, cloudURL, "/v1/auth/pat/verify", pat, payload)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		return resp.StatusCode, nil
+	}
+	var session struct {
+		UserID    string `json:"user_id"`
+		ProjectID string `json:"project_id"`
+		Role      string `json:"role"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&session); err != nil {
+		return resp.StatusCode, err
+	}
+	if session.UserID == "" || session.ProjectID != projectID || session.Role == "" {
+		return resp.StatusCode, fmt.Errorf("invalid PAT verification response")
+	}
+	return resp.StatusCode, nil
 }
 
 func postCloudJSON(ctx context.Context, cloudURL, path, pat string, payload []byte) (*http.Response, error) {

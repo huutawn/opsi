@@ -32,8 +32,9 @@ export type LocalSessionStatus = {
 export class LocalClient {
   private localSession = "";
 
-  async session() {
-    return this.call<LocalSessionStatus>("/api/local/session");
+  async session(projectID?: string) {
+    const query = projectID ? `?project_id=${encodeURIComponent(projectID)}` : "";
+    return this.call<LocalSessionStatus>(`/api/local/session${query}`);
   }
 
   startLogin(projectID?: string) {
