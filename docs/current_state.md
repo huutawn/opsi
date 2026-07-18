@@ -409,12 +409,25 @@ OCI artifact delivery, managed
 gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
 E2E, release hardening, supply-chain evidence, and measured disaster recovery.
 
-The R5-005 live checkpoint is currently `OPERATOR_REQUIRED` because the
-preferred disposable repository `huutawn/opsi-r5-005-fixture` does not exist.
-Sanitized public preflight confirms the canonical callback, PKCE S256/state,
-fixed GitHub authorization endpoint, public health, and unsigned webhook
-rejection. No live App installation, installation token, repository webhook,
-claim/binding, `opsi init`, or UI parity claim is made yet.
+The R5-005 live checkpoint is `OPERATOR_REQUIRED`, not `DONE`. The fixture,
+installation, and numeric identities exist. Sanitized App preflight confirms
+manual events `repository`, default lifecycle events
+`installation`/`installation_repositories`, Metadata read-only, the canonical
+HTTPS callback/webhook, installation-token creation, and the expected selected
+repository. Projectless browser login/callback, keychain Bearer PAT verification,
+installation/repository idempotent claims, two active service bindings,
+`opsi init` dry-run/apply/second-apply idempotency, and CLI/Local API parity pass
+live. Cloud runs immutable digest
+`sha256:b37677c0a3aed9e031a2460118bd761267bf4c30908a9b8e11980987ce7907fb`;
+4/4 staging services and public health pass with unchanged named volumes.
+
+The signed live `installation_repositories: added` delivery is processed, and
+redelivery after Cloud recreation returns `duplicate=true`, proving PostgreSQL
+durable dedupe without a second business mutation. GitHub's App delivery API
+still exposes no `installation_repositories: removed` delivery and no
+`repository` delivery for the fixture. A second GitHub account is also not
+available for the canonical live wrong-user negative. These missing live
+artifacts block R5-005 `DONE`; unit/mock evidence does not replace them.
 
 ## Ordered next work
 

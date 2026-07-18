@@ -181,6 +181,14 @@ VPS control-plane hiện tại do operator chỉ định không được dùng l
 
 **Gate:** CLI và UI đều hoàn thành manual GitHub App/repository binding; live evidence không chứa token.
 
+**Trạng thái acceptance 2026-07-18:** `OPERATOR_REQUIRED`. Browser login/callback,
+installation/repository claim, hai service binding, `opsi init`, CLI/Local API
+parity và durable replay của delivery `installation_repositories: added` đã pass
+live. GitHub App delivery API chưa có delivery `removed` hoặc `repository` cho
+fixture; chưa có account GitHub thứ hai cho live wrong-user negative. Các bằng
+chứng live này thuộc canonical procedure ở trên nên chặn `DONE`; không thay bằng
+mock. R5-006 chưa bắt đầu.
+
 ### R5-006 — Monorepo config v2, changed-service resolver và workflow generation
 
 **Mục tiêu:** một repository chứa nhiều service và chỉ build service bị ảnh hưởng, nhưng fail safe thành full build khi diff không đáng tin.

@@ -81,6 +81,46 @@ Never store the raw webhook payload in evidence. Record only delivery ID,
 event/action, HTTP result, duplicate flag, numeric installation/repository IDs,
 and the resulting sanitized inventory state.
 
+## Current Sanitized Checkpoint (2026-07-18)
+
+Verdict: `OPERATOR_REQUIRED`.
+
+- Reviewed revision: `12df6c9`; Cloud source revision: `f1824e1`.
+- Runtime digest:
+  `sha256:b37677c0a3aed9e031a2460118bd761267bf4c30908a9b8e11980987ce7907fb`.
+- App preflight passes for App `4315525`, installation `147333403`, owner
+  `143307746`, repository `1304594095`, manual event `repository`, default
+  lifecycle events, and Metadata read-only.
+- Projectless browser callback reaches `auth=ok`; Local verifies the keychain PAT
+  through Bearer and returns only safe session identity metadata.
+- Installation and repository claims are idempotent. Repository `1304594095` is
+  active and claimed by the acceptance project.
+- Active bindings are `ghbind-028442b1a921955e` (`api`) and
+  `ghbind-60d429b5076c8dad` (`worker`). CLI and Local API return the same IDs.
+- `opsi init` dry-run passes, first apply creates the two bootstrap files, and
+  the second apply reports both unchanged. Nothing is committed or pushed to
+  the fixture.
+- Signed `installation_repositories: added` GUID
+  `ff5d1740-82ad-11f1-8b7d-10bc8b43c4a0` is accepted after the sparse-payload
+  fix. API attempt `3831934016995467264` returns processed; attempts
+  `3831934369688190976` and `3831935254709403648` after Cloud recreation return
+  `duplicate=true` with installation/repository numeric identity intact.
+- Unsigned webhook and callback without state return 401. Body-only synthetic
+  PAT input returns 401. Release with active bindings returns typed 409.
+- Full Cloud/CLI tests and vet, focused PostgreSQL restart/dedupe, UI lint/build,
+  source hygiene, preflight tests, staging validators, Compose parse, public
+  health, and secret-marker log scan pass.
+
+GitHub's App delivery API currently returns no matching
+`installation_repositories: removed` delivery and no `repository` delivery.
+Do not infer either event from the operator action or from the final active
+inventory. The remaining operator checkpoint is one action at a time: remove
+only the fixture from installation `147333403`, Save once, and leave it removed
+until the sanitized `removed` delivery is confirmed. Add it back only after that
+confirmation. A second GitHub account is separately required for the canonical
+live wrong-user negative; its absence blocks `DONE` rather than becoming mock
+or follow-up evidence.
+
 ## Browser Login UX
 
 Start the Local UI and use **Sign in with GitHub**. Normal login does not ask

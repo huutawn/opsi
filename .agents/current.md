@@ -138,14 +138,15 @@ Agent VPS; do not reset or rebuild it again. The live Worker restart during
 `install_k3s` is a mandatory R5-017 gate on a disposable VPS or fresh reset
 with a deterministic staging-only E2E barrier or fault mechanism, never a
 production fault hook. R5-018/MCP remains blocked unless that deferred gate
-passes. R5-005 code closure is in progress. Manual GitHub installation claim is
-now available through both `opsi github installation claim` and the Local
-API/UI; repository inventory exposes durable `available`/`active`/`conflict`
+passes. R5-005 is `OPERATOR_REQUIRED`, not `DONE`. Projectless browser login and
+callback, keychain PAT verification, installation/repository claims, two
+service bindings, `opsi init` dry-run/apply/idempotency, and CLI/Local API parity
+pass live. Repository inventory exposes durable `available`/`active`/`conflict`
 ownership state without leaking another project's ID. Local API GitHub
 mutations use the keychain PAT and one-time local session/idempotency headers,
-while the browser receives no PAT or OAuth token. Full CLI/Cloud tests, focused
-race tests, UI lint/build, and disposable PostgreSQL GitHub
-inventory/durable-dedupe tests pass.
+while the browser receives no PAT or OAuth token. Full CLI/Cloud tests and vet,
+UI lint/build, and disposable PostgreSQL GitHub inventory/durable-dedupe tests
+pass at revision `12df6c9`.
 
 The R5-005 fixture now exists and the operator supplied installation/repository
 numeric identity. The App must keep Metadata read-only and manually subscribe
@@ -153,9 +154,13 @@ only to `repository`. GitHub sends `installation` and
 `installation_repositories` as default lifecycle events for every App; they do
 not need to appear in the App API `events` array, and `installation_target` is
 not a substitute. The focused sanitized verifier and tests encode this boundary;
-live selected-repository remove/add must prove lifecycle delivery. Browser grant
-redemption, installation claim, lifecycle webhooks, repository/binding/init, and
-CLI/UI parity remain the active live gate.
+live selected-repository remove/add must prove lifecycle delivery. The live
+`added` delivery is accepted and durable replay returns `duplicate=true` after
+Cloud restart. GitHub's App delivery API still contains no matching `removed`
+delivery and no `repository` delivery, despite the reported remove/save/add/save
+operation. Those two sanitized deliveries, plus a live wrong-user check using a
+second GitHub account, remain the acceptance blockers; evidence must not be
+fabricated from mocks.
 
 The R5-005 live browser checkpoint exposed stale-keychain and project-first
 login UX defects. Browser login now starts from GitHub identity without asking
