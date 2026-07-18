@@ -103,6 +103,13 @@ currently proves the complete scenario. Do not change `MANUAL_GATED` to `DONE`
 until a maintainer runs the protected workflow, reviews the redacted output, and
 commits or otherwise records the accepted artifact.
 
+For R5-004C, run the direct-Agent gate before any target reset: the product CLI
+must be able to read the PAT from its OS keychain, resolve the Cloud-provided
+`{"nodes":[...]}` metadata, save the TLS pin atomically, and return direct
+TLS-pinned Agent status. If the OS keychain cannot complete the login/read
+operation, stop `PARTIAL`; do not reset the Agent VPS or attempt the Worker
+restart gate.
+
 Artifacts are written under `.tmp/e2e-k3s/<run-id>/`. Raw kubeconfig, SSH
 password, PAT, OTP/TOTP, app secret values, and raw logs must not be stored.
 

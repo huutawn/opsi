@@ -340,6 +340,14 @@ agreed on the completed session, checkpoint index four, node, Agent identity,
 and advancing heartbeat. The live mid-step Worker restart/resume scenario was
 not run because the completed healthy node has no safe production fault hook.
 
+R5-004C standardized the Cloud node-list response as `{"nodes":[...]}` and
+deployed the Cloud-only staging image update. The direct-Agent acceptance was
+then stopped before any target reset because the Fedora OS keychain did not
+complete the product CLI login operation. As a result, a PAT-authenticated,
+TLS-pinned direct status call and the Local UI shared-credential proof were not
+accepted; no Agent VPS decommission, reset, recovery bootstrap, Worker restart
+during `install_k3s`, or target reboot was performed in this attempt.
+
 Git-based deployment exists and can apply user-provided manifests. Such a
 manifest may contain its own Service, Ingress, Gateway, TLS, lifecycle, or
 shutdown configuration; those resources are user-owned input, not an

@@ -6,6 +6,20 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Repair Task
 
+### R5-004C acceptance status
+
+- `GET /api/projects/{project_id}/nodes` now has one canonical response
+  contract: `{"nodes":[...]}`. The CLI rejects malformed or unexpected node
+  response schemas without reflecting response bodies or credentials.
+- The Cloud-only image update was deployed to staging with an immutable digest;
+  the Bootstrap Worker and Agent images were intentionally retained because
+  their source did not change.
+- R5-004 remains `PARTIAL`: the Fedora OS keychain did not complete the
+  product CLI login operation, so direct TLS-pinned, PAT-authenticated CLI
+  status and the Local UI shared-credential acceptance could not be proven.
+  The Agent VPS was not reset, decommissioned, or re-bootstrapped, and the
+  Worker-restart gate was not attempted.
+
 - R5-004 live clean-VPS bootstrap ran on 2026-07-17 at revision
   `d3df6b8d2b3a029ea3f589dfb840ff296e7bdbd5`. The final CLI created one
   durable session and node through Cloud/Worker strict SSH; pinned K3s
