@@ -46,6 +46,12 @@ func (s Service) ProvisionBootstrapOwner(ctx context.Context, req Request) (Resu
 	if err != nil {
 		return Result{}, err
 	}
+	if req.LinkExistingOwner {
+		if !initialized {
+			return Result{}, &Error{Code: CodeNotInitialized, Message: "first owner must be initialized before linking OAuth identity"}
+		}
+		return s.linkExistingOwner(ctx, tx, state, req)
+	}
 	if initialized && (state.Email != req.Email || state.OrgSlug != req.OrgSlug || state.ProjectSlug != req.ProjectSlug) {
 		return Result{}, &Error{Code: CodeAlreadyInitialized, Message: "first owner is already initialized with a different identity tuple"}
 	}
@@ -114,6 +120,43 @@ func (s Service) ProvisionBootstrapOwner(ctx context.Context, req Request) (Resu
 	}
 	if err := tx.Commit(); err != nil {
 		return Result{}, fmt.Errorf("commit bootstrap owner: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) linkExistingOwner(ctx context.Context, tx *sql.Tx, state bootstrapState, req Request) (Result, error) {
+	now := s.clock()
+	result := Result{
+		UserID: state.UserID, OrganizationID: state.OrganizationID, ProjectID: state.ProjectID,
+		MembershipRole: "Owner", OAuthLinked: true,
+	}
+	orgCreated, orgChanged, err := ensureOrganizationOwner(ctx, tx, state.OrganizationID, state.UserID, now)
+	if err != nil {
+		return Result{}, err
+	}
+	projectCreated, projectChanged, err := ensureProjectOwner(ctx, tx, state.ProjectID, state.UserID, now)
+	if err != nil {
+		return Result{}, err
+	}
+	result.MembershipCreated = orgCreated || projectCreated
+	oauthCreated, err := ensureOAuthIdentity(ctx, tx, state.UserID, req.OAuthProvider, req.OAuthSubject, now)
+	if err != nil {
+		return Result{}, err
+	}
+	changed := orgCreated || orgChanged || projectCreated || projectChanged || oauthCreated
+	result.Reused = !changed
+	if changed {
+		metadata, _ := json.Marshal(map[string]any{
+			"user_id": state.UserID, "organization_id": state.OrganizationID, "project_id": state.ProjectID,
+			"oauth_provider": req.OAuthProvider, "reused": false,
+		})
+		if _, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id,org_id,project_id,actor_user_id,actor_type,action,resource_type,resource_id,result,metadata_redacted,created_at)
+			VALUES($1,$2,$3,NULL,'local-admin','ADMIN_BOOTSTRAP_OWNER_OAUTH_LINKED','admin_bootstrap',$4,'success',$5,$6)`, newID("aud"), state.OrganizationID, state.ProjectID, bootstrapStateKey, string(metadata), now); err != nil {
+			return Result{}, fmt.Errorf("audit bootstrap owner OAuth link: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Result{}, fmt.Errorf("commit bootstrap owner OAuth link: %w", err)
 	}
 	return result, nil
 }

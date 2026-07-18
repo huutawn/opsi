@@ -12,6 +12,7 @@ import (
 const (
 	CodeIdentityLinkRequired  = "ADMIN_IDENTITY_LINK_REQUIRED"
 	CodeRequiresPostgres      = "ADMIN_BOOTSTRAP_REQUIRES_POSTGRES"
+	CodeNotInitialized        = "ADMIN_BOOTSTRAP_NOT_INITIALIZED"
 	CodeAlreadyInitialized    = "ADMIN_BOOTSTRAP_ALREADY_INITIALIZED"
 	CodeConflict              = "ADMIN_BOOTSTRAP_CONFLICT"
 	CodeOAuthIdentityConflict = "OAUTH_IDENTITY_CONFLICT"
@@ -51,16 +52,17 @@ func ErrorCode(err error) string {
 }
 
 type Request struct {
-	Email         string
-	DisplayName   string
-	OrgName       string
-	OrgSlug       string
-	ProjectName   string
-	ProjectSlug   string
-	OAuthProvider string
-	OAuthSubject  string
-	IssuePAT      bool
-	PATTokenHash  string
+	Email             string
+	DisplayName       string
+	OrgName           string
+	OrgSlug           string
+	ProjectName       string
+	ProjectSlug       string
+	OAuthProvider     string
+	OAuthSubject      string
+	LinkExistingOwner bool
+	IssuePAT          bool
+	PATTokenHash      string
 }
 
 type Result struct {
@@ -79,6 +81,20 @@ type Result struct {
 }
 
 func NormalizeAndValidate(req Request, configuredProvider string) (Request, error) {
+	if req.LinkExistingOwner {
+		if strings.TrimSpace(req.Email) != "" || strings.TrimSpace(req.DisplayName) != "" || strings.TrimSpace(req.OrgName) != "" || strings.TrimSpace(req.OrgSlug) != "" || strings.TrimSpace(req.ProjectName) != "" || strings.TrimSpace(req.ProjectSlug) != "" || req.IssuePAT {
+			return Request{}, &Error{Code: CodeConflict, Message: "link-existing-owner accepts only OAuth identity flags"}
+		}
+		var err error
+		req.OAuthProvider, req.OAuthSubject, err = normalizeOAuthIdentity(req.OAuthProvider, req.OAuthSubject, configuredProvider)
+		if err != nil {
+			return Request{}, err
+		}
+		if req.OAuthProvider == "" {
+			return Request{}, &Error{Code: CodeIdentityLinkRequired, Message: "oauth-provider and oauth-subject are required"}
+		}
+		return req, nil
+	}
 	var err error
 	if req.Email, err = normalizeEmail(req.Email); err != nil {
 		return Request{}, err
@@ -98,27 +114,36 @@ func NormalizeAndValidate(req Request, configuredProvider string) (Request, erro
 	if req.ProjectSlug, err = normalizeSlug(req.ProjectSlug, req.ProjectName); err != nil {
 		return Request{}, fmt.Errorf("project slug: %w", err)
 	}
-	if containsControl(req.OAuthProvider) || containsControl(req.OAuthSubject) {
-		return Request{}, &Error{Code: CodeConflict, Message: "OAuth identity is invalid"}
-	}
-	req.OAuthProvider = strings.ToLower(strings.TrimSpace(req.OAuthProvider))
-	req.OAuthSubject = strings.TrimSpace(req.OAuthSubject)
-	if (req.OAuthProvider == "") != (req.OAuthSubject == "") {
-		return Request{}, &Error{Code: CodeIdentityLinkRequired, Message: "oauth-provider and oauth-subject must be supplied together"}
-	}
-	if req.OAuthProvider != "" {
-		provider := strings.ToLower(strings.TrimSpace(configuredProvider))
-		if provider == "" || req.OAuthProvider != provider {
-			return Request{}, &Error{Code: CodeConflict, Message: "OAuth provider is not configured by Cloud"}
-		}
-		if len(req.OAuthSubject) > maxOAuthSubjectLength || containsControl(req.OAuthSubject) {
-			return Request{}, &Error{Code: CodeConflict, Message: "OAuth subject is invalid"}
-		}
+	req.OAuthProvider, req.OAuthSubject, err = normalizeOAuthIdentity(req.OAuthProvider, req.OAuthSubject, configuredProvider)
+	if err != nil {
+		return Request{}, err
 	}
 	if req.OAuthProvider == "" && !req.IssuePAT {
 		return Request{}, &Error{Code: CodeIdentityLinkRequired, Message: "OAuth linkage or pat-output-file is required"}
 	}
 	return req, nil
+}
+
+func normalizeOAuthIdentity(provider, subject, configuredProvider string) (string, string, error) {
+	if containsControl(provider) || containsControl(subject) {
+		return "", "", &Error{Code: CodeConflict, Message: "OAuth identity is invalid"}
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	subject = strings.TrimSpace(subject)
+	if (provider == "") != (subject == "") {
+		return "", "", &Error{Code: CodeIdentityLinkRequired, Message: "oauth-provider and oauth-subject must be supplied together"}
+	}
+	if provider == "" {
+		return "", "", nil
+	}
+	configuredProvider = strings.ToLower(strings.TrimSpace(configuredProvider))
+	if configuredProvider == "" || provider != configuredProvider {
+		return "", "", &Error{Code: CodeConflict, Message: "OAuth provider is not configured by Cloud"}
+	}
+	if len(subject) > maxOAuthSubjectLength {
+		return "", "", &Error{Code: CodeConflict, Message: "OAuth subject is invalid"}
+	}
+	return provider, subject, nil
 }
 
 func normalizeEmail(value string) (string, error) {

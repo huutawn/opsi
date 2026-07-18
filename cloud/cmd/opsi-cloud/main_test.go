@@ -26,7 +26,7 @@ func TestBootstrapOwnerHelpListsIdentityFlags(t *testing.T) {
 	if code := run([]string{"admin", "bootstrap-owner", "--help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("help exit=%d stderr=%s", code, stderr.String())
 	}
-	for _, flag := range []string{"--config", "--email", "--org-name", "--project-name", "--oauth-provider", "--oauth-subject", "--pat-output-file", "--json"} {
+	for _, flag := range []string{"--config", "--email", "--org-name", "--project-name", "--oauth-provider", "--oauth-subject", "--link-existing-owner", "--pat-output-file", "--json"} {
 		if !strings.Contains(stderr.String(), flag) {
 			t.Fatalf("help missing %s: %s", flag, stderr.String())
 		}
@@ -37,6 +37,7 @@ func TestBootstrapOwnerValidationFailsBeforeDatabaseAccess(t *testing.T) {
 	tests := [][]string{
 		{"admin", "bootstrap-owner"},
 		{"admin", "bootstrap-owner", "--config", "missing.json", "--email", "owner@example.com", "--org-name", "Org", "--project-name", "Project"},
+		{"admin", "bootstrap-owner", "--config", "missing.json", "--link-existing-owner", "--oauth-provider", "github", "--oauth-subject", "143307746"},
 	}
 	for _, args := range tests {
 		var stdout, stderr bytes.Buffer

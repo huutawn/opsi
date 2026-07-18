@@ -98,7 +98,16 @@ OAuth code, or state in browser storage.
 Expected failure guidance:
 
 - `GITHUB_ACCOUNT_UNLINKED`: repeat the supported `bootstrap-owner` operation
-  with provider `github` and the verified numeric GitHub user subject.
+  against the canonical initialized owner without guessing its original tuple:
+
+  ```bash
+  opsi-cloud admin bootstrap-owner \
+    --config /etc/opsi/cloud.json \
+    --link-existing-owner \
+    --oauth-provider github \
+    --oauth-subject VERIFIED_NUMERIC_GITHUB_USER_ID \
+    --json
+  ```
 - `OPSI_MEMBERSHIP_REQUIRED`: restore an active Opsi project membership for the
   already linked user.
 - `PROJECT_SELECTION_REQUIRED`: the identity has multiple project memberships;

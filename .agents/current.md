@@ -166,6 +166,14 @@ never stores browser auth state. Failed GitHub callbacks return one-time typed
 errors to the Local UI instead of leaving the operator on a public JSON error
 page. Focused Cloud/CLI tests and UI lint/build cover the recovery path.
 
+The first live projectless login then proved the GitHub account itself was not
+prelinked. The canonical `bootstrap-owner` command now has an explicit
+`--link-existing-owner` recovery mode that reads the durable bootstrap marker,
+restores its Owner memberships if required, conflict-checks the numeric OAuth
+identity, and links it transactionally without requiring the original
+email/org/project tuple or issuing a PAT. It remains a local admin operation;
+there is no browser, public API, or parallel deployment path.
+
 ## Verification
 
 R5-002 regression checks are focused Cloud tests,

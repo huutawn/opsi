@@ -36,11 +36,12 @@ func runBootstrapOwner(args []string, stdout, stderr io.Writer) int {
 	displayName := fs.String("display-name", "", "owner display name")
 	oauthProvider := fs.String("oauth-provider", "", "configured OAuth provider")
 	oauthSubject := fs.String("oauth-subject", "", "verified provider subject to prelink")
+	linkExistingOwner := fs.Bool("link-existing-owner", false, "link OAuth identity to the canonical initialized owner")
 	patOutputFile := fs.String("pat-output-file", "", "new mode-0600 file for the initial PAT")
 	jsonOutput := fs.Bool("json", false, "write metadata as JSON")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: opsi-cloud admin bootstrap-owner --config FILE --email EMAIL --org-name NAME --project-name NAME (--oauth-provider PROVIDER --oauth-subject SUBJECT | --pat-output-file FILE) [flags]")
-		fmt.Fprintln(stderr, "Flags: --config --email --org-name --org-slug --project-name --project-slug --display-name --oauth-provider --oauth-subject --pat-output-file --json")
+		fmt.Fprintln(stderr, "Usage: opsi-cloud admin bootstrap-owner --config FILE [--link-existing-owner --oauth-provider PROVIDER --oauth-subject SUBJECT | --email EMAIL --org-name NAME --project-name NAME (--oauth-provider PROVIDER --oauth-subject SUBJECT | --pat-output-file FILE)] [flags]")
+		fmt.Fprintln(stderr, "Flags: --config --email --org-name --org-slug --project-name --project-slug --display-name --oauth-provider --oauth-subject --link-existing-owner --pat-output-file --json")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -53,8 +54,12 @@ func runBootstrapOwner(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "unexpected arguments")
 		return 2
 	}
-	if *configPath == "" || *email == "" || *orgName == "" || *projectName == "" {
-		fmt.Fprintln(stderr, "ADMIN_BOOTSTRAP_CONFLICT: config, email, org-name, and project-name are required")
+	if *configPath == "" {
+		fmt.Fprintln(stderr, "ADMIN_BOOTSTRAP_CONFLICT: config is required")
+		return 2
+	}
+	if !*linkExistingOwner && (*email == "" || *orgName == "" || *projectName == "") {
+		fmt.Fprintln(stderr, "ADMIN_BOOTSTRAP_CONFLICT: email, org-name, and project-name are required")
 		return 2
 	}
 	cfg, err := webhookrelay.LoadConfig(*configPath)
@@ -65,7 +70,7 @@ func runBootstrapOwner(args []string, stdout, stderr io.Writer) int {
 	req, err := adminbootstrap.NormalizeAndValidate(adminbootstrap.Request{
 		Email: *email, DisplayName: *displayName, OrgName: *orgName, OrgSlug: *orgSlug,
 		ProjectName: *projectName, ProjectSlug: *projectSlug, OAuthProvider: *oauthProvider,
-		OAuthSubject: *oauthSubject, IssuePAT: *patOutputFile != "",
+		OAuthSubject: *oauthSubject, LinkExistingOwner: *linkExistingOwner, IssuePAT: *patOutputFile != "",
 	}, "github")
 	if err != nil {
 		fmt.Fprintln(stderr, err)

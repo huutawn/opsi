@@ -67,6 +67,58 @@ func TestPostgresBootstrapOwnerIsIdempotentAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestPostgresBootstrapOwnerLinksExistingMarkerOAuthIdentity(t *testing.T) {
+	dsn := requirePostgresTestDSN(t)
+	db := openMigratedPostgres(t, dsn)
+	defer db.Close()
+	resetBootstrapMarker(t, db)
+	suffix := slugify(newID("link"))
+	link, err := NormalizeAndValidate(Request{LinkExistingOwner: true, OAuthProvider: "github", OAuthSubject: "143307746"}, "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Service{DB: db}).ProvisionBootstrapOwner(t.Context(), link); ErrorCode(err) != CodeNotInitialized {
+		t.Fatalf("link without bootstrap marker err=%v", err)
+	}
+	_, patHash, _, err := auth.NewPAT(time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := NormalizeAndValidate(Request{
+		Email: suffix + "@example.test", OrgName: "Link " + suffix, OrgSlug: "org-" + suffix,
+		ProjectName: "Link " + suffix, ProjectSlug: "project-" + suffix, IssuePAT: true, PATTokenHash: patHash,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := (Service{DB: db}).ProvisionBootstrapOwner(t.Context(), initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked, err := (Service{DB: db}).ProvisionBootstrapOwner(t.Context(), link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linked.UserID != owner.UserID || linked.OrganizationID != owner.OrganizationID || linked.ProjectID != owner.ProjectID || !linked.OAuthLinked || linked.Reused {
+		t.Fatalf("unexpected linked result: owner=%+v linked=%+v", owner, linked)
+	}
+	userID, err := (auth.PostgresStore{DB: db}).OAuthUser(t.Context(), "github", "143307746")
+	if err != nil || userID != owner.UserID {
+		t.Fatalf("linked OAuth user=%q err=%v", userID, err)
+	}
+	reused, err := (Service{DB: db}).ProvisionBootstrapOwner(t.Context(), link)
+	if err != nil || !reused.Reused {
+		t.Fatalf("idempotent link result=%+v err=%v", reused, err)
+	}
+	var metadata string
+	if err := db.QueryRow(`SELECT metadata_redacted::text FROM cloud_audit_events WHERE action='ADMIN_BOOTSTRAP_OWNER_OAUTH_LINKED' AND project_id=$1 ORDER BY created_at DESC LIMIT 1`, owner.ProjectID).Scan(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(metadata, link.OAuthSubject) {
+		t.Fatalf("OAuth subject leaked into audit: %s", metadata)
+	}
+}
+
 func TestPostgresBootstrapOwnerConcurrentSameAndConflictingInput(t *testing.T) {
 	dsn := requirePostgresTestDSN(t)
 	db := openMigratedPostgres(t, dsn)

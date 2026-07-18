@@ -13,6 +13,25 @@ func TestNormalizeAndValidateBootstrapOwner(t *testing.T) {
 	}
 }
 
+func TestNormalizeAndValidateExistingOwnerOAuthLink(t *testing.T) {
+	got, err := NormalizeAndValidate(Request{LinkExistingOwner: true, OAuthProvider: " GitHub ", OAuthSubject: " 143307746 "}, "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OAuthProvider != "github" || got.OAuthSubject != "143307746" {
+		t.Fatalf("unexpected link normalization: %+v", got)
+	}
+	for _, req := range []Request{
+		{LinkExistingOwner: true},
+		{LinkExistingOwner: true, OAuthProvider: "github", OAuthSubject: "123", Email: "owner@example.test"},
+		{LinkExistingOwner: true, OAuthProvider: "github", OAuthSubject: "123", IssuePAT: true},
+	} {
+		if _, err := NormalizeAndValidate(req, "github"); err == nil {
+			t.Fatalf("invalid existing-owner link accepted: %+v", req)
+		}
+	}
+}
+
 func TestNormalizeAndValidateBootstrapOwnerRejectsInvalidInput(t *testing.T) {
 	tests := []struct {
 		name string
