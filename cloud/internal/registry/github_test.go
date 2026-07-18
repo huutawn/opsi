@@ -157,6 +157,10 @@ func TestGitHubBindingValidationAndUniqueness(t *testing.T) {
 	if _, err := service.CreateGitHubServiceBinding(project.ID, GitHubServiceBindingDraft{ServiceID: secondService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: "user-1"}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_ALREADY_BOUND") {
 		t.Fatalf("duplicate repository key err=%v", err)
 	}
+	secondBinding, err := service.CreateGitHubServiceBinding(project.ID, GitHubServiceBindingDraft{ServiceID: secondService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "worker", ConfigPath: "services/worker/opsi.yaml", CreatedBy: "user-1"})
+	if err != nil || secondBinding.RepositoryID != repository.RepositoryID || secondBinding.ServiceKey != "worker" {
+		t.Fatalf("second service binding=%+v err=%v", secondBinding, err)
+	}
 	archived := testGitHubRepository(402, installation.InstallationID)
 	archived.Archived = true
 	if _, err := service.UpsertGitHubRepository(archived); err != nil {
