@@ -1,8 +1,10 @@
 import type { FormEvent } from "react";
+import type { LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
 
 export type ConsoleController = {
   active: string;
+  session: LocalSessionStatus | null;
   setActive: (view: string) => void;
   setProjectID: (id: string) => void;
   setServiceDetail: (service: ServiceRecord | null) => void;

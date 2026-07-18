@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { LocalClient } from "@/lib/api/local-client";
+import { LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type {
   BootstrapSession,
   ConsoleState,
@@ -14,6 +14,7 @@ import type {
 } from "@/lib/contracts/registry";
 
 export function useConsoleState() {
+  const [session, setSession] = useState<LocalSessionStatus | null>(null);
   const [orgID, setOrgID] = useState("org-1");
   const [active, setActive] = useState("Projects");
   const [projectID, setProjectID] = useState("");
@@ -51,6 +52,7 @@ export function useConsoleState() {
     patch({ status: "loading", message: "" });
     try {
       const session = await client.session();
+      setSession(session);
       if (!session.authenticated) {
         patch({
           status: "permission",
@@ -329,6 +331,7 @@ export function useConsoleState() {
 
   return {
     active,
+    session,
     orgID,
     setActive,
     setOrgID,

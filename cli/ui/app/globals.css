@@ -154,15 +154,92 @@ button:disabled {
   white-space: nowrap;
 }
 
-.authNotice {
-  flex: 1 0 100%;
+.authGate {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(198, 215, 205, 0.5), transparent 34%),
+    radial-gradient(circle at 82% 80%, rgba(231, 220, 201, 0.58), transparent 38%),
+    var(--bg);
+}
+
+.authGateCard {
+  width: min(100%, 520px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 38px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 24px 70px rgba(39, 43, 38, 0.12);
+  text-align: center;
+}
+
+.authMark {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 18px;
+  place-items: center;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 26px;
+  font-weight: 800;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.authGateCard h1 {
+  margin: 0;
+  font-size: clamp(28px, 5vw, 42px);
+  letter-spacing: -0.04em;
+}
+
+.authGateText,
+.authGateHint,
+.authGatePrivacy {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.authGateText {
+  margin: 14px 0 22px;
+}
+
+.authGateHint {
+  margin: 0 0 16px;
+  font-size: 13px;
+}
+
+.authGateError {
+  margin: 0 0 16px;
   border: 1px solid #edc7c8;
   border-radius: 8px;
-  padding: 12px 14px;
+  padding: 11px 12px;
   background: var(--bad-bg);
   color: var(--bad);
   font-size: 13px;
   font-weight: 650;
+  text-align: left;
+}
+
+.authGateButton {
+  width: 100%;
+  min-height: 46px;
+  font-weight: 700;
+}
+
+.authGatePrivacy {
+  margin: 18px 0 0;
+  font-size: 11px;
 }
 
 .projectPicker {
@@ -661,6 +738,15 @@ th {
 @media (max-width: 560px) {
   .main {
     padding: 12px;
+  }
+
+  .authGate {
+    padding: 16px;
+  }
+
+  .authGateCard {
+    border-radius: 14px;
+    padding: 28px 20px;
   }
 
   .metrics {
