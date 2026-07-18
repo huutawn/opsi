@@ -1,56 +1,22 @@
 package keychain
 
 import (
-	"fmt"
+	"errors"
 	"sync"
-
-	keyring "github.com/99designs/keyring"
 )
 
 const patKey = "default-pat"
+
+var (
+	ErrPATNotFound         = errors.New("PAT is not stored in the OS keychain")
+	ErrKeychainTimeout     = errors.New("OS keychain did not respond before the deadline; unlock Secret Service and try again")
+	ErrKeychainUnavailable = errors.New("OS keychain is unavailable or locked; unlock Secret Service and try again")
+)
 
 type Store interface {
 	SetPAT(token string) error
 	GetPAT() (string, error)
 	DeletePAT() error
-}
-
-type OSStore struct {
-	ring keyring.Keyring
-}
-
-func NewOSStore() (*OSStore, error) {
-	ring, err := keyring.Open(keyring.Config{
-		ServiceName: "opsi",
-		AllowedBackends: []keyring.BackendType{
-			keyring.SecretServiceBackend,
-			keyring.PassBackend,
-			keyring.KWalletBackend,
-			keyring.KeyCtlBackend,
-			keyring.KeychainBackend,
-			keyring.WinCredBackend,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open OS keychain: %w", err)
-	}
-	return &OSStore{ring: ring}, nil
-}
-
-func (s *OSStore) SetPAT(token string) error {
-	return s.ring.Set(keyring.Item{Key: patKey, Data: []byte(token)})
-}
-
-func (s *OSStore) GetPAT() (string, error) {
-	item, err := s.ring.Get(patKey)
-	if err != nil {
-		return "", err
-	}
-	return string(item.Data), nil
-}
-
-func (s *OSStore) DeletePAT() error {
-	return s.ring.Remove(patKey)
 }
 
 type FakeStore struct {
@@ -71,7 +37,7 @@ func (s *FakeStore) GetPAT() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.token == "" {
-		return "", fmt.Errorf("PAT not found")
+		return "", ErrPATNotFound
 	}
 	return s.token, nil
 }

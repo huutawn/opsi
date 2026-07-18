@@ -22,3 +22,16 @@ func TestFakeStoreMissingPAT(t *testing.T) {
 		t.Fatal("expected missing PAT error")
 	}
 }
+
+func TestFakeStoreDeletePAT(t *testing.T) {
+	store := NewFakeStore()
+	if err := store.SetPAT("token-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeletePAT(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetPAT(); err == nil {
+		t.Fatal("expected PAT to be deleted")
+	}
+}
