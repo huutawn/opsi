@@ -337,6 +337,14 @@ th {
   text-align: center;
 }
 
+.notice {
+  border: 1px solid #b9ddf4;
+  border-radius: 8px;
+  background: var(--info-bg);
+  padding: 12px 14px;
+  color: var(--info);
+}
+
 .form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

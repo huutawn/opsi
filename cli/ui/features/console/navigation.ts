@@ -1,5 +1,5 @@
 export const navGroups = [
-  ["Setup", "Projects", "Servers / Nodes"],
+  ["Setup", "Projects", "Servers / Nodes", "GitHub"],
   ["Operate", "Overview", "Services", "Deployments", "Incidents"],
   ["Understand", "Topology", "Logs", "Metrics", "Support"],
   ["Control", "Secrets", "Audit", "Settings"],

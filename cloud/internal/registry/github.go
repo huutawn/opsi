@@ -40,19 +40,21 @@ type GitHubInstallation struct {
 }
 
 type GitHubRepository struct {
-	RepositoryID   int64     `json:"repository_id"`
-	InstallationID int64     `json:"installation_id"`
-	OwnerID        int64     `json:"owner_id"`
-	OwnerLogin     string    `json:"owner_login"`
-	Name           string    `json:"name"`
-	FullName       string    `json:"full_name"`
-	Private        bool      `json:"private"`
-	Archived       bool      `json:"archived"`
-	Disabled       bool      `json:"disabled"`
-	DefaultBranch  string    `json:"default_branch"`
-	Status         string    `json:"status"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	RepositoryID     int64     `json:"repository_id"`
+	InstallationID   int64     `json:"installation_id"`
+	OwnerID          int64     `json:"owner_id"`
+	OwnerLogin       string    `json:"owner_login"`
+	Name             string    `json:"name"`
+	FullName         string    `json:"full_name"`
+	Private          bool      `json:"private"`
+	Archived         bool      `json:"archived"`
+	Disabled         bool      `json:"disabled"`
+	DefaultBranch    string    `json:"default_branch"`
+	Status           string    `json:"status"`
+	ClaimStatus      string    `json:"claim_status"`
+	ClaimedProjectID string    `json:"claimed_project_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type GitHubInstallationProjectLink struct {
@@ -411,6 +413,15 @@ func (s *Service) ListGitHubRepositories(projectID string) ([]GitHubRepository, 
 	repositories := make([]GitHubRepository, 0)
 	for _, repository := range s.githubRepositories {
 		if _, ok := linked[repository.InstallationID]; ok {
+			repository.ClaimStatus = "available"
+			if claim, exists := s.githubRepositoryClaims[repository.RepositoryID]; exists && claim.Status == GitHubLinkActive {
+				if claim.ProjectID == projectID {
+					repository.ClaimStatus = GitHubLinkActive
+					repository.ClaimedProjectID = projectID
+				} else {
+					repository.ClaimStatus = "conflict"
+				}
+			}
 			repositories = append(repositories, repository)
 		}
 	}

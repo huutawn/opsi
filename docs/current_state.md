@@ -176,7 +176,18 @@ Safe ActionPlane client.
   enforce one active project claim per repository, and bind monorepo service
   keys only to services in that project. Each service has at most one active
   GitHub binding; repository ownership never binds directly to Agent, Node,
-  runtime, or VPS identity.
+  runtime, or VPS identity. Project-scoped repository inventory also reports
+  `available`, same-project `active`, or cross-project `conflict` claim state;
+  conflict responses do not reveal the other project ID.
+- Manual GitHub control-plane parity now uses the existing `/v1` endpoints.
+  CLI commands list installations/repositories/bindings, claim/release
+  repositories, create/remove bindings, and run a browser-backed installation
+  claim with a bounded loopback callback. The Local API maps the same inventory
+  and mutation routes, redeems installation grants server-side with the PAT
+  from OS keychain, and exposes a Local UI for installation connection,
+  repository claim/release, multi-service bindings, conflict/retry states, and
+  explicit release/remove confirmation. Browser code does not call Cloud or
+  GitHub directly and does not use browser credential storage.
 - Postgres-backed registry/relay/audit/idempotency/bootstrap/PAT/OTP state when
   configured; development/test modes may use in-memory implementations where
   production validation permits.
@@ -397,6 +408,13 @@ user-auth/repository-bootstrap verification, Actions OIDC, trusted
 OCI artifact delivery, managed
 gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
 E2E, release hardening, supply-chain evidence, and measured disaster recovery.
+
+The R5-005 live checkpoint is currently `OPERATOR_REQUIRED` because the
+preferred disposable repository `huutawn/opsi-r5-005-fixture` does not exist.
+Sanitized public preflight confirms the canonical callback, PKCE S256/state,
+fixed GitHub authorization endpoint, public health, and unsigned webhook
+rejection. No live App installation, installation token, repository webhook,
+claim/binding, `opsi init`, or UI parity claim is made yet.
 
 ## Ordered next work
 

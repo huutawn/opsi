@@ -82,7 +82,7 @@ func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer
 
 func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error)) *http.ServeMux {
 	localSession := newLocalSessionToken()
-	authFlow := &localAuthFlow{states: map[string]time.Time{}}
+	authFlow := &localAuthFlow{states: map[string]time.Time{}, installationClaims: map[string]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -96,6 +96,9 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	})
 	mux.HandleFunc("/api/local/session/callback", func(w http.ResponseWriter, r *http.Request) {
 		completeLocalBrowserLogin(w, r, cfg, factory, authFlow)
+	})
+	mux.HandleFunc("/api/local/github/installations/claim/callback", func(w http.ResponseWriter, r *http.Request) {
+		completeLocalInstallationClaim(w, r, cfg, factory, authFlow)
 	})
 	mux.HandleFunc("/api/local/session/logout", func(w http.ResponseWriter, r *http.Request) {
 		if !requireLocalSession(w, r, localSession) {
@@ -132,7 +135,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			"agent_connected": probeAgent(r.Context(), cfg, factory),
 			"token_status":    tokenStatus(factory),
 			"local_session":   localSession,
-			"capabilities":    []string{"projects", "nodes", "services", "deployments", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
+			"capabilities":    []string{"projects", "nodes", "services", "deployments", "github_app", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
 	})
 	mux.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {
@@ -148,15 +151,16 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		_ = json.NewEncoder(w).Encode(status)
 	})
 	mux.HandleFunc("/api/local/", func(w http.ResponseWriter, r *http.Request) {
-		proxyLocalRegistry(w, r, cfg, factory, localSession)
+		proxyLocalRegistry(w, r, cfg, factory, localSession, authFlow)
 	})
 	mux.Handle("/", newUIHandler(uiDir, devUI))
 	return mux
 }
 
 type localAuthFlow struct {
-	mu     sync.Mutex
-	states map[string]time.Time
+	mu                 sync.Mutex
+	states             map[string]time.Time
+	installationClaims map[string]time.Time
 }
 
 func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.Config, flow *localAuthFlow) {
@@ -373,88 +377,6 @@ func storeFromFactory(factory func() (keychain.Store, error)) (keychain.Store, e
 		return nil, fmt.Errorf("keychain is not configured")
 	}
 	return factory()
-}
-
-func writeLocalJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), localSession string) {
-	if isMutation(r.Method) {
-		if r.Header.Get("X-Local-Session") != localSession {
-			writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_SESSION_REQUIRED", "mutating local requests require X-Local-Session")
-			return
-		}
-		if r.Header.Get("Idempotency-Key") == "" {
-			writeLocalError(w, r, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "mutating local requests require Idempotency-Key")
-			return
-		}
-	}
-	if localTelemetry(w, r, cfg, factory) {
-		return
-	}
-	if localSecretOperation(w, r, cfg, factory) {
-		return
-	}
-	if localIncidentOperation(w, r, cfg, factory) {
-		return
-	}
-	cloud, err := url.Parse(cfg.CloudURL)
-	if err != nil || cloud.Scheme == "" || cloud.Host == "" {
-		writeLocalError(w, r, http.StatusBadGateway, "INVALID_CLOUD_URL", "local cloud_url is invalid")
-		return
-	}
-	path, rawQuery, err := localToCloudPath(r.URL)
-	if err != nil {
-		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", err.Error())
-		return
-	}
-	target := *cloud
-	target.Path = path
-	target.RawQuery = rawQuery
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	if projectID, serviceID, ok := localDeploymentIDs(r.URL.Path, r.Method); ok {
-		sourceType, found, err := fetchCloudServiceSourceType(ctx, *cloud, projectID, serviceID, r.Header, factory)
-		if err != nil {
-			writeLocalError(w, r, http.StatusBadGateway, "LOCAL_DEPLOY_VALIDATION_FAILED", "could not validate service deployment source")
-			return
-		}
-		if found && sourceType == "image" {
-			writeLocalError(w, r, http.StatusBadRequest, "IMAGE_DEPLOY_NOT_SUPPORTED", "Image-source deploy is not supported by the current Agent runner. Use Git source or enable the image deploy capability.")
-			return
-		}
-	}
-	req, err := http.NewRequestWithContext(ctx, r.Method, target.String(), r.Body)
-	if err != nil {
-		writeLocalError(w, r, http.StatusBadGateway, "LOCAL_PROXY_REQUEST_FAILED", "could not create Cloud request")
-		return
-	}
-	copyProxyHeaders(req.Header, r.Header)
-	req.Header.Del("Authorization")
-	if pat := optionalPAT(factory); pat != "" {
-		req.Header.Set("Authorization", "Bearer "+pat)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		writeLocalError(w, r, http.StatusBadGateway, "CLOUD_UNAVAILABLE", "Cloud registry is unavailable")
-		return
-	}
-	defer resp.Body.Close()
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	if requestID := r.Header.Get("X-Request-ID"); requestID != "" {
-		w.Header().Set("X-Request-ID", requestID)
-	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
 }
 
 func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
@@ -1027,48 +949,6 @@ func fetchCloudServiceSourceType(ctx context.Context, cloud url.URL, projectID, 
 		}
 	}
 	return "", false, nil
-}
-
-func localToCloudPath(u *url.URL) (string, string, error) {
-	path := strings.TrimPrefix(u.Path, "/api/local")
-	if path == "/projects" || path == "/projects/" {
-		q := u.Query()
-		orgID := q.Get("org_id")
-		if orgID == "" {
-			orgID = "org-1"
-		}
-		q.Del("org_id")
-		return "/api/orgs/" + url.PathEscape(orgID) + "/projects", q.Encode(), nil
-	}
-	if strings.HasPrefix(path, "/projects/") && strings.HasSuffix(path, "/nodes/bootstrap") {
-		return "/api" + strings.TrimSuffix(path, "/nodes/bootstrap") + "/bootstrap-sessions", u.RawQuery, nil
-	}
-	if strings.HasPrefix(path, "/projects/") {
-		return "/api" + path, u.RawQuery, nil
-	}
-	return "", "", fmt.Errorf("local route %s is not implemented", u.Path)
-}
-
-func isMutation(method string) bool {
-	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
-}
-
-func copyProxyHeaders(dst, src http.Header) {
-	for _, key := range []string{"Content-Type", "X-Request-ID", "Idempotency-Key"} {
-		if value := src.Get(key); value != "" {
-			dst.Set(key, value)
-		}
-	}
-}
-
-func writeLocalError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
-	requestID := r.Header.Get("X-Request-ID")
-	w.Header().Set("content-type", "application/json")
-	if requestID != "" {
-		w.Header().Set("X-Request-ID", requestID)
-	}
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": message, "retryable": status >= 500, "request_id": requestID}})
 }
 
 func newLocalSessionToken() string {

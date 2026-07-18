@@ -353,9 +353,8 @@ func runInstallationClaim(ctx context.Context, output io.Writer, client *cloudcl
 	if err != nil {
 		return err
 	}
-	authorizationURL, parseErr := url.Parse(started.AuthorizationURL)
-	if parseErr != nil || authorizationURL.Scheme != "https" || authorizationURL.Host == "" || authorizationURL.User != nil || strings.IndexFunc(started.AuthorizationURL, unicode.IsControl) >= 0 {
-		return errors.New("Cloud returned an invalid installation authorization URL")
+	if err := validateGitHubAuthorizationURL(started.AuthorizationURL); err != nil {
+		return err
 	}
 	if _, err := fmt.Fprintf(output, "Open this URL to authorize the GitHub App installation:\n%s\n", started.AuthorizationURL); err != nil {
 		return err
@@ -377,6 +376,14 @@ func runInstallationClaim(ctx context.Context, output io.Writer, client *cloudcl
 	case <-ctx.Done():
 		return errors.New("timed out waiting for GitHub installation authorization")
 	}
+}
+
+func validateGitHubAuthorizationURL(raw string) error {
+	authorizationURL, err := url.Parse(raw)
+	if err != nil || authorizationURL.Scheme != "https" || authorizationURL.Host == "" || authorizationURL.User != nil || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
+		return errors.New("Cloud returned an invalid installation authorization URL")
+	}
+	return nil
 }
 
 type claimResult struct {

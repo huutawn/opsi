@@ -46,6 +46,14 @@ func TestGitHubInventoryClaimAndBindingParityBehavior(t *testing.T) {
 	if _, err := service.ClaimGitHubRepository(secondProject.ID, repository.RepositoryID, "user-2"); !hasGitHubCode(err, "GITHUB_REPOSITORY_ALREADY_CLAIMED") {
 		t.Fatalf("cross-project claim err=%v", err)
 	}
+	firstInventory, err := service.ListGitHubRepositories(firstProject.ID)
+	if err != nil || len(firstInventory) != 1 || firstInventory[0].ClaimStatus != GitHubLinkActive || firstInventory[0].ClaimedProjectID != firstProject.ID {
+		t.Fatalf("first project claim inventory=%+v err=%v", firstInventory, err)
+	}
+	secondInventory, err := service.ListGitHubRepositories(secondProject.ID)
+	if err != nil || len(secondInventory) != 1 || secondInventory[0].ClaimStatus != "conflict" || secondInventory[0].ClaimedProjectID != "" {
+		t.Fatalf("cross-project conflict inventory=%+v err=%v", secondInventory, err)
+	}
 	if _, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: secondService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: "user-1"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-project service err=%v", err)
 	}
@@ -84,6 +92,10 @@ func TestGitHubInventoryClaimAndBindingParityBehavior(t *testing.T) {
 	}
 	if service.githubRepositoryClaims[repository.RepositoryID].Status != GitHubLinkRevoked {
 		t.Fatalf("claim=%+v", service.githubRepositoryClaims[repository.RepositoryID])
+	}
+	firstInventory, err = service.ListGitHubRepositories(firstProject.ID)
+	if err != nil || len(firstInventory) != 1 || firstInventory[0].ClaimStatus != "available" || firstInventory[0].ClaimedProjectID != "" {
+		t.Fatalf("released inventory=%+v err=%v", firstInventory, err)
 	}
 	if err := service.MarkGitHubInstallationStatus(installation.InstallationID, GitHubInstallationActive, false); err != nil {
 		t.Fatal(err)

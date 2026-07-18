@@ -371,16 +371,26 @@ func (s PostgresService) ListGitHubRepositories(projectID string) ([]GitHubRepos
 	if _, err := githubProject(ctx, s.DB, projectID); err != nil {
 		return nil, githubPostgresError(err)
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT r.repository_id, r.installation_id, r.owner_id, r.owner_login, r.name, r.full_name, r.private, r.archived, r.disabled, r.default_branch, r.status, r.created_at, r.updated_at FROM github_repositories r JOIN github_installation_project_links l ON l.installation_id=r.installation_id WHERE l.project_id=$1 AND l.status='active' ORDER BY r.repository_id`, projectID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT r.repository_id, r.installation_id, r.owner_id, r.owner_login, r.name, r.full_name, r.private, r.archived, r.disabled, r.default_branch, r.status, r.created_at, r.updated_at, c.project_id, c.status FROM github_repositories r JOIN github_installation_project_links l ON l.installation_id=r.installation_id LEFT JOIN github_repository_claims c ON c.repository_id=r.repository_id WHERE l.project_id=$1 AND l.status='active' ORDER BY r.repository_id`, projectID)
 	if err != nil {
 		return nil, githubPostgresError(err)
 	}
 	defer rows.Close()
 	var repositories []GitHubRepository
 	for rows.Next() {
-		repository, err := scanGitHubRepository(rows)
-		if err != nil {
+		var repository GitHubRepository
+		var claimProjectID, claimStatus sql.NullString
+		if err := rows.Scan(&repository.RepositoryID, &repository.InstallationID, &repository.OwnerID, &repository.OwnerLogin, &repository.Name, &repository.FullName, &repository.Private, &repository.Archived, &repository.Disabled, &repository.DefaultBranch, &repository.Status, &repository.CreatedAt, &repository.UpdatedAt, &claimProjectID, &claimStatus); err != nil {
 			return nil, githubPostgresError(err)
+		}
+		repository.ClaimStatus = "available"
+		if claimStatus.String == GitHubLinkActive {
+			if claimProjectID.String == projectID {
+				repository.ClaimStatus = GitHubLinkActive
+				repository.ClaimedProjectID = projectID
+			} else {
+				repository.ClaimStatus = "conflict"
+			}
 		}
 		repositories = append(repositories, repository)
 	}

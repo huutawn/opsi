@@ -138,7 +138,26 @@ Agent VPS; do not reset or rebuild it again. The live Worker restart during
 `install_k3s` is a mandatory R5-017 gate on a disposable VPS or fresh reset
 with a deterministic staging-only E2E barrier or fault mechanism, never a
 production fault hook. R5-018/MCP remains blocked unless that deferred gate
-passes. R5-005 is authorized to begin.
+passes. R5-005 code closure is in progress. Manual GitHub installation claim is
+now available through both `opsi github installation claim` and the Local
+API/UI; repository inventory exposes durable `available`/`active`/`conflict`
+ownership state without leaking another project's ID. Local API GitHub
+mutations use the keychain PAT and one-time local session/idempotency headers,
+while the browser receives no PAT or OAuth token. Full CLI/Cloud tests, focused
+race tests, UI lint/build, and disposable PostgreSQL GitHub
+inventory/durable-dedupe tests pass.
+
+The live R5-005 gate is `OPERATOR_REQUIRED`: the preferred repository
+`huutawn/opsi-r5-005-fixture` does not exist. Do not create it without explicit
+operator authorization. After the operator creates it, install the App with
+Only select repositories, Metadata read-only, and only Installation,
+Installation repositories, and Repository events. Fixture rename/access
+changes and any second-account wrong-user proof remain separate explicit
+operator actions. Public sanitized preflight confirms the fixed GitHub
+authorization endpoint, canonical callback, PKCE S256/state, public health, and
+unsigned webhook rejection; App private-key/App-ID use, live installation
+tokens, browser grant redemption, lifecycle webhooks, and CLI/UI manual parity
+remain unproven until the fixture exists.
 
 ## Verification
 

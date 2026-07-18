@@ -50,6 +50,14 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 	if _, err := service.ClaimGitHubRepository(secondProject.ID, repository.RepositoryID, secondProject.CreatedBy); !hasGitHubCode(err, "GITHUB_REPOSITORY_ALREADY_CLAIMED") {
 		t.Fatalf("cross-project claim err=%v", err)
 	}
+	firstInventory, err := service.ListGitHubRepositories(firstProject.ID)
+	if err != nil || len(firstInventory) != 1 || firstInventory[0].ClaimStatus != GitHubLinkActive || firstInventory[0].ClaimedProjectID != firstProject.ID {
+		t.Fatalf("first project claim inventory=%+v err=%v", firstInventory, err)
+	}
+	secondInventory, err := service.ListGitHubRepositories(secondProject.ID)
+	if err != nil || len(secondInventory) != 1 || secondInventory[0].ClaimStatus != "conflict" || secondInventory[0].ClaimedProjectID != "" {
+		t.Fatalf("cross-project conflict inventory=%+v err=%v", secondInventory, err)
+	}
 	binding, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: firstProject.CreatedBy})
 	if err != nil {
 		t.Fatal(err)

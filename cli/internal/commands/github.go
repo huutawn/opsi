@@ -5,21 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
+	"github.com/opsi-dev/opsi/cli/internal/repository"
 	"github.com/spf13/cobra"
 )
 
 const githubCommandTimeout = 30 * time.Second
 
 type githubFlags struct {
-	projectID    string
-	repositoryID int64
-	serviceID    string
-	serviceKey   string
-	configPath   string
-	bindingID    string
+	projectID      string
+	installationID int64
+	noBrowser      bool
+	timeout        time.Duration
+	repositoryID   int64
+	serviceID      string
+	serviceKey     string
+	configPath     string
+	bindingID      string
 }
 
 func newGitHubCommand(configPath *string, options Options) *cobra.Command {
@@ -33,7 +38,7 @@ func newGitHubCommand(configPath *string, options Options) *cobra.Command {
 func newGitHubInstallationListCommand(configPath *string, options Options) *cobra.Command {
 	flags := &githubFlags{}
 	command := &cobra.Command{Use: "installation", Short: "Inspect GitHub App installations"}
-	command.AddCommand(&cobra.Command{
+	list := &cobra.Command{
 		Use:   "list",
 		Short: "List GitHub App installations linked to a project",
 		RunE: func(command *cobra.Command, _ []string) error {
@@ -48,8 +53,47 @@ func newGitHubInstallationListCommand(configPath *string, options Options) *cobr
 			}
 			return json.NewEncoder(command.OutOrStdout()).Encode(map[string]any{"installations": installations})
 		},
-	})
-	command.Commands()[0].Flags().StringVar(&flags.projectID, "project-id", "", "project id")
+	}
+	list.Flags().StringVar(&flags.projectID, "project-id", "", "project id")
+	command.AddCommand(list)
+
+	claim := &cobra.Command{
+		Use:   "claim",
+		Short: "Claim a GitHub App installation through the browser",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			if err := validateGitHubProjectID(flags.projectID); err != nil {
+				return err
+			}
+			if flags.installationID <= 0 {
+				return errors.New("installation-id must be a positive integer")
+			}
+			if flags.timeout <= 0 || flags.timeout > 5*time.Minute {
+				return errors.New("timeout must be greater than zero and at most 5m")
+			}
+			client, err := newCommandCloudClient(*configPath, options)
+			if err != nil {
+				return fmt.Errorf("create GitHub Cloud client: %w", err)
+			}
+			ctx, cancel := context.WithTimeout(command.Context(), flags.timeout)
+			defer cancel()
+			claimOptions := initOptions{
+				ProjectID:      flags.projectID,
+				InstallationID: flags.installationID,
+				NoBrowser:      flags.noBrowser,
+				Timeout:        flags.timeout,
+			}
+			if err := runInstallationClaim(ctx, command.OutOrStdout(), client, options, claimOptions); err != nil {
+				return fmt.Errorf("GitHub installation claim failed: %w", err)
+			}
+			return nil
+		},
+	}
+	claim.Flags().StringVar(&flags.projectID, "project-id", "", "project id")
+	claim.Flags().Int64Var(&flags.installationID, "installation-id", 0, "numeric GitHub App installation id")
+	claim.Flags().BoolVar(&flags.noBrowser, "no-browser", false, "print authorization URL without opening a browser")
+	claim.Flags().DurationVar(&flags.timeout, "timeout", 5*time.Minute, "overall browser callback timeout")
+	command.AddCommand(claim)
 	return command
 }
 
@@ -160,8 +204,8 @@ func newGitHubBindingCommand(configPath *string, options Options) *cobra.Command
 		Use:   "remove",
 		Short: "Remove a GitHub repository service binding",
 		RunE: func(command *cobra.Command, _ []string) error {
-			if flags.bindingID == "" || len(flags.bindingID) > 256 {
-				return errors.New("binding-id is required and must be at most 256 bytes")
+			if err := validateGitHubOpaqueID("binding-id", flags.bindingID); err != nil {
+				return err
 			}
 			client, ctx, cancel, err := githubClient(command.Context(), *configPath, options, flags.projectID)
 			if err != nil {
@@ -190,8 +234,8 @@ func newGitHubBindingCommand(configPath *string, options Options) *cobra.Command
 }
 
 func githubClient(parent context.Context, configPath string, options Options, projectID string) (*cloudclient.Client, context.Context, context.CancelFunc, error) {
-	if projectID == "" {
-		return nil, nil, nil, errors.New("project-id is required")
+	if err := validateGitHubProjectID(projectID); err != nil {
+		return nil, nil, nil, err
 	}
 	ctx, cancel := context.WithTimeout(parent, githubCommandTimeout)
 	client, err := newCommandCloudClient(configPath, options)
@@ -210,14 +254,32 @@ func requireGitHubRepositoryID(repositoryID int64) error {
 }
 
 func validateGitHubBindingInput(flags *githubFlags) error {
+	if err := validateGitHubProjectID(flags.projectID); err != nil {
+		return err
+	}
 	if err := requireGitHubRepositoryID(flags.repositoryID); err != nil {
 		return err
 	}
-	if flags.serviceID == "" || flags.serviceKey == "" {
-		return errors.New("service-id and service-key are required")
+	if err := validateGitHubOpaqueID("service-id", flags.serviceID); err != nil {
+		return err
 	}
-	if len(flags.configPath) == 0 || len(flags.configPath) > 256 {
-		return errors.New("config-path is required and must be at most 256 bytes")
+	if err := repository.ValidateServiceKey(flags.serviceKey); err != nil {
+		return fmt.Errorf("invalid service-key: %w", err)
+	}
+	if err := repository.ValidateConfigPath(flags.configPath); err != nil {
+		return fmt.Errorf("invalid config-path: %w", err)
+	}
+	return nil
+}
+
+func validateGitHubProjectID(projectID string) error {
+	return validateGitHubOpaqueID("project-id", projectID)
+}
+
+func validateGitHubOpaqueID(label, value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || len(trimmed) > 256 || trimmed != value || strings.ContainsAny(value, "/\\") {
+		return fmt.Errorf("%s is required and must be a non-path identifier of at most 256 bytes", label)
 	}
 	return nil
 }

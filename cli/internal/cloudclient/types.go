@@ -127,15 +127,17 @@ type GitHubInstallation struct {
 }
 
 type GitHubRepository struct {
-	RepositoryID   int64  `json:"repository_id"`
-	InstallationID int64  `json:"installation_id"`
-	OwnerLogin     string `json:"owner_login"`
-	Name           string `json:"name"`
-	FullName       string `json:"full_name"`
-	Archived       bool   `json:"archived"`
-	Disabled       bool   `json:"disabled"`
-	DefaultBranch  string `json:"default_branch"`
-	Status         string `json:"status"`
+	RepositoryID     int64  `json:"repository_id"`
+	InstallationID   int64  `json:"installation_id"`
+	OwnerLogin       string `json:"owner_login"`
+	Name             string `json:"name"`
+	FullName         string `json:"full_name"`
+	Archived         bool   `json:"archived"`
+	Disabled         bool   `json:"disabled"`
+	DefaultBranch    string `json:"default_branch"`
+	Status           string `json:"status"`
+	ClaimStatus      string `json:"claim_status"`
+	ClaimedProjectID string `json:"claimed_project_id,omitempty"`
 }
 
 type GitHubBinding struct {

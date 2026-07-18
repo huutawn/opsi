@@ -55,6 +55,38 @@ export type ServiceRecord = {
   namespace?: string;
 };
 
+export type GitHubInstallation = {
+  installation_id: number;
+  account_login?: string;
+  status: string;
+  suspended?: boolean;
+};
+
+export type GitHubRepository = {
+  repository_id: number;
+  installation_id: number;
+  owner_login?: string;
+  name?: string;
+  full_name: string;
+  archived?: boolean;
+  disabled?: boolean;
+  default_branch?: string;
+  status: string;
+  claim_status: "available" | "active" | "conflict" | string;
+  claimed_project_id?: string;
+};
+
+export type GitHubBinding = {
+  id: string;
+  project_id: string;
+  service_id: string;
+  repository_id: number;
+  installation_id: number;
+  service_key: string;
+  config_path: string;
+  status: string;
+};
+
 export type DeploymentJob = {
   id: string;
   service_id: string;

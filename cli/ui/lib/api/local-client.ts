@@ -2,6 +2,9 @@ import type {
   AuditEvent,
   BootstrapSession,
   DeploymentJob,
+  GitHubBinding,
+  GitHubInstallation,
+  GitHubRepository,
   NodeDiagnostics,
   NodeRecord,
   Project,
@@ -110,6 +113,54 @@ export class LocalClient {
       method: "POST",
       write: true,
       body: JSON.stringify(body),
+    });
+  }
+
+  githubInstallations(projectID: string) {
+    return this.call<{ installations: GitHubInstallation[] }>(`/api/local/projects/${projectID}/github/installations`);
+  }
+
+  startGitHubInstallationClaim(projectID: string, installationID: number) {
+    return this.call<{ authorization_url: string; status: string; expires_at: string }>(
+      `/api/local/projects/${projectID}/github/installations/${installationID}/claim/start`,
+      { method: "POST", write: true, body: "{}" },
+    );
+  }
+
+  githubRepositories(projectID: string) {
+    return this.call<{ repositories: GitHubRepository[] }>(`/api/local/projects/${projectID}/github/repositories`);
+  }
+
+  claimGitHubRepository(projectID: string, repositoryID: number) {
+    return this.call<{ repository_id: number; project_id: string; status: string }>(
+      `/api/local/projects/${projectID}/github/repositories/${repositoryID}/claim`,
+      { method: "POST", write: true, body: "{}" },
+    );
+  }
+
+  releaseGitHubRepository(projectID: string, repositoryID: number) {
+    return this.call<{ released: boolean }>(`/api/local/projects/${projectID}/github/repositories/${repositoryID}/claim`, {
+      method: "DELETE",
+      write: true,
+    });
+  }
+
+  githubBindings(projectID: string) {
+    return this.call<{ bindings: GitHubBinding[] }>(`/api/local/projects/${projectID}/github/bindings`);
+  }
+
+  createGitHubBinding(projectID: string, body: { service_id: string; repository_id: number; service_key: string; config_path: string }) {
+    return this.call<GitHubBinding>(`/api/local/projects/${projectID}/github/bindings`, {
+      method: "POST",
+      write: true,
+      body: JSON.stringify(body),
+    });
+  }
+
+  removeGitHubBinding(projectID: string, bindingID: string) {
+    return this.call<{ removed: boolean }>(`/api/local/projects/${projectID}/github/bindings/${encodeURIComponent(bindingID)}`, {
+      method: "DELETE",
+      write: true,
     });
   }
 

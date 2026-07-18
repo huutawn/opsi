@@ -207,6 +207,118 @@ func TestLocalMutationWithSessionProxies(t *testing.T) {
 	}
 }
 
+func TestLocalGitHubInventoryUsesV1CloudPathAndKeychainPAT(t *testing.T) {
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/proj-1/github/repositories" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer keychain-pat" {
+			t.Fatalf("authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"repositories":[]}`))
+	}))
+	defer cloud.Close()
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("keychain-pat"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/github/repositories")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+}
+
+func TestLocalGitHubInstallationClaimRedeemsOnceWithoutBrowserCredential(t *testing.T) {
+	var callbackURL, localState string
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer keychain-pat" {
+			t.Fatalf("authorization = %q", got)
+		}
+		switch r.URL.Path {
+		case "/v1/projects/proj-1/github/installations/77/claim/start":
+			var body struct {
+				LocalCallback string `json:"local_callback"`
+				LocalState    string `json:"local_state"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			callbackURL, localState = body.LocalCallback, body.LocalState
+			_, _ = w.Write([]byte(`{"authorization_url":"https://github.com/login/oauth/authorize?client_id=test"}`))
+		case "/v1/github/installations/claim/redeem":
+			var body struct {
+				Grant string `json:"grant"`
+				State string `json:"state"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Grant != "one-time-grant" || body.State != localState {
+				t.Fatalf("redeem = %+v", body)
+			}
+			_, _ = w.Write([]byte(`{"installation":{"installation_id":77,"status":"active"},"repositories_synced":1}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer cloud.Close()
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("keychain-pat"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/github/installations/77/claim/start", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Idempotency-Key", "claim-start")
+	req.Header.Set("X-Local-Session", localTestSession(t, server.URL))
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&started); err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || callbackURL == "" || localState == "" {
+		t.Fatalf("status=%d callback=%q state=%q", res.StatusCode, callbackURL, localState)
+	}
+
+	callback := callbackURL + "?grant=one-time-grant&state=" + url.QueryEscape(localState)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err = client.Get(callback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusFound || strings.Contains(res.Header.Get("Location"), "grant") {
+		t.Fatalf("callback status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
+	}
+	res, err = client.Get(callback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("reused callback status=%d", res.StatusCode)
+	}
+}
+
 func TestLocalDeploymentRejectsImageBeforeCloudPost(t *testing.T) {
 	cloudPost := false
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
