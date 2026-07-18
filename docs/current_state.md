@@ -340,13 +340,17 @@ agreed on the completed session, checkpoint index four, node, Agent identity,
 and advancing heartbeat. The live mid-step Worker restart/resume scenario was
 not run because the completed healthy node has no safe production fault hook.
 
-R5-004C standardized the Cloud node-list response as `{"nodes":[...]}` and
-deployed the Cloud-only staging image update. The direct-Agent acceptance was
-then stopped before any target reset because the Fedora OS keychain did not
-complete the product CLI login operation. As a result, a PAT-authenticated,
-TLS-pinned direct status call and the Local UI shared-credential proof were not
-accepted; no Agent VPS decommission, reset, recovery bootstrap, Worker restart
-during `install_k3s`, or target reboot was performed in this attempt.
+R5-004D kept the canonical `{"nodes":[...]}` response and resolved the existing
+`R5-004` project through an idempotent staging `bootstrap-owner` repeat
+(`reused: true`, no PAT issued). Fedora Secret Service canary and the bounded
+final CLI keychain path passed; atomic TLS resolution, direct TLS-pinned
+PAT-authenticated status, real pin/name/auth negatives, and Local UI shared
+state all passed. The old Agent node was decommissioned, only Opsi/K3s-managed
+paths were reset under the trusted ED25519 SSH key, and recovery session
+`boot-7b843526dff6842b` completed as `node-c69fe70180d359d7`. The one permitted
+poller started too late: its first observation was checkpoint `4/register_agent`,
+so it did not restart the Worker during `install_k3s`. R5-004 stays `PARTIAL`;
+no second reset/rebuild, production fault hook, or target reboot was attempted.
 
 Git-based deployment exists and can apply user-provided manifests. Such a
 manifest may contain its own Service, Ingress, Gateway, TLS, lifecycle, or

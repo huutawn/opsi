@@ -6,7 +6,7 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Repair Task
 
-### R5-004C acceptance status
+### R5-004D acceptance status
 
 - `GET /api/projects/{project_id}/nodes` now has one canonical response
   contract: `{"nodes":[...]}`. The CLI rejects malformed or unexpected node
@@ -14,11 +14,18 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 - The Cloud-only image update was deployed to staging with an immutable digest;
   the Bootstrap Worker and Agent images were intentionally retained because
   their source did not change.
-- R5-004 remains `PARTIAL`: the Fedora OS keychain did not complete the
-  product CLI login operation, so direct TLS-pinned, PAT-authenticated CLI
-  status and the Local UI shared-credential acceptance could not be proven.
-  The Agent VPS was not reset, decommissioned, or re-bootstrapped, and the
-  Worker-restart gate was not attempted.
+- R5-004 remains `PARTIAL`. Fedora Secret Service canary store/get/delete and
+  the bounded Linux keychain path passed. The final CLI resolved the existing
+  `R5-004` project through an idempotent `bootstrap-owner` repeat
+  (`reused: true`, no PAT issued), then passed atomic Cloud TLS resolution,
+  direct pinned TLS/PAT status, real pin/name/auth negatives, and Local UI
+  shared-state proof.
+- The old Agent node was decommissioned and only Opsi/K3s-managed paths were
+  reset under the trusted ED25519 host key. Recovery session
+  `boot-7b843526dff6842b` completed as node `node-c69fe70180d359d7`, but the
+  single poller first observed checkpoint `4/register_agent`; it never
+  restarted the Worker during `install_k3s`. No second reset, recovery session,
+  Worker fault, or target reboot was attempted.
 
 - R5-004 live clean-VPS bootstrap ran on 2026-07-17 at revision
   `d3df6b8d2b3a029ea3f589dfb840ff296e7bdbd5`. The final CLI created one
@@ -125,10 +132,10 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Next Ordered Work
 
-R5-004 remains active only for the live mid-step Worker restart/resume gate.
-The completed healthy node must not be interrupted without a supported fault
-hook or isolated fixture; current code has no production fault-injection hook.
-Do not start R5-005 until that limitation is accepted or safely proven.
+R5-004 remains `PARTIAL` only for the live mid-step Worker restart/resume gate.
+The authorized recovery attempt was consumed after its poller missed the
+destructive-step window. Do not reset/rebuild the Agent VPS again, add a
+production fault hook, or start R5-005 without a new explicit decision.
 
 ## Verification
 

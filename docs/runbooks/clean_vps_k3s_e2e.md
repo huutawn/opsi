@@ -110,6 +110,13 @@ TLS-pinned Agent status. If the OS keychain cannot complete the login/read
 operation, stop `PARTIAL`; do not reset the Agent VPS or attempt the Worker
 restart gate.
 
+For a separately authorized R5-004 recovery fault attempt, prepare the bounded
+poller before creating the session and make session creation plus polling one
+process. The poller must capture its precondition (`installing_k3s`, checkpoint
+still before `install_k3s`, and no registration start), immediately restart the
+Worker once, and fail closed if it misses that window. Do not create a second
+session or reset the target after a missed window.
+
 Artifacts are written under `.tmp/e2e-k3s/<run-id>/`. Raw kubeconfig, SSH
 password, PAT, OTP/TOTP, app secret values, and raw logs must not be stored.
 
