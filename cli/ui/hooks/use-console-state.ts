@@ -18,7 +18,7 @@ export function useConsoleState() {
   const [active, setActive] = useState("Projects");
   const [projectID, setProjectID] = useState("");
   const [state, setState] = useState<ConsoleState>({
-    status: "idle",
+    status: "loading",
     message: "",
     projects: [],
     project: null,

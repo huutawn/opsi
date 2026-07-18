@@ -70,19 +70,25 @@ export function Topbar({
 
   return (
     <div className="topbar">
-      <label>
-        <span className="srOnly">Org ID</span>
-        <input className="field" onChange={(event) => onOrgID(event.target.value)} value={orgID} />
-      </label>
-      <button onClick={onRefresh} type="button">
-        Refresh
-      </button>
+      {session?.authenticated ? (
+        <>
+          <label>
+            <span className="srOnly">Org ID</span>
+            <input className="field" onChange={(event) => onOrgID(event.target.value)} value={orgID} />
+          </label>
+          <button onClick={onRefresh} type="button">
+            Refresh
+          </button>
+        </>
+      ) : null}
       <span className="statusPill">
-        {session?.authenticated
+        {session === null
+          ? "Checking session"
+          : session.authenticated
           ? "Signed in"
-          : session?.token_status === "invalid"
+          : session.token_status === "invalid"
             ? "Credential invalid"
-            : session?.token_status === "unverified"
+            : session.token_status === "unverified"
               ? "Credential unverified"
               : "Signed out"}
       </span>
