@@ -9,8 +9,7 @@ export function ConsoleRouter({ console }: { console: ConsoleController }) {
     return (
       <StatePanel
         title="Sign in required"
-        text={console.state.message || "Use Sign in with GitHub in the top bar, then retry."}
-        retry={() => void console.actions.load()}
+        text={console.state.message || "Use Sign in with GitHub in the top bar to continue."}
       />
     );
   if (console.state.status === "network")
