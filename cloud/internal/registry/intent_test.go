@@ -22,7 +22,14 @@ func TestMarkNodeOfflineRevokesOldAgentAndUnblocksReplacement(t *testing.T) {
 		t.Fatalf("replacement bootstrap remained blocked: %v", err)
 	}
 	nodes, err = service.ListNodes(projectID)
-	if err != nil || len(nodes) != 2 || nodes[1].ID != replacement.NodeID || nodes[1].Name == "203.0.113.10" {
+	var replacementNode *Node
+	for index := range nodes {
+		if nodes[index].ID == replacement.NodeID {
+			replacementNode = &nodes[index]
+			break
+		}
+	}
+	if err != nil || len(nodes) != 2 || replacementNode == nil || replacementNode.Name == "203.0.113.10" {
 		t.Fatalf("replacement node identity is not distinct: err=%v nodes=%+v", err, nodes)
 	}
 }

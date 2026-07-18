@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -77,9 +78,7 @@ func (c *Client) ListServices(ctx context.Context, projectID string) ([]Service,
 }
 
 func (c *Client) ListNodes(ctx context.Context, projectID string) ([]Node, error) {
-	var response struct {
-		Nodes []Node `json:"nodes"`
-	}
+	var response nodeListResponse
 	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "nodes"}, nil, "", &response)
 	return response.Nodes, err
 }
@@ -233,10 +232,21 @@ func (c *Client) do(ctx context.Context, method string, segments []string, body 
 	if response == nil || len(data) == 0 {
 		return nil
 	}
+	if !json.Valid(data) {
+		return newResponseDecodeError("invalid JSON", result)
+	}
 	if err := json.Unmarshal(data, response); err != nil {
-		return errors.New("Cloud API returned invalid JSON")
+		return newResponseDecodeError("unexpected response schema", result)
 	}
 	return nil
+}
+
+func newResponseDecodeError(kind string, response *http.Response) error {
+	contentType := "unknown"
+	if value, _, err := mime.ParseMediaType(response.Header.Get("Content-Type")); err == nil && value != "" {
+		contentType = value
+	}
+	return fmt.Errorf("Cloud API returned %s (status %d, content-type %q)", kind, response.StatusCode, contentType)
 }
 
 func (c *Client) endpoint(segments ...string) (*url.URL, error) {

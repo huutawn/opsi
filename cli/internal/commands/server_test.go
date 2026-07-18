@@ -130,6 +130,91 @@ func TestServerBootstrapCLIAndLocalUIUseSameCloudFlow(t *testing.T) {
 	}
 }
 
+func TestServerConnectSavesOnlyCompletePinnedAgentMetadata(t *testing.T) {
+	const pat = "connect-test-pat"
+	const certPin = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	cloud := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/api/projects/project-1/nodes" || request.Header.Get("Authorization") != "Bearer "+pat {
+			t.Fatalf("unexpected Cloud request: %s %s headers=%+v", request.Method, request.URL.Path, request.Header)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{"nodes":[{"id":"node-1","agent_id":"agent-1","agent_endpoint":"52.77.226.123","agent_port":9443,"agent_tls_server_name":"52.77.226.123","agent_cert_sha256":"`+certPin+`"}]}`)
+	}))
+	defer cloud.Close()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "cli.yaml")
+	if err := os.WriteFile(configPath, []byte("agent_addr: 127.0.0.1:9443\ncloud_url: "+cloud.URL+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT(pat); err != nil {
+		t.Fatal(err)
+	}
+	command := NewRootCommand(Options{Version: "test", KeychainFactory: func() (keychain.Store, error) { return store, nil }, HTTPClient: cloud.Client()})
+	output := bytes.NewBuffer(nil)
+	command.SetOut(output)
+	command.SetArgs([]string{"--config", configPath, "server", "connect", "--project-id", "project-1", "--node-id", "node-1"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"node_id":"node-1"`) || strings.Contains(output.String(), pat) {
+		t.Fatalf("unexpected command output: %s", output.String())
+	}
+	info, err := os.Lstat(configPath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("config file info=%v err=%v", info, err)
+	}
+	contents, err := os.ReadFile(configPath)
+	if err != nil || strings.Contains(string(contents), pat) {
+		t.Fatalf("config contents=%q err=%v", contents, err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil || cfg.AgentAddr != "52.77.226.123:9443" || cfg.TLS.ServerName != "52.77.226.123" || cfg.TLS.PinnedServerCertSHA256 != certPin {
+		t.Fatalf("config=%+v err=%v", cfg, err)
+	}
+}
+
+func TestServerConnectFailurePreservesExistingConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing direct TLS metadata", body: `{"nodes":[{"id":"node-1","agent_id":"agent-1"}]}`, want: "no complete direct TLS Agent metadata"},
+		{name: "node outside project response", body: `{"nodes":[{"id":"other-node","agent_id":"agent-1","agent_endpoint":"52.77.226.123","agent_port":9443,"agent_tls_server_name":"52.77.226.123","agent_cert_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]}`, want: "not found in the requested project"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cloud := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(response, test.body)
+			}))
+			defer cloud.Close()
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "cli.yaml")
+			original := []byte("agent_addr: 127.0.0.1:9443\ncloud_url: " + cloud.URL + "\n")
+			if err := os.WriteFile(configPath, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := keychain.NewFakeStore()
+			if err := store.SetPAT("pat"); err != nil {
+				t.Fatal(err)
+			}
+			command := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return store, nil }, HTTPClient: cloud.Client()})
+			command.SetArgs([]string{"--config", configPath, "server", "connect", "--project-id", "project-1", "--node-id", "node-1"})
+			err := command.Execute()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v", err)
+			}
+			contents, readErr := os.ReadFile(configPath)
+			if readErr != nil || !bytes.Equal(contents, original) {
+				t.Fatalf("config changed=%q err=%v", contents, readErr)
+			}
+		})
+	}
+}
+
 func TestServerBootstrapRejectsUnsafeCredentialInput(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "cli.yaml")

@@ -196,7 +196,10 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 	if len(parts) == 3 && parts[2] == "nodes" {
 		if r.Method == http.MethodGet {
 			value, err := s.Registry.ListNodes(projectID)
-			writeRegistryResult(w, r, value, err, http.StatusOK)
+			if value == nil {
+				value = []registry.Node{}
+			}
+			writeRegistryResult(w, r, map[string]any{"nodes": value}, err, http.StatusOK)
 			return
 		}
 		if r.Method == http.MethodPost {

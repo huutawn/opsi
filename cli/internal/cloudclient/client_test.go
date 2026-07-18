@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -95,6 +96,102 @@ func TestResponseBoundAndHTMLNotReflected(t *testing.T) {
 			t.Fatalf("raw body reflected: %v", err)
 		}
 	})
+}
+
+func TestListNodesContractAndSafeDecodeFailures(t *testing.T) {
+	const pat = "node-list-pat"
+	tests := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		wantNodes   int
+		wantErr     string
+	}{
+		{name: "empty envelope", status: http.StatusOK, contentType: "application/json", body: `{"nodes":[]}`},
+		{name: "direct Agent metadata", status: http.StatusOK, contentType: "application/json", body: `{"nodes":[{"id":"node-1","project_id":"project-1","agent_id":"agent-1","agent_endpoint":"52.77.226.123","agent_port":9443,"agent_tls_server_name":"agent.example.test","agent_cert_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`, wantNodes: 1},
+		{name: "missing envelope", status: http.StatusOK, contentType: "application/json", body: `{}`, wantErr: "unexpected response schema"},
+		{name: "wrong nodes type", status: http.StatusOK, contentType: "application/json", body: `{"nodes":{}}`, wantErr: "unexpected response schema"},
+		{name: "HTML response", status: http.StatusOK, contentType: "text/html; charset=utf-8", body: `<html>upstream ` + pat + `</html>`, wantErr: "invalid JSON (status 200, content-type \"text/html\")"},
+		{name: "plain text response", status: http.StatusOK, contentType: "text/plain", body: "unavailable " + pat, wantErr: "invalid JSON (status 200, content-type \"text/plain\")"},
+		{name: "malformed JSON", status: http.StatusOK, contentType: "application/json", body: `{"nodes":[`, wantErr: "invalid JSON"},
+		{name: "truncated JSON", status: http.StatusOK, contentType: "application/json", body: `{"nodes":[{"id":"node-1"}`, wantErr: "invalid JSON"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Content-Type", test.contentType)
+				response.WriteHeader(test.status)
+				_, _ = io.WriteString(response, test.body)
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL, pat, "test", server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			nodes, err := client.ListNodes(context.Background(), "project-1")
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) || strings.Contains(err.Error(), pat) {
+					t.Fatalf("error=%v", err)
+				}
+				return
+			}
+			if err != nil || len(nodes) != test.wantNodes {
+				t.Fatalf("nodes=%+v err=%v", nodes, err)
+			}
+			if test.wantNodes == 1 {
+				node := nodes[0]
+				if node.AgentID != "agent-1" || node.AgentEndpoint != "52.77.226.123" || node.AgentPort != 9443 || node.AgentTLSServerName != "agent.example.test" || node.AgentCertSHA256 != strings.Repeat("a", 64) {
+					t.Fatalf("direct Agent metadata changed: %+v", node)
+				}
+			}
+		})
+	}
+}
+
+func TestListNodesHTTPStatusesReturnTypedErrors(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Content-Type", "text/plain")
+				response.WriteHeader(status)
+				_, _ = io.WriteString(response, "private failure")
+			}))
+			defer server.Close()
+			client, err := New(server.URL, "pat", "test", server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.ListNodes(context.Background(), "project-1")
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != status || strings.Contains(err.Error(), "private failure") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestListNodesAgainstExternalHandler(t *testing.T) {
+	rawURL := os.Getenv("OPSI_CLOUDCLIENT_CONTRACT_URL")
+	projectID := os.Getenv("OPSI_CLOUDCLIENT_CONTRACT_PROJECT_ID")
+	agentID := os.Getenv("OPSI_CLOUDCLIENT_CONTRACT_AGENT_ID")
+	if rawURL == "" || projectID == "" || agentID == "" {
+		t.Skip("run by the Cloud handler-to-CLI-client contract test")
+	}
+	client, err := New(rawURL, "contract-pat", "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := client.ListNodes(context.Background(), projectID)
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("nodes=%+v err=%v", nodes, err)
+	}
+	node := nodes[0]
+	if node.AgentID != agentID || node.AgentEndpoint != "52.77.226.123" || node.AgentPort != 9443 || node.AgentTLSServerName != "52.77.226.123" || node.AgentCertSHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("direct Agent metadata changed: %+v", node)
+	}
 }
 
 func TestRedirectIsNotFollowed(t *testing.T) {

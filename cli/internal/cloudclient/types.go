@@ -1,6 +1,8 @@
 package cloudclient
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -35,6 +37,30 @@ type Node struct {
 	AgentPort          int    `json:"agent_port"`
 	AgentTLSServerName string `json:"agent_tls_server_name"`
 	AgentCertSHA256    string `json:"agent_cert_sha256"`
+}
+
+type nodeListResponse struct {
+	Nodes []Node `json:"nodes"`
+}
+
+func (r *nodeListResponse) UnmarshalJSON(data []byte) error {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	rawNodes, ok := envelope["nodes"]
+	if !ok {
+		return errors.New("nodes envelope is missing")
+	}
+	var nodes []Node
+	if err := json.Unmarshal(rawNodes, &nodes); err != nil {
+		return err
+	}
+	if nodes == nil {
+		return errors.New("nodes must be an array")
+	}
+	r.Nodes = nodes
+	return nil
 }
 
 type BootstrapRequest struct {

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -352,6 +353,29 @@ func TestRegistryAPIReadModelsForUI(t *testing.T) {
 	}
 	_ = registerDeployAgent(t, handler, project.ID, node.ID, "ui-agent")
 
+	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/nodes", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("nodes status=%d body=%s", w.Code, w.Body.String())
+	}
+	var nodes struct {
+		Nodes []struct {
+			ID                 string `json:"id"`
+			AgentID            string `json:"agent_id"`
+			AgentEndpoint      string `json:"agent_endpoint"`
+			AgentPort          int    `json:"agent_port"`
+			AgentTLSServerName string `json:"agent_tls_server_name"`
+			AgentCertSHA256    string `json:"agent_cert_sha256"`
+		} `json:"nodes"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&nodes); err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes.Nodes) != 1 || nodes.Nodes[0].ID != node.ID || nodes.Nodes[0].AgentID == "" || nodes.Nodes[0].AgentEndpoint != "203.0.113.10" || nodes.Nodes[0].AgentPort != 9443 || nodes.Nodes[0].AgentTLSServerName != "203.0.113.10" || nodes.Nodes[0].AgentCertSHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("unexpected node list: %+v", nodes)
+	}
+
 	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{"requested_by":"ui"}`)))
 	req.Header.Set("Idempotency-Key", "ui-deploy")
 	req.Header.Set("X-Request-ID", "req-ui-deploy")
@@ -400,6 +424,107 @@ func TestRegistryAPIReadModelsForUI(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("deployment queued")) {
 		t.Fatalf("deployment events status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegistryAPIListNodesEmptyEnvelope(t *testing.T) {
+	server := NewServer(Config{})
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Demo","slug":"empty-nodes","created_by":"user-1"}`)))
+	req.Header.Set("Idempotency-Key", "empty-nodes-project")
+	req.Header.Set("X-Request-ID", "req-empty-nodes-project")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create project status=%d body=%s", w.Code, w.Body.String())
+	}
+	var project struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&project); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/nodes", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("nodes status=%d content-type=%q body=%s", w.Code, w.Header().Get("Content-Type"), w.Body.String())
+	}
+	var response struct {
+		Nodes []json.RawMessage `json:"nodes"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Nodes == nil || len(response.Nodes) != 0 {
+		t.Fatalf("empty node list=%+v", response.Nodes)
+	}
+}
+
+func TestRegistryAPIListNodesContractWithCLIClient(t *testing.T) {
+	server := NewServer(Config{})
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Contract","slug":"node-list-contract","created_by":"user-1"}`)))
+	req.Header.Set("Idempotency-Key", "node-list-contract-project")
+	req.Header.Set("X-Request-ID", "req-node-list-contract-project")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create project status=%d body=%s", w.Code, w.Body.String())
+	}
+	var project struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&project); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/nodes", bytes.NewReader([]byte(`{"name":"contract-node","role":"server","status":"healthy","public_host":"52.77.226.123"}`)))
+	req.Header.Set("Idempotency-Key", "node-list-contract-node")
+	req.Header.Set("X-Request-ID", "req-node-list-contract-node")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create node status=%d body=%s", w.Code, w.Body.String())
+	}
+	var node struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&node); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/agents", bytes.NewReader([]byte(`{"node_id":"`+node.ID+`","public_key_fingerprint":"sha256:contract","version":"v1","agent_endpoint":"52.77.226.123","agent_port":9443,"agent_tls_server_name":"52.77.226.123","agent_cert_sha256":"`+strings.Repeat("b", 64)+`"}`)))
+	req.Header.Set("Idempotency-Key", "node-list-contract-agent")
+	req.Header.Set("X-Request-ID", "req-node-list-contract-agent")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register agent status=%d body=%s", w.Code, w.Body.String())
+	}
+	var agentResponse struct {
+		Agent struct {
+			ID string `json:"id"`
+		} `json:"agent"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&agentResponse); err != nil || agentResponse.Agent.ID == "" {
+		t.Fatalf("decode registered agent: agent=%+v err=%v", agentResponse, err)
+	}
+
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+	repoRoot, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("go", "test", "./internal/cloudclient", "-run", "^TestListNodesAgainstExternalHandler$", "-count=1")
+	command.Dir = filepath.Join(repoRoot, "cli")
+	command.Env = append(os.Environ(), "OPSI_CLOUDCLIENT_CONTRACT_URL="+httpServer.URL, "OPSI_CLOUDCLIENT_CONTRACT_PROJECT_ID="+project.ID, "OPSI_CLOUDCLIENT_CONTRACT_AGENT_ID="+agentResponse.Agent.ID)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("CLI cloudclient contract test failed: %v\n%s", err, output)
 	}
 }
 
