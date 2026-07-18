@@ -95,6 +95,12 @@ parameters after rendering a useful message. It must not leave the operator on
 a raw public JSON error page, and it must not put a PAT, GitHub token, grant,
 OAuth code, or state in browser storage.
 
+After redeem, Local session verification sends the keychain PAT only as an
+`Authorization: Bearer` header to `/v1/auth/pat/verify`; the JSON body contains
+only optional project context. Cloud must reject a body-only token. This keeps
+verify, rotate, revoke, registry, and GitHub project APIs on one credential
+transport and prevents PAT material from entering request JSON evidence.
+
 Expected failure guidance:
 
 - `GITHUB_ACCOUNT_UNLINKED`: repeat the supported `bootstrap-owner` operation

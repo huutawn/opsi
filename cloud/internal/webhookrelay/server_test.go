@@ -29,6 +29,30 @@ func TestHealthFailsClosedWhenDependencyCheckFails(t *testing.T) {
 	}
 }
 
+func TestPATVerifyUsesBearerAuthorizationAndDoesNotAcceptBodyToken(t *testing.T) {
+	hash, err := auth.HashPAT("pat-live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Config{})
+	server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{{UserID: "user-1", OrgID: "org-1", ProjectID: "proj-1", Role: "Owner", Hash: hash, ExpiresAt: time.Now().Add(time.Hour)}}}}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/pat/verify", strings.NewReader(`{"project_id":"proj-1"}`))
+	req.Header.Set("Authorization", "Bearer pat-live")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"project_id":"proj-1"`) {
+		t.Fatalf("bearer verification status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/auth/pat/verify", strings.NewReader(`{"token":"pat-live","project_id":"proj-1"}`))
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("body token was accepted: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGitHubWebhookQueuesEnvelopeAndLongPollReturnsIt(t *testing.T) {
 	server := NewServer(Config{TTL: Duration(time.Hour)})
 	webhookSecret := strings.Repeat("w", 32)

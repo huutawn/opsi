@@ -174,6 +174,16 @@ identity, and links it transactionally without requiring the original
 email/org/project tuple or issuing a PAT. It remains a local admin operation;
 there is no browser, public API, or parallel deployment path.
 
+The next live callback successfully redeemed and returned `auth=ok`, but Local
+session verification still reported the newly stored PAT as invalid. The cause
+was a transport contract mismatch: CLI correctly sent the credential in the
+Bearer header while Cloud `/v1/auth/pat/verify` read only a JSON-body token.
+Cloud now uses the same fail-closed Bearer parser as rotate/revoke, the control
+plane E2E verifier no longer sends PAT material in a JSON body or process
+argument, and a focused endpoint test rejects body-only tokens. Signed-out UI
+is now one centered auth gate; the duplicate topbar login and ineffective retry
+paths are removed.
+
 ## Verification
 
 R5-002 regression checks are focused Cloud tests,

@@ -238,14 +238,13 @@ func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Token     string `json:"token"`
 		ProjectID string `json:"project_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid pat verify request")
 		return
 	}
-	result, err := s.Auth.VerifyPAT(r.Context(), auth.VerifyRequest{Token: req.Token, ProjectID: req.ProjectID})
+	result, err := s.Auth.VerifyPAT(r.Context(), auth.VerifyRequest{Token: bearerFromRequest(r), ProjectID: req.ProjectID})
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
@@ -306,7 +305,11 @@ func (s *Server) auditAuth(orgID, userID, projectID, action, result string, meta
 }
 
 func bearerFromRequest(r *http.Request) string {
-	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

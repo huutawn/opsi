@@ -339,17 +339,22 @@ bootstrap_owner() {
 verify_pat() {
   local project_id="$1" expected_user_id="$2" response_file
   response_file="$(mktemp "$tmp_dir/pat-response.XXXXXX.json")"
-  python3 - "$PAT_FILE" "$project_id" <<'PY' |
+  python3 - "$PAT_FILE" "$project_id" "$HTTP_PORT" "$response_file" <<'PY'
 import json
 import pathlib
 import sys
+import urllib.request
 
 token = pathlib.Path(sys.argv[1]).read_text().strip()
-json.dump({"token": token, "project_id": sys.argv[2]}, sys.stdout)
+request = urllib.request.Request(
+    f"http://127.0.0.1:{sys.argv[3]}/v1/auth/pat/verify",
+    data=json.dumps({"project_id": sys.argv[2]}).encode(),
+    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=10) as response:
+    pathlib.Path(sys.argv[4]).write_bytes(response.read())
 PY
-    curl --fail --silent --show-error -H 'Content-Type: application/json' \
-      --data-binary @- "http://127.0.0.1:${HTTP_PORT}/v1/auth/pat/verify" \
-      >"$response_file" 2>>"$safe_output"
   python3 - "$response_file" "$project_id" "$expected_user_id" <<'PY'
 import json
 import pathlib
