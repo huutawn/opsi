@@ -220,6 +220,11 @@ func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !isLoopback(c.cfg.AgentAddr) {
+		if err := verifyRemoteTLS(ctx, c.cfg); err != nil {
+			return nil, err
+		}
+	}
 	conn, err := grpc.DialContext(ctx, c.cfg.AgentAddr, grpc.WithTransportCredentials(creds), grpc.WithBlock())
 	if err != nil {
 		return nil, fmt.Errorf("connect agent: %w", err)
@@ -235,6 +240,26 @@ func transportCredentials(cfg config.Config) (credentials.TransportCredentials, 
 		return insecure.NewCredentials(), nil
 	}
 
+	tlsCfg, err := tlsConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return credentials.NewTLS(tlsCfg), nil
+}
+
+func verifyRemoteTLS(ctx context.Context, cfg config.Config) error {
+	tlsCfg, err := tlsConfig(cfg)
+	if err != nil {
+		return err
+	}
+	connection, err := (&tls.Dialer{NetDialer: &net.Dialer{}, Config: tlsCfg}).DialContext(ctx, "tcp", cfg.AgentAddr)
+	if err != nil {
+		return fmt.Errorf("verify Agent TLS: %w", err)
+	}
+	return connection.Close()
+}
+
+func tlsConfig(cfg config.Config) (*tls.Config, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
 	serverName := cfg.TLS.ServerName
 	if serverName == "" {
@@ -285,7 +310,7 @@ func transportCredentials(cfg config.Config) (credentials.TransportCredentials, 
 		}
 	}
 
-	return credentials.NewTLS(tlsCfg), nil
+	return tlsCfg, nil
 }
 
 func isLoopback(address string) bool {
