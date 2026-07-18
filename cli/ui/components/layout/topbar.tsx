@@ -3,23 +3,24 @@ import { LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 
 export function Topbar({
   orgID,
-  projectID,
   onOrgID,
   onRefresh,
 }: {
   orgID: string;
-  projectID?: string;
   onOrgID: (value: string) => void;
   onRefresh: () => void;
 }) {
   const client = useMemo(() => new LocalClient(), []);
   const [session, setSession] = useState<LocalSessionStatus | null>(null);
-  const [authError, setAuthError] = useState("");
-  const [loginProjectID, setLoginProjectID] = useState(projectID ?? "");
+  const [authError, setAuthError] = useState(() => {
+    if (typeof window === "undefined") return "";
+    const code = new URLSearchParams(window.location.search).get("auth_error");
+    return code ? authErrorMessage(code) : "";
+  });
 
   async function refreshSession() {
     try {
-      setSession(await client.session(projectID || loginProjectID.trim() || undefined));
+      setSession(await client.session());
       setAuthError("");
     } catch (error) {
       setAuthError((error as Error).message);
@@ -28,8 +29,15 @@ export function Topbar({
 
   useEffect(() => {
     let cancelled = false;
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("auth") || params.has("auth_error")) {
+      params.delete("auth");
+      params.delete("auth_error");
+      const query = params.toString();
+      window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    }
     client
-      .session(projectID)
+      .session()
       .then((next) => {
         if (!cancelled) setSession(next);
       })
@@ -39,16 +47,11 @@ export function Topbar({
     return () => {
       cancelled = true;
     };
-  }, [client, projectID]);
+  }, [client]);
 
   async function login() {
-    const targetProjectID = projectID || loginProjectID.trim();
-    if (!targetProjectID) {
-      setAuthError("Enter a project ID before signing in");
-      return;
-    }
     try {
-      const next = await client.startLogin(targetProjectID);
+      const next = await client.startLogin();
       window.location.assign(next.auth_url);
     } catch (error) {
       setAuthError((error as Error).message);
@@ -57,7 +60,7 @@ export function Topbar({
 
   async function logout() {
     try {
-      await client.logout(projectID);
+      await client.logout();
       await refreshSession();
       onRefresh();
     } catch (error) {
@@ -85,25 +88,35 @@ export function Topbar({
       </span>
       <span className="statusPill">Cloud {session?.cloud_connected ?? "unknown"}</span>
       <span className="statusPill">Agent {session?.agent_connected ?? "unknown"}</span>
-      {!projectID && !session?.authenticated ? (
-        <input
-          aria-label="Project ID for login"
-          className="field loginProject"
-          onChange={(event) => setLoginProjectID(event.target.value)}
-          placeholder="Project ID"
-          value={loginProjectID}
-        />
-      ) : null}
       {session?.authenticated ? (
         <button onClick={() => void logout()} type="button">
           Logout
         </button>
       ) : (
         <button onClick={() => void login()} type="button">
-          {session?.token_status === "invalid" ? "Re-authenticate" : "Login"}
+          {session?.token_status === "invalid" ? "Continue with GitHub" : "Sign in with GitHub"}
         </button>
       )}
-      {authError ? <span className="statusPill">{authError}</span> : null}
+      {authError ? <div className="authNotice" role="alert">{authError}</div> : null}
     </div>
   );
+}
+
+function authErrorMessage(code: string) {
+  switch (code) {
+    case "GITHUB_ACCOUNT_UNLINKED":
+      return "This GitHub account is not linked to an Opsi user. Sign in with the GitHub account invited to this Opsi organization.";
+    case "OPSI_MEMBERSHIP_REQUIRED":
+      return "Your GitHub-linked Opsi user does not have an active project membership.";
+    case "PROJECT_SELECTION_REQUIRED":
+      return "This GitHub account belongs to multiple Opsi projects. Select a project before continuing.";
+    case "GITHUB_AUTH_DENIED":
+      return "GitHub authorization was cancelled. You can try again when ready.";
+    case "AUTH_SESSION_EXPIRED":
+      return "The sign-in request expired. Start a new GitHub sign-in.";
+    case "AUTH_UNAVAILABLE":
+      return "Opsi sign-in is temporarily unavailable. Try again shortly.";
+    default:
+      return "GitHub sign-in failed. Start a new sign-in and try again.";
+  }
 }

@@ -9,7 +9,7 @@ export function ConsoleRouter({ console }: { console: ConsoleController }) {
     return (
       <StatePanel
         title="Sign in required"
-        text="Cloud rejected the saved credential. Use Re-authenticate in the top bar, then retry this project."
+        text={console.state.message || "Use Sign in with GitHub in the top bar, then retry."}
         retry={() => void console.actions.load()}
       />
     );

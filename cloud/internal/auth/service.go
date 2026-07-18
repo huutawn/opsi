@@ -16,6 +16,7 @@ var (
 	ErrExpired       = errors.New("pat expired")
 	ErrRevoked       = errors.New("pat revoked")
 	ErrNoMembership  = errors.New("project membership not found")
+	ErrProjectChoice = errors.New("multiple project memberships require selection")
 	ErrOAuthIdentity = errors.New("oauth identity not linked")
 )
 
@@ -77,7 +78,7 @@ type Service struct {
 }
 
 func (s Service) VerifyPAT(ctx context.Context, req VerifyRequest) (VerifyResult, error) {
-	if req.Token == "" || req.ProjectID == "" {
+	if req.Token == "" {
 		return VerifyResult{}, ErrInvalidToken
 	}
 	if s.Store == nil {
@@ -88,8 +89,11 @@ func (s Service) VerifyPAT(ctx context.Context, req VerifyRequest) (VerifyResult
 		return VerifyResult{}, err
 	}
 	now := s.now()
+	var verified VerifyResult
+	matchedProjects := map[string]struct{}{}
 	for _, candidate := range candidates {
-		if candidate.ProjectID != req.ProjectID || candidate.UserID == "" || candidate.Role == "" {
+		wrongProject := req.ProjectID != "" && candidate.ProjectID != req.ProjectID
+		if wrongProject || candidate.ProjectID == "" || candidate.UserID == "" || candidate.Role == "" {
 			continue
 		}
 		if bcrypt.CompareHashAndPassword([]byte(candidate.Hash), []byte(req.Token)) != nil {
@@ -101,7 +105,14 @@ func (s Service) VerifyPAT(ctx context.Context, req VerifyRequest) (VerifyResult
 		if !candidate.ExpiresAt.IsZero() && !now.Before(candidate.ExpiresAt) {
 			return VerifyResult{}, ErrExpired
 		}
-		return VerifyResult{TokenID: candidate.ID, UserID: candidate.UserID, Email: candidate.Email, OrgID: candidate.OrgID, ProjectID: candidate.ProjectID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt, Revoked: candidate.Revoked}, nil
+		matchedProjects[candidate.ProjectID] = struct{}{}
+		if len(matchedProjects) > 1 {
+			return VerifyResult{}, ErrProjectChoice
+		}
+		verified = VerifyResult{TokenID: candidate.ID, UserID: candidate.UserID, Email: candidate.Email, OrgID: candidate.OrgID, ProjectID: candidate.ProjectID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt, Revoked: candidate.Revoked}
+	}
+	if verified.ProjectID != "" {
+		return verified, nil
 	}
 	return VerifyResult{}, ErrInvalidToken
 }
@@ -255,7 +266,7 @@ type MemoryStore struct {
 func (s MemoryStore) PATCandidates(_ context.Context, projectID string) ([]Candidate, error) {
 	out := make([]Candidate, 0, len(s.Candidates))
 	for _, candidate := range s.Candidates {
-		if candidate.ProjectID == projectID {
+		if projectID == "" || candidate.ProjectID == projectID {
 			out = append(out, candidate)
 		}
 	}
@@ -263,17 +274,31 @@ func (s MemoryStore) PATCandidates(_ context.Context, projectID string) ([]Candi
 }
 
 func (s *MemoryStore) IssuePATForUser(_ context.Context, userID, projectID, tokenHash string, expiresAt time.Time) (Candidate, error) {
+	var selected Candidate
+	projects := map[string]struct{}{}
 	for _, candidate := range s.Candidates {
-		if candidate.UserID == userID && (projectID == "" || candidate.ProjectID == projectID) {
-			candidate.ID = fmt.Sprintf("pat_%d", len(s.Candidates)+1)
-			candidate.Hash = tokenHash
-			candidate.ExpiresAt = expiresAt
-			candidate.Revoked = false
-			s.Candidates = append(s.Candidates, candidate)
-			return candidate, nil
+		wrongProject := projectID != "" && candidate.ProjectID != projectID
+		if candidate.UserID != userID || wrongProject {
+			continue
 		}
+		if _, exists := projects[candidate.ProjectID]; exists {
+			continue
+		}
+		projects[candidate.ProjectID] = struct{}{}
+		selected = candidate
 	}
-	return Candidate{}, ErrNoMembership
+	if len(projects) == 0 {
+		return Candidate{}, ErrNoMembership
+	}
+	if projectID == "" && len(projects) > 1 {
+		return Candidate{}, ErrProjectChoice
+	}
+	selected.ID = fmt.Sprintf("pat_%d", len(s.Candidates)+1)
+	selected.Hash = tokenHash
+	selected.ExpiresAt = expiresAt
+	selected.Revoked = false
+	s.Candidates = append(s.Candidates, selected)
+	return selected, nil
 }
 
 func (s *MemoryStore) RevokePAT(_ context.Context, tokenID string) error {

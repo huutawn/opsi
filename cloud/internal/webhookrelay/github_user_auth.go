@@ -158,7 +158,15 @@ func (s *Server) handleBrowserAuthCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	pending, ok := s.consumeOAuthState(state)
-	if !ok || !s.clock().Before(pending.ExpiresAt) {
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "auth state expired or invalid")
+		return
+	}
+	if !s.clock().Before(pending.ExpiresAt) {
+		if pending.Purpose == oauthPurposeLogin {
+			redirectBrowserAuthError(w, r, pending, "AUTH_SESSION_EXPIRED")
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "auth state expired or invalid")
 		return
 	}
@@ -167,11 +175,19 @@ func (s *Server) handleBrowserAuthCallback(w http.ResponseWriter, r *http.Reques
 			"provider": githubProvider,
 			"reason":   "github_authorization_denied",
 		})
+		if pending.Purpose == oauthPurposeLogin {
+			redirectBrowserAuthError(w, r, pending, "GITHUB_AUTH_DENIED")
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "GitHub authorization was denied")
 		return
 	}
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		if pending.Purpose == oauthPurposeLogin {
+			redirectBrowserAuthError(w, r, pending, "GITHUB_AUTH_FAILED")
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "auth state expired or invalid")
 		return
 	}
@@ -192,16 +208,16 @@ func (s *Server) completeBrowserLogin(w http.ResponseWriter, r *http.Request, pe
 			"provider": githubProvider,
 			"reason":   err.Error(),
 		})
-		writeError(w, http.StatusUnauthorized, "GitHub login failed")
+		redirectBrowserAuthError(w, r, pending, "GITHUB_AUTH_FAILED")
 		return
 	}
 	if s.Auth == nil {
-		writeError(w, http.StatusServiceUnavailable, "auth service is not configured")
+		redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
 		return
 	}
 	grantCode, err := secureRandomValue(s.randomSource(), secureTokenBytes)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "auth grant generation failed")
+		redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
 		return
 	}
 	issued, err := s.Auth.IssuePATForOAuth(r.Context(), githubProvider, subject, pending.ProjectID, 90*24*time.Hour)
@@ -210,7 +226,16 @@ func (s *Server) completeBrowserLogin(w http.ResponseWriter, r *http.Request, pe
 			"provider": githubProvider,
 			"reason":   "identity_or_membership_not_found",
 		})
-		writeError(w, http.StatusForbidden, "OAuth identity or project membership not found")
+		switch {
+		case errors.Is(err, auth.ErrOAuthIdentity):
+			redirectBrowserAuthError(w, r, pending, "GITHUB_ACCOUNT_UNLINKED")
+		case errors.Is(err, auth.ErrNoMembership):
+			redirectBrowserAuthError(w, r, pending, "OPSI_MEMBERSHIP_REQUIRED")
+		case errors.Is(err, auth.ErrProjectChoice):
+			redirectBrowserAuthError(w, r, pending, "PROJECT_SELECTION_REQUIRED")
+		default:
+			redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
+		}
 		return
 	}
 
@@ -227,6 +252,19 @@ func (s *Server) completeBrowserLogin(w http.ResponseWriter, r *http.Request, pe
 	callback, _ := url.Parse(pending.LocalCallback)
 	query := callback.Query()
 	query.Set("code", grantCode)
+	query.Set("state", pending.LocalState)
+	callback.RawQuery = query.Encode()
+	http.Redirect(w, r, callback.String(), http.StatusFound)
+}
+
+func redirectBrowserAuthError(w http.ResponseWriter, r *http.Request, pending oauthState, code string) {
+	callback, err := url.Parse(pending.LocalCallback)
+	if err != nil || !localCallbackAllowed(callback.String()) {
+		writeError(w, http.StatusUnauthorized, "browser authorization failed")
+		return
+	}
+	query := callback.Query()
+	query.Set("error", code)
 	query.Set("state", pending.LocalState)
 	callback.RawQuery = query.Encode()
 	http.Redirect(w, r, callback.String(), http.StatusFound)

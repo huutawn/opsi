@@ -154,8 +154,15 @@ button:disabled {
   white-space: nowrap;
 }
 
-.loginProject {
-  width: 150px;
+.authNotice {
+  flex: 1 0 100%;
+  border: 1px solid #edc7c8;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--bad-bg);
+  color: var(--bad);
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .projectPicker {

@@ -105,6 +105,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			return
 		}
 		logoutLocalSession(w, r, cfg, factory)
+		authFlow.clearSession()
 	})
 	mux.HandleFunc("/api/local/session/token/rotate", func(w http.ResponseWriter, r *http.Request) {
 		if !requireLocalSession(w, r, localSession) {
@@ -129,12 +130,23 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		}
 		w.Header().Set("content-type", "application/json")
 		projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
-		authenticated, tokenState, cloudState := localPATStatus(r.Context(), cfg, factory, projectID)
+		if projectID == "" {
+			projectID = authFlow.session().ProjectID
+		}
+		authenticated, tokenState, cloudState, identity := false, "missing", "unknown", localSessionIdentity{}
+		if optionalPAT(factory) != "" {
+			tokenState = "unverified"
+		}
+		if projectID != "" || r.URL.Query().Get("verify") == "1" {
+			authenticated, tokenState, cloudState, identity = localPATStatus(r.Context(), cfg, factory, projectID)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"authenticated":   authenticated,
 			"cloud_connected": cloudState,
 			"agent_connected": probeAgent(r.Context(), cfg, factory),
 			"token_status":    tokenState,
+			"org_id":          identity.OrgID,
+			"project_id":      identity.ProjectID,
 			"local_session":   localSession,
 			"capabilities":    []string{"projects", "nodes", "services", "deployments", "github_app", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
@@ -162,6 +174,30 @@ type localAuthFlow struct {
 	mu                 sync.Mutex
 	states             map[string]time.Time
 	installationClaims map[string]time.Time
+	currentSession     localSessionIdentity
+}
+
+type localSessionIdentity struct {
+	UserID    string `json:"user_id,omitempty"`
+	OrgID     string `json:"org_id,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	Role      string `json:"role,omitempty"`
+}
+
+func (f *localAuthFlow) session() localSessionIdentity {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.currentSession
+}
+
+func (f *localAuthFlow) setSession(session localSessionIdentity) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.currentSession = session
+}
+
+func (f *localAuthFlow) clearSession() {
+	f.setSession(localSessionIdentity{})
 }
 
 func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.Config, flow *localAuthFlow) {
@@ -173,10 +209,7 @@ func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.C
 		ProjectID string `json:"project_id"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
-	if strings.TrimSpace(body.ProjectID) == "" {
-		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "enter a project ID before signing in")
-		return
-	}
+	body.ProjectID = strings.TrimSpace(body.ProjectID)
 	state := newLocalSessionToken()
 	callback := "http://" + r.Host + "/api/local/session/callback"
 	payload, _ := json.Marshal(map[string]any{"local_callback": callback, "local_state": state, "project_id": body.ProjectID})
@@ -222,7 +255,15 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		delete(flow.states, state)
 	}
 	flow.mu.Unlock()
-	if !ok || time.Now().UTC().After(expiresAt) || code == "" {
+	if !ok || time.Now().UTC().After(expiresAt) {
+		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_CALLBACK_INVALID", "auth callback expired or invalid")
+		return
+	}
+	if authError := browserAuthErrorCode(r.URL.Query().Get("error")); authError != "" {
+		http.Redirect(w, r, "/?auth_error="+url.QueryEscape(authError), http.StatusFound)
+		return
+	}
+	if code == "" {
 		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_CALLBACK_INVALID", "auth callback expired or invalid")
 		return
 	}
@@ -238,9 +279,10 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	var out struct {
-		Token string `json:"token"`
+		Token   string               `json:"token"`
+		Session localSessionIdentity `json:"session"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.Token == "" {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.Token == "" || out.Session.ProjectID == "" || out.Session.OrgID == "" {
 		writeLocalError(w, r, http.StatusBadGateway, "AUTH_REDEEM_FAILED", "Cloud auth response was invalid")
 		return
 	}
@@ -249,7 +291,17 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		writeLocalError(w, r, http.StatusInternalServerError, "LOCAL_CREDENTIAL_STORE_FAILED", "could not store credential in OS keychain")
 		return
 	}
+	flow.setSession(out.Session)
 	http.Redirect(w, r, "/?auth=ok", http.StatusFound)
+}
+
+func browserAuthErrorCode(code string) string {
+	switch code {
+	case "AUTH_SESSION_EXPIRED", "GITHUB_AUTH_DENIED", "GITHUB_AUTH_FAILED", "GITHUB_ACCOUNT_UNLINKED", "OPSI_MEMBERSHIP_REQUIRED", "PROJECT_SELECTION_REQUIRED", "AUTH_UNAVAILABLE":
+		return code
+	default:
+		return ""
+	}
 }
 
 func rotateLocalPAT(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) {
@@ -327,52 +379,46 @@ func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain
 	return "ok"
 }
 
-func localPATStatus(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), projectID string) (bool, string, string) {
+func localPATStatus(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), projectID string) (bool, string, string, localSessionIdentity) {
 	pat := optionalPAT(factory)
 	if pat == "" {
-		return false, "missing", "unknown"
-	}
-	if projectID == "" {
-		return false, "unverified", "unknown"
+		return false, "missing", "unknown", localSessionIdentity{}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	status, err := verifyCloudPAT(ctx, cfg.CloudURL, pat, projectID)
+	status, identity, err := verifyCloudPAT(ctx, cfg.CloudURL, pat, projectID)
 	if err != nil {
-		return false, "unverified", "failed"
+		return false, "unverified", "failed", localSessionIdentity{}
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return false, "invalid", "ok"
+		return false, "invalid", "ok", localSessionIdentity{}
 	}
 	if status >= 200 && status < 300 {
-		return true, "valid", "ok"
+		return true, "valid", "ok", identity
 	}
-	return false, "unverified", "failed"
+	return false, "unverified", "failed", localSessionIdentity{}
 }
 
-func verifyCloudPAT(ctx context.Context, cloudURL, pat, projectID string) (int, error) {
+func verifyCloudPAT(ctx context.Context, cloudURL, pat, projectID string) (int, localSessionIdentity, error) {
 	payload, _ := json.Marshal(map[string]string{"project_id": projectID})
 	resp, err := postCloudJSON(ctx, cloudURL, "/v1/auth/pat/verify", pat, payload)
 	if err != nil {
-		return 0, err
+		return 0, localSessionIdentity{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		return resp.StatusCode, nil
+		return resp.StatusCode, localSessionIdentity{}, nil
 	}
-	var session struct {
-		UserID    string `json:"user_id"`
-		ProjectID string `json:"project_id"`
-		Role      string `json:"role"`
-	}
+	var session localSessionIdentity
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&session); err != nil {
-		return resp.StatusCode, err
+		return resp.StatusCode, localSessionIdentity{}, err
 	}
-	if session.UserID == "" || session.ProjectID != projectID || session.Role == "" {
-		return resp.StatusCode, fmt.Errorf("invalid PAT verification response")
+	wrongProject := projectID != "" && session.ProjectID != projectID
+	if session.UserID == "" || session.OrgID == "" || session.ProjectID == "" || wrongProject || session.Role == "" {
+		return resp.StatusCode, localSessionIdentity{}, fmt.Errorf("invalid PAT verification response")
 	}
-	return resp.StatusCode, nil
+	return resp.StatusCode, session, nil
 }
 
 func postCloudJSON(ctx context.Context, cloudURL, path, pat string, payload []byte) (*http.Response, error) {

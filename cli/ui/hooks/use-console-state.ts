@@ -50,9 +50,22 @@ export function useConsoleState() {
   async function load() {
     patch({ status: "loading", message: "" });
     try {
-      const list = await client.projects(orgID);
+      const session = await client.session();
+      if (!session.authenticated) {
+        patch({
+          status: "permission",
+          message: "Sign in with GitHub to load your Opsi projects.",
+          projects: [],
+          project: null,
+        });
+        return;
+      }
+      const effectiveOrgID = session.org_id || orgID;
+      if (session.org_id && session.org_id !== orgID) setOrgID(session.org_id);
+      const effectiveProjectID = projectID || session.project_id || "";
+      const list = await client.projects(effectiveOrgID);
       const projects = list.projects ?? [];
-      const selected = projects.find((item) => item.id === projectID) ?? projects[0] ?? null;
+      const selected = projects.find((item) => item.id === effectiveProjectID) ?? projects[0] ?? null;
       if (!selected) {
         patch(emptyPatch(projects));
         return;

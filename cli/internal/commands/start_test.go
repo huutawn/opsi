@@ -886,7 +886,7 @@ func TestLocalSessionVerifiesPATBeforeReportingAuthenticated(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["project_id"] != "proj-1" {
 			t.Fatalf("verification body=%v err=%v", body, err)
 		}
-		_, _ = w.Write([]byte(`{"user_id":"user-1","project_id":"proj-1","role":"owner"}`))
+		_, _ = w.Write([]byte(`{"user_id":"user-1","org_id":"org-1","project_id":"proj-1","role":"owner"}`))
 	}))
 	defer cloud.Close()
 	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
@@ -930,6 +930,40 @@ func TestLocalSessionVerifiesPATBeforeReportingAuthenticated(t *testing.T) {
 	}
 }
 
+func TestLocalSessionResolvesProjectFromPATWithoutBrowserStorage(t *testing.T) {
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("saved-pat"); err != nil {
+		t.Fatal(err)
+	}
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/pat/verify" || r.Header.Get("Authorization") != "Bearer saved-pat" {
+			t.Fatalf("unexpected verification request: path=%s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["project_id"] != "" {
+			t.Fatalf("verification body=%v err=%v", body, err)
+		}
+		_, _ = w.Write([]byte(`{"user_id":"user-1","org_id":"org-1","project_id":"proj-1","role":"owner"}`))
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) {
+		return store, nil
+	}))
+	defer server.Close()
+	res, err := http.Get(server.URL + "/api/local/session?verify=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var session map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	if session["authenticated"] != true || session["org_id"] != "org-1" || session["project_id"] != "proj-1" {
+		t.Fatalf("projectless session=%v", session)
+	}
+}
+
 func TestLocalProxySanitizesCloudAuthFailures(t *testing.T) {
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -963,14 +997,18 @@ func TestLocalBrowserLoginRedeemsToKeychainWithoutBrowserPAT(t *testing.T) {
 		case "/v1/auth/browser/start":
 			var req struct {
 				LocalState string `json:"local_state"`
+				ProjectID  string `json:"project_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatal(err)
 			}
 			localState = req.LocalState
+			if req.ProjectID != "" {
+				t.Fatalf("browser login unexpectedly required project %q", req.ProjectID)
+			}
 			_, _ = w.Write([]byte(`{"auth_url":"https://cloud.example.test/login","status":"pending"}`))
 		case "/v1/auth/browser/redeem":
-			_, _ = w.Write([]byte(`{"token":"pat_secret_should_stay_local","session":{"user_id":"u","project_id":"proj"}}`))
+			_, _ = w.Write([]byte(`{"token":"pat_secret_should_stay_local","session":{"user_id":"u","org_id":"org","project_id":"proj","role":"owner"}}`))
 		default:
 			t.Fatalf("unexpected Cloud path %s", r.URL.Path)
 		}
@@ -981,7 +1019,7 @@ func TestLocalBrowserLoginRedeemsToKeychainWithoutBrowserPAT(t *testing.T) {
 	}))
 	defer server.Close()
 
-	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{"project_id":"proj"}`))
+	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1006,6 +1044,45 @@ func TestLocalBrowserLoginRedeemsToKeychainWithoutBrowserPAT(t *testing.T) {
 	}
 	if got != "pat_secret_should_stay_local" {
 		t.Fatalf("stored token = %q", got)
+	}
+}
+
+func TestLocalBrowserLoginReturnsSanitizedFailureToUI(t *testing.T) {
+	var localState string
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			LocalState string `json:"local_state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		localState = req.LocalState
+		_, _ = w.Write([]byte(`{"auth_url":"https://cloud.example.test/login","status":"pending"}`))
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, nil))
+	defer server.Close()
+	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err = client.Get(server.URL + "/api/local/session/callback?error=GITHUB_ACCOUNT_UNLINKED&state=" + url.QueryEscape(localState))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusFound || res.Header.Get("Location") != "/?auth_error=GITHUB_ACCOUNT_UNLINKED" {
+		t.Fatalf("status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
+	}
+	res, err = client.Get(server.URL + "/api/local/session/callback?error=GITHUB_ACCOUNT_UNLINKED&state=" + url.QueryEscape(localState))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("reused failure state status=%d", res.StatusCode)
 	}
 }
 

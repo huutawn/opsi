@@ -312,7 +312,11 @@ func TestBrowserAuthCallbackRejectsEmailWithoutStableSubject(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/v1/auth/browser/callback?code=provider-code&state="+url.QueryEscape(authURL.Query().Get("state")), nil)
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "opsi_pat_") {
+	location, err := url.Parse(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusFound || location.Query().Get("error") != "GITHUB_AUTH_FAILED" || strings.Contains(w.Body.String(), "opsi_pat_") {
 		t.Fatalf("email-only callback status=%d body=%s", w.Code, w.Body.String())
 	}
 }

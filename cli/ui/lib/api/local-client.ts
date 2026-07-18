@@ -26,6 +26,8 @@ export type LocalSessionStatus = {
   agent_connected: "ok" | "failed" | "unknown";
   token_status?: string;
   local_session?: string;
+  org_id?: string;
+  project_id?: string;
   capabilities?: string[];
 };
 
@@ -33,7 +35,7 @@ export class LocalClient {
   private localSession = "";
 
   async session(projectID?: string) {
-    const query = projectID ? `?project_id=${encodeURIComponent(projectID)}` : "";
+    const query = projectID ? `?verify=1&project_id=${encodeURIComponent(projectID)}` : "?verify=1";
     return this.call<LocalSessionStatus>(`/api/local/session${query}`);
   }
 

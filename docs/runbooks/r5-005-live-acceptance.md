@@ -80,3 +80,28 @@ After browser authorization and installation claim have passed:
 Never store the raw webhook payload in evidence. Record only delivery ID,
 event/action, HTTP result, duplicate flag, numeric installation/repository IDs,
 and the resulting sanitized inventory state.
+
+## Browser Login UX
+
+Start the Local UI and use **Sign in with GitHub**. Normal login does not ask
+for a project ID. GitHub is the identity provider; Cloud resolves the single
+active Opsi project membership after matching the prelinked numeric GitHub
+subject. A keychain PAT is checked by the Local backend on startup, and only
+safe `org_id`/`project_id` session metadata reaches the browser.
+
+The public GitHub callback redirects both success and typed sanitized failures
+back to the one-time loopback callback. The Local UI removes callback query
+parameters after rendering a useful message. It must not leave the operator on
+a raw public JSON error page, and it must not put a PAT, GitHub token, grant,
+OAuth code, or state in browser storage.
+
+Expected failure guidance:
+
+- `GITHUB_ACCOUNT_UNLINKED`: repeat the supported `bootstrap-owner` operation
+  with provider `github` and the verified numeric GitHub user subject.
+- `OPSI_MEMBERSHIP_REQUIRED`: restore an active Opsi project membership for the
+  already linked user.
+- `PROJECT_SELECTION_REQUIRED`: the identity has multiple project memberships;
+  select one explicitly rather than guessing.
+- denied, expired, or failed GitHub authorization: start a new login because
+  both Cloud state and the Local callback state are one-time.

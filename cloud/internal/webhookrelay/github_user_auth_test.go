@@ -102,6 +102,20 @@ func callbackRequest(server *Server, state, code string) *httptest.ResponseRecor
 	return response
 }
 
+func requireBrowserAuthErrorRedirect(t *testing.T, response *httptest.ResponseRecorder, code string) {
+	t.Helper()
+	if response.Code != http.StatusFound {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.Hostname() != "127.0.0.1" || location.Query().Get("error") != code || location.Query().Get("state") != "local-state" {
+		t.Fatalf("unexpected error redirect %s", location.Redacted())
+	}
+}
+
 func githubJSONResponse(request *http.Request, status int, body string) *http.Response {
 	return &http.Response{
 		StatusCode: status,
@@ -205,9 +219,7 @@ func TestBrowserAuthStateRejectsExpiredUnknownReusedAndMissingCode(t *testing.T)
 		_, authorizeURL, _ := startBrowserAuth(t, server, "project")
 		now = now.Add(oauthStateTTL)
 		response := callbackRequest(server, authorizeURL.Query().Get("state"), "code")
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-		}
+		requireBrowserAuthErrorRedirect(t, response, "AUTH_SESSION_EXPIRED")
 	})
 
 	t.Run("exchange failure consumes state", func(t *testing.T) {
@@ -222,9 +234,10 @@ func TestBrowserAuthStateRejectsExpiredUnknownReusedAndMissingCode(t *testing.T)
 		state := authorizeURL.Query().Get("state")
 		first := callbackRequest(server, state, "code")
 		second := callbackRequest(server, state, "code")
-		if first.Code != http.StatusUnauthorized || second.Code != http.StatusUnauthorized || calls.Load() != 1 {
+		if second.Code != http.StatusUnauthorized || calls.Load() != 1 {
 			t.Fatalf("first=%d second=%d exchange calls=%d", first.Code, second.Code, calls.Load())
 		}
+		requireBrowserAuthErrorRedirect(t, first, "GITHUB_AUTH_FAILED")
 		if strings.Contains(first.Body.String(), "provider-secret-body") {
 			t.Fatalf("provider response leaked: %s", first.Body.String())
 		}
@@ -235,9 +248,7 @@ func TestBrowserAuthStateRejectsExpiredUnknownReusedAndMissingCode(t *testing.T)
 		_, authorizeURL, _ := startBrowserAuth(t, server, "project")
 		state := authorizeURL.Query().Get("state")
 		response := callbackRequest(server, state, "")
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("status=%d", response.Code)
-		}
+		requireBrowserAuthErrorRedirect(t, response, "GITHUB_AUTH_FAILED")
 		if reused := callbackRequest(server, state, "code"); reused.Code != http.StatusUnauthorized {
 			t.Fatalf("reused state status=%d", reused.Code)
 		}
@@ -257,9 +268,10 @@ func TestBrowserAuthGitHubDenialConsumesStateWithoutExchange(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/v1/auth/browser/callback?state="+url.QueryEscape(state)+"&error=access_denied&error_description="+url.QueryEscape("arbitrary secret description"), nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized || calls.Load() != 0 {
+	if calls.Load() != 0 {
 		t.Fatalf("status=%d exchange calls=%d", response.Code, calls.Load())
 	}
+	requireBrowserAuthErrorRedirect(t, response, "GITHUB_AUTH_DENIED")
 	if strings.Contains(response.Body.String(), "arbitrary secret description") {
 		t.Fatalf("denial description reflected: %s", response.Body.String())
 	}
@@ -453,9 +465,7 @@ func TestBrowserAuthUsesGitHubProviderAndRequiresPrelinkedIdentity(t *testing.T)
 		candidateCount := len(store.Candidates)
 		_, authorizeURL, _ := startBrowserAuth(t, server, projectID)
 		response := callbackRequest(server, authorizeURL.Query().Get("state"), "code")
-		if response.Code != http.StatusForbidden {
-			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-		}
+		requireBrowserAuthErrorRedirect(t, response, "GITHUB_ACCOUNT_UNLINKED")
 		if len(store.Candidates) != candidateCount || len(store.OAuthIdentities) != 1 {
 			t.Fatal("unlinked login mutated users or OAuth identities")
 		}

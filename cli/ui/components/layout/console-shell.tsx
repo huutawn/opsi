@@ -18,7 +18,6 @@ export function ConsoleShell() {
       <main className="main" id="main">
         <Topbar
           orgID={console.orgID}
-          projectID={console.state.project?.id}
           onOrgID={console.setOrgID}
           onRefresh={() => void console.actions.load()}
         />

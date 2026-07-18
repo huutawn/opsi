@@ -157,12 +157,14 @@ live selected-repository remove/add must prove lifecycle delivery. Browser grant
 redemption, installation claim, lifecycle webhooks, repository/binding/init, and
 CLI/UI parity remain the active live gate.
 
-The R5-005 live browser checkpoint exposed a stale-keychain UX defect: Local
-session status treated any stored PAT as authenticated even when Cloud rejected
-it. Local session now verifies the PAT for a supplied project, reports
-valid/invalid/unverified state without returning the credential, sanitizes Cloud
-401/403 responses, and keeps project-ID login available when inventory cannot
-load. Focused CLI tests and UI lint/build cover the recovery path.
+The R5-005 live browser checkpoint exposed stale-keychain and project-first
+login UX defects. Browser login now starts from GitHub identity without asking
+for a project ID. Cloud resolves the only active project membership and rejects
+ambiguous multi-project identity explicitly. Local session startup verifies a
+keychain PAT through Cloud, returns only safe org/project identity metadata, and
+never stores browser auth state. Failed GitHub callbacks return one-time typed
+errors to the Local UI instead of leaving the operator on a public JSON error
+page. Focused Cloud/CLI tests and UI lint/build cover the recovery path.
 
 ## Verification
 

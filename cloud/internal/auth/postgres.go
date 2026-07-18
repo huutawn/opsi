@@ -29,7 +29,7 @@ FROM personal_access_tokens p
 JOIN users u ON u.id = p.user_id
 JOIN project_memberships m ON m.user_id = p.user_id
 JOIN projects pr ON pr.id = m.project_id
-WHERE m.project_id = $1`, projectID)
+WHERE ($1 = '' OR m.project_id = $1)`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -77,15 +77,15 @@ JOIN project_memberships m ON m.user_id = u.id
 JOIN projects pr ON pr.id = m.project_id
 WHERE u.id = $1 AND ($2 = '' OR m.project_id = $2)
 ORDER BY m.created_at
-LIMIT 1`, userID, projectID)
+LIMIT 2`, userID, projectID)
 	if err != nil {
 		return Candidate{}, err
 	}
 	defer rows.Close()
-	return s.issueFromRows(ctx, rows, tokenHash, expiresAt)
+	return s.issueFromRows(ctx, rows, tokenHash, expiresAt, projectID == "")
 }
 
-func (s PostgresStore) issueFromRows(ctx context.Context, rows *sql.Rows, tokenHash string, expiresAt time.Time) (Candidate, error) {
+func (s PostgresStore) issueFromRows(ctx context.Context, rows *sql.Rows, tokenHash string, expiresAt time.Time, requireUnique bool) (Candidate, error) {
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return Candidate{}, err
@@ -95,6 +95,9 @@ func (s PostgresStore) issueFromRows(ctx context.Context, rows *sql.Rows, tokenH
 	candidate := Candidate{ID: newID("pat"), Hash: tokenHash, ExpiresAt: expiresAt}
 	if err := rows.Scan(&candidate.UserID, &candidate.Email, &candidate.OrgID, &candidate.ProjectID, &candidate.Role); err != nil {
 		return Candidate{}, err
+	}
+	if requireUnique && rows.Next() {
+		return Candidate{}, ErrProjectChoice
 	}
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO personal_access_tokens(id, user_id, token_hash, expires_at, revoked) VALUES($1,$2,$3,$4,false)`, candidate.ID, candidate.UserID, tokenHash, expiresAt); err != nil {
 		return Candidate{}, err
