@@ -473,8 +473,9 @@ typed reasons; a truly
 empty trusted diff is the only empty plan. CLI `opsi cd plan` and Local API
 `/api/local/repository/plan/preview` use the same DTO and service.
 
-The generated workflow has read-only contents permission, immutable checkout
-SHA, bounded plan/build jobs, deterministic concurrency and fork-safe behavior;
+The generated workflow has read-only contents permission, immutable action and
+Opsi planner source revisions, bounded plan/build jobs, deterministic
+concurrency and fork-safe behavior;
 it performs no OIDC, GHCR push, Cloud call, or deployment. Local UI repository CD
 setup displays all services, previews config/migration/workflow changes, applies
 with local session/idempotency confirmation, and previews affected services with
