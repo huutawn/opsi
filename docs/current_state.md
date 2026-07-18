@@ -351,6 +351,11 @@ paths were reset under the trusted ED25519 SSH key, and recovery session
 poller started too late: its first observation was checkpoint `4/register_agent`,
 so it did not restart the Worker during `install_k3s`. R5-004 stays `PARTIAL`;
 no second reset/rebuild, production fault hook, or target reboot was attempted.
+This is accepted as `FUNCTIONAL_ACCEPTANCE_PASS / RESILIENCE_EVIDENCE_DEFERRED`:
+Gate B is accepted, `node-c69fe70180d359d7` remains the current Agent VPS, and
+the destructive-step Worker restart moves to mandatory R5-017 evidence on a
+disposable VPS or fresh reset with a deterministic staging-only barrier or fault
+mechanism. R5-018/MCP is blocked until that deferred R5-017 gate passes.
 
 Git-based deployment exists and can apply user-provided manifests. Such a
 manifest may contain its own Service, Ingress, Gateway, TLS, lifecycle, or

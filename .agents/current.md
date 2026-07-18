@@ -132,10 +132,13 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Next Ordered Work
 
-R5-004 remains `PARTIAL` only for the live mid-step Worker restart/resume gate.
-The authorized recovery attempt was consumed after its poller missed the
-destructive-step window. Do not reset/rebuild the Agent VPS again, add a
-production fault hook, or start R5-005 without a new explicit decision.
+R5-004 is `PARTIAL / FUNCTIONAL_ACCEPTANCE_PASS / RESILIENCE_EVIDENCE_DEFERRED`.
+Gate B is accepted and recovery node `node-c69fe70180d359d7` remains the current
+Agent VPS; do not reset or rebuild it again. The live Worker restart during
+`install_k3s` is a mandatory R5-017 gate on a disposable VPS or fresh reset
+with a deterministic staging-only E2E barrier or fault mechanism, never a
+production fault hook. R5-018/MCP remains blocked unless that deferred gate
+passes. R5-005 is authorized to begin.
 
 ## Verification
 

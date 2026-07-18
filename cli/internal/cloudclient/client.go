@@ -167,6 +167,10 @@ func (c *Client) ClaimRepository(ctx context.Context, projectID string, reposito
 	return response, err
 }
 
+func (c *Client) ReleaseRepository(ctx context.Context, projectID string, repositoryID int64) error {
+	return c.do(ctx, http.MethodDelete, []string{"v1", "projects", projectID, "github", "repositories", strconv.FormatInt(repositoryID, 10), "claim"}, nil, fmt.Sprintf("repository-release:%s:%d", projectID, repositoryID), nil)
+}
+
 func (c *Client) CreateServiceBinding(ctx context.Context, projectID, serviceID string, repositoryID int64, serviceKey, configPath string) (GitHubBinding, error) {
 	request := struct {
 		ServiceID    string `json:"service_id"`
@@ -178,6 +182,10 @@ func (c *Client) CreateServiceBinding(ctx context.Context, projectID, serviceID 
 	key := fmt.Sprintf("binding:%s:%s:%d:%s:%s", projectID, serviceID, repositoryID, serviceKey, configPath)
 	err := c.do(ctx, http.MethodPost, []string{"v1", "projects", projectID, "github", "bindings"}, request, key, &response)
 	return response, err
+}
+
+func (c *Client) RemoveServiceBinding(ctx context.Context, projectID, bindingID string) error {
+	return c.do(ctx, http.MethodDelete, []string{"v1", "projects", projectID, "github", "bindings", bindingID}, nil, fmt.Sprintf("binding-remove:%s:%s", projectID, bindingID), nil)
 }
 
 func (c *Client) do(ctx context.Context, method string, segments []string, body any, idempotencyKey string, response any) error {
