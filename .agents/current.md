@@ -147,17 +147,15 @@ while the browser receives no PAT or OAuth token. Full CLI/Cloud tests, focused
 race tests, UI lint/build, and disposable PostgreSQL GitHub
 inventory/durable-dedupe tests pass.
 
-The live R5-005 gate is `OPERATOR_REQUIRED`: the preferred repository
-`huutawn/opsi-r5-005-fixture` does not exist. Do not create it without explicit
-operator authorization. After the operator creates it, install the App with
-Only select repositories, Metadata read-only, and only Installation,
-Installation repositories, and Repository events. Fixture rename/access
-changes and any second-account wrong-user proof remain separate explicit
-operator actions. Public sanitized preflight confirms the fixed GitHub
-authorization endpoint, canonical callback, PKCE S256/state, public health, and
-unsigned webhook rejection; App private-key/App-ID use, live installation
-tokens, browser grant redemption, lifecycle webhooks, and CLI/UI manual parity
-remain unproven until the fixture exists.
+The R5-005 fixture now exists and the operator supplied installation/repository
+numeric identity. The App must keep Metadata read-only and manually subscribe
+only to `repository`. GitHub sends `installation` and
+`installation_repositories` as default lifecycle events for every App; they do
+not need to appear in the App API `events` array, and `installation_target` is
+not a substitute. The focused sanitized verifier and tests encode this boundary;
+live selected-repository remove/add must prove lifecycle delivery. Browser grant
+redemption, installation claim, lifecycle webhooks, repository/binding/init, and
+CLI/UI parity remain the active live gate.
 
 ## Verification
 
