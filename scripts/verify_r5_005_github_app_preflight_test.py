@@ -130,6 +130,10 @@ class GitHubAppPreflightTests(unittest.TestCase):
             },
         ]
         request_bytes.side_effect = [
+            (
+                200,
+                b'[{"id":9,"guid":"same-guid","redelivery":true},{"id":10,"guid":"same-guid","redelivery":false}]',
+            ),
             (202, b""),
             (
                 200,

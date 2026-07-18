@@ -241,6 +241,17 @@ def redeliver(bearer: str, api_id: int, wait_seconds: int) -> dict[str, Any]:
     original = request_json(f"/app/hook/deliveries/{api_id}", bearer)
     guid = original.get("guid")
     require(isinstance(guid, str) and guid != "", "GitHub delivery GUID is missing")
+    _, before_raw = request_bytes("/app/hook/deliveries?per_page=100", bearer)
+    try:
+        before_deliveries = json.loads(before_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PreflightError("GitHub delivery list returned malformed JSON") from exc
+    require(isinstance(before_deliveries, list), "GitHub delivery list must be a JSON array")
+    previous_attempts = {
+        item.get("id")
+        for item in before_deliveries
+        if isinstance(item, dict) and item.get("guid") == guid and item.get("redelivery")
+    }
     status, _ = request_bytes(f"/app/hook/deliveries/{api_id}/attempts", bearer, method="POST")
     require(status == 202, "GitHub delivery redelivery was not accepted")
     deadline = time.monotonic() + wait_seconds
@@ -254,7 +265,10 @@ def redeliver(bearer: str, api_id: int, wait_seconds: int) -> dict[str, Any]:
         attempts = [
             item
             for item in deliveries
-            if isinstance(item, dict) and item.get("guid") == guid and item.get("redelivery") and item.get("id") != api_id
+            if isinstance(item, dict)
+            and item.get("guid") == guid
+            and item.get("redelivery")
+            and item.get("id") not in previous_attempts
         ]
         if attempts:
             latest = max(attempts, key=lambda item: str(item.get("delivered_at", "")))
