@@ -377,11 +377,11 @@ func parseGitHubAppEvent(eventName, deliveryID string, body []byte, receivedAt t
 		if err := json.Unmarshal(body, &payload); err != nil || payload.Installation == nil || payload.Installation.ID <= 0 || payload.Added == nil || payload.Removed == nil {
 			return GitHubAppEvent{}, false, fmt.Errorf("invalid installation repositories payload")
 		}
-		added, err := parseGitHubRepositories(payload.Added)
+		added, err := parseGitHubRepositoryIdentities(payload.Added)
 		if err != nil {
 			return GitHubAppEvent{}, false, err
 		}
-		removed, err := parseGitHubRepositories(payload.Removed)
+		removed, err := parseGitHubRepositoryIdentities(payload.Removed)
 		if err != nil {
 			return GitHubAppEvent{}, false, err
 		}
@@ -426,19 +426,18 @@ func supportedGitHubAppAction(eventName, action string) bool {
 	return false
 }
 
-func parseGitHubRepositories(payloads []githubRepositoryPayload) ([]GitHubRepository, error) {
+func parseGitHubRepositoryIdentities(payloads []githubRepositoryPayload) ([]GitHubRepository, error) {
 	repositories := make([]GitHubRepository, 0, len(payloads))
 	seen := make(map[int64]struct{}, len(payloads))
 	for _, payload := range payloads {
-		repository, err := parseGitHubRepository(payload)
-		if err != nil {
-			return nil, err
+		if payload.ID <= 0 {
+			return nil, fmt.Errorf("invalid repository identity")
 		}
-		if _, ok := seen[repository.ID]; ok {
+		if _, ok := seen[payload.ID]; ok {
 			return nil, fmt.Errorf("duplicate repository ID")
 		}
-		seen[repository.ID] = struct{}{}
-		repositories = append(repositories, repository)
+		seen[payload.ID] = struct{}{}
+		repositories = append(repositories, GitHubRepository{ID: payload.ID})
 	}
 	return repositories, nil
 }

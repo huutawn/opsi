@@ -191,8 +191,18 @@ func TestGitHubWebhookMutationIsAtomicDurableAndIdentitySafeInMemory(t *testing.
 		t.Fatalf("duplicate=%v installation=%+v err=%v", duplicate, service.githubInstallations[501], err)
 	}
 	added := testGitHubRepository(701, 501)
-	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "delivery-added", Event: "installation_repositories", Action: "added", InstallationID: 501, Added: []GitHubRepository{added}, ReceivedAt: time.Now().UTC()}); err != nil {
+	added.Status = GitHubRepositoryRemoved
+	if _, err := service.UpsertGitHubRepository(added); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "delivery-added", Event: "installation_repositories", Action: "added", InstallationID: 501, Added: []GitHubRepository{{RepositoryID: added.RepositoryID}}, ReceivedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := service.githubRepositories[701]; got.Status != GitHubRepositoryActive || got.FullName != added.FullName || got.DefaultBranch != added.DefaultBranch {
+		t.Fatalf("sparse add did not preserve repository metadata: %+v", got)
+	}
+	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "delivery-unknown-added", Event: "installation_repositories", Action: "added", InstallationID: 501, Added: []GitHubRepository{{RepositoryID: 702}}, ReceivedAt: time.Now().UTC()}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown sparse add err=%v", err)
 	}
 	renamed := added
 	renamed.Name, renamed.FullName = "renamed", "octo/renamed"
@@ -203,7 +213,7 @@ func TestGitHubWebhookMutationIsAtomicDurableAndIdentitySafeInMemory(t *testing.
 	if got := service.githubRepositories[701]; got.Name != "renamed" || got.OwnerID != 602 || got.RepositoryID != 701 {
 		t.Fatalf("renamed repository=%+v", got)
 	}
-	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "delivery-removed", Event: "installation_repositories", Action: "removed", InstallationID: 501, Removed: []GitHubRepository{renamed}, ReceivedAt: time.Now().UTC()}); err != nil || service.githubRepositories[701].Status != GitHubRepositoryRemoved {
+	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "delivery-removed", Event: "installation_repositories", Action: "removed", InstallationID: 501, Removed: []GitHubRepository{{RepositoryID: renamed.RepositoryID}}, ReceivedAt: time.Now().UTC()}); err != nil || service.githubRepositories[701].Status != GitHubRepositoryRemoved {
 		t.Fatalf("remove err=%v repository=%+v", err, service.githubRepositories[701])
 	}
 	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "delivery-deleted-repo", Event: "repository", Action: "deleted", InstallationID: 501, Repository: &renamed, ReceivedAt: time.Now().UTC()}); err != nil || service.githubRepositories[701].Status != GitHubRepositoryDeleted {

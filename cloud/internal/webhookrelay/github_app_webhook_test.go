@@ -141,8 +141,8 @@ func TestGitHubAppWebhookParsesTypedEvents(t *testing.T) {
 				t.Fatalf("event=%+v", event)
 			}
 		}},
-		{name: "repositories added", eventName: "installation_repositories", body: []byte(`{"action":"added","installation":{"id":101},"repositories_added":[{"id":301,"name":"api","full_name":"example/api","owner":{"id":202,"login":"example"}}],"repositories_removed":[]}`), assertions: func(t *testing.T, event GitHubAppEvent) {
-			if event.InstallationID != 101 || len(event.Added) != 1 || event.Added[0].ID != 301 || event.Added[0].OwnerID != 202 || len(event.Removed) != 0 {
+		{name: "repositories added", eventName: "installation_repositories", body: []byte(`{"action":"added","installation":{"id":101},"repositories_added":[{"id":301,"node_id":"R_kgDOExample","name":"api","full_name":"example/api","private":false}],"repositories_removed":[]}`), assertions: func(t *testing.T, event GitHubAppEvent) {
+			if event.InstallationID != 101 || len(event.Added) != 1 || event.Added[0].ID != 301 || event.Added[0].OwnerID != 0 || event.Added[0].DefaultBranch != "" || len(event.Removed) != 0 {
 				t.Fatalf("event=%+v", event)
 			}
 		}},

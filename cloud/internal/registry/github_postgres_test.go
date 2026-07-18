@@ -162,8 +162,16 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 		t.Fatal(err)
 	}
 	partialRepository := testGitHubRepository(15003, partialInstallation.InstallationID)
-	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "postgres-partial-added", Event: "installation_repositories", Action: "added", InstallationID: partialInstallation.InstallationID, Added: []GitHubRepository{partialRepository}, ReceivedAt: time.Now().UTC()}); err != nil {
+	partialRepository.Status = GitHubRepositoryRemoved
+	if _, err := service.UpsertGitHubRepository(partialRepository); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "postgres-partial-added", Event: "installation_repositories", Action: "added", InstallationID: partialInstallation.InstallationID, Added: []GitHubRepository{{RepositoryID: partialRepository.RepositoryID}}, ReceivedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	var partialName, partialBranch, partialAddedStatus string
+	if err := db.QueryRow(`SELECT name,default_branch,status FROM github_repositories WHERE repository_id=$1`, partialRepository.RepositoryID).Scan(&partialName, &partialBranch, &partialAddedStatus); err != nil || partialName != partialRepository.Name || partialBranch != partialRepository.DefaultBranch || partialAddedStatus != GitHubRepositoryActive {
+		t.Fatalf("partial added name=%q branch=%q status=%q err=%v", partialName, partialBranch, partialAddedStatus, err)
 	}
 	if _, err := service.RecordGitHubWebhookEvent(context.Background(), GitHubWebhookMutation{DeliveryID: "postgres-partial-removed", Event: "installation_repositories", Action: "removed", InstallationID: partialInstallation.InstallationID, Removed: []GitHubRepository{{RepositoryID: partialRepository.RepositoryID}}, ReceivedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)

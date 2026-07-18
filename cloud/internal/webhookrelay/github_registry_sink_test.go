@@ -53,7 +53,10 @@ func TestRegistryGitHubAppEventSinkPersistsAndDeduplicatesAcrossServerRecreation
 			t.Fatalf("%s status=%d body=%s", change.action, response.Code, response.Body.String())
 		}
 	}
-	addedBody := []byte(`{"action":"added","installation":{"id":101},"repositories_added":[{"id":301,"name":"api","full_name":"example/api","default_branch":"main","owner":{"id":202,"login":"example"}}],"repositories_removed":[]}`)
+	if _, err := sharedRegistry.UpsertGitHubRepository(registry.GitHubRepository{RepositoryID: 301, InstallationID: 101, OwnerID: 202, OwnerLogin: "example", Name: "api", FullName: "example/api", DefaultBranch: "main", Status: registry.GitHubRepositoryRemoved}); err != nil {
+		t.Fatal(err)
+	}
+	addedBody := []byte(`{"action":"added","installation":{"id":101},"repositories_added":[{"id":301,"node_id":"R_kgDOExample","name":"api","full_name":"example/api","private":false}],"repositories_removed":[]}`)
 	response = serveGitHubAppWebhook(secondServer, githubAppWebhookRequest(http.MethodPost, "installation_repositories", "sink-added", addedBody, secret))
 	if response.Code != http.StatusOK {
 		t.Fatalf("added status=%d body=%s", response.Code, response.Body.String())

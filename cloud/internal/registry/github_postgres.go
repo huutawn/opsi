@@ -253,10 +253,7 @@ func applyGitHubWebhookTx(ctx context.Context, tx githubDBTX, event GitHubWebhoo
 						return err
 					}
 				} else {
-					repository.InstallationID = event.InstallationID
-					repository.Status = group.status
-					repository.CreatedAt, repository.UpdatedAt = at, at
-					if _, err := upsertGitHubRepositoryTx(ctx, tx, repository, at); err != nil {
+					if err := activateGitHubRepositoryTx(ctx, tx, event.InstallationID, repository.RepositoryID, at); err != nil {
 						return err
 					}
 				}
@@ -286,6 +283,21 @@ func applyGitHubWebhookTx(ctx context.Context, tx githubDBTX, event GitHubWebhoo
 	}
 }
 
+func activateGitHubRepositoryTx(ctx context.Context, tx githubDBTX, installationID, repositoryID int64, at time.Time) error {
+	current, err := scanGitHubRepository(tx.QueryRowContext(ctx, githubRepositorySelect+` WHERE repository_id=$1 FOR UPDATE`, repositoryID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if current.InstallationID != installationID {
+		return ErrGitHubEventConflict
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE github_repositories SET status='active',updated_at=$2 WHERE repository_id=$1`, repositoryID, at)
+	return err
+}
+
 func removeGitHubRepositoryTx(ctx context.Context, tx githubDBTX, installationID int64, repository GitHubRepository, at time.Time) error {
 	current, err := scanGitHubRepository(tx.QueryRowContext(ctx, githubRepositorySelect+` WHERE repository_id=$1 FOR UPDATE`, repository.RepositoryID))
 	if err == nil {
@@ -298,11 +310,7 @@ func removeGitHubRepositoryTx(ctx context.Context, tx githubDBTX, installationID
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	repository.InstallationID = installationID
-	repository.Status = GitHubRepositoryRemoved
-	repository.CreatedAt, repository.UpdatedAt = at, at
-	_, err = upsertGitHubRepositoryTx(ctx, tx, repository, at)
-	return err
+	return nil
 }
 
 func currentGitHubInstallationStatus(ctx context.Context, tx githubDBTX, installationID int64) (string, bool, error) {

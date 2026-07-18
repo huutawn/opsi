@@ -84,6 +84,34 @@ class GitHubAppPreflightTests(unittest.TestCase):
         )
         self.assertEqual(repository["id"], 1304594095)
 
+    def test_delivery_sanitizer_keeps_only_numeric_identity_and_result(self):
+        delivery = verifier.sanitize_delivery(
+            {
+                "id": 123,
+                "guid": "delivery-guid",
+                "event": "installation_repositories",
+                "action": "added",
+                "status_code": 200,
+                "redelivery": True,
+                "request": {
+                    "headers": {"x-hub-signature-256": "must-not-return"},
+                    "payload": {
+                        "installation": {"id": 147333403},
+                        "repositories_added": [{"id": 1304594095, "private_field": "must-not-return"}],
+                        "repositories_removed": [],
+                        "sender": {"token": "must-not-return"},
+                    },
+                },
+                "response": {"payload": '{"status":"ok","duplicate":true,"debug":"must-not-return"}'},
+            }
+        )
+        self.assertEqual(delivery["installation_id"], 147333403)
+        self.assertEqual(delivery["added_repository_ids"], [1304594095])
+        self.assertEqual(delivery["response"], {"status": "ok", "duplicate": True})
+        serialized = str(delivery)
+        self.assertNotIn("signature", serialized)
+        self.assertNotIn("must-not-return", serialized)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

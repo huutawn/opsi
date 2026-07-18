@@ -137,7 +137,7 @@ def mint_app_jwt(app_id: int, private_key: Path) -> str:
     return f"{unsigned}.{base64url(result.stdout)}"
 
 
-def request_json(path: str, bearer: str, method: str = "GET", body: bytes | None = None) -> dict[str, Any]:
+def request_bytes(path: str, bearer: str, method: str = "GET", body: bytes | None = None) -> tuple[int, bytes]:
     request = urllib.request.Request(
         GITHUB_API + path,
         method=method,
@@ -153,6 +153,7 @@ def request_json(path: str, bearer: str, method: str = "GET", body: bytes | None
     try:
         with urllib.request.build_opener(NoRedirectHandler()).open(request, timeout=20) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
+            status = response.status
     except PreflightError:
         raise
     except urllib.error.HTTPError as exc:
@@ -160,12 +161,93 @@ def request_json(path: str, bearer: str, method: str = "GET", body: bytes | None
     except (OSError, urllib.error.URLError) as exc:
         raise PreflightError("GitHub API request failed") from exc
     require(len(raw) <= MAX_RESPONSE_BYTES, "GitHub API response exceeds the preflight limit")
+    return status, raw
+
+
+def request_json(path: str, bearer: str, method: str = "GET", body: bytes | None = None) -> dict[str, Any]:
+    _, raw = request_bytes(path, bearer, method, body)
     try:
         decoded = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PreflightError("GitHub API returned malformed JSON") from exc
     require(isinstance(decoded, dict), "GitHub API response must be a JSON object")
     return decoded
+
+
+def parse_delivery_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or len(value) > MAX_RESPONSE_BYTES:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def sanitize_delivery(delivery: dict[str, Any]) -> dict[str, Any]:
+    safe = {
+        "api_id": positive_int(delivery.get("id"), "delivery.id"),
+        "guid": delivery.get("guid", ""),
+        "event": delivery.get("event", ""),
+        "action": delivery.get("action", ""),
+        "delivered_at": delivery.get("delivered_at"),
+        "redelivery": bool(delivery.get("redelivery")),
+        "status_code": delivery.get("status_code"),
+    }
+    request_payload = parse_delivery_payload((delivery.get("request") or {}).get("payload"))
+    installation = request_payload.get("installation")
+    if isinstance(installation, dict) and isinstance(installation.get("id"), int):
+        safe["installation_id"] = installation["id"]
+    repository = request_payload.get("repository")
+    if isinstance(repository, dict) and isinstance(repository.get("id"), int):
+        safe["repository_id"] = repository["id"]
+    for source, target in (("repositories_added", "added_repository_ids"), ("repositories_removed", "removed_repository_ids")):
+        repositories = request_payload.get(source)
+        if isinstance(repositories, list):
+            safe[target] = [item["id"] for item in repositories if isinstance(item, dict) and isinstance(item.get("id"), int)]
+    response_payload = parse_delivery_payload((delivery.get("response") or {}).get("payload"))
+    safe["response"] = {
+        key: response_payload[key]
+        for key in ("status", "duplicate", "error", "error_code")
+        if key in response_payload
+    }
+    return safe
+
+
+def delivery_json(bearer: str, api_id: int) -> dict[str, Any]:
+    return sanitize_delivery(request_json(f"/app/hook/deliveries/{api_id}", bearer))
+
+
+def list_deliveries(bearer: str, event: str, action: str, limit: int) -> dict[str, Any]:
+    _, raw = request_bytes(f"/app/hook/deliveries?per_page={limit}", bearer)
+    try:
+        deliveries = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PreflightError("GitHub delivery list returned malformed JSON") from exc
+    require(isinstance(deliveries, list), "GitHub delivery list must be a JSON array")
+    result = []
+    for delivery in deliveries:
+        if not isinstance(delivery, dict) or delivery.get("event") != event:
+            continue
+        if action and delivery.get("action") != action:
+            continue
+        result.append(sanitize_delivery(delivery))
+    return {"deliveries": result}
+
+
+def redeliver(bearer: str, api_id: int, wait_seconds: int) -> dict[str, Any]:
+    status, _ = request_bytes(f"/app/hook/deliveries/{api_id}/attempts", bearer, method="POST")
+    require(status == 202, "GitHub delivery redelivery was not accepted")
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        delivery = delivery_json(bearer, api_id)
+        if delivery.get("redelivery") and isinstance(delivery.get("status_code"), int):
+            return delivery
+        if time.monotonic() >= deadline:
+            raise PreflightError("GitHub delivery redelivery did not complete before timeout")
+        time.sleep(1)
 
 
 def run_live(args: argparse.Namespace) -> dict[str, Any]:
@@ -221,6 +303,24 @@ def parser() -> argparse.ArgumentParser:
     live.add_argument("--repository-full-name", required=True)
     live.add_argument("--default-branch", default="main")
     live.add_argument("--webhook-url", required=True)
+
+    deliveries = subparsers.add_parser("deliveries", help="list sanitized GitHub App webhook deliveries")
+    deliveries.add_argument("--app-id", type=int, required=True)
+    deliveries.add_argument("--private-key", type=Path, required=True)
+    deliveries.add_argument("--event", choices=("repository", "installation_repositories"), required=True)
+    deliveries.add_argument("--action", choices=("", "added", "removed", "created", "deleted", "renamed", "edited"), default="")
+    deliveries.add_argument("--limit", type=int, choices=range(1, 101), default=30)
+
+    delivery = subparsers.add_parser("delivery", help="show one sanitized GitHub App webhook delivery")
+    delivery.add_argument("--app-id", type=int, required=True)
+    delivery.add_argument("--private-key", type=Path, required=True)
+    delivery.add_argument("--api-id", type=int, required=True)
+
+    replay = subparsers.add_parser("redeliver", help="redeliver and verify one sanitized GitHub App webhook delivery")
+    replay.add_argument("--app-id", type=int, required=True)
+    replay.add_argument("--private-key", type=Path, required=True)
+    replay.add_argument("--api-id", type=int, required=True)
+    replay.add_argument("--wait-seconds", type=int, choices=range(1, 121), default=30)
     return result
 
 
@@ -232,8 +332,16 @@ def main() -> int:
                 positive_int(getattr(args, name), name)
         if args.mode == "check-app-json":
             output = validate_app(parse_json_file(args.path), args.app_id)
-        else:
+        elif args.mode == "live":
             output = run_live(args)
+        else:
+            jwt = mint_app_jwt(args.app_id, args.private_key)
+            if args.mode == "deliveries":
+                output = list_deliveries(jwt, args.event, args.action, args.limit)
+            elif args.mode == "delivery":
+                output = delivery_json(jwt, positive_int(args.api_id, "api_id"))
+            else:
+                output = redeliver(jwt, positive_int(args.api_id, "api_id"), args.wait_seconds)
     except PreflightError as exc:
         print(f"R5-005 GitHub App preflight failed: {exc}", file=sys.stderr)
         return 1

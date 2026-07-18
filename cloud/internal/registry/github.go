@@ -289,8 +289,19 @@ func (s *Service) validateGitHubWebhookMutationLocked(event GitHubWebhookMutatio
 		}
 	}
 	for _, repository := range event.Added {
-		if err := validateRepository(repository); err != nil {
-			return err
+		if repository.RepositoryID <= 0 {
+			return githubInvalid("GITHUB_REPOSITORY_INVALID", "GitHub repository identity is invalid")
+		}
+		if _, duplicate := seen[repository.RepositoryID]; duplicate {
+			return githubInvalid("GITHUB_WEBHOOK_INVALID", "webhook contains duplicate repository identity")
+		}
+		seen[repository.RepositoryID] = struct{}{}
+		current, ok := s.githubRepositories[repository.RepositoryID]
+		if !ok {
+			return ErrNotFound
+		}
+		if current.InstallationID != event.InstallationID {
+			return ErrGitHubEventConflict
 		}
 	}
 	for _, repository := range event.Removed {
@@ -349,15 +360,16 @@ func (s *Service) applyGitHubWebhookMutationLocked(event GitHubWebhookMutation, 
 		}
 	case "installation_repositories":
 		for _, repository := range event.Added {
-			s.upsertWebhookRepositoryLocked(repository, event.InstallationID, GitHubRepositoryActive, at)
+			current := s.githubRepositories[repository.RepositoryID]
+			current.Status = GitHubRepositoryActive
+			current.UpdatedAt = at
+			s.githubRepositories[repository.RepositoryID] = current
 		}
 		for _, repository := range event.Removed {
 			if current, ok := s.githubRepositories[repository.RepositoryID]; ok {
 				current.Status = GitHubRepositoryRemoved
 				current.UpdatedAt = at
 				s.githubRepositories[repository.RepositoryID] = current
-			} else {
-				s.upsertWebhookRepositoryLocked(repository, event.InstallationID, GitHubRepositoryRemoved, at)
 			}
 		}
 	case "repository":
