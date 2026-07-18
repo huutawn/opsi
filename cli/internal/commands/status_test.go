@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
@@ -39,6 +40,25 @@ func TestStatusCommandCallsAgent(t *testing.T) {
 	}
 }
 
+func TestStatusCommandAllowsTLSHandshakeLatency(t *testing.T) {
+	addr, stop := startDelayedCommandStatusServer(t, 300*time.Millisecond)
+	defer stop()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "cli.yaml")
+	if err := os.WriteFile(configPath, []byte("agent_addr: "+addr+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) {
+		return keychain.NewFakeStore(), nil
+	}})
+	cmd.SetArgs([]string{"--config", configPath, "status"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status should tolerate bounded remote connection latency: %v", err)
+	}
+}
+
 type commandStatusServer struct{}
 
 func (commandStatusServer) Status(context.Context, *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
@@ -53,6 +73,27 @@ func startCommandStatusServer(t *testing.T) (string, func()) {
 	}
 	server := grpc.NewServer()
 	agentv1.RegisterStatusServiceServer(server, commandStatusServer{})
+	go func() { _ = server.Serve(listener) }()
+	return listener.Addr().String(), server.Stop
+}
+
+type delayedCommandStatusServer struct {
+	delay time.Duration
+}
+
+func (s delayedCommandStatusServer) Status(context.Context, *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
+	time.Sleep(s.delay)
+	return &agentv1.StatusResponse{NodeID: "fake-node", Health: "ok", Version: "test"}, nil
+}
+
+func startDelayedCommandStatusServer(t *testing.T, delay time.Duration) (string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	agentv1.RegisterStatusServiceServer(server, delayedCommandStatusServer{delay: delay})
 	go func() { _ = server.Serve(listener) }()
 	return listener.Addr().String(), server.Stop
 }

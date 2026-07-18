@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const directAgentStatusTimeout = 5 * time.Second
+
 func newStatusCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
@@ -21,7 +23,7 @@ func newStatusCommand(configPath *string, factory func() (keychain.Store, error)
 			if err != nil {
 				return err
 			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), 200*time.Millisecond)
+			ctx, cancel := context.WithTimeout(cmd.Context(), directAgentStatusTimeout)
 			defer cancel()
 			ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
 
