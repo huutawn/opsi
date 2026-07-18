@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
+from unittest import mock
 
 import verify_r5_005_github_app_preflight as verifier
 
@@ -111,6 +112,33 @@ class GitHubAppPreflightTests(unittest.TestCase):
         serialized = str(delivery)
         self.assertNotIn("signature", serialized)
         self.assertNotIn("must-not-return", serialized)
+
+    @mock.patch.object(verifier, "request_bytes")
+    @mock.patch.object(verifier, "request_json")
+    def test_redeliver_follows_the_new_attempt_with_the_same_guid(self, request_json, request_bytes):
+        request_json.side_effect = [
+            {"id": 10, "guid": "same-guid"},
+            {
+                "id": 11,
+                "guid": "same-guid",
+                "event": "installation_repositories",
+                "action": "added",
+                "redelivery": True,
+                "status_code": 200,
+                "request": {"payload": {"installation": {"id": 147333403}}},
+                "response": {"payload": '{"status":"ok","duplicate":false}'},
+            },
+        ]
+        request_bytes.side_effect = [
+            (202, b""),
+            (
+                200,
+                b'[{"id":11,"guid":"same-guid","redelivery":true,"delivered_at":"2026-07-18T14:02:07Z"}]',
+            ),
+        ]
+        result = verifier.redeliver("not-a-real-token", 10, 1)
+        self.assertEqual(result["api_id"], 11)
+        self.assertEqual(result["response"], {"status": "ok", "duplicate": False})
 
 
 if __name__ == "__main__":
