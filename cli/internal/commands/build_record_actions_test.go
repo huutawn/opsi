@@ -56,6 +56,21 @@ func TestSubmitBuildRecordFromGitHubActionsUsesTokensOnlyInHeaders(t *testing.T)
 	}
 }
 
+func TestActionsOIDCRequestURLAcceptsGitHubOwnedActionsHostsOnly(t *testing.T) {
+	for _, host := range []string{"pipelines.actions.githubusercontent.com", "vstoken.actions.githubusercontent.com", "oidc.actions.githubusercontent.com"} {
+		raw := "https://" + host + "/_apis/distributedtask/hubs/build/plans/plan/jobs/job/idtoken?api-version=2.0"
+		if _, err := actionsOIDCRequestURL(raw, "https://opsidev.site/v1/build-records"); err != nil {
+			t.Fatalf("host %s rejected: %v", host, err)
+		}
+	}
+	for _, host := range []string{"actions.githubusercontent.com", "actions.githubusercontent.com.evil.example", "evil.example"} {
+		raw := "https://" + host + "/_apis/distributedtask/hubs/build/plans/plan/jobs/job/idtoken?api-version=2.0"
+		if _, err := actionsOIDCRequestURL(raw, "https://opsidev.site/v1/build-records"); err == nil {
+			t.Fatalf("host %s accepted", host)
+		}
+	}
+}
+
 func TestSubmitBuildRecordFromGitHubActionsRejectsUnsafeEnvironmentAndURLs(t *testing.T) {
 	base := validActionsBuildRecordInput()
 	for name, mutate := range map[string]func(*actionsBuildRecordInput){

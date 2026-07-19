@@ -162,7 +162,7 @@ func actionsOIDCRequestURL(raw, audience string) (*url.URL, error) {
 		return nil, errors.New("GitHub Actions OIDC request URL is invalid")
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if (host != "pipelines.actions.githubusercontent.com" && host != "vstoken.actions.githubusercontent.com") || (parsed.Port() != "" && parsed.Port() != "443") {
+	if !strings.HasSuffix(host, ".actions.githubusercontent.com") || len(host) <= len(".actions.githubusercontent.com") || (parsed.Port() != "" && parsed.Port() != "443") {
 		return nil, errors.New("GitHub Actions OIDC request URL is outside the expected token boundary")
 	}
 	if !strings.HasPrefix(parsed.Path, "/_apis/distributedtask/hubs/") || !strings.HasSuffix(parsed.Path, "/idtoken") {
