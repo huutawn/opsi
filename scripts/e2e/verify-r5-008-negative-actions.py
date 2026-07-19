@@ -20,7 +20,16 @@ RECORD_ID = re.compile(r"^br-[A-Za-z0-9._-]{1,128}$")
 
 
 def fail(message: str) -> None:
+    print(f"::error title=R5-008 negative verifier::{workflow_escape(message)}", file=sys.stderr)
     raise SystemExit(message)
+
+
+def workflow_escape(value: object) -> str:
+    return str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def notice(name: str, message: str) -> None:
+    print(f"::notice title=R5-008 {workflow_escape(name)}::{workflow_escape(message)}")
 
 
 def oidc_request_url(audience: str) -> str:
@@ -134,6 +143,7 @@ def expect_error(results: list[dict[str, object]], name: str, actual: tuple[int,
     if actual_status != status or actual_code != code:
         fail(f"{name}: expected HTTP {status} {code}, got HTTP {actual_status} {actual_code}")
     results.append({"case": name, "status": actual_status, "error_code": actual_code, "retry_after": retry_after})
+    notice(name, f"HTTP {actual_status} {actual_code}" + (f" Retry-After={retry_after}" if retry_after else ""))
 
 
 def run_forbidden(args: argparse.Namespace) -> list[dict[str, object]]:
@@ -178,6 +188,7 @@ def run_suite(args: argparse.Namespace) -> list[dict[str, object]]:
     if created_status != 201 or created.get("reused") is not False or not isinstance(record_id, str) or not RECORD_ID.match(record_id):
         fail("valid submission did not create a sanitized BuildRecord")
     results.append({"case": "create", "status": created_status, "record_id": record_id, "reused": False})
+    notice("create", f"HTTP {created_status} record_id={record_id} reused=false")
 
     replay_status, replay, _ = post(endpoint, token, base)
     replay_record = replay.get("record", {})
@@ -185,6 +196,7 @@ def run_suite(args: argparse.Namespace) -> list[dict[str, object]]:
     if replay_status != 200 or replay.get("reused") is not True or replay_id != record_id:
         fail("exact replay did not reuse the same BuildRecord")
     results.append({"case": "exact-replay", "status": replay_status, "record_id": replay_id, "reused": True})
+    notice("exact-replay", f"HTTP {replay_status} record_id={replay_id} reused=true")
 
     changed = dict(base)
     changed["oci_digest"] = args.conflict_digest
