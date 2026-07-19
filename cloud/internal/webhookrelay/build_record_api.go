@@ -1,12 +1,15 @@
 package webhookrelay
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
@@ -14,7 +17,14 @@ import (
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
 
-const maxBuildRecordBodyBytes = 64 << 10
+const (
+	maxBuildRecordBodyBytes     = 64 << 10
+	buildRecordMaxConcurrency   = 8
+	buildRecordGlobalLimit      = 120
+	buildRecordTokenLimit       = 30
+	buildRecordRateWindow       = time.Minute
+	buildRecordRateRetrySeconds = 60
+)
 
 func (s *Server) handleBuildRecordSubmission(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -25,6 +35,11 @@ func (s *Server) handleBuildRecordSubmission(w http.ResponseWriter, r *http.Requ
 		writeRegistryError(w, registry.APIError{Status: 400, Code: "OIDC_REQUEST_INVALID", Message: "OIDC submission does not accept query parameters or cookies", RequestID: r.Header.Get("X-Request-ID")})
 		return
 	}
+	release, ok := s.admitBuildRecordSubmission(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	token := bearerToken(r)
 	if len(r.Header.Values("Authorization")) != 1 || token == "" || strings.ContainsAny(token, " \t\r\n") {
 		writeRegistryError(w, registry.APIError{Status: 401, Code: "OIDC_AUTH_REQUIRED", Message: "Authorization bearer OIDC token is required", RequestID: r.Header.Get("X-Request-ID")})
@@ -53,6 +68,41 @@ func (s *Server) handleBuildRecordSubmission(w http.ResponseWriter, r *http.Requ
 		status = http.StatusOK
 	}
 	writeJSON(w, status, map[string]any{"record": record, "reused": reused})
+}
+
+func (s *Server) admitBuildRecordSubmission(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	if s.buildRecordSlots == nil {
+		s.buildRecordSlots = make(chan struct{}, buildRecordMaxConcurrency)
+	}
+	select {
+	case s.buildRecordSlots <- struct{}{}:
+	case <-r.Context().Done():
+		return func() {}, false
+	default:
+		writeBuildRecordRateLimit(w, r, "BUILD_RECORD_BUSY", "BuildRecord submission concurrency is saturated", 1)
+		return func() {}, false
+	}
+	release := func() { <-s.buildRecordSlots }
+	if s.limits == nil || !s.limits.Allow("build-record:global", buildRecordGlobalLimit, buildRecordRateWindow) {
+		release()
+		writeBuildRecordRateLimit(w, r, "BUILD_RECORD_RATE_LIMITED", "BuildRecord submission rate limit exceeded", buildRecordRateRetrySeconds)
+		return func() {}, false
+	}
+	token := bearerToken(r)
+	if token != "" {
+		fingerprint := sha256.Sum256([]byte(token))
+		if !s.limits.Allow("build-record:token:"+fmt.Sprintf("%x", fingerprint[:]), buildRecordTokenLimit, buildRecordRateWindow) {
+			release()
+			writeBuildRecordRateLimit(w, r, "BUILD_RECORD_RATE_LIMITED", "BuildRecord submission rate limit exceeded", buildRecordRateRetrySeconds)
+			return func() {}, false
+		}
+	}
+	return release, true
+}
+
+func writeBuildRecordRateLimit(w http.ResponseWriter, r *http.Request, code, message string, retryAfter int) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	writeRegistryError(w, registry.APIError{Status: http.StatusTooManyRequests, Code: code, Message: message, RequestID: r.Header.Get("X-Request-ID")})
 }
 
 func (s *Server) handleBuildRecordRead(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {

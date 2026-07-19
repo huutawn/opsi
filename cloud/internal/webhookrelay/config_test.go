@@ -89,9 +89,69 @@ func writePrivateKeyStub(t *testing.T) string {
 func validProductionConfig(t *testing.T) string {
 	t.Helper()
 	return validProductionPrefix + fmt.Sprintf(
-		`,"github_app":{"client_id":"client","client_secret":"secret-client","callback_url":"https://cloud.example.test/v1/auth/browser/callback","app_id":12345,"private_key_path":%q,"webhook_secret":"%s"},"github_oidc":{"enabled":true,"workloads":[{"repository_id":1,"service_key":"api","workflow_refs":["huutawn/opsi/.github/workflows/opsi-cd.yaml@refs/heads/developer"],"refs":["refs/heads/developer"],"events":["push"],"oci_repositories":["ghcr.io/huutawn/opsi/api"]}]}`,
+		`,"github_app":{"client_id":"client","client_secret":"secret-client","callback_url":"https://cloud.example.test/v1/auth/browser/callback","app_id":12345,"private_key_path":%q,"webhook_secret":"%s"},"github_oidc":{"enabled":true,"audience":"https://cloud.example.test/v1/build-records","workloads":[{"repository_id":1,"service_key":"api","workflow_refs":["huutawn/opsi/.github/workflows/opsi-cd.yaml@refs/heads/developer"],"refs":["refs/heads/developer"],"events":["push"],"oci_repositories":["ghcr.io/huutawn/opsi/api"]}]}`,
 		writePrivateKeyStub(t), strings.Repeat("w", 32),
 	)
+}
+
+func TestLoadConfigProductionBindsAudienceToCanonicalBuildRecordEndpoint(t *testing.T) {
+	clearCloudEnv(t)
+	for name, mutate := range map[string]func(string) string{
+		"scheme": func(value string) string {
+			return strings.Replace(value, "https://cloud.example.test/v1/build-records", "http://cloud.example.test/v1/build-records", 1)
+		},
+		"host": func(value string) string {
+			return strings.Replace(value, "https://cloud.example.test/v1/build-records", "https://other.example.test/v1/build-records", 1)
+		},
+		"port": func(value string) string {
+			return strings.Replace(value, "https://cloud.example.test/v1/build-records", "https://cloud.example.test:8443/v1/build-records", 1)
+		},
+		"path": func(value string) string {
+			return strings.Replace(value, "/v1/build-records", "/v1/build-records/extra", 1)
+		},
+		"query": func(value string) string {
+			return strings.Replace(value, "/v1/build-records", "/v1/build-records?x=1", 1)
+		},
+		"fragment": func(value string) string {
+			return strings.Replace(value, "/v1/build-records", "/v1/build-records#x", 1)
+		},
+		"trailing slash": func(value string) string { return strings.Replace(value, "/v1/build-records", "/v1/build-records/", 1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadConfig(writeCloudConfig(t, `{`+mutate(validProductionConfig(t))+`}`))
+			if err == nil || !strings.Contains(err.Error(), "github_oidc.audience must exactly match") {
+				t.Fatalf("audience mismatch error=%v", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigProductionNormalizesPublicBaseURLForAudience(t *testing.T) {
+	clearCloudEnv(t)
+	config := strings.Replace(validProductionConfig(t), `"public_base_url":"https://cloud.example.test"`, `"public_base_url":"https://CLOUD.EXAMPLE.TEST:443/"`, 1)
+	cfg, err := LoadConfig(writeCloudConfig(t, `{`+config+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PublicBaseURL != "https://cloud.example.test" || cfg.GitHubOIDC.Audience != cfg.PublicBaseURL+buildRecordPath {
+		t.Fatalf("public_base_url=%q audience=%q", cfg.PublicBaseURL, cfg.GitHubOIDC.Audience)
+	}
+}
+
+func TestLoadConfigProductionRejectsPublicBaseURLPathQueryAndFragment(t *testing.T) {
+	clearCloudEnv(t)
+	for _, publicURL := range []string{
+		"https://cloud.example.test/tenant",
+		"https://cloud.example.test/?x=1",
+		"https://cloud.example.test/#fragment",
+	} {
+		t.Run(publicURL, func(t *testing.T) {
+			config := strings.Replace(validProductionConfig(t), "https://cloud.example.test", publicURL, 1)
+			if _, err := LoadConfig(writeCloudConfig(t, `{`+config+`}`)); err == nil || !strings.Contains(err.Error(), "public_base_url") {
+				t.Fatalf("invalid public_base_url error=%v", err)
+			}
+		})
+	}
 }
 
 func TestLoadConfigProductionRequiresDurableSecurity(t *testing.T) {

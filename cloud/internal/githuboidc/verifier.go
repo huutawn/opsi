@@ -93,6 +93,12 @@ func (c Config) Validate(production bool) error {
 	if strings.TrimSpace(c.Audience) == "" || len(c.Audience) > 256 || !safeValue(c.Audience) {
 		return errors.New("GitHub OIDC audience must be bounded and printable")
 	}
+	if production {
+		audience, err := exactHTTPSURL(c.Audience)
+		if err != nil || audience.Path != "/v1/build-records" || audience.RawPath != "" || audience.RawQuery != "" || audience.Fragment != "" {
+			return errors.New("production GitHub OIDC audience must be an exact HTTPS BuildRecord endpoint")
+		}
+	}
 	if time.Duration(c.ClockSkew) < 0 || time.Duration(c.ClockSkew) > 5*time.Minute {
 		return errors.New("GitHub OIDC clock skew must be between 0 and 5m")
 	}

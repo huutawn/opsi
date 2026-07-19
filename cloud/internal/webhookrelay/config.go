@@ -15,6 +15,7 @@ import (
 
 const (
 	githubCallbackPath  = "/v1/auth/browser/callback"
+	buildRecordPath     = "/v1/build-records"
 	legacyAuthEnvPrefix = "OPSI_CLOUD_" + "AUTH_"
 	maxConfigFileBytes  = 64 * 1024
 )
@@ -344,9 +345,11 @@ func validateConfig(cfg *Config) error {
 		if !cfg.RequireAgentSignatures {
 			return fmt.Errorf("production requires require_agent_signatures=true")
 		}
-		if cfg.PublicBaseURL == "" || !strings.HasPrefix(cfg.PublicBaseURL, "https://") {
-			return fmt.Errorf("production requires an https public_base_url")
+		publicBaseURL, err := normalizeProductionPublicBaseURL(cfg.PublicBaseURL)
+		if err != nil {
+			return err
 		}
+		cfg.PublicBaseURL = publicBaseURL
 		for name, value := range map[string]string{
 			"database_url":                cfg.DatabaseURL,
 			"public_base_url":             cfg.PublicBaseURL,
@@ -383,7 +386,39 @@ func validateConfig(cfg *Config) error {
 	if err := validateGitHubAppConfig(cfg); err != nil {
 		return err
 	}
+	if cfg.Production {
+		expectedAudience := cfg.PublicBaseURL + buildRecordPath
+		if cfg.GitHubOIDC.Audience != expectedAudience {
+			return fmt.Errorf("production github_oidc.audience must exactly match %s", expectedAudience)
+		}
+	}
 	return cfg.GitHubOIDC.Validate(cfg.Production)
+}
+
+func normalizeProductionPublicBaseURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return "", fmt.Errorf("production requires an exact https public_base_url")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" {
+		return "", fmt.Errorf("production public_base_url must contain only an https origin")
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "" || strings.HasSuffix(hostname, ".") {
+		return "", fmt.Errorf("production public_base_url host is invalid")
+	}
+	port := parsed.Port()
+	if port == "443" {
+		port = ""
+	}
+	host := hostname
+	if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return "https://" + host, nil
 }
 
 func isProductionPlaceholder(value string) bool {

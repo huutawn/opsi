@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +26,82 @@ func (f buildRecordOIDCFixture) Verify(_ context.Context, token string) (githubo
 		return githuboidc.VerifiedIdentity{}, errors.New("invalid")
 	}
 	return f.identity, nil
+}
+
+type fixedRateLimiter struct{ allow bool }
+
+func (l fixedRateLimiter) Allow(string, int, time.Duration) bool { return l.allow }
+
+type blockingBuildRecordOIDC struct {
+	identity githuboidc.VerifiedIdentity
+	entered  chan struct{}
+	release  chan struct{}
+	calls    atomic.Int32
+}
+
+func (f *blockingBuildRecordOIDC) Verify(ctx context.Context, _ string) (githuboidc.VerifiedIdentity, error) {
+	f.calls.Add(1)
+	select {
+	case f.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-f.release:
+		return f.identity, nil
+	case <-ctx.Done():
+		return githuboidc.VerifiedIdentity{}, ctx.Err()
+	}
+}
+
+func TestBuildRecordSubmissionRateLimitRunsBeforeOIDCAndDoesNotLeakToken(t *testing.T) {
+	identity := testBuildRecordIdentity()
+	verifier := &blockingBuildRecordOIDC{identity: identity, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	server := NewServer(Config{})
+	server.OIDC = verifier
+	server.limits = fixedRateLimiter{allow: false}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	response := postBuildRecord(t, httpServer.URL, mustBuildRecordBody(t, identity), "rate-limit-secret-marker")
+	raw := readResponse(response)
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != "60" || !strings.Contains(raw, "BUILD_RECORD_RATE_LIMITED") {
+		t.Fatalf("status=%d retry=%q body=%s", response.StatusCode, response.Header.Get("Retry-After"), raw)
+	}
+	if verifier.calls.Load() != 0 || strings.Contains(raw, "rate-limit-secret-marker") {
+		t.Fatalf("verifier calls=%d body=%s", verifier.calls.Load(), raw)
+	}
+}
+
+func TestBuildRecordSubmissionConcurrencyIsBoundedBeforeOIDCWork(t *testing.T) {
+	identity := testBuildRecordIdentity()
+	verifier := &blockingBuildRecordOIDC{identity: identity, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	server := NewServer(Config{})
+	server.OIDC = verifier
+	server.limits = fixedRateLimiter{allow: true}
+	server.buildRecordSlots = make(chan struct{}, 1)
+	server.BuildRecords = buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: testBuildBindingResolver{binding: buildrecord.Binding{ProjectID: "project-1", BindingID: "binding-1", ServiceID: "service-1", ServiceKey: "api", RepositoryID: identity.RepositoryID, RepositoryOwnerID: identity.RepositoryOwnerID}}, Policies: []githuboidc.WorkloadPolicy{{RepositoryID: identity.RepositoryID, ServiceKey: "api", WorkflowRefs: []string{identity.WorkflowRef}, Refs: []string{identity.Ref}, Events: []string{identity.EventName}, OCIRepositories: []string{"ghcr.io/huutawn/opsi/api"}}}}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	firstDone := make(chan *http.Response, 1)
+	body := mustBuildRecordBody(t, identity)
+	go func() { firstDone <- postBuildRecord(t, httpServer.URL, body, "first-token") }()
+	select {
+	case <-verifier.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not enter verifier")
+	}
+	second := postBuildRecord(t, httpServer.URL, body, "second-token")
+	raw := readResponse(second)
+	if second.StatusCode != http.StatusTooManyRequests || second.Header.Get("Retry-After") != "1" || !strings.Contains(raw, "BUILD_RECORD_BUSY") {
+		t.Fatalf("status=%d retry=%q body=%s", second.StatusCode, second.Header.Get("Retry-After"), raw)
+	}
+	if verifier.calls.Load() != 1 {
+		t.Fatalf("verifier calls=%d", verifier.calls.Load())
+	}
+	close(verifier.release)
+	response := <-firstDone
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("first status=%d body=%s", response.StatusCode, readResponse(response))
+	}
 }
 
 func TestBuildRecordSubmissionOIDCStrictReplayAndConflict(t *testing.T) {
@@ -159,6 +236,14 @@ func testBuildRecordIdentity() githuboidc.VerifiedIdentity {
 }
 func testBuildRecordSubmission(i githuboidc.VerifiedIdentity) buildrecordv1.Submission {
 	return buildrecordv1.Submission{SchemaVersion: buildrecordv1.SchemaVersion, ServiceKey: "api", RepositoryID: i.RepositoryID, RepositoryOwnerID: i.RepositoryOwnerID, Ref: i.Ref, SHA: i.SHA, EventName: i.EventName, WorkflowRef: i.WorkflowRef, RunID: i.RunID, RunAttempt: i.RunAttempt, ConfigHash: strings.Repeat("b", 64), Platform: "linux/amd64", OCIRepository: "ghcr.io/huutawn/opsi/api", OCIDigest: "sha256:" + strings.Repeat("c", 64), Status: "succeeded"}
+}
+func mustBuildRecordBody(t *testing.T, identity githuboidc.VerifiedIdentity) []byte {
+	t.Helper()
+	body, err := json.Marshal(testBuildRecordSubmission(identity))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 func testBuildRecordIdentityRecord(projectID string) buildrecordv1.Record {
 	identity := testBuildRecordIdentity()

@@ -44,6 +44,7 @@ type Server struct {
 	githubAppClient         *GitHubAppClient
 	githubAppEventSink      GitHubAppEventSink
 	githubReplay            *githubReplayStore
+	buildRecordSlots        chan struct{}
 	authMu                  sync.Mutex
 	oauthStates             map[string]oauthState
 	authGrants              map[string]authGrant
@@ -75,6 +76,7 @@ func NewServer(cfg Config) *Server {
 		limits:                  newRateLimiter(),
 		observer:                NewObserver(),
 		alerts:                  NewAlertManager(cfg.Alerts),
+		buildRecordSlots:        make(chan struct{}, buildRecordMaxConcurrency),
 		oauthStates:             map[string]oauthState{},
 		authGrants:              map[string]authGrant{},
 		installationClaimGrants: map[string]installationClaimGrant{},
