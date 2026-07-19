@@ -28,8 +28,10 @@ artifacts. At this snapshot:
   durable installation/repository inventory, secure installation claim, and
   project/service mapping are implemented. `opsi init` now performs safe local
   GitHub origin matching, numeric repository claim, service binding, and atomic
-  repository bootstrap file generation. GitHub Actions OIDC, `BuildRecord`, digest-based deployment,
-  `DeploymentPolicy`, and pull request preview environments are not implemented.
+  repository bootstrap file generation. GitHub Actions OIDC, `BuildRecord`,
+  manual `TopologyPlan`, exact-match `DeploymentPolicy`, and deterministic
+  routing preflight are implemented. Digest deployment, `DeploymentJob`, and
+  pull request preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
   certificate directories, databases, logs, and generated output.
@@ -540,7 +542,7 @@ unbound service 403, tag-only digest 400, exact replay 200 with the same ID and
 BuildRecord, and rate-limit 429 with `Retry-After: 60`. A pull request run had
 `plan` and untrusted build jobs only; `publish-and-record` was skipped. Temporary
 negative workflow/policy entries were removed afterward. No Agent deployment
-path was added and R5-009 was not started.
+path was added during R5-008.
 
 The final staging Cloud image is
 `ghcr.io/huutawn/opsi-cloud@sha256:c3c63a1724a8b17876c200251293156773b172b782257811c8d3d848eac61bf6`,
@@ -548,6 +550,47 @@ built from Opsi code-bearing revision
 `b1435f0029e0ad65c019ff692bfa80e1f2aa1476`. PostgreSQL/Cloud named volumes,
 Bootstrap Worker, and reverse proxy were preserved; staging was 4/4 healthy,
 public `/health` returned 200, and the sanitized log-marker count was zero.
+
+## R5-009 manual placement and routing checkpoint
+
+R5-009 adds `opsi.topology_plan/v1` and `opsi.deployment_policy/v1` without
+changing the R5-008 OIDC verifier or static workload-admission policy.
+`DeploymentPolicy` is evaluated only for an already accepted `BuildRecord` and
+cannot override issuer, JWKS, audience, signature, claim/body binding,
+repository ownership, or active service binding checks. ADR-005 records this
+authority boundary.
+
+Topology and policy state use immutable PostgreSQL revisions with mutable heads,
+expected revision/state-hash concurrency, project/operation/key/payload-bound
+idempotency, authenticated audit actors, and disabled revisions instead of
+physical deletion. Operator capacity is a separate audited
+`source=operator_declared` record. Factual capacity comes from the node
+heartbeat inventory; unknown capacity fails closed unless the active matching
+policy explicitly grants a service/environment/runtime-scoped override.
+Heartbeat freshness is computed from server time with a bounded server-side
+TTL. Single-node runtimes with no deploy Agent, multiple deploy Agents, stale
+heartbeats, unknown capacity without override, oversubscription, or foreign
+runtime identity fail closed.
+
+CLI supports topology plan/validate/diff/apply/get/facts, audited operator
+capacity, policy create/diff/apply/disable/list/get, and deterministic routing
+preflight. The loopback Local API exposes the same contracts. The Local UI
+manual wizard selects repository, service, accepted BuildRecord, environment,
+runtime, integer resources, and exposure intent; retains unrelated service
+assignments; previews validation/diffs/hashes; confirms apply; and renders
+revision/audit results. Browser storage and direct Browser-to-Cloud/Agent calls
+remain absent, and there is no deploy button.
+
+Disposable PostgreSQL plus real loopback Cloud, CLI, Local API, built Local UI,
+and headless Chrome acceptance passed for `api` and `worker`. CLI and Local API/UI
+returned identical topology/policy hashes; browser preview and apply produced
+audited revisions; exact replay returned `reused=true`; conflicting replay
+returned typed 409; concurrent topology apply produced one revision and one
+state conflict; PostgreSQL restart preserved heads, revisions, and idempotency
+rows. Routing selected one factual runtime/Agent and rejected stale, unknown,
+oversubscribed, foreign, missing-Agent, ambiguous-Agent, wrong identity, and
+disabled-policy cases. No SSH, Agent VPS, K3s, workload, `DeploymentJob`, MCP,
+or AI mutation was performed.
 
 ## Verification commands
 

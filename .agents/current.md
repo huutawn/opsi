@@ -6,6 +6,22 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Task
 
+### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
+
+- R5-009 local acceptance passed on 2026-07-19 with disposable PostgreSQL,
+  loopback Cloud, real CLI, Local API, built Local UI, and headless Chrome.
+- `TopologyPlan v1` and `DeploymentPolicy v1` use immutable PostgreSQL
+  revisions, mutable heads, authenticated audit, bounded exact fields, scoped
+  unknown-capacity override, expected revision/state hash, and idempotency.
+- Positive route selected exactly one fresh healthy runtime/node/deploy Agent for
+  both `api` and `worker`; stale, unknown, oversubscribed, foreign, zero-Agent,
+  ambiguous-Agent, wrong-identity, and disabled-policy cases failed closed.
+- CLI and Local API/UI returned identical plan/policy hashes. Browser wizard
+  preview/apply rendered revision and audit results. PostgreSQL restart and
+  concurrent one-winner apply passed.
+- No SSH, Agent VPS, reboot/reset/bootstrap, workload, `DeploymentJob`, Agent
+  mutation, MCP, AI, or R5-010 work was performed.
+
 ### R5-008 — Live GitHub runner, GHCR, and BuildRecord proof
 
 - R5-007 hardening and live R5-008 acceptance passed on 2026-07-19.
@@ -18,8 +34,8 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 - Cloud staging runs `4/4` healthy on immutable image
   `ghcr.io/huutawn/opsi-cloud@sha256:c3c63a1724a8b17876c200251293156773b172b782257811c8d3d848eac61bf6`.
 - Temporary negative workflows/policy were removed after exact live 401/403/400/
-  409/replay/rate-limit/failed-build/PR checks. No Agent VPS was used and R5-009
-  was not started.
+  409/replay/rate-limit/failed-build/PR checks. No Agent VPS was used during
+  R5-008; R5-009 is recorded separately above.
 
 ### R5-007 — GitHub Actions OIDC verifier and BuildRecord v1
 

@@ -315,6 +315,15 @@ R5-008 live acceptance runbook.
 
 **Gate:** CLI/UI manual placement và policy parity; cross-project/stale/oversubscription/ambiguous Agent/replay tests.
 
+**Trạng thái acceptance 2026-07-19:** `DONE / LOCAL_FUNCTIONAL_ACCEPTANCE_PASS`.
+`TopologyPlan v1`, `DeploymentPolicy v1`, scoped unknown-capacity override,
+server-time heartbeat validation, immutable PostgreSQL revisions, audit/RBAC,
+CLI and Local API/UI parity, disposable PostgreSQL restart/concurrency proof,
+real loopback CLI flow, and headless Local UI wizard preview/apply passed.
+Routing remains preflight-only: no `DeploymentJob`, Agent command, K3s change,
+workload, SSH, or VPS mutation was performed. Authority boundaries are recorded
+in `docs/architecture_decisions/ADR-005-manual-placement-policy-boundary.md`.
+
 ### R5-010 — Digest-only Agent deployment và Opsi workload renderer
 
 **CẦN VPS:** dùng VPS Agent đã bootstrap ở R5-004. Nếu VPS đã bị thay đổi ngoài kiểm soát, nhắc user reset hoặc cấp VPS Agent sạch.
