@@ -572,5 +572,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateBootstrapCheckpoint(ctx, db); err != nil {
 		return err
 	}
-	return MigrateBuildRecords(ctx, db)
+	if err := MigrateBuildRecords(ctx, db); err != nil {
+		return err
+	}
+	return MigrateR5009TopologyPolicy(ctx, db)
 }

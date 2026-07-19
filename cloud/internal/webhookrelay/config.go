@@ -35,6 +35,13 @@ type Config struct {
 	RequireAgentSignatures bool              `json:"require_agent_signatures"`
 	GitHubApp              GitHubAppConfig   `json:"github_app"`
 	GitHubOIDC             githuboidc.Config `json:"github_oidc"`
+	Placement              PlacementConfig   `json:"placement"`
+}
+
+type PlacementConfig struct {
+	HeartbeatTTL        Duration `json:"heartbeat_ttl"`
+	ReservedCPUMilli    int64    `json:"reserved_cpu_millicores"`
+	ReservedMemoryBytes int64    `json:"reserved_memory_bytes"`
 }
 
 type OTPConfig struct {
@@ -87,6 +94,9 @@ func LoadConfig(path string) (Config, error) {
 	cfg := Config{
 		TTL:        Duration(24 * time.Hour),
 		GitHubOIDC: githuboidc.DefaultConfig(),
+		Placement: PlacementConfig{
+			HeartbeatTTL: Duration(2 * time.Minute), ReservedCPUMilli: 250, ReservedMemoryBytes: 256 << 20,
+		},
 		GitHubApp: GitHubAppConfig{
 			CallbackURL: "http://127.0.0.1:8080" + githubCallbackPath,
 		},
@@ -305,6 +315,18 @@ func validateConfig(cfg *Config) error {
 	}
 	if time.Duration(cfg.TTL) > 24*time.Hour {
 		return fmt.Errorf("ttl must be <= 24h")
+	}
+	if time.Duration(cfg.Placement.HeartbeatTTL) == 0 {
+		cfg.Placement.HeartbeatTTL = Duration(2 * time.Minute)
+	}
+	if ttl := time.Duration(cfg.Placement.HeartbeatTTL); ttl < 30*time.Second || ttl > 30*time.Minute {
+		return fmt.Errorf("placement.heartbeat_ttl must be between 30s and 30m")
+	}
+	if cfg.Placement.ReservedCPUMilli < 0 || cfg.Placement.ReservedCPUMilli > 1_000_000 {
+		return fmt.Errorf("placement.reserved_cpu_millicores is outside bounded values")
+	}
+	if cfg.Placement.ReservedMemoryBytes < 0 || cfg.Placement.ReservedMemoryBytes > 1<<50 {
+		return fmt.Errorf("placement.reserved_memory_bytes is outside bounded values")
 	}
 	for i, route := range cfg.Routes {
 		if route.ProjectID == "" || route.ServiceID == "" || route.RepoFullName == "" || route.Branch == "" {

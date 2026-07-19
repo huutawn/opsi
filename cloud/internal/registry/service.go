@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -589,6 +590,7 @@ type API interface {
 	ListProjects(orgID string) ([]Project, error)
 	ProjectReadiness(projectID string) (Readiness, error)
 	ListNodes(projectID string) ([]Node, error)
+	PlacementFacts(context.Context, string) (topology.Facts, error)
 	NodeDiagnostics(projectID, nodeID string) (NodeDiagnostics, error)
 	UpsertNode(projectID, name, role, status, publicHost, agentID, key string) (Node, error)
 	RegisterAgent(projectID, nodeID, fingerprint, credentialHash, version, key string, capabilities map[string]any, endpoints ...AgentEndpoint) (Agent, error)

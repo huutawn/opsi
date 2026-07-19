@@ -18,9 +18,11 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/topology"
 )
 
 type Server struct {
@@ -31,6 +33,8 @@ type Server struct {
 	HTTPClient   *http.Client
 	Registry     registry.API
 	BuildRecords buildrecord.Service
+	Topology     topology.Service
+	Policies     deploymentpolicy.Service
 	OIDC         interface {
 		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
 	}
@@ -62,13 +66,17 @@ func NewServer(cfg Config) *Server {
 	}
 	verifier, verifierErr := githuboidc.New(oidcConfig)
 	registryService := registry.NewService()
+	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
+	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
 	server := &Server{
 		Queue:                   NewQueue(),
 		Config:                  cfg,
 		OTP:                     service,
 		HTTPClient:              newGitHubHTTPClient(),
 		Registry:                registryService,
-		BuildRecords:            buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads},
+		BuildRecords:            buildRecordService,
+		Topology:                topologyService,
+		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
 		OIDC:                    verifier,
 		oidcInitError:           verifierErr,
 		credentials:             NewCredentialStore(),
