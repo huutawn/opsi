@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -19,7 +20,7 @@ func (f actionsRoundTripper) RoundTrip(request *http.Request) (*http.Response, e
 func TestSubmitBuildRecordFromGitHubActionsUsesTokensOnlyInHeaders(t *testing.T) {
 	input := validActionsBuildRecordInput()
 	const requestToken = "runner-request-secret"
-	const oidcToken = "header.payload.signature"
+	oidcToken := actionsTestOIDCToken(t, input, input.WorkflowRef)
 	input.RequestToken = requestToken
 	var calls int
 	client := &http.Client{Transport: actionsRoundTripper(func(request *http.Request) (*http.Response, error) {
@@ -38,7 +39,7 @@ func TestSubmitBuildRecordFromGitHubActionsUsesTokensOnlyInHeaders(t *testing.T)
 			if err := json.NewDecoder(request.Body).Decode(&submission); err != nil {
 				t.Fatal(err)
 			}
-			if submission["service_key"] != "api" || submission["status"] != "succeeded" || submission["oci_digest"] != input.OCIDigest {
+			if submission["service_key"] != "api" || submission["status"] != "succeeded" || submission["oci_digest"] != input.OCIDigest || submission["job_workflow_ref"] != input.WorkflowRef {
 				t.Fatalf("submission=%+v", submission)
 			}
 			return actionsResponse(http.StatusCreated, `{"record":{"id":"br-live-1"},"reused":false}`), nil
@@ -122,7 +123,7 @@ func TestSubmitBuildRecordReturnsOnlyTypedCloudErrorCode(t *testing.T) {
 	client := &http.Client{Transport: actionsRoundTripper(func(*http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
-			return actionsResponse(http.StatusOK, `{"value":"header.payload.signature"}`), nil
+			return actionsResponse(http.StatusOK, `{"value":"`+actionsTestOIDCToken(t, input, "")+`"}`), nil
 		}
 		return actionsResponse(http.StatusForbidden, `{"error_code":"BUILD_WORKLOAD_FORBIDDEN","message":"secret-marker"}`), nil
 	})}
@@ -148,4 +149,22 @@ func validActionsBuildRecordInput() actionsBuildRecordInput {
 
 func actionsResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body))}
+}
+
+func actionsTestOIDCToken(t *testing.T, input actionsBuildRecordInput, jobWorkflowRef string) string {
+	t.Helper()
+	claims := map[string]string{
+		"aud": "https://opsidev.site/v1/build-records", "repository_id": input.RepositoryID,
+		"repository_owner_id": input.OwnerID, "ref": input.Ref, "sha": input.SHA,
+		"event_name": input.EventName, "workflow_ref": input.WorkflowRef,
+		"run_id": input.RunID, "run_attempt": input.RunAttempt,
+	}
+	if jobWorkflowRef != "" {
+		claims["job_workflow_ref"] = jobWorkflowRef
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
 }

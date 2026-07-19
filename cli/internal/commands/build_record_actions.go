@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,8 +119,7 @@ func submitBuildRecordFromGitHubActions(ctx context.Context, input actionsBuildR
 	if err != nil {
 		return actionsBuildRecordResult{}, err
 	}
-	submission, err := actionsBuildRecordSubmission(input)
-	if err != nil {
+	if _, err := actionsBuildRecordSubmission(input); err != nil {
 		return actionsBuildRecordResult{}, err
 	}
 	if client == nil {
@@ -129,7 +129,60 @@ func submitBuildRecordFromGitHubActions(ctx context.Context, input actionsBuildR
 	if err != nil {
 		return actionsBuildRecordResult{}, err
 	}
+	input, err = bindSelectedActionsClaims(input, oidcToken, audience)
+	if err != nil {
+		return actionsBuildRecordResult{}, err
+	}
+	submission, err := actionsBuildRecordSubmission(input)
+	if err != nil {
+		return actionsBuildRecordResult{}, err
+	}
 	return postActionsBuildRecord(ctx, client, endpoint, oidcToken, submission)
+}
+
+func bindSelectedActionsClaims(input actionsBuildRecordInput, token, audience string) (actionsBuildRecordInput, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || parts[1] == "" {
+		return actionsBuildRecordInput{}, errors.New("GitHub Actions OIDC token payload is invalid")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(payload) == 0 || len(payload) > 16<<10 {
+		return actionsBuildRecordInput{}, errors.New("GitHub Actions OIDC token payload is invalid")
+	}
+	var claims struct {
+		Audience          string `json:"aud"`
+		RepositoryID      string `json:"repository_id"`
+		RepositoryOwnerID string `json:"repository_owner_id"`
+		Ref               string `json:"ref"`
+		SHA               string `json:"sha"`
+		EventName         string `json:"event_name"`
+		WorkflowRef       string `json:"workflow_ref"`
+		JobWorkflowRef    string `json:"job_workflow_ref"`
+		RunID             string `json:"run_id"`
+		RunAttempt        string `json:"run_attempt"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.Audience != audience {
+		return actionsBuildRecordInput{}, errors.New("GitHub Actions OIDC audience or selected claims are invalid")
+	}
+	for name, pair := range map[string][2]string{
+		"repository ID":       {input.RepositoryID, claims.RepositoryID},
+		"repository owner ID": {input.OwnerID, claims.RepositoryOwnerID},
+		"ref":                 {input.Ref, claims.Ref},
+		"SHA":                 {input.SHA, claims.SHA},
+		"event":               {input.EventName, claims.EventName},
+		"workflow ref":        {input.WorkflowRef, claims.WorkflowRef},
+		"run ID":              {input.RunID, claims.RunID},
+		"run attempt":         {input.RunAttempt, claims.RunAttempt},
+	} {
+		if pair[0] == "" || pair[0] != pair[1] {
+			return actionsBuildRecordInput{}, fmt.Errorf("GitHub Actions %s does not match the selected OIDC claim", name)
+		}
+	}
+	if input.JobWorkflowRef != "" && input.JobWorkflowRef != claims.JobWorkflowRef {
+		return actionsBuildRecordInput{}, errors.New("GitHub Actions job workflow ref does not match the selected OIDC claim")
+	}
+	input.JobWorkflowRef = claims.JobWorkflowRef
+	return input, nil
 }
 
 func actionsBuildRecordEndpoint(raw string) (*url.URL, string, error) {
@@ -213,6 +266,9 @@ func actionsBuildRecordSubmission(input actionsBuildRecordInput) (buildrecordv1.
 		if value == "" || len(value) > 512 || strings.TrimSpace(value) != value || strings.ContainsAny(value, "\r\n\x00") {
 			return buildrecordv1.Submission{}, fmt.Errorf("%s is invalid", name)
 		}
+	}
+	if input.JobWorkflowRef != "" && (len(input.JobWorkflowRef) > 512 || strings.TrimSpace(input.JobWorkflowRef) != input.JobWorkflowRef || strings.ContainsAny(input.JobWorkflowRef, "\r\n\x00")) {
+		return buildrecordv1.Submission{}, errors.New("job workflow ref is invalid")
 	}
 	return buildrecordv1.Submission{
 		SchemaVersion: buildrecordv1.SchemaVersion, ServiceKey: input.ServiceKey,
