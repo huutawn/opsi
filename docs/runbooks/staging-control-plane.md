@@ -67,8 +67,10 @@ In `config/cloud.json`, replace every `github_oidc` placeholder with the exact
 audience, numeric repository ID, service key, direct `workflow_ref`, allowed
 refs/events, and canonical OCI repository for the active GitHub binding. Keep
 the issuer and JWKS URL pinned to GitHub's documented production endpoints.
-Leave `job_workflow_refs` absent for the current direct R5-006 workflow; add it
-only when a separately reviewed reusable workflow is actually used.
+Set the audience to the exact canonical endpoint derived from `public_base_url`:
+`<public_base_url>/v1/build-records`. If GitHub emits `job_workflow_ref` for the
+reviewed direct or reusable workflow, add that exact observed ref to
+`job_workflow_refs`; never use a wildcard or silently ignore a non-empty claim.
 
 Generate new random values locally instead of pasting them into a shell command:
 

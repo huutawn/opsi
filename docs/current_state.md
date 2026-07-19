@@ -522,8 +522,32 @@ metadata only. Exact retries reuse the row; conflicting retries return typed
 409. Project-scoped PAT reads are available through the CLI and Local API/UI;
 the browser has no Cloud/GitHub credential path and no deploy action.
 
-R5-008 still owns GitHub-hosted runner, GHCR, live OIDC, and public registry
-proof. No Agent deployment path was added in R5-007.
+R5-008 live acceptance passed on 2026-07-19. Baseline run `29676422752` attempt
+2 selected `api` and `worker` and created BuildRecords
+`br-21170479e7f2bda0a9b2ef89ef821b47` and
+`br-9e549bbbaecdd41f4264d03c2c573a30`. The API-only run `29676722594` at
+SHA `06a617d8d323c06502f37c1f874e871c7845429b` created
+`br-c3d7654507dae1383b0e52eebe67eebf`; no worker record was created. In each
+case the verified repository/owner/ref/SHA/workflow/run identity, config hash,
+plan hash, platform, OCI repository, and registry digest matched. Anonymous
+GHCR manifest-by-digest returned HTTP 200 with the same digest for both fixture
+services and for the final Cloud image.
+
+The controlled negative suite returned typed wrong-audience 401,
+unallowlisted-workflow/wrong-ref/wrong-OCI 403, claim/body SHA mismatch 403,
+unbound service 403, tag-only digest 400, exact replay 200 with the same ID and
+`reused=true`, changed-payload conflict 409, failed-image-build with no
+BuildRecord, and rate-limit 429 with `Retry-After: 60`. A pull request run had
+`plan` and untrusted build jobs only; `publish-and-record` was skipped. Temporary
+negative workflow/policy entries were removed afterward. No Agent deployment
+path was added and R5-009 was not started.
+
+The final staging Cloud image is
+`ghcr.io/huutawn/opsi-cloud@sha256:c3c63a1724a8b17876c200251293156773b172b782257811c8d3d848eac61bf6`,
+built from Opsi code-bearing revision
+`b1435f0029e0ad65c019ff692bfa80e1f2aa1476`. PostgreSQL/Cloud named volumes,
+Bootstrap Worker, and reverse proxy were preserved; staging was 4/4 healthy,
+public `/health` returned 200, and the sanitized log-marker count was zero.
 
 ## Verification commands
 

@@ -247,11 +247,11 @@ conflicting keys and stale filesystem state fail typed without writing.
 **Gate:** claim/body/replay/idempotency/Postgres restart/no-log-token tests; CLI/UI hiển thị cùng sanitized record.
 
 **Trạng thái acceptance 2026-07-19:** `DONE / LOCAL_FUNCTIONAL_ACCEPTANCE_PASS /
-LIVE_EVIDENCE_DEFERRED`. Local signed OIDC fixtures, pinned production config,
+LIVE_ACCEPTANCE_PASS`. Local signed OIDC fixtures, pinned production config,
 claim and stored-binding authorization, exact/conflicting replay, append-only
 PostgreSQL restart/concurrency evidence, CLI/Local API/UI read parity, and
-source/config validators pass. GitHub-hosted runner, GHCR, live token, and
-registry correlation remain explicitly assigned to R5-008.
+source/config validators pass. Live runner/GHCR/Cloud proof is recorded under
+R5-008; no Agent deployment is part of this scope.
 
 ### R5-008 — Live GitHub runner và public GHCR proof
 
@@ -272,6 +272,26 @@ registry correlation remain explicitly assigned to R5-008.
 **Avoid:** Agent/K3s deploy, private registry, PR preview deploy, AI/MCP.
 
 **Gate:** real runner -> GHCR digest -> BuildRecord pass; changed-service behavior có evidence thật.
+
+**Trạng thái acceptance 2026-07-19:** `DONE / LIVE_ACCEPTANCE_PASS`. The
+disposable fixture `huutawn/opsi-r5-005-fixture` at final revision
+`c0ae78e0c1b5df93ae0f67a4de860849cbf71c97` passed baseline run
+`29676422752` attempt 2 (`api` + `worker`) and changed-service run
+`29676722594` (`api` only). BuildRecord IDs, repository/owner/ref/SHA/workflow/
+run identity, config/plan hashes, platform, OCI repository, and immutable
+GHCR digests matched; anonymous digest pulls returned 200. Controlled live
+negative checks covered wrong audience/workflow/ref, body SHA mismatch, wrong
+service/OCI, malformed tag digest, exact replay, changed-payload 409, failed
+image build, PR publish skip, and bounded 429 rate limiting. CLI and Local UI
+reads showed the same sanitized baseline and api-only records. Temporary
+negative policy/workflows were removed, production policy retained exact main
+push/service/OCI allowlists, and no Agent/K3s/R5-009/MCP/AI path was used.
+
+Final Cloud staging uses immutable image
+`ghcr.io/huutawn/opsi-cloud@sha256:c3c63a1724a8b17876c200251293156773b172b782257811c8d3d848eac61bf6`,
+built from Opsi code-bearing revision
+`b1435f0029e0ad65c019ff692bfa80e1f2aa1476`. Full sanitized evidence is in the
+R5-008 live acceptance runbook.
 
 ### R5-009 — TopologyPlan, DeploymentPolicy và manual placement CLI/UI
 

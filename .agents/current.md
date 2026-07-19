@@ -6,6 +6,21 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Task
 
+### R5-008 — Live GitHub runner, GHCR, and BuildRecord proof
+
+- R5-007 hardening and live R5-008 acceptance passed on 2026-07-19.
+- Opsi code-bearing revision: `b1435f0029e0ad65c019ff692bfa80e1f2aa1476`.
+- Final fixture revision: `c0ae78e0c1b5df93ae0f67a4de860849cbf71c97`.
+- Canonical generated workflow source pin: `f782c84f60c1d657b11e7a74a2bd55f6c2ae31e1`.
+- Baseline run `29676422752` attempt `2` selected `api` and `worker`; changed run
+  `29676722594` selected only `api`. Public GHCR digests and Cloud BuildRecords
+  matched for both runs.
+- Cloud staging runs `4/4` healthy on immutable image
+  `ghcr.io/huutawn/opsi-cloud@sha256:c3c63a1724a8b17876c200251293156773b172b782257811c8d3d848eac61bf6`.
+- Temporary negative workflows/policy were removed after exact live 401/403/400/
+  409/replay/rate-limit/failed-build/PR checks. No Agent VPS was used and R5-009
+  was not started.
+
 ### R5-007 — GitHub Actions OIDC verifier and BuildRecord v1
 
 - R5-006 remains `DONE / FUNCTIONAL_ACCEPTANCE_PASS`. Its focused R5-007 entry
