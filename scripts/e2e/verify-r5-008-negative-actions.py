@@ -17,6 +17,7 @@ import urllib.request
 BUILD_RECORD_PATH = "/v1/build-records"
 MAX_RESPONSE_BYTES = 64 * 1024
 RECORD_ID = re.compile(r"^br-[A-Za-z0-9._-]{1,128}$")
+USER_AGENT = "opsi-r5-008-actions-verifier/1.0"
 
 
 def fail(message: str) -> None:
@@ -59,7 +60,7 @@ def request_oidc(audience: str) -> str:
         fail("negative verifier must run in a GitHub Actions OIDC job")
     request = urllib.request.Request(
         oidc_request_url(audience),
-        headers={"Authorization": "Bearer " + request_token, "Accept": "application/json"},
+        headers={"Authorization": "Bearer " + request_token, "Accept": "application/json", "User-Agent": USER_AGENT},
     )
     with urllib.request.urlopen(request, timeout=15) as response:
         payload = json.loads(response.read(MAX_RESPONSE_BYTES + 1))
@@ -118,7 +119,12 @@ def post(endpoint: str, token: str, body: dict[str, object]) -> tuple[int, dict[
         endpoint,
         data=json.dumps(body, separators=(",", ":"), sort_keys=True).encode(),
         method="POST",
-        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"},
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
     )
     try:
         response = urllib.request.urlopen(request, timeout=15)
