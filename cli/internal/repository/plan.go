@@ -57,10 +57,11 @@ type ServicePlan struct {
 }
 
 type BuildTarget struct {
-	Key        string `json:"key"`
-	Context    string `json:"context"`
-	Dockerfile string `json:"dockerfile"`
-	Platform   string `json:"platform"`
+	Key            string   `json:"key"`
+	Context        string   `json:"context"`
+	Dockerfile     string   `json:"dockerfile"`
+	Platform       string   `json:"platform"`
+	ProductionRefs []string `json:"production_refs,omitempty"`
 }
 
 type ChangedServicePlan struct {
@@ -397,7 +398,13 @@ func finalizePlan(plan ChangedServicePlan, cfg ConfigV2) ChangedServicePlan {
 	}
 	for _, service := range cfg.Services {
 		if selected[service.Key] {
-			plan.Matrix = append(plan.Matrix, BuildTarget{Key: service.Key, Context: service.Build.Context, Dockerfile: service.Build.Dockerfile, Platform: service.Build.Platform})
+			var productionRefs []string
+			if service.Deploy.Production.Enabled {
+				for _, branch := range service.Deploy.Production.Branches {
+					productionRefs = append(productionRefs, "refs/heads/"+branch)
+				}
+			}
+			plan.Matrix = append(plan.Matrix, BuildTarget{Key: service.Key, Context: service.Build.Context, Dockerfile: service.Build.Dockerfile, Platform: service.Build.Platform, ProductionRefs: productionRefs})
 		}
 	}
 	plan.PlanHash = ""

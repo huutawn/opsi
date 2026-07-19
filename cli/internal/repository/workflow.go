@@ -1,11 +1,6 @@
 package repository
 
-import (
-	"encoding/json"
-	"fmt"
-	"sort"
-	"strings"
-)
+import "fmt"
 
 // Pin the planner/helper source independently from the fixture's source commit.
 const opsiSourceRevision = "528f3e38052904756db842a85476b7acf5152050"
@@ -32,6 +27,8 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has-services: ${{ steps.matrix.outputs.has-services }}
+      publish-matrix: ${{ steps.matrix.outputs.publish-matrix }}
+      has-publish-services: ${{ steps.matrix.outputs.has-publish-services }}
       config-hash: ${{ steps.matrix.outputs.config-hash }}
       plan-hash: ${{ steps.matrix.outputs.plan-hash }}
       reason-codes: ${{ steps.matrix.outputs.reason-codes }}
@@ -71,8 +68,10 @@ jobs:
         id: matrix
         env:
           OPSI_PLAN: ${{ runner.temp }}/opsi-plan.json
+          OPSI_EVENT_NAME: ${{ github.event_name }}
+          OPSI_REF: ${{ github.ref }}
         run: |
-          python3 - "$OPSI_PLAN" "$GITHUB_OUTPUT" <<'PY'
+          python3 - "$OPSI_PLAN" "$GITHUB_OUTPUT" "$OPSI_EVENT_NAME" "$OPSI_REF" <<'PY'
           import json
           import pathlib
           import sys
@@ -84,11 +83,23 @@ jobs:
               raise SystemExit("invalid or oversized Opsi matrix")
           if not isinstance(reasons, list) or len(reasons) > 128:
               raise SystemExit("invalid or oversized Opsi reason list")
+          publish = []
+          for target in matrix:
+              refs = target.get("production_refs", [])
+              if not isinstance(refs, list) or len(refs) > 64:
+                  raise SystemExit("invalid or oversized production ref list")
+              if any(not isinstance(ref, str) or not ref.startswith("refs/heads/") or len(ref) > 512 for ref in refs):
+                  raise SystemExit("invalid production ref")
+              if sys.argv[3] == "push" and sys.argv[4] in refs:
+                  publish.append(target)
           compact = json.dumps({"service": matrix}, separators=(",", ":"), sort_keys=True)
+          publish_compact = json.dumps({"service": publish}, separators=(",", ":"), sort_keys=True)
           reason_json = json.dumps(reasons, separators=(",", ":"), sort_keys=True)
           with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as output:
               output.write("matrix=" + compact + chr(10))
               output.write("has-services=" + ("true" if matrix else "false") + chr(10))
+              output.write("publish-matrix=" + publish_compact + chr(10))
+              output.write("has-publish-services=" + ("true" if publish else "false") + chr(10))
               output.write("config-hash=" + str(plan.get("config_hash", "")) + chr(10))
               output.write("plan-hash=" + str(plan.get("plan_hash", "")) + chr(10))
               output.write("reason-codes=" + reason_json + chr(10))
@@ -120,7 +131,7 @@ jobs:
 
   publish-and-record:
     needs: plan
-    if: needs.plan.outputs.has-services == 'true' && github.event_name == 'push' && github.event.repository.fork == false && contains(fromJSON('%s'), github.ref)
+    if: needs.plan.outputs.has-publish-services == 'true' && github.event_name == 'push' && github.event.repository.fork == false && startsWith(github.ref, 'refs/heads/')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -133,7 +144,7 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.publish-matrix) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -201,27 +212,5 @@ jobs:
 `
 
 func RenderWorkflow(config ...ConfigV2) []byte {
-	refs := trustedWorkflowRefs(config...)
-	return []byte(fmt.Sprintf(workflowTemplate, opsiSourceRevision, refs, opsiSourceRevision))
-}
-
-func trustedWorkflowRefs(config ...ConfigV2) string {
-	branches := map[string]bool{}
-	for _, cfg := range config {
-		for _, service := range cfg.Services {
-			for _, branch := range service.Deploy.Production.Branches {
-				branches[branch] = true
-			}
-		}
-	}
-	if len(branches) == 0 {
-		branches["main"] = true
-	}
-	values := make([]string, 0, len(branches))
-	for branch := range branches {
-		values = append(values, "refs/heads/"+branch)
-	}
-	sort.Strings(values)
-	encoded, _ := json.Marshal(values)
-	return strings.ReplaceAll(string(encoded), "'", "''")
+	return []byte(fmt.Sprintf(workflowTemplate, opsiSourceRevision, opsiSourceRevision))
 }

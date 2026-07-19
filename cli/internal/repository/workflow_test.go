@@ -51,7 +51,9 @@ func TestWorkflowAuthorityIsSplitAndDeterministic(t *testing.T) {
 	for _, required := range []string{
 		"github.event_name == 'push'",
 		"github.event.repository.fork == false",
-		`contains(fromJSON('["refs/heads/main"]'), github.ref)`,
+		"startsWith(github.ref, 'refs/heads/')",
+		"needs.plan.outputs.has-publish-services == 'true'",
+		"fromJSON(needs.plan.outputs.publish-matrix)",
 		"packages: write", "id-token: write", "contents: read",
 		"secrets.GITHUB_TOKEN", "vars.OPSI_CLOUD_URL",
 		"opsi internal build-record submit-from-github-actions",
@@ -83,14 +85,17 @@ func TestWorkflowPinsActionsAndOpsiSource(t *testing.T) {
 	}
 }
 
-func TestWorkflowTrustedRefsComeFromProductionConfig(t *testing.T) {
+func TestPlanMatrixCarriesExactServiceProductionRefs(t *testing.T) {
 	cfg := ConfigV2{Version: 2, Services: []ServiceV2{
-		{Key: "api", Deploy: DeployV2{Production: ProductionV2{Enabled: true, Branches: []string{"release", "main"}}}},
-		{Key: "worker", Deploy: DeployV2{Production: ProductionV2{Enabled: true, Branches: []string{"main"}}}},
+		{Key: "api", Build: BuildV2{Context: "services/api", Dockerfile: "services/api/Dockerfile", Platform: "linux/amd64"}, Deploy: DeployV2{Production: ProductionV2{Enabled: true, Branches: []string{"release", "main"}}}},
+		{Key: "worker", Build: BuildV2{Context: "services/worker", Dockerfile: "services/worker/Dockerfile", Platform: "linux/amd64"}, Deploy: DeployV2{Production: ProductionV2{Enabled: false, Branches: []string{}}}},
 	}}
-	text := string(RenderWorkflow(cfg))
-	if !strings.Contains(text, `contains(fromJSON('["refs/heads/main","refs/heads/release"]'), github.ref)`) {
-		t.Fatalf("trusted refs were not rendered deterministically:\n%s", text)
+	plan, err := (CDService{}).Plan(t.Context(), PlanRequest{Event: EventInitial, Head: strings.Repeat("a", 40), Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Matrix) != 2 || strings.Join(plan.Matrix[0].ProductionRefs, ",") != "refs/heads/main,refs/heads/release" || len(plan.Matrix[1].ProductionRefs) != 0 {
+		t.Fatalf("matrix=%+v", plan.Matrix)
 	}
 }
 
