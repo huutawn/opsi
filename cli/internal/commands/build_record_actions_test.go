@@ -116,6 +116,22 @@ func TestSubmitBuildRecordErrorsDoNotLeakTokens(t *testing.T) {
 	}
 }
 
+func TestSubmitBuildRecordReturnsOnlyTypedCloudErrorCode(t *testing.T) {
+	input := validActionsBuildRecordInput()
+	var calls int
+	client := &http.Client{Transport: actionsRoundTripper(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return actionsResponse(http.StatusOK, `{"value":"header.payload.signature"}`), nil
+		}
+		return actionsResponse(http.StatusForbidden, `{"error_code":"BUILD_WORKLOAD_FORBIDDEN","message":"secret-marker"}`), nil
+	})}
+	_, err := submitBuildRecordFromGitHubActions(context.Background(), input, client)
+	if err == nil || !strings.Contains(err.Error(), "BUILD_WORKLOAD_FORBIDDEN") || strings.Contains(err.Error(), "secret-marker") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func validActionsBuildRecordInput() actionsBuildRecordInput {
 	return actionsBuildRecordInput{
 		CloudURL: "https://opsidev.site", ServiceKey: "api",

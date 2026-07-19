@@ -30,6 +30,7 @@ var (
 	actionsHash    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	actionsDigest  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	actionsOCIRepo = regexp.MustCompile(`^ghcr\.io/[a-z0-9](?:[a-z0-9._-]*/?)+[a-z0-9]$`)
+	actionsAPICode = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 )
 
 type actionsBuildRecordInput struct {
@@ -265,6 +266,12 @@ func postActionsBuildRecord(ctx context.Context, client *http.Client, endpoint *
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusOK {
+		var failure struct {
+			Code string `json:"error_code"`
+		}
+		if decodeActionsJSON(response.Body, &failure) == nil && actionsAPICode.MatchString(failure.Code) {
+			return actionsBuildRecordResult{}, fmt.Errorf("BuildRecord submission failed with HTTP %d (%s)", response.StatusCode, failure.Code)
+		}
 		return actionsBuildRecordResult{}, fmt.Errorf("BuildRecord submission failed with HTTP %d", response.StatusCode)
 	}
 	var payload struct {
