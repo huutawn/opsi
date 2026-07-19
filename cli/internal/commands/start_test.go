@@ -237,6 +237,44 @@ func TestLocalGitHubInventoryUsesV1CloudPathAndKeychainPAT(t *testing.T) {
 	}
 }
 
+func TestLocalBuildRecordReadUsesProjectScopedCloudPathAndKeychainPAT(t *testing.T) {
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("build-record-pat"); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{}
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer build-record-pat" {
+			t.Fatalf("method=%s auth=%q", r.Method, r.Header.Get("Authorization"))
+		}
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/br-1") {
+			_, _ = w.Write([]byte(`{"id":"br-1"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"records":[{"id":"br-1"}]}`))
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) { return store, nil }))
+	defer server.Close()
+	for _, path := range []string{"/api/local/projects/project-1/build-records?limit=50", "/api/local/projects/project-1/build-records/br-1"} {
+		response, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			t.Fatalf("path=%s status=%d body=%s", path, response.StatusCode, body)
+		}
+		_ = response.Body.Close()
+	}
+	if strings.Join(paths, ",") != "/api/projects/project-1/build-records,/api/projects/project-1/build-records/br-1" {
+		t.Fatalf("Cloud paths=%v", paths)
+	}
+}
+
 func TestLocalGitHubInstallationClaimRedeemsOnceWithoutBrowserCredential(t *testing.T) {
 	var callbackURL, localState string
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

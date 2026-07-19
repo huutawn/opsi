@@ -1,5 +1,7 @@
 import type {
   AuditEvent,
+  BuildRecord,
+  BuildRecordList,
   BootstrapSession,
   DeploymentJob,
   GitHubBinding,
@@ -151,6 +153,20 @@ export class LocalClient {
 
   services(projectID: string) {
     return this.call<{ services: ServiceRecord[] }>(`/api/local/projects/${projectID}/services`);
+  }
+
+  buildRecords(projectID: string, filters: { serviceKey?: string; repositoryID?: string; sha?: string; status?: string; cursor?: string } = {}) {
+    const query = new URLSearchParams({ limit: "50" });
+    if (filters.serviceKey) query.set("service_key", filters.serviceKey);
+    if (filters.repositoryID) query.set("repository_id", filters.repositoryID);
+    if (filters.sha) query.set("sha", filters.sha);
+    if (filters.status) query.set("status", filters.status);
+    if (filters.cursor) query.set("cursor", filters.cursor);
+    return this.call<BuildRecordList>(`/api/local/projects/${projectID}/build-records?${query}`);
+  }
+
+  buildRecord(projectID: string, recordID: string) {
+    return this.call<BuildRecord>(`/api/local/projects/${projectID}/build-records/${encodeURIComponent(recordID)}`);
   }
 
   createService(projectID: string, body: Record<string, unknown>) {

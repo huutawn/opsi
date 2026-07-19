@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 )
 
 const (
@@ -18,19 +20,20 @@ const (
 )
 
 type Config struct {
-	TTL                    Duration        `json:"ttl"`
-	DatabaseURL            string          `json:"database_url"`
-	PublicBaseURL          string          `json:"public_base_url"`
-	Production             bool            `json:"production"`
-	EnableDebugUI          bool            `json:"enable_debug_ui"`
-	OTP                    OTPConfig       `json:"otp"`
-	SMTP                   SMTPConfig      `json:"smtp"`
-	Alerts                 AlertConfig     `json:"alerts"`
-	Routes                 []Route         `json:"routes"`
-	BootstrapWorkerToken   string          `json:"bootstrap_worker_token"`
-	BootstrapSecretKey     string          `json:"bootstrap_secret_key"`
-	RequireAgentSignatures bool            `json:"require_agent_signatures"`
-	GitHubApp              GitHubAppConfig `json:"github_app"`
+	TTL                    Duration          `json:"ttl"`
+	DatabaseURL            string            `json:"database_url"`
+	PublicBaseURL          string            `json:"public_base_url"`
+	Production             bool              `json:"production"`
+	EnableDebugUI          bool              `json:"enable_debug_ui"`
+	OTP                    OTPConfig         `json:"otp"`
+	SMTP                   SMTPConfig        `json:"smtp"`
+	Alerts                 AlertConfig       `json:"alerts"`
+	Routes                 []Route           `json:"routes"`
+	BootstrapWorkerToken   string            `json:"bootstrap_worker_token"`
+	BootstrapSecretKey     string            `json:"bootstrap_secret_key"`
+	RequireAgentSignatures bool              `json:"require_agent_signatures"`
+	GitHubApp              GitHubAppConfig   `json:"github_app"`
+	GitHubOIDC             githuboidc.Config `json:"github_oidc"`
 }
 
 type OTPConfig struct {
@@ -81,7 +84,8 @@ type Duration time.Duration
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
-		TTL: Duration(24 * time.Hour),
+		TTL:        Duration(24 * time.Hour),
+		GitHubOIDC: githuboidc.DefaultConfig(),
 		GitHubApp: GitHubAppConfig{
 			CallbackURL: "http://127.0.0.1:8080" + githubCallbackPath,
 		},
@@ -165,6 +169,56 @@ func applyEnvOverrides(cfg *Config) error {
 	if err := applyStringOrFileEnv("OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET", "OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET_FILE", &cfg.GitHubApp.WebhookSecret); err != nil {
 		return err
 	}
+	if err := applyBoolEnv("OPSI_CLOUD_GITHUB_OIDC_ENABLED", &cfg.GitHubOIDC.Enabled); err != nil {
+		return err
+	}
+	applyStringEnv("OPSI_CLOUD_GITHUB_OIDC_ISSUER", &cfg.GitHubOIDC.Issuer)
+	applyStringEnv("OPSI_CLOUD_GITHUB_OIDC_JWKS_URL", &cfg.GitHubOIDC.JWKSURL)
+	applyStringEnv("OPSI_CLOUD_GITHUB_OIDC_AUDIENCE", &cfg.GitHubOIDC.Audience)
+	if err := applyGitHubOIDCDurationEnv("OPSI_CLOUD_GITHUB_OIDC_CLOCK_SKEW", &cfg.GitHubOIDC.ClockSkew); err != nil {
+		return err
+	}
+	if err := applyGitHubOIDCDurationEnv("OPSI_CLOUD_GITHUB_OIDC_HTTP_TIMEOUT", &cfg.GitHubOIDC.HTTPTimeout); err != nil {
+		return err
+	}
+	if err := applyGitHubOIDCDurationEnv("OPSI_CLOUD_GITHUB_OIDC_CACHE_TTL", &cfg.GitHubOIDC.CacheTTL); err != nil {
+		return err
+	}
+	if err := applyIntEnv("OPSI_CLOUD_GITHUB_OIDC_MAX_TOKEN_BYTES", &cfg.GitHubOIDC.MaxTokenBytes); err != nil {
+		return err
+	}
+	if err := applyIntEnv("OPSI_CLOUD_GITHUB_OIDC_MAX_JWKS_BYTES", &cfg.GitHubOIDC.MaxJWKSBytes); err != nil {
+		return err
+	}
+	if err := applyIntEnv("OPSI_CLOUD_GITHUB_OIDC_MAX_JWK_KEYS", &cfg.GitHubOIDC.MaxJWKKeys); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyGitHubOIDCDurationEnv(name string, target *githuboidc.Duration) error {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid duration", name)
+	}
+	*target = githuboidc.Duration(parsed)
+	return nil
+}
+
+func applyIntEnv(name string, target *int) error {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fmt.Errorf("%s must be a positive integer", name)
+	}
+	*target = parsed
 	return nil
 }
 
@@ -313,8 +367,23 @@ func validateConfig(cfg *Config) error {
 				return fmt.Errorf("production %s must not use a placeholder", name)
 			}
 		}
+		if isProductionPlaceholder(cfg.GitHubOIDC.Audience) {
+			return fmt.Errorf("production github_oidc.audience must not use a placeholder")
+		}
+		for i, workload := range cfg.GitHubOIDC.Workloads {
+			for _, values := range [][]string{workload.WorkflowRefs, workload.JobWorkflowRefs, workload.Refs, workload.Events, workload.OCIRepositories} {
+				for _, value := range values {
+					if isProductionPlaceholder(value) {
+						return fmt.Errorf("production github_oidc.workloads[%d] must not use placeholders", i)
+					}
+				}
+			}
+		}
 	}
-	return validateGitHubAppConfig(cfg)
+	if err := validateGitHubAppConfig(cfg); err != nil {
+		return err
+	}
+	return cfg.GitHubOIDC.Validate(cfg.Production)
 }
 
 func isProductionPlaceholder(value string) bool {

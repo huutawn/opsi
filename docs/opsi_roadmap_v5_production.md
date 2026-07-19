@@ -246,6 +246,13 @@ conflicting keys and stale filesystem state fail typed without writing.
 
 **Gate:** claim/body/replay/idempotency/Postgres restart/no-log-token tests; CLI/UI hiển thị cùng sanitized record.
 
+**Trạng thái acceptance 2026-07-19:** `DONE / LOCAL_FUNCTIONAL_ACCEPTANCE_PASS /
+LIVE_EVIDENCE_DEFERRED`. Local signed OIDC fixtures, pinned production config,
+claim and stored-binding authorization, exact/conflicting replay, append-only
+PostgreSQL restart/concurrency evidence, CLI/Local API/UI read parity, and
+source/config validators pass. GitHub-hosted runner, GHCR, live token, and
+registry correlation remain explicitly assigned to R5-008.
+
 ### R5-008 — Live GitHub runner và public GHCR proof
 
 **Mục tiêu:** chứng minh R5-006/R5-007 bằng token và registry thật.

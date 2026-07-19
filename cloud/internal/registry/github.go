@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 )
 
 const (
@@ -603,6 +605,37 @@ func (s *Service) ListGitHubServiceBindings(projectID string) ([]GitHubServiceBi
 	}
 	sort.Slice(bindings, func(i, j int) bool { return bindings[i].CreatedAt.Before(bindings[j].CreatedAt) })
 	return bindings, nil
+}
+
+func (s *Service) ResolveBuildBinding(_ context.Context, repositoryID uint64, serviceKey string) (buildrecord.Binding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if repositoryID == 0 || !validGitHubServiceKey(serviceKey) {
+		return buildrecord.Binding{}, ErrNotFound
+	}
+	repository, ok := s.githubRepositories[int64(repositoryID)]
+	if !ok || repository.Status != GitHubRepositoryActive || repository.Archived || repository.Disabled {
+		return buildrecord.Binding{}, ErrNotFound
+	}
+	installation, ok := s.githubInstallations[repository.InstallationID]
+	if !ok || installation.Status != GitHubInstallationActive || installation.Suspended {
+		return buildrecord.Binding{}, ErrNotFound
+	}
+	claim, ok := s.githubRepositoryClaims[repository.RepositoryID]
+	if !ok || claim.Status != GitHubLinkActive {
+		return buildrecord.Binding{}, ErrNotFound
+	}
+	for _, binding := range s.githubServiceBindings {
+		if binding.Status != GitHubLinkActive || binding.RepositoryID != repository.RepositoryID || binding.ServiceKey != serviceKey || binding.ProjectID != claim.ProjectID {
+			continue
+		}
+		service, exists := s.services[binding.ServiceID]
+		if !exists || service.ProjectID != binding.ProjectID || service.Status == "deleted" {
+			return buildrecord.Binding{}, ErrNotFound
+		}
+		return buildrecord.Binding{ProjectID: binding.ProjectID, BindingID: binding.ID, ServiceID: binding.ServiceID, ServiceKey: binding.ServiceKey, RepositoryID: repositoryID, RepositoryOwnerID: uint64(repository.OwnerID), RepositoryFullName: repository.FullName}, nil
+	}
+	return buildrecord.Binding{}, ErrNotFound
 }
 
 func (s *Service) claimableRepositoryLocked(projectID string, repositoryID int64) (GitHubRepository, GitHubInstallation, error) {

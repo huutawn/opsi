@@ -87,6 +87,43 @@ export type GitHubBinding = {
   status: string;
 };
 
+export type BuildRecord = {
+  schema_version: "opsi.build_record/v1";
+  id: string;
+  project_id: string;
+  repository_id: number;
+  repository_owner_id: number;
+  active_binding_id: string;
+  service_id: string;
+  service_key: string;
+  created_at: string;
+  workload: {
+    issuer: string;
+    subject: string;
+    repository_id: number;
+    repository_owner_id: number;
+    ref: string;
+    sha: string;
+    event_name: string;
+    workflow: string;
+    workflow_ref: string;
+    job_workflow_ref?: string;
+    run_id: number;
+    run_attempt: number;
+  };
+  build: {
+    config_hash: string;
+    plan_hash?: string;
+    platform: string;
+    oci_repository: string;
+    oci_digest: string;
+    provenance_digest?: string;
+    status: string;
+  };
+};
+
+export type BuildRecordList = { records: BuildRecord[]; next_cursor?: string };
+
 export type DeploymentJob = {
   id: string;
   service_id: string;

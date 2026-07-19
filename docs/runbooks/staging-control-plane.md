@@ -63,6 +63,13 @@ identity, pinned K3s version, artifact URLs, and non-zero SHA-256 values. Do not
 put secret values in these files; the staging profile consumes them from
 individual files under `secrets/`.
 
+In `config/cloud.json`, replace every `github_oidc` placeholder with the exact
+audience, numeric repository ID, service key, direct `workflow_ref`, allowed
+refs/events, and canonical OCI repository for the active GitHub binding. Keep
+the issuer and JWKS URL pinned to GitHub's documented production endpoints.
+Leave `job_workflow_refs` absent for the current direct R5-006 workflow; add it
+only when a separately reviewed reusable workflow is actually used.
+
 Generate new random values locally instead of pasting them into a shell command:
 
 ```bash

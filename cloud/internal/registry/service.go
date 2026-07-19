@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -636,6 +637,8 @@ type API interface {
 	CreateGitHubServiceBinding(projectID string, draft GitHubServiceBindingDraft) (GitHubServiceBinding, error)
 	RemoveGitHubServiceBinding(projectID, bindingID, userID string) error
 	ListGitHubServiceBindings(projectID string) ([]GitHubServiceBinding, error)
+	ResolveBuildBinding(ctx context.Context, repositoryID uint64, serviceKey string) (buildrecord.Binding, error)
+	AuditWorkload(projectID, action, resourceID, result string, metadata map[string]any)
 	Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any)
 }
 
@@ -1903,6 +1906,16 @@ func (s *Service) Audit(orgID, projectID, actorUserID, action, resourceType, res
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.audit = append(s.audit, AuditEvent{ID: newID("aud"), OrgID: orgID, ProjectID: projectID, ActorUserID: actorUserID, ActorType: "user", Action: action, ResourceType: resourceType, ResourceID: resourceID, Result: result, MetadataRedacted: RedactMap(metadata), CreatedAt: s.clock()})
+}
+
+func (s *Service) AuditWorkload(projectID, action, resourceID, result string, metadata map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	project, ok := s.projects[projectID]
+	if !ok {
+		return
+	}
+	s.audit = append(s.audit, AuditEvent{ID: newID("aud"), OrgID: project.OrgID, ProjectID: projectID, ActorType: "github_actions", Action: action, ResourceType: "build_record", ResourceID: resourceID, Result: result, MetadataRedacted: RedactMap(metadata), CreatedAt: s.clock()})
 }
 
 func (s *Service) readinessLocked(projectID string) (Readiness, error) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 )
 
 const (
@@ -23,6 +24,28 @@ type githubDBTX interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s PostgresService) ResolveBuildBinding(ctx context.Context, repositoryID uint64, serviceKey string) (buildrecord.Binding, error) {
+	if s.DB == nil || repositoryID == 0 || !validGitHubServiceKey(serviceKey) {
+		return buildrecord.Binding{}, ErrNotFound
+	}
+	var binding buildrecord.Binding
+	err := s.DB.QueryRowContext(ctx, `SELECT b.project_id,b.id,b.service_id,b.service_key,r.repository_id,r.owner_id,r.full_name
+		FROM github_service_bindings b
+		JOIN github_repositories r ON r.repository_id=b.repository_id AND r.installation_id=b.installation_id
+		JOIN github_installations i ON i.installation_id=r.installation_id
+		JOIN github_repository_claims c ON c.repository_id=r.repository_id AND c.installation_id=r.installation_id AND c.project_id=b.project_id
+		JOIN control_services s ON s.id=b.service_id AND s.project_id=b.project_id
+		WHERE b.repository_id=$1 AND b.service_key=$2 AND b.status='active' AND r.status='active' AND NOT r.archived AND NOT r.disabled
+		AND i.status='active' AND NOT i.suspended AND c.status='active' AND s.status<>'deleted'`, repositoryID, serviceKey).Scan(&binding.ProjectID, &binding.BindingID, &binding.ServiceID, &binding.ServiceKey, &binding.RepositoryID, &binding.RepositoryOwnerID, &binding.RepositoryFullName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return buildrecord.Binding{}, ErrNotFound
+	}
+	if err != nil {
+		return buildrecord.Binding{}, githubPostgresError(err)
+	}
+	return binding, nil
 }
 
 func (s PostgresService) UpsertGitHubInstallation(installation GitHubInstallation) (GitHubInstallation, error) {

@@ -17,17 +17,24 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 type Server struct {
-	Queue                   RelayQueue
-	Config                  Config
-	OTP                     *otp.Service
-	Auth                    *auth.Service
-	HTTPClient              *http.Client
-	Registry                registry.API
+	Queue        RelayQueue
+	Config       Config
+	OTP          *otp.Service
+	Auth         *auth.Service
+	HTTPClient   *http.Client
+	Registry     registry.API
+	BuildRecords buildrecord.Service
+	OIDC         interface {
+		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
+	}
+	oidcInitError           error
 	credentials             CredentialVault
 	registrations           RegistrationVault
 	limits                  RateLimiter
@@ -48,12 +55,21 @@ type Server struct {
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
+	oidcConfig := cfg.GitHubOIDC
+	if oidcConfig.Issuer == "" {
+		oidcConfig = githuboidc.DefaultConfig()
+	}
+	verifier, verifierErr := githuboidc.New(oidcConfig)
+	registryService := registry.NewService()
 	server := &Server{
 		Queue:                   NewQueue(),
 		Config:                  cfg,
 		OTP:                     service,
 		HTTPClient:              newGitHubHTTPClient(),
-		Registry:                registry.NewService(),
+		Registry:                registryService,
+		BuildRecords:            buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads},
+		OIDC:                    verifier,
+		oidcInitError:           verifierErr,
 		credentials:             NewCredentialStore(),
 		registrations:           NewRegistrationTokenStore(),
 		limits:                  newRateLimiter(),
@@ -63,6 +79,9 @@ func NewServer(cfg Config) *Server {
 		authGrants:              map[string]authGrant{},
 		installationClaimGrants: map[string]installationClaimGrant{},
 		random:                  rand.Reader,
+	}
+	server.BuildRecords.AuditSink = func(event buildrecord.AuditEvent) {
+		registryService.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
 	}
 	server.githubReplay = newGitHubReplayStore(githubReplayMaxEntries, githubReplayTTL, server.clock)
 	return server
@@ -101,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("/v1/webhooks/github-app", s.handleGitHubAppWebhook)
+	mux.HandleFunc("/v1/build-records", s.handleBuildRecordSubmission)
 	mux.HandleFunc("/v1/auth/pat/verify", s.handlePATVerify)
 	mux.HandleFunc("/v1/auth/browser/start", s.handleBrowserAuthStart)
 	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)

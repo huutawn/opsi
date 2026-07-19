@@ -188,6 +188,9 @@ func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID
 
 func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts []string, principal auth.VerifyResult) {
 	projectID := parts[1]
+	if s.handleBuildRecordRead(w, r, projectID, parts, principal) {
+		return
+	}
 	if len(parts) == 3 && parts[2] == "readiness" && r.Method == http.MethodGet {
 		value, err := s.Registry.ProjectReadiness(projectID)
 		writeRegistryResult(w, r, value, err, http.StatusOK)

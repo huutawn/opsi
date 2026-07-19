@@ -5,7 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
+
+type BuildRecord = buildrecordv1.Record
+type BuildRecordList = buildrecordv1.ListResult
 
 type APIError struct {
 	Status  int

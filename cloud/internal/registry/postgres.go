@@ -1254,6 +1254,15 @@ func (s PostgresService) Audit(orgID, projectID, actorUserID, action, resourceTy
 	_, _ = s.DB.ExecContext(context.Background(), `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_user_id, actor_type, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),'user',$5,$6,$7,$8,$9,$10)`, newID("aud"), orgID, projectID, actorUserID, action, resourceType, resourceID, result, string(data), s.clock())
 }
 
+func (s PostgresService) AuditWorkload(projectID, action, resourceID, result string, metadata map[string]any) {
+	data, _ := json.Marshal(RedactMap(metadata))
+	var orgID string
+	if err := s.DB.QueryRowContext(context.Background(), `SELECT COALESCE(org_id,'') FROM projects WHERE id=$1`, projectID).Scan(&orgID); err != nil {
+		return
+	}
+	_, _ = s.DB.ExecContext(context.Background(), `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_user_id, actor_type, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,$3,NULL,'github_actions',$4,'build_record',$5,$6,$7,$8)`, newID("aud"), orgID, projectID, action, resourceID, result, string(data), s.clock())
+}
+
 func (s PostgresService) defaultScope(ctx context.Context, projectID string) (Project, Runtime, Environment, error) {
 	project, err := s.getProject(ctx, projectID)
 	if err != nil {

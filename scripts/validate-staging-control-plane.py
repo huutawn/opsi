@@ -86,6 +86,35 @@ def parse_json(text: str, name: str) -> dict[str, object]:
     return value
 
 
+def validate_oidc(cloud: dict[str, object], runtime: bool) -> None:
+    oidc = cloud.get("github_oidc")
+    if not isinstance(oidc, dict) or oidc.get("enabled") is not True:
+        fail("production cloud config must enable github_oidc")
+    if oidc.get("issuer") != "https://token.actions.githubusercontent.com":
+        fail("github_oidc issuer must be the pinned GitHub issuer")
+    if oidc.get("jwks_url") != "https://token.actions.githubusercontent.com/.well-known/jwks":
+        fail("github_oidc jwks_url must be the pinned GitHub JWKS endpoint")
+    audience = oidc.get("audience")
+    if not isinstance(audience, str) or not audience or (runtime and is_placeholder(audience)):
+        fail("github_oidc audience must be exact and non-placeholder")
+    workloads = oidc.get("workloads")
+    if not isinstance(workloads, list) or not workloads:
+        fail("github_oidc workloads must be a non-empty allowlist")
+    for index, workload in enumerate(workloads):
+        if not isinstance(workload, dict) or not isinstance(workload.get("repository_id"), int) or workload["repository_id"] <= 0:
+            fail(f"github_oidc workload {index} repository_id must be positive")
+        if not isinstance(workload.get("service_key"), str) or not workload["service_key"]:
+            fail(f"github_oidc workload {index} service_key is required")
+        for key in ("workflow_refs", "refs", "events", "oci_repositories"):
+            values = workload.get(key)
+            if not isinstance(values, list) or not values or not all(isinstance(value, str) and value for value in values):
+                fail(f"github_oidc workload {index} {key} must be a non-empty string allowlist")
+            if runtime and any(is_placeholder(value) for value in values):
+                fail(f"github_oidc workload {index} {key} contains a placeholder")
+        if runtime and is_placeholder(workload["service_key"]):
+            fail(f"github_oidc workload {index} service_key contains a placeholder")
+
+
 def parse_bool(value: str, name: str) -> bool:
     if value.lower() == "true":
         return True
@@ -200,6 +229,7 @@ def validate_source_texts(
     worker = parse_json(worker_text, "bootstrap-worker.example.json")
     if not isinstance(cloud.get("routes"), list):
         fail("cloud example must define routes as an array")
+    validate_oidc(cloud, runtime=False)
 
     expected_flags = {
         "OPSI_CLOUD_PRODUCTION": True,
@@ -313,7 +343,7 @@ def validate_source_texts(
         fail("staging worker config must not contain an inline worker token")
 
 
-def validate_runtime_values(env: dict[str, str], worker: dict[str, object], secrets: dict[str, str]) -> None:
+def validate_runtime_values(env: dict[str, str], cloud: dict[str, object], worker: dict[str, object], secrets: dict[str, str]) -> None:
     for name, expected in {
         "OPSI_CLOUD_PRODUCTION": True,
         "OPSI_CLOUD_ENABLE_DEBUG_UI": False,
@@ -322,6 +352,7 @@ def validate_runtime_values(env: dict[str, str], worker: dict[str, object], secr
     }.items():
         if parse_bool(env.get(name, ""), name) is not expected:
             fail(f"runtime staging requires {name}={str(expected).lower()}")
+    validate_oidc(cloud, runtime=True)
     public = require_https(env.get("OPSI_CLOUD_PUBLIC_BASE_URL", ""), "OPSI_CLOUD_PUBLIC_BASE_URL", False)
     callback = require_https(env.get("OPSI_CLOUD_GITHUB_APP_CALLBACK_URL", ""), "OPSI_CLOUD_GITHUB_APP_CALLBACK_URL", False)
     if callback.path != CALLBACK_PATH or callback.query or (callback.hostname, effective_port(callback)) != (public.hostname, effective_port(public)):
@@ -420,7 +451,7 @@ def validate_runtime() -> None:
     validate_permissions(cloud_path, owner_uid=1000)
     validate_permissions(worker_path, owner_uid=1000)
     env = parse_env(read_required(env_path))
-    parse_json(read_required(cloud_path), "cloud.json")
+    cloud = parse_json(read_required(cloud_path), "cloud.json")
     worker = parse_json(read_required(worker_path), "bootstrap-worker.json")
     secrets: dict[str, str] = {}
     for name, filename in SECRET_FILE_NAMES.items():
@@ -431,7 +462,7 @@ def validate_runtime() -> None:
             owner_uid=None if name == "postgres-password" else 1000,
         )
         secrets[name] = read_required(path)
-    validate_runtime_values(env, worker, secrets)
+    validate_runtime_values(env, cloud, worker, secrets)
 
 
 def main() -> int:

@@ -77,6 +77,24 @@ func (c *Client) ListServices(ctx context.Context, projectID string) ([]Service,
 	return response.Services, err
 }
 
+func (c *Client) ListBuildRecords(ctx context.Context, projectID string, query url.Values) (BuildRecordList, error) {
+	var response BuildRecordList
+	segments := []string{"api", "projects", projectID, "build-records"}
+	endpoint, err := c.endpoint(segments...)
+	if err != nil {
+		return response, err
+	}
+	endpoint.RawQuery = query.Encode()
+	err = c.doURL(ctx, http.MethodGet, endpoint, nil, "", &response)
+	return response, err
+}
+
+func (c *Client) GetBuildRecord(ctx context.Context, projectID, recordID string) (BuildRecord, error) {
+	var response BuildRecord
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "build-records", recordID}, nil, "", &response)
+	return response, err
+}
+
 func (c *Client) ListNodes(ctx context.Context, projectID string) ([]Node, error) {
 	var response nodeListResponse
 	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "nodes"}, nil, "", &response)
@@ -201,7 +219,11 @@ func (c *Client) do(ctx context.Context, method string, segments []string, body 
 		}
 		reader = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), reader)
+	return c.doURL(ctx, method, endpoint, reader, idempotencyKey, response)
+}
+
+func (c *Client) doURL(ctx context.Context, method string, endpoint *url.URL, body io.Reader, idempotencyKey string, response any) error {
+	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return fmt.Errorf("create Cloud request: %w", err)
 	}

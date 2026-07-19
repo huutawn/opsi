@@ -89,7 +89,7 @@ func writePrivateKeyStub(t *testing.T) string {
 func validProductionConfig(t *testing.T) string {
 	t.Helper()
 	return validProductionPrefix + fmt.Sprintf(
-		`,"github_app":{"client_id":"client","client_secret":"secret-client","callback_url":"https://cloud.example.test/v1/auth/browser/callback","app_id":12345,"private_key_path":%q,"webhook_secret":"%s"}`,
+		`,"github_app":{"client_id":"client","client_secret":"secret-client","callback_url":"https://cloud.example.test/v1/auth/browser/callback","app_id":12345,"private_key_path":%q,"webhook_secret":"%s"},"github_oidc":{"enabled":true,"workloads":[{"repository_id":1,"service_key":"api","workflow_refs":["huutawn/opsi/.github/workflows/opsi-cd.yaml@refs/heads/developer"],"refs":["refs/heads/developer"],"events":["push"],"oci_repositories":["ghcr.io/huutawn/opsi/api"]}]}`,
 		writePrivateKeyStub(t), strings.Repeat("w", 32),
 	)
 }

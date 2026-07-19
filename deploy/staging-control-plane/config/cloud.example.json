@@ -1,3 +1,25 @@
 {
-  "routes": []
+  "routes": [],
+  "github_oidc": {
+    "enabled": true,
+    "issuer": "https://token.actions.githubusercontent.com",
+    "jwks_url": "https://token.actions.githubusercontent.com/.well-known/jwks",
+    "audience": "REPLACE_WITH_EXACT_OIDC_AUDIENCE",
+    "clock_skew": "1m",
+    "http_timeout": "5s",
+    "max_token_bytes": 16384,
+    "max_jwks_bytes": 262144,
+    "max_jwk_keys": 32,
+    "cache_ttl": "15m",
+    "workloads": [
+      {
+        "repository_id": 1,
+        "service_key": "REPLACE_WITH_SERVICE_KEY",
+        "workflow_refs": ["REPLACE_WITH_OWNER/REPLACE_WITH_REPOSITORY/.github/workflows/opsi-cd.yaml@refs/heads/developer"],
+        "refs": ["refs/heads/developer"],
+        "events": ["push"],
+        "oci_repositories": ["ghcr.io/replace-with-owner/replace-with-repository/service"]
+      }
+    ]
+  }
 }

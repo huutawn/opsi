@@ -8,12 +8,14 @@ import { LogsView } from "@/features/logs/logs-view";
 import { SecretsView } from "@/features/secrets/secrets-view";
 import { SupportView } from "@/features/support/support-view";
 import { GitHubView } from "@/features/github/github-view";
+import { BuildRecordsView } from "@/features/build-records/build-records-view";
 
 export const OperationsViewMap: Record<string, (props: { console: ConsoleController }) => React.ReactNode> = {
   Projects: ProjectsView,
   GitHub: GitHubView,
   Overview: OverviewView,
   Services: ServicesView,
+  "Build Records": BuildRecordsView,
   Deployments: DeploymentsView,
   Topology: TopologyView,
   Audit: AuditView,

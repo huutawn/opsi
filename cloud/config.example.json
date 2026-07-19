@@ -1,14 +1,16 @@
 {
-  "routes": [
-    {
-      "project_id": "dev-project",
-      "service_id": "example-app",
-      "service_name": "example-app",
-      "service_type": "backend",
-      "repo_url": "https://github.com/example/app.git",
-      "repo_full_name": "example/app",
-      "branch": "main",
-      "webhook_secret": "REPLACE_WITH_RANDOM_32_BYTE_WEBHOOK_SECRET"
-    }
-  ]
+  "routes": [],
+  "github_oidc": {
+    "enabled": false,
+    "issuer": "https://token.actions.githubusercontent.com",
+    "jwks_url": "https://token.actions.githubusercontent.com/.well-known/jwks",
+    "audience": "https://github.com/huutawn/opsi",
+    "clock_skew": "1m",
+    "http_timeout": "5s",
+    "max_token_bytes": 16384,
+    "max_jwks_bytes": 262144,
+    "max_jwk_keys": 32,
+    "cache_ttl": "15m",
+    "workloads": []
+  }
 }

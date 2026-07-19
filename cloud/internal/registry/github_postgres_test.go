@@ -62,6 +62,10 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolved, err := service.ResolveBuildBinding(context.Background(), uint64(repository.RepositoryID), "api")
+	if err != nil || resolved.BindingID != binding.ID || resolved.ProjectID != firstProject.ID || resolved.RepositoryOwnerID != uint64(repository.OwnerID) {
+		t.Fatalf("resolved build binding=%+v err=%v", resolved, err)
+	}
 	if _, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: secondService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: firstProject.CreatedBy}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_ALREADY_BOUND") {
 		t.Fatalf("repository key uniqueness err=%v", err)
 	}
@@ -96,6 +100,9 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 	}
 	if err := service.RemoveGitHubServiceBinding(firstProject.ID, binding.ID, firstProject.CreatedBy); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := service.ResolveBuildBinding(context.Background(), uint64(repository.RepositoryID), "api"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removed build binding resolved: %v", err)
 	}
 	if err := service.ReleaseGitHubRepository(firstProject.ID, repository.RepositoryID, firstProject.CreatedBy); err != nil {
 		t.Fatal(err)

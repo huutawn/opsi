@@ -63,6 +63,8 @@ opsi-cloud
 **/*.sqlite-*
 **/*.db
 # Test and Coverage
+__pycache__/
+*.py[cod]
 *.test
 *.out
 *.coverprofile

@@ -1,3 +1,16 @@
 {
-  "routes": []
+  "routes": [],
+  "github_oidc": {
+    "enabled": false,
+    "issuer": "https://token.actions.githubusercontent.com",
+    "jwks_url": "https://token.actions.githubusercontent.com/.well-known/jwks",
+    "audience": "https://github.com/huutawn/opsi",
+    "clock_skew": "1m",
+    "http_timeout": "5s",
+    "max_token_bytes": 16384,
+    "max_jwks_bytes": 262144,
+    "max_jwk_keys": 32,
+    "cache_ttl": "15m",
+    "workloads": []
+  }
 }

@@ -12,7 +12,14 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   review repaired Local repository apply so a bounded safe `Idempotency-Key`
   replays only the same canonical request, conflicting reuse fails typed, and
   apply requires the exact filesystem-bound `preview_hash` returned by preview.
-- Active task is R5-007. R5-005 remains `OPERATOR_REQUIRED / FUNCTIONAL_ACCEPTANCE_PASS / LIVE_LIFECYCLE_EVIDENCE_DEFERRED`.
+- R5-007 is `DONE / LOCAL_FUNCTIONAL_ACCEPTANCE_PASS / LIVE_EVIDENCE_DEFERRED`.
+  Cloud pins GitHub issuer/JWKS, verifies signed bounded claims, authorizes the
+  active repository/service binding and exact workload policy, and stores
+  append-only `opsi.build_record/v1` rows idempotently in PostgreSQL.
+- CLI and Local API/UI expose project-scoped PAT-authenticated BuildRecord
+  list/detail only. The browser receives no PAT/OIDC token and has no submit or
+  deploy action.
+- R5-005 remains `OPERATOR_REQUIRED / FUNCTIONAL_ACCEPTANCE_PASS / LIVE_LIFECYCLE_EVIDENCE_DEFERRED`.
 - R5-005 and R5-006 business scope outside the focused repair is frozen.
 - The two missing live webhook deliveries (`installation_repositories: removed` and
   `repository`) and the live wrong-user check using a second GitHub account remain

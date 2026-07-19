@@ -138,32 +138,32 @@ class StagingValidatorTests(unittest.TestCase):
         self.assert_source_rejected(env_text=self.env_text.replace("ghcr.io/opsi-dev/opsi-cloud@sha256:REPLACE_WITH_64_HEX_IMAGE_DIGEST", "ghcr.io/opsi-dev/opsi-cloud:latest", 1))
 
     def test_placeholder_runtime_secret_rejected(self) -> None:
-        env, worker, secrets = self.valid_runtime_fixture()
+        env, cloud, worker, secrets = self.valid_runtime_fixture()
         secrets["bootstrap-secret-key"] = "REPLACE_WITH_BOOTSTRAP_SECRET_KEY_1234"
         with self.assertRaises(validator.ValidationError):
-            validator.validate_runtime_values(env, worker, secrets)
+            validator.validate_runtime_values(env, cloud, worker, secrets)
 
     def test_sanitized_runtime_fixture_passes(self) -> None:
-        env, worker, secrets = self.valid_runtime_fixture()
-        validator.validate_runtime_values(env, worker, secrets)
+        env, cloud, worker, secrets = self.valid_runtime_fixture()
+        validator.validate_runtime_values(env, cloud, worker, secrets)
 
     def test_database_url_password_mismatch_rejected(self) -> None:
-        env, worker, secrets = self.valid_runtime_fixture()
+        env, cloud, worker, secrets = self.valid_runtime_fixture()
         secrets["database-url"] = secrets["database-url"].replace("database%2Fpassword", "different-password", 1)
         with self.assertRaisesRegex(validator.ValidationError, "password must match postgres-password"):
-            validator.validate_runtime_values(env, worker, secrets)
+            validator.validate_runtime_values(env, cloud, worker, secrets)
 
     def test_database_url_username_mismatch_rejected(self) -> None:
-        env, worker, secrets = self.valid_runtime_fixture()
+        env, cloud, worker, secrets = self.valid_runtime_fixture()
         secrets["database-url"] = secrets["database-url"].replace("postgres://opsi:", "postgres://other:", 1)
         with self.assertRaisesRegex(validator.ValidationError, "username must match POSTGRES_USER"):
-            validator.validate_runtime_values(env, worker, secrets)
+            validator.validate_runtime_values(env, cloud, worker, secrets)
 
     def test_database_url_database_mismatch_rejected(self) -> None:
-        env, worker, secrets = self.valid_runtime_fixture()
+        env, cloud, worker, secrets = self.valid_runtime_fixture()
         secrets["database-url"] = secrets["database-url"].replace("/opsi?", "/other?")
         with self.assertRaisesRegex(validator.ValidationError, "database must match POSTGRES_DB"):
-            validator.validate_runtime_values(env, worker, secrets)
+            validator.validate_runtime_values(env, cloud, worker, secrets)
 
     def valid_runtime_fixture(self):
         env = validator.parse_env(self.env_text)
@@ -180,6 +180,16 @@ class StagingValidatorTests(unittest.TestCase):
                 "OPSI_CLOUD_GITHUB_APP_ID": "12345",
             }
         )
+        cloud = json.loads(self.cloud_text)
+        cloud["github_oidc"]["audience"] = "https://github.com/huutawn/opsi"
+        cloud["github_oidc"]["workloads"] = [{
+            "repository_id": 1304594095,
+            "service_key": "api",
+            "workflow_refs": ["huutawn/opsi/.github/workflows/opsi-cd.yaml@refs/heads/developer"],
+            "refs": ["refs/heads/developer"],
+            "events": ["push"],
+            "oci_repositories": ["ghcr.io/huutawn/opsi/api"],
+        }]
         worker = json.loads(self.worker_text)
         worker.update(
             {
@@ -203,7 +213,7 @@ class StagingValidatorTests(unittest.TestCase):
                 "ssh-known-hosts": "host.example.test ssh-ed25519 sanitized-test\n",
             }
         )
-        return copy.deepcopy(env), copy.deepcopy(worker), copy.deepcopy(secrets)
+        return copy.deepcopy(env), copy.deepcopy(cloud), copy.deepcopy(worker), copy.deepcopy(secrets)
 
 
 if __name__ == "__main__":

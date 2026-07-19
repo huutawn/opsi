@@ -332,6 +332,11 @@ button:disabled {
   font-weight: 700;
 }
 
+.monoWrap {
+  font-family: "IBM Plex Mono", "Courier New", monospace;
+  overflow-wrap: anywhere;
+}
+
 .status {
   display: inline-flex;
   align-items: center;

@@ -16,6 +16,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/postgres"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
@@ -96,7 +97,13 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		}
 		relay.Queue = webhookrelay.NewPostgresQueue(db)
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
-		relay.Registry = registry.PostgresService{DB: db}
+		postgresRegistry := registry.PostgresService{DB: db}
+		relay.Registry = postgresRegistry
+		relay.BuildRecords.Store = buildrecord.PostgresStore{DB: db}
+		relay.BuildRecords.Bindings = postgresRegistry
+		relay.BuildRecords.AuditSink = func(event buildrecord.AuditEvent) {
+			postgresRegistry.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
+		}
 		relay.OTP.Store = otp.PostgresStore{DB: db}
 		relay.SetHealthCheck(db.PingContext)
 		if cfg.BootstrapSecretKey != "" {

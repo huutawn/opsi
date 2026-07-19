@@ -494,6 +494,37 @@ Git adapter: fixed-argv bounded diff parser; Local API: config/mutation/workflow
 plan preview plus confirmed apply; Local UI: service editor and plan/workflow
 preview with loading/error/retry state and stable preview-bound apply retries.
 
+## R5-007 trusted BuildRecord checkpoint
+
+R5-007 adds a dedicated Cloud GitHub Actions OIDC verifier and a versioned
+`opsi.build_record/v1` application path. Production configuration pins the
+issuer to `https://token.actions.githubusercontent.com`, pins the official
+JWKS endpoint, requires an exact audience and non-empty workload allowlist, and
+fails closed on token/JWKS size, timeout, cache, algorithm, signature, issuer,
+audience, time, type, numeric identity, ref, workflow, SHA, and redirect checks.
+The verifier uses a bounded coalesced JWKS cache and never persists raw JWTs or
+JWKS responses.
+
+The official GitHub OIDC reference was checked on 2026-07-19. It lists
+`job_workflow_ref` only for jobs using a reusable workflow; the generated R5-006
+workflow is a direct workflow, so its trusted contract uses exact `workflow_ref`
+and does not invent or silently require `job_workflow_ref`. A reusable workflow
+is accepted only when an explicit workload policy allowlists its exact claim.
+
+BuildRecord submission accepts only `Authorization: Bearer <OIDC JWT>` at
+`POST /v1/build-records`; PATs, query/cookie tokens, unknown JSON fields, project
+authority in the body, mutable OCI tags, and cross-binding identities are
+rejected. Repository/owner/run/attempt/service identity is derived from the
+verified token and active GitHub registry binding. PostgreSQL stores one
+append-only row per `(repository_id, run_id, run_attempt, service_key)` with a
+payload hash, immutable digest, hashes, workflow identity, and safe workload
+metadata only. Exact retries reuse the row; conflicting retries return typed
+409. Project-scoped PAT reads are available through the CLI and Local API/UI;
+the browser has no Cloud/GitHub credential path and no deploy action.
+
+R5-008 still owns GitHub-hosted runner, GHCR, live OIDC, and public registry
+proof. No Agent deployment path was added in R5-007.
+
 ## Verification commands
 
 From repository root:
