@@ -1,10 +1,8 @@
 package webhookrelay
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -90,8 +88,7 @@ func (s *Server) admitBuildRecordSubmission(w http.ResponseWriter, r *http.Reque
 	}
 	token := bearerToken(r)
 	if token != "" {
-		fingerprint := sha256.Sum256([]byte(token))
-		if !s.limits.Allow("build-record:token:"+fmt.Sprintf("%x", fingerprint[:]), buildRecordTokenLimit, buildRecordRateWindow) {
+		if !s.limits.Allow("build-record:token:"+tokenHash(token), buildRecordTokenLimit, buildRecordRateWindow) {
 			release()
 			writeBuildRecordRateLimit(w, r, "BUILD_RECORD_RATE_LIMITED", "BuildRecord submission rate limit exceeded", buildRecordRateRetrySeconds)
 			return func() {}, false

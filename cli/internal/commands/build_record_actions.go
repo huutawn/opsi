@@ -165,12 +165,18 @@ func actionsOIDCRequestURL(raw, audience string) (*url.URL, error) {
 	if (host != "pipelines.actions.githubusercontent.com" && host != "vstoken.actions.githubusercontent.com") || (parsed.Port() != "" && parsed.Port() != "443") {
 		return nil, errors.New("GitHub Actions OIDC request URL is outside the expected token boundary")
 	}
+	if !strings.HasPrefix(parsed.Path, "/_apis/distributedtask/hubs/") || !strings.HasSuffix(parsed.Path, "/idtoken") {
+		return nil, errors.New("GitHub Actions OIDC request URL is outside the expected token path")
+	}
 	for _, segment := range strings.Split(parsed.Path, "/") {
 		if segment == ".." || strings.ContainsAny(segment, "\\\r\n") {
 			return nil, errors.New("GitHub Actions OIDC request URL path is invalid")
 		}
 	}
 	query := parsed.Query()
+	if len(query) != 1 || len(query["api-version"]) != 1 || query.Get("api-version") != "2.0" {
+		return nil, errors.New("GitHub Actions OIDC request URL query is invalid")
+	}
 	query.Set("audience", audience)
 	parsed.RawQuery = query.Encode()
 	return parsed, nil

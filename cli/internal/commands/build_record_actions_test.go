@@ -65,7 +65,13 @@ func TestSubmitBuildRecordFromGitHubActionsRejectsUnsafeEnvironmentAndURLs(t *te
 		"token http": func(input *actionsBuildRecordInput) {
 			input.TokenRequestURL = "http://pipelines.actions.githubusercontent.com/token"
 		},
-		"token host":     func(input *actionsBuildRecordInput) { input.TokenRequestURL = "https://evil.example/token" },
+		"token host": func(input *actionsBuildRecordInput) { input.TokenRequestURL = "https://evil.example/token" },
+		"token path": func(input *actionsBuildRecordInput) {
+			input.TokenRequestURL = "https://pipelines.actions.githubusercontent.com/other?api-version=2.0"
+		},
+		"token query": func(input *actionsBuildRecordInput) {
+			input.TokenRequestURL = "https://pipelines.actions.githubusercontent.com/_apis/distributedtask/hubs/build/plans/plan/jobs/job/idtoken?api-version=1.0"
+		},
 		"tag digest":     func(input *actionsBuildRecordInput) { input.OCIDigest = "latest" },
 		"wrong platform": func(input *actionsBuildRecordInput) { input.Platform = "linux/arm64" },
 	} {
@@ -101,7 +107,7 @@ func validActionsBuildRecordInput() actionsBuildRecordInput {
 		ConfigHash: strings.Repeat("a", 64), PlanHash: strings.Repeat("b", 64),
 		Platform: "linux/amd64", OCIRepository: "ghcr.io/huutawn/opsi-r5-005-fixture/api",
 		OCIDigest: "sha256:" + strings.Repeat("c", 64), GitHubActions: "true",
-		TokenRequestURL: "https://pipelines.actions.githubusercontent.com/example/oidc?api-version=2.0",
+		TokenRequestURL: "https://pipelines.actions.githubusercontent.com/_apis/distributedtask/hubs/build/plans/plan/jobs/job/idtoken?api-version=2.0",
 		RequestToken:    "runner-token", RepositoryID: "1304594095", OwnerID: "143307746",
 		Ref: "refs/heads/main", SHA: strings.Repeat("d", 40), EventName: "push",
 		WorkflowRef: "huutawn/opsi-r5-005-fixture/.github/workflows/opsi-cd.yaml@refs/heads/main",
