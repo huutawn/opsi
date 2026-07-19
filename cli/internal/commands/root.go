@@ -52,6 +52,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.AddCommand(newCDCommand(options))
 	root.AddCommand(newGitHubCommand(&configPath, options))
 	root.AddCommand(newBuildRecordCommand(&configPath, options))
+	root.AddCommand(newInternalCommand(options))
 	root.AddCommand(newStartCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
