@@ -148,7 +148,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			"org_id":          identity.OrgID,
 			"project_id":      identity.ProjectID,
 			"local_session":   localSession,
-			"capabilities":    []string{"projects", "nodes", "services", "deployments", "github_app", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
+			"capabilities":    []string{"projects", "nodes", "services", "deployments", "github_app", "build_records", "topology", "deployment_policy", "routing_preflight", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
 	})
 	mux.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {

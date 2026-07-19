@@ -95,6 +95,84 @@ func (c *Client) GetBuildRecord(ctx context.Context, projectID, recordID string)
 	return response, err
 }
 
+func (c *Client) GetPlacementFacts(ctx context.Context, projectID string) (PlacementFacts, error) {
+	var response PlacementFacts
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "topology", "facts"}, nil, "", &response)
+	return response, err
+}
+func (c *Client) PreviewTopology(ctx context.Context, projectID string, draft TopologyDraft) (TopologyPreview, error) {
+	var response TopologyPreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "topology", "plan"}, map[string]any{"draft": draft}, "", &response)
+	return response, err
+}
+func (c *Client) ValidateTopology(ctx context.Context, projectID string, draft TopologyDraft, policyID string) (TopologyValidation, error) {
+	var response TopologyValidation
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "topology", "validate"}, map[string]any{"draft": draft, "policy_id": policyID}, "", &response)
+	return response, err
+}
+func (c *Client) DiffTopology(ctx context.Context, projectID string, draft TopologyDraft) (TopologyDiff, error) {
+	var response TopologyDiff
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "topology", "diff"}, map[string]any{"draft": draft}, "", &response)
+	return response, err
+}
+func (c *Client) ApplyTopology(ctx context.Context, projectID, key string, request TopologyApplyRequest) (TopologyApplyResult, error) {
+	var response TopologyApplyResult
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "topology", "apply"}, request, key, &response)
+	return response, err
+}
+func (c *Client) GetTopology(ctx context.Context, projectID string) (TopologyPlan, error) {
+	var response TopologyPlan
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "topology"}, nil, "", &response)
+	return response, err
+}
+func (c *Client) GetOperatorCapacity(ctx context.Context, projectID, runtimeID string) (OperatorCapacity, error) {
+	var response OperatorCapacity
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "topology", "capacities", runtimeID}, nil, "", &response)
+	return response, err
+}
+func (c *Client) ApplyOperatorCapacity(ctx context.Context, projectID, runtimeID, key string, request OperatorCapacityApplyRequest) (OperatorCapacityApplyResult, error) {
+	var response OperatorCapacityApplyResult
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "topology", "capacities", runtimeID}, request, key, &response)
+	return response, err
+}
+func (c *Client) PreviewDeploymentPolicy(ctx context.Context, projectID string, draft DeploymentPolicyDraft) (DeploymentPolicyPreview, error) {
+	var response DeploymentPolicyPreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployment-policies", "preview"}, draft, "", &response)
+	return response, err
+}
+func (c *Client) DiffDeploymentPolicy(ctx context.Context, projectID string, request DeploymentPolicyApplyRequest) (DeploymentPolicyDiff, error) {
+	var response DeploymentPolicyDiff
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployment-policies", "diff"}, request, "", &response)
+	return response, err
+}
+func (c *Client) ApplyDeploymentPolicy(ctx context.Context, projectID, key string, request DeploymentPolicyApplyRequest) (DeploymentPolicyApplyResult, error) {
+	var response DeploymentPolicyApplyResult
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployment-policies", "apply"}, request, key, &response)
+	return response, err
+}
+func (c *Client) ListDeploymentPolicies(ctx context.Context, projectID string) ([]DeploymentPolicy, error) {
+	var response struct {
+		Policies []DeploymentPolicy `json:"policies"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "deployment-policies"}, nil, "", &response)
+	return response.Policies, err
+}
+func (c *Client) GetDeploymentPolicy(ctx context.Context, projectID, policyID string) (DeploymentPolicy, error) {
+	var response DeploymentPolicy
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "deployment-policies", policyID}, nil, "", &response)
+	return response, err
+}
+func (c *Client) DisableDeploymentPolicy(ctx context.Context, projectID, policyID, key string, request DeploymentPolicyDisableRequest) (DeploymentPolicyApplyResult, error) {
+	var response DeploymentPolicyApplyResult
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployment-policies", policyID, "disable"}, request, key, &response)
+	return response, err
+}
+func (c *Client) RouteBuildRecord(ctx context.Context, projectID string, request RoutingRequest) (RoutingDecision, error) {
+	var response RoutingDecision
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "routing-decisions"}, request, "", &response)
+	return response, err
+}
+
 func (c *Client) ListNodes(ctx context.Context, projectID string) ([]Node, error) {
 	var response nodeListResponse
 	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "nodes"}, nil, "", &response)

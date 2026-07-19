@@ -35,7 +35,7 @@ func writeLocalError(w http.ResponseWriter, r *http.Request, status int, code, m
 }
 
 func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), localSession string, authFlow *localAuthFlow) {
-	if isMutation(r.Method) {
+	if isMutation(r.Method) && !isPlacementPreview(r.URL.Path) {
 		if r.Header.Get("X-Local-Session") != localSession {
 			writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_SESSION_REQUIRED", "mutating local requests require X-Local-Session")
 			return
@@ -272,6 +272,15 @@ func localToCloudPath(u *url.URL) (string, string, error) {
 
 func isMutation(method string) bool {
 	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
+}
+
+func isPlacementPreview(path string) bool {
+	for _, suffix := range []string{"/topology/plan", "/topology/validate", "/topology/diff", "/deployment-policies/preview", "/deployment-policies/diff", "/routing-decisions"} {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func copyProxyHeaders(dst, src http.Header) {

@@ -7,10 +7,32 @@ import (
 	"time"
 
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
+	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
 type BuildRecord = buildrecordv1.Record
 type BuildRecordList = buildrecordv1.ListResult
+type TopologyDraft = topologyv1.Draft
+type TopologyPlan = topologyv1.Plan
+type TopologyPreview = topologyv1.Preview
+type TopologyValidation = topologyv1.ValidationResult
+type TopologyDiff = topologyv1.Diff
+type TopologyApplyRequest = topologyv1.ApplyRequest
+type TopologyApplyResult = topologyv1.ApplyResult
+type OperatorCapacity = topologyv1.OperatorCapacity
+type OperatorCapacityApplyRequest = topologyv1.OperatorCapacityApplyRequest
+type OperatorCapacityApplyResult = topologyv1.OperatorCapacityApplyResult
+type DeploymentPolicyDraft = deploymentpolicyv1.Draft
+type DeploymentPolicy = deploymentpolicyv1.Policy
+type DeploymentPolicyPreview = deploymentpolicyv1.Preview
+type DeploymentPolicyDiff = deploymentpolicyv1.Diff
+type DeploymentPolicyApplyRequest = deploymentpolicyv1.ApplyRequest
+type DeploymentPolicyApplyResult = deploymentpolicyv1.ApplyResult
+type DeploymentPolicyDisableRequest = deploymentpolicyv1.DisableRequest
+type RoutingRequest = deploymentpolicyv1.RoutingRequest
+type RoutingDecision = deploymentpolicyv1.RoutingDecision
+type PlacementFacts = topologyv1.PlacementFacts
 
 type APIError struct {
 	Status  int

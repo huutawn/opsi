@@ -154,6 +154,156 @@ button:disabled {
   white-space: nowrap;
 }
 
+.placementStack {
+  display: grid;
+  gap: 14px;
+}
+
+.wizardRail {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
+.wizardRail b {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 7px;
+  background: linear-gradient(135deg, #f4f1e9, #fbfbfa);
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.placementGrid,
+.reviewGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.placementGrid label,
+.placementStack > section > label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.placementGrid .wide {
+  grid-column: 1 / -1;
+}
+
+.runtimeEvidence,
+.hashPair {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  margin: 14px 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--line);
+}
+
+.runtimeEvidence > div,
+.hashPair > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 11px;
+  background: var(--panel-soft);
+}
+
+.runtimeEvidence span,
+.hashPair span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hashPair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.hashPair code,
+.policyRow code {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.override {
+  display: flex !important;
+  align-items: center;
+  gap: 8px !important;
+  margin: 12px 0;
+  color: var(--warn) !important;
+}
+
+.placementError {
+  border-left: 3px solid var(--bad);
+  padding: 8px 10px;
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.reviewGrid > div,
+.capacityCard,
+.policyRow {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 12px;
+  background: var(--panel-soft);
+}
+
+.reviewGrid b,
+.capacityCard > div,
+.policyRow > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.capacityCard {
+  margin: 10px 0;
+}
+
+.capacityCard p,
+.reviewGrid p,
+.policyRow p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.policyRow {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.disableRow {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+@media (max-width: 900px) {
+  .wizardRail {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .placementGrid,
+  .reviewGrid,
+  .runtimeEvidence {
+    grid-template-columns: 1fr;
+  }
+}
+
 .authGate {
   display: grid;
   min-height: 100dvh;

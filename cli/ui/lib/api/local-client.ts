@@ -19,6 +19,16 @@ import type {
   TelemetryQueryResponse,
   TelemetrySummary,
   TimelineEvent,
+  TopologyDraft,
+  TopologyPlan,
+  TopologyPreview,
+  TopologyValidation,
+  TopologyDiff,
+  PlacementFacts,
+  DeploymentPolicyDraft,
+  DeploymentPolicy,
+  DeploymentPolicyPreview,
+  DeploymentPolicyApplyResult,
 } from "@/lib/contracts/registry";
 
 type RequestOptions = RequestInit & { write?: boolean; idempotencyKey?: string };
@@ -168,6 +178,18 @@ export class LocalClient {
   buildRecord(projectID: string, recordID: string) {
     return this.call<BuildRecord>(`/api/local/projects/${projectID}/build-records/${encodeURIComponent(recordID)}`);
   }
+
+  placementFacts(projectID: string) { return this.call<PlacementFacts>(`/api/local/projects/${projectID}/topology/facts`); }
+  topology(projectID: string) { return this.call<TopologyPlan>(`/api/local/projects/${projectID}/topology`); }
+  topologyPlan(projectID: string, draft: TopologyDraft) { return this.call<TopologyPreview>(`/api/local/projects/${projectID}/topology/plan`, { method: "POST", body: JSON.stringify({ draft }) }); }
+  topologyValidate(projectID: string, draft: TopologyDraft, policyID = "") { return this.call<TopologyValidation>(`/api/local/projects/${projectID}/topology/validate`, { method: "POST", body: JSON.stringify({ draft, policy_id: policyID }) }); }
+  topologyDiff(projectID: string, draft: TopologyDraft) { return this.call<TopologyDiff>(`/api/local/projects/${projectID}/topology/diff`, { method: "POST", body: JSON.stringify({ draft }) }); }
+  topologyApply(projectID: string, body: { draft: TopologyDraft; expected_revision: number; expected_state_hash: string; policy_id?: string }, idempotencyKey: string) { return this.call<{ plan: TopologyPlan; reused: boolean }>(`/api/local/projects/${projectID}/topology/apply`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
+  deploymentPolicies(projectID: string) { return this.call<{ policies: DeploymentPolicy[] }>(`/api/local/projects/${projectID}/deployment-policies`); }
+  deploymentPolicyPreview(projectID: string, policy: DeploymentPolicyDraft) { return this.call<DeploymentPolicyPreview>(`/api/local/projects/${projectID}/deployment-policies/preview`, { method: "POST", body: JSON.stringify(policy) }); }
+  deploymentPolicyDiff(projectID: string, body: { policy_id?: string; policy: DeploymentPolicyDraft; expected_revision?: number; expected_state_hash?: string }) { return this.call<{ policy_id?: string; current_revision: number; current_hash?: string; proposed_hash: string; changes: unknown[] }>(`/api/local/projects/${projectID}/deployment-policies/diff`, { method: "POST", body: JSON.stringify(body) }); }
+  deploymentPolicyApply(projectID: string, body: { policy_id?: string; policy: DeploymentPolicyDraft; expected_revision: number; expected_state_hash: string }, idempotencyKey: string) { return this.call<DeploymentPolicyApplyResult>(`/api/local/projects/${projectID}/deployment-policies/apply`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
+  disableDeploymentPolicy(projectID: string, policyID: string, body: { expected_revision: number; expected_state_hash: string }, idempotencyKey: string) { return this.call<DeploymentPolicyApplyResult>(`/api/local/projects/${projectID}/deployment-policies/${encodeURIComponent(policyID)}/disable`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
 
   createService(projectID: string, body: Record<string, unknown>) {
     return this.call<ServiceRecord>(`/api/local/projects/${projectID}/services`, {

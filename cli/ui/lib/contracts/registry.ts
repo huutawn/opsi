@@ -124,6 +124,46 @@ export type BuildRecord = {
 
 export type BuildRecordList = { records: BuildRecord[]; next_cursor?: string };
 
+export type TopologyAssignment = {
+  service_key: string;
+  environment_id: string;
+  runtime_id: string;
+  replicas: number;
+  cpu_request_millicores: number;
+  memory_request_bytes: number;
+  exposure: { mode: "none" | "internal" | "public" };
+  rationale?: { summary?: string };
+};
+
+export type TopologyDraft = { schema_version: "opsi.topology_plan/v1"; project_id: string; assignments: TopologyAssignment[] };
+export type TopologyPlan = TopologyDraft & { id: string; revision: number; state_hash: string; plan_hash: string; created_by: string; applied_by: string; created_at: string; applied_at: string };
+export type TopologyPreview = { draft: TopologyDraft; plan_hash: string; state_hash: string };
+export type TopologyCapacity = {
+  runtime_id: string; node_id?: string; agent_id?: string; source: string; heartbeat_age_seconds?: number; heartbeat_fresh: boolean;
+  cpu_capacity_millicores?: number; memory_capacity_bytes?: number; reserved_cpu_millicores: number; reserved_memory_bytes: number;
+  assigned_cpu_millicores: number; assigned_memory_bytes: number; requested_cpu_millicores: number; requested_memory_bytes: number;
+  available_cpu_millicores?: number; available_memory_bytes?: number; unknown_capacity: boolean; unknown_capacity_policy_override: boolean; oversubscribed: boolean;
+};
+export type TopologyValidation = { schema_version: string; project_id: string; plan_hash: string; valid: boolean; runtimes: Array<{ runtime_id: string; eligible: boolean; capacity: TopologyCapacity; issues: Array<{ code: string; message: string }> }>; issues: Array<{ code: string; message: string; service_key?: string; runtime_id?: string }>; validated_at: string };
+export type TopologyDiff = { project_id: string; current_revision: number; current_hash?: string; proposed_hash: string; changes: Array<{ service_key: string; change: string; before?: TopologyAssignment; after?: TopologyAssignment }> };
+export type PlacementFacts = {
+  project_id: string;
+  environments: Array<{ id: string; project_id: string; name: string; type: string; status: string }>;
+  runtimes: Array<{ id: string; project_id: string; environment_id: string; name: string; type: string; status: string }>;
+  nodes: Array<{ id: string; project_id: string; runtime_id: string; status: string; cpu_cores?: number; memory_mb?: number; last_seen_at?: string }>;
+  agents: Array<{ id: string; project_id: string; runtime_id: string; node_id: string; status: string; capabilities: Record<string, unknown>; last_seen_at?: string }>;
+  services: Array<{ id: string; project_id: string; key: string }>;
+};
+
+export type DeploymentPolicyDraft = {
+  schema_version: "opsi.deployment_policy/v1"; project_id: string; repository_id: number; service_keys: string[]; workflow_refs: string[]; job_workflow_refs?: string[];
+  allowed_events: string[]; allowed_git_refs: string[]; environment_id: string; allowed_runtime_ids: string[]; allowed_oci_repositories: string[]; allowed_oci_prefixes?: string[];
+  allowed_platforms: string[]; allowed_config_hashes: string[]; allowed_build_plan_hashes: string[]; allow_unknown_capacity: boolean; enabled: boolean;
+};
+export type DeploymentPolicy = { schema_version: string; id: string; revision: number; state_hash: string; policy_hash: string; policy: DeploymentPolicyDraft; created_by: string; applied_by: string; created_at: string; applied_at: string };
+export type DeploymentPolicyPreview = { policy: DeploymentPolicyDraft; policy_hash: string; state_hash: string };
+export type DeploymentPolicyApplyResult = { policy: DeploymentPolicy; reused: boolean };
+
 export type DeploymentJob = {
   id: string;
   service_id: string;
