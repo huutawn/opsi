@@ -4,12 +4,16 @@ Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
-## Active Repair Task
+## Active Task
 
-### R5-006 — Monorepo config v2, changed-service resolver and workflow generation
+### R5-007 — GitHub Actions OIDC verifier and BuildRecord v1
 
-- Active task is R5-006. R5-005 remains `OPERATOR_REQUIRED / FUNCTIONAL_ACCEPTANCE_PASS / LIVE_LIFECYCLE_EVIDENCE_DEFERRED`.
-- R5-005 business code and existing evidence are frozen for this task.
+- R5-006 remains `DONE / FUNCTIONAL_ACCEPTANCE_PASS`. Its focused R5-007 entry
+  review repaired Local repository apply so a bounded safe `Idempotency-Key`
+  replays only the same canonical request, conflicting reuse fails typed, and
+  apply requires the exact filesystem-bound `preview_hash` returned by preview.
+- Active task is R5-007. R5-005 remains `OPERATOR_REQUIRED / FUNCTIONAL_ACCEPTANCE_PASS / LIVE_LIFECYCLE_EVIDENCE_DEFERRED`.
+- R5-005 and R5-006 business scope outside the focused repair is frozen.
 - The two missing live webhook deliveries (`installation_repositories: removed` and
   `repository`) and the live wrong-user check using a second GitHub account remain
   deferred; no evidence is fabricated and R5-005 is not marked `DONE`.

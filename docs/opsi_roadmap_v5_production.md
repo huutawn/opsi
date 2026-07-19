@@ -219,6 +219,12 @@ dependency closure, rename, missing base, and empty diff) pass. R5-007 OIDC,
 BuildRecord, GHCR push, and deployment remain unstarted; live GitHub runner proof
 is intentionally deferred to R5-008.
 
+**Focused follow-up 2026-07-19:** R5-006 remains `DONE`. The R5-007 entry
+review made Local apply require a bounded safe idempotency key and the exact
+server-generated preview hash bound to the canonical request, current/rendered
+managed-file hashes, and ordered actions. Exact retries reuse the stored result;
+conflicting keys and stale filesystem state fail typed without writing.
+
 ### R5-007 — GitHub Actions OIDC verifier và BuildRecord v1
 
 **Mục tiêu:** Cloud xác thực GitHub workload và lưu artifact metadata, chưa tự deploy.

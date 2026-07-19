@@ -479,7 +479,12 @@ concurrency and fork-safe behavior;
 it performs no OIDC, GHCR push, Cloud call, or deployment. Local UI repository CD
 setup displays all services, previews config/migration/workflow changes, applies
 with local session/idempotency confirmation, and previews affected services with
-the same plan hash as CLI. Live GitHub runner execution remains a later R5-008
+the same plan hash as CLI. The R5-007 focused entry review strengthened that
+apply boundary: preview returns a hash over the canonical mutation, current and
+rendered managed-file hashes, and ordered file actions; apply recomputes it from
+the current filesystem, rejects stale previews before write, and uses a bounded
+in-memory ledger so exact retries reuse the result while conflicting key reuse
+returns a typed conflict. Live GitHub runner execution remains a later R5-008
 checkpoint.
 
 Capability matrix (R5-006): config v1/v2 parser-validator-writer and atomic
@@ -487,7 +492,7 @@ mutation path: implemented; `opsi init` create/add/update/migrate/dry-run/apply:
 implemented; workflow renderer: deterministic secure changed-service matrix;
 Git adapter: fixed-argv bounded diff parser; Local API: config/mutation/workflow/
 plan preview plus confirmed apply; Local UI: service editor and plan/workflow
-preview with loading/error/retry state.
+preview with loading/error/retry state and stable preview-bound apply retries.
 
 ## Verification commands
 

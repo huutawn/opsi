@@ -40,6 +40,7 @@ export function RepositoryCD() {
   const [configHash, setConfigHash] = useState("");
   const [draft, setDraft] = useState(emptyDraft);
   const [preview, setPreview] = useState<RepositoryMutationPreview | null>(null);
+  const [applyKey, setApplyKey] = useState("");
   const [plan, setPlan] = useState<RepositoryCDPlan | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "previewing" | "applying" | "success" | "error">("loading");
   const [message, setMessage] = useState("");
@@ -86,6 +87,7 @@ export function RepositoryCD() {
       preview: service.deploy.preview.enabled,
     });
     setPreview(null);
+    setApplyKey("");
   }
 
   async function previewMutation(event: FormEvent<HTMLFormElement>) {
@@ -96,6 +98,7 @@ export function RepositoryCD() {
     try {
       const result = await client.previewRepositoryMutation(toService(draft));
       setPreview(result);
+      setApplyKey(crypto.randomUUID());
       setStatus("ready");
     } catch (error) {
       setStatus("error");
@@ -110,10 +113,10 @@ export function RepositoryCD() {
     setStatus("applying");
     setMessage("");
     try {
-      const applied = await client.applyRepositoryMutation(toService(draft));
-      setPreview(applied);
-      setConfig(applied.config);
-      setConfigHash(applied.config_hash);
+      const result = await client.applyRepositoryMutation(toService(draft), preview.preview_hash, applyKey);
+      setPreview(result);
+      setConfig(result.config);
+      setConfigHash(result.config_hash);
       setStatus("success");
     } catch (error) {
       setStatus("error");

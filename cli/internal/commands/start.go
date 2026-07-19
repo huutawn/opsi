@@ -237,8 +237,7 @@ func requireLocalSession(w http.ResponseWriter, r *http.Request, localSession st
 		writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_SESSION_REQUIRED", "mutating local requests require X-Local-Session")
 		return false
 	}
-	if r.Header.Get("Idempotency-Key") == "" {
-		writeLocalError(w, r, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "mutating local requests require Idempotency-Key")
+	if !requireLocalIdempotencyKey(w, r) {
 		return false
 	}
 	return true

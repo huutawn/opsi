@@ -19,7 +19,7 @@ import type {
   TimelineEvent,
 } from "@/lib/contracts/registry";
 
-type RequestOptions = RequestInit & { write?: boolean };
+type RequestOptions = RequestInit & { write?: boolean; idempotencyKey?: string };
 export type LocalSessionStatus = {
   authenticated: boolean;
   cloud_connected: "ok" | "failed" | "unknown";
@@ -54,7 +54,10 @@ export type RepositoryMutationPreview = {
   workflow_yaml: string;
   config_diff: string;
   workflow_diff: string;
+  preview_hash: string;
 };
+
+export type RepositoryMutationApplyResult = RepositoryMutationPreview & { reused: boolean };
 
 export type RepositoryCDPlan = {
   schema_version: string;
@@ -217,11 +220,12 @@ export class LocalClient {
     });
   }
 
-  applyRepositoryMutation(service: RepositoryCDService) {
-    return this.call<RepositoryMutationPreview>("/api/local/repository/apply", {
+  applyRepositoryMutation(service: RepositoryCDService, previewHash: string, idempotencyKey: string) {
+    return this.call<RepositoryMutationApplyResult>("/api/local/repository/apply", {
       method: "POST",
       write: true,
-      body: JSON.stringify({ service, confirm: true }),
+      idempotencyKey,
+      body: JSON.stringify({ service, confirm: true, preview_hash: previewHash }),
     });
   }
 
@@ -333,11 +337,14 @@ export class LocalClient {
     headers.set("content-type", "application/json");
     headers.set("X-Request-ID", crypto.randomUUID());
     if (init.write) {
-      headers.set("Idempotency-Key", crypto.randomUUID());
+      headers.set("Idempotency-Key", init.idempotencyKey ?? crypto.randomUUID());
       headers.set("X-Local-Session", await this.getLocalSession());
     }
 
-    const res = await fetch(path, { ...init, headers });
+    const requestInit = { ...init };
+    delete requestInit.write;
+    delete requestInit.idempotencyKey;
+    const res = await fetch(path, { ...requestInit, headers });
     const text = await res.text();
     const data = text ? JSON.parse(text) : {};
     if (!res.ok) {
