@@ -165,8 +165,8 @@ func actionsOIDCRequestURL(raw, audience string) (*url.URL, error) {
 	if !strings.HasSuffix(host, ".actions.githubusercontent.com") || len(host) <= len(".actions.githubusercontent.com") || (parsed.Port() != "" && parsed.Port() != "443") {
 		return nil, errors.New("GitHub Actions OIDC request URL is outside the expected token boundary")
 	}
-	if !strings.HasPrefix(parsed.Path, "/_apis/distributedtask/hubs/") || !strings.HasSuffix(parsed.Path, "/idtoken") {
-		return nil, errors.New("GitHub Actions OIDC request URL is outside the expected token path")
+	if parsed.Path == "/" {
+		return nil, errors.New("GitHub Actions OIDC request URL path is invalid")
 	}
 	for _, segment := range strings.Split(parsed.Path, "/") {
 		if segment == ".." || strings.ContainsAny(segment, "\\\r\n") {

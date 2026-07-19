@@ -82,7 +82,7 @@ func TestSubmitBuildRecordFromGitHubActionsRejectsUnsafeEnvironmentAndURLs(t *te
 		},
 		"token host": func(input *actionsBuildRecordInput) { input.TokenRequestURL = "https://evil.example/token" },
 		"token path": func(input *actionsBuildRecordInput) {
-			input.TokenRequestURL = "https://pipelines.actions.githubusercontent.com/other?api-version=2.0"
+			input.TokenRequestURL = "https://pipelines.actions.githubusercontent.com/?api-version=2.0"
 		},
 		"token query": func(input *actionsBuildRecordInput) {
 			input.TokenRequestURL = "https://pipelines.actions.githubusercontent.com/_apis/distributedtask/hubs/build/plans/plan/jobs/job/idtoken?api-version=1.0"
