@@ -24,8 +24,8 @@ services:
   cloud:
     image: opsi-cloud-dev:${OPSI_VERSION:-dev}
     build:
-      context: ../../cloud
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: cloud/Dockerfile
       target: cloud
       args:
         GO_VERSION: 1.26.4
@@ -85,8 +85,8 @@ services:
   bootstrap-worker:
     image: opsi-bootstrap-worker-dev:${OPSI_VERSION:-dev}
     build:
-      context: ../../cloud
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: cloud/Dockerfile
       target: bootstrap-worker
       args:
         GO_VERSION: 1.26.4

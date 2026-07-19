@@ -2,11 +2,12 @@ ARG GO_VERSION=1.26.4
 
 FROM golang:${GO_VERSION}-alpine AS builder
 ARG VERSION=dev
-WORKDIR /src
-COPY go.mod go.sum ./
+WORKDIR /src/cloud
+COPY contracts/go /src/contracts/go
+COPY cloud/go.mod cloud/go.sum ./
 RUN go mod download
-COPY cmd ./cmd
-COPY internal ./internal
+COPY cloud/cmd ./cmd
+COPY cloud/internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/opsi-cloud ./cmd/opsi-cloud && \
     CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker
 
