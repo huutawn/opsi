@@ -31,8 +31,8 @@ artifacts. At this snapshot:
   repository bootstrap file generation. GitHub Actions OIDC, `BuildRecord`,
   manual `TopologyPlan`, exact-match `DeploymentPolicy`, and deterministic
   routing preflight are implemented. R5-010 adds the immutable-digest
-  `DeploymentJob` path and deploys its Cloud revision on staging; real Agent
-  workload acceptance is still blocked. Pull request
+  `DeploymentJob` path and has passed live Agent/K3s workload, CLI/Local UI
+  parity, idempotent replay, and Agent restart acceptance. Pull request
   preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
@@ -399,26 +399,36 @@ ClusterIP Service resources, rejects foreign collisions, and verifies the
 named application container imageID. The Git clone/build path remains only for
 legacy/manual development use.
 
-Local implementation does not establish live Agent acceptance. Full Go test/vet,
-focused race, disposable PostgreSQL migration/restart/concurrency, UI
-lint/build/source-state, deterministic Agent release, source hygiene, and diff
-checks pass at final code-bearing revision
-`4b7fe549f02fd47a07c0196e264971c31488850d`. Immutable Cloud image
-`ghcr.io/huutawn/opsi-cloud@sha256:d3bacfc86d879a802a8912d7c11490a9f0f4468c83092d4863883acdad7ce704`
-is published and runs on staging with PostgreSQL, Bootstrap Worker, proxy, and
-volumes retained; all four services are healthy with zero restarts. Agent
-release `0.0.0-r5.010.4b7fe54` is reproducibly built with binary SHA-256
-`f25d00735dc7a92611b15986eea03fa050cb8893ee27a2e9485d9890503a6799`,
-and exact code tag `r5-010-4b7fe54` is pushed,
-and GitHub prerelease `r5-010-4b7fe54` is published with binary, checksums,
-and release metadata; an anonymous download matched the binary SHA-256. Product
-login and canonical live BuildRecord lookup remain blocked by `AUTH_REQUIRED`;
-the still-installed R5-004 Agent reports its historical hard-coded
-`cloud_connected=false`; the final R5-010 binary reports factual Cloud
-connectivity after upgrade. Headless live
-UI parity, published Agent artifact, supported live Agent upgrade, real K3s
-workload proof, and restart recovery remain unproven. R5-010 creates no
-Ingress/Gateway/DNS/TLS resource and implements no automatic rollback; those
+Full Go test/vet, focused race, disposable PostgreSQL
+migration/restart/concurrency, UI lint/build/source-state, deterministic Agent
+release, source hygiene, and diff checks pass across the R5-010 implementation.
+Final code-bearing revision is
+`27906f52bfdc1ea0ffb1db5dfb9587e4bbd82fb7`. Immutable Cloud image
+`ghcr.io/huutawn/opsi-cloud@sha256:43a04fd265742bdd7d35bf591fecb2a5ac4d20c65fd9f748a607d78e4bca88a5`
+and Bootstrap Worker image
+`ghcr.io/huutawn/opsi-bootstrap-worker@sha256:c552b0a0ac4ef8369c878e5c9435b34da50c4e5a1be3bc4e94f2327c944a7b7b`
+run on staging with PostgreSQL, proxy, and volumes retained; all four services
+are healthy, both Opsi processes report `27906f5`, and public `/health` returns
+200. Agent release `0.0.0-r5.010.27906f5` is reproducibly built with binary
+SHA-256 `20686468d5922d78739378fdfa892f9cdc3f900417d0e71b55d85ebb2fba85e5`.
+Exact tag and prerelease `r5-010-27906f5` publish the binary, checksums, and
+release metadata; anonymous download matched.
+
+Live product acceptance used BuildRecord `br-c3d7654507dae1383b0e52eebe67eebf`
+and exact image
+`ghcr.io/huutawn/opsi-r5-005-fixture/api@sha256:9f02ca2cb19bc61f322ee6174f057d00b3bde17ae787b390d0abbb0d750dea6a`.
+Topology `topo-ee3f2ebe51872ba698534c0252cc9ea3` revision 1 and policy
+`pol-4c5499f7852fe941e2f187d537156eda` revision 1 route to runtime
+`rt-2486bf7e46161f77`, node `node-c69fe70180d359d7`, and Agent
+`agent-d1e13723f6e06ff7`. CLI job `dep-a8ddc1ac840a6ae8` and UI job
+`dep-ff93adea6e0f8a0e` both succeeded and exact replay returned `reused=true`.
+The Opsi-owned namespace contains one Deployment and one ClusterIP Service;
+generation is observed, one replica is available, the named `app` container is
+ready, and imageID matches the BuildRecord digest. Supported atomic Agent
+upgrade and a later service restart preserved identity, K3s `v1.36.2+k3s1`,
+job/result durability, workload readiness, and resource uniqueness. No Git
+clone/build process or external exposure resource was present. R5-010 creates
+no Ingress/Gateway/DNS/TLS resource and implements no automatic rollback; those
 remain R5-011 scope.
 
 ## E2E and production evidence

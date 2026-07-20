@@ -8,7 +8,7 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ### R5-010 — Immutable manual production deployment
 
-- Final code-bearing revision `4b7fe549f02fd47a07c0196e264971c31488850d`
+- Final code-bearing revision `27906f52bfdc1ea0ffb1db5dfb9587e4bbd82fb7`
   is committed from starting revision
   `0edaa4330c57377e7545ae5e3a86407b74e19107` on `developer`.
 - The existing DeploymentJob and Agent deploy engine are extended with one
@@ -18,30 +18,31 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   implemented. Full Go test/vet, focused race, disposable PostgreSQL restart /
   concurrency, UI lint/build/source-state, deterministic renderer/release,
   source-hygiene, and diff checks pass locally.
-- Product BuildRecord lookup is currently `AUTH_REQUIRED`. Before live work the
-  operator must run `opsi login --pat-file <protected-path>`; no PAT is accepted
-  in chat, argv, history, logs, or evidence.
-- Cloud image
-  `ghcr.io/huutawn/opsi-cloud@sha256:d3bacfc86d879a802a8912d7c11490a9f0f4468c83092d4863883acdad7ce704`
-  is published and deployed on staging. PostgreSQL, Bootstrap Worker, proxy,
-  and their volumes were retained; staging returned four healthy containers,
-  zero restarts, Cloud version `4b7fe54`, and public `/health` success.
-- Deterministic Agent release `0.0.0-r5.010.4b7fe54` is built locally from the
-  committed revision with binary SHA-256
-  `f25d00735dc7a92611b15986eea03fa050cb8893ee27a2e9485d9890503a6799`.
-  Its exact code tag `r5-010-4b7fe54` is pushed to GitHub.
-  GitHub prerelease `https://github.com/huutawn/opsi/releases/tag/r5-010-4b7fe54`
-  is published with `opsi-agent-linux-amd64`, `checksums.txt`, and `release.json`;
-  an anonymous download matched the same SHA-256.
-- Read-only live preflight re-confirmed the trusted Agent ED25519 fingerprint,
-  staging Cloud digest and four healthy staging containers, K3s `v1.36.2+k3s1`,
-  node `node-c69fe70180d359d7`, and Agent `0.0.0-r5.004.af0ebce`. That old Agent
-  local health reports its hard-coded `cloud_connected=false`; revision
-  `4b7fe54` replaces it with factual heartbeat/poll connectivity tracking, but
-  the supported upgrade cannot run until the release asset and product login
-  are available.
-- No Agent upgrade, workload apply, Agent restart, K3s reset, VPS reset, or
-  Cloudflare/DNS/TLS change has been performed for R5-010.
+- Product login and accepted BuildRecord lookup succeeded through the existing
+  protected local keychain path; no PAT was entered in chat, argv, history,
+  logs, or evidence.
+- Cloud staging runs immutable Cloud image
+  `ghcr.io/huutawn/opsi-cloud@sha256:43a04fd265742bdd7d35bf591fecb2a5ac4d20c65fd9f748a607d78e4bca88a5`
+  and Bootstrap Worker image
+  `ghcr.io/huutawn/opsi-bootstrap-worker@sha256:c552b0a0ac4ef8369c878e5c9435b34da50c4e5a1be3bc4e94f2327c944a7b7b`.
+  PostgreSQL, proxy, and named volumes were retained; validators passed, all
+  four staging containers are healthy, versions report `27906f5`, and public
+  `/health` returns 200.
+- Deterministic Agent release `0.0.0-r5.010.27906f5` has binary SHA-256
+  `20686468d5922d78739378fdfa892f9cdc3f900417d0e71b55d85ebb2fba85e5`.
+  Tag `r5-010-27906f5` and prerelease
+  `https://github.com/huutawn/opsi/releases/tag/r5-010-27906f5` contain the
+  binary, checksums, and release metadata; anonymous download matched.
+- Supported atomic upgrade preserved Agent `agent-d1e13723f6e06ff7`, node
+  `node-c69fe70180d359d7`, configuration, and K3s `v1.36.2+k3s1`; a controlled
+  `opsi-agent.service` restart recovered the heartbeat and did not duplicate
+  Kubernetes resources.
+- Live accepted BuildRecord `br-c3d7654507dae1383b0e52eebe67eebf` resolved to
+  `ghcr.io/huutawn/opsi-r5-005-fixture/api@sha256:9f02ca2cb19bc61f322ee6174f057d00b3bde17ae787b390d0abbb0d750dea6a`.
+  CLI job `dep-a8ddc1ac840a6ae8` and UI job `dep-ff93adea6e0f8a0e` both replay
+  with `reused=true`; the workload is ready at the exact digest.
+- No VPS/K3s reset or reinstall, Cloudflare/DNS/TLS change, external exposure,
+  rollback, R5-011, MCP, or AI work was performed.
 
 ### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
 

@@ -1,10 +1,7 @@
 # R5-010 immutable deployment acceptance
 
-Status: local functional gates, Cloud staging upgrade, and Agent prerelease
-publication pass. Agent execution is blocked by product `AUTH_REQUIRED`.
-The installed R5-004 Agent reports a hard-coded `cloud_connected=false`; final
-revision `4b7fe54` changes this to factual heartbeat/poll connectivity and must
-be installed through the supported upgrade command before acceptance.
+Status: `DONE / LIVE_ACCEPTANCE_PASS` at revision
+`27906f52bfdc1ea0ffb1db5dfb9587e4bbd82fb7`.
 
 ## Safety boundaries
 
@@ -28,14 +25,16 @@ be installed through the supported upgrade command before acceptance.
 
 Current immutable release inputs:
 
-- Git tag: `r5-010-4b7fe54`
-- Agent version: `0.0.0-r5.010.4b7fe54`
+- Git tag: `r5-010-27906f5`
+- Agent version: `0.0.0-r5.010.27906f5`
 - Agent binary SHA-256:
-  `f25d00735dc7a92611b15986eea03fa050cb8893ee27a2e9485d9890503a6799`
+  `20686468d5922d78739378fdfa892f9cdc3f900417d0e71b55d85ebb2fba85e5`
 - Cloud image:
-  `ghcr.io/huutawn/opsi-cloud@sha256:d3bacfc86d879a802a8912d7c11490a9f0f4468c83092d4863883acdad7ce704`
+  `ghcr.io/huutawn/opsi-cloud@sha256:43a04fd265742bdd7d35bf591fecb2a5ac4d20c65fd9f748a607d78e4bca88a5`
+- Bootstrap Worker image:
+  `ghcr.io/huutawn/opsi-bootstrap-worker@sha256:c552b0a0ac4ef8369c878e5c9435b34da50c4e5a1be3bc4e94f2327c944a7b7b`
 - Public prerelease:
-  `https://github.com/huutawn/opsi/releases/tag/r5-010-4b7fe54`
+  `https://github.com/huutawn/opsi/releases/tag/r5-010-27906f5`
 
 ## Live gate
 
@@ -54,4 +53,28 @@ Current immutable release inputs:
    lifecycle. Confirm heartbeat recovery, durable job/result, running workload,
    and no duplicate resources.
 
-R5-010 is not DONE until every live gate has recorded sanitized evidence.
+## Recorded live evidence
+
+- BuildRecord: `br-c3d7654507dae1383b0e52eebe67eebf`.
+- Image: `ghcr.io/huutawn/opsi-r5-005-fixture/api@sha256:9f02ca2cb19bc61f322ee6174f057d00b3bde17ae787b390d0abbb0d750dea6a`.
+- Topology: `topo-ee3f2ebe51872ba698534c0252cc9ea3` revision 1.
+- Policy: `pol-4c5499f7852fe941e2f187d537156eda` revision 1.
+- Target: runtime `rt-2486bf7e46161f77`, node
+  `node-c69fe70180d359d7`, Agent `agent-d1e13723f6e06ff7`.
+- CLI job: `dep-a8ddc1ac840a6ae8`; UI job:
+  `dep-ff93adea6e0f8a0e`; both terminal `succeeded`, and exact replay returned
+  `reused=true` without creating another Kubernetes resource.
+- Namespace: `opsi-proj-b1b9ba6457f59-env-4245cff4e8ce1f-e035e29615`.
+- Deployment and Service:
+  `opsi-api-rt-2486bf7e46161f7-d6638c4918`.
+- Kubernetes corroboration: one owned Deployment, one owned ClusterIP Service,
+  observed generation equals desired generation, one available replica, named
+  `app` container ready, and imageID equals the BuildRecord digest.
+- Supported atomic Agent upgrade and later `opsi-agent.service` restart kept
+  K3s `v1.36.2+k3s1`, node/Agent identity, workload readiness, durable job
+  result, and resource uniqueness.
+- No Git clone/build process, external exposure resource, secret in evidence,
+  VPS/K3s reset, or Cloudflare/DNS/TLS change was observed or performed.
+
+R5-010 is `DONE / LIVE_ACCEPTANCE_PASS`. R5-011 exposure and rollback remain
+not started.
