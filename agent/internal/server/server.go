@@ -28,13 +28,18 @@ import (
 )
 
 type StatusService struct {
-	version   string
-	startedAt time.Time
-	cfg       config.Config
+	version        string
+	startedAt      time.Time
+	cfg            config.Config
+	cloudConnected func() bool
 }
 
-func NewStatusService(version string, startedAt time.Time, cfg config.Config) *StatusService {
-	return &StatusService{version: version, startedAt: startedAt, cfg: cfg}
+func NewStatusService(version string, startedAt time.Time, cfg config.Config, cloudConnected ...func() bool) *StatusService {
+	connected := func() bool { return false }
+	if len(cloudConnected) > 0 && cloudConnected[0] != nil {
+		connected = cloudConnected[0]
+	}
+	return &StatusService{version: version, startedAt: startedAt, cfg: cfg, cloudConnected: connected}
 }
 
 func (s *StatusService) Status(context.Context, *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
@@ -43,7 +48,7 @@ func (s *StatusService) Status(context.Context, *agentv1.StatusRequest) (*agentv
 		UptimeSeconds:  int64(time.Since(s.startedAt).Seconds()),
 		NodeID:         s.cfg.NodeID,
 		Health:         "ok",
-		CloudConnected: false,
+		CloudConnected: s.cloudConnected(),
 		StartedAtUnix:  s.startedAt.Unix(),
 	}, nil
 }
@@ -400,6 +405,7 @@ func (s *DeploymentService) validateDependencies(ctx context.Context, req deploy
 
 func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Logger) error {
 	startedAt := time.Now().UTC()
+	cloudConnection := &cloudrunner.ConnectionState{}
 
 	store, err := deploy.OpenSQLiteStore(cfg.SQLitePath)
 	if err != nil {
@@ -452,7 +458,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		grpcOptions = append(grpcOptions, grpc.UnaryInterceptor(statusAuthInterceptor(authVerifier(cfg), firstNonEmpty(cfg.CloudRelay.ProjectID, cfg.Deployment.ProjectID))))
 	}
 	grpcServer := grpc.NewServer(grpcOptions...)
-	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg))
+	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg, cloudConnection.Connected))
 	authVerifier := authVerifier(cfg)
 	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine, authVerifier, serviceStore))
 	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
@@ -461,7 +467,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(telemetryStore, authVerifier)))
 
 	healthServer := &http.Server{
-		Handler:           healthHandler(version, startedAt, cfg),
+		Handler:           healthHandler(version, startedAt, cfg, cloudConnection.Connected),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -572,6 +578,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			PollInterval:      pollInterval,
 			LongPollWait:      longPollWait,
 			HeartbeatInterval: heartbeatInterval,
+			ConnectionState:   cloudConnection,
 			Logger:            logger,
 		}
 		go func() {
@@ -883,7 +890,11 @@ func deploymentEngineConfig(cfg config.Config) (deploy.EngineConfig, error) {
 	return engineCfg, nil
 }
 
-func healthHandler(version string, startedAt time.Time, cfg config.Config) http.Handler {
+func healthHandler(version string, startedAt time.Time, cfg config.Config, cloudConnected ...func() bool) http.Handler {
+	connected := func() bool { return false }
+	if len(cloudConnected) > 0 && cloudConnected[0] != nil {
+		connected = cloudConnected[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -892,7 +903,7 @@ func healthHandler(version string, startedAt time.Time, cfg config.Config) http.
 			"version":         version,
 			"node_id":         cfg.NodeID,
 			"uptime_seconds":  int64(time.Since(startedAt).Seconds()),
-			"cloud_connected": false,
+			"cloud_connected": connected(),
 		})
 	})
 	return mux

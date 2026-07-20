@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
@@ -26,6 +27,20 @@ type DeployEngine interface {
 	Deploy(context.Context, deploy.Request, deploy.ProgressFunc) (deploy.Record, error)
 }
 
+type ConnectionState struct {
+	connected atomic.Bool
+}
+
+func (s *ConnectionState) SetConnected(connected bool) {
+	if s != nil {
+		s.connected.Store(connected)
+	}
+}
+
+func (s *ConnectionState) Connected() bool {
+	return s != nil && s.connected.Load()
+}
+
 type Runner struct {
 	Client            CloudClient
 	Engine            DeployEngine
@@ -36,6 +51,7 @@ type Runner struct {
 	PollInterval      time.Duration
 	LongPollWait      time.Duration
 	HeartbeatInterval time.Duration
+	ConnectionState   *ConnectionState
 	Logger            *slog.Logger
 }
 
@@ -82,8 +98,11 @@ func (r Runner) sendHeartbeat(ctx context.Context) {
 		Capabilities: map[string]any{"deploy": true, "node_lifecycle": r.NodeLifecycle != nil},
 	})
 	if err != nil {
+		r.ConnectionState.SetConnected(false)
 		r.log().Warn("cloud heartbeat failed", "error", err)
+		return
 	}
+	r.ConnectionState.SetConnected(true)
 }
 
 func (r Runner) jobLoop(ctx context.Context) error {
@@ -97,10 +116,12 @@ func (r Runner) jobLoop(ctx context.Context) error {
 		}
 		lease, err := r.Client.PollJob(ctx, r.NodeID, r.LongPollWait)
 		if err != nil {
+			r.ConnectionState.SetConnected(false)
 			r.log().Warn("cloud job poll failed", "error", err)
 			timer.Reset(r.PollInterval)
 			continue
 		}
+		r.ConnectionState.SetConnected(true)
 		if lease != nil && lease.Deployment != nil {
 			r.handleLease(ctx, *lease.Deployment)
 		}

@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -108,6 +110,28 @@ func TestRunServesHealthAndStatus(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not stop")
+	}
+}
+
+func TestStatusAndHealthExposeCloudConnectionState(t *testing.T) {
+	connected := true
+	cfg := config.Default()
+	cfg.NodeID = "node-1"
+	status := NewStatusService("v1", time.Unix(10, 0), cfg, func() bool { return connected })
+	response, err := status.Status(context.Background(), &agentv1.StatusRequest{})
+	if err != nil || !response.CloudConnected {
+		t.Fatalf("status=%+v err=%v", response, err)
+	}
+	httpResponse := httptest.NewRecorder()
+	healthHandler("v1", time.Unix(10, 0), cfg, func() bool { return connected }).ServeHTTP(httpResponse, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var body map[string]any
+	if err := json.Unmarshal(httpResponse.Body.Bytes(), &body); err != nil || body["cloud_connected"] != true {
+		t.Fatalf("health body=%s err=%v", httpResponse.Body.String(), err)
+	}
+	connected = false
+	response, _ = status.Status(context.Background(), &agentv1.StatusRequest{})
+	if response.CloudConnected {
+		t.Fatal("status did not reflect disconnected Cloud state")
 	}
 }
 

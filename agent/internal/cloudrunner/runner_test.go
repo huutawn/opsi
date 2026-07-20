@@ -82,6 +82,7 @@ func (fakeEngine) Deploy(_ context.Context, req deploy.Request, progress deploy.
 
 func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	connection := &ConnectionState{}
 	client := &fakeClient{cancel: cancel, leases: []cloudrelay.DeploymentLease{{
 		Kind: "deployment", Action: "deploy",
 		Deployment: cloudrelay.DeploymentJobEnvelope{ID: "dep-1", ManifestHash: "manifest"},
@@ -97,6 +98,7 @@ func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
 		PollInterval:      time.Millisecond,
 		LongPollWait:      time.Millisecond,
 		HeartbeatInterval: time.Hour,
+		ConnectionState:   connection,
 	}
 	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("run err = %v", err)
@@ -107,6 +109,24 @@ func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
 	if client.heartbeats == 0 {
 		t.Fatal("heartbeat was not sent")
 	}
+	if !connection.Connected() {
+		t.Fatal("successful heartbeat/poll did not update Cloud connection state")
+	}
+}
+
+func TestConnectionStateFailsClosedAfterCloudError(t *testing.T) {
+	state := &ConnectionState{}
+	state.SetConnected(true)
+	Runner{Client: &failingCloudClient{}, ConnectionState: state}.sendHeartbeat(context.Background())
+	if state.Connected() {
+		t.Fatal("Cloud connection state remained true after a heartbeat error")
+	}
+}
+
+type failingCloudClient struct{ fakeClient }
+
+func (failingCloudClient) Heartbeat(context.Context, string, cloudrelay.Heartbeat) error {
+	return errors.New("unavailable")
 }
 
 func TestRunnerExecutesNodeLifecycleLeaseAndReportsResult(t *testing.T) {
