@@ -173,6 +173,58 @@ func (c *Client) RouteBuildRecord(ctx context.Context, projectID string, request
 	return response, err
 }
 
+func (c *Client) PreviewDeployment(ctx context.Context, projectID string, request DeploymentCreateRequest) (DeploymentPreview, error) {
+	var response DeploymentPreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", "preview"}, request, "", &response)
+	return response, err
+}
+
+func (c *Client) DiffDeployment(ctx context.Context, projectID string, request DeploymentCreateRequest) (DeploymentPreview, error) {
+	var response DeploymentPreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", "diff"}, request, "", &response)
+	return response, err
+}
+
+func (c *Client) ApplyDeployment(ctx context.Context, projectID, key string, request DeploymentCreateRequest) (DeploymentJob, error) {
+	var response DeploymentJob
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments"}, request, key, &response)
+	return response, err
+}
+
+func (c *Client) GetDeployment(ctx context.Context, projectID, deploymentID string) (DeploymentJob, error) {
+	var response DeploymentJob
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "deployments", deploymentID}, nil, "", &response)
+	return response, err
+}
+
+func (c *Client) ListDeployments(ctx context.Context, projectID string) ([]DeploymentJob, error) {
+	var response struct {
+		Deployments []DeploymentJob `json:"deployments"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "deployments"}, nil, "", &response)
+	return response.Deployments, err
+}
+
+func (c *Client) DeploymentEvents(ctx context.Context, projectID, deploymentID string) ([]DeploymentEvent, error) {
+	var response struct {
+		Events []DeploymentEvent `json:"events"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "deployments", deploymentID, "events"}, nil, "", &response)
+	return response.Events, err
+}
+
+func (c *Client) CancelDeployment(ctx context.Context, projectID, deploymentID, key string) (DeploymentJob, error) {
+	var response DeploymentJob
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", deploymentID, "cancel"}, struct{}{}, key, &response)
+	return response, err
+}
+
+func (c *Client) RetryDeployment(ctx context.Context, projectID, deploymentID, key string) (DeploymentJob, error) {
+	var response DeploymentJob
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", deploymentID, "retry"}, struct{}{}, key, &response)
+	return response, err
+}
+
 func (c *Client) ListNodes(ctx context.Context, projectID string) ([]Node, error) {
 	var response nodeListResponse
 	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "nodes"}, nil, "", &response)

@@ -4,17 +4,20 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 type CloudClient interface {
 	PollJob(context.Context, string, time.Duration) (*cloudrelay.JobLease, error)
 	CompleteDeployment(context.Context, string, string, cloudrelay.DeploymentResult) error
+	ProgressDeployment(context.Context, string, string, deploymentv1.Progress) error
 	CompleteNodeLifecycle(context.Context, string, string, cloudrelay.NodeLifecycleResult) error
 	Heartbeat(context.Context, string, cloudrelay.Heartbeat) error
 }
@@ -125,7 +128,42 @@ func (r Runner) handleNodeLifecycle(ctx context.Context, lease cloudrelay.NodeLi
 }
 
 func (r Runner) handleLease(ctx context.Context, lease cloudrelay.DeploymentLease) {
-	result := r.execute(ctx, lease)
+	var progressMu sync.Mutex
+	state := deploymentv1.StateLeased
+	report := func(next, message string) {
+		if lease.Command == nil {
+			return
+		}
+		progressMu.Lock()
+		state = next
+		progressMu.Unlock()
+		if err := r.Client.ProgressDeployment(ctx, r.NodeID, lease.Deployment.ID, deploymentv1.Progress{SchemaVersion: deploymentv1.EventSchemaVersion, LeaseToken: lease.LeaseToken, State: next, MessageRedacted: message}); err != nil {
+			r.log().Warn("cloud deployment progress report failed", "deployment_id", lease.Deployment.ID, "state", next, "error", err)
+		}
+	}
+	report(deploymentv1.StateLeased, "Agent accepted immutable deployment command")
+	done := make(chan struct{})
+	if lease.Command != nil {
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					progressMu.Lock()
+					current := state
+					progressMu.Unlock()
+					report(current, "Agent deployment lease heartbeat")
+				}
+			}
+		}()
+	}
+	result := r.execute(ctx, lease, report)
+	close(done)
 	for attempt := 0; attempt < 3; attempt++ {
 		err := r.Client.CompleteDeployment(ctx, r.NodeID, lease.Deployment.ID, result)
 		if err == nil {
@@ -153,16 +191,29 @@ func (r Runner) executeNodeLifecycle(ctx context.Context, lease cloudrelay.NodeL
 	return cloudrelay.NodeLifecycleResult{Status: result.Status, LeaseToken: lease.LeaseToken, FailureCode: result.FailureCode, FailureMessageRedacted: result.FailureMessageRedacted, Verified: result.Verified}
 }
 
-func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
+func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease, report func(string, string)) cloudrelay.DeploymentResult {
 	if lease.Action != "" && lease.Action != "deploy" {
-		return cloudrelay.DeploymentResult{Status: "failed", FailureCode: "ACTION_UNSUPPORTED", FailureMessageRedacted: "deployment action is not supported", RollbackEligible: false}
+		return deploymentFailure(lease, "ACTION_UNSUPPORTED", "deployment action is not supported")
+	}
+	if lease.Command != nil && lease.Command.NodeID != r.NodeID {
+		return deploymentFailure(lease, "DEPLOYMENT_TARGET_MISMATCH", "deployment command target does not match this Agent node")
 	}
 	req, err := RequestFromLease(lease, r.DeploymentConfig)
 	if err != nil {
-		return cloudrelay.DeploymentResult{Status: "failed", FailureCode: failureCode(err), FailureMessageRedacted: err.Error(), RollbackEligible: false}
+		return deploymentFailure(lease, failureCode(err), err.Error())
 	}
 	record, err := r.Engine.Deploy(ctx, req, func(event *deploy.ProgressEvent) error {
 		r.log().Info("cloud deployment progress", "deployment_id", lease.Deployment.ID, "phase", event.Phase, "percent", event.Percent)
+		if lease.Command != nil && report != nil {
+			switch event.Phase {
+			case deploy.PhasePulling:
+				report(deploymentv1.StatePulling, event.Message)
+			case deploy.PhaseApplying:
+				report(deploymentv1.StateApplying, event.Message)
+			case deploy.PhaseWatching:
+				report(deploymentv1.StateWaitingReady, event.Message)
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -172,6 +223,16 @@ func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease) c
 		record.Error = err.Error()
 	}
 	return ResultFromRecord(record, err, lease)
+}
+
+func deploymentFailure(lease cloudrelay.DeploymentLease, code, message string) cloudrelay.DeploymentResult {
+	result := cloudrelay.DeploymentResult{Status: "failed", LeaseToken: lease.LeaseToken, FailureCode: code, FailureMessageRedacted: deploy.RedactSensitive(message), RollbackEligible: false}
+	if lease.Command != nil {
+		result.SchemaVersion = deploymentv1.ResultSchemaVersion
+		result.SpecHash = lease.Command.SpecHash
+		result.ApplicationImage = lease.Command.Image.Reference
+	}
+	return result
 }
 
 func (r Runner) log() *slog.Logger {

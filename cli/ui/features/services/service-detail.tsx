@@ -7,7 +7,6 @@ export function ServiceDetail({ console }: { console: ConsoleController }) {
   if (!service) return null;
   const jobs = console.state.deployments.filter((item) => item.service_id === service.id);
   const deps = console.state.services.filter((item) => item.type !== "application" && item.id !== service.id);
-  const deployDisabled = !console.state.readiness?.can_deploy || service.source_type !== "git" || console.state.busy === `deploy-${service.id}`;
   return (
     <Panel title="Service detail">
       <div className="metrics">
@@ -48,19 +47,16 @@ export function ServiceDetail({ console }: { console: ConsoleController }) {
         </div>
       </div>
       <p className="muted">
-        {service.source_type !== "git"
-          ? "Image-source deploy is not supported by the current Agent runner."
-          : console.state.readiness?.can_deploy
-            ? "Review complete. Deployment will queue through the local API."
-            : "Project is not ready. Add the first healthy server before deploying."}
+        {console.state.readiness?.can_deploy
+          ? "Choose an accepted BuildRecord and typed WorkloadSpec in the manual Cloud deployment flow."
+          : "Project is not ready. Add the first healthy server before deploying."}
       </p>
       <button
         className="primary"
-        disabled={deployDisabled}
-        onClick={() => void console.actions.deploy(service.id)}
+        onClick={() => console.setActive("Deployments")}
         type="button"
       >
-        {console.state.busy === `deploy-${service.id}` ? "Queueing" : "Deploy reviewed plan"}
+        Open manual deployment flow
       </button>
       <h3>Dependencies</h3>
       {deps.length ? deps.map((item) => <StatusBadge key={item.id} value={item.name} />) : <p className="muted">No bindings yet.</p>}

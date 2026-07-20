@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -22,7 +23,7 @@ const nodeSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id
 
 const serviceSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, type, status, source_type, COALESCE(repo_url,''), COALESCE(image,''), COALESCE(branch,''), COALESCE(git_sha,''), COALESCE(build_method,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(manifest_path,''), watch_paths::text, COALESCE(container_port,0), COALESCE(health_path,''), COALESCE(replicas_desired,0), COALESCE(resources->'requests','{}'::jsonb)::text, COALESCE(resources->'limits','{}'::jsonb)::text, COALESCE(bindings,'[]'::jsonb)::text, namespace, created_at, updated_at FROM control_services`
 
-const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, COALESCE(action,'deploy'), idempotency_key, COALESCE(deployment_plan_hash,''), COALESCE(manifest_hash,''), COALESCE(intent_hash,''), deployment_intent_json::text, COALESCE(previous_revision_ref,''), COALESCE(rollback_eligible,false), COALESCE(rollback_blocked_reason,''), COALESCE(requested_by,''), COALESCE(agent_id,''), COALESCE(node_id,''), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), COALESCE(lease_token,''), lease_expires_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), started_at, finished_at, created_at, updated_at FROM deployment_jobs`
+const deploymentSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, service_id, status, COALESCE(action,'deploy'), idempotency_key, COALESCE(deployment_plan_hash,''), COALESCE(manifest_hash,''), COALESCE(intent_hash,''), deployment_intent_json::text, COALESCE(previous_revision_ref,''), COALESCE(rollback_eligible,false), COALESCE(rollback_blocked_reason,''), COALESCE(requested_by,''), COALESCE(agent_id,''), COALESCE(node_id,''), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), COALESCE(lease_token,''), lease_expires_at, retry_after, COALESCE(attempt_count,0), COALESCE(max_attempts,3), started_at, finished_at, created_at, updated_at, COALESCE(schema_version,''), COALESCE(mode,''), COALESCE(snapshot_json,'{}')::text, COALESCE(spec_hash,''), COALESCE(payload_hash,''), COALESCE(terminal_result_json,'{}')::text FROM deployment_jobs`
 
 const nodeLifecycleSelectSQL = `SELECT id, org_id, project_id, runtime_id, action, status, target_node_id, target_node_name, node_id, COALESCE(agent_id,''), COALESCE(requested_by,''), COALESCE(idempotency_key,''), confirm_remove, COALESCE(lease_token,''), lease_expires_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), verified, finished_at, created_at, updated_at FROM node_lifecycle_jobs`
 
@@ -182,7 +183,7 @@ func (s PostgresService) DeploymentEvents(projectID, deploymentID string) ([]Dep
 	if job.ProjectID != projectID {
 		return nil, ErrNotFound
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, COALESCE(request_id,''), created_at FROM deployment_events WHERE project_id = $1 AND deployment_id = $2 ORDER BY created_at`, projectID, deploymentID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT COALESCE(schema_version,''), id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, COALESCE(attempt,0), COALESCE(request_id,''), created_at FROM deployment_events WHERE project_id = $1 AND deployment_id = $2 ORDER BY created_at`, projectID, deploymentID)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +191,7 @@ func (s PostgresService) DeploymentEvents(projectID, deploymentID string) ([]Dep
 	var out []DeploymentEvent
 	for rows.Next() {
 		var e DeploymentEvent
-		if err := rows.Scan(&e.ID, &e.OrgID, &e.ProjectID, &e.DeploymentID, &e.ServiceID, &e.Level, &e.Step, &e.MessageRedacted, &e.ProgressPercent, &e.RequestID, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.SchemaVersion, &e.ID, &e.OrgID, &e.ProjectID, &e.DeploymentID, &e.ServiceID, &e.Level, &e.Step, &e.MessageRedacted, &e.ProgressPercent, &e.Attempt, &e.RequestID, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -1080,6 +1081,123 @@ func (s PostgresService) StartDeployment(projectID, serviceID, requestedBy, key,
 	return job, tx.Commit()
 }
 
+func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, requestedBy, key, requestID string) (DeploymentJob, bool, error) {
+	ctx := context.Background()
+	if !validDeploymentIdempotencyKey(key) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "IDEMPOTENCY_KEY_INVALID", Message: "deployment idempotency key is invalid", RequestID: requestID}
+	}
+	// Resolve exact replays before reading mutable authority so a retry remains
+	// bound to the original durable job even after routing/policy changes.
+	if job, reused, err := s.ReplayImmutableDeployment(snapshot.ProjectID, key, snapshot.PayloadHash); err != nil || reused {
+		return job, reused, err
+	}
+	if snapshot.SchemaVersion != deploymentv1.JobSchemaVersion || snapshot.ProjectID == "" || snapshot.Authority.BuildRecord.ProjectID != snapshot.ProjectID {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "DEPLOYMENT_SNAPSHOT_INVALID", Message: "deployment authority snapshot is invalid", RequestID: requestID}
+	}
+	if err := snapshot.Image.Validate(); err != nil {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "BUILD_ARTIFACT_INVALID", Message: "immutable image reference is invalid", RequestID: requestID}
+	}
+	if err := snapshot.Workload.Validate(); err != nil {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "WORKLOAD_SPEC_INVALID", Message: "WorkloadSpec is invalid", RequestID: requestID}
+	}
+	if hash, err := snapshot.Workload.Hash(); err != nil || hash != snapshot.SpecHash {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "WORKLOAD_SPEC_HASH_INVALID", Message: "WorkloadSpec hash does not match", RequestID: requestID}
+	}
+	if snapshot.Image.Repository != snapshot.Authority.BuildRecord.Build.OCIRepository || snapshot.Image.Digest != snapshot.Authority.BuildRecord.Build.OCIDigest {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "BUILD_ARTIFACT_MISMATCH", Message: "image reference does not match the accepted BuildRecord", RequestID: requestID}
+	}
+	service, err := s.getService(ctx, snapshot.Authority.BuildRecord.ServiceID)
+	if err != nil || service.ProjectID != snapshot.ProjectID {
+		return DeploymentJob{}, false, ErrNotFound
+	}
+	if service.EnvironmentID != snapshot.Authority.EnvironmentID || service.RuntimeID != snapshot.Authority.RuntimeID {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_SERVICE_BINDING_INVALID", Message: "service binding does not match the resolved target", RequestID: requestID}
+	}
+	node, agent, err := s.deployAgent(ctx, snapshot.ProjectID, snapshot.Authority.RuntimeID, requestID)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if node.ID != snapshot.Authority.NodeID || agent.ID != snapshot.Authority.AgentID {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "ROUTING_TARGET_CHANGED", Message: "resolved Agent target changed before job creation", RequestID: requestID}
+	}
+	now := s.clock()
+	snapshot.CreatedAt = now
+	snapshot.ActorUserID = requestedBy
+	snapshot.IdempotencyKey = key
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "immutable_image", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: snapshot.Authority.EnvironmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: "deploy", IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
+	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	defer tx.Rollback()
+	lockKey := "deploy:v1:" + snapshot.ProjectID + ":" + key
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lockKey); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	var existingID string
+	err = tx.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE scope=$1 AND key=$2`, "deploy:v1:"+snapshot.ProjectID, key).Scan(&existingID)
+	if err == nil {
+		existing, scanErr := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 FOR UPDATE`, existingID))
+		if scanErr != nil {
+			return DeploymentJob{}, false, scanErr
+		}
+		if existing.PayloadHash != snapshot.PayloadHash {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used with a different deployment payload", RequestID: requestID}
+		}
+		existing.Reused = true
+		return existing, true, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertDeployment(ctx, tx, job); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := acquireDeploymentLock(ctx, tx, snapshot.ProjectID, service.ID, job.ID, now, requestID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	event := DeploymentEvent{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: deploymentv1.StateQueued, MessageRedacted: "immutable image deployment queued", ProgressPercent: 0, Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now}
+	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertIdempotency(ctx, tx, "deploy:v1:"+snapshot.ProjectID, key, "deployment_job", job.ID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	return job, false, tx.Commit()
+}
+
+func (s PostgresService) ReplayImmutableDeployment(projectID, key, payloadHash string) (DeploymentJob, bool, error) {
+	ctx := context.Background()
+	var deploymentID string
+	err := s.DB.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE scope=$1 AND key=$2`, "deploy:v1:"+projectID, key).Scan(&deploymentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeploymentJob{}, false, nil
+	}
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	job, err := s.getDeployment(ctx, deploymentID)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if job.ProjectID != projectID {
+		return DeploymentJob{}, false, ErrNotFound
+	}
+	if job.PayloadHash != payloadHash {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used with a different deployment payload"}
+	}
+	job.Reused = true
+	return job, true, nil
+}
+
+func (s PostgresService) ImmutableDeploymentCommand(job DeploymentJob) *deploymentv1.AgentCommand {
+	if job.Snapshot == nil {
+		return nil
+	}
+	return &deploymentv1.AgentCommand{SchemaVersion: deploymentv1.CommandSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, AgentID: job.AgentID, LeaseToken: job.LeaseToken, Attempt: int32(job.AttemptCount), Image: job.Snapshot.Image, Workload: job.Snapshot.Workload, SpecHash: job.SpecHash}
+}
+
 func (s PostgresService) RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error) {
 	ctx := context.Background()
 	scope := "rollback:" + projectID + ":" + deploymentID
@@ -1147,7 +1265,7 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	if err := expireDeploymentLeases(ctx, tx, projectID, now); err != nil {
 		return DeploymentLease{}, false, err
 	}
-	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack))
+	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4,$5) AND (retry_after IS NULL OR retry_after <= $6) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack, deploymentv1.StateQueued, now))
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
 			return DeploymentLease{}, false, err
@@ -1165,7 +1283,11 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 		action = job.Action
 	}
 	leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
-	job.Status = DeploymentWaitingAgent
+	if job.Mode == "immutable_image" {
+		job.Status = deploymentv1.StateLeased
+	} else {
+		job.Status = DeploymentWaitingAgent
+	}
 	job.Action = action
 	job.AttemptCount++
 	if job.MaxAttempts == 0 {
@@ -1173,11 +1295,21 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	}
 	job.LeaseToken = newID("lease")
 	job.LeaseExpiresAt = &leaseExpiresAt
+	job.RetryAfter = nil
+	if job.StartedAt == nil {
+		job.StartedAt = &now
+	}
 	job.UpdatedAt = now
-	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, action = $2, lease_token = $3, lease_expires_at = $4, attempt_count = $5, max_attempts = $6, updated_at = $7 WHERE id = $8`, job.Status, job.Action, job.LeaseToken, leaseExpiresAt, job.AttemptCount, job.MaxAttempts, now, job.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, action = $2, lease_token = $3, lease_expires_at = $4, retry_after = NULL, attempt_count = $5, max_attempts = $6, started_at = COALESCE(started_at,$7), updated_at = $7 WHERE id = $8`, job.Status, job.Action, job.LeaseToken, leaseExpiresAt, job.AttemptCount, job.MaxAttempts, now, job.ID); err != nil {
 		return DeploymentLease{}, false, err
 	}
 	event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: now}
+	if job.Mode == "immutable_image" {
+		event.SchemaVersion = deploymentv1.EventSchemaVersion
+		event.Step = deploymentv1.StateLeased
+		event.ProgressPercent = 10
+		event.Attempt = job.AttemptCount
+	}
 	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 		return DeploymentLease{}, false, err
 	}
@@ -1188,7 +1320,7 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	if err := tx.Commit(); err != nil {
 		return DeploymentLease{}, false, err
 	}
-	return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken}, true, nil
+	return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken, Command: s.ImmutableDeploymentCommand(job)}, true, nil
 }
 
 func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error) {
@@ -1212,7 +1344,7 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 		return job, tx.Commit()
 	}
 	now := s.clock()
-	if job.Status != DeploymentWaitingAgent || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) {
+	if !deploymentLeaseActiveStatus(job.Status) || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) {
 		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_LEASE_EXPIRED", Message: "deployment lease is not active", NextAction: "poll_for_new_lease", RequestID: requestID}
 	}
 	if job.LeaseToken != "" && result.LeaseToken != job.LeaseToken {
@@ -1220,6 +1352,9 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	}
 	if job.IntentHash != "" && result.IntentHash != "" && result.IntentHash != job.IntentHash {
 		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "deployment result intent hash does not match leased job", RequestID: requestID}
+	}
+	if job.Mode == "immutable_image" && result.Status != deploymentv1.StateSucceeded && result.Status != deploymentv1.StateFailed {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_STATUS_INVALID", Message: "immutable deployment result must be succeeded or failed", RequestID: requestID}
 	}
 	job.Status = normalizedDeploymentResultStatus(result.Status)
 	job.FailureCode = result.FailureCode
@@ -1233,7 +1368,16 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	job.LeaseExpiresAt = nil
 	job.FinishedAt = &now
 	job.UpdatedAt = now
-	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, manifest_hash = NULLIF($2,''), rollback_eligible = $3, rollback_blocked_reason = NULLIF($4,''), failure_code = NULLIF($5,''), failure_message_redacted = NULLIF($6,''), lease_token = NULL, lease_expires_at = NULL, finished_at = $7, updated_at = $7 WHERE id = $8 AND project_id = $9 AND node_id = $10`, job.Status, job.ManifestHash, job.RollbackEligible, job.RollbackBlockedReason, job.FailureCode, job.FailureMessageRedacted, now, deploymentID, projectID, nodeID); err != nil {
+	terminalJSON := any(nil)
+	if job.Mode == "immutable_image" {
+		if result.SchemaVersion != deploymentv1.ResultSchemaVersion || result.SpecHash != job.SpecHash || job.Snapshot == nil || result.ApplicationImage != job.Snapshot.Image.Reference || (job.Status == DeploymentSucceeded && !deploymentResultHasExactDigest(result.ApplicationImageID, job.Snapshot.Image.Digest)) {
+			return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "Agent result does not match the immutable deployment command", RequestID: requestID}
+		}
+		job.TerminalResult = &deploymentv1.AgentResult{SchemaVersion: result.SchemaVersion, LeaseToken: result.LeaseToken, Status: job.Status, SpecHash: result.SpecHash, ApplicationImage: result.ApplicationImage, ApplicationImageID: result.ApplicationImageID, Namespace: result.Namespace, DeploymentName: result.DeploymentName, ServiceName: result.ServiceName, AvailableReplicas: result.AvailableReplicas, FailureCode: result.FailureCode, FailureMessageRedacted: job.FailureMessageRedacted}
+		encoded, _ := json.Marshal(job.TerminalResult)
+		terminalJSON = string(encoded)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, manifest_hash = NULLIF($2,''), rollback_eligible = $3, rollback_blocked_reason = NULLIF($4,''), failure_code = NULLIF($5,''), failure_message_redacted = NULLIF($6,''), lease_token = NULL, lease_expires_at = NULL, retry_after = NULL, finished_at = $7, updated_at = $7, terminal_result_json = COALESCE(terminal_result_json,$11::jsonb) WHERE id = $8 AND project_id = $9 AND node_id = $10`, job.Status, job.ManifestHash, job.RollbackEligible, job.RollbackBlockedReason, job.FailureCode, job.FailureMessageRedacted, now, deploymentID, projectID, nodeID, terminalJSON); err != nil {
 		return DeploymentJob{}, err
 	}
 	for _, event := range deploymentCompletionEvents(job, requestID, now) {
@@ -1247,6 +1391,194 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 		}
 	}
 	return job, tx.Commit()
+}
+
+func (s PostgresService) ProgressImmutableDeployment(projectID, nodeID, deploymentID, requestID string, progress deploymentv1.Progress) (DeploymentJob, error) {
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	defer tx.Rollback()
+	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 FOR UPDATE`, deploymentID))
+	if errors.Is(err, sql.ErrNoRows) || err == nil && (job.ProjectID != projectID || job.NodeID != nodeID || job.Mode != "immutable_image") {
+		return DeploymentJob{}, ErrNotFound
+	}
+	if err != nil {
+		return DeploymentJob{}, err
+	}
+	if deploymentTerminalStatus(job.Status) || job.Status == deploymentv1.StateCancelled {
+		return job, tx.Commit()
+	}
+	now := s.clock()
+	if job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) || progress.LeaseToken == "" || progress.LeaseToken != job.LeaseToken {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STALE_LEASE", Message: "deployment progress lease is stale", RequestID: requestID}
+	}
+	if !validImmutableTransition(job.Status, progress.State) {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STATE_INVALID", Message: "deployment state transition is not monotonic", RequestID: requestID}
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployment_events WHERE deployment_id=$1`, deploymentID).Scan(&count); err != nil {
+		return DeploymentJob{}, err
+	}
+	message := RedactString(progress.MessageRedacted)
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	if message == "" {
+		message = "deployment progress updated"
+	}
+	leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status=$1, lease_expires_at=$2, updated_at=$3 WHERE id=$4`, progress.State, leaseExpiresAt, now, deploymentID); err != nil {
+		return DeploymentJob{}, err
+	}
+	if count < 199 {
+		event := DeploymentEvent{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: progress.State, MessageRedacted: message, ProgressPercent: immutableProgressPercent(progress.State), Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now}
+		if err := insertDeploymentEvent(ctx, tx, event); err != nil {
+			return DeploymentJob{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return DeploymentJob{}, err
+	}
+	return s.getDeployment(ctx, deploymentID)
+}
+
+func (s PostgresService) GetDeployment(projectID, deploymentID string) (DeploymentJob, error) {
+	job, err := s.getDeployment(context.Background(), deploymentID)
+	if err != nil || job.ProjectID != projectID {
+		return DeploymentJob{}, ErrNotFound
+	}
+	return job, nil
+}
+
+func (s PostgresService) CancelDeployment(projectID, deploymentID, key, requestID string) (DeploymentJob, bool, error) {
+	ctx := context.Background()
+	if !validDeploymentIdempotencyKey(key) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "IDEMPOTENCY_KEY_INVALID", Message: "deployment idempotency key is invalid", RequestID: requestID}
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	defer tx.Rollback()
+	scope := "deploy-cancel:v1:" + projectID
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, scope+":"+key); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	var existingID string
+	err = tx.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE scope=$1 AND key=$2`, scope, key).Scan(&existingID)
+	if err == nil {
+		if existingID != deploymentID {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used for another deployment cancellation", RequestID: requestID}
+		}
+		job, scanErr := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 AND project_id=$2`, deploymentID, projectID))
+		if scanErr != nil {
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				return DeploymentJob{}, false, ErrNotFound
+			}
+			return DeploymentJob{}, false, scanErr
+		}
+		job.Reused = true
+		return job, true, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return DeploymentJob{}, false, err
+	}
+	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 FOR UPDATE`, deploymentID))
+	if errors.Is(err, sql.ErrNoRows) || err == nil && job.ProjectID != projectID {
+		return DeploymentJob{}, false, ErrNotFound
+	}
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if deploymentTerminalStatus(job.Status) || job.Status == deploymentv1.StateCancelled {
+		if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
+			return DeploymentJob{}, false, err
+		}
+		return job, false, tx.Commit()
+	}
+	if job.Status != deploymentv1.StateQueued {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "CANCEL_UNSAFE", Message: "deployment has reached an Agent or runtime mutation stage", NextAction: "watch_deployment", RequestID: requestID}
+	}
+	now := s.clock()
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status=$1, finished_at=$2, updated_at=$2, lease_token=NULL, lease_expires_at=NULL, retry_after=NULL WHERE id=$3`, deploymentv1.StateCancelled, now, deploymentID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id=$1 AND deployment_id=$2`, job.ServiceID, job.ID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertDeploymentEvent(ctx, tx, DeploymentEvent{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: deploymentv1.StateCancelled, MessageRedacted: "deployment cancelled before runtime mutation", ProgressPercent: 100, Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now}); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	job, err = s.getDeployment(ctx, deploymentID)
+	return job, false, err
+}
+
+func (s PostgresService) RetryDeployment(projectID, deploymentID, key, requestID string) (DeploymentJob, bool, error) {
+	ctx := context.Background()
+	if !validDeploymentIdempotencyKey(key) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "IDEMPOTENCY_KEY_INVALID", Message: "deployment idempotency key is invalid", RequestID: requestID}
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "deploy-retry:v1:"+projectID+":"+key); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 FOR UPDATE`, deploymentID))
+	if errors.Is(err, sql.ErrNoRows) || err == nil && (job.ProjectID != projectID || job.Mode != "immutable_image") {
+		return DeploymentJob{}, false, ErrNotFound
+	}
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	scope := "deploy-retry:v1:" + projectID
+	var existingID string
+	err = tx.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE scope=$1 AND key=$2`, scope, key).Scan(&existingID)
+	if err == nil {
+		if existingID != deploymentID {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key is bound to another retry operation", RequestID: requestID}
+		}
+		job.Reused = true
+		return job, true, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return DeploymentJob{}, false, err
+	}
+	if job.Status != deploymentv1.StateFailed || job.TerminalResult != nil || job.FailureCode != "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "RETRY_TERMINAL_IMMUTABLE", Message: "only a lease-exhausted job without an Agent terminal result can be retried in place", NextAction: "create_explicit_redeploy", RequestID: requestID}
+	}
+	now := s.clock()
+	job.Status = deploymentv1.StateQueued
+	job.FailureCode = ""
+	job.FailureMessageRedacted = ""
+	job.FinishedAt = nil
+	job.LeaseToken = ""
+	job.LeaseExpiresAt = nil
+	job.MaxAttempts = job.AttemptCount + defaultDeploymentMaxAttempts
+	job.UpdatedAt = now
+	if err := acquireDeploymentLock(ctx, tx, projectID, job.ServiceID, job.ID, now, requestID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status=$1, failure_code=NULL, failure_message_redacted=NULL, finished_at=NULL, lease_token=NULL, lease_expires_at=NULL, retry_after=NULL, max_attempts=$2, updated_at=$3 WHERE id=$4`, job.Status, job.MaxAttempts, now, job.ID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertDeploymentEvent(ctx, tx, DeploymentEvent{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: deploymentv1.StateQueued, MessageRedacted: "lease-exhausted deployment queued for another bounded attempt window", ProgressPercent: 0, Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now}); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	return job, false, tx.Commit()
 }
 
 func (s PostgresService) Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) {
@@ -1359,16 +1691,29 @@ func scanService(row rowScanner) (ServiceRecord, error) {
 
 func scanDeployment(row rowScanner) (DeploymentJob, error) {
 	var d DeploymentJob
-	var leaseExpiresAt, started, finished sql.NullTime
-	var intentJSON string
-	err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.Action, &d.IdempotencyKey, &d.DeploymentPlanHash, &d.ManifestHash, &d.IntentHash, &intentJSON, &d.PreviousRevisionRef, &d.RollbackEligible, &d.RollbackBlockedReason, &d.RequestedBy, &d.AgentID, &d.NodeID, &d.FailureCode, &d.FailureMessageRedacted, &d.LeaseToken, &leaseExpiresAt, &d.AttemptCount, &d.MaxAttempts, &started, &finished, &d.CreatedAt, &d.UpdatedAt)
+	var leaseExpiresAt, retryAfter, started, finished sql.NullTime
+	var intentJSON, snapshotJSON, terminalJSON string
+	err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.EnvironmentID, &d.RuntimeID, &d.ServiceID, &d.Status, &d.Action, &d.IdempotencyKey, &d.DeploymentPlanHash, &d.ManifestHash, &d.IntentHash, &intentJSON, &d.PreviousRevisionRef, &d.RollbackEligible, &d.RollbackBlockedReason, &d.RequestedBy, &d.AgentID, &d.NodeID, &d.FailureCode, &d.FailureMessageRedacted, &d.LeaseToken, &leaseExpiresAt, &retryAfter, &d.AttemptCount, &d.MaxAttempts, &started, &finished, &d.CreatedAt, &d.UpdatedAt, &d.SchemaVersion, &d.Mode, &snapshotJSON, &d.SpecHash, &d.PayloadHash, &terminalJSON)
 	if intentJSON != "" {
 		var intent DeploymentIntent
 		if json.Unmarshal([]byte(intentJSON), &intent) == nil {
 			d.DeploymentIntent = &intent
 		}
 	}
+	if snapshotJSON != "" && snapshotJSON != "{}" {
+		var snapshot deploymentv1.JobSnapshot
+		if json.Unmarshal([]byte(snapshotJSON), &snapshot) == nil && snapshot.SchemaVersion != "" {
+			d.Snapshot = &snapshot
+		}
+	}
+	if terminalJSON != "" && terminalJSON != "{}" {
+		var result deploymentv1.AgentResult
+		if json.Unmarshal([]byte(terminalJSON), &result) == nil && result.SchemaVersion != "" {
+			d.TerminalResult = &result
+		}
+	}
 	d.LeaseExpiresAt = nullTimePtr(leaseExpiresAt)
+	d.RetryAfter = nullTimePtr(retryAfter)
 	d.StartedAt = nullTimePtr(started)
 	d.FinishedAt = nullTimePtr(finished)
 	return d, err
@@ -1448,20 +1793,22 @@ func acquireDeploymentLock(ctx context.Context, tx *sql.Tx, projectID, serviceID
 
 func insertDeployment(ctx context.Context, tx *sql.Tx, job DeploymentJob) error {
 	intent, _ := json.Marshal(job.DeploymentIntent)
+	snapshot, _ := json.Marshal(job.Snapshot)
+	terminal, _ := json.Marshal(job.TerminalResult)
 	if job.MaxAttempts == 0 {
 		job.MaxAttempts = defaultDeploymentMaxAttempts
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, action, idempotency_key, deployment_plan_hash, manifest_hash, intent_hash, deployment_intent_json, previous_revision_ref, rollback_eligible, rollback_blocked_reason, requested_by, agent_id, node_id, failure_code, failure_message_redacted, attempt_count, max_attempts, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),$13::jsonb,NULLIF($14,''),$15,NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),NULLIF($19,''),NULLIF($20,''),NULLIF($21,''),$22,$23,$24,$25)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.Action, job.IdempotencyKey, job.DeploymentPlanHash, job.ManifestHash, job.IntentHash, string(intent), job.PreviousRevisionRef, job.RollbackEligible, job.RollbackBlockedReason, job.RequestedBy, job.AgentID, job.NodeID, job.FailureCode, job.FailureMessageRedacted, job.AttemptCount, job.MaxAttempts, job.CreatedAt, job.UpdatedAt)
+	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_jobs(id, org_id, project_id, environment_id, runtime_id, service_id, status, action, idempotency_key, deployment_plan_hash, manifest_hash, intent_hash, deployment_intent_json, previous_revision_ref, rollback_eligible, rollback_blocked_reason, requested_by, agent_id, node_id, failure_code, failure_message_redacted, attempt_count, max_attempts, created_at, updated_at, schema_version, mode, snapshot_json, spec_hash, payload_hash, terminal_result_json, retry_after) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),$13::jsonb,NULLIF($14,''),$15,NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),NULLIF($19,''),NULLIF($20,''),NULLIF($21,''),$22,$23,$24,$25,NULLIF($26,''),NULLIF($27,''),NULLIF($28::jsonb,'null'::jsonb),NULLIF($29,''),NULLIF($30,''),NULLIF($31::jsonb,'null'::jsonb),$32)`, job.ID, job.OrgID, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.Status, job.Action, job.IdempotencyKey, job.DeploymentPlanHash, job.ManifestHash, job.IntentHash, string(intent), job.PreviousRevisionRef, job.RollbackEligible, job.RollbackBlockedReason, job.RequestedBy, job.AgentID, job.NodeID, job.FailureCode, job.FailureMessageRedacted, job.AttemptCount, job.MaxAttempts, job.CreatedAt, job.UpdatedAt, job.SchemaVersion, job.Mode, string(snapshot), job.SpecHash, job.PayloadHash, string(terminal), job.RetryAfter)
 	return err
 }
 
 func insertDeploymentEvent(ctx context.Context, tx *sql.Tx, event DeploymentEvent) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_events(id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, request_id, created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11)`, event.ID, event.OrgID, event.ProjectID, event.DeploymentID, event.ServiceID, event.Level, event.Step, event.MessageRedacted, event.ProgressPercent, event.RequestID, event.CreatedAt)
+	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_events(id, org_id, project_id, deployment_id, service_id, level, step, message_redacted, progress_percent, request_id, created_at, schema_version, attempt) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13)`, event.ID, event.OrgID, event.ProjectID, event.DeploymentID, event.ServiceID, event.Level, event.Step, event.MessageRedacted, event.ProgressPercent, event.RequestID, event.CreatedAt, event.SchemaVersion, event.Attempt)
 	return err
 }
 
 func expireDeploymentLeases(ctx context.Context, tx *sql.Tx, projectID string, now time.Time) error {
-	rows, err := tx.QueryContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND status = $2 AND lease_expires_at <= $3 FOR UPDATE`, projectID, DeploymentWaitingAgent, now)
+	rows, err := tx.QueryContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND status IN ($2,$3,$4,$5,$6) AND lease_expires_at <= $7 FOR UPDATE`, projectID, DeploymentWaitingAgent, deploymentv1.StateLeased, deploymentv1.StatePulling, deploymentv1.StateApplying, deploymentv1.StateWaitingReady, now)
 	if err != nil {
 		return err
 	}
@@ -1482,28 +1829,45 @@ func expireDeploymentLeases(ctx context.Context, tx *sql.Tx, projectID string, n
 			job.MaxAttempts = defaultDeploymentMaxAttempts
 		}
 		nextStatus := DeploymentQueued
+		if job.Mode == "immutable_image" {
+			nextStatus = deploymentv1.StateQueued
+		}
 		if job.Action == "rollback" {
 			nextStatus = DeploymentRollingBack
 		}
 		level, step, message, progress := "warn", EventAgentLeaseExpired, "agent lease expired; job returned to queue", 20
 		finishedAt := any(nil)
+		retryAfter := any(nil)
 		if job.AttemptCount >= job.MaxAttempts {
 			nextStatus, level, step, message, progress = DeploymentDeadLetter, "error", EventDeploymentDeadLetter, "deployment lease attempts exhausted", 100
+			if job.Mode == "immutable_image" {
+				nextStatus, step = deploymentv1.StateFailed, deploymentv1.StateFailed
+			}
 			finishedAt = now
 			if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id = $1 AND deployment_id = $2`, job.ServiceID, job.ID); err != nil {
 				return err
 			}
+		} else {
+			if job.Mode == "immutable_image" {
+				retryAfter = now.Add(deploymentRetryBackoff(job.AttemptCount))
+				message = "agent lease expired; job queued with bounded retry backoff"
+			}
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, lease_token = NULL, lease_expires_at = NULL, failure_code = CASE WHEN $1 = $2 THEN 'DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED' ELSE failure_code END, failure_message_redacted = CASE WHEN $1 = $2 THEN $3 ELSE failure_message_redacted END, finished_at = $4, updated_at = $5 WHERE id = $6`, nextStatus, DeploymentDeadLetter, message, finishedAt, now, job.ID); err != nil {
+		terminalFailure := nextStatus == DeploymentDeadLetter || nextStatus == deploymentv1.StateFailed
+		if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, lease_token = NULL, lease_expires_at = NULL, retry_after = $6, failure_code = CASE WHEN $2 THEN 'DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED' ELSE failure_code END, failure_message_redacted = CASE WHEN $2 THEN $3 ELSE failure_message_redacted END, finished_at = $4, updated_at = $5 WHERE id = $7`, nextStatus, terminalFailure, message, finishedAt, now, retryAfter, job.ID); err != nil {
 			return err
 		}
 		event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: level, Step: step, MessageRedacted: message, ProgressPercent: progress, CreatedAt: now}
+		if job.Mode == "immutable_image" {
+			event.SchemaVersion = deploymentv1.EventSchemaVersion
+			event.Attempt = job.AttemptCount
+		}
 		if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 			return err
 		}
 		action := "DEPLOYMENT_RETRY_SCHEDULED"
 		result := "success"
-		if nextStatus == DeploymentDeadLetter {
+		if terminalFailure {
 			action = "DEPLOYMENT_DEAD_LETTERED"
 			result = "failure"
 		}

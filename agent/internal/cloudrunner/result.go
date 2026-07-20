@@ -6,16 +6,29 @@ import (
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 func ResultFromRecord(record deploy.Record, err error, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
 	result := cloudrelay.DeploymentResult{
+		SchemaVersion:         deploymentv1.ResultSchemaVersion,
 		Status:                "failed",
 		LeaseToken:            lease.LeaseToken,
 		FinalRevisionRef:      firstNonEmpty(record.ImageTag, lease.Deployment.ManifestHash),
 		IntentHash:            firstNonEmpty(lease.Deployment.IntentHash, intentHashFromLease(lease)),
 		RollbackEligible:      lease.Deployment.PreviousRevisionRef != "",
 		RollbackBlockedReason: "",
+		SpecHash:              record.SpecHash,
+		ApplicationImage:      record.ImageTag,
+		ApplicationImageID:    record.ImageID,
+		Namespace:             record.Namespace,
+		DeploymentName:        record.DeploymentName,
+		ServiceName:           record.KubernetesServiceName,
+		AvailableReplicas:     record.AvailableReplicas,
+	}
+	if lease.Command != nil {
+		result.SpecHash = firstNonEmpty(result.SpecHash, lease.Command.SpecHash)
+		result.ApplicationImage = firstNonEmpty(result.ApplicationImage, lease.Command.Image.Reference)
 	}
 	switch record.Status {
 	case deploy.StatusSuccess:

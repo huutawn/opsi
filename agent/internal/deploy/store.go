@@ -83,7 +83,13 @@ CREATE TABLE IF NOT EXISTS deployments (
   triggered_by TEXT NOT NULL,
   migration_ran BOOLEAN NOT NULL DEFAULT 0,
   rollback_safe BOOLEAN NOT NULL DEFAULT 0,
-  rollback_reason TEXT NOT NULL DEFAULT ''
+  rollback_reason TEXT NOT NULL DEFAULT '',
+  spec_hash TEXT NOT NULL DEFAULT '',
+  image_id TEXT NOT NULL DEFAULT '',
+  namespace TEXT NOT NULL DEFAULT '',
+  deployment_name TEXT NOT NULL DEFAULT '',
+  kubernetes_service_name TEXT NOT NULL DEFAULT '',
+  available_replicas INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS deployments_project_service_sha_status_idx
   ON deployments(project_id, service_id, git_sha, status);
@@ -127,12 +133,18 @@ func (s *SQLiteStore) ensureDeploymentColumns(ctx context.Context) error {
 		return err
 	}
 	for name, ddl := range map[string]string{
-		"project_id":      "ALTER TABLE deployments ADD COLUMN project_id TEXT NOT NULL DEFAULT ''",
-		"service_id":      "ALTER TABLE deployments ADD COLUMN service_id TEXT NOT NULL DEFAULT ''",
-		"service_name":    "ALTER TABLE deployments ADD COLUMN service_name TEXT NOT NULL DEFAULT ''",
-		"migration_ran":   "ALTER TABLE deployments ADD COLUMN migration_ran BOOLEAN NOT NULL DEFAULT 0",
-		"rollback_safe":   "ALTER TABLE deployments ADD COLUMN rollback_safe BOOLEAN NOT NULL DEFAULT 0",
-		"rollback_reason": "ALTER TABLE deployments ADD COLUMN rollback_reason TEXT NOT NULL DEFAULT ''",
+		"project_id":              "ALTER TABLE deployments ADD COLUMN project_id TEXT NOT NULL DEFAULT ''",
+		"service_id":              "ALTER TABLE deployments ADD COLUMN service_id TEXT NOT NULL DEFAULT ''",
+		"service_name":            "ALTER TABLE deployments ADD COLUMN service_name TEXT NOT NULL DEFAULT ''",
+		"migration_ran":           "ALTER TABLE deployments ADD COLUMN migration_ran BOOLEAN NOT NULL DEFAULT 0",
+		"rollback_safe":           "ALTER TABLE deployments ADD COLUMN rollback_safe BOOLEAN NOT NULL DEFAULT 0",
+		"rollback_reason":         "ALTER TABLE deployments ADD COLUMN rollback_reason TEXT NOT NULL DEFAULT ''",
+		"spec_hash":               "ALTER TABLE deployments ADD COLUMN spec_hash TEXT NOT NULL DEFAULT ''",
+		"image_id":                "ALTER TABLE deployments ADD COLUMN image_id TEXT NOT NULL DEFAULT ''",
+		"namespace":               "ALTER TABLE deployments ADD COLUMN namespace TEXT NOT NULL DEFAULT ''",
+		"deployment_name":         "ALTER TABLE deployments ADD COLUMN deployment_name TEXT NOT NULL DEFAULT ''",
+		"kubernetes_service_name": "ALTER TABLE deployments ADD COLUMN kubernetes_service_name TEXT NOT NULL DEFAULT ''",
+		"available_replicas":      "ALTER TABLE deployments ADD COLUMN available_replicas INTEGER NOT NULL DEFAULT 0",
 	} {
 		if columns[name] {
 			continue
@@ -213,9 +225,19 @@ ON CONFLICT(project_id, id) DO UPDATE SET
 
 func (s *SQLiteStore) Insert(ctx context.Context, record Record) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO deployments(deploy_id, project_id, service_id, service_name, started_at_unix, git_sha, image_tag, status, triggered_by, migration_ran, rollback_safe, rollback_reason)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, record.DeployID, record.ProjectID, record.ServiceID, record.ServiceName, record.StartedAt.Unix(), record.GitSHA, record.ImageTag, record.Status, record.TriggeredBy, record.MigrationRan, record.RollbackSafe, record.RollbackReason)
+INSERT INTO deployments(deploy_id, project_id, service_id, service_name, started_at_unix, git_sha, image_tag, status, triggered_by, migration_ran, rollback_safe, rollback_reason, spec_hash, image_id, namespace, deployment_name, kubernetes_service_name, available_replicas)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(deploy_id) DO UPDATE SET
+  status = excluded.status,
+  image_tag = excluded.image_tag,
+  spec_hash = excluded.spec_hash,
+  error = '',
+  finished_at_unix = 0,
+  duration_ms = 0
+WHERE deployments.project_id = excluded.project_id
+  AND deployments.service_id = excluded.service_id
+  AND deployments.git_sha = excluded.git_sha
+`, record.DeployID, record.ProjectID, record.ServiceID, record.ServiceName, record.StartedAt.Unix(), record.GitSHA, record.ImageTag, record.Status, record.TriggeredBy, record.MigrationRan, record.RollbackSafe, record.RollbackReason, record.SpecHash, record.ImageID, record.Namespace, record.DeploymentName, record.KubernetesServiceName, record.AvailableReplicas)
 	if err != nil {
 		return fmt.Errorf("insert deployment: %w", err)
 	}
@@ -229,9 +251,9 @@ func (s *SQLiteStore) Update(ctx context.Context, record Record) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE deployments
-SET finished_at_unix = ?, status = ?, duration_ms = ?, error = ?, image_tag = ?, migration_ran = ?, rollback_safe = ?, rollback_reason = ?
+SET finished_at_unix = ?, status = ?, duration_ms = ?, error = ?, image_tag = ?, migration_ran = ?, rollback_safe = ?, rollback_reason = ?, spec_hash = ?, image_id = ?, namespace = ?, deployment_name = ?, kubernetes_service_name = ?, available_replicas = ?
 WHERE deploy_id = ?
-`, finished, record.Status, record.Duration.Milliseconds(), record.Error, record.ImageTag, record.MigrationRan, record.RollbackSafe, record.RollbackReason, record.DeployID)
+`, finished, record.Status, record.Duration.Milliseconds(), record.Error, record.ImageTag, record.MigrationRan, record.RollbackSafe, record.RollbackReason, record.SpecHash, record.ImageID, record.Namespace, record.DeploymentName, record.KubernetesServiceName, record.AvailableReplicas, record.DeployID)
 	if err != nil {
 		return fmt.Errorf("update deployment: %w", err)
 	}
@@ -240,7 +262,7 @@ WHERE deploy_id = ?
 
 func (s *SQLiteStore) FindSuccessful(ctx context.Context, projectID, serviceID, gitSHA string) (*Record, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT deploy_id, project_id, service_id, service_name, started_at_unix, finished_at_unix, git_sha, image_tag, status, duration_ms, error, triggered_by, migration_ran, rollback_safe, rollback_reason
+SELECT deploy_id, project_id, service_id, service_name, started_at_unix, finished_at_unix, git_sha, image_tag, status, duration_ms, error, triggered_by, migration_ran, rollback_safe, rollback_reason, spec_hash, image_id, namespace, deployment_name, kubernetes_service_name, available_replicas
 FROM deployments
 WHERE project_id = ? AND service_id = ? AND git_sha = ? AND status = ?
 ORDER BY started_at_unix DESC
@@ -259,7 +281,7 @@ func scanRecord(row scanner) (*Record, error) {
 	var rec Record
 	var startedUnix, finishedUnix int64
 	var durationMS int64
-	if err := row.Scan(&rec.DeployID, &rec.ProjectID, &rec.ServiceID, &rec.ServiceName, &startedUnix, &finishedUnix, &rec.GitSHA, &rec.ImageTag, &rec.Status, &durationMS, &rec.Error, &rec.TriggeredBy, &rec.MigrationRan, &rec.RollbackSafe, &rec.RollbackReason); err != nil {
+	if err := row.Scan(&rec.DeployID, &rec.ProjectID, &rec.ServiceID, &rec.ServiceName, &startedUnix, &finishedUnix, &rec.GitSHA, &rec.ImageTag, &rec.Status, &durationMS, &rec.Error, &rec.TriggeredBy, &rec.MigrationRan, &rec.RollbackSafe, &rec.RollbackReason, &rec.SpecHash, &rec.ImageID, &rec.Namespace, &rec.DeploymentName, &rec.KubernetesServiceName, &rec.AvailableReplicas); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}

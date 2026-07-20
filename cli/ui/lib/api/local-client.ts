@@ -29,6 +29,8 @@ import type {
   DeploymentPolicy,
   DeploymentPolicyPreview,
   DeploymentPolicyApplyResult,
+  DeploymentPreview,
+  WorkloadSpec,
 } from "@/lib/contracts/registry";
 
 type RequestOptions = RequestInit & { write?: boolean; idempotencyKey?: string };
@@ -274,11 +276,26 @@ export class LocalClient {
     });
   }
 
-  deploy(projectID: string, serviceID: string) {
-    return this.call<DeploymentJob>(`/api/local/projects/${projectID}/services/${serviceID}/deployments`, {
+  deploymentPreview(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }) {
+    return this.call<DeploymentPreview>(`/api/local/projects/${projectID}/deployments/preview`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  deploymentDiff(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }) {
+    return this.call<DeploymentPreview>(`/api/local/projects/${projectID}/deployments/diff`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  deploymentApply(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }, idempotencyKey: string) {
+    return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments`, {
       method: "POST",
       write: true,
-      body: JSON.stringify({ requested_by: "cli-ui" }),
+      idempotencyKey,
+      body: JSON.stringify(body),
     });
   }
 
@@ -294,8 +311,20 @@ export class LocalClient {
     return this.call<{ deployments: DeploymentJob[] }>(`/api/local/projects/${projectID}/deployments`);
   }
 
+  deployment(projectID: string, deploymentID: string) {
+    return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments/${encodeURIComponent(deploymentID)}`);
+  }
+
   deploymentEvents(projectID: string, deploymentID: string) {
     return this.call<{ events: TimelineEvent[] }>(`/api/local/projects/${projectID}/deployments/${deploymentID}/events`);
+  }
+
+  deploymentCancel(projectID: string, deploymentID: string, idempotencyKey: string) {
+    return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments/${encodeURIComponent(deploymentID)}/cancel`, { method: "POST", write: true, idempotencyKey, body: "{}" });
+  }
+
+  deploymentRetry(projectID: string, deploymentID: string, idempotencyKey: string) {
+    return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments/${encodeURIComponent(deploymentID)}/retry`, { method: "POST", write: true, idempotencyKey, body: "{}" });
   }
 
   audit(projectID: string) {

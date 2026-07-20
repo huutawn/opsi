@@ -864,6 +864,7 @@ func deploymentEngineConfig(cfg config.Config) (deploy.EngineConfig, error) {
 		Git:            deploy.ExecGitClient{},
 		Builder:        deploy.ContainerdBuilder{NerdctlPath: cfg.Deployment.NerdctlPath, Namespace: cfg.Deployment.ContainerdNS},
 		K3s:            deploy.KubectlAdapter{},
+		Production:     deploy.ProductionAdapter{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, "kubectl"), K3sPath: "k3s", Timeout: rolloutTimeout, PollInterval: pollInterval},
 		BuildRoot:      cfg.Deployment.BuildRoot,
 		RolloutTimeout: rolloutTimeout,
 		PollInterval:   pollInterval,

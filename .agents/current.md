@@ -6,6 +6,28 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Task
 
+### R5-010 — Immutable manual production deployment
+
+- Implementation is in progress from starting revision
+  `0edaa4330c57377e7545ae5e3a86407b74e19107` on `developer`.
+- The existing DeploymentJob and Agent deploy engine are extended with one
+  `immutable_image` path; no second production engine is introduced.
+- Local contracts, Cloud authority snapshot/state machine, Agent digest pull
+  and Opsi renderer, canonical CLI subcommands, and loopback Local UI flow are
+  implemented. Full Go test/vet, focused race, disposable PostgreSQL restart /
+  concurrency, UI lint/build/source-state, deterministic renderer/release,
+  source-hygiene, and diff checks pass locally.
+- Product BuildRecord lookup is currently `AUTH_REQUIRED`. Before live work the
+  operator must run `opsi login --pat-file <protected-path>`; no PAT is accepted
+  in chat, argv, history, logs, or evidence.
+- Read-only live preflight re-confirmed the trusted Agent ED25519 fingerprint,
+  staging Cloud digest and four healthy staging containers, K3s `v1.36.2+k3s1`,
+  node `node-c69fe70180d359d7`, and Agent `0.0.0-r5.004.af0ebce`. The Agent local
+  health currently reports `cloud_connected=false`, which must be resolved or
+  explained through the authenticated product path before deployment.
+- No Cloud/Agent release, staging mutation, workload apply, Agent restart, K3s
+  reset, VPS reset, or Cloudflare/DNS/TLS change has been performed for R5-010.
+
 ### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
 
 - R5-009 local acceptance passed on 2026-07-19 with disposable PostgreSQL,

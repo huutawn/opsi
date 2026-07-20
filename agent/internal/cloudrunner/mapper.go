@@ -13,6 +13,10 @@ import (
 var errImageSourceUnsupported = errors.New("image source deploy is not supported by the Agent runner yet")
 
 func RequestFromLease(lease cloudrelay.DeploymentLease, cfg config.DeploymentConfig) (deploy.Request, error) {
+	if lease.Command != nil {
+		request := deploy.Request{Production: lease.Command}
+		return request, request.Validate()
+	}
 	sourceType := lease.Service.SourceType
 	if lease.Deployment.DeploymentIntent != nil && lease.Deployment.DeploymentIntent.Source.Type != "" {
 		sourceType = lease.Deployment.DeploymentIntent.Source.Type

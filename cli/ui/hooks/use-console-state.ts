@@ -170,19 +170,6 @@ export function useConsoleState() {
     }
   }
 
-  async function deploy(serviceID: string) {
-    if (!currentProject || !state.readiness?.can_deploy) return;
-    patch({ busy: `deploy-${serviceID}` });
-    try {
-      const job = await client.deploy(currentProject.id, serviceID);
-      await loadDeploymentEvents(job.id);
-      setActive("Deployments");
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
-  }
-
   async function diagnostics(nodeID: string) {
     if (!currentProject) return;
     patch({ nodeDetail: await client.node(currentProject.id, nodeID) });
@@ -345,7 +332,6 @@ export function useConsoleState() {
       addServer,
       createProject,
       createService,
-      deploy,
       diagnostics,
       load,
       loadBootstrapEvents,

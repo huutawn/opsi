@@ -977,54 +977,6 @@ func redactLocalTelemetryText(value string) string {
 	return strings.ReplaceAll(out, "kubeconfig", "[REDACTED]")
 }
 
-func localDeploymentIDs(path, method string) (string, string, bool) {
-	if method != http.MethodPost {
-		return "", "", false
-	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 7 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "services" || parts[6] != "deployments" {
-		return "", "", false
-	}
-	return parts[3], parts[5], true
-}
-
-func fetchCloudServiceSourceType(ctx context.Context, cloud url.URL, projectID, serviceID string, headers http.Header, factory func() (keychain.Store, error)) (string, bool, error) {
-	cloud.Path = "/api/projects/" + url.PathEscape(projectID) + "/services"
-	cloud.RawQuery = ""
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cloud.String(), nil)
-	if err != nil {
-		return "", false, err
-	}
-	copyProxyHeaders(req.Header, headers)
-	req.Header.Del("Authorization")
-	if pat := optionalPAT(factory); pat != "" {
-		req.Header.Set("Authorization", "Bearer "+pat)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", false, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("service list status %d", resp.StatusCode)
-	}
-	var payload struct {
-		Services []struct {
-			ID         string `json:"id"`
-			SourceType string `json:"source_type"`
-		} `json:"services"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", false, err
-	}
-	for _, service := range payload.Services {
-		if service.ID == serviceID {
-			return service.SourceType, true, nil
-		}
-	}
-	return "", false, nil
-}
-
 func newLocalSessionToken() string {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {

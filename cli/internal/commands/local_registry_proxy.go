@@ -66,14 +66,16 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	// The pre-R5-010 service-scoped endpoint is retained only as a development
+	// compatibility boundary; production immutable jobs use /deployments.
 	if projectID, serviceID, ok := localDeploymentIDs(r.URL.Path, r.Method); ok {
 		sourceType, found, err := fetchCloudServiceSourceType(ctx, *cloud, projectID, serviceID, r.Header, factory)
 		if err != nil {
-			writeLocalError(w, r, http.StatusBadGateway, "LOCAL_DEPLOY_VALIDATION_FAILED", "could not validate service deployment source")
+			writeLocalError(w, r, http.StatusBadGateway, "LOCAL_DEPLOY_VALIDATION_FAILED", "could not validate legacy deployment source")
 			return
 		}
 		if found && sourceType == "image" {
-			writeLocalError(w, r, http.StatusBadRequest, "IMAGE_DEPLOY_NOT_SUPPORTED", "Image-source deploy is not supported by the current Agent runner. Use Git source or enable the image deploy capability.")
+			writeLocalError(w, r, http.StatusBadRequest, "IMAGE_DEPLOY_NOT_SUPPORTED", "legacy service-scoped image deploy is disabled; use an accepted BuildRecord with opsi deploy apply")
 			return
 		}
 	}
@@ -109,6 +111,54 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func localDeploymentIDs(path, method string) (string, string, bool) {
+	if method != http.MethodPost {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 7 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "services" || parts[6] != "deployments" {
+		return "", "", false
+	}
+	return parts[3], parts[5], true
+}
+
+func fetchCloudServiceSourceType(ctx context.Context, cloud url.URL, projectID, serviceID string, headers http.Header, factory func() (keychain.Store, error)) (string, bool, error) {
+	cloud.Path = "/api/projects/" + url.PathEscape(projectID) + "/services"
+	cloud.RawQuery = ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cloud.String(), nil)
+	if err != nil {
+		return "", false, err
+	}
+	copyProxyHeaders(req.Header, headers)
+	req.Header.Del("Authorization")
+	if pat := optionalPAT(factory); pat != "" {
+		req.Header.Set("Authorization", "Bearer "+pat)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("service list status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Services []struct {
+			ID         string `json:"id"`
+			SourceType string `json:"source_type"`
+		} `json:"services"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", false, err
+	}
+	for _, service := range payload.Services {
+		if service.ID == serviceID {
+			return service.SourceType, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func startLocalInstallationClaim(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), flow *localAuthFlow) bool {
@@ -275,7 +325,7 @@ func isMutation(method string) bool {
 }
 
 func isPlacementPreview(path string) bool {
-	for _, suffix := range []string{"/topology/plan", "/topology/validate", "/topology/diff", "/deployment-policies/preview", "/deployment-policies/diff", "/routing-decisions"} {
+	for _, suffix := range []string{"/topology/plan", "/topology/validate", "/topology/diff", "/deployment-policies/preview", "/deployment-policies/diff", "/deployments/preview", "/deployments/diff", "/routing-decisions"} {
 		if strings.HasSuffix(path, suffix) {
 			return true
 		}

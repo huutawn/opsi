@@ -23,6 +23,8 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 type Server struct {
@@ -431,6 +433,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentDeploymentResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/deployments/") && strings.HasSuffix(r.URL.Path, "/progress") {
+		s.handleAgentDeploymentProgress(w, r)
+		return
+	}
 	if strings.Contains(r.URL.Path, "/node-lifecycle/") && strings.HasSuffix(r.URL.Path, "/result") {
 		s.handleAgentNodeLifecycleResult(w, r)
 		return
@@ -451,9 +457,16 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if ok {
+		if lease.Command != nil && lease.Deployment.AttemptCount == 1 {
+			if err := s.validateLeasedDeploymentAuthority(r.Context(), lease.Deployment); err != nil {
+				_, _ = s.Registry.CompleteDeployment(projectID, nodeID, lease.Deployment.ID, r.Header.Get("X-Request-ID"), registry.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: "failed", LeaseToken: lease.LeaseToken, SpecHash: lease.Deployment.SpecHash, ApplicationImage: lease.Command.Image.Reference, FailureCode: "DEPLOYMENT_AUTHORITY_REVOKED", FailureMessageRedacted: "deployment authority changed before first Agent lease"})
+				writeRegistryFailure(w, r, err)
+				return
+			}
+		}
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
-		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action, "lease_token": lease.LeaseToken})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
 		return
 	}
 	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)
@@ -490,6 +503,62 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, env)
+}
+
+type immutableDeploymentProgressStore interface {
+	ProgressImmutableDeployment(string, string, string, string, deploymentv1.Progress) (registry.DeploymentJob, error)
+}
+
+func (s *Server) handleAgentDeploymentProgress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+		return
+	}
+	deploymentID := deploymentIDFromAgentPath(r.URL.Path)
+	store, ok := s.Registry.(immutableDeploymentProgressStore)
+	if deploymentID == "" || !ok {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "DEPLOYMENT_PROGRESS_UNAVAILABLE", Message: "deployment progress store is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	var progress deploymentv1.Progress
+	if !decodeJSON(w, r, &progress) {
+		return
+	}
+	if progress.SchemaVersion != deploymentv1.EventSchemaVersion {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "DEPLOYMENT_PROGRESS_INVALID", Message: "deployment progress schema is invalid", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	job, err := store.ProgressImmutableDeployment(projectID, nodeID, deploymentID, r.Header.Get("X-Request-ID"), progress)
+	writeRegistryResult(w, r, job, err, http.StatusOK)
+}
+
+func (s *Server) validateLeasedDeploymentAuthority(ctx context.Context, job registry.DeploymentJob) error {
+	if job.Snapshot == nil {
+		return nil
+	}
+	snapshot := job.Snapshot
+	record, err := s.BuildRecords.Get(ctx, job.ProjectID, snapshot.Authority.BuildRecord.ID)
+	if err != nil || record.Build.Status != "succeeded" || record.Build.OCIRepository != snapshot.Image.Repository || record.Build.OCIDigest != snapshot.Image.Digest || record.ActiveBindingID != snapshot.Authority.BuildRecord.ActiveBindingID {
+		return registry.APIError{Status: 409, Code: "DEPLOYMENT_BUILD_AUTHORITY_REVOKED", Message: "BuildRecord or active service binding changed before Agent lease"}
+	}
+	decision, err := s.Policies.Route(ctx, job.ProjectID, deploymentpolicyv1.RoutingRequest{BuildRecordID: record.ID, EnvironmentID: snapshot.Authority.EnvironmentID})
+	if err != nil || !decision.Eligible || decision.DecisionHash != snapshot.Authority.RoutingDecisionHash || decision.RuntimeID != job.RuntimeID || decision.NodeID != job.NodeID || decision.AgentID != job.AgentID {
+		return registry.APIError{Status: 409, Code: "DEPLOYMENT_ROUTING_AUTHORITY_REVOKED", Message: "routing decision changed before Agent lease"}
+	}
+	plan, err := s.Topology.Get(ctx, job.ProjectID)
+	if err != nil || plan.ID != snapshot.Authority.TopologyPlanID || plan.Revision != snapshot.Authority.TopologyRevision || plan.PlanHash != snapshot.Authority.TopologyHash {
+		return registry.APIError{Status: 409, Code: "DEPLOYMENT_TOPOLOGY_AUTHORITY_REVOKED", Message: "TopologyPlan changed before Agent lease"}
+	}
+	policy, err := s.Policies.Get(ctx, job.ProjectID, snapshot.Authority.DeploymentPolicyID)
+	if err != nil || !policy.Draft.Enabled || policy.Revision != snapshot.Authority.DeploymentPolicyRevision || policy.PolicyHash != snapshot.Authority.DeploymentPolicyHash {
+		return registry.APIError{Status: 409, Code: "DEPLOYMENT_POLICY_AUTHORITY_REVOKED", Message: "DeploymentPolicy changed before Agent lease"}
+	}
+	return nil
 }
 
 func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Request) {

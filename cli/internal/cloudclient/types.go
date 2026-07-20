@@ -8,6 +8,7 @@ import (
 
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
@@ -33,6 +34,54 @@ type DeploymentPolicyDisableRequest = deploymentpolicyv1.DisableRequest
 type RoutingRequest = deploymentpolicyv1.RoutingRequest
 type RoutingDecision = deploymentpolicyv1.RoutingDecision
 type PlacementFacts = topologyv1.PlacementFacts
+type DeploymentCreateRequest = deploymentv1.CreateRequest
+type DeploymentPreview = deploymentv1.Preview
+type WorkloadSpec = deploymentv1.WorkloadSpec
+type WorkloadResources = deploymentv1.Resources
+type WorkloadResourceValues = deploymentv1.ResourceValues
+type WorkloadProbe = deploymentv1.Probe
+type WorkloadEnvironmentVariable = deploymentv1.EnvironmentVariable
+type WorkloadSecretReference = deploymentv1.SecretReference
+type WorkloadExposureIntent = deploymentv1.ExposureIntent
+
+type DeploymentJob struct {
+	SchemaVersion          string                    `json:"schema_version,omitempty"`
+	Mode                   string                    `json:"mode,omitempty"`
+	ID                     string                    `json:"id"`
+	ProjectID              string                    `json:"project_id"`
+	EnvironmentID          string                    `json:"environment_id"`
+	RuntimeID              string                    `json:"runtime_id"`
+	ServiceID              string                    `json:"service_id"`
+	Status                 string                    `json:"status"`
+	AgentID                string                    `json:"agent_id,omitempty"`
+	NodeID                 string                    `json:"node_id,omitempty"`
+	FailureCode            string                    `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                    `json:"failure_message_redacted,omitempty"`
+	LeaseExpiresAt         *time.Time                `json:"lease_expires_at,omitempty"`
+	RetryAfter             *time.Time                `json:"retry_after,omitempty"`
+	AttemptCount           int                       `json:"attempt_count,omitempty"`
+	MaxAttempts            int                       `json:"max_attempts,omitempty"`
+	StartedAt              *time.Time                `json:"started_at,omitempty"`
+	FinishedAt             *time.Time                `json:"finished_at,omitempty"`
+	CreatedAt              time.Time                 `json:"created_at"`
+	UpdatedAt              time.Time                 `json:"updated_at"`
+	Snapshot               *deploymentv1.JobSnapshot `json:"snapshot,omitempty"`
+	SpecHash               string                    `json:"spec_hash,omitempty"`
+	Reused                 bool                      `json:"reused,omitempty"`
+	TerminalResult         *deploymentv1.AgentResult `json:"terminal_result,omitempty"`
+}
+
+type DeploymentEvent struct {
+	SchemaVersion   string    `json:"schema_version,omitempty"`
+	ID              string    `json:"id"`
+	DeploymentID    string    `json:"deployment_id"`
+	Step            string    `json:"step"`
+	MessageRedacted string    `json:"message_redacted"`
+	ProgressPercent int       `json:"progress_percent"`
+	Attempt         int       `json:"attempt,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
 
 type APIError struct {
 	Status  int

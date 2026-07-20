@@ -3,7 +3,7 @@
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-17 |
+| Last updated | 2026-07-20 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
@@ -30,8 +30,9 @@ artifacts. At this snapshot:
   GitHub origin matching, numeric repository claim, service binding, and atomic
   repository bootstrap file generation. GitHub Actions OIDC, `BuildRecord`,
   manual `TopologyPlan`, exact-match `DeploymentPolicy`, and deterministic
-  routing preflight are implemented. Digest deployment, `DeploymentJob`, and
-  pull request preview environments are not implemented.
+  routing preflight are implemented. R5-010 adds the local immutable-digest
+  `DeploymentJob` path; real VPS acceptance is still blocked. Pull request
+  preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
   certificate directories, databases, logs, and generated output.
@@ -91,8 +92,9 @@ bindings live under `contracts/`; business logic remains in the owning domain.
 - Deterministic bounded incident context from metric windows and log
   fingerprints, plus list/get/resolve authorization, MTTR, and resolve audit.
 - Cloud relay client and runner for signed heartbeat, deployment lease/result,
-  and `DeploymentIntent`-scoped Git execution. Image-source deploy is rejected
-  before runtime execution.
+  legacy `DeploymentIntent`-scoped Git execution, and the R5-010 immutable-image
+  command/result contract. Production image jobs never enter the Git clone or
+  Dockerfile build branch.
 
 Agent does not currently provide public incident evidence or a unified action
 policy/approval/executor contract.
@@ -376,22 +378,35 @@ shutdown configuration; those resources are user-owned input, not an
 Opsi-managed gateway. `IngressEnabled` was removed from active contracts/config,
 with a fail-fast error retained for old configuration.
 
-The migration target is:
+R5-010 now implements the local migration path as:
 
 ```text
-legacy/manual Git build
--> trusted OCI artifact delivery
+legacy/manual Git build (development compatibility only)
+-> accepted BuildRecord + exact R5-009 route
+-> durable immutable-image DeploymentJob
+-> Agent digest pull + Opsi Deployment/ClusterIP Service
 ```
 
-The target flow uses GitHub Actions build/test, an OCI registry, an OIDC-bound
+The production flow uses GitHub Actions build/test, an OCI registry, an OIDC-bound
 `BuildRecord`, `DeploymentPolicy`, a durable `DeploymentJob`, and Agent
 deployment of `registry/repository@sha256:<digest>`. Git commit SHA remains
-source identity and provenance, not the runtime artifact. This target has not
-started: image-source deployment remains rejected, and the current Git-source
-clone/build path remains implemented for legacy/manual development use.
+source identity and provenance, not the runtime artifact. The local
+implementation extends the existing job/engine rather than adding a parallel
+deployment engine. It snapshots BuildRecord/topology/policy/routing/workload
+authority, uses lease-bound monotonic progress, renders owned Deployment and
+ClusterIP Service resources, rejects foreign collisions, and verifies the
+named application container imageID. The Git clone/build path remains only for
+legacy/manual development use.
 
-Opsi-rendered Deployment/ClusterIP Service, managed Traefik `ExposureSpec`,
-conflict checks, readiness, and rollback also have not started.
+Local implementation does not establish live acceptance. Full Go test/vet,
+focused race, disposable PostgreSQL migration/restart/concurrency, UI
+lint/build/source-state, deterministic Agent release, source hygiene, and diff
+checks pass. Product login and canonical live BuildRecord lookup remain blocked
+by `AUTH_REQUIRED`; read-only Agent health currently reports
+`cloud_connected=false`. Headless live UI parity, published immutable Cloud /
+Agent artifacts, supported live Agent upgrade, real K3s workload proof, and
+restart recovery remain unproven. R5-010 creates no Ingress/Gateway/DNS/TLS
+resource and implements no automatic rollback; those remain R5-011 scope.
 
 ## E2E and production evidence
 

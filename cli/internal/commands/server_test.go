@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -127,6 +128,45 @@ func TestServerBootstrapCLIAndLocalUIUseSameCloudFlow(t *testing.T) {
 		if request.Authorization != "Bearer test-pat" || request.IdempotencyKey == "" {
 			t.Fatalf("missing protected Cloud headers: %+v", request)
 		}
+	}
+}
+
+func TestAgentUpgradeLifecycleInputsAndScriptAreFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	identity := filepath.Join(dir, "identity")
+	knownHosts := filepath.Join(dir, "known_hosts")
+	if err := os.WriteFile(identity, []byte("test-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(knownHosts, []byte("host ssh-ed25519 test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	valid := agentUpgradeFlags{projectID: "proj-1", nodeID: "node-1", artifactURL: "https://github.com/huutawn/opsi/releases/download/r5-010/opsi-agent-linux-amd64", artifactSHA256: strings.Repeat("a", 64), expectedVersion: "0.0.0-r5.010.test", sshUsername: "ubuntu", sshPort: 22, identityFile: identity, knownHostsFile: knownHosts}
+	if err := valid.validate(); err != nil {
+		t.Fatal(err)
+	}
+	invalid := valid
+	invalid.artifactURL = "https://user:secret@example.test/agent"
+	if invalid.validate() == nil {
+		t.Fatal("accepted credential-bearing artifact URL")
+	}
+	invalid = valid
+	invalid.artifactSHA256 = strings.Repeat("A", 64)
+	if invalid.validate() == nil {
+		t.Fatal("accepted non-canonical Agent checksum")
+	}
+	for _, required := range []string{"/opt/opsi/agent/releases", "/opt/opsi/agent/current", "/opt/opsi/agent/previous", "sha256sum", "systemctl restart opsi-agent", "wait_health", "atomic_link"} {
+		if !strings.Contains(atomicAgentUpgradeScript, required) {
+			t.Fatalf("Agent upgrade lifecycle omitted %q", required)
+		}
+	}
+	if strings.Contains(atomicAgentUpgradeScript, "k3s") || strings.Contains(atomicAgentUpgradeScript, "scp ") {
+		t.Fatal("Agent upgrade lifecycle mutates K3s or uses scp replacement")
+	}
+	syntax := exec.Command("sh", "-n")
+	syntax.Stdin = strings.NewReader(atomicAgentUpgradeScript)
+	if output, err := syntax.CombinedOutput(); err != nil {
+		t.Fatalf("atomic Agent upgrade script is not valid POSIX shell: %v: %s", err, output)
 	}
 }
 

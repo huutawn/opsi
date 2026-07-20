@@ -11,15 +11,22 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 type fakeClient struct {
 	leases      []cloudrelay.DeploymentLease
 	nodeLeases  []cloudrelay.NodeLifecycleLease
 	results     []cloudrelay.DeploymentResult
+	progress    []deploymentv1.Progress
 	nodeResults []cloudrelay.NodeLifecycleResult
 	heartbeats  int
 	cancel      context.CancelFunc
+}
+
+func (f *fakeClient) ProgressDeployment(_ context.Context, _ string, _ string, progress deploymentv1.Progress) error {
+	f.progress = append(f.progress, progress)
+	return nil
 }
 
 func (f *fakeClient) PollJob(context.Context, string, time.Duration) (*cloudrelay.JobLease, error) {

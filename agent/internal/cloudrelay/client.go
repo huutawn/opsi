@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 type Client struct {
@@ -40,11 +41,12 @@ type WebhookEnvelope struct {
 }
 
 type DeploymentLease struct {
-	Kind       string                `json:"kind"`
-	Action     string                `json:"action"`
-	LeaseToken string                `json:"lease_token,omitempty"`
-	Deployment DeploymentJobEnvelope `json:"deployment"`
-	Service    ServiceEnvelope       `json:"service"`
+	Kind       string                     `json:"kind"`
+	Action     string                     `json:"action"`
+	LeaseToken string                     `json:"lease_token,omitempty"`
+	Deployment DeploymentJobEnvelope      `json:"deployment"`
+	Service    ServiceEnvelope            `json:"service"`
+	Command    *deploymentv1.AgentCommand `json:"command,omitempty"`
 }
 
 type JobLease struct {
@@ -145,6 +147,7 @@ type ServiceEnvelope struct {
 }
 
 type DeploymentResult struct {
+	SchemaVersion          string `json:"schema_version,omitempty"`
 	Status                 string `json:"status"`
 	LeaseToken             string `json:"lease_token,omitempty"`
 	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
@@ -153,6 +156,13 @@ type DeploymentResult struct {
 	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
 	RollbackEligible       bool   `json:"rollback_eligible"`
 	RollbackBlockedReason  string `json:"rollback_blocked_reason,omitempty"`
+	SpecHash               string `json:"spec_hash,omitempty"`
+	ApplicationImage       string `json:"application_image,omitempty"`
+	ApplicationImageID     string `json:"application_image_id,omitempty"`
+	Namespace              string `json:"namespace,omitempty"`
+	DeploymentName         string `json:"deployment_name,omitempty"`
+	ServiceName            string `json:"service_name,omitempty"`
+	AvailableReplicas      int32  `json:"available_replicas,omitempty"`
 }
 
 type NodeLifecycleLease struct {
@@ -291,6 +301,43 @@ func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("complete deployment: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c Client) ProgressDeployment(ctx context.Context, nodeID, deploymentID string, progress deploymentv1.Progress) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/deployments/" + url.PathEscape(deploymentID) + "/progress"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(progress)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("deployment progress: status %d", resp.StatusCode)
 	}
 	return nil
 }

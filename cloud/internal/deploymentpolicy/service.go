@@ -276,7 +276,7 @@ func policyMatches(policy deploymentpolicyv1.Draft, record buildrecordv1.Record,
 		return true
 	}
 	for _, prefix := range policy.AllowedOCIPrefixes {
-		if strings.HasPrefix(record.Build.OCIRepository, prefix) {
+		if record.Build.OCIRepository == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(record.Build.OCIRepository, strings.TrimSuffix(prefix, "/")+"/") {
 			return true
 		}
 	}

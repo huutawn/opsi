@@ -165,10 +165,23 @@ export type DeploymentPolicyPreview = { policy: DeploymentPolicyDraft; policy_ha
 export type DeploymentPolicyApplyResult = { policy: DeploymentPolicy; reused: boolean };
 
 export type DeploymentJob = {
-  id: string;
-  service_id: string;
-  status: string;
-  deployment_plan_hash?: string;
+	 schema_version?: string;
+	 mode?: string;
+	 id: string;
+	 project_id?: string;
+	 environment_id?: string;
+	 runtime_id?: string;
+	 service_id: string;
+	 status: string;
+	 spec_hash?: string;
+	 attempt_count?: number;
+	 max_attempts?: number;
+	 retry_after?: string;
+	 reused?: boolean;
+	 started_at?: string;
+	 finished_at?: string;
+	 updated_at?: string;
+	 deployment_plan_hash?: string;
   manifest_hash?: string;
   intent_hash?: string;
   deployment_intent?: unknown;
@@ -178,17 +191,65 @@ export type DeploymentJob = {
   agent_id?: string;
   node_id?: string;
   failure_code?: string;
-  failure_message_redacted?: string;
+	 failure_message_redacted?: string;
+	 terminal_result?: {
+		schema_version: string;
+		status: string;
+		spec_hash: string;
+		application_image: string;
+		application_image_id: string;
+		namespace: string;
+		deployment_name: string;
+		service_name: string;
+		available_replicas: number;
+		failure_code?: string;
+		failure_message_redacted?: string;
+	 };
   requested_by?: string;
-  created_at: string;
+	 created_at: string;
+	 snapshot?: {
+		project_id: string;
+		image: { repository: string; digest: string; reference: string };
+		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; deployment_policy_id: string; deployment_policy_revision: number; runtime_id: string; node_id: string; agent_id: string };
+		workload: WorkloadSpec;
+		spec_hash: string;
+	};
+};
+
+export type WorkloadSpec = {
+	schema_version: "opsi.workload_spec/v1";
+	service_key: string;
+	replicas: number;
+	application_container_name: "app";
+	container_port: number;
+	readiness_probe?: { path: string; port: number; initial_delay_seconds: number; period_seconds: number; timeout_seconds: number; failure_threshold: number };
+	liveness_probe?: { path: string; port: number; initial_delay_seconds: number; period_seconds: number; timeout_seconds: number; failure_threshold: number };
+	resources: { requests: { cpu: string; memory: string }; limits: { cpu: string; memory: string } };
+	termination_grace_period_seconds: number;
+	environment?: Array<{ name: string; value: string }>;
+	secret_references?: Array<{ env_name: string; secret_id: string }>;
+	exposure: { mode: "none" | "internal" };
+};
+
+export type DeploymentPreview = {
+	schema_version: string;
+	snapshot: NonNullable<DeploymentJob["snapshot"]>;
+	current?: DeploymentJob["snapshot"];
+	changes: string[];
+	eligible: boolean;
+	decision_code: string;
+	message: string;
+	resolved_at: string;
 };
 
 export type TimelineEvent = {
+  schema_version?: string;
   id: string;
   deployment_id?: string;
   step: string;
   message_redacted: string;
   progress_percent: number;
+  attempt?: number;
   request_id?: string;
   created_at: string;
 };

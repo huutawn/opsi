@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -471,35 +473,43 @@ type DeploymentIntentReview struct {
 }
 
 type DeploymentJob struct {
-	ID                     string            `json:"id"`
-	OrgID                  string            `json:"org_id"`
-	ProjectID              string            `json:"project_id"`
-	EnvironmentID          string            `json:"environment_id"`
-	RuntimeID              string            `json:"runtime_id"`
-	ServiceID              string            `json:"service_id"`
-	Status                 string            `json:"status"`
-	Action                 string            `json:"action,omitempty"`
-	IdempotencyKey         string            `json:"idempotency_key"`
-	DeploymentPlanHash     string            `json:"deployment_plan_hash,omitempty"`
-	ManifestHash           string            `json:"manifest_hash,omitempty"`
-	IntentHash             string            `json:"intent_hash,omitempty"`
-	DeploymentIntent       *DeploymentIntent `json:"deployment_intent,omitempty"`
-	PreviousRevisionRef    string            `json:"previous_revision_ref,omitempty"`
-	RollbackEligible       bool              `json:"rollback_eligible"`
-	RollbackBlockedReason  string            `json:"rollback_blocked_reason,omitempty"`
-	RequestedBy            string            `json:"requested_by,omitempty"`
-	AgentID                string            `json:"agent_id,omitempty"`
-	NodeID                 string            `json:"node_id,omitempty"`
-	FailureCode            string            `json:"failure_code,omitempty"`
-	FailureMessageRedacted string            `json:"failure_message_redacted,omitempty"`
-	LeaseToken             string            `json:"-"`
-	LeaseExpiresAt         *time.Time        `json:"lease_expires_at,omitempty"`
-	AttemptCount           int               `json:"attempt_count,omitempty"`
-	MaxAttempts            int               `json:"max_attempts,omitempty"`
-	StartedAt              *time.Time        `json:"started_at,omitempty"`
-	FinishedAt             *time.Time        `json:"finished_at,omitempty"`
-	CreatedAt              time.Time         `json:"created_at"`
-	UpdatedAt              time.Time         `json:"updated_at"`
+	SchemaVersion          string                    `json:"schema_version,omitempty"`
+	Mode                   string                    `json:"mode,omitempty"`
+	ID                     string                    `json:"id"`
+	OrgID                  string                    `json:"org_id"`
+	ProjectID              string                    `json:"project_id"`
+	EnvironmentID          string                    `json:"environment_id"`
+	RuntimeID              string                    `json:"runtime_id"`
+	ServiceID              string                    `json:"service_id"`
+	Status                 string                    `json:"status"`
+	Action                 string                    `json:"action,omitempty"`
+	IdempotencyKey         string                    `json:"idempotency_key"`
+	DeploymentPlanHash     string                    `json:"deployment_plan_hash,omitempty"`
+	ManifestHash           string                    `json:"manifest_hash,omitempty"`
+	IntentHash             string                    `json:"intent_hash,omitempty"`
+	DeploymentIntent       *DeploymentIntent         `json:"deployment_intent,omitempty"`
+	PreviousRevisionRef    string                    `json:"previous_revision_ref,omitempty"`
+	RollbackEligible       bool                      `json:"rollback_eligible"`
+	RollbackBlockedReason  string                    `json:"rollback_blocked_reason,omitempty"`
+	RequestedBy            string                    `json:"requested_by,omitempty"`
+	AgentID                string                    `json:"agent_id,omitempty"`
+	NodeID                 string                    `json:"node_id,omitempty"`
+	FailureCode            string                    `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                    `json:"failure_message_redacted,omitempty"`
+	LeaseToken             string                    `json:"-"`
+	LeaseExpiresAt         *time.Time                `json:"lease_expires_at,omitempty"`
+	RetryAfter             *time.Time                `json:"retry_after,omitempty"`
+	AttemptCount           int                       `json:"attempt_count,omitempty"`
+	MaxAttempts            int                       `json:"max_attempts,omitempty"`
+	StartedAt              *time.Time                `json:"started_at,omitempty"`
+	FinishedAt             *time.Time                `json:"finished_at,omitempty"`
+	CreatedAt              time.Time                 `json:"created_at"`
+	UpdatedAt              time.Time                 `json:"updated_at"`
+	Snapshot               *deploymentv1.JobSnapshot `json:"snapshot,omitempty"`
+	SpecHash               string                    `json:"spec_hash,omitempty"`
+	PayloadHash            string                    `json:"payload_hash,omitempty"`
+	Reused                 bool                      `json:"reused,omitempty"`
+	TerminalResult         *deploymentv1.AgentResult `json:"terminal_result,omitempty"`
 }
 
 type deploymentLock struct {
@@ -508,6 +518,7 @@ type deploymentLock struct {
 }
 
 type DeploymentEvent struct {
+	SchemaVersion   string    `json:"schema_version,omitempty"`
 	ID              string    `json:"id"`
 	OrgID           string    `json:"org_id"`
 	ProjectID       string    `json:"project_id"`
@@ -517,18 +528,21 @@ type DeploymentEvent struct {
 	Step            string    `json:"step"`
 	MessageRedacted string    `json:"message_redacted"`
 	ProgressPercent int       `json:"progress_percent"`
+	Attempt         int       `json:"attempt,omitempty"`
 	RequestID       string    `json:"request_id,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 
 type DeploymentLease struct {
-	Deployment DeploymentJob `json:"deployment"`
-	Service    ServiceRecord `json:"service"`
-	Action     string        `json:"action"`
-	LeaseToken string        `json:"lease_token,omitempty"`
+	Deployment DeploymentJob              `json:"deployment"`
+	Service    ServiceRecord              `json:"service"`
+	Action     string                     `json:"action"`
+	LeaseToken string                     `json:"lease_token,omitempty"`
+	Command    *deploymentv1.AgentCommand `json:"command,omitempty"`
 }
 
 type DeploymentResult struct {
+	SchemaVersion          string `json:"schema_version,omitempty"`
 	Status                 string `json:"status"`
 	LeaseToken             string `json:"lease_token,omitempty"`
 	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
@@ -537,6 +551,13 @@ type DeploymentResult struct {
 	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
 	RollbackEligible       bool   `json:"rollback_eligible"`
 	RollbackBlockedReason  string `json:"rollback_blocked_reason,omitempty"`
+	SpecHash               string `json:"spec_hash,omitempty"`
+	ApplicationImage       string `json:"application_image,omitempty"`
+	ApplicationImageID     string `json:"application_image_id,omitempty"`
+	Namespace              string `json:"namespace,omitempty"`
+	DeploymentName         string `json:"deployment_name,omitempty"`
+	ServiceName            string `json:"service_name,omitempty"`
+	AvailableReplicas      int32  `json:"available_replicas,omitempty"`
 }
 
 type AuditEvent struct {
@@ -1459,6 +1480,93 @@ func (s *Service) StartDeployment(projectID, serviceID, requestedBy, key, reques
 	return job, nil
 }
 
+// StartImmutableDeployment is the canonical R5-010 create path. The caller
+// supplies an authority snapshot produced by BuildRecord + routing services;
+// this method only persists the snapshot and never accepts source or manifest data.
+func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, requestedBy, key, requestID string) (DeploymentJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !validDeploymentIdempotencyKey(key) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "IDEMPOTENCY_KEY_INVALID", Message: "deployment idempotency key is invalid", RequestID: requestID}
+	}
+	if existing, ok := s.idempotency["deploy:v1:"+snapshot.ProjectID+":"+key].(DeploymentJob); ok {
+		if existing.PayloadHash != snapshot.PayloadHash {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used with a different deployment payload", RequestID: requestID}
+		}
+		if current, exists := s.deployments[existing.ID]; exists {
+			existing = current
+		}
+		existing.Reused = true
+		return existing, true, nil
+	}
+	if snapshot.SchemaVersion != deploymentv1.JobSchemaVersion || snapshot.ProjectID == "" || snapshot.Authority.BuildRecord.ProjectID != snapshot.ProjectID {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "DEPLOYMENT_SNAPSHOT_INVALID", Message: "deployment authority snapshot is invalid", RequestID: requestID}
+	}
+	if err := snapshot.Image.Validate(); err != nil {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "BUILD_ARTIFACT_INVALID", Message: "immutable image reference is invalid", RequestID: requestID}
+	}
+	if err := snapshot.Workload.Validate(); err != nil {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "WORKLOAD_SPEC_INVALID", Message: "WorkloadSpec is invalid", RequestID: requestID}
+	}
+	if hash, err := snapshot.Workload.Hash(); err != nil || hash != snapshot.SpecHash {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "WORKLOAD_SPEC_HASH_INVALID", Message: "WorkloadSpec hash does not match", RequestID: requestID}
+	}
+	if snapshot.Image.Repository != snapshot.Authority.BuildRecord.Build.OCIRepository || snapshot.Image.Digest != snapshot.Authority.BuildRecord.Build.OCIDigest {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "BUILD_ARTIFACT_MISMATCH", Message: "image reference does not match the accepted BuildRecord", RequestID: requestID}
+	}
+	service, ok := s.services[snapshot.Authority.BuildRecord.ServiceID]
+	if !ok || service.ProjectID != snapshot.ProjectID || service.Name == "" {
+		return DeploymentJob{}, false, ErrNotFound
+	}
+	if service.ID != snapshot.Authority.BuildRecord.ServiceID || service.EnvironmentID != snapshot.Authority.EnvironmentID || service.RuntimeID != snapshot.Authority.RuntimeID {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_SERVICE_BINDING_INVALID", Message: "service binding does not match the resolved target", RequestID: requestID}
+	}
+	node, agent, err := s.deployAgentLocked(snapshot.ProjectID, snapshot.Authority.RuntimeID, requestID)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if node.ID != snapshot.Authority.NodeID || agent.ID != snapshot.Authority.AgentID {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "ROUTING_TARGET_CHANGED", Message: "resolved Agent target changed before job creation", RequestID: requestID}
+	}
+	now := s.clock()
+	snapshot.CreatedAt = now
+	snapshot.ActorUserID = requestedBy
+	snapshot.IdempotencyKey = key
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "immutable_image", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: snapshot.Authority.EnvironmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: "deploy", IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
+	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
+	if err := s.acquireDeploymentLockLocked(service.ID, job.ID, now, requestID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	s.deployments[job.ID] = job
+	s.deployEvents[job.ID] = []DeploymentEvent{{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: deploymentv1.StateQueued, MessageRedacted: "immutable image deployment queued", ProgressPercent: 0, Attempt: job.AttemptCount, CreatedAt: now}}
+	s.idempotency["deploy:v1:"+snapshot.ProjectID+":"+key] = job
+	return job, false, nil
+}
+
+func (s *Service) ReplayImmutableDeployment(projectID, key, payloadHash string) (DeploymentJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.idempotency["deploy:v1:"+projectID+":"+key].(DeploymentJob)
+	if !ok {
+		return DeploymentJob{}, false, nil
+	}
+	if existing.PayloadHash != payloadHash {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used with a different deployment payload"}
+	}
+	if current, exists := s.deployments[existing.ID]; exists {
+		existing = current
+	}
+	existing.Reused = true
+	return existing, true, nil
+}
+
+func (s *Service) ImmutableDeploymentCommand(job DeploymentJob) *deploymentv1.AgentCommand {
+	if job.Snapshot == nil {
+		return nil
+	}
+	return &deploymentv1.AgentCommand{SchemaVersion: deploymentv1.CommandSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, AgentID: job.AgentID, LeaseToken: job.LeaseToken, Attempt: int32(job.AttemptCount), Image: job.Snapshot.Image, Workload: job.Snapshot.Workload, SpecHash: job.SpecHash}
+}
+
 func (s *Service) RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1505,6 +1613,9 @@ func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bo
 		if job.ProjectID != projectID || job.NodeID != nodeID || (job.Status != DeploymentQueued && job.Status != DeploymentRollingBack) {
 			continue
 		}
+		if job.RetryAfter != nil && job.RetryAfter.After(s.clock()) {
+			continue
+		}
 		service, ok := s.services[job.ServiceID]
 		if !ok {
 			return DeploymentLease{}, false, ErrNotFound
@@ -1518,7 +1629,11 @@ func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bo
 		}
 		now := s.clock()
 		leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
-		job.Status = DeploymentWaitingAgent
+		if job.Mode == "immutable_image" {
+			job.Status = deploymentv1.StateLeased
+		} else {
+			job.Status = DeploymentWaitingAgent
+		}
 		job.Action = action
 		job.AttemptCount++
 		if job.MaxAttempts == 0 {
@@ -1526,10 +1641,18 @@ func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bo
 		}
 		job.LeaseToken = newID("lease")
 		job.LeaseExpiresAt = &leaseExpiresAt
+		job.RetryAfter = nil
+		if job.StartedAt == nil {
+			job.StartedAt = &now
+		}
 		job.UpdatedAt = now
 		s.deployments[id] = job
-		s.deployEvents[id] = append(s.deployEvents[id], DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: job.UpdatedAt})
-		return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken}, true, nil
+		event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: job.UpdatedAt}
+		if job.Mode == "immutable_image" {
+			event.SchemaVersion, event.Step, event.ProgressPercent, event.Attempt = deploymentv1.EventSchemaVersion, deploymentv1.StateLeased, 10, job.AttemptCount
+		}
+		s.deployEvents[id] = append(s.deployEvents[id], event)
+		return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken, Command: s.ImmutableDeploymentCommand(job)}, true, nil
 	}
 	return DeploymentLease{}, false, nil
 }
@@ -1545,7 +1668,7 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 		return job, nil
 	}
 	now := s.clock()
-	if job.Status != DeploymentWaitingAgent || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) {
+	if !deploymentLeaseActiveStatus(job.Status) || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) {
 		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_LEASE_EXPIRED", Message: "deployment lease is not active", NextAction: "poll_for_new_lease", RequestID: requestID}
 	}
 	if job.LeaseToken != "" && result.LeaseToken != job.LeaseToken {
@@ -1553,6 +1676,9 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	}
 	if job.IntentHash != "" && result.IntentHash != "" && result.IntentHash != job.IntentHash {
 		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "deployment result intent hash does not match leased job", RequestID: requestID}
+	}
+	if job.Mode == "immutable_image" && result.Status != deploymentv1.StateSucceeded && result.Status != deploymentv1.StateFailed {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_STATUS_INVALID", Message: "immutable deployment result must be succeeded or failed", RequestID: requestID}
 	}
 	status := normalizedDeploymentResultStatus(result.Status)
 	job.Status = status
@@ -1567,6 +1693,12 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	job.LeaseExpiresAt = nil
 	job.FinishedAt = &now
 	job.UpdatedAt = now
+	if job.Mode == "immutable_image" {
+		if result.SchemaVersion != deploymentv1.ResultSchemaVersion || result.SpecHash != job.SpecHash || job.Snapshot == nil || result.ApplicationImage != job.Snapshot.Image.Reference || !deploymentResultHasExactDigest(result.ApplicationImageID, job.Snapshot.Image.Digest) && status == DeploymentSucceeded {
+			return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "Agent result does not match the immutable deployment command", RequestID: requestID}
+		}
+		job.TerminalResult = &deploymentv1.AgentResult{SchemaVersion: result.SchemaVersion, LeaseToken: result.LeaseToken, Status: status, SpecHash: result.SpecHash, ApplicationImage: result.ApplicationImage, ApplicationImageID: result.ApplicationImageID, Namespace: result.Namespace, DeploymentName: result.DeploymentName, ServiceName: result.ServiceName, AvailableReplicas: result.AvailableReplicas, FailureCode: result.FailureCode, FailureMessageRedacted: job.FailureMessageRedacted}
+	}
 	s.deployments[deploymentID] = job
 	s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], deploymentCompletionEvents(job, requestID, now)...)
 	if deploymentTerminalStatus(status) {
@@ -1575,31 +1707,113 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	return job, nil
 }
 
+func (s *Service) ProgressImmutableDeployment(projectID, nodeID, deploymentID, requestID string, progress deploymentv1.Progress) (DeploymentJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.deployments[deploymentID]
+	if !ok || job.ProjectID != projectID || job.NodeID != nodeID || job.Mode != "immutable_image" {
+		return DeploymentJob{}, ErrNotFound
+	}
+	now := s.clock()
+	if deploymentTerminalStatus(job.Status) || job.Status == deploymentv1.StateCancelled {
+		return job, nil
+	}
+	if job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) || progress.LeaseToken == "" || progress.LeaseToken != job.LeaseToken {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STALE_LEASE", Message: "deployment progress lease is stale", RequestID: requestID}
+	}
+	if !validImmutableTransition(job.Status, progress.State) {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STATE_INVALID", Message: "deployment state transition is not monotonic", RequestID: requestID}
+	}
+	message := RedactString(progress.MessageRedacted)
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	if message == "" {
+		message = "deployment progress updated"
+	}
+	job.Status = progress.State
+	leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
+	job.LeaseExpiresAt = &leaseExpiresAt
+	job.UpdatedAt = now
+	s.deployments[deploymentID] = job
+	if len(s.deployEvents[deploymentID]) < 199 {
+		s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], DeploymentEvent{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: progress.State, MessageRedacted: message, ProgressPercent: immutableProgressPercent(progress.State), Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now})
+	}
+	return job, nil
+}
+
+func validImmutableTransition(current, next string) bool {
+	rank := map[string]int{deploymentv1.StateLeased: 1, deploymentv1.StatePulling: 2, deploymentv1.StateApplying: 3, deploymentv1.StateWaitingReady: 4}
+	return rank[next] != 0 && (rank[next] == rank[current] || rank[next] == rank[current]+1)
+}
+
+func immutableProgressPercent(state string) int {
+	switch state {
+	case deploymentv1.StateLeased:
+		return 10
+	case deploymentv1.StatePulling:
+		return 25
+	case deploymentv1.StateApplying:
+		return 55
+	case deploymentv1.StateWaitingReady:
+		return 75
+	default:
+		return 0
+	}
+}
+
 func (s *Service) expireDeploymentLeasesLocked(projectID string) {
 	now := s.clock()
 	for id, job := range s.deployments {
-		if job.ProjectID != projectID || job.Status != DeploymentWaitingAgent || job.LeaseExpiresAt == nil || job.LeaseExpiresAt.After(now) {
+		if job.ProjectID != projectID || !deploymentLeaseActiveStatus(job.Status) || job.LeaseExpiresAt == nil || job.LeaseExpiresAt.After(now) {
 			continue
 		}
 		job.LeaseToken = ""
 		job.LeaseExpiresAt = nil
+		job.RetryAfter = nil
 		job.UpdatedAt = now
 		if job.MaxAttempts == 0 {
 			job.MaxAttempts = defaultDeploymentMaxAttempts
 		}
 		if job.AttemptCount >= job.MaxAttempts {
 			job.Status = DeploymentDeadLetter
+			if job.Mode == "immutable_image" {
+				job.Status = deploymentv1.StateFailed
+			}
 			job.FailureCode = "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED"
 			job.FailureMessageRedacted = "deployment lease attempts exhausted"
 			job.FinishedAt = &now
 			delete(s.deployLocks, job.ServiceID)
-			s.deployEvents[id] = append(s.deployEvents[id], DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "error", Step: EventDeploymentDeadLetter, MessageRedacted: job.FailureMessageRedacted, ProgressPercent: 100, CreatedAt: now})
+			step := EventDeploymentDeadLetter
+			if job.Mode == "immutable_image" {
+				step = deploymentv1.StateFailed
+			}
+			event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "error", Step: step, MessageRedacted: job.FailureMessageRedacted, ProgressPercent: 100, CreatedAt: now}
+			if job.Mode == "immutable_image" {
+				event.SchemaVersion = deploymentv1.EventSchemaVersion
+				event.Attempt = job.AttemptCount
+			}
+			s.deployEvents[id] = append(s.deployEvents[id], event)
 		} else {
 			job.Status = DeploymentQueued
+			if job.Mode == "immutable_image" {
+				job.Status = deploymentv1.StateQueued
+			}
 			if job.Action == "rollback" {
 				job.Status = DeploymentRollingBack
 			}
-			s.deployEvents[id] = append(s.deployEvents[id], DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "warn", Step: EventAgentLeaseExpired, MessageRedacted: "agent lease expired; job returned to queue", ProgressPercent: 20, CreatedAt: now})
+			message := "agent lease expired; job returned to queue"
+			if job.Mode == "immutable_image" {
+				retryAfter := now.Add(deploymentRetryBackoff(job.AttemptCount))
+				job.RetryAfter = &retryAfter
+				message = "agent lease expired; job queued with bounded retry backoff"
+			}
+			event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "warn", Step: EventAgentLeaseExpired, MessageRedacted: message, ProgressPercent: 20, CreatedAt: now}
+			if job.Mode == "immutable_image" {
+				event.SchemaVersion = deploymentv1.EventSchemaVersion
+				event.Attempt = job.AttemptCount
+			}
+			s.deployEvents[id] = append(s.deployEvents[id], event)
 		}
 		s.deployments[id] = job
 	}
@@ -1613,6 +1827,124 @@ func (s *Service) DeploymentEvents(projectID, deploymentID string) ([]Deployment
 		return nil, ErrNotFound
 	}
 	return append([]DeploymentEvent(nil), s.deployEvents[deploymentID]...), nil
+}
+
+func (s *Service) GetDeployment(projectID, deploymentID string) (DeploymentJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.deployments[deploymentID]
+	if !ok || job.ProjectID != projectID {
+		return DeploymentJob{}, ErrNotFound
+	}
+	return job, nil
+}
+
+func (s *Service) CancelDeployment(projectID, deploymentID, key, requestID string) (DeploymentJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !validDeploymentIdempotencyKey(key) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "IDEMPOTENCY_KEY_INVALID", Message: "deployment idempotency key is invalid", RequestID: requestID}
+	}
+	scope := "deploy-cancel:v1:" + projectID + ":" + key
+	if existingID, exists := s.idempotency[scope].(string); exists {
+		if existingID != deploymentID {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used for another deployment cancellation", RequestID: requestID}
+		}
+		job, ok := s.deployments[deploymentID]
+		if !ok || job.ProjectID != projectID {
+			return DeploymentJob{}, false, ErrNotFound
+		}
+		job.Reused = true
+		return job, true, nil
+	}
+	job, ok := s.deployments[deploymentID]
+	if !ok || job.ProjectID != projectID {
+		return DeploymentJob{}, false, ErrNotFound
+	}
+	if deploymentTerminalStatus(job.Status) || job.Status == deploymentv1.StateCancelled {
+		s.idempotency[scope] = deploymentID
+		return job, false, nil
+	}
+	if job.Status != deploymentv1.StateQueued {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "CANCEL_UNSAFE", Message: "deployment has reached an Agent or runtime mutation stage", NextAction: "watch_deployment", RequestID: requestID}
+	}
+	now := s.clock()
+	job.Status = deploymentv1.StateCancelled
+	job.FinishedAt = &now
+	job.UpdatedAt = now
+	job.LeaseToken = ""
+	job.LeaseExpiresAt = nil
+	job.RetryAfter = nil
+	s.deployments[deploymentID] = job
+	s.idempotency[scope] = deploymentID
+	delete(s.deployLocks, job.ServiceID)
+	s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], DeploymentEvent{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: deploymentv1.StateCancelled, MessageRedacted: "deployment cancelled before runtime mutation", ProgressPercent: 100, Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now})
+	return job, false, nil
+}
+
+func (s *Service) RetryDeployment(projectID, deploymentID, key, requestID string) (DeploymentJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !validDeploymentIdempotencyKey(key) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "IDEMPOTENCY_KEY_INVALID", Message: "deployment idempotency key is invalid", RequestID: requestID}
+	}
+	job, ok := s.deployments[deploymentID]
+	if !ok || job.ProjectID != projectID || job.Mode != "immutable_image" {
+		return DeploymentJob{}, false, ErrNotFound
+	}
+	scope := "deploy-retry:v1:" + projectID + ":" + key
+	if existingID, exists := s.idempotency[scope].(string); exists {
+		if existingID != deploymentID {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used for another deployment retry", RequestID: requestID}
+		}
+		job.Reused = true
+		return job, true, nil
+	}
+	if job.Status != deploymentv1.StateFailed || job.TerminalResult != nil || job.FailureCode != "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "RETRY_TERMINAL_IMMUTABLE", Message: "only a lease-exhausted job without an Agent terminal result can be retried in place", NextAction: "create_explicit_redeploy", RequestID: requestID}
+	}
+	now := s.clock()
+	job.Status = deploymentv1.StateQueued
+	job.FailureCode = ""
+	job.FailureMessageRedacted = ""
+	job.FinishedAt = nil
+	job.LeaseToken = ""
+	job.LeaseExpiresAt = nil
+	job.MaxAttempts = job.AttemptCount + defaultDeploymentMaxAttempts
+	job.UpdatedAt = now
+	if err := s.acquireDeploymentLockLocked(job.ServiceID, job.ID, now, requestID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	s.deployments[deploymentID] = job
+	s.idempotency[scope] = deploymentID
+	s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], DeploymentEvent{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: deploymentv1.StateQueued, MessageRedacted: "lease-exhausted deployment queued for another bounded attempt window", ProgressPercent: 0, Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now})
+	return job, false, nil
+}
+
+func validDeploymentIdempotencyKey(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if char <= ' ' || char == 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func deploymentRetryBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	backoff := 5 * time.Second
+	for index := 1; index < attempt && backoff < time.Minute; index++ {
+		backoff *= 2
+	}
+	if backoff > time.Minute {
+		return time.Minute
+	}
+	return backoff
 }
 
 func validateServiceForDeploy(service ServiceRecord, requestID string) error {
@@ -1850,6 +2182,16 @@ func deploymentQueuedEvents(job DeploymentJob, requestID string, now time.Time) 
 }
 
 func deploymentCompletionEvents(job DeploymentJob, requestID string, now time.Time) []DeploymentEvent {
+	if job.Mode == "immutable_image" {
+		level, message := "info", "immutable image deployment succeeded"
+		if job.Status != deploymentv1.StateSucceeded {
+			level, message = "error", job.FailureMessageRedacted
+			if message == "" {
+				message = "immutable image deployment failed"
+			}
+		}
+		return []DeploymentEvent{{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: level, Step: job.Status, MessageRedacted: message, ProgressPercent: 100, Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now}}
+	}
 	switch job.Status {
 	case DeploymentSucceeded:
 		return []DeploymentEvent{
@@ -1881,13 +2223,21 @@ func normalizedDeploymentResultStatus(status string) string {
 	}
 }
 
+func deploymentLeaseActiveStatus(status string) bool {
+	return status == DeploymentWaitingAgent || status == deploymentv1.StateLeased || status == deploymentv1.StatePulling || status == deploymentv1.StateApplying || status == deploymentv1.StateWaitingReady
+}
+
 func deploymentTerminalStatus(status string) bool {
 	switch status {
-	case DeploymentSucceeded, DeploymentFailed, DeploymentRolledBack, DeploymentDeadLetter:
+	case DeploymentSucceeded, DeploymentFailed, DeploymentRolledBack, DeploymentDeadLetter, deploymentv1.StateCancelled:
 		return true
 	default:
 		return false
 	}
+}
+
+func deploymentResultHasExactDigest(imageID, digest string) bool {
+	return imageID == digest || strings.HasSuffix(imageID, "@"+digest) || strings.HasSuffix(imageID, "://"+digest)
 }
 
 func (s *Service) acquireDeploymentLockLocked(serviceID, deploymentID string, now time.Time, requestID string) error {

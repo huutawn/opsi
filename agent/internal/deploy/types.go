@@ -17,10 +17,12 @@ import (
 
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 const (
 	PhaseQueued   = "queued"
+	PhasePulling  = "pulling"
 	PhaseCloning  = "cloning"
 	PhaseBuilding = "building"
 	PhaseApplying = "applying"
@@ -42,6 +44,7 @@ const (
 )
 
 type Request struct {
+	Production                    *deploymentv1.AgentCommand
 	ProjectID                     string
 	ServiceID                     string
 	ServiceName                   string
@@ -75,21 +78,27 @@ type ServiceDependency struct {
 }
 
 type Record struct {
-	DeployID       string
-	ProjectID      string
-	ServiceID      string
-	ServiceName    string
-	StartedAt      time.Time
-	FinishedAt     time.Time
-	GitSHA         string
-	ImageTag       string
-	Status         string
-	Duration       time.Duration
-	Error          string
-	TriggeredBy    string
-	MigrationRan   bool
-	RollbackSafe   bool
-	RollbackReason string
+	DeployID              string
+	ProjectID             string
+	ServiceID             string
+	ServiceName           string
+	StartedAt             time.Time
+	FinishedAt            time.Time
+	GitSHA                string
+	ImageTag              string
+	Status                string
+	Duration              time.Duration
+	Error                 string
+	TriggeredBy           string
+	MigrationRan          bool
+	RollbackSafe          bool
+	RollbackReason        string
+	SpecHash              string
+	ImageID               string
+	Namespace             string
+	DeploymentName        string
+	KubernetesServiceName string
+	AvailableReplicas     int32
 }
 
 type ServiceRecord struct {
@@ -235,6 +244,28 @@ func RequestFromWebhook(event WebhookEvent, cfg config.DeploymentConfig) (Reques
 }
 
 func (r Request) Validate() error {
+	if r.Production != nil {
+		if r.Production.SchemaVersion != deploymentv1.CommandSchemaVersion {
+			return errors.New("unsupported production deployment command schema")
+		}
+		if err := r.Production.Image.Validate(); err != nil {
+			return err
+		}
+		if err := r.Production.Workload.Validate(); err != nil {
+			return err
+		}
+		hash, err := r.Production.Workload.Hash()
+		if err != nil || hash != r.Production.SpecHash {
+			return errors.New("production workload spec hash mismatch")
+		}
+		if r.Production.JobID == "" || r.Production.ProjectID == "" || r.Production.NodeID == "" || r.Production.AgentID == "" || r.Production.LeaseToken == "" {
+			return errors.New("production deployment identity is incomplete")
+		}
+		if len(r.Production.Workload.SecretReferences) != 0 {
+			return errors.New("SECRET_REFERENCE_UNRESOLVED")
+		}
+		return nil
+	}
 	if r.ProjectID == "" {
 		return errors.New("project_id is required")
 	}
