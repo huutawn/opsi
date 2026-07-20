@@ -119,7 +119,7 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
       const created = await client.deploymentApply(projectID, request, key);
       setJob(created);
       setSelectedJobID(created.id);
-      await refreshJob(created.id, created.reused);
+      await refreshJob(created.id, created.reused ?? false);
       await console.actions.load();
       setDisconnected(false);
     } catch (reason) {

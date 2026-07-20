@@ -19,7 +19,7 @@ test("manual deployment UI uses the loopback immutable job API and typed review 
   assert.match(componentSource, /item\.service_id === serviceID && item\.build\.status === "succeeded"/);
   assert.match(componentSource, /const serviceKey = selectedRecord\?\.service_key \?\? ""/);
   assert.doesNotMatch(componentSource, /item\.service_id === serviceID && item\.service_key === serviceKey/);
-  assert.match(componentSource, /refreshJob\(created\.id, created\.reused\)/);
+  assert.match(componentSource, /refreshJob\(created\.id, created\.reused \?\? false\)/);
   assert.match(componentSource, /Idempotency/);
   assert.match(componentSource, /job\.reused === true \? "reused"/);
   assert.doesNotMatch(componentSource, /textarea|raw yaml|raw manifest|localStorage|sessionStorage|Authorization/i);
