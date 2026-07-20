@@ -30,8 +30,9 @@ artifacts. At this snapshot:
   GitHub origin matching, numeric repository claim, service binding, and atomic
   repository bootstrap file generation. GitHub Actions OIDC, `BuildRecord`,
   manual `TopologyPlan`, exact-match `DeploymentPolicy`, and deterministic
-  routing preflight are implemented. R5-010 adds the local immutable-digest
-  `DeploymentJob` path; real VPS acceptance is still blocked. Pull request
+  routing preflight are implemented. R5-010 adds the immutable-digest
+  `DeploymentJob` path and deploys its Cloud revision on staging; real Agent
+  workload acceptance is still blocked. Pull request
   preview environments are not implemented.
 - Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
 - Source packaging rejects local config, credentials, private keys, runtime
@@ -398,15 +399,23 @@ ClusterIP Service resources, rejects foreign collisions, and verifies the
 named application container imageID. The Git clone/build path remains only for
 legacy/manual development use.
 
-Local implementation does not establish live acceptance. Full Go test/vet,
+Local implementation does not establish live Agent acceptance. Full Go test/vet,
 focused race, disposable PostgreSQL migration/restart/concurrency, UI
 lint/build/source-state, deterministic Agent release, source hygiene, and diff
-checks pass. Product login and canonical live BuildRecord lookup remain blocked
-by `AUTH_REQUIRED`; read-only Agent health currently reports
-`cloud_connected=false`. Headless live UI parity, published immutable Cloud /
-Agent artifacts, supported live Agent upgrade, real K3s workload proof, and
-restart recovery remain unproven. R5-010 creates no Ingress/Gateway/DNS/TLS
-resource and implements no automatic rollback; those remain R5-011 scope.
+checks pass at code-bearing revision
+`8dfdc91a141aac6d1288354614ffd9dd1ea6fb78`. Immutable Cloud image
+`ghcr.io/huutawn/opsi-cloud@sha256:ef3a73ee2b6bde0e9be3b614697fba25a61bbb2bc1beb585763b95902aeb87c0`
+is published and runs on staging with PostgreSQL, Bootstrap Worker, proxy, and
+volumes retained; all four services are healthy with zero restarts. Agent
+release `0.0.0-r5.010.8dfdc91` is reproducibly built with binary SHA-256
+`0aacf7691d41c267dcf2850b1097254f6fe41502de5298b7c45c9d20b9634165`,
+but GitHub prerelease publication is blocked by GitHub CLI `401`. Product login
+and canonical live BuildRecord lookup remain blocked by `AUTH_REQUIRED`;
+read-only Agent health currently reports `cloud_connected=false`. Headless live
+UI parity, published Agent artifact, supported live Agent upgrade, real K3s
+workload proof, and restart recovery remain unproven. R5-010 creates no
+Ingress/Gateway/DNS/TLS resource and implements no automatic rollback; those
+remain R5-011 scope.
 
 ## E2E and production evidence
 

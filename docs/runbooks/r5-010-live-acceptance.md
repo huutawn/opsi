@@ -1,7 +1,8 @@
 # R5-010 immutable deployment acceptance
 
-Status: local functional gates pass; live execution is blocked by product
-`AUTH_REQUIRED` and an Agent preflight reporting `cloud_connected=false`.
+Status: local functional gates and Cloud staging upgrade pass. Agent execution
+is blocked by product `AUTH_REQUIRED`, GitHub prerelease publication `401`, and
+an Agent preflight reporting `cloud_connected=false`.
 
 ## Safety boundaries
 
