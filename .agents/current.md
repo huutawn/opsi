@@ -8,7 +8,7 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ### R5-010 — Immutable manual production deployment
 
-- Code-bearing revision `8dfdc91a141aac6d1288354614ffd9dd1ea6fb78`
+- Final code-bearing revision `4b7fe549f02fd47a07c0196e264971c31488850d`
   is committed from starting revision
   `0edaa4330c57377e7545ae5e3a86407b74e19107` on `developer`.
 - The existing DeploymentJob and Agent deploy engine are extended with one
@@ -22,20 +22,23 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   operator must run `opsi login --pat-file <protected-path>`; no PAT is accepted
   in chat, argv, history, logs, or evidence.
 - Cloud image
-  `ghcr.io/huutawn/opsi-cloud@sha256:ef3a73ee2b6bde0e9be3b614697fba25a61bbb2bc1beb585763b95902aeb87c0`
+  `ghcr.io/huutawn/opsi-cloud@sha256:d3bacfc86d879a802a8912d7c11490a9f0f4468c83092d4863883acdad7ce704`
   is published and deployed on staging. PostgreSQL, Bootstrap Worker, proxy,
   and their volumes were retained; staging returned four healthy containers,
-  zero restarts, Cloud version `8dfdc91`, and public `/health` success.
-- Deterministic Agent release `0.0.0-r5.010.8dfdc91` is built locally from the
+  zero restarts, Cloud version `4b7fe54`, and public `/health` success.
+- Deterministic Agent release `0.0.0-r5.010.4b7fe54` is built locally from the
   committed revision with binary SHA-256
-  `0aacf7691d41c267dcf2850b1097254f6fe41502de5298b7c45c9d20b9634165`.
+  `f25d00735dc7a92611b15986eea03fa050cb8893ee27a2e9485d9890503a6799`.
+  Its exact code tag `r5-010-4b7fe54` is pushed to GitHub.
   GitHub prerelease publication is blocked by GitHub CLI `401`; the operator
   must restore `gh` authentication without pasting a token into chat.
 - Read-only live preflight re-confirmed the trusted Agent ED25519 fingerprint,
   staging Cloud digest and four healthy staging containers, K3s `v1.36.2+k3s1`,
-  node `node-c69fe70180d359d7`, and Agent `0.0.0-r5.004.af0ebce`. The Agent local
-  health currently reports `cloud_connected=false`, which must be resolved or
-  explained through the authenticated product path before deployment.
+  node `node-c69fe70180d359d7`, and Agent `0.0.0-r5.004.af0ebce`. That old Agent
+  local health reports its hard-coded `cloud_connected=false`; revision
+  `4b7fe54` replaces it with factual heartbeat/poll connectivity tracking, but
+  the supported upgrade cannot run until the release asset and product login
+  are available.
 - No Agent upgrade, workload apply, Agent restart, K3s reset, VPS reset, or
   Cloudflare/DNS/TLS change has been performed for R5-010.
 

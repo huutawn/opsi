@@ -402,16 +402,19 @@ legacy/manual development use.
 Local implementation does not establish live Agent acceptance. Full Go test/vet,
 focused race, disposable PostgreSQL migration/restart/concurrency, UI
 lint/build/source-state, deterministic Agent release, source hygiene, and diff
-checks pass at code-bearing revision
-`8dfdc91a141aac6d1288354614ffd9dd1ea6fb78`. Immutable Cloud image
-`ghcr.io/huutawn/opsi-cloud@sha256:ef3a73ee2b6bde0e9be3b614697fba25a61bbb2bc1beb585763b95902aeb87c0`
+checks pass at final code-bearing revision
+`4b7fe549f02fd47a07c0196e264971c31488850d`. Immutable Cloud image
+`ghcr.io/huutawn/opsi-cloud@sha256:d3bacfc86d879a802a8912d7c11490a9f0f4468c83092d4863883acdad7ce704`
 is published and runs on staging with PostgreSQL, Bootstrap Worker, proxy, and
 volumes retained; all four services are healthy with zero restarts. Agent
-release `0.0.0-r5.010.8dfdc91` is reproducibly built with binary SHA-256
-`0aacf7691d41c267dcf2850b1097254f6fe41502de5298b7c45c9d20b9634165`,
+release `0.0.0-r5.010.4b7fe54` is reproducibly built with binary SHA-256
+`f25d00735dc7a92611b15986eea03fa050cb8893ee27a2e9485d9890503a6799`,
+and exact code tag `r5-010-4b7fe54` is pushed,
 but GitHub prerelease publication is blocked by GitHub CLI `401`. Product login
 and canonical live BuildRecord lookup remain blocked by `AUTH_REQUIRED`;
-read-only Agent health currently reports `cloud_connected=false`. Headless live
+the still-installed R5-004 Agent reports its historical hard-coded
+`cloud_connected=false`; the final R5-010 binary reports factual Cloud
+connectivity after upgrade. Headless live
 UI parity, published Agent artifact, supported live Agent upgrade, real K3s
 workload proof, and restart recovery remain unproven. R5-010 creates no
 Ingress/Gateway/DNS/TLS resource and implements no automatic rollback; those
