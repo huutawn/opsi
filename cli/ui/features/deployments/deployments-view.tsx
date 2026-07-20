@@ -119,7 +119,7 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
       const created = await client.deploymentApply(projectID, request, key);
       setJob(created);
       setSelectedJobID(created.id);
-      await refreshJob(created.id);
+      await refreshJob(created.id, created.reused);
       await console.actions.load();
       setDisconnected(false);
     } catch (reason) {
@@ -130,9 +130,9 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
     }
   }
 
-  const refreshJob = useCallback(async (jobID: string) => {
+  const refreshJob = useCallback(async (jobID: string, reused?: boolean) => {
     const [current, result] = await Promise.all([client.deployment(projectID, jobID), client.deploymentEvents(projectID, jobID)]);
-    setJob(current);
+    setJob(reused === undefined ? current : { ...current, reused });
     setEvents(result.events ?? []);
     setDisconnected(false);
   }, [client, projectID]);
@@ -206,6 +206,7 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
         {selectedJobID ? <>
           {job && <div className="specList compact">
             <div><span>Job / state</span><b>{job.id} / {job.status}</b></div>
+            <div><span>Idempotency</span><b>{job.reused === true ? "reused" : job.reused === false ? "new job" : "not reported"}</b></div>
             <div><span>Attempt</span><b>{job.attempt_count ?? 0}/{job.max_attempts ?? 0}{job.retry_after ? ` — retry after ${job.retry_after}` : ""}</b></div>
             <div><span>Final digest</span><b>{job.terminal_result?.application_image ?? job.snapshot?.image.reference ?? "-"}</b></div>
             <div><span>Readiness</span><b>{job.terminal_result ? `${job.terminal_result.available_replicas} replicas / ${job.terminal_result.application_image_id}` : "pending"}</b></div>
