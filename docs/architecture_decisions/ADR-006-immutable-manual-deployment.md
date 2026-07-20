@@ -1,6 +1,6 @@
 # ADR-006: Immutable manual production deployment
 
-Status: Accepted for R5-010 implementation; live acceptance pending.
+Status: Accepted; R5-010 reached `DONE / LIVE_ACCEPTANCE_PASS`.
 
 ## Context
 
@@ -41,4 +41,3 @@ target. External exposure and rollback remain outside R5-010.
   Kubernetes objects.
 - Agent upgrade evidence must use the existing checksum-addressed atomic
   release lifecycle; an unsupported copy-only replacement is not acceptance.
-

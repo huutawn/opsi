@@ -6,43 +6,27 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
 ## Active Task
 
-### R5-010 — Immutable manual production deployment
+### R5-011.1 — Local external exposure contract and renderer
 
-- Final code-bearing revision `27906f52bfdc1ea0ffb1db5dfb9587e4bbd82fb7`
-  is committed from starting revision
-  `0edaa4330c57377e7545ae5e3a86407b74e19107` on `developer`.
-- The existing DeploymentJob and Agent deploy engine are extended with one
-  `immutable_image` path; no second production engine is introduced.
-- Local contracts, Cloud authority snapshot/state machine, Agent digest pull
-  and Opsi renderer, canonical CLI subcommands, and loopback Local UI flow are
-  implemented. Full Go test/vet, focused race, disposable PostgreSQL restart /
-  concurrency, UI lint/build/source-state, deterministic renderer/release,
-  source-hygiene, and diff checks pass locally.
-- Product login and accepted BuildRecord lookup succeeded through the existing
-  protected local keychain path; no PAT was entered in chat, argv, history,
-  logs, or evidence.
-- Cloud staging runs immutable Cloud image
-  `ghcr.io/huutawn/opsi-cloud@sha256:43a04fd265742bdd7d35bf591fecb2a5ac4d20c65fd9f748a607d78e4bca88a5`
-  and Bootstrap Worker image
-  `ghcr.io/huutawn/opsi-bootstrap-worker@sha256:c552b0a0ac4ef8369c878e5c9435b34da50c4e5a1be3bc4e94f2327c944a7b7b`.
-  PostgreSQL, proxy, and named volumes were retained; validators passed, all
-  four staging containers are healthy, versions report `27906f5`, and public
-  `/health` returns 200.
-- Deterministic Agent release `0.0.0-r5.010.27906f5` has binary SHA-256
-  `20686468d5922d78739378fdfa892f9cdc3f900417d0e71b55d85ebb2fba85e5`.
-  Tag `r5-010-27906f5` and prerelease
-  `https://github.com/huutawn/opsi/releases/tag/r5-010-27906f5` contain the
-  binary, checksums, and release metadata; anonymous download matched.
-- Supported atomic upgrade preserved Agent `agent-d1e13723f6e06ff7`, node
-  `node-c69fe70180d359d7`, configuration, and K3s `v1.36.2+k3s1`; a controlled
-  `opsi-agent.service` restart recovered the heartbeat and did not duplicate
-  Kubernetes resources.
-- Live accepted BuildRecord `br-c3d7654507dae1383b0e52eebe67eebf` resolved to
-  `ghcr.io/huutawn/opsi-r5-005-fixture/api@sha256:9f02ca2cb19bc61f322ee6174f057d00b3bde17ae787b390d0abbb0d750dea6a`.
-  CLI job `dep-a8ddc1ac840a6ae8` and UI job `dep-ff93adea6e0f8a0e` both replay
-  with `reused=true`; the workload is ready at the exact digest.
-- No VPS/K3s reset or reinstall, Cloudflare/DNS/TLS change, external exposure,
-  rollback, R5-011, MCP, or AI work was performed.
+- Starting revision is `9caf01bbbff868546d4065195dd70004c2002ef9` on
+  `developer`. R5-010 remains `DONE / LIVE_ACCEPTANCE_PASS` at its recorded live
+  evidence and is reused without changing the running workload.
+- `ExposureSpec v1` owns bounded project/environment/runtime/service/job
+  identity, canonical hostname and Prefix path, exact service port, bounded TLS
+  mode/opaque reference, optional display metadata, and deterministic spec hash.
+- The existing R5-010 namespace/name/label helpers, exact ClusterIP Service
+  renderer result, and `CommandRunner`/kubectl boundary remain authoritative.
+  The sole gateway resource is `networking.k8s.io/v1` Ingress with fixed
+  `ingressClassName: traefik` and field manager `opsi-r5-011-exposure`.
+- Read-only preflight distinguishes create, unchanged, and deterministic owned
+  diff, and fails closed for foreign names, backend mismatch, cross-workload
+  identity, TLS reference failures, and Opsi/foreign hostname-path conflicts.
+- R5-011.1 is `DONE / LOCAL_CONTRACT_RENDERER_PASS` after the recorded local
+  contract/Agent test, vet, race, deterministic, source-hygiene, diff, and
+  secret-marker checks. R5-011 is not DONE.
+- No SSH/VPS/K3s mutation, Ingress apply, external endpoint, Agent release,
+  Cloud/Worker deploy, readiness reconciliation, rollback/WAL, Cloud API,
+  CLI/UI, DNS/Cloudflare/certificate, MCP, or AI work was performed.
 
 ### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
 

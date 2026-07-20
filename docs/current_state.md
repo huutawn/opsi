@@ -34,7 +34,9 @@ artifacts. At this snapshot:
   `DeploymentJob` path and has passed live Agent/K3s workload, CLI/Local UI
   parity, idempotent replay, and Agent restart acceptance. Pull request
   preview environments are not implemented.
-- Opsi does not render or manage Ingress, Gateway API resources, domains, or TLS.
+- R5-011.1 locally renders one standard Traefik Ingress and performs read-only
+  ownership/conflict preflight. Opsi does not yet apply/manage a live Ingress,
+  Gateway API resource, domain, certificate, or TLS secret lifecycle.
 - Source packaging rejects local config, credentials, private keys, runtime
   certificate directories, databases, logs, and generated output.
 
@@ -430,6 +432,17 @@ job/result durability, workload readiness, and resource uniqueness. No Git
 clone/build process or external exposure resource was present. R5-010 creates
 no Ingress/Gateway/DNS/TLS resource and implements no automatic rollback; those
 remain R5-011 scope.
+
+R5-011.1 now defines strict `ExposureSpec v1` and a deterministic local
+`networking.k8s.io/v1` Ingress renderer with fixed Traefik class and field
+manager. It reuses the authoritative R5-010 namespace/name/ownership helpers,
+targets only the exact owned ClusterIP Service/port, resolves TLS only from an
+opaque verified namespace-local reference, and preflights same-name ownership
+and path-component-aware host/path conflicts without mutation. This checkpoint
+is `DONE / LOCAL_CONTRACT_RENDERER_PASS`; R5-011 itself remains in progress.
+There is no live Ingress, external endpoint, readiness reconciliation,
+known-good rollback, Cloud lifecycle, CLI/UI exposure flow, DNS, or certificate
+provisioning yet.
 
 ## E2E and production evidence
 

@@ -17,6 +17,8 @@ import (
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
+const ProductionFieldManager = "opsi-r5-010"
+
 // ProductionRuntime is the only Agent execution boundary for immutable image jobs.
 // The legacy Git/Build/K3s adapters remain available for development compatibility.
 type ProductionRuntime interface {
@@ -111,7 +113,7 @@ func (a ProductionAdapter) Deploy(ctx context.Context, command deploymentv1.Agen
 	if err := a.verifyOwnership(ctx, resources, namespace, command); err != nil {
 		return productionFailure(record, progress, "K8S_RESOURCE_OWNERSHIP_CONFLICT", err)
 	}
-	if _, err := a.Runner.Run(ctx, rendered, a.KubectlPath, "apply", "--server-side", "--field-manager=opsi-r5-010", "-f", "-"); err != nil {
+	if _, err := a.Runner.Run(ctx, rendered, a.KubectlPath, "apply", "--server-side", "--field-manager="+ProductionFieldManager, "-f", "-"); err != nil {
 		return productionFailure(record, progress, "K8S_APPLY_FAILED", err)
 	}
 	record.Namespace = namespace

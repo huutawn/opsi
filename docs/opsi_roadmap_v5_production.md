@@ -372,6 +372,15 @@ in `docs/architecture_decisions/ADR-005-manual-placement-policy-boundary.md`.
 
 **Gate:** external endpoint thật trở lại A sau B fail; CLI/UI/audit/K3s state đồng nhất.
 
+**Execution checkpoint R5-011.1 (2026-07-20):** `DONE /
+LOCAL_CONTRACT_RENDERER_PASS`. `ExposureSpec v1`, strict hostname/path/TLS
+validation, deterministic standard Traefik Ingress rendering, and read-only
+ownership/conflict preflight pass locally while reusing the R5-010 namespace,
+name, label, ClusterIP Service, and kubectl boundaries. No Ingress was applied
+and no external endpoint, readiness reconciliation, rollback, Cloud API,
+CLI/UI, DNS, or certificate lifecycle was started. R5-011 remains in progress;
+R5-011.2 and R5-011.3 own those remaining gates.
+
 ### R5-012 — Main CD và PR preview manual acceptance
 
 **CẦN VPS:** VPS Agent staging; cần test repository GitHub thật.
