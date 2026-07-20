@@ -30,8 +30,9 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   committed revision with binary SHA-256
   `f25d00735dc7a92611b15986eea03fa050cb8893ee27a2e9485d9890503a6799`.
   Its exact code tag `r5-010-4b7fe54` is pushed to GitHub.
-  GitHub prerelease publication is blocked by GitHub CLI `401`; the operator
-  must restore `gh` authentication without pasting a token into chat.
+  GitHub prerelease `https://github.com/huutawn/opsi/releases/tag/r5-010-4b7fe54`
+  is published with `opsi-agent-linux-amd64`, `checksums.txt`, and `release.json`;
+  an anonymous download matched the same SHA-256.
 - Read-only live preflight re-confirmed the trusted Agent ED25519 fingerprint,
   staging Cloud digest and four healthy staging containers, K3s `v1.36.2+k3s1`,
   node `node-c69fe70180d359d7`, and Agent `0.0.0-r5.004.af0ebce`. That old Agent

@@ -1,7 +1,7 @@
 # R5-010 immutable deployment acceptance
 
-Status: local functional gates and Cloud staging upgrade pass. Agent execution
-is blocked by product `AUTH_REQUIRED` and GitHub prerelease publication `401`.
+Status: local functional gates, Cloud staging upgrade, and Agent prerelease
+publication pass. Agent execution is blocked by product `AUTH_REQUIRED`.
 The installed R5-004 Agent reports a hard-coded `cloud_connected=false`; final
 revision `4b7fe54` changes this to factual heartbeat/poll connectivity and must
 be installed through the supported upgrade command before acceptance.
@@ -34,6 +34,8 @@ Current immutable release inputs:
   `f25d00735dc7a92611b15986eea03fa050cb8893ee27a2e9485d9890503a6799`
 - Cloud image:
   `ghcr.io/huutawn/opsi-cloud@sha256:d3bacfc86d879a802a8912d7c11490a9f0f4468c83092d4863883acdad7ce704`
+- Public prerelease:
+  `https://github.com/huutawn/opsi/releases/tag/r5-010-4b7fe54`
 
 ## Live gate
 

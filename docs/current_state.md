@@ -410,8 +410,9 @@ volumes retained; all four services are healthy with zero restarts. Agent
 release `0.0.0-r5.010.4b7fe54` is reproducibly built with binary SHA-256
 `f25d00735dc7a92611b15986eea03fa050cb8893ee27a2e9485d9890503a6799`,
 and exact code tag `r5-010-4b7fe54` is pushed,
-but GitHub prerelease publication is blocked by GitHub CLI `401`. Product login
-and canonical live BuildRecord lookup remain blocked by `AUTH_REQUIRED`;
+and GitHub prerelease `r5-010-4b7fe54` is published with binary, checksums,
+and release metadata; an anonymous download matched the binary SHA-256. Product
+login and canonical live BuildRecord lookup remain blocked by `AUTH_REQUIRED`;
 the still-installed R5-004 Agent reports its historical hard-coded
 `cloud_connected=false`; the final R5-010 binary reports factual Cloud
 connectivity after upgrade. Headless live
