@@ -30,6 +30,15 @@ func TestValidatorHealthCapacityAndAmbiguityFailClosed(t *testing.T) {
 		code   string
 	}{
 		{name: "healthy", mutate: func(*Facts) {}, valid: true},
+		{name: "historical offline node", mutate: func(f *Facts) {
+			f.Nodes = append(f.Nodes, NodeFact{ID: "n-old", ProjectID: "p1", RuntimeID: "r1", Status: "offline"})
+		}, valid: true},
+		{name: "historical removed node", mutate: func(f *Facts) {
+			f.Nodes = append(f.Nodes, NodeFact{ID: "n-old", ProjectID: "p1", RuntimeID: "r1", Status: "removed"})
+		}, valid: true},
+		{name: "second active node", mutate: func(f *Facts) {
+			f.Nodes = append(f.Nodes, NodeFact{ID: "n2", ProjectID: "p1", RuntimeID: "r1", Status: "pending"})
+		}, code: "TOPOLOGY_RUNTIME_MULTI_NODE_UNSUPPORTED"},
 		{name: "stale", mutate: func(f *Facts) { f.Nodes[0].LastSeenAt = &stale }, code: "TOPOLOGY_HEARTBEAT_STALE"},
 		{name: "future heartbeat", mutate: func(f *Facts) { f.Nodes[0].LastSeenAt = &future }, code: "TOPOLOGY_HEARTBEAT_STALE"},
 		{name: "zero agent", mutate: func(f *Facts) { f.Agents = nil }, code: "TOPOLOGY_AGENT_MISSING"},

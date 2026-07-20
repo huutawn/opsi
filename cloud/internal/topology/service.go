@@ -301,7 +301,7 @@ func validateRuntime(ctx context.Context, s Service, facts Facts, runtime Runtim
 	rv := topologyv1.RuntimeValidation{RuntimeID: runtime.ID, Eligible: true, Issues: []topologyv1.Issue{}}
 	nodes := make([]NodeFact, 0, 2)
 	for _, node := range facts.Nodes {
-		if node.ProjectID == runtime.ProjectID && node.RuntimeID == runtime.ID {
+		if node.ProjectID == runtime.ProjectID && node.RuntimeID == runtime.ID && nodeParticipatesInRuntime(node.Status) {
 			nodes = append(nodes, node)
 		}
 	}
@@ -383,6 +383,15 @@ func validateRuntime(ctx context.Context, s Service, facts Facts, runtime Runtim
 		rv.Issues = append(rv.Issues, topologyv1.Issue{Code: "TOPOLOGY_CAPACITY_EXCEEDED", Message: "requested resources exceed capacity after reserved headroom", RuntimeID: runtime.ID, Severity: "error"})
 	}
 	return rv
+}
+
+func nodeParticipatesInRuntime(status string) bool {
+	switch status {
+	case "offline", "removed":
+		return false
+	default:
+		return true
+	}
 }
 
 func heartbeatFresh(lastSeen *time.Time, now time.Time, ttl time.Duration) bool {
