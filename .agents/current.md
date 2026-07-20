@@ -28,6 +28,28 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   Cloud/Worker deploy, readiness reconciliation, rollback/WAL, Cloud API,
   CLI/UI, DNS/Cloudflare/certificate, MCP, or AI work was performed.
 
+### R5-011.2 — Agent-local durable reconciliation and exact rollback
+
+- Starting revision is `7587d5892fee53844ca50f0ad8f91db3b3d67d81` on
+  `developer`; the pre-existing UI test change remains outside this task.
+- `ExposureSpec.SpecHash` is now functional-only (display metadata excluded),
+  with compatibility decoding for the metadata-inclusive R5-011.1 hash.
+  Kubernetes absence uses fixed `--ignore-not-found` plus bounded empty output;
+  ingress inventory has timeout, byte/item bounds, strict decode, sorting, and
+  fail-closed overflow handling.
+- The existing Agent `deploy.Engine`, `ProductionAdapter`, and SQLite store
+  now implement versioned rollout intent/WAL/events, one active target lock,
+  CAS UID/resourceVersion ownership, factual app-digest/Service-endpoint/
+  Ingress/local-routing readiness, immutable known-good snapshots, bounded
+  restart reconciliation, and exact automatic rollback. No second renderer or
+  deployment engine was added.
+- `R5-011.2` verdict is `DONE / LOCAL_RECONCILIATION_ROLLBACK_PASS` after the
+  disposable pinned K3s A -> broken immutable B -> exact A verifier, including
+  Agent/store restart while B was waiting and one-resource-count proof.
+- R5-011.3 still owns Cloud PostgreSQL lifecycle/state plus Agent/CLI/Local
+  API/UI wiring. R5-011.4 still owns live public endpoint proof. No VPS,
+  Cloudflare, DNS, certificate, MCP, AI, or release action was performed.
+
 ### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
 
 - R5-009 local acceptance passed on 2026-07-19 with disposable PostgreSQL,

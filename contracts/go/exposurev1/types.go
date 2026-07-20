@@ -118,12 +118,18 @@ func (s ExposureSpec) Canonicalize() (ExposureSpec, error) {
 	if err := out.validateShape(); err != nil {
 		return ExposureSpec{}, err
 	}
-	hash, err := out.hashCanonical()
+	hash, err := out.RuntimeHash()
 	if err != nil {
 		return ExposureSpec{}, err
 	}
 	if s.SpecHash != "" && s.SpecHash != hash {
-		return ExposureSpec{}, validationError(CodeSpecHashMismatch, "spec_hash", "spec_hash does not match the canonical contract")
+		// R5-011.1 included display metadata in SpecHash. Accept that legacy
+		// representation once, then canonicalize to the runtime-only hash so a
+		// display edit cannot trigger a Kubernetes mutation or rollback.
+		legacyHash, legacyErr := out.legacyHash()
+		if legacyErr != nil || s.SpecHash != legacyHash {
+			return ExposureSpec{}, validationError(CodeSpecHashMismatch, "spec_hash", "spec_hash does not match the canonical contract")
+		}
 	}
 	out.SpecHash = hash
 	return out, nil
@@ -143,6 +149,20 @@ func (s ExposureSpec) Hash() (string, error) {
 		return "", err
 	}
 	return canonical.SpecHash, nil
+}
+
+// RuntimeHash identifies only fields that can change the rendered Ingress or
+// its workload binding. Metadata is intentionally excluded from this hash.
+func (s ExposureSpec) RuntimeHash() (string, error) {
+	canonical := s
+	canonical.SpecHash = ""
+	canonical.Metadata = nil
+	data, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("marshal runtime ExposureSpec: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (s ExposureSpec) validateShape() error {
@@ -187,12 +207,12 @@ func (s ExposureSpec) validateShape() error {
 	return nil
 }
 
-func (s ExposureSpec) hashCanonical() (string, error) {
+func (s ExposureSpec) legacyHash() (string, error) {
 	payload := s
 	payload.SpecHash = ""
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal canonical ExposureSpec: %w", err)
+		return "", fmt.Errorf("marshal legacy ExposureSpec: %w", err)
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil

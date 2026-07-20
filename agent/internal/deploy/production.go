@@ -19,6 +19,11 @@ import (
 
 const ProductionFieldManager = "opsi-r5-010"
 
+const (
+	MaxCommandOutputBytes = 256 * 1024
+	MaxCommandErrorBytes  = 512
+)
+
 // ProductionRuntime is the only Agent execution boundary for immutable image jobs.
 // The legacy Git/Build/K3s adapters remain available for development compatibility.
 type ProductionRuntime interface {
@@ -36,11 +41,45 @@ func (ExecCommandRunner) Run(ctx context.Context, input []byte, name string, arg
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
 	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("%s failed: %s", name, RedactSensitive(strings.TrimSpace(string(out))))
+	output := &boundedCommandBuffer{limit: MaxCommandOutputBytes}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	if output.overflow {
+		return nil, errors.New("command output exceeded the allowed bound")
 	}
-	return out, nil
+	if err != nil {
+		message := strings.TrimSpace(string(output.Bytes()))
+		if len(message) > MaxCommandErrorBytes {
+			message = message[:MaxCommandErrorBytes]
+		}
+		if message == "" {
+			return nil, fmt.Errorf("%s failed", name)
+		}
+		return nil, fmt.Errorf("%s failed: %s", name, RedactSensitive(message))
+	}
+	return append([]byte(nil), output.Bytes()...), nil
+}
+
+type boundedCommandBuffer struct {
+	bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func (b *boundedCommandBuffer) Write(data []byte) (int, error) {
+	written := len(data)
+	remaining := b.limit - b.Len()
+	if remaining <= 0 {
+		b.overflow = true
+		return written, nil
+	}
+	if len(data) > remaining {
+		b.overflow = true
+		data = data[:remaining]
+	}
+	_, _ = b.Buffer.Write(data)
+	return written, nil
 }
 
 // RegistryCredentialProvider is deliberately separate from command execution.
@@ -64,12 +103,17 @@ func (AnonymousRegistryCredentials) Credentials(context.Context, deploymentv1.Im
 // ProductionAdapter pulls by digest, renders Opsi-owned resources, and checks
 // readiness using the application container name instead of container position.
 type ProductionAdapter struct {
-	Runner       CommandRunner
-	Credentials  RegistryCredentialProvider
-	KubectlPath  string
-	K3sPath      string
-	PollInterval time.Duration
-	Timeout      time.Duration
+	Runner              CommandRunner
+	Credentials         RegistryCredentialProvider
+	TLSResolver         TLSSecretResolver
+	RoutingProbe        RoutingProbe
+	RequireLocalRouting bool
+	KubectlPath         string
+	K3sPath             string
+	PollInterval        time.Duration
+	Timeout             time.Duration
+	ReadTimeout         time.Duration
+	MaxOutputBytes      int
 }
 
 func (a ProductionAdapter) Deploy(ctx context.Context, command deploymentv1.AgentCommand, progress ProgressFunc) (Record, error) {
@@ -209,19 +253,22 @@ func (a ProductionAdapter) verifyOwnership(ctx context.Context, resources render
 		{kind: "service", name: resources.ServiceName, obj: resources.Service},
 	}
 	for _, check := range checks {
-		args := []string{"get", check.kind, check.name, "-o", "json"}
+		args := []string{"get", check.kind, check.name, "-o", "json", "--ignore-not-found", "--show-managed-fields"}
 		if check.kind != "namespace" {
-			args = append(args, "-n", namespace)
+			args = []string{"get", check.kind, check.name, "-n", namespace, "-o", "json", "--ignore-not-found", "--show-managed-fields"}
 		}
 		out, err := a.Runner.Run(ctx, nil, a.KubectlPath, args...)
 		if err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "not found") {
-				continue
-			}
-			return err
+			return errors.New("Kubernetes ownership read failed")
+		}
+		if len(out) > a.kubernetesOutputLimit() {
+			return errors.New("Kubernetes ownership response exceeded the allowed bound")
+		}
+		if len(bytes.TrimSpace(out)) == 0 {
+			continue
 		}
 		var current map[string]any
-		if err := json.Unmarshal(out, &current); err != nil {
+		if err := decodeSingleJSON(out, &current); err != nil {
 			return errors.New("existing Kubernetes resource returned invalid JSON")
 		}
 		metadata, _ := current["metadata"].(map[string]any)
@@ -290,8 +337,11 @@ func (a ProductionAdapter) getJSON(ctx context.Context, kind, name, namespace st
 	if err != nil {
 		return nil, err
 	}
+	if len(out) > a.kubernetesOutputLimit() {
+		return nil, errors.New("Kubernetes response exceeded the allowed bound")
+	}
 	var value map[string]any
-	if err := json.Unmarshal(out, &value); err != nil {
+	if err := decodeSingleJSON(out, &value); err != nil {
 		return nil, errors.New("Kubernetes returned invalid JSON")
 	}
 	return value, nil
@@ -346,8 +396,18 @@ func selectorString(selector map[string]string) string {
 }
 
 func number(value any) int {
-	if number, ok := value.(float64); ok {
-		return int(number)
+	switch value := value.(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case int32:
+		return int(value)
+	case int64:
+		return int(value)
+	case json.Number:
+		result, _ := value.Int64()
+		return int(result)
 	}
 	return 0
 }

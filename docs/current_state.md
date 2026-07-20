@@ -34,9 +34,9 @@ artifacts. At this snapshot:
   `DeploymentJob` path and has passed live Agent/K3s workload, CLI/Local UI
   parity, idempotent replay, and Agent restart acceptance. Pull request
   preview environments are not implemented.
-- R5-011.1 locally renders one standard Traefik Ingress and performs read-only
-  ownership/conflict preflight. Opsi does not yet apply/manage a live Ingress,
-  Gateway API resource, domain, certificate, or TLS secret lifecycle.
+- R5-011.2 locally reconciles the one standard Traefik Ingress with durable
+  known-good rollback and disposable K3s proof. No live Agent/VPS Ingress,
+  Gateway API resource, domain, certificate, or TLS secret lifecycle exists.
 - Source packaging rejects local config, credentials, private keys, runtime
   certificate directories, databases, logs, and generated output.
 
@@ -433,16 +433,16 @@ clone/build process or external exposure resource was present. R5-010 creates
 no Ingress/Gateway/DNS/TLS resource and implements no automatic rollback; those
 remain R5-011 scope.
 
-R5-011.1 now defines strict `ExposureSpec v1` and a deterministic local
+R5-011.1 defines strict `ExposureSpec v1` and a deterministic local
 `networking.k8s.io/v1` Ingress renderer with fixed Traefik class and field
-manager. It reuses the authoritative R5-010 namespace/name/ownership helpers,
-targets only the exact owned ClusterIP Service/port, resolves TLS only from an
-opaque verified namespace-local reference, and preflights same-name ownership
-and path-component-aware host/path conflicts without mutation. This checkpoint
-is `DONE / LOCAL_CONTRACT_RENDERER_PASS`; R5-011 itself remains in progress.
-There is no live Ingress, external endpoint, readiness reconciliation,
-known-good rollback, Cloud lifecycle, CLI/UI exposure flow, DNS, or certificate
-provisioning yet.
+manager. R5-011.2 extends the same Agent engine with a versioned SQLite WAL,
+UID/resourceVersion compare-and-swap ownership checks, factual Deployment/
+Service/Ingress readiness, a bounded local Traefik probe, exact known-good
+snapshots, restart reconciliation, and automatic rollback. The R5-011.2
+checkpoint is `DONE / LOCAL_RECONCILIATION_ROLLBACK_PASS` after the disposable
+K3s A -> broken immutable B -> exact A gate. R5-011 itself remains in progress:
+Cloud lifecycle/control-plane state, CLI/Local API/UI, DNS/certificate
+provisioning, and public endpoint acceptance are not implemented here.
 
 ## E2E and production evidence
 

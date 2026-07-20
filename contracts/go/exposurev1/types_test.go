@@ -46,6 +46,50 @@ func TestExposureSpecStrictJSONAndDeterministicHash(t *testing.T) {
 	}
 }
 
+func TestExposureSpecMetadataIsDisplayOnlyForRuntimeHash(t *testing.T) {
+	spec := validSpec(t)
+	changed := spec
+	metadata := *spec.Metadata
+	metadata.DisplayName = "A different display name"
+	metadata.Rationale = "A different audit rationale"
+	changed.Metadata = &metadata
+	canonical, err := changed.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical.SpecHash != spec.SpecHash {
+		t.Fatalf("metadata changed runtime hash: old=%s new=%s", spec.SpecHash, canonical.SpecHash)
+	}
+	functional := spec
+	functional.Path = "/v2"
+	functional.SpecHash = ""
+	functional, err = functional.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if functional.SpecHash == spec.SpecHash {
+		t.Fatal("functional route change did not change runtime hash")
+	}
+}
+
+func TestExposureSpecAcceptsR5011LegacyMetadataHash(t *testing.T) {
+	spec := validSpec(t)
+	legacy := spec
+	legacy.SpecHash = ""
+	legacyHash, err := legacy.legacyHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.SpecHash = legacyHash
+	canonical, err := legacy.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical.SpecHash != spec.SpecHash {
+		t.Fatalf("legacy hash was not migrated: got=%s want=%s", canonical.SpecHash, spec.SpecHash)
+	}
+}
+
 func TestExposureSpecRejectsUnknownOversizedAndUnsafeShapes(t *testing.T) {
 	spec := validSpec(t)
 	data, err := json.Marshal(spec)

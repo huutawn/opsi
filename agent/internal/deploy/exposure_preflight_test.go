@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
@@ -172,6 +173,48 @@ func TestExposurePreflightConcurrentResultsAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestTypedKubernetesAbsenceAndReadFailures(t *testing.T) {
+	key := kubectlKey("get", "ingress", "api", "-n", "opsi", "-o", "json", "--ignore-not-found")
+	absent := &exposureRunner{outputs: map[string][]byte{key: nil}, errors: map[string]error{}}
+	object, exists, err := (ProductionAdapter{Runner: absent}).getOptionalKubernetesObject(context.Background(), "ingress", "api", "opsi")
+	if err != nil || exists || object != nil {
+		t.Fatalf("absent object=%+v exists=%v err=%v", object, exists, err)
+	}
+	permission := &exposureRunner{outputs: map[string][]byte{}, errors: map[string]error{key: errors.New("resource not found in localized permission response")}}
+	if _, _, err := (ProductionAdapter{Runner: permission}).getOptionalKubernetesObject(context.Background(), "ingress", "api", "opsi"); exposureCode(err) != CodeKubernetesRead {
+		t.Fatalf("non-zero read was treated as absence: %v", err)
+	}
+	malformed := &exposureRunner{outputs: map[string][]byte{key: []byte(`{"kind":"Ingress"} trailing`)}, errors: map[string]error{}}
+	if _, _, err := (ProductionAdapter{Runner: malformed}).getOptionalKubernetesObject(context.Background(), "ingress", "api", "opsi"); exposureCode(err) != CodeKubernetesInvalidResponse {
+		t.Fatalf("malformed response err=%v", err)
+	}
+	oversized := &exposureRunner{outputs: map[string][]byte{key: []byte(strings.Repeat("x", 33))}, errors: map[string]error{}}
+	if _, _, err := (ProductionAdapter{Runner: oversized, MaxOutputBytes: 32}).getOptionalKubernetesObject(context.Background(), "ingress", "api", "opsi"); exposureCode(err) != CodeKubernetesResponseTooLarge {
+		t.Fatalf("oversized response err=%v", err)
+	}
+	if _, _, err := (ProductionAdapter{Runner: blockingRunner{}, ReadTimeout: time.Millisecond}).getOptionalKubernetesObject(context.Background(), "ingress", "api", "opsi"); exposureCode(err) != CodeKubernetesTimeout {
+		t.Fatalf("timeout response err=%v", err)
+	}
+}
+
+func TestIngressInventoryBoundsAndSorting(t *testing.T) {
+	key := kubectlKey("get", "ingress", "--all-namespaces", "-o", "json")
+	items := []map[string]any{ingressFixture("z", "second", "z.example.com", "/", map[string]any{}), ingressFixture("a", "first", "a.example.com", "/", map[string]any{})}
+	runner := &exposureRunner{outputs: map[string][]byte{key: mustJSON(t, map[string]any{"apiVersion": "v1", "kind": "List", "items": items})}, errors: map[string]error{}}
+	got, err := (ProductionAdapter{Runner: runner}).listIngresses(context.Background())
+	if err != nil || got[0]["metadata"].(map[string]any)["namespace"] != "a" {
+		t.Fatalf("sorted inventory=%+v err=%v", got, err)
+	}
+	overflow := make([]map[string]any, MaxIngressInventoryItems+1)
+	for index := range overflow {
+		overflow[index] = ingressFixture("ns", "ingress-"+strings.Repeat("x", index%3), "example.com", "/", map[string]any{})
+	}
+	runner.outputs[key] = mustJSON(t, map[string]any{"apiVersion": "v1", "kind": "List", "items": overflow})
+	if _, err := (ProductionAdapter{Runner: runner}).listIngresses(context.Background()); exposureCode(err) != CodeKubernetesInventoryOverflow {
+		t.Fatalf("inventory overflow err=%v", err)
+	}
+}
+
 func exposureFixtures(t *testing.T, command deploymentv1.AgentCommand, spec exposurev1.ExposureSpec) (RenderedExposure, map[string]any) {
 	t.Helper()
 	rendered, err := renderExposure(context.Background(), command, spec, nil)
@@ -188,15 +231,18 @@ func exposureFixtures(t *testing.T, command deploymentv1.AgentCommand, spec expo
 func newExposureRunner(t *testing.T, rendered RenderedExposure, service, ingress map[string]any, ingresses []map[string]any) *exposureRunner {
 	t.Helper()
 	runner := &exposureRunner{outputs: map[string][]byte{}, errors: map[string]error{}}
-	serviceKey := kubectlKey("get", "service", rendered.BackendServiceName, "-n", rendered.Namespace, "-o", "json")
+	if ingresses == nil {
+		ingresses = []map[string]any{}
+	}
+	serviceKey := kubectlKey("get", "service", rendered.BackendServiceName, "-n", rendered.Namespace, "-o", "json", "--ignore-not-found")
 	if service == nil {
-		runner.errors[serviceKey] = errors.New("not found")
+		runner.outputs[serviceKey] = nil
 	} else {
 		runner.outputs[serviceKey] = mustJSON(t, service)
 	}
-	ingressKey := kubectlKey("get", "ingress", rendered.IngressName, "-n", rendered.Namespace, "-o", "json")
+	ingressKey := kubectlKey("get", "ingress", rendered.IngressName, "-n", rendered.Namespace, "-o", "json", "--ignore-not-found")
 	if ingress == nil {
-		runner.errors[ingressKey] = errors.New("not found")
+		runner.outputs[ingressKey] = nil
 	} else {
 		runner.outputs[ingressKey] = mustJSON(t, ingress)
 	}
@@ -207,6 +253,13 @@ func newExposureRunner(t *testing.T, rendered RenderedExposure, service, ingress
 type exposureRunner struct {
 	outputs map[string][]byte
 	errors  map[string]error
+}
+
+type blockingRunner struct{}
+
+func (blockingRunner) Run(ctx context.Context, _ []byte, _ string, _ ...string) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 func (r *exposureRunner) Run(_ context.Context, _ []byte, _ string, args ...string) ([]byte, error) {

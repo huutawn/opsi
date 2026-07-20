@@ -47,22 +47,30 @@ type Engine struct {
 	Builder        Builder
 	K3s            K3sAdapter
 	Production     ProductionRuntime
+	Reconciler     RolloutRuntime
 	BuildRoot      string
 	RolloutTimeout time.Duration
 	PollInterval   time.Duration
 }
 
 func NewEngine(store Store, cfg EngineConfig) *Engine {
-	return &Engine{
+	engine := &Engine{
 		Store:          store,
 		Git:            cfg.Git,
 		Builder:        cfg.Builder,
 		K3s:            cfg.K3s,
 		Production:     cfg.Production,
+		Reconciler:     cfg.Reconciler,
 		BuildRoot:      firstNonEmpty(cfg.BuildRoot, "/tmp/opsi-builds"),
 		RolloutTimeout: durationOrDefault(cfg.RolloutTimeout, 10*time.Minute),
 		PollInterval:   durationOrDefault(cfg.PollInterval, 5*time.Second),
 	}
+	if engine.Reconciler == nil {
+		if runtime, ok := cfg.Production.(RolloutRuntime); ok {
+			engine.Reconciler = runtime
+		}
+	}
+	return engine
 }
 
 type EngineConfig struct {
@@ -70,6 +78,7 @@ type EngineConfig struct {
 	Builder        Builder
 	K3s            K3sAdapter
 	Production     ProductionRuntime
+	Reconciler     RolloutRuntime
 	BuildRoot      string
 	RolloutTimeout time.Duration
 	PollInterval   time.Duration

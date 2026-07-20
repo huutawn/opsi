@@ -1,21 +1,28 @@
 package deploy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"sort"
 	"strings"
+	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 )
 
 const (
-	ExposureCreateEligible = "create_eligible"
-	ExposureUnchanged      = "unchanged"
-	ExposureUpdateEligible = "update_eligible"
+	ExposureCreateEligible       = "create_eligible"
+	ExposureUnchanged            = "unchanged"
+	ExposureUpdateEligible       = "update_eligible"
+	DefaultKubernetesReadTimeout = 10 * time.Second
+	DefaultKubernetesOutputBytes = 256 * 1024
+	MaxIngressInventoryItems     = 256
 )
 
 type ExposureDifference struct {
@@ -103,47 +110,106 @@ func (a ProductionAdapter) preflightBackendService(ctx context.Context, command 
 	if !serviceObjectHasExactPort(current, spec.ServicePort) {
 		return exposureError(CodeBackendServicePort, spec, "redeploy the authoritative workload with the requested service port")
 	}
-	currentHash, err := objectSectionHash(current, "spec")
-	if err != nil {
-		return &ExposureError{Code: CodeKubernetesInvalidResponse, SafeAction: "inspect the Kubernetes Service response locally"}
-	}
-	expectedHash, err := objectSectionHash(expected.Service, "spec")
-	if err != nil {
-		return err
-	}
+	currentHash := serviceFunctionalHash(current)
+	expectedHash := serviceFunctionalHash(expected.Service)
 	if currentHash != expectedHash {
 		return exposureError(CodeBackendServiceMismatch, spec, "reconcile the authoritative R5-010 Service before exposing it")
 	}
 	return nil
 }
 
+func serviceFunctionalHash(service map[string]any) string {
+	spec, _ := service["spec"].(map[string]any)
+	functional := map[string]any{"type": spec["type"], "selector": spec["selector"], "ports": spec["ports"]}
+	return hashValue(functional)
+}
+
 func (a ProductionAdapter) getOptionalKubernetesObject(ctx context.Context, kind, name, namespace string) (map[string]any, bool, error) {
-	out, err := a.Runner.Run(ctx, nil, a.KubectlPath, "get", kind, name, "-n", namespace, "-o", "json")
+	readCtx, cancel := context.WithTimeout(ctx, a.kubernetesReadTimeout())
+	defer cancel()
+	out, err := a.Runner.Run(readCtx, nil, a.KubectlPath, "get", kind, name, "-n", namespace, "-o", "json", "--ignore-not-found")
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "not found") {
-			return nil, false, nil
+		if errors.Is(readCtx.Err(), context.DeadlineExceeded) {
+			return nil, false, &ExposureError{Code: CodeKubernetesTimeout, SafeAction: "retry the read-only Kubernetes preflight"}
 		}
 		return nil, false, &ExposureError{Code: CodeKubernetesRead, SafeAction: "retry the read-only Kubernetes preflight"}
 	}
+	if len(out) > a.kubernetesOutputLimit() {
+		return nil, false, &ExposureError{Code: CodeKubernetesResponseTooLarge, SafeAction: "reduce the Kubernetes response and retry"}
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return nil, false, nil
+	}
 	var object map[string]any
-	if err := json.Unmarshal(out, &object); err != nil {
+	if err := decodeSingleJSON(out, &object); err != nil || len(object) == 0 {
 		return nil, false, &ExposureError{Code: CodeKubernetesInvalidResponse, SafeAction: "inspect the Kubernetes API response locally"}
 	}
 	return object, true, nil
 }
 
 func (a ProductionAdapter) listIngresses(ctx context.Context) ([]map[string]any, error) {
-	out, err := a.Runner.Run(ctx, nil, a.KubectlPath, "get", "ingress", "--all-namespaces", "-o", "json")
+	readCtx, cancel := context.WithTimeout(ctx, a.kubernetesReadTimeout())
+	defer cancel()
+	out, err := a.Runner.Run(readCtx, nil, a.KubectlPath, "get", "ingress", "--all-namespaces", "-o", "json")
 	if err != nil {
+		if errors.Is(readCtx.Err(), context.DeadlineExceeded) {
+			return nil, &ExposureError{Code: CodeKubernetesTimeout, SafeAction: "retry the read-only Kubernetes preflight"}
+		}
 		return nil, &ExposureError{Code: CodeKubernetesRead, SafeAction: "retry the read-only Kubernetes preflight"}
 	}
-	var list struct {
-		Items []map[string]any `json:"items"`
+	if len(out) > a.kubernetesOutputLimit() {
+		return nil, &ExposureError{Code: CodeKubernetesResponseTooLarge, SafeAction: "reduce the Kubernetes response and retry"}
 	}
-	if err := json.Unmarshal(out, &list); err != nil {
+	var list struct {
+		APIVersion string           `json:"apiVersion"`
+		Kind       string           `json:"kind"`
+		Metadata   json.RawMessage  `json:"metadata,omitempty"`
+		Items      []map[string]any `json:"items"`
+	}
+	if err := decodeSingleJSON(out, &list); err != nil || list.Items == nil {
 		return nil, &ExposureError{Code: CodeKubernetesInvalidResponse, SafeAction: "inspect the Kubernetes API response locally"}
 	}
+	if len(list.Items) > MaxIngressInventoryItems {
+		return nil, &ExposureError{Code: CodeKubernetesInventoryOverflow, SafeAction: "narrow the Kubernetes inventory and retry"}
+	}
+	sort.Slice(list.Items, func(i, j int) bool {
+		left, _ := list.Items[i]["metadata"].(map[string]any)
+		right, _ := list.Items[j]["metadata"].(map[string]any)
+		leftKey, _ := left["namespace"].(string)
+		leftName, _ := left["name"].(string)
+		rightKey, _ := right["namespace"].(string)
+		rightName, _ := right["name"].(string)
+		return leftKey+"\x00"+leftName < rightKey+"\x00"+rightName
+	})
 	return list.Items, nil
+}
+
+func (a ProductionAdapter) kubernetesReadTimeout() time.Duration {
+	if a.ReadTimeout > 0 {
+		return a.ReadTimeout
+	}
+	return DefaultKubernetesReadTimeout
+}
+
+func (a ProductionAdapter) kubernetesOutputLimit() int {
+	if a.MaxOutputBytes > 0 {
+		return a.MaxOutputBytes
+	}
+	return DefaultKubernetesOutputBytes
+}
+
+func decodeSingleJSON(data []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("Kubernetes response contains trailing JSON")
+	}
+	return nil
 }
 
 func preflightRouteConflicts(items []map[string]any, desired exposurev1.ExposureSpec, rendered RenderedExposure) error {
@@ -285,10 +351,6 @@ func ingressDiff(current, desired map[string]any) ([]ExposureDifference, error) 
 	}
 	sort.Slice(diff, func(i, j int) bool { return diff[i].Field < diff[j].Field })
 	return diff, nil
-}
-
-func objectSectionHash(object map[string]any, section string) (string, error) {
-	return logicalHash(object[section])
 }
 
 func logicalHash(value any) (string, error) {

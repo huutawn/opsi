@@ -381,6 +381,18 @@ and no external endpoint, readiness reconciliation, rollback, Cloud API,
 CLI/UI, DNS, or certificate lifecycle was started. R5-011 remains in progress;
 R5-011.2 and R5-011.3 own those remaining gates.
 
+**Execution checkpoint R5-011.2 (2026-07-20):** `DONE /
+LOCAL_RECONCILIATION_ROLLBACK_PASS`. The existing Agent deployment engine and
+SQLite store now own a versioned pre-mutation WAL, one-active-target lock,
+allowlisted monotonic states, UID/resourceVersion compare-and-swap mutation,
+factual workload/Service/Ingress/local-Traefik readiness, exact known-good
+history, bounded restart reconciliation, and automatic rollback. A pinned
+disposable K3s gate applied nginx A by full OCI digest, restarted the
+engine/store after broken immutable B reached `waiting`, restored exact A,
+confirmed the `app` imageID digest, and retained exactly one Deployment,
+Service, and Ingress. R5-011 remains partial: Cloud PostgreSQL lifecycle/API,
+CLI/Local API/UI are R5-011.3, and live public endpoint proof is R5-011.4.
+
 ### R5-012 — Main CD và PR preview manual acceptance
 
 **CẦN VPS:** VPS Agent staging; cần test repository GitHub thật.

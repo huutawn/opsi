@@ -1,6 +1,7 @@
 # ADR-007: Canonical Traefik external exposure
 
-Status: Accepted for the R5-011.1 local contract and renderer checkpoint.
+Status: Accepted; R5-011.2 local reconciliation/rollback extends the same
+contract and renderer without adding another exposure resource.
 
 ## Context
 
@@ -58,10 +59,16 @@ or returns certificate/private-key data and has no plaintext or file fallback.
 
 - R5-010 namespace/name/label conventions and its exact ClusterIP Service are
   reused; no second deployment engine or Kubernetes client is introduced.
-- R5-011.1 is local contract, renderer, and read-only preflight only. It does
-  not apply an Ingress or create a live external endpoint.
-- Readiness reconciliation, persistence/WAL, known-good rollback, Cloud
-  lifecycle/API, Agent exposure commands, CLI/UI, and live endpoint acceptance
-  remain R5-011.2 and R5-011.3.
+- R5-011.2 applies the same owned Ingress through the Agent-local durable
+  rollout WAL, compares UID/resourceVersion before mutation, and verifies
+  Deployment generation, the `app` container digest, Service endpoints, and
+  Ingress identity before committing known-good. Runtime readiness and local
+  Traefik routing are factual gates; public readiness is intentionally absent.
+- The WAL stores versioned immutable intent, bounded typed errors, resource
+  identities, and readiness evidence hashes only. A failed desired rollout
+  restores the exact previous digest/spec/exposure snapshot or ends in
+  `rollback_failed`; it never adopts or deletes a foreign object.
+- Cloud lifecycle, Agent command/API wiring, CLI/UI, DNS, certificate
+  provisioning, and live external endpoint acceptance remain R5-011.3/R5-011.4.
 - DNS, certificate provisioning, Cloudflare, cert-manager, and private-key
   handling remain outside this decision.
