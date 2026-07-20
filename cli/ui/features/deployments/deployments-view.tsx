@@ -66,13 +66,13 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
     });
   }, [console.state.deployments, projectID, selectedJobID]);
 
-  const service = services.find((item) => item.id === serviceID);
-  const serviceKey = service?.name ?? "";
-  const serviceRecords = records.filter((item) => item.service_id === serviceID && item.service_key === serviceKey && item.build.status === "succeeded");
+  // BuildRecord.service_key is the authority; service.name is only a display label.
+  const serviceRecords = records.filter((item) => item.service_id === serviceID && item.build.status === "succeeded");
   const repositoryIDs = Array.from(new Set(serviceRecords.map((item) => String(item.repository_id))));
   const selectedRepositoryID = repositoryIDs.includes(repositoryID) ? repositoryID : repositoryIDs[0] ?? "";
   const acceptedRecords = serviceRecords.filter((item) => String(item.repository_id) === selectedRepositoryID);
   const selectedRecord = acceptedRecords.find((item) => item.id === recordID) ?? acceptedRecords[0];
+  const serviceKey = selectedRecord?.service_key ?? "";
   const assignment = topology?.assignments.find((item) => item.service_key === serviceKey && item.environment_id === environmentID);
   const resolvedRuntimeID = preview?.snapshot.authority.runtime_id;
   const resolvedNodeID = preview?.snapshot.authority.node_id;
