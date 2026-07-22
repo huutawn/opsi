@@ -21,6 +21,8 @@ const (
 	RuntimeSnapshotVersion     = "opsi.runtime_snapshot/v1"
 	KnownGoodSchemaVersion     = "opsi.known_good/v1"
 	ReadinessEvidenceVersion   = "opsi.readiness_evidence/v1"
+	ExposureMutationVersion    = "opsi.exposure_mutation/v1"
+	ExposurePreviewVersion     = "opsi.exposure_preview/v1"
 	RolloutStatePrepared       = "prepared"
 	RolloutStateApplying       = "applying"
 	RolloutStateWaiting        = "waiting"
@@ -29,6 +31,8 @@ const (
 	RolloutStateRollingBack    = "rolling_back"
 	RolloutStateRolledBack     = "rolled_back"
 	RolloutStateRollbackFailed = "rollback_failed"
+	RolloutOperationApply      = "apply"
+	RolloutOperationRollback   = "rollback"
 	MaxRolloutAttempts         = 3
 	MaxRolloutErrorBytes       = 1024
 	MaxRolloutResources        = 8
@@ -189,10 +193,14 @@ func (s RuntimeSnapshot) AgentCommand() AgentCommand {
 type RolloutIntent struct {
 	SchemaVersion         string          `json:"schema_version"`
 	RolloutID             string          `json:"rollout_id"`
+	Operation             string          `json:"operation"`
 	Target                RuntimeTarget   `json:"target"`
 	Desired               RuntimeSnapshot `json:"desired"`
 	PreviousKnownGoodID   string          `json:"previous_known_good_id,omitempty"`
 	PreviousKnownGoodHash string          `json:"previous_known_good_hash,omitempty"`
+	PreviousDigest        string          `json:"previous_digest,omitempty"`
+	ExpectedKnownGoodID   string          `json:"expected_known_good_id,omitempty"`
+	ExpectedKnownGoodHash string          `json:"expected_known_good_hash,omitempty"`
 	Attempt               int32           `json:"attempt"`
 	CreatedAt             time.Time       `json:"created_at"`
 	IntentHash            string          `json:"intent_hash"`
@@ -233,6 +241,12 @@ func (i RolloutIntent) Canonicalize() (RolloutIntent, error) {
 	if out.SchemaVersion != RolloutSchemaVersion || !validOpaqueID(out.RolloutID) {
 		return RolloutIntent{}, errors.New("rollout schema or id is invalid")
 	}
+	if out.Operation == "" {
+		out.Operation = RolloutOperationApply
+	}
+	if out.Operation != RolloutOperationApply && out.Operation != RolloutOperationRollback {
+		return RolloutIntent{}, errors.New("rollout operation is invalid")
+	}
 	if err := out.Target.Validate(); err != nil {
 		return RolloutIntent{}, err
 	}
@@ -247,6 +261,24 @@ func (i RolloutIntent) Canonicalize() (RolloutIntent, error) {
 	}
 	if out.PreviousKnownGoodID != "" && (!validOpaqueID(out.PreviousKnownGoodID) || !rolloutHashPattern.MatchString(out.PreviousKnownGoodHash)) {
 		return RolloutIntent{}, errors.New("previous known-good reference is invalid")
+	}
+	if out.PreviousDigest != "" && !digestPattern.MatchString(out.PreviousDigest) {
+		return RolloutIntent{}, errors.New("previous digest is invalid")
+	}
+	if out.PreviousKnownGoodID == "" && out.PreviousDigest != "" {
+		return RolloutIntent{}, errors.New("previous digest requires a known-good reference")
+	}
+	if (out.ExpectedKnownGoodID == "") != (out.ExpectedKnownGoodHash == "") {
+		return RolloutIntent{}, errors.New("expected known-good reference is incomplete")
+	}
+	if out.ExpectedKnownGoodID != "" && (!validOpaqueID(out.ExpectedKnownGoodID) || !rolloutHashPattern.MatchString(out.ExpectedKnownGoodHash)) {
+		return RolloutIntent{}, errors.New("expected known-good reference is invalid")
+	}
+	if out.Operation == RolloutOperationApply && out.ExpectedKnownGoodID != "" {
+		return RolloutIntent{}, errors.New("apply rollout must use the previous known-good reference as its expectation")
+	}
+	if out.Operation == RolloutOperationRollback && (out.PreviousKnownGoodID == "" || out.ExpectedKnownGoodID == "") {
+		return RolloutIntent{}, errors.New("explicit rollback requires target and expected current known-good references")
 	}
 	payload := out
 	payload.IntentHash = ""
@@ -375,13 +407,33 @@ func IsTerminalRolloutState(state string) bool {
 
 func CanTransitionRollout(from, to string) bool {
 	allowed := map[string]map[string]bool{
-		RolloutStatePrepared:    {RolloutStateApplying: true, RolloutStateFailed: true},
+		RolloutStatePrepared:    {RolloutStateApplying: true, RolloutStateRollingBack: true, RolloutStateFailed: true},
 		RolloutStateApplying:    {RolloutStateWaiting: true, RolloutStateFailed: true},
 		RolloutStateWaiting:     {RolloutStateSucceeded: true, RolloutStateFailed: true},
 		RolloutStateFailed:      {RolloutStateRollingBack: true},
 		RolloutStateRollingBack: {RolloutStateRolledBack: true, RolloutStateRollbackFailed: true},
 	}
 	return allowed[from][to]
+}
+
+type ExposureMutationRequest struct {
+	SchemaVersion       string                  `json:"schema_version"`
+	BaseDeploymentJobID string                  `json:"base_deployment_job_id"`
+	ExpectedStateHash   string                  `json:"expected_state_hash,omitempty"`
+	Exposure            exposurev1.ExposureSpec `json:"exposure"`
+}
+
+type ExposurePreview struct {
+	SchemaVersion       string                   `json:"schema_version"`
+	BaseDeploymentJobID string                   `json:"base_deployment_job_id"`
+	Current             *exposurev1.ExposureSpec `json:"current,omitempty"`
+	Desired             exposurev1.ExposureSpec  `json:"desired"`
+	Changes             []string                 `json:"changes"`
+	StateHash           string                   `json:"state_hash"`
+	Eligible            bool                     `json:"eligible"`
+	DecisionCode        string                   `json:"decision_code"`
+	Message             string                   `json:"message"`
+	ResolvedAt          time.Time                `json:"resolved_at"`
 }
 
 func canonicalHash(value any) (string, error) {

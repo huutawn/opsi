@@ -393,6 +393,25 @@ confirmed the `app` imageID digest, and retained exactly one Deployment,
 Service, and Ingress. R5-011 remains partial: Cloud PostgreSQL lifecycle/API,
 CLI/Local API/UI are R5-011.3, and live public endpoint proof is R5-011.4.
 
+**Execution checkpoint R5-011.3 (2026-07-22):** `DONE /
+LOCAL_CONTROL_PLANE_UI_PASS`. The existing R5-010 DeploymentJob tables were
+extended append-only for rollout intent/state, ExposureSpec, digest and
+known-good references, readiness hashes, sanitized terminal results, and
+rollout events. Cloud preview/diff/apply/list/detail uses project-scoped
+authorization, exact idempotency, target locking, monotonic transitions, and
+terminal immutability. The lease command carries immutable rollout authority
+into the existing Agent `ReconcileRollout`/`ReconcilePending` path; Agent
+SQLite/Kubernetes remains factual runtime truth. Manual CLI and Local API proxy
+use the same Cloud authority, and the Local UI renders deterministic preview,
+explicit confirmation, progress/history, factual digests/readiness, and
+automatic/explicit rollback states. Disposable PostgreSQL, backend/Agent
+restart, success, B -> A automatic rollback, explicit rollback,
+no-known-good, rollback-failed, stale/out-of-order/terminal/idempotency,
+concurrency, authorization, ownership, and secret/raw-payload negative gates
+passed. No VPS, staging deployment, DNS/certificate provisioning, public
+endpoint, or R5-012/MCP/AI path was used. R5-011 remains partial and R5-011.4
+still owns live public endpoint acceptance.
+
 ### R5-012 — Main CD và PR preview manual acceptance
 
 **CẦN VPS:** VPS Agent staging; cần test repository GitHub thật.

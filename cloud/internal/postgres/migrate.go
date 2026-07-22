@@ -578,5 +578,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateR5009TopologyPolicy(ctx, db); err != nil {
 		return err
 	}
-	return MigrateR5010Deployment(ctx, db)
+	if err := MigrateR5010Deployment(ctx, db); err != nil {
+		return err
+	}
+	return MigrateR5011Rollout(ctx, db)
 }

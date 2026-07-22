@@ -25,3 +25,34 @@ test("manual deployment UI uses the loopback immutable job API and typed review 
   assert.doesNotMatch(componentSource, /textarea|raw yaml|raw manifest|localStorage|sessionStorage|Authorization/i);
   assert.doesNotMatch(source, /https?:\/\/(?!127\.0\.0\.1|localhost)/);
 });
+
+test("manual exposure rollout uses only Local API and renders factual rollback lifecycle", async () => {
+  const componentSource = await readFile(component, "utf8");
+  const clientSource = await readFile(client, "utf8");
+  const source = `${componentSource}\n${clientSource}`;
+
+  for (const required of [
+    "exposurePreview",
+    "exposureApply",
+    "/api/local/projects/${projectID}/exposures/preview",
+    "/api/local/projects/${projectID}/exposures",
+    "confirmExposure",
+    "confirmRollback",
+    "rolling_back",
+    "rolled_back",
+    "rollback_failed",
+    "readiness_evidence_hash",
+    "desired_digest",
+    "current_digest",
+    "previous_digest",
+    "selectionOverride.current = created.id",
+  ]) {
+    assert.match(source, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(componentSource, /change external routing and trigger automatic rollback/);
+  assert.match(componentSource, /restores the exact previous Agent known-good snapshot/);
+  assert.match(componentSource, /await client\.exposureApply/);
+  assert.match(componentSource, /await client\.rollback/);
+  assert.doesNotMatch(componentSource, /fake-success|localStorage|sessionStorage|Authorization|lease_token|raw manifest|kubectl/i);
+  assert.doesNotMatch(clientSource, /\/api\/projects\//);
+});

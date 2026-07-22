@@ -39,6 +39,7 @@ type ProgressEvent struct {
 	Message     string
 	Percent     int32
 	Err         error
+	Rollout     *deploymentv1.RolloutRecord
 }
 
 type Engine struct {

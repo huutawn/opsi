@@ -49,7 +49,7 @@ export function useConsoleState() {
   }
 
   async function load() {
-    patch({ status: "loading", message: "" });
+    patch(state.status === "ready" ? { message: "" } : { status: "loading", message: "" });
     try {
       const session = await client.session();
       setSession(session);
@@ -202,7 +202,7 @@ export function useConsoleState() {
     if (!currentProject) return;
     patch({ busy: `rollback-${deploymentID}` });
     try {
-      const job = await client.rollback(currentProject.id, deploymentID);
+      const job = await client.rollback(currentProject.id, deploymentID, `ui-rollback-${deploymentID}`);
       await loadDeploymentEvents(job.id);
       await load();
     } finally {

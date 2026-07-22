@@ -38,6 +38,7 @@ type deploymentSpecFlags struct {
 	secretRefs     []string
 	exposure       string
 	idempotencyKey string
+	yes            bool
 	jsonOutput     bool
 }
 
@@ -46,6 +47,7 @@ type deploymentReadFlags struct {
 	deploymentID   string
 	idempotencyKey string
 	jsonOutput     bool
+	yes            bool
 }
 
 func newDeployCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
@@ -94,6 +96,9 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 				}
 				return writeDeploymentPreview(command, preview, flags.jsonOutput)
 			default:
+				if !flags.yes {
+					return errors.New("deploy apply requires --yes")
+				}
 				if strings.TrimSpace(flags.idempotencyKey) == "" {
 					return errors.New("idempotency-key is required for deploy apply")
 				}
@@ -180,12 +185,12 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 	bindDeploymentReadFlags(events, eventFlags, true, false)
 	root.AddCommand(events)
 
-	for _, operation := range []string{"cancel", "retry"} {
+	for _, operation := range []string{"cancel", "retry", "rollback"} {
 		flags := &deploymentReadFlags{}
 		operation := operation
 		command := &cobra.Command{Use: operation, Short: deploymentOperationShort(operation), Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-			if flags.deploymentID == "" || flags.idempotencyKey == "" {
-				return errors.New("deployment-id and idempotency-key are required")
+			if flags.deploymentID == "" || flags.idempotencyKey == "" || !flags.yes {
+				return errors.New("deployment-id, idempotency-key, and --yes are required")
 			}
 			client, ctx, cancel, err := deploymentClient(command.Context(), *configPath, factory, flags.projectID)
 			if err != nil {
@@ -195,6 +200,8 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 			var job cloudclient.DeploymentJob
 			if operation == "cancel" {
 				job, err = client.CancelDeployment(ctx, flags.projectID, flags.deploymentID, flags.idempotencyKey)
+			} else if operation == "rollback" {
+				job, err = client.RollbackDeployment(ctx, flags.projectID, flags.deploymentID, flags.idempotencyKey)
 			} else {
 				job, err = client.RetryDeployment(ctx, flags.projectID, flags.deploymentID, flags.idempotencyKey)
 			}
@@ -289,6 +296,7 @@ func bindDeploymentSpecFlags(command *cobra.Command, flags *deploymentSpecFlags,
 	set.StringVar(&flags.exposure, "exposure", "internal", "exposure intent: none or internal; R5-010 creates no external route")
 	if mutation {
 		set.StringVar(&flags.idempotencyKey, "idempotency-key", "", "idempotency identity for exact replay")
+		set.BoolVar(&flags.yes, "yes", false, "confirm the deployment mutation")
 	}
 	set.BoolVar(&flags.jsonOutput, "json", false, "emit JSON")
 }
@@ -300,6 +308,7 @@ func bindDeploymentReadFlags(command *cobra.Command, flags *deploymentReadFlags,
 	}
 	if mutation {
 		command.Flags().StringVar(&flags.idempotencyKey, "idempotency-key", "", "idempotency identity")
+		command.Flags().BoolVar(&flags.yes, "yes", false, "confirm the deployment mutation")
 	}
 	command.Flags().BoolVar(&flags.jsonOutput, "json", false, "emit JSON")
 }

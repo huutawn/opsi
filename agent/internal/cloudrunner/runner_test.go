@@ -12,6 +12,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 )
 
 type fakeClient struct {
@@ -80,6 +81,40 @@ func (fakeEngine) Deploy(_ context.Context, req deploy.Request, progress deploy.
 	return rec, nil
 }
 
+type fakeRolloutEngine struct {
+	fakeEngine
+	pendingCalls int
+	intent       deploymentv1.RolloutIntent
+}
+
+func (f *fakeRolloutEngine) ReconcilePending(context.Context, deploy.ProgressFunc) ([]deploymentv1.RolloutRecord, error) {
+	f.pendingCalls++
+	return nil, nil
+}
+
+func (f *fakeRolloutEngine) ReconcileRollout(_ context.Context, intent deploymentv1.RolloutIntent, progress deploy.ProgressFunc) (deploymentv1.RolloutRecord, error) {
+	f.intent = intent
+	now := time.Now().UTC()
+	resources := []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}
+	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: true, LocalRoutingReady: true, WorkloadEvidenceHash: strings.Repeat("1", 64), ServiceEvidenceHash: strings.Repeat("2", 64), ExposureEvidenceHash: strings.Repeat("3", 64), ApplicationImageIDHash: strings.Repeat("4", 64), LocalProbeEvidenceHash: strings.Repeat("5", 64), ObservedAt: now}
+	states := []string{deploymentv1.RolloutStatePrepared, deploymentv1.RolloutStateApplying, deploymentv1.RolloutStateWaiting, deploymentv1.RolloutStateSucceeded}
+	var record deploymentv1.RolloutRecord
+	for index, state := range states {
+		record = deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: state, Version: uint64(index + 1), StateHash: strings.Repeat(string(rune('a'+index)), 64), Resources: resources, CreatedAt: now, UpdatedAt: now}
+		if state == deploymentv1.RolloutStateSucceeded {
+			record.Evidence = &evidence
+			record.TerminalAt = &now
+		}
+		if progress != nil {
+			copy := record
+			if err := progress(&deploy.ProgressEvent{Phase: state, Message: "sanitized " + state, Percent: int32((index + 1) * 25), Rollout: &copy}); err != nil {
+				return record, err
+			}
+		}
+	}
+	return record, nil
+}
+
 func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &ConnectionState{}
@@ -111,6 +146,39 @@ func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
 	}
 	if !connection.Connected() {
 		t.Fatal("successful heartbeat/poll did not update Cloud connection state")
+	}
+}
+
+func TestRunnerExecutesRolloutLeaseAndReportsSanitizedLifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	intent := testCloudRolloutIntent(t)
+	command := intent.Desired.AgentCommand()
+	command.Rollout = &intent
+	command.LeaseToken = "lease-rollout"
+	engine := &fakeRolloutEngine{}
+	client := &fakeClient{cancel: cancel, leases: []cloudrelay.DeploymentLease{{
+		Kind: "deployment", Action: deploymentv1.RolloutOperationApply, LeaseToken: "lease-rollout",
+		Deployment: cloudrelay.DeploymentJobEnvelope{ID: intent.Desired.DeploymentJobID},
+		Command:    &command,
+	}}}
+	runner := Runner{Client: client, Engine: engine, NodeID: intent.Target.NodeID, PollInterval: time.Millisecond, LongPollWait: time.Millisecond, HeartbeatInterval: time.Hour}
+	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run err=%v", err)
+	}
+	if engine.pendingCalls != 1 || engine.intent.IntentHash != intent.IntentHash || engine.intent.RolloutID != intent.RolloutID {
+		t.Fatalf("pending=%d intent=%+v results=%+v progress=%+v", engine.pendingCalls, engine.intent, client.results, client.progress)
+	}
+	wantStates := []string{deploymentv1.RolloutStatePrepared, deploymentv1.RolloutStateApplying, deploymentv1.RolloutStateWaiting, deploymentv1.RolloutStateSucceeded}
+	if len(client.progress) != len(wantStates) {
+		t.Fatalf("progress=%+v", client.progress)
+	}
+	for index, state := range wantStates {
+		if client.progress[index].State != state || client.progress[index].LeaseToken != "lease-rollout" || client.progress[index].IntentHash != intent.IntentHash {
+			t.Fatalf("progress[%d]=%+v", index, client.progress[index])
+		}
+	}
+	if len(client.results) != 1 || client.results[0].Status != deploymentv1.StateSucceeded || client.results[0].RolloutResult == nil || client.results[0].RolloutResult.CurrentDigest != intent.Desired.Image.Digest || client.results[0].RolloutResult.KnownGoodID != intent.RolloutID || client.results[0].RolloutResult.LeaseToken != "" {
+		t.Fatalf("result=%+v", client.results)
 	}
 }
 
@@ -209,4 +277,28 @@ func TestResultFromRecordRedactsFailureMessage(t *testing.T) {
 	if strings.Contains(result.FailureMessageRedacted, secret) {
 		t.Fatalf("failure message leaked secret: %q", result.FailureMessageRedacted)
 	}
+}
+
+func testCloudRolloutIntent(t *testing.T) deploymentv1.RolloutIntent {
+	t.Helper()
+	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: "api", Replicas: 1, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: 8080, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: "100m", Memory: "128Mi"}, Limits: deploymentv1.ResourceValues{CPU: "500m", Memory: "512Mi"}}, TerminationGracePeriodSecond: 30, Exposure: deploymentv1.ExposureIntent{Mode: "internal"}}
+	workloadHash, err := workload.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := deploymentv1.NewImmutableImage("ghcr.io/example/api", "sha256:"+strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exposure, err := (exposurev1.ExposureSpec{SchemaVersion: exposurev1.SchemaVersion, ProjectID: "proj-1", EnvironmentID: "prod", RuntimeID: "runtime-1", ServiceKey: "api", DeploymentJobID: "dep-rollout", Hostname: "api.example.com", Path: "/", ServicePort: 8080, TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled}}).Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := deploymentv1.RuntimeTarget{ProjectID: "proj-1", EnvironmentID: "prod", RuntimeID: "runtime-1", ServiceKey: "api", NodeID: "node-1", AgentID: "agent-1"}
+	snapshot := deploymentv1.RuntimeSnapshot{SchemaVersion: deploymentv1.RuntimeSnapshotVersion, Target: target, DeploymentJobID: "dep-rollout", Image: image, Workload: workload, WorkloadSpecHash: workloadHash, Exposure: exposure, ExposureSpecHash: exposure.SpecHash, Authority: deploymentv1.RuntimeAuthority{TopologyPlanID: "topology-1", TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64), DeploymentPolicyID: "policy-1", DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("c", 64), RoutingDecisionHash: strings.Repeat("d", 64)}}
+	intent, err := (deploymentv1.RolloutIntent{SchemaVersion: deploymentv1.RolloutSchemaVersion, RolloutID: "rollout-1", Operation: deploymentv1.RolloutOperationApply, Target: target, Desired: snapshot, Attempt: 1, CreatedAt: time.Now().UTC()}).Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return intent
 }

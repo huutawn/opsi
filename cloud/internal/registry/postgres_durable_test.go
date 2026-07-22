@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,6 +197,145 @@ func TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart(t *testing.T
 	}
 	if record.ID != job.ServiceID || lease.Command.Image.Reference != snapshot.Image.Reference {
 		t.Fatalf("immutable identity drifted: record=%+v job=%+v command=%+v", record, job, lease.Command)
+	}
+}
+
+func TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply(t *testing.T) {
+	dsn := requirePostgresTestDSN(t, "exposure rollout durability")
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := postgres.Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	suffix := strings.ToLower(newID("rolloutpg"))
+	orgID, userID := "org-"+suffix, "user-"+suffix
+	if _, err := db.ExecContext(ctx, `INSERT INTO users(id,email) VALUES($1,$2)`, userID, userID+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO organizations(id,name,slug) VALUES($1,$2,$3)`, orgID, "Rollout", "rollout-"+suffix); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM organizations WHERE id=$1`, orgID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+	now := time.Date(2026, 7, 22, 8, 0, 0, 0, time.UTC)
+	fresh := func() PostgresService { return PostgresService{DB: db, Now: func() time.Time { return now }} }
+	service := fresh()
+	project, err := service.CreateProject(orgID, "Rollout", "rollout-"+suffix, userID, "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, snapshot := postgresImmutableSnapshot(t, service, project.ID, suffix)
+	snapshot.Authority.TopologyPlanID = "topology-" + suffix
+	snapshot.Authority.TopologyRevision = 1
+	snapshot.Authority.TopologyHash = strings.Repeat("1", 64)
+	snapshot.Authority.DeploymentPolicyID = "policy-" + suffix
+	snapshot.Authority.DeploymentPolicyRevision = 1
+	snapshot.Authority.DeploymentPolicyHash = strings.Repeat("2", 64)
+	snapshot.Authority.RoutingDecisionHash = strings.Repeat("3", 64)
+	baseJob, _, err := service.StartImmutableDeployment(snapshot, userID, "base-key", "base-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseLease, ok, err := service.LeaseDeployment(project.ID, baseJob.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("base lease ok=%v err=%v", ok, err)
+	}
+	base, err := service.CompleteDeployment(project.ID, baseJob.NodeID, baseJob.ID, "base-result", DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.StateSucceeded, LeaseToken: baseLease.LeaseToken, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference, ApplicationImageID: "containerd://" + snapshot.Image.Digest, AvailableReplicas: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := rolloutExposureRequest(t, base, "dep-pg-exposure-"+suffix, "pg.example.com", "/")
+	job, reused, err := service.StartExposureRollout(project.ID, userID, "exposure-key", "create", request)
+	if err != nil || reused {
+		t.Fatalf("job=%+v reused=%v err=%v", job, reused, err)
+	}
+	replay, reused, err := fresh().StartExposureRollout(project.ID, userID, "exposure-key", "replay", request)
+	if err != nil || !reused || replay.ID != job.ID || replay.RolloutIntent == nil || replay.RolloutIntent.IntentHash != job.RolloutIntent.IntentHash {
+		t.Fatalf("restart replay=%+v reused=%v err=%v", replay, reused, err)
+	}
+	if _, err := fresh().GetDeployment("foreign-project", job.ID); err != ErrNotFound {
+		t.Fatalf("cross-project lookup disclosed rollout: %v", err)
+	}
+	lease, ok, err := fresh().LeaseDeployment(project.ID, job.NodeID)
+	if err != nil || !ok || lease.Command == nil || lease.Command.Rollout == nil {
+		t.Fatalf("rollout lease=%+v ok=%v err=%v", lease, ok, err)
+	}
+	progress := rolloutProgress(lease, deploymentv1.RolloutStateApplying, "4", "")
+	firstProgress, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "applying", progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsBeforeReplay, err := fresh().DeploymentEvents(project.ID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondProgress, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "applying-replay", progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsAfterReplay, _ := fresh().DeploymentEvents(project.ID, job.ID)
+	if firstProgress.RolloutVersion != secondProgress.RolloutVersion || len(eventsBeforeReplay) != len(eventsAfterReplay) {
+		t.Fatalf("progress replay mutated durable history: versions=%d/%d events=%d/%d", firstProgress.RolloutVersion, secondProgress.RolloutVersion, len(eventsBeforeReplay), len(eventsAfterReplay))
+	}
+	if _, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "waiting", rolloutProgress(lease, deploymentv1.RolloutStateWaiting, "5", "")); err != nil {
+		t.Fatal(err)
+	}
+	terminalProgress, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "succeeded", rolloutProgress(lease, deploymentv1.RolloutStateSucceeded, "6", ""))
+	if err != nil || terminalProgress.Status != deploymentv1.RolloutStateWaiting || terminalProgress.RolloutState != deploymentv1.RolloutStateSucceeded || terminalProgress.TerminalResult != nil {
+		t.Fatalf("terminal progress=%+v err=%v", terminalProgress, err)
+	}
+	result := rolloutResult(lease, deploymentv1.RolloutStateSucceeded, "6", job.DesiredDigest, "known-pg-a", strings.Repeat("a", 64), "")
+	finished, err := fresh().CompleteDeployment(project.ID, job.NodeID, job.ID, "result", result)
+	if err != nil || finished.TerminalResult == nil || finished.CurrentDigest != job.DesiredDigest {
+		t.Fatalf("finished=%+v err=%v", finished, err)
+	}
+	restarted := fresh()
+	persisted, err := restarted.GetDeployment(project.ID, job.ID)
+	if err != nil || persisted.TerminalResult == nil || persisted.RolloutIntent == nil || persisted.ExposureSpec == nil || persisted.RolloutStateHash != strings.Repeat("6", 64) {
+		t.Fatalf("restart persisted=%+v err=%v", persisted, err)
+	}
+	terminalEvents, _ := restarted.DeploymentEvents(project.ID, job.ID)
+	if _, err := restarted.CompleteDeployment(project.ID, job.NodeID, job.ID, "result-replay", result); err != nil {
+		t.Fatal(err)
+	}
+	terminalEventsReplay, _ := restarted.DeploymentEvents(project.ID, job.ID)
+	if len(terminalEventsReplay) != len(terminalEvents) {
+		t.Fatalf("terminal replay duplicated event: %d/%d", len(terminalEvents), len(terminalEventsReplay))
+	}
+
+	requests := []deploymentv1.ExposureMutationRequest{
+		rolloutExposureRequest(t, base, "dep-pg-concurrent-a-"+suffix, "pg-a.example.com", "/"),
+		rolloutExposureRequest(t, base, "dep-pg-concurrent-b-"+suffix, "pg-b.example.com", "/"),
+	}
+	var wait sync.WaitGroup
+	errorsFound := make(chan error, len(requests))
+	for index, candidate := range requests {
+		wait.Add(1)
+		go func(index int, candidate deploymentv1.ExposureMutationRequest) {
+			defer wait.Done()
+			_, _, err := fresh().StartExposureRollout(project.ID, userID, "concurrent-"+string(rune('a'+index)), "concurrent", candidate)
+			errorsFound <- err
+		}(index, candidate)
+	}
+	wait.Wait()
+	close(errorsFound)
+	winners, locked := 0, 0
+	for err := range errorsFound {
+		if err == nil {
+			winners++
+		} else if apiCode(err) == "DEPLOYMENT_LOCKED" {
+			locked++
+		}
+	}
+	if winners != 1 || locked != 1 {
+		t.Fatalf("Postgres concurrent apply winners=%d locked=%d", winners, locked)
 	}
 }
 

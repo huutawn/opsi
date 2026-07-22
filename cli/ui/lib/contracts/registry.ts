@@ -204,7 +204,29 @@ export type DeploymentJob = {
 		available_replicas: number;
 		failure_code?: string;
 		failure_message_redacted?: string;
+		rollout_id?: string;
+		rollout_state?: string;
+		intent_hash?: string;
+		state_hash?: string;
+		workload_spec_hash?: string;
+		exposure_spec_hash?: string;
+		desired_digest?: string;
+		current_digest?: string;
+		previous_digest?: string;
+		known_good_id?: string;
+		known_good_hash?: string;
+		readiness_evidence_hash?: string;
 	 };
+	 base_deployment_id?: string;
+	 rollout_state?: string;
+	 rollout_state_hash?: string;
+	 desired_digest?: string;
+	 current_digest?: string;
+	 previous_digest?: string;
+	 known_good_id?: string;
+	 known_good_hash?: string;
+	 readiness_evidence_hash?: string;
+	 exposure_spec?: ExposureSpec;
   requested_by?: string;
 	 created_at: string;
 	 snapshot?: {
@@ -214,6 +236,41 @@ export type DeploymentJob = {
 		workload: WorkloadSpec;
 		spec_hash: string;
 	};
+};
+
+export type ExposureSpec = {
+	schema_version: "opsi.exposure_spec/v1";
+	project_id: string;
+	environment_id: string;
+	runtime_id: string;
+	service_key: string;
+	deployment_job_id: string;
+	hostname: string;
+	path: string;
+	service_port: number;
+	tls: { mode: "disabled" | "secret_ref"; secret_ref?: string };
+	metadata?: { display_name?: string; rationale?: string };
+	spec_hash: string;
+};
+
+export type ExposureMutationRequest = {
+	schema_version: "opsi.exposure_mutation/v1";
+	base_deployment_job_id: string;
+	expected_state_hash?: string;
+	exposure: ExposureSpec;
+};
+
+export type ExposurePreview = {
+	schema_version: string;
+	base_deployment_job_id: string;
+	current?: ExposureSpec;
+	desired: ExposureSpec;
+	changes: string[];
+	state_hash: string;
+	eligible: boolean;
+	decision_code: string;
+	message: string;
+	resolved_at: string;
 };
 
 export type WorkloadSpec = {

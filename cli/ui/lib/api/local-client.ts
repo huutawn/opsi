@@ -299,10 +299,11 @@ export class LocalClient {
     });
   }
 
-  rollback(projectID: string, deploymentID: string) {
+  rollback(projectID: string, deploymentID: string, idempotencyKey: string) {
     return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments/${deploymentID}/rollback`, {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify({ requested_by: "cli-ui" }),
     });
   }
@@ -325,6 +326,18 @@ export class LocalClient {
 
   deploymentRetry(projectID: string, deploymentID: string, idempotencyKey: string) {
     return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments/${encodeURIComponent(deploymentID)}/retry`, { method: "POST", write: true, idempotencyKey, body: "{}" });
+  }
+
+  exposurePreview(projectID: string, body: import("../contracts/registry").ExposureMutationRequest) {
+    return this.call<import("../contracts/registry").ExposurePreview>(`/api/local/projects/${projectID}/exposures/preview`, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  exposureDiff(projectID: string, body: import("../contracts/registry").ExposureMutationRequest) {
+    return this.call<import("../contracts/registry").ExposurePreview>(`/api/local/projects/${projectID}/exposures/diff`, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  exposureApply(projectID: string, body: import("../contracts/registry").ExposureMutationRequest, idempotencyKey: string) {
+    return this.call<DeploymentJob>(`/api/local/projects/${projectID}/exposures`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
   }
 
   audit(projectID: string) {

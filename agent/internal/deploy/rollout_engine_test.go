@@ -141,6 +141,67 @@ func TestRolloutRestartFromWaitingKeepsIDAndRollsBack(t *testing.T) {
 	}
 }
 
+func TestExplicitRollbackRestartFromPreparedRestoresKnownGoodWithoutApplyingDesired(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "agent.sqlite")
+	store, err := OpenSQLiteStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newFakeRolloutRuntime()
+	engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+	a := testRuntimeSnapshot(t, "job-a", "8")
+	if record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-a", a, nil), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+		t.Fatalf("seed A record=%+v err=%v", record, err)
+	}
+	knownA, _ := store.CurrentKnownGood(context.Background(), a.Target)
+	b := testRuntimeSnapshot(t, "job-b", "9")
+	if record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-b", b, knownA), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+		t.Fatalf("seed B record=%+v err=%v", record, err)
+	}
+	knownB, _ := store.CurrentKnownGood(context.Background(), b.Target)
+	rollback := testRolloutIntent(t, "rollout-back-to-a", b, knownA)
+	rollback.Operation = deploymentv1.RolloutOperationRollback
+	rollback.PreviousDigest = a.Image.Digest
+	rollback.ExpectedKnownGoodID = knownB.ID
+	rollback.ExpectedKnownGoodHash = knownB.SnapshotHash
+	rollback.IntentHash = ""
+	rollback, err = rollback.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := rollback
+	stale.RolloutID = "rollout-stale-back-to-a"
+	stale.ExpectedKnownGoodID = knownA.ID
+	stale.ExpectedKnownGoodHash = knownA.SnapshotHash
+	stale.IntentHash = ""
+	stale, err = stale.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.ReconcileRollout(context.Background(), stale, nil); rolloutErrorCode(err) != deploymentv1.RolloutCodeConflict {
+		t.Fatalf("stale explicit rollback err=%v", err)
+	}
+	if _, err := store.BeginRollout(context.Background(), rollback, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLiteStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restarted := NewEngine(reopened, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+	results, err := restarted.ReconcilePending(context.Background(), nil)
+	if err != nil || len(results) != 1 || results[0].State != deploymentv1.RolloutStateRolledBack {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
+	if runtime.current.DeploymentJobID != a.DeploymentJobID || runtime.current.Image.Digest != a.Image.Digest {
+		t.Fatalf("prepared rollback restart applied desired B instead of known-good A: %+v", runtime.current)
+	}
+}
+
 func TestRolloutWALReplayConflictLockAndTerminalImmutability(t *testing.T) {
 	store := openTestStore(t)
 	snapshot := testRuntimeSnapshot(t, "job-a", "f")

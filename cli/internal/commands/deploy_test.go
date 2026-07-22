@@ -96,7 +96,7 @@ func TestDeployApplyUsesCanonicalCloudImmutableEndpoint(t *testing.T) {
 	command := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return keychain.NewFakeStore(), nil }})
 	output := bytes.NewBuffer(nil)
 	command.SetOut(output)
-	command.SetArgs([]string{"--config", configPath, "deploy", "apply", "--project-id", "proj-1", "--build-record-id", "br-1", "--environment-id", "env-1", "--service-key", "api", "--replicas", "1", "--container-port", "8080", "--cpu-request", "100m", "--memory-request", "128Mi", "--cpu-limit", "500m", "--memory-limit", "512Mi", "--idempotency-key", "deploy-key", "--json"})
+	command.SetArgs([]string{"--config", configPath, "deploy", "apply", "--project-id", "proj-1", "--build-record-id", "br-1", "--environment-id", "env-1", "--service-key", "api", "--replicas", "1", "--container-port", "8080", "--cpu-request", "100m", "--memory-request", "128Mi", "--cpu-limit", "500m", "--memory-limit", "512Mi", "--idempotency-key", "deploy-key", "--yes", "--json"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}

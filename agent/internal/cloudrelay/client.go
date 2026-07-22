@@ -147,22 +147,23 @@ type ServiceEnvelope struct {
 }
 
 type DeploymentResult struct {
-	SchemaVersion          string `json:"schema_version,omitempty"`
-	Status                 string `json:"status"`
-	LeaseToken             string `json:"lease_token,omitempty"`
-	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
-	IntentHash             string `json:"intent_hash,omitempty"`
-	FailureCode            string `json:"failure_code,omitempty"`
-	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
-	RollbackEligible       bool   `json:"rollback_eligible"`
-	RollbackBlockedReason  string `json:"rollback_blocked_reason,omitempty"`
-	SpecHash               string `json:"spec_hash,omitempty"`
-	ApplicationImage       string `json:"application_image,omitempty"`
-	ApplicationImageID     string `json:"application_image_id,omitempty"`
-	Namespace              string `json:"namespace,omitempty"`
-	DeploymentName         string `json:"deployment_name,omitempty"`
-	ServiceName            string `json:"service_name,omitempty"`
-	AvailableReplicas      int32  `json:"available_replicas,omitempty"`
+	SchemaVersion          string                    `json:"schema_version,omitempty"`
+	Status                 string                    `json:"status"`
+	LeaseToken             string                    `json:"lease_token,omitempty"`
+	FinalRevisionRef       string                    `json:"final_revision_ref,omitempty"`
+	IntentHash             string                    `json:"intent_hash,omitempty"`
+	FailureCode            string                    `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                    `json:"failure_message_redacted,omitempty"`
+	RollbackEligible       bool                      `json:"rollback_eligible"`
+	RollbackBlockedReason  string                    `json:"rollback_blocked_reason,omitempty"`
+	SpecHash               string                    `json:"spec_hash,omitempty"`
+	ApplicationImage       string                    `json:"application_image,omitempty"`
+	ApplicationImageID     string                    `json:"application_image_id,omitempty"`
+	Namespace              string                    `json:"namespace,omitempty"`
+	DeploymentName         string                    `json:"deployment_name,omitempty"`
+	ServiceName            string                    `json:"service_name,omitempty"`
+	AvailableReplicas      int32                     `json:"available_replicas,omitempty"`
+	RolloutResult          *deploymentv1.AgentResult `json:"rollout_result,omitempty"`
 }
 
 type NodeLifecycleLease struct {

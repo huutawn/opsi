@@ -363,14 +363,19 @@ func (s *SQLiteStore) BeginRollout(ctx context.Context, intent deploymentv1.Roll
 		return nil, fmt.Errorf("check active rollout: %w", err)
 	}
 	var currentID, currentHash string
+	expectedID, expectedHash := canonical.PreviousKnownGoodID, canonical.PreviousKnownGoodHash
+	if canonical.Operation == deploymentv1.RolloutOperationRollback {
+		expectedID = canonical.ExpectedKnownGoodID
+		expectedHash = canonical.ExpectedKnownGoodHash
+	}
 	err = tx.QueryRowContext(ctx, `SELECT c.snapshot_id, s.snapshot_hash FROM known_good_current c JOIN known_good_snapshots s ON s.snapshot_id = c.snapshot_id WHERE c.target_key = ?`, canonical.Target.Key()).Scan(&currentID, &currentHash)
 	if errors.Is(err, sql.ErrNoRows) {
-		if canonical.PreviousKnownGoodID != "" {
+		if expectedID != "" {
 			return nil, &rolloutStoreError{Code: deploymentv1.RolloutCodeConflict, Msg: "previous known-good reference is stale"}
 		}
 	} else if err != nil {
 		return nil, fmt.Errorf("check current known-good: %w", err)
-	} else if currentID != canonical.PreviousKnownGoodID || currentHash != canonical.PreviousKnownGoodHash {
+	} else if currentID != expectedID || currentHash != expectedHash {
 		return nil, &rolloutStoreError{Code: deploymentv1.RolloutCodeConflict, Msg: "previous known-good reference is stale"}
 	}
 	now := time.Now().UTC()

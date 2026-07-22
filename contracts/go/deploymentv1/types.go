@@ -341,28 +341,56 @@ type AgentCommand struct {
 	Image         ImmutableImage `json:"image"`
 	Workload      WorkloadSpec   `json:"workload"`
 	SpecHash      string         `json:"spec_hash"`
+	Rollout       *RolloutIntent `json:"rollout,omitempty"`
 }
 
 type Progress struct {
-	SchemaVersion   string `json:"schema_version"`
-	LeaseToken      string `json:"lease_token"`
-	State           string `json:"state"`
-	MessageRedacted string `json:"message_redacted,omitempty"`
+	SchemaVersion         string             `json:"schema_version"`
+	LeaseToken            string             `json:"lease_token"`
+	State                 string             `json:"state"`
+	MessageRedacted       string             `json:"message_redacted,omitempty"`
+	ProgressPercent       int32              `json:"progress_percent,omitempty"`
+	RolloutID             string             `json:"rollout_id,omitempty"`
+	IntentHash            string             `json:"intent_hash,omitempty"`
+	StateHash             string             `json:"state_hash,omitempty"`
+	WorkloadSpecHash      string             `json:"workload_spec_hash,omitempty"`
+	ExposureSpecHash      string             `json:"exposure_spec_hash,omitempty"`
+	DesiredDigest         string             `json:"desired_digest,omitempty"`
+	CurrentDigest         string             `json:"current_digest,omitempty"`
+	PreviousDigest        string             `json:"previous_digest,omitempty"`
+	ReadinessEvidenceHash string             `json:"readiness_evidence_hash,omitempty"`
+	Resources             []ResourceIdentity `json:"resources,omitempty"`
+	FailureCode           string             `json:"failure_code,omitempty"`
+	Attempt               int32              `json:"attempt,omitempty"`
 }
 
 type AgentResult struct {
-	SchemaVersion          string `json:"schema_version"`
-	LeaseToken             string `json:"lease_token"`
-	Status                 string `json:"status"`
-	SpecHash               string `json:"spec_hash"`
-	ApplicationImage       string `json:"application_image"`
-	ApplicationImageID     string `json:"application_image_id"`
-	Namespace              string `json:"namespace"`
-	DeploymentName         string `json:"deployment_name"`
-	ServiceName            string `json:"service_name"`
-	AvailableReplicas      int32  `json:"available_replicas"`
-	FailureCode            string `json:"failure_code,omitempty"`
-	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
+	SchemaVersion          string             `json:"schema_version"`
+	LeaseToken             string             `json:"-"`
+	Status                 string             `json:"status"`
+	SpecHash               string             `json:"spec_hash"`
+	ApplicationImage       string             `json:"application_image"`
+	ApplicationImageID     string             `json:"application_image_id"`
+	Namespace              string             `json:"namespace"`
+	DeploymentName         string             `json:"deployment_name"`
+	ServiceName            string             `json:"service_name"`
+	AvailableReplicas      int32              `json:"available_replicas"`
+	FailureCode            string             `json:"failure_code,omitempty"`
+	FailureMessageRedacted string             `json:"failure_message_redacted,omitempty"`
+	RolloutID              string             `json:"rollout_id,omitempty"`
+	RolloutState           string             `json:"rollout_state,omitempty"`
+	IntentHash             string             `json:"intent_hash,omitempty"`
+	StateHash              string             `json:"state_hash,omitempty"`
+	WorkloadSpecHash       string             `json:"workload_spec_hash,omitempty"`
+	ExposureSpecHash       string             `json:"exposure_spec_hash,omitempty"`
+	DesiredDigest          string             `json:"desired_digest,omitempty"`
+	CurrentDigest          string             `json:"current_digest,omitempty"`
+	PreviousDigest         string             `json:"previous_digest,omitempty"`
+	KnownGoodID            string             `json:"known_good_id,omitempty"`
+	KnownGoodHash          string             `json:"known_good_hash,omitempty"`
+	ReadinessEvidenceHash  string             `json:"readiness_evidence_hash,omitempty"`
+	Resources              []ResourceIdentity `json:"resources,omitempty"`
+	Attempt                int32              `json:"attempt,omitempty"`
 }
 
 func validOpaqueID(value string) bool {

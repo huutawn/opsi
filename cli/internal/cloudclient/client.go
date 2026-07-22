@@ -225,6 +225,51 @@ func (c *Client) RetryDeployment(ctx context.Context, projectID, deploymentID, k
 	return response, err
 }
 
+func (c *Client) PreviewExposure(ctx context.Context, projectID string, request ExposureMutationRequest) (ExposurePreview, error) {
+	var response ExposurePreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "exposures", "preview"}, request, "", &response)
+	return response, err
+}
+
+func (c *Client) DiffExposure(ctx context.Context, projectID string, request ExposureMutationRequest) (ExposurePreview, error) {
+	var response ExposurePreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "exposures", "diff"}, request, "", &response)
+	return response, err
+}
+
+func (c *Client) ApplyExposure(ctx context.Context, projectID, key string, request ExposureMutationRequest) (DeploymentJob, error) {
+	var response DeploymentJob
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "exposures"}, request, key, &response)
+	return response, err
+}
+
+func (c *Client) ListExposures(ctx context.Context, projectID, serviceID, environmentID string) ([]DeploymentJob, error) {
+	var response struct {
+		Exposures []DeploymentJob `json:"exposures"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "exposures"}, nil, "", &response)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]DeploymentJob, 0, len(response.Exposures))
+	for _, job := range response.Exposures {
+		if serviceID != "" && serviceID != job.ServiceID {
+			continue
+		}
+		if environmentID != "" && environmentID != job.EnvironmentID {
+			continue
+		}
+		filtered = append(filtered, job)
+	}
+	return filtered, nil
+}
+
+func (c *Client) RollbackDeployment(ctx context.Context, projectID, deploymentID, key string) (DeploymentJob, error) {
+	var response DeploymentJob
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", deploymentID, "rollback"}, map[string]string{"requested_by": "cli"}, key, &response)
+	return response, err
+}
+
 func (c *Client) ListNodes(ctx context.Context, projectID string) ([]Node, error) {
 	var response nodeListResponse
 	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "nodes"}, nil, "", &response)

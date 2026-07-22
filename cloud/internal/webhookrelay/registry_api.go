@@ -188,6 +188,9 @@ func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID
 
 func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts []string, principal auth.VerifyResult) {
 	projectID := parts[1]
+	if s.handleExposureAPI(w, r, projectID, parts, principal) {
+		return
+	}
 	if s.handleDeploymentAPI(w, r, projectID, parts, principal) {
 		return
 	}

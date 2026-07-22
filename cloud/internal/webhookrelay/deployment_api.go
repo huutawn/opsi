@@ -29,6 +29,91 @@ type immutableDeploymentReplayReader interface {
 	ReplayImmutableDeployment(string, string, string) (registry.DeploymentJob, bool, error)
 }
 
+type exposureLifecycleStore interface {
+	PreviewExposure(string, string, deploymentv1.ExposureMutationRequest) (deploymentv1.ExposurePreview, error)
+	StartExposureRollout(string, string, string, string, deploymentv1.ExposureMutationRequest) (registry.DeploymentJob, bool, error)
+}
+
+func (s *Server) handleExposureAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
+	if len(parts) < 3 || parts[2] != "exposures" {
+		return false
+	}
+	store, ok := s.Registry.(exposureLifecycleStore)
+	if !ok {
+		writeRegistryError(w, registry.APIError{Status: 503, Code: "EXPOSURE_UNAVAILABLE", Message: "exposure lifecycle store is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+		return true
+	}
+	if len(parts) == 4 && (parts[3] == "preview" || parts[3] == "diff") && r.Method == http.MethodPost {
+		if !s.requireRole(w, r, principal, projectID, "deployment_job", projectID, "owner", "admin", "developer", "viewer") {
+			return true
+		}
+		var request deploymentv1.ExposureMutationRequest
+		if !decodeStrictDeploymentJSON(w, r, &request) {
+			return true
+		}
+		preview, err := store.PreviewExposure(projectID, principal.UserID, request)
+		writeRegistryResult(w, r, preview, err, http.StatusOK)
+		return true
+	}
+	if len(parts) == 3 && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "deployment_job", projectID, "owner", "admin", "developer") {
+			return true
+		}
+		var request deploymentv1.ExposureMutationRequest
+		if !decodeStrictDeploymentJSON(w, r, &request) {
+			return true
+		}
+		job, reused, err := store.StartExposureRollout(projectID, principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), request)
+		job.Reused = reused
+		if err == nil {
+			s.Registry.Audit(job.OrgID, projectID, principal.UserID, "EXPOSURE_ROLLOUT_CREATED", "deployment_job", job.ID, "success", map[string]any{"base_deployment_id": job.BaseDeploymentID, "rollout_id": job.RolloutIntent.RolloutID, "intent_hash": job.RolloutIntent.IntentHash, "exposure_spec_hash": job.ExposureSpec.SpecHash, "reused": reused})
+		}
+		writeRegistryResult(w, r, job, err, http.StatusAccepted)
+		return true
+	}
+	if len(parts) == 3 && r.Method == http.MethodGet {
+		if !s.requireRole(w, r, principal, projectID, "deployment_job", projectID, "owner", "admin", "developer", "viewer", "support") {
+			return true
+		}
+		jobs, err := s.Registry.ListDeployments(projectID)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		filtered := make([]registry.DeploymentJob, 0)
+		for _, job := range jobs {
+			if job.Mode != "rollout" {
+				continue
+			}
+			if value := r.URL.Query().Get("service_id"); value != "" && value != job.ServiceID {
+				continue
+			}
+			if value := r.URL.Query().Get("environment_id"); value != "" && value != job.EnvironmentID {
+				continue
+			}
+			filtered = append(filtered, job)
+		}
+		writeRegistryResult(w, r, map[string]any{"exposures": filtered}, nil, http.StatusOK)
+		return true
+	}
+	if len(parts) == 4 && r.Method == http.MethodGet {
+		if !s.requireRole(w, r, principal, projectID, "deployment_job", parts[3], "owner", "admin", "developer", "viewer", "support") {
+			return true
+		}
+		reader, ok := s.Registry.(immutableDeploymentReader)
+		if !ok {
+			return false
+		}
+		job, err := reader.GetDeployment(projectID, parts[3])
+		if err == nil && job.Mode != "rollout" {
+			err = registry.ErrNotFound
+		}
+		writeRegistryResult(w, r, job, err, http.StatusOK)
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleDeploymentAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
 	if len(parts) < 3 || parts[2] != "deployments" {
 		return false

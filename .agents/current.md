@@ -50,6 +50,36 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   API/UI wiring. R5-011.4 still owns live public endpoint proof. No VPS,
   Cloudflare, DNS, certificate, MCP, AI, or release action was performed.
 
+### R5-011.3 — Durable Cloud rollout/exposure lifecycle and Local UI
+
+- The existing R5-010 `DeploymentJob`, lease, event, and Agent command path now
+  carries immutable `RolloutIntent` authority, including exact digest,
+  WorkloadSpec/ExposureSpec hashes, topology/policy/routing authority, and
+  expected known-good references. Agent SQLite remains runtime truth.
+- Append-only PostgreSQL migration `MigrateR5011Rollout` extends the existing
+  deployment tables with rollout intent/state, exposure, digest, known-good,
+  readiness, and sanitized terminal result fields. Existing R5-010 rows are
+  preserved. In-memory and PostgreSQL services enforce project scope,
+  idempotency, target locking, allowlisted monotonic transitions, terminal
+  immutability, stale lease rejection, and sanitized bounded metadata.
+- Canonical Cloud routes are exposure preview/diff/apply/list/detail plus the
+  existing deployment events/status/rollback routes. Manual CLI commands are
+  `opsi exposure create|diff|apply|status|history` and
+  `opsi deploy rollback|status|list|events`; mutations require explicit
+  confirmation and idempotency keys. Browser calls only Local API paths.
+- Local acceptance passed success, automatic B -> A rollback, explicit
+  rollback, no-known-good, rollback-failed, target/route/ownership/identity
+  conflicts, stale/out-of-order/terminal/idempotency/concurrency/security
+  negatives, PostgreSQL/backend/Agent restart fixtures, and CLI/Local API/UI
+  factual state parity. UI source-state tests, lint, build, and a disposable
+  headless Chrome interaction fixture (preview -> apply -> succeeded -> explicit
+  rollback -> rolled_back) pass. Playwright is not installed, so the browser
+  evidence uses Chrome DevTools Protocol instead.
+- Verdict: `DONE / LOCAL_CONTROL_PLANE_UI_PASS` for R5-011.3 only. R5-011
+  remains partial; R5-011.4 still owns live Agent/VPS, public endpoint, and
+  certificate/DNS acceptance. No VPS, staging deployment, MCP, AI, or R5-012
+  action was performed.
+
 ### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
 
 - R5-009 local acceptance passed on 2026-07-19 with disposable PostgreSQL,

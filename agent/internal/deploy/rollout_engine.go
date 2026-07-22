@@ -32,6 +32,10 @@ func (e *Engine) ReconcileRollout(ctx context.Context, intent deploymentv1.Rollo
 	if record.TerminalAt != nil {
 		return *record, nil
 	}
+	_ = emitRolloutProgress(progress, *record, PhaseQueued, "durable rollout prepared", 20, nil)
+	if record.Intent.Operation == deploymentv1.RolloutOperationRollback && record.State == deploymentv1.RolloutStatePrepared {
+		return e.startExplicitRollback(context.WithoutCancel(ctx), *record, progress)
+	}
 	return e.resumeRollout(ctx, *record, &plan, progress)
 }
 
@@ -47,13 +51,28 @@ func (e *Engine) ReconcilePending(ctx context.Context, progress ProgressFunc) ([
 	}
 	results := make([]deploymentv1.RolloutRecord, 0, len(records))
 	for _, record := range records {
-		result, reconcileErr := e.resumeRollout(ctx, record, nil, progress)
+		var result deploymentv1.RolloutRecord
+		var reconcileErr error
+		if record.Intent.Operation == deploymentv1.RolloutOperationRollback && record.State == deploymentv1.RolloutStatePrepared {
+			result, reconcileErr = e.startExplicitRollback(context.WithoutCancel(ctx), record, progress)
+		} else {
+			result, reconcileErr = e.resumeRollout(ctx, record, nil, progress)
+		}
 		results = append(results, result)
 		if reconcileErr != nil {
 			return results, reconcileErr
 		}
 	}
 	return results, nil
+}
+
+func (e *Engine) startExplicitRollback(ctx context.Context, record deploymentv1.RolloutRecord, progress ProgressFunc) (deploymentv1.RolloutRecord, error) {
+	transitioned, err := e.Store.TransitionRollout(ctx, record.Intent.RolloutID, deploymentv1.RolloutStateRollingBack, nil, record.Resources, nil, false)
+	if err != nil {
+		return record, err
+	}
+	_ = emitRolloutProgress(progress, *transitioned, PhaseRollback, "restoring exact previous known-good snapshot", 40, nil)
+	return e.resumeRollback(ctx, *transitioned, progress)
 }
 
 func (e *Engine) resumeRollout(ctx context.Context, record deploymentv1.RolloutRecord, plan *RolloutPlan, progress ProgressFunc) (deploymentv1.RolloutRecord, error) {
@@ -194,7 +213,10 @@ func (e *Engine) resumeRollback(ctx context.Context, record deploymentv1.Rollout
 		return record, err
 	}
 	_ = emitRolloutProgress(progress, *rolledBack, PhaseRollback, "exact previous known-good snapshot restored", 100, record.Error)
-	return *rolledBack, record.Error
+	if record.Error != nil {
+		return *rolledBack, record.Error
+	}
+	return *rolledBack, nil
 }
 
 func (e *Engine) rollbackFailed(ctx context.Context, record deploymentv1.RolloutRecord, cause error, progress ProgressFunc) (deploymentv1.RolloutRecord, error) {
@@ -212,10 +234,14 @@ func (e *Engine) validatePreviousKnownGood(ctx context.Context, intent deploymen
 	if err != nil {
 		return err
 	}
-	if current == nil && intent.PreviousKnownGoodID == "" {
+	expectedID, expectedHash := intent.PreviousKnownGoodID, intent.PreviousKnownGoodHash
+	if intent.Operation == deploymentv1.RolloutOperationRollback {
+		expectedID, expectedHash = intent.ExpectedKnownGoodID, intent.ExpectedKnownGoodHash
+	}
+	if current == nil && expectedID == "" {
 		return nil
 	}
-	if current == nil || current.ID != intent.PreviousKnownGoodID || current.SnapshotHash != intent.PreviousKnownGoodHash {
+	if current == nil || current.ID != expectedID || current.SnapshotHash != expectedHash {
 		return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeConflict, "previous known-good reference is stale", false)
 	}
 	return nil
@@ -238,8 +264,11 @@ func boundedRolloutFailure(err error) *deploymentv1.RolloutError {
 }
 
 func emitRolloutProgress(progress ProgressFunc, rollout deploymentv1.RolloutRecord, phase, message string, percent int32, err error) error {
-	record := Record{DeployID: rollout.Intent.RolloutID, ProjectID: rollout.Intent.Target.ProjectID, ServiceID: rollout.Intent.Target.ServiceKey, ServiceName: rollout.Intent.Target.ServiceKey, Status: rollout.State, StartedAt: rollout.CreatedAt, SpecHash: rollout.Intent.Desired.WorkloadSpecHash, ImageTag: rollout.Intent.Desired.Image.Reference}
-	return emit(progress, record, phase, message, percent, err)
+	if progress == nil {
+		return nil
+	}
+	record := rollout
+	return progress(&ProgressEvent{OperationID: rollout.Intent.RolloutID, ProjectID: rollout.Intent.Target.ProjectID, ServiceID: rollout.Intent.Target.ServiceKey, ServiceName: rollout.Intent.Target.ServiceKey, Phase: phase, Message: message, Percent: percent, Err: err, Rollout: &record})
 }
 
 func rolloutErrorCode(err error) string {

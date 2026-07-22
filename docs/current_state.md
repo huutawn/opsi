@@ -3,7 +3,7 @@
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-20 |
+| Last updated | 2026-07-22 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
@@ -35,8 +35,11 @@ artifacts. At this snapshot:
   parity, idempotent replay, and Agent restart acceptance. Pull request
   preview environments are not implemented.
 - R5-011.2 locally reconciles the one standard Traefik Ingress with durable
-  known-good rollback and disposable K3s proof. No live Agent/VPS Ingress,
-  Gateway API resource, domain, certificate, or TLS secret lifecycle exists.
+  known-good rollback and disposable K3s proof. R5-011.3 adds the durable
+  Cloud PostgreSQL exposure/rollout lifecycle, existing DeploymentJob lease and
+  Agent command mapping, manual CLI, Local API, and factual Local UI timeline.
+  No live Agent/VPS Ingress, Gateway API resource, domain, certificate, or TLS
+  secret lifecycle exists.
 - Source packaging rejects local config, credentials, private keys, runtime
   certificate directories, databases, logs, and generated output.
 
@@ -440,9 +443,13 @@ UID/resourceVersion compare-and-swap ownership checks, factual Deployment/
 Service/Ingress readiness, a bounded local Traefik probe, exact known-good
 snapshots, restart reconciliation, and automatic rollback. The R5-011.2
 checkpoint is `DONE / LOCAL_RECONCILIATION_ROLLBACK_PASS` after the disposable
-K3s A -> broken immutable B -> exact A gate. R5-011 itself remains in progress:
-Cloud lifecycle/control-plane state, CLI/Local API/UI, DNS/certificate
-provisioning, and public endpoint acceptance are not implemented here.
+K3s A -> broken immutable B -> exact A gate. R5-011.3 now extends the same
+canonical DeploymentJob and lease path through Cloud PostgreSQL, Agent
+progress/result, CLI, Local API, and Local UI, with durable sanitized history
+and explicit/automatic rollback evidence. Its checkpoint is `DONE /
+LOCAL_CONTROL_PLANE_UI_PASS`. R5-011 itself remains partial: no DNS,
+certificate provisioning, live Agent/VPS mutation, public endpoint, or
+R5-011.4 acceptance was performed.
 
 ## E2E and production evidence
 

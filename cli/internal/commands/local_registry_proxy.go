@@ -325,7 +325,7 @@ func isMutation(method string) bool {
 }
 
 func isPlacementPreview(path string) bool {
-	for _, suffix := range []string{"/topology/plan", "/topology/validate", "/topology/diff", "/deployment-policies/preview", "/deployment-policies/diff", "/deployments/preview", "/deployments/diff", "/routing-decisions"} {
+	for _, suffix := range []string{"/topology/plan", "/topology/validate", "/topology/diff", "/deployment-policies/preview", "/deployment-policies/diff", "/deployments/preview", "/deployments/diff", "/exposures/preview", "/exposures/diff", "/routing-decisions"} {
 		if strings.HasSuffix(path, suffix) {
 			return true
 		}
