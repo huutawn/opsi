@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted target architecture; implementation pending
+Accepted; original decision history retained below
 
 ## Date
 
@@ -10,13 +10,13 @@ Accepted target architecture; implementation pending
 
 ## Context
 
-Opsi currently supports a Git-source deployment path in which Agent clones
-source, builds an image through containerd or Docker, and applies user-provided
-runtime manifests. Image-source deployment is currently rejected. This remains
-an implemented legacy/manual development path during migration; this ADR does
-not remove, deprecate, or change runtime code.
+When this decision was accepted, Opsi supported a Git-source deployment path in
+which Agent cloned source, built an image through containerd or Docker, and
+applied repository-provided runtime manifests. Image-source deployment was
+rejected. This historical state motivated the migration; the 2026-07-23
+implementation addendum records its replacement.
 
-That current path is not an acceptable canonical production CD design. It makes
+That former path is not an acceptable canonical production CD design. It makes
 the runtime node responsible for source retrieval and builds, treats a Git
 revision as if it were the runtime artifact, complicates deterministic rebuilds,
 and couples repository access to a replaceable Agent. It also lacks a clear
@@ -270,9 +270,8 @@ or resolves the immutable digest, and deploys that digest through the typed
 Opsi-rendered runtime path. It reports a bounded sanitized result to Cloud.
 
 Agent must not clone or build source when processing an image-source job. The
-current Git-source implementation remains only as the explicitly non-production
-legacy/manual path until migration tasks update callers and establish one
-authoritative production path.
+former Git-source implementation was removed after migration updated every
+caller and established one authoritative production path.
 
 ### 9. Rollout and rollback
 
@@ -290,7 +289,7 @@ authorized deployment transaction and reports the rollback outcome.
 | GitHub webhook <-> Cloud | Per-App HMAC signature, event and delivery identity | Authentic event delivery for mapped App | Artifact integrity, workflow identity, registry authority |
 | GitHub Actions <-> Cloud | GitHub OIDC JWT, JWKS, claims, replay/idempotency policy | Submit claim-bound `BuildRecord` for configured workflow/run | Installation API token, artifact storage, registry access |
 | GitHub Actions <-> OCI registry | Scoped runner push credential or registry federation | Push artifact to allowed repository | Opsi user identity, Agent pull outside scope |
-| Cloud policy/routing <-> Agent | Existing authenticated job relay plus future digest contract | Deliver authorized immutable deployment job | Source archive transfer, raw build log transfer, AI approval |
+| Cloud policy/routing <-> Agent | Authenticated canonical PollJob contract | Deliver authorized immutable deployment job | Source archive transfer, raw build log transfer, AI approval |
 | Agent <-> OCI registry | Scoped pull credential | Pull allowed repository/digest | GitHub user OAuth, broad registry administration |
 | Agent <-> K3s/containerd | Agent-owned typed execution and resource identity | Deploy/reconcile/rollback allowed digest | Arbitrary AI command or mutable-tag production identity |
 | AI/MCP <-> Safe ActionPlane | Redacted typed evidence, deterministic preflight, separate human grant | Approved typed AI-originated operation | Trusted CD approval or policy bypass |
@@ -317,8 +316,8 @@ credentials or stored as plaintext Cloud metadata.
 - Same-repository previews can be supported safely, while fork pull requests
   fail closed unless a later, explicitly reviewed design creates an isolated
   no-secret build boundary.
-- Migration requires a period in which current Git-source deployment still
-  exists, but only the future artifact path is the production target.
+- The original migration plan allowed temporary Git-source coexistence until
+  every caller moved to the artifact path.
 
 ## Rejected alternatives
 
@@ -362,10 +361,9 @@ credentials or stored as plaintext Cloud metadata.
    image artifact deployment.
 5. P17-P21 add Opsi-owned workload rendering, exposure, readiness, rollback,
    main-branch CD, and preview policy.
-6. The Git-source path remains an explicitly non-production legacy/manual
-   development path during migration. Its eventual removal or permanent bounded
-   ownership requires a separate implementation task that updates every caller,
-   test, contract, and document.
+6. The migration temporarily retained the Git-source development path until a
+   separate implementation task updated every caller, test, contract, and
+   document and removed it.
 7. P27-P32 harden credentials, tenancy, supply chain, private registry,
    durability, upgrade, rollback, and disaster recovery before production
    acceptance.
@@ -376,12 +374,12 @@ Traefik, private registry, or signing as implemented before evidence exists.
 
 ## Verification
 
-P02 verification is documentation-only:
+P02 verification was documentation-only:
 
 - active documents reference `docs/opsi_roadmap_v5_production.md` and this ADR;
 - active documents contain no reference to the absent roadmap v3 directory;
-- current-state documents still describe current Git clone/build behavior and
-  image-source rejection;
+- current-state documents described the then-current Git clone/build behavior
+  and image-source rejection;
 - target documents identify the OCI image digest as the production runtime
   artifact and mutable tags as non-authoritative;
 - GitHub App user authorization, installation authorization, webhook
@@ -395,3 +393,34 @@ P02 verification is documentation-only:
 Implementation verification is ordered by roadmap P07-P32 and requires targeted
 tests plus the specified GitHub runner, VPS, staging, and production-like
 checkpoints. This accepted decision is not implementation evidence.
+
+## Implementation addendum — 2026-07-23
+
+R5-005 through R5-011-S2 implemented the trusted path described by this ADR.
+The one executable delivery path is:
+
+```text
+GitHub Actions OIDC
+-> accepted BuildRecord
+-> immutable OCI digest
+-> TopologyPlan + DeploymentPolicy + routing
+-> durable DeploymentJob/RolloutIntent
+-> Agent PollJob
+-> ProductionAdapter/ReconcileRollout
+-> Opsi-owned K3s resources
+-> factual readiness/known-good rollback
+```
+
+The Agent Git clone/build and arbitrary manifest application path, direct Agent
+deployment RPC, service-scoped deployment creation, and generic GitHub push
+relay are retired. The transport route retains the historical
+`/webhooks/next` name, but `PollJob` carries only canonical deployment or node
+lifecycle jobs; it is not a generic webhook relay. GitHub App authorization,
+installation/repository ownership, Actions OIDC verification, BuildRecord
+admission, topology/policy routing, and immutable deployment are implemented
+checkpoints rather than future architecture.
+
+This addendum records implementation state without changing the original
+decision rationale. Full K3s acceptance remains an operator-run local workflow;
+R5-011 is `PARTIAL`, R5-011.4 is `MANUAL_GATED`, and R5-012/MCP/AI/DNS/TLS/public
+endpoint acceptance is not claimed.

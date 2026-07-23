@@ -1,9 +1,9 @@
 # Opsi Security Story
 
-Status: active boundary summary, last updated 2026-07-15. Detailed requirements
+Status: active boundary summary, last updated 2026-07-23. Detailed requirements
 are in `docs/opsi_srs.md`; implementation status is in
-`docs/status_matrix.md`; trusted artifact target architecture is in
-`docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
+`docs/status_matrix.md`; the trusted artifact decision and implementation
+addendum are in `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
 
 ## Current trust model
 
@@ -16,11 +16,11 @@ Cloud has no AI runtime, model/provider integration, prompt path, or RCA fallbac
 Agent has no AI analyzer or RCA-backed executor. Historical RCA/mitigation data
 is storage-only and is never execution authority.
 
-Cloud currently has generic browser OAuth mediation and a webhook route with
-per-route SHA-256 HMAC verification. These are not evidence of GitHub App user
-authorization, App installation authentication, installation/repository event
-ownership, or GitHub Actions OIDC. Agent currently supports Git-source
-clone/build deployment and rejects image-source deployment.
+Cloud implements GitHub App user authorization, installation authentication,
+typed App-wide webhook intake, repository ownership, GitHub Actions OIDC, and
+accepted BuildRecords. The generic push relay is retired. Agent accepts only
+canonical immutable deployment jobs and reconciles Opsi-owned resources; Git
+source build and caller-supplied manifest execution are retired.
 
 ## Credentials and secrets
 
@@ -102,10 +102,7 @@ restart checks remain operator work in R5-003 and are `UNPROVEN`.
 - Retryable mutations require request identity/idempotency; authorization must
   not be inferred from user-supplied role text alone when auth is enabled.
 
-## Trusted artifact delivery target
-
-This section is target architecture and is not implemented at the current
-snapshot.
+## Trusted artifact delivery
 
 - GitHub App user authorization uses App Client ID/Secret, state, and PKCE to
   bind an Opsi identity to a GitHub numeric user ID.
@@ -170,9 +167,9 @@ redacted excerpts, hashes, and sanitization/prompt-injection metadata.
 
 ## Current security limitations
 
-Production readiness remains unproven. Missing evidence includes the complete
-clean VPS pass, live origin TLS, Cloudflare Full (strict), direct-origin
-restriction, GitHub App/OIDC trust, digest artifact delivery, managed gateway
-security, public evidence API, Safe ActionPlane, CLI MCP hardening, release
-provenance, and repeated recovery/acceptance runs. P01 clean control-plane VPS
-checkpoint `CP-VPS-1` is `DEFERRED / UNPROVEN`; no pass evidence exists.
+Production readiness remains unproven. GitHub App/OIDC trust and immutable
+digest delivery have implementation and recorded acceptance evidence, but the
+manual full K3s scenario, R5-011.4 public endpoint, DNS/certificate lifecycle,
+public evidence API, Safe ActionPlane, CLI MCP hardening, release provenance,
+and repeated recovery/acceptance runs remain open. R5-011 is `PARTIAL` and
+R5-011.4 is `MANUAL_GATED`.

@@ -29,7 +29,10 @@ Generate local development certificates first if TLS paths are enabled:
  ../scripts/dev-certs.sh ./certs
 ```
 
-For local deployment smoke tests without containerd/K3s, keep `deployment.dry_run: true` in `config.example.yaml`. Production deployments consume only the immutable `AgentCommand` delivered by Cloud and reconcile Opsi-owned K3s resources by digest.
+`deployment.dry_run` controls only managed-service catalog application. It does
+not bypass immutable `ProductionAdapter` deployment. Production deployments
+consume only the immutable `AgentCommand` delivered by Cloud and reconcile
+Opsi-owned K3s resources by digest.
 
 ## Linux release artifact
 
@@ -79,6 +82,11 @@ BuildRecord, topology, policy, routing, and durable job into an immutable
 Opsi-owned K3s resources, reports readiness, and participates in rollback or
 rollout reconciliation. Historical SQLite deployment columns remain readable
 for restore compatibility but are not executable input paths.
+
+The poll transport may retain the historical `/webhooks/next` route name, but
+it carries only canonical deployment or node lifecycle jobs. It is not a
+generic webhook relay, and the Agent has no Git/source or arbitrary-manifest
+deployment path.
 
 ## Phase 3 Telemetry
 

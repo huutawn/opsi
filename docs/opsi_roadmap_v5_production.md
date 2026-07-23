@@ -215,9 +215,9 @@ R5-005.
 manual local scope. Config v2 migration/init, bounded changed-service plans,
 CLI/Local API plan-hash parity, deterministic secure workflow YAML, UI preview/
 apply/error states, and disposable Git acceptance (api, worker, shared path,
-dependency closure, rename, missing base, and empty diff) pass. R5-007 OIDC,
-BuildRecord, GHCR push, and deployment remain unstarted; live GitHub runner proof
-is intentionally deferred to R5-008.
+dependency closure, rename, missing base, and empty diff) pass. Later checkpoints
+implemented R5-007 OIDC/BuildRecord and accepted the live R5-008 GitHub
+runner/GHCR proof.
 
 **Focused follow-up 2026-07-19:** R5-006 remains `DONE`. The R5-007 entry
 review made Local apply require a bounded safe idempotency key and the exact
@@ -348,6 +348,14 @@ in `docs/architecture_decisions/ADR-005-manual-placement-policy-boundary.md`.
 
 **Gate:** real public GHCR digest chạy trên K3s; CLI/UI cùng job/progress/result; no-clone/no-secret/sidecar/ownership negatives pass.
 
+**Trạng thái acceptance 2026-07-20:** `DONE / LIVE_ACCEPTANCE_PASS`. An
+accepted BuildRecord and exact R5-009 route created durable immutable-image
+DeploymentJobs through the project-scoped CLI/Local API/UI path. Agent pulled
+the exact public GHCR digest, rendered one Opsi-owned Deployment and ClusterIP
+Service, verified the named application container image ID/readiness, preserved
+state across restart, and passed no-Git/no-build/no-manifest, ownership,
+sidecar, idempotency, PostgreSQL, and bounded-result gates.
+
 ### R5-011 — ExposureSpec, readiness, reconciliation và rollback
 
 **CẦN VPS:** VPS Agent có workload thật từ R5-010.
@@ -411,6 +419,24 @@ concurrency, authorization, ownership, and secret/raw-payload negative gates
 passed. No VPS, staging deployment, DNS/certificate provisioning, public
 endpoint, or R5-012/MCP/AI path was used. R5-011 remains partial and R5-011.4
 still owns live public endpoint acceptance.
+
+**Execution checkpoint R5-011-S2 (2026-07-23):** `DONE /
+SINGLE_IMMUTABLE_DELIVERY_PATH_PASS`. Direct Git/build/manifest Agent
+deployment, direct Agent deploy RPC, service-scoped deployment creation,
+generic GitHub push relay, and inline debug configuration are retired. The only
+executable path is GitHub Actions OIDC -> accepted BuildRecord -> immutable OCI
+digest -> TopologyPlan + DeploymentPolicy + routing -> durable
+DeploymentJob/RolloutIntent -> Agent PollJob ->
+ProductionAdapter/ReconcileRollout -> Opsi-owned K3s resources -> factual
+readiness/known-good rollback. The historical `/webhooks/next` route name is a
+canonical job transport, not a generic relay.
+
+**Correction checkpoint R5-011-S3 (2026-07-23):** documentation and the manual
+acceptance harness were corrected only. The operator-run path now requires a
+protected PEM/OpenSSH key file and exact pinned SSH host fingerprint; the false
+GitHub-hosted K3s workflow and obsolete readiness/future-work snapshots were
+deleted. No VPS, release, DNS, TLS, public endpoint, R5-012, MCP, or AI action
+was performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
 
 ### R5-012 — Main CD và PR preview manual acceptance
 

@@ -9,24 +9,36 @@
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
+## R5-011-S3 correction checkpoint
+
+This checkpoint corrects the runnable manual acceptance and documentation
+truth. The operator-run path is PEM-only with pinned SSH host identity; the
+GitHub-hosted K3s workflow, dated readiness snapshot, and obsolete future-work
+classification were removed. No runtime or database behavior changed.
+
 ## R5-011-S2 checkpoint
 
 `R5-011-S2 — SINGLE_IMMUTABLE_DELIVERY_PATH_PASS` is locally implemented:
 direct Git/build/manifest Agent execution, CLI direct deploy, Local/Cloud
 service-scoped deployment creation, generic GitHub push relay, and Cloud debug
 UI/configuration are removed. The only executable delivery path is
-GitHub Actions BuildRecord -> immutable OCI digest -> Cloud topology/policy/
+GitHub Actions OIDC -> accepted BuildRecord -> immutable OCI digest -> Cloud topology/policy/
 routing -> durable DeploymentJob/RolloutIntent -> Agent PollJob ->
-ProductionAdapter/ReconcileRollout -> K3s readiness and rollback.
+ProductionAdapter/ReconcileRollout -> Opsi-owned K3s resources -> factual
+readiness and known-good rollback.
 
 Historical deployment columns and relay tables remain only for restore/read
 compatibility. Legacy queued jobs cannot be leased to an Agent. Health command
 output is bounded to 256 KiB per command with a five-second timeout and
 fail-closed overflow/truncation behavior.
 
+The transport route may retain the historical `/webhooks/next` name, but
+`PollJob` carries only canonical deployment or node lifecycle jobs; it is not a
+generic webhook relay.
+
 Verification is local and PostgreSQL-backed; no VPS, DNS, TLS, public endpoint,
 or full K3s E2E acceptance was performed. Full E2E status is `MANUAL_GATED`.
-R5-011 remains `PARTIAL`; R5-011.4 has not started. R5-012 and MCP/AI work are
+R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`. R5-012 and MCP/AI work are
 outside this checkpoint.
 
 ## M0 boundary state
@@ -169,7 +181,7 @@ Safe ActionPlane client.
 
 - Organization/project/membership metadata, RBAC, PAT verification and GitHub
   App user authorization grant mediation, OTP, Agent/node registration, bootstrap sessions,
-  deployment job envelopes, webhook relay, audit, and support metadata.
+  deployment job envelopes, App webhook intake, audit, and support metadata.
 - Generic GitHub push relay execution and route-scoped webhook secrets are
   retired; only the GitHub App webhook remains active.
 - The browser login path uses fixed GitHub authorization, token, and `/user`
@@ -482,8 +494,8 @@ are included in `make verify`.
 
 Checkpoint: `R5-011-S1 — TRUST_BOUNDARY_AND_HEALTH_TRUTH_PASS`. This is local
 code verification only: no VPS/live exposure proof was performed, R5-011
-remains `PARTIAL`, R5-011.4 has not started, and legacy deployment cleanup was
-not performed. No Cloud, MCP, AI, or staging change is claimed.
+remains `PARTIAL`, and R5-011.4 remains `MANUAL_GATED`. No Cloud, MCP, AI, or
+staging change is claimed.
 
 ## E2E and production evidence
 
@@ -497,11 +509,11 @@ remains `MANUAL_GATED`.
 
 Production readiness remains unproven. Current gaps include direct-origin
 restriction and certificate rotation, clean control-plane VM proof, live
-mid-step bootstrap resume, live GitHub App installation and
-user-auth/repository-bootstrap verification, Actions OIDC, trusted
-OCI artifact delivery, managed
-gateway, public incident evidence, Safe ActionPlane, CLI MCP, complete Dev VPS
-E2E, release hardening, supply-chain evidence, and measured disaster recovery.
+mid-step bootstrap resume, the full manual K3s E2E, public incident evidence,
+Safe ActionPlane, CLI MCP, release hardening, supply-chain evidence, and
+measured disaster recovery. GitHub App/OIDC, accepted BuildRecord, immutable
+OCI delivery, topology/policy routing, and Agent reconciliation are implemented
+checkpoints rather than future work.
 
 The R5-005 live checkpoint is `OPERATOR_REQUIRED`, not `DONE`. The fixture,
 installation, and numeric identities exist. Sanitized App preflight confirms
@@ -539,11 +551,10 @@ inventory, verified installation claim, single-project repository ownership,
 and service binding are implemented with local and PostgreSQL tests; P09 live
 GitHub verification remains `UNPROVEN`. P10 `opsi init` repository bootstrap is
 `CODE COMPLETE` with local tests, while its live GitHub checkpoint remains
-`UNPROVEN`. P11 is blocked until that checkpoint is run or explicitly recorded
-as deferred;
-OIDC-bound trusted artifact delivery, runtime delivery, and the later
-evidence/ActionPlane/MCP phases remain ordered future work. The ordered source
-of truth is `docs/opsi_roadmap_v5_production.md`.
+`UNPROVEN`. Those live GitHub negatives remain operator-required, while the
+OIDC-bound trusted artifact and immutable runtime delivery checkpoints are
+implemented. The later evidence/ActionPlane/MCP phases remain ordered future
+work. The ordered source of truth is `docs/opsi_roadmap_v5_production.md`.
 
 ## R5-006 repository CD checkpoint
 
@@ -578,8 +589,8 @@ apply boundary: preview returns a hash over the canonical mutation, current and
 rendered managed-file hashes, and ordered file actions; apply recomputes it from
 the current filesystem, rejects stale previews before write, and uses a bounded
 in-memory ledger so exact retries reuse the result while conflicting key reuse
-returns a typed conflict. Live GitHub runner execution remains a later R5-008
-checkpoint.
+returns a typed conflict. Live GitHub runner execution was accepted in the
+R5-008 checkpoint.
 
 Capability matrix (R5-006): config v1/v2 parser-validator-writer and atomic
 mutation path: implemented; `opsi init` create/add/update/migrate/dry-run/apply:

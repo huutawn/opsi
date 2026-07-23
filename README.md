@@ -7,15 +7,13 @@ single canonical active roadmap is `docs/opsi_roadmap_v5_production.md`. Trusted
 delivery is defined by
 `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
 
-## Current M0 boundary
+## Current boundary
 
 - Cloud has no AI runtime or AI provider integration.
 - Agent has no AI analyzer, fallback RCA, or RCA-backed execution.
 - Active incidents support factual list/get/resolve only.
 - `IncidentEvidence v1`, Safe ActionPlane, and the CLI-side MCP bridge are not
   implemented.
-- Agent currently supports Git-source clone/build deployment and rejects
-  image-source deployment before runtime execution.
 - GitHub App user authorization is implemented with fixed GitHub endpoints,
   PKCE S256, one-time state, and a prelinked numeric GitHub user ID. GitHub App
   installation authentication now loads an RSA private key from a read-only
@@ -26,10 +24,13 @@ delivery is defined by
   bind multiple service keys within that project. `opsi init` now matches a
   safe local GitHub origin against Cloud metadata, claims the numeric repository
   ID, creates the P09 service binding, and atomically writes a secret-free
-  `.opsi/opsi-cd.yaml` plus a manual bootstrap-only workflow. GitHub Actions OIDC,
-  `BuildRecord`, digest deployment, `DeploymentPolicy`, and PR previews are not
-  implemented.
-- Opsi does not currently render or manage Ingress, Gateway, domains, or TLS.
+  `.opsi/opsi-cd.yaml` plus a manual bootstrap-only workflow. GitHub Actions
+  OIDC admission, accepted `BuildRecord` storage, immutable digest deployment,
+  `TopologyPlan`, `DeploymentPolicy`, routing, and Opsi-owned K3s reconciliation
+  are implemented. PR-preview acceptance remains future R5-012 work.
+- Opsi renders its owned Deployment, ClusterIP Service, and Traefik exposure
+  resources. DNS, certificate provisioning, and public endpoint acceptance are
+  not complete.
 - P01 code is complete. Its clean control-plane VPS checkpoint is
   `DEFERRED / UNPROVEN` because no clean Ubuntu VPS was available.
 - Bootstrap sessions persist a durable per-step checkpoint. New workers build
@@ -45,29 +46,32 @@ delivery is defined by
   organization-owner status. Pending OAuth state and local grants remain in
   memory and are lost when Cloud restarts. Installation tokens remain in
   memory, while webhook delivery deduplication is durable in PostgreSQL and the
-  P08 in-memory replay layer remains enabled. No real GitHub App flow has been
-  tested yet.
+  P08 in-memory replay layer remains enabled. The remaining GitHub App live
+  negatives are tracked as operator-required evidence in the status matrix.
 
 The roadmap target is user-owned AI through a future local CLI MCP bridge. AI
 will read redacted evidence and propose typed actions; deterministic Agent policy
 and a separate human approval channel remain authoritative. MCP will not expose
 execute or approve tools.
 
-The production delivery target is separate from that AI boundary:
+The production delivery path is separate from that AI boundary:
 
 ```text
-GitHub Actions build/test
--> OCI registry
--> image@sha256:<digest>
--> Opsi Cloud BuildRecord and DeploymentPolicy
--> DeploymentJob
--> Agent deploys the immutable digest
+GitHub Actions OIDC
+-> accepted BuildRecord
+-> immutable OCI digest
+-> TopologyPlan + DeploymentPolicy + routing
+-> durable DeploymentJob/RolloutIntent
+-> Agent PollJob
+-> ProductionAdapter/ReconcileRollout
+-> Opsi-owned K3s resources
+-> factual readiness/known-good rollback
 ```
 
 Git commit SHA remains provenance and source identity, not the runtime artifact.
-The existing Git clone/build path remains a legacy/manual development path
-during migration; the trusted OCI artifact flow is target architecture, not a
-current capability.
+The Agent Git clone/build and arbitrary manifest execution paths are retired;
+there is one executable delivery path from accepted BuildRecord to immutable
+runtime state.
 
 ## Build and test
 
@@ -108,26 +112,17 @@ make verify-e2e-k3s
 ```
 
 The active incident segment checks list, detail, resolve, and resolve audit only.
-The command path exists, but no committed real-infrastructure pass artifact
+This is an operator-run local workflow requiring `OPSI_E2E_SSH_KEY_PATH` and an
+exact `OPSI_E2E_VPS_HOST_KEY_SHA256`; no GitHub-hosted K3s workflow exists. The
+command path exists, but no committed real-infrastructure pass artifact
 currently proves the complete scenario. See
 `docs/runbooks/clean_vps_k3s_e2e.md`.
 
 ## Roadmap order
 
-P01 development control-plane code is complete, while checkpoint `CP-VPS-1`
-remains `DEFERRED / UNPROVEN`. P02 documentation is retained. P03 Agent
-executable and deterministic Linux release artifact code is complete. P04
-durable BootstrapJob checkpoint/resume behavior is implemented and its focused
-unit, race, PostgreSQL, and migration-upgrade tests pass. P05 hardened pinned
-K3s installation, SSH host-key verification, checksum-addressed Agent releases,
-canonical systemd activation/rollback, and registration replay. Focused/race
-tests and development Docker smoke pass. P06 clean target VPS proof remains
-`DEFERRED / UNPROVEN`. P07 GitHub App user authorization and P08 installation
-authentication/webhook code are complete, while live GitHub verification
-remains `UNPROVEN`. P09 durable installation/repository inventory, secure
-installation claim, single-project repository ownership, and monorepo service
-bindings are implemented with local/PostgreSQL evidence; live P09 GitHub proof
-remains `UNPROVEN`. P10 repository bootstrap code and local tests are complete;
-its real GitHub App checkpoint remains `UNPROVEN`. P11 remains blocked until
-that checkpoint is run or explicitly recorded as deferred.
-Production readiness must not be inferred.
+The implemented checkpoint includes GitHub App identity/repository binding,
+GitHub Actions OIDC, accepted BuildRecords, topology/policy routing, immutable
+DeploymentJobs, Agent polling, and factual K3s readiness/rollback. R5-011 stays
+`PARTIAL`; its live R5-011.4 endpoint gate is `MANUAL_GATED`. R5-012, MCP, AI,
+DNS, TLS, and public endpoint acceptance are not done. Production readiness
+must not be inferred.

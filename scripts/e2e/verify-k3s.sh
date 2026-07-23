@@ -21,13 +21,25 @@ MEMORY_LIMIT="${OPSI_E2E_MEMORY_LIMIT:-}"
 TARGET_HOST="${OPSI_E2E_VPS_HOST:-}"
 TARGET_SSH_USER="${OPSI_E2E_VPS_SSH_USER:-root}"
 TARGET_SSH_PORT="${OPSI_E2E_VPS_SSH_PORT:-22}"
-TARGET_SSH_PASSWORD="${OPSI_E2E_VPS_SSH_PASSWORD:-}"
+OPSI_E2E_SSH_KEY_PATH="${OPSI_E2E_SSH_KEY_PATH:-}"
+HOST_KEY_SHA256="${OPSI_E2E_VPS_HOST_KEY_SHA256:-}"
 SECRET_NAME="${OPSI_E2E_SECRET_NAME:-opsi-e2e-secret}"
 TOTP_CODE="${OPSI_E2E_TOTP_CODE:-}"
 OTP_REQUEST_ID="${OPSI_E2E_OTP_REQUEST_ID:-}"
 OTP_CODE="${OPSI_E2E_OTP_CODE:-}"
 APP_SECRET_VALUE="${OPSI_E2E_APP_SECRET_VALUE:-e2e-secret-value-$RUN_ID}"
 POLL_SECONDS="${OPSI_E2E_POLL_SECONDS:-900}"
+KNOWN_HOSTS_FILE=""
+BOOTSTRAP_REQUEST_FILE=""
+SELF_TEST_DIR=""
+
+cleanup_temps() {
+  [ -z "$BOOTSTRAP_REQUEST_FILE" ] || rm -f -- "$BOOTSTRAP_REQUEST_FILE"
+  [ -z "$KNOWN_HOSTS_FILE" ] || rm -f -- "$KNOWN_HOSTS_FILE"
+  [ -z "$SELF_TEST_DIR" ] || rm -rf -- "$SELF_TEST_DIR"
+}
+
+trap cleanup_temps EXIT
 
 usage() {
   cat <<'EOF'
@@ -40,7 +52,8 @@ Required env for full run:
   OPSI_E2E_PROJECT_ID
   OPSI_E2E_LOCAL_URL
   OPSI_E2E_VPS_HOST
-  OPSI_E2E_VPS_SSH_PASSWORD
+  OPSI_E2E_SSH_KEY_PATH
+  OPSI_E2E_VPS_HOST_KEY_SHA256
   OPSI_E2E_BUILD_RECORD_ID
   OPSI_E2E_BAD_BUILD_RECORD_ID
   OPSI_E2E_ENVIRONMENT_ID
@@ -78,11 +91,11 @@ for s in secrets:
     data = data.replace(s, "[REDACTED]")
 patterns = [
     r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\",}]+",
-    r"(?i)((password|ssh_password|token|agent_token|registration_token|pat|private_key|kubeconfig|app_secret|otp_code|totp_code)\s*[\"=:]+\s*)(\"[^\"]*\"|[^,\s}]+)",
+    r"(?i)((token|agent_token|registration_token|pat|private_key|kubeconfig|app_secret|otp_code|totp_code)\s*[\"=:]+\s*)(\"[^\"]*\"|[^,\s}]+)",
 ]
 for pat in patterns:
     data = re.sub(pat, lambda m: m.group(1) + "[REDACTED]", data)
-sys.stdout.write(data)' "$TARGET_SSH_PASSWORD" "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE"
+sys.stdout.write(data)' "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE"
 }
 
 json_get() {
@@ -120,25 +133,103 @@ need_env() {
   [ -n "${!1:-}" ] || fail "missing env: $1"
 }
 
+validate_ssh_key_path() {
+  local raw="$OPSI_E2E_SSH_KEY_PATH" resolved
+  [ -n "$raw" ] || return 1
+  resolved="$(python3 - "$raw" <<'PY'
+import os, stat, sys
+
+path = os.path.abspath(os.path.expanduser(sys.argv[1]))
+current = os.path.sep
+for part in path.split(os.path.sep)[1:]:
+    current = os.path.join(current, part)
+    try:
+        info = os.lstat(current)
+    except OSError:
+        raise SystemExit("SSH key path cannot be accessed")
+    if stat.S_ISLNK(info.st_mode):
+        raise SystemExit("SSH key path must not contain symlinks")
+info = os.lstat(path)
+if not stat.S_ISREG(info.st_mode):
+    raise SystemExit("SSH key path must be a regular file")
+if not info.st_mode & stat.S_IRUSR or not os.access(path, os.R_OK):
+    raise SystemExit("SSH key file must be readable")
+if info.st_mode & 0o077:
+    raise SystemExit("SSH key file must not grant group or other permissions")
+if info.st_size == 0:
+    raise SystemExit("SSH key file must not be empty")
+if info.st_size > 1024 * 1024:
+    raise SystemExit("SSH key file exceeds 1 MiB")
+with open(path, "rb") as key_file:
+    key = key_file.read(1024 * 1024 + 1)
+markers = (
+    b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----",
+    b"-----BEGIN " + b"PRIVATE KEY-----",
+    b"-----BEGIN " + b"ENCRYPTED PRIVATE KEY-----",
+    b"-----BEGIN " + b"RSA PRIVATE KEY-----",
+    b"-----BEGIN " + b"EC PRIVATE KEY-----",
+    b"-----BEGIN " + b"DSA PRIVATE KEY-----",
+)
+if not any(marker in key for marker in markers):
+    raise SystemExit("SSH key file has no recognized private-key marker")
+print(path)
+PY
+)" || return 1
+  OPSI_E2E_SSH_KEY_PATH="$resolved"
+}
+
+select_host_key() {
+  local candidates="$1" expected="$2" output="$3" line fingerprint matches=0
+  : > "$output"
+  chmod 600 "$output"
+  while IFS= read -r line; do
+    [ -n "$line" ] && [ "${line#\#}" = "$line" ] || continue
+    fingerprint="$(printf '%s\n' "$line" | ssh-keygen -lf - -E sha256 2>/dev/null | awk 'NR == 1 { print $2 }')"
+    if [ "$fingerprint" = "$expected" ]; then
+      printf '%s\n' "$line" >> "$output"
+      matches=$((matches + 1))
+    fi
+  done < "$candidates"
+  [ "$matches" -eq 1 ]
+}
+
+pin_host_identity() {
+  local candidates
+  [[ "$TARGET_HOST" != -* && "$TARGET_HOST" != *[$' \t\r\n']* ]] || fail "invalid OPSI_E2E_VPS_HOST"
+  [[ "$TARGET_SSH_PORT" =~ ^[0-9]+$ ]] && [ "$TARGET_SSH_PORT" -ge 1 ] && [ "$TARGET_SSH_PORT" -le 65535 ] || fail "invalid OPSI_E2E_VPS_SSH_PORT"
+  [[ "$HOST_KEY_SHA256" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]] || fail "invalid OPSI_E2E_VPS_HOST_KEY_SHA256"
+  candidates="$(mktemp)"
+  KNOWN_HOSTS_FILE="$(mktemp)"
+  chmod 600 "$candidates" "$KNOWN_HOSTS_FILE"
+  if ! timeout 15s ssh-keyscan -T 5 -p "$TARGET_SSH_PORT" "$TARGET_HOST" > "$candidates" 2>/dev/null; then
+    rm -f -- "$candidates"
+    fail "SSH host-key scan failed"
+  fi
+  if ! select_host_key "$candidates" "$HOST_KEY_SHA256" "$KNOWN_HOSTS_FILE"; then
+    rm -f -- "$candidates"
+    fail "SSH host-key fingerprint had zero or multiple matches"
+  fi
+  rm -f -- "$candidates"
+}
+
 preflight() {
   mkdir -p "$ARTIFACT_DIR"
   log "preflight: artifact_dir=$ARTIFACT_DIR"
-  for t in bash curl python3 ssh go node npm kubectl; do need_tool "$t"; done
+  for t in bash curl python3 ssh ssh-keygen ssh-keyscan timeout go node npm kubectl; do need_tool "$t"; done
   need_env OPSI_E2E_PROJECT_ID
   need_env OPSI_E2E_VPS_HOST
-  need_env OPSI_E2E_VPS_SSH_PASSWORD
+  need_env OPSI_E2E_SSH_KEY_PATH
+  need_env OPSI_E2E_VPS_HOST_KEY_SHA256
   for name in OPSI_E2E_BUILD_RECORD_ID OPSI_E2E_BAD_BUILD_RECORD_ID OPSI_E2E_ENVIRONMENT_ID OPSI_E2E_SERVICE_KEY OPSI_E2E_REPLICAS OPSI_E2E_CONTAINER_PORT OPSI_E2E_CPU_REQUEST OPSI_E2E_MEMORY_REQUEST OPSI_E2E_CPU_LIMIT OPSI_E2E_MEMORY_LIMIT; do
     need_env "$name"
   done
   if [ -z "$TOTP_CODE" ] && { [ -z "$OTP_REQUEST_ID" ] || [ -z "$OTP_CODE" ]; }; then
     fail "missing second factor: set OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE"
   fi
+  validate_ssh_key_path || fail "OPSI_E2E_SSH_KEY_PATH failed protected private-key validation"
+  pin_host_identity
   curl -fsS "$LOCAL_URL/health" >/dev/null || fail "local backend unavailable at OPSI_E2E_LOCAL_URL"
-  if command -v sshpass >/dev/null 2>&1 && [ "${OPSI_E2E_SKIP_SSH_AUTH_CHECK:-}" != "1" ]; then
-    SSHPASS="$TARGET_SSH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER@$TARGET_HOST" 'test "$(uname -s)" = Linux && test -r /etc/os-release' >/dev/null || fail "SSH auth/preflight failed"
-  else
-    log "preflight: sshpass unavailable or auth check skipped; bootstrap worker will verify SSH"
-  fi
+  remote_k3s 'test "$(uname -s)" = Linux && test -r /etc/os-release' >/dev/null || fail "SSH key authentication/preflight failed"
   log "preflight: ok"
 }
 
@@ -172,13 +263,31 @@ api_file() {
 }
 
 write_json() {
-  local file="$1" expr="$2"
-  python3 - "$file" "$expr" <<'PY'
-import json, os, sys
-file, kind = sys.argv[1], sys.argv[2]
+  local file="$1" expr="$2" key_path="${3:-}"
+  python3 - "$file" "$expr" "$key_path" <<'PY'
+import json, os, stat, sys
+file, kind, key_path = sys.argv[1:4]
 e = os.environ
 if kind == "bootstrap":
-    data = {"role":"first_server","public_host":e["OPSI_E2E_VPS_HOST"],"ssh_port":int(e.get("OPSI_E2E_VPS_SSH_PORT","22")),"ssh_username":e.get("OPSI_E2E_VPS_SSH_USER","root"),"auth_method":"password","ssh_password":e["OPSI_E2E_VPS_SSH_PASSWORD"]}
+    fd = os.open(key_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size < 1 or info.st_size > 1024 * 1024:
+            raise SystemExit("SSH key changed after validation")
+        key = os.read(fd, 1024 * 1024 + 1)
+    finally:
+        os.close(fd)
+    markers = (
+        b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----",
+        b"-----BEGIN " + b"PRIVATE KEY-----",
+        b"-----BEGIN " + b"ENCRYPTED PRIVATE KEY-----",
+        b"-----BEGIN " + b"RSA PRIVATE KEY-----",
+        b"-----BEGIN " + b"EC PRIVATE KEY-----",
+        b"-----BEGIN " + b"DSA PRIVATE KEY-----",
+    )
+    if len(key) > 1024 * 1024 or not any(marker in key for marker in markers):
+        raise SystemExit("SSH key changed after validation")
+    data = {"role":"first_server","public_host":e["OPSI_E2E_VPS_HOST"],"ssh_port":int(e.get("OPSI_E2E_VPS_SSH_PORT","22")),"ssh_username":e.get("OPSI_E2E_VPS_SSH_USER","root"),"auth_method":"private_key","ssh_private_key":key.decode("utf-8")}
 elif kind in {"deployment", "bad_deployment"}:
     build_record_id = e["OPSI_E2E_BUILD_RECORD_ID"] if kind == "deployment" else e["OPSI_E2E_BAD_BUILD_RECORD_ID"]
     data = {
@@ -243,14 +352,17 @@ wait_deployment_status() {
 }
 
 check_artifacts_clean() {
-  python3 - "$ARTIFACT_DIR" "$TARGET_SSH_PASSWORD" "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE" <<'PY'
-import pathlib, sys
+  python3 - "$ARTIFACT_DIR" "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE" <<'PY'
+import pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 secrets = [s for s in sys.argv[2:] if s]
 for path in root.rglob("*"):
     if not path.is_file():
         continue
     text = path.read_text(errors="ignore")
+    if re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", text):
+        print(path)
+        raise SystemExit(1)
     for secret in secrets:
         if secret and secret in text:
             print(path)
@@ -259,11 +371,10 @@ PY
 }
 
 remote_k3s() {
-  SSHPASS="$TARGET_SSH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER@$TARGET_HOST" "$@"
+  ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS_FILE" -o ConnectTimeout=20 -i "$OPSI_E2E_SSH_KEY_PATH" -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER@$TARGET_HOST" "$@"
 }
 
 verify_runtime() {
-  need_tool sshpass
   remote_k3s "sudo k3s kubectl -n default rollout status deployment/$SERVICE_NAME --timeout=120s" | redact > "$ARTIFACT_DIR/k3s-rollout.redacted.log" || fail "K3s rollout status failed"
   remote_k3s "sudo k3s kubectl -n default get deploy,svc,pods -l app.kubernetes.io/name=$SERVICE_NAME -o wide" | redact > "$ARTIFACT_DIR/k3s-runtime.redacted.log" || fail "K3s runtime state failed"
 }
@@ -307,8 +418,9 @@ manual_cleanup() {
   mkdir -p "$ARTIFACT_DIR"
   cat > "$ARTIFACT_DIR/cleanup.txt" <<EOF
 Manual cleanup for run $RUN_ID:
-  ssh $TARGET_SSH_USER@$TARGET_HOST 'sudo k3s kubectl -n default delete deploy,svc -l app.kubernetes.io/name=$SERVICE_NAME --ignore-not-found'
-  ssh $TARGET_SSH_USER@$TARGET_HOST 'sudo bash /tmp/opsi/scripts/vps-reset.sh --dry-run'
+  Re-establish the same PEM-only, fingerprint-pinned SSH boundary before any target cleanup.
+  Delete only the Opsi-owned Deployment/Service labeled app.kubernetes.io/name=$SERVICE_NAME.
+  Review the reset script with --dry-run before any separately authorized reset.
   Review $LOCAL_URL via local UI and revoke/remove E2E project resources created with idempotency prefix $RUN_ID.
 EOF
 }
@@ -318,9 +430,16 @@ run_e2e() {
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
   local f body id good_deploy_id bad_deploy_id service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record
-  f="$(mktemp)"; write_json "$f" bootstrap
-  body="$(api_file POST "/api/local/projects/$PROJECT_ID/nodes/bootstrap" "$f" bootstrap 1)" || fail "bootstrap session create failed"
-  rm -f "$f"
+  BOOTSTRAP_REQUEST_FILE="$(mktemp)"
+  chmod 600 "$BOOTSTRAP_REQUEST_FILE"
+  write_json "$BOOTSTRAP_REQUEST_FILE" bootstrap "$OPSI_E2E_SSH_KEY_PATH"
+  if ! body="$(api_file POST "/api/local/projects/$PROJECT_ID/nodes/bootstrap" "$BOOTSTRAP_REQUEST_FILE" bootstrap 1)"; then
+    rm -f -- "$BOOTSTRAP_REQUEST_FILE"
+    BOOTSTRAP_REQUEST_FILE=""
+    fail "bootstrap session create failed"
+  fi
+  rm -f -- "$BOOTSTRAP_REQUEST_FILE"
+  BOOTSTRAP_REQUEST_FILE=""
   id="$(printf '%s' "$body" | json_get id)" || fail "bootstrap response missing id"
   wait_json_field "/api/local/projects/$PROJECT_ID/bootstrap-sessions/$id" status completed bootstrap-session
   log "step 1/11 bootstrap completed through local backend: session=$id target=$TARGET_HOST"
@@ -390,10 +509,53 @@ run_e2e() {
 }
 
 self_test() {
+  local key_public fixture match original_key forbidden pem_marker expected request
   mkdir -p "$ARTIFACT_DIR"
-  OPSI_E2E_VPS_SSH_PASSWORD="secret-password" OPSI_E2E_APP_SECRET_VALUE="app-secret" OPSI_E2E_TOTP_CODE="123456" OPSI_E2E_OTP_CODE="" \
-    bash -c 'printf "password=secret-password token=abc kubeconfig=raw app-secret 123456" | '"$0"' --redact-only' > "$ARTIFACT_DIR/redaction-test.txt"
+  OPSI_E2E_APP_SECRET_VALUE="app-secret" OPSI_E2E_TOTP_CODE="123456" OPSI_E2E_OTP_CODE="" \
+    bash -c 'printf "token=abc kubeconfig=raw app-secret 123456" | '"$0"' --redact-only' > "$ARTIFACT_DIR/redaction-test.txt"
   grep -q '\[REDACTED\]' "$ARTIFACT_DIR/redaction-test.txt" || fail "self-test redaction failed"
+  original_key="$OPSI_E2E_SSH_KEY_PATH"
+  OPSI_E2E_SSH_KEY_PATH=""
+  if validate_ssh_key_path >/dev/null 2>&1; then fail "self-test accepted missing PEM-key input"; fi
+  SELF_TEST_DIR="$(mktemp -d)"
+  ssh-keygen -q -t ed25519 -N '' -f "$SELF_TEST_DIR/key"
+  chmod 600 "$SELF_TEST_DIR/key"
+  ln -s "$SELF_TEST_DIR/key" "$SELF_TEST_DIR/key-link"
+  OPSI_E2E_SSH_KEY_PATH="$SELF_TEST_DIR/key-link"
+  if validate_ssh_key_path >/dev/null 2>&1; then fail "self-test accepted symlink key"; fi
+  chmod 640 "$SELF_TEST_DIR/key"
+  OPSI_E2E_SSH_KEY_PATH="$SELF_TEST_DIR/key"
+  if validate_ssh_key_path >/dev/null 2>&1; then fail "self-test accepted insecure key mode"; fi
+  chmod 600 "$SELF_TEST_DIR/key"
+  validate_ssh_key_path >/dev/null || fail "self-test rejected protected key"
+  request="$SELF_TEST_DIR/bootstrap.json"
+  : > "$request"
+  chmod 600 "$request"
+  OPSI_E2E_VPS_HOST=fixture OPSI_E2E_VPS_SSH_USER=fixture-user OPSI_E2E_VPS_SSH_PORT=22 \
+    write_json "$request" bootstrap "$OPSI_E2E_SSH_KEY_PATH" || fail "self-test bootstrap JSON generation failed"
+  [ "$(stat -c '%a' "$request")" = 600 ] || fail "self-test bootstrap request mode was not 0600"
+  python3 - "$request" <<'PY' || fail "self-test bootstrap JSON omitted the PEM credential"
+import json, sys
+with open(sys.argv[1]) as request_file:
+    data = json.load(request_file)
+if data.get("auth_method") != "private_key" or "ssh_private_key" not in data or "PRIVATE KEY" not in data["ssh_private_key"]:
+    raise SystemExit(1)
+PY
+  rm -f -- "$request"
+  key_public="$(<"$SELF_TEST_DIR/key.pub")"
+  fixture="$SELF_TEST_DIR/host-keys"
+  match="$SELF_TEST_DIR/known-hosts"
+  printf 'fixture %s\n' "$key_public" > "$fixture"
+  expected="$(ssh-keygen -lf "$fixture" -E sha256 | awk 'NR == 1 { print $2 }')"
+  select_host_key "$fixture" "$expected" "$match" || fail "self-test rejected correct host fingerprint"
+  if select_host_key "$fixture" "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" "$match"; then
+    fail "self-test accepted incorrect host fingerprint"
+  fi
+  pem_marker='-----BEGIN OPENSSH '"PRIVATE KEY-----"
+  printf '%s\n' "$pem_marker" > "$ARTIFACT_DIR/pem-leak.txt"
+  if check_artifacts_clean >/dev/null 2>&1; then fail "self-test artifact validation accepted a PEM marker"; fi
+  rm -f -- "$ARTIFACT_DIR/pem-leak.txt"
+  OPSI_E2E_SSH_KEY_PATH="$original_key"
   printf '{"incident":{"incident_id":"inc-self-test","status":"open"}}' | verify_incident_detail inc-self-test || fail "self-test factual incident detail failed"
   if printf '{"incident":{"incident_id":"inc-self-test","action_%s":"legacy"}}' hash | verify_incident_detail inc-self-test >/dev/null 2>&1; then
     fail "self-test legacy incident field was accepted"
@@ -405,6 +567,9 @@ self_test() {
   grep -q 'POST "/api/local/projects/\$PROJECT_ID/deployments"' "$0" || fail "self-test canonical deployment endpoint missing"
   grep -q 'GET "/api/local/projects/\$PROJECT_ID/deployments/\$deploy_id"' "$0" || fail "self-test canonical deployment polling missing"
   grep -q 'build_record_id' "$0" || fail "self-test BuildRecord request construction missing"
+  grep -q 'auth_method":"private_key"' "$0" || fail "self-test PEM bootstrap request missing"
+  grep -q 'ssh_private_key' "$0" || fail "self-test PEM bootstrap field missing"
+  grep -q 'UserKnownHostsFile=' "$0" || fail "self-test dedicated known_hosts missing"
   grep -q "k3s kubectl" "$0" || fail "self-test real K3s check missing"
   grep -q "X-Local-Session" "$0" || fail "self-test local session guard missing"
   grep -q 'incidents/\$incident_id/resolve' "$0" || fail "self-test incident resolve path missing"
@@ -412,6 +577,9 @@ self_test() {
   if grep -q "$legacy_scope" "$0"; then fail "self-test found a service-scoped deployment surface"; fi
   for forbidden in 'repo''_url' 'git''_sha' 'docker''file' 'manifest''_path' 'requested''_by' 'user''_id' 'role''='; do
     if grep -q "$forbidden" "$0"; then fail "self-test found retired caller/source field: $forbidden"; fi
+  done
+  for forbidden in 'pass''word' 'ssh''pass' 'accept''-new'; do
+    if grep -qi "$forbidden" "$0"; then fail "self-test found retired SSH transport token: $forbidden"; fi
   done
   grep -q "Manual cleanup" "$0" || fail "self-test cleanup path missing"
   log "self-test: ok"

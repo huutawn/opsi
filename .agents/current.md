@@ -4,6 +4,19 @@ Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
+### R5-011-S3 — MANUAL_ACCEPTANCE_TRUTH_REPAIR
+
+- Correction only: the manual K3s acceptance is PEM-only, pins one exact SSH
+  host fingerprint, submits accepted healthy/bad BuildRecords through the
+  canonical project deployment route, and rejects PEM material in evidence.
+- The false GitHub-hosted K3s workflow, dated readiness snapshot, and obsolete
+  future-work duplicate are deleted. Active documents now record one delivery
+  path from GitHub Actions OIDC through accepted BuildRecord, immutable digest,
+  topology/policy routing, durable job, Agent PollJob, ProductionAdapter/
+  ReconcileRollout, Opsi-owned K3s resources, and factual readiness/rollback.
+- No SSH, VPS, DNS, TLS, release, public endpoint, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
 ### R5-011-S2 — SINGLE_IMMUTABLE_DELIVERY_PATH_PASS
 
 - Direct Git/build/manifest Agent deployment, CLI direct deploy, Local/Cloud
@@ -19,7 +32,7 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 - Local/PostgreSQL tests, race tests, source hygiene, build, and E2E self-test
   were run. No VPS, DNS, TLS, public endpoint, or full K3s E2E acceptance was
   performed; the full E2E remains `MANUAL_GATED`.
-- R5-011 remains `PARTIAL`; R5-011.4 has not started. No R5-012 or MCP/AI
+- R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`. No R5-012 or MCP/AI
   work was performed.
 
 ## Active Task
@@ -116,8 +129,8 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   `24.16.0`, and npm `11.17.0`; the exact revision has not been deployed or
   exercised against a VPS/live public endpoint.
 - Checkpoint: `R5-011-S1 — TRUST_BOUNDARY_AND_HEALTH_TRUTH_PASS`. R5-011 remains
-  `PARTIAL`; R5-011.4 has not started, legacy deployment cleanup was not done,
-  and no Cloud, MCP, AI, or staging changes were made.
+  `PARTIAL`; R5-011.4 remains `MANUAL_GATED`, and no Cloud, MCP, AI, or staging
+  changes were made.
 
 ### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
 
@@ -244,8 +257,9 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 - Cloud has no AI provider/runtime. Agent has no LLM/provider/prompt path.
 - `IncidentEvidence v1`, Safe ActionPlane, and `opsi mcp serve` are not
   implemented.
-- Opsi does not render or manage Ingress, Gateway API, domains, or TLS. User
-  manifests may contain their own resources.
+- Opsi renders its owned Deployment, ClusterIP Service, and Traefik Ingress.
+  Caller-supplied manifests are not executable input. DNS and certificate
+  provisioning remain outside the implemented boundary.
 - The control-plane staging package terminates origin TLS at Caddy. This is
   deployment infrastructure for Cloud and is not an Agent-managed application
   gateway capability.

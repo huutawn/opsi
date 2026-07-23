@@ -2,19 +2,18 @@
 
 | Metadata | Value |
 |---|---|
-| Version | 6.0 |
+| Version | 6.1 |
 | Status | Active architecture map |
-| Last updated | 2026-07-13 |
+| Last updated | 2026-07-23 |
 | Requirements | `docs/opsi_srs.md` |
 | Implementation truth | `docs/current_state.md`, `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact decision | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
-This document deliberately separates the current M0 architecture from the
-target architecture. Target components must not be inferred to exist unless the
-status matrix provides implementation evidence.
+This document separates implemented architecture from later roadmap work. The
+status matrix remains the evidence authority.
 
-## 1. Current architecture at M0
+## 1. Current architecture
 
 ```text
 Browser
@@ -23,21 +22,22 @@ Browser
        -> Agent gRPC runtime APIs
 
 Cloud
-  -> bootstrap/deployment job relay
-       -> Agent cloud runner
-
-Git repository
-  -> Agent clone/build legacy/manual path
+  -> durable bootstrap jobs
+  -> accepted BuildRecord + topology/policy/routing
+  -> durable DeploymentJob/RolloutIntent
+       -> Agent PollJob
 
 Agent
-  -> K3s/containerd
+  -> ProductionAdapter/ReconcileRollout
+  -> Opsi-owned K3s resources
   -> local SQLite/runtime stores
 ```
 
-No current path contains an AI provider, MCP server, `IncidentEvidence v1`,
-`ActionPlan`, approval grant, Safe ActionPlane, GitHub Actions OIDC,
-`BuildRecord`, digest-based image deployment, `DeploymentPolicy`, or pull
-request preview environment.
+GitHub App identity/repository binding, GitHub Actions OIDC, accepted
+`BuildRecord`, digest deployment, `TopologyPlan`, `DeploymentPolicy`, routing,
+and factual readiness/known-good rollback are implemented. No current path
+contains an AI provider, MCP server, `IncidentEvidence v1`, `ActionPlan`,
+approval grant, Safe ActionPlane, or pull-request preview environment.
 
 ### 1.1 Repository domains
 
@@ -62,10 +62,12 @@ Cloud may relay versioned deployment/bootstrap work to an authenticated Agent.
 The work is not complete merely because Cloud metadata changed; Agent must
 perform and report the runtime operation.
 
-Cloud currently provides generic browser OAuth mediation and a webhook route
-with per-route HMAC verification. Those implemented pieces are not GitHub App
-user authorization, App installation-token support, installation/repository
-event ownership, or GitHub Actions OIDC verification.
+Cloud provides GitHub App user authorization, installation authentication,
+typed App-wide webhook intake, repository/service ownership, GitHub Actions
+OIDC verification, and accepted BuildRecord storage. The generic GitHub push
+relay and route-scoped webhook secrets are retired. The historical
+`/webhooks/next` transport name remains, but `PollJob` carries only canonical
+deployment or node lifecycle jobs; it is not a generic webhook relay.
 
 Bootstrap Worker is a long-running, single-concurrency Cloud-side worker. It
 polls `POST /internal/bootstrap/sessions/lease`; the registry atomically claims
@@ -78,13 +80,13 @@ Cloud recovers expired leases before polling. Retryable outcomes receive
 persisted bounded backoff; exhausted or permanent outcomes enter
 `dead_letter`. Credential retrieval remains durable across attempts and
 registration tokens rotate per attempt. Owner/Admin manual retry is
-project-scoped and idempotent. The worker still processes at most one session,
-and P04 owns the future per-step resumable BootstrapJob state machine.
+project-scoped and idempotent. The worker processes at most one session and
+uses the implemented resumable per-step BootstrapJob checkpoint state.
 
 The worker uses a private control-plane URL for lease traffic and a distinct
-Agent-reachable Cloud URL when installing a remote Agent. Bootstrap credential
-handoff supports passwords and unencrypted SSH private keys; production requires
-known-host verification and encrypted PostgreSQL credential storage.
+Agent-reachable Cloud URL when installing a remote Agent. The operator-run K3s
+acceptance validates a protected PEM/OpenSSH private-key file and pins one exact
+SSH host-key fingerprint before bootstrap.
 
 ### 1.3 Current CLI/local backend boundary
 
@@ -109,12 +111,13 @@ storage-only. They are not execution authority.
 
 ### 1.5 Current deployment and gateway boundary
 
-Git deployment and user-provided manifest application exist. Those manifests may
-contain Service, Ingress, Gateway, TLS, or lifecycle objects owned by the user.
-Opsi itself does not currently render or manage a gateway resource, domain, or
-TLS certificate. The removed `deployment.ingress_enabled` key fails fast. Agent
-currently clones/builds Git source for this path and rejects image-source
-deployment before runtime execution.
+The sole executable delivery path is GitHub Actions OIDC -> accepted
+`BuildRecord` -> immutable OCI digest -> `TopologyPlan` + `DeploymentPolicy` +
+routing -> durable `DeploymentJob`/`RolloutIntent` -> Agent `PollJob` ->
+`ProductionAdapter`/`ReconcileRollout` -> Opsi-owned K3s resources -> factual
+readiness and known-good rollback. Agent source clone/build, caller-supplied
+manifests, direct deployment RPC, service-scoped deployment creation, and the
+generic push relay are retired. Opsi does not yet provision DNS or certificates.
 
 ### 1.6 Current incident path
 
@@ -129,7 +132,7 @@ Agent telemetry/detectors
 The clean VPS/K3s command path verifies this factual lifecycle and resolve audit.
 There is no analyze, action approval, or mitigation execution step.
 
-## 2. Target architecture - not implemented at the current snapshot
+## 2. Trusted artifact architecture
 
 ```text
 GitHub
@@ -158,7 +161,7 @@ exist for people, but Agent deploys the digest.
 
 ### 2.1 GitHub and OCI trust paths
 
-The target has five separate trust paths:
+The implemented delivery boundary has five separate trust paths:
 
 1. GitHub App user authorization uses App Client ID/Secret, state, and PKCE for
    login or identity linkage. GitHub numeric user ID is the subject.
@@ -205,7 +208,7 @@ GitHub installation
 A repository is never owned by or bound directly to an Agent/VPS. Agent is a
 replaceable runtime target.
 
-### 2.3 Target delivery and gateway flow
+### 2.3 Delivery and gateway flow
 
 An allowed `BuildRecord` creates or reuses a durable `DeploymentJob`. Agent
 validates the allowlisted image repository and full `sha256` digest, pulls the
@@ -215,9 +218,8 @@ with hostname/path conflict detection. Readiness, last-known-good digest,
 automatic rollback, post-check, and restart reconciliation complete the
 deployment transaction.
 
-For image-source jobs Agent must not clone or build source. The current
-Git-source clone/build implementation remains the explicitly non-production
-legacy/manual path during migration.
+Agent never receives Git source, Docker build input, arbitrary manifests, or a
+caller-selected runtime target for deployment.
 
 ### 2.4 Trusted CD policy and pull requests
 
