@@ -4,6 +4,24 @@ Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
+### R5-011-S2 — SINGLE_IMMUTABLE_DELIVERY_PATH_PASS
+
+- Direct Git/build/manifest Agent deployment, CLI direct deploy, Local/Cloud
+  service-scoped deployment creation, generic GitHub push relay, and Cloud
+  inline debug UI/configuration are retired. Only the BuildRecord -> immutable
+  digest -> DeploymentJob/RolloutIntent -> PollJob -> ProductionAdapter/
+  ReconcileRollout -> K3s readiness/rollback path remains executable.
+- Historical deployment columns and relay tables remain for restore/read
+  compatibility only; legacy queued jobs are terminalized or skipped
+  deterministically and cannot reach an Agent.
+- Health command output is bounded to 256 KiB per probe with a five-second
+  timeout and fail-closed overflow/truncation behavior.
+- Local/PostgreSQL tests, race tests, source hygiene, build, and E2E self-test
+  were run. No VPS, DNS, TLS, public endpoint, or full K3s E2E acceptance was
+  performed; the full E2E remains `MANUAL_GATED`.
+- R5-011 remains `PARTIAL`; R5-011.4 has not started. No R5-012 or MCP/AI
+  work was performed.
+
 ## Active Task
 
 ### R5-011.1 — Local external exposure contract and renderer

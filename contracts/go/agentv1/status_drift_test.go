@@ -19,7 +19,6 @@ func TestProtoServiceRPCContractDrift(t *testing.T) {
 	want := protoRPCs(string(data))
 	got := map[string][]string{
 		StatusServiceName:         descMethods(StatusService_ServiceDesc),
-		DeploymentServiceName:     descMethods(DeploymentService_ServiceDesc),
 		ServiceManagerServiceName: descMethods(ServiceManagerService_ServiceDesc),
 		TelemetryServiceName:      descMethods(TelemetryService_ServiceDesc),
 		SecretServiceName:         descMethods(SecretService_ServiceDesc),
@@ -36,30 +35,6 @@ func TestProtoServiceRPCContractDrift(t *testing.T) {
 		if strings.Join(wantMethods, ",") != strings.Join(gotMethods, ",") {
 			t.Fatalf("%s rpc drift: proto=%v binding=%v", service, wantMethods, gotMethods)
 		}
-	}
-}
-
-func TestDeployRequestContractDrift(t *testing.T) {
-	data, err := os.ReadFile("../../agent/v1/status.proto")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := protoMessageFields(string(data), "DeployRequest")
-	typ := reflect.TypeOf(DeployRequest{})
-	got := make([]string, 0, typ.NumField())
-	for i := 0; i < typ.NumField(); i++ {
-		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
-		if name != "" && name != "-" {
-			got = append(got, name)
-		}
-	}
-	sort.Strings(got)
-	if strings.Join(want, ",") != strings.Join(got, ",") {
-		t.Fatalf("DeployRequest field drift: proto=%v binding=%v", want, got)
-	}
-	proto := string(data)
-	if !regexp.MustCompile(`reserved\s+19\s*;`).MatchString(proto) || !regexp.MustCompile(`reserved\s+"ingress_enabled"\s*;`).MatchString(proto) {
-		t.Fatal("DeployRequest must reserve removed field number 19 and name ingress_enabled")
 	}
 }
 

@@ -3,7 +3,10 @@ package cloudrunner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,6 +63,75 @@ func TestProbeRuntimeTimeoutAndMissingProbeFailClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecHealthCommandRunnerAllowsExactOutputBound(t *testing.T) {
+	output, err := (ExecHealthCommandRunner{}).Run(context.Background(), os.Args[0], "-test.run=TestHealthCommandHelper", "--", "stdout", fmt.Sprint(MaxHealthCommandOutputLen))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != MaxHealthCommandOutputLen {
+		t.Fatalf("output length = %d", len(output))
+	}
+}
+
+func TestExecHealthCommandRunnerFailsClosedAboveOutputBound(t *testing.T) {
+	output, err := (ExecHealthCommandRunner{}).Run(context.Background(), os.Args[0], "-test.run=TestHealthCommandHelper", "--", "stdout", fmt.Sprint(MaxHealthCommandOutputLen+1))
+	if !errors.Is(err, errHealthCommandOutputExceeded) || output != nil {
+		t.Fatalf("output=%d err=%v", len(output), err)
+	}
+}
+
+func TestExecHealthCommandRunnerBoundsLargeStderr(t *testing.T) {
+	output, err := (ExecHealthCommandRunner{}).Run(context.Background(), os.Args[0], "-test.run=TestHealthCommandHelper", "--", "stderr", fmt.Sprint(MaxHealthCommandOutputLen*4))
+	if !errors.Is(err, errHealthCommandOutputExceeded) || output != nil {
+		t.Fatalf("output=%d err=%v", len(output), err)
+	}
+}
+
+func TestExecHealthCommandRunnerTimeoutFailsClosed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	output, err := (ExecHealthCommandRunner{}).Run(ctx, os.Args[0], "-test.run=TestHealthCommandHelper", "--", "block", "0")
+	if err == nil || output != nil {
+		t.Fatalf("output=%d err=%v", len(output), err)
+	}
+}
+
+func TestTruncatedNodeJSONCannotBecomeReady(t *testing.T) {
+	runner := &scriptedHealthRunner{responses: []healthCommandResponse{
+		{output: []byte("ok")},
+		{output: []byte(`{"items":[{"status":{"conditions":[{"type":"Ready","status":"True"}]}}`)},
+	}}
+	health := ProbeRuntime(context.Background(), KubernetesHealthProbe{KubectlPath: "kubectl", Runner: runner})
+	if health.NodeReady || health.K3SStatus != K3SStatusUnavailable {
+		t.Fatalf("health = %+v", health)
+	}
+}
+
+func TestHealthCommandHelper(t *testing.T) {
+	separator := -1
+	for index, arg := range os.Args {
+		if arg == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || len(os.Args) < separator+3 {
+		return
+	}
+	mode := os.Args[separator+1]
+	var size int
+	_, _ = fmt.Sscan(os.Args[separator+2], &size)
+	switch mode {
+	case "stdout":
+		_, _ = os.Stdout.WriteString(strings.Repeat("x", size))
+	case "stderr":
+		_, _ = os.Stderr.WriteString(strings.Repeat("x", size))
+	case "block":
+		select {}
+	}
+	os.Exit(0)
 }
 
 type healthCommandResponse struct {

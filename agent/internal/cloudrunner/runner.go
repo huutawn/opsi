@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
-	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -21,6 +20,17 @@ type CloudClient interface {
 	ProgressDeployment(context.Context, string, string, deploymentv1.Progress) error
 	CompleteNodeLifecycle(context.Context, string, string, cloudrelay.NodeLifecycleResult) error
 	Heartbeat(context.Context, string, cloudrelay.Heartbeat) error
+}
+
+var errImageSourceUnsupported = errors.New("immutable deployment command required")
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type DeployEngine interface {
@@ -52,7 +62,6 @@ type Runner struct {
 	NodeLifecycle     NodeLifecycleExecutor
 	NodeID            string
 	Version           string
-	DeploymentConfig  config.DeploymentConfig
 	PollInterval      time.Duration
 	LongPollWait      time.Duration
 	HeartbeatInterval time.Duration
@@ -236,8 +245,11 @@ func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease, r
 	if lease.Command != nil && lease.Command.NodeID != r.NodeID {
 		return deploymentFailure(lease, "DEPLOYMENT_TARGET_MISMATCH", "deployment command target does not match this Agent node")
 	}
-	req, err := RequestFromLease(lease, r.DeploymentConfig)
+	req, err := RequestFromLease(lease)
 	if err != nil {
+		if errors.Is(err, deploy.ErrLegacyDeploymentRetired) {
+			return deploymentFailure(lease, "LEGACY_DEPLOYMENT_RETIRED", "legacy deployment jobs are retired")
+		}
 		return deploymentFailure(lease, failureCode(err), err.Error())
 	}
 	record, err := r.Engine.Deploy(ctx, req, func(event *deploy.ProgressEvent) error {

@@ -4,64 +4,62 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
-func TestDeploymentLeaseRetryDeadLetterAndStaleResult(t *testing.T) {
+func TestLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease(t *testing.T) {
 	service, projectID := readyRegistry(t)
-	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	record := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api.yaml", "svc-lease")
-	job, err := service.StartDeployment(projectID, record.ID, "user-1", "dep-lease", "req-lease")
+	record := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api.yaml", "svc-retired")
+	nodes, err := service.ListNodes(projectID)
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("nodes err=%v nodes=%+v", err, nodes)
+	}
+	legacy := DeploymentJob{
+		ID: "dep-legacy", OrgID: record.OrgID, ProjectID: projectID,
+		EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID,
+		ServiceID: record.ID, Status: DeploymentQueued, NodeID: nodes[0].ID,
+		CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
+	}
+	service.deployments[legacy.ID] = legacy
+
+	snapshot := immutableSnapshot(t, service, projectID, record.ID, "canonical-behind-legacy")
+	canonical, _, err := service.StartImmutableDeployment(snapshot, "user-1", "dep-canonical", "req-canonical")
 	if err != nil {
 		t.Fatal(err)
 	}
-	job.MaxAttempts = 2
-	service.deployments[job.ID] = job
-
-	first, ok, err := service.LeaseDeployment(projectID, job.NodeID)
+	lease, ok, err := service.LeaseDeployment(projectID, nodes[0].ID)
 	if err != nil || !ok {
-		t.Fatalf("first lease ok=%v err=%v", ok, err)
+		t.Fatalf("canonical lease ok=%v err=%v", ok, err)
 	}
-	if first.LeaseToken == "" || first.Deployment.AttemptCount != 1 {
-		t.Fatalf("bad first lease: %+v", first)
+	if lease.Deployment.ID != canonical.ID || lease.Command == nil {
+		t.Fatalf("legacy job reached Agent or canonical command missing: %+v", lease)
 	}
-	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "req-stale", DeploymentResult{Status: DeploymentSucceeded, LeaseToken: "old", IntentHash: job.IntentHash}); apiCode(err) != "DEPLOYMENT_STALE_LEASE" {
-		t.Fatalf("stale token err = %#v", err)
+	retired := service.deployments[legacy.ID]
+	if retired.Status != DeploymentFailed || retired.FailureCode != LegacyDeploymentRetired || retired.FinishedAt == nil {
+		t.Fatalf("legacy job was not retired deterministically: %+v", retired)
 	}
-
-	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
-	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "req-expired", DeploymentResult{Status: DeploymentSucceeded, LeaseToken: first.LeaseToken, IntentHash: job.IntentHash}); apiCode(err) != "DEPLOYMENT_LEASE_EXPIRED" {
-		t.Fatalf("expired lease err = %#v", err)
+	if lock := service.deployLocks[record.ID]; lock.DeploymentID != canonical.ID {
+		t.Fatalf("legacy retirement released the canonical deployment lock: %+v", lock)
 	}
-	second, ok, err := service.LeaseDeployment(projectID, job.NodeID)
-	if err != nil || !ok {
-		t.Fatalf("second lease ok=%v err=%v", ok, err)
+	if events := service.deployEvents[legacy.ID]; len(events) != 1 || events[0].MessageRedacted != "legacy deployment jobs are retired" {
+		t.Fatalf("legacy retirement evidence is missing or unsafe: %+v", events)
 	}
-	if second.LeaseToken == first.LeaseToken || second.Deployment.AttemptCount != 2 {
-		t.Fatalf("lease was not retried: first=%+v second=%+v", first, second)
+	if _, _, err := service.RetryDeployment(projectID, legacy.ID, "retry-legacy", "req-retry"); apiCode(err) != LegacyDeploymentRetired {
+		t.Fatalf("legacy retry err=%v", err)
 	}
-
-	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
-	_, ok, err = service.LeaseDeployment(projectID, job.NodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Fatal("dead-lettered job should not lease again")
-	}
-	dead := service.deployments[job.ID]
-	if dead.Status != DeploymentDeadLetter || dead.FailureCode != "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" {
-		t.Fatalf("job not dead-lettered: %+v", dead)
-	}
-	if _, locked := service.deployLocks[record.ID]; locked {
-		t.Fatal("dead-lettered deployment kept service lock")
+	if _, err := service.RollbackDeployment(projectID, legacy.ID, "user-1", "rollback-legacy", "req-rollback"); apiCode(err) != LegacyDeploymentRetired {
+		t.Fatalf("legacy rollback err=%v", err)
 	}
 }
 
 func TestDuplicateDeploymentResultIsIdempotent(t *testing.T) {
 	service, projectID := readyRegistry(t)
 	record := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api.yaml", "svc-result")
-	job, err := service.StartDeployment(projectID, record.ID, "user-1", "dep-result", "req-result")
+	snapshot := immutableSnapshot(t, service, projectID, record.ID, "result")
+	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "dep-result", "req-result")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +67,7 @@ func TestDuplicateDeploymentResultIsIdempotent(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
 	}
-	result := DeploymentResult{Status: DeploymentSucceeded, LeaseToken: lease.LeaseToken, IntentHash: job.IntentHash, FinalRevisionRef: "rev-1", RollbackEligible: true}
+	result := DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: DeploymentSucceeded, LeaseToken: lease.LeaseToken, IntentHash: job.IntentHash, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference, ApplicationImageID: "docker-pullable://" + snapshot.Image.Reference, FinalRevisionRef: "rev-1", RollbackEligible: true}
 	done, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "req-result", result)
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +85,8 @@ func TestDuplicateDeploymentResultIsIdempotent(t *testing.T) {
 func TestConcurrentAgentsCannotLeaseSameDeployment(t *testing.T) {
 	service, projectID := readyRegistry(t)
 	record := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api.yaml", "svc-concurrent")
-	job, err := service.StartDeployment(projectID, record.ID, "user-1", "dep-concurrent", "req-concurrent")
+	snapshot := immutableSnapshot(t, service, projectID, record.ID, "concurrent")
+	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "dep-concurrent", "req-concurrent")
 	if err != nil {
 		t.Fatal(err)
 	}

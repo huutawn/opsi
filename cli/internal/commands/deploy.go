@@ -9,11 +9,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/opsi-dev/opsi/cli/internal/agentclient"
 	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
-	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
-	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	"github.com/spf13/cobra"
 )
@@ -51,24 +48,9 @@ type deploymentReadFlags struct {
 }
 
 func newDeployCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
-	var legacy agentv1.DeployRequest
-	var legacyRequests, legacyLimits, legacyDependencies []string
-	root := &cobra.Command{Use: "deploy", Short: "Deploy an accepted BuildRecord through Cloud and the exact routed Agent", RunE: func(command *cobra.Command, _ []string) error {
-		return runLegacyDevDeployment(command, *configPath, factory, &legacy, legacyRequests, legacyLimits, legacyDependencies)
+	root := &cobra.Command{Use: "deploy", Short: "Deploy an accepted BuildRecord through Cloud and the exact routed Agent", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		return command.Help()
 	}}
-	legacyFlags := root.Flags()
-	legacyFlags.StringVar(&legacy.ProjectID, "project-id", "", "legacy development-only project scope; production uses a deploy subcommand")
-	legacyFlags.StringVar(&legacy.ServiceID, "service-id", "", "legacy development-only service ID")
-	legacyFlags.StringVar(&legacy.ServiceName, "service-name", "", "legacy development-only service name")
-	legacyFlags.StringVar(&legacy.RepoURL, "repo-url", "", "legacy development-only Git repository")
-	legacyFlags.StringVar(&legacy.Branch, "branch", "", "legacy development-only Git branch")
-	legacyFlags.StringVar(&legacy.GitSHA, "git-sha", "", "legacy development-only Git commit")
-	legacyFlags.StringVar(&legacy.ManifestPath, "manifest-path", "", "legacy development-only manifest path")
-	legacyFlags.StringArrayVar(&legacy.WatchPaths, "watch-path", nil, "legacy development-only watch path")
-	legacyFlags.StringArrayVar(&legacyDependencies, "depends-on", nil, "legacy development-only dependency")
-	legacyFlags.Int32Var(&legacy.TerminationGracePeriodSeconds, "termination-grace-period-seconds", 0, "legacy development-only termination grace")
-	legacyFlags.StringArrayVar(&legacyRequests, "resource-request", nil, "legacy development-only resource request key=value")
-	legacyFlags.StringArrayVar(&legacyLimits, "resource-limit", nil, "legacy development-only resource limit key=value")
 	for _, operation := range []string{"dry-run", "diff", "apply"} {
 		flags := &deploymentSpecFlags{replicas: 1, containerPort: 8080, cpuRequest: "100m", memoryRequest: "128Mi", cpuLimit: "500m", memoryLimit: "512Mi", termination: 30, exposure: "internal"}
 		operation := operation
@@ -214,51 +196,6 @@ func newDeployCommand(configPath *string, factory func() (keychain.Store, error)
 		root.AddCommand(command)
 	}
 	return root
-}
-
-func runLegacyDevDeployment(command *cobra.Command, configPath string, factory func() (keychain.Store, error), request *agentv1.DeployRequest, requests, limits, dependencies []string) error {
-	if request.ProjectID == "" || request.ServiceID == "" || request.ServiceName == "" || request.RepoURL == "" || request.GitSHA == "" || request.ManifestPath == "" {
-		return errors.New("choose a deploy subcommand for production; the direct Git path is development-only and requires project-id, service-id, service-name, repo-url, git-sha, and manifest-path")
-	}
-	var err error
-	if request.ResourceRequestsJSON, err = encodeLegacyResourceFlags(requests); err != nil {
-		return err
-	}
-	if request.ResourceLimitsJSON, err = encodeLegacyResourceFlags(limits); err != nil {
-		return err
-	}
-	for _, value := range dependencies {
-		if value = strings.TrimSpace(value); value != "" {
-			request.DependsOn = append(request.DependsOn, agentv1.ServiceDependency{Name: value})
-		}
-	}
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(command.Context(), 15*time.Minute)
-	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	encoder := json.NewEncoder(command.OutOrStdout())
-	return agentclient.New(cfg).Deploy(ctx, request, func(event *agentv1.ProgressEvent) error { return encoder.Encode(event) })
-}
-
-func encodeLegacyResourceFlags(values []string) (string, error) {
-	if len(values) == 0 {
-		return "", nil
-	}
-	resources := map[string]string{}
-	for _, value := range values {
-		key, content, ok := strings.Cut(value, "=")
-		if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(content) == "" {
-			return "", fmt.Errorf("resource value must be key=value: %s", value)
-		}
-		resources[strings.TrimSpace(key)] = strings.TrimSpace(content)
-	}
-	data, err := json.Marshal(resources)
-	return string(data), err
 }
 
 func deploymentOperationShort(operation string) string {

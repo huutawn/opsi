@@ -1,5 +1,4 @@
 {
-  "routes": [],
   "github_oidc": {
     "enabled": false,
     "issuer": "https://token.actions.githubusercontent.com",

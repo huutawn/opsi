@@ -29,7 +29,7 @@ Generate local development certificates first if TLS paths are enabled:
  ../scripts/dev-certs.sh ./certs
 ```
 
-For local deployment smoke tests without containerd/K3s, keep `deployment.dry_run: true` in `config.example.yaml`. Production single-node K3s deployments use `git`, `nerdctl --namespace k8s.io build`, `kubectl apply`, `kubectl set image`, and `kubectl rollout status/undo`. Docker remains available with `deployment.builder_mode: docker` for compatibility or registry-oriented flows.
+For local deployment smoke tests without containerd/K3s, keep `deployment.dry_run: true` in `config.example.yaml`. Production deployments consume only the immutable `AgentCommand` delivered by Cloud and reconcile Opsi-owned K3s resources by digest.
 
 ## Linux release artifact
 
@@ -71,11 +71,14 @@ the service, checks the local health endpoint, and restores the previous release
 if the new one is unhealthy. This behavior has unit/contract coverage but has
 not been proven on a clean target VPS; that evidence belongs to P06.
 
-## Phase 2 Deployment
+## Immutable Deployment
 
-Agent exposes `opsi.agent.v1.DeploymentService.Deploy` over gRPC. The engine resolves missing CLI request fields from `deployment:` config, requires `project_id` + `service_id` + `service_name`, upserts service metadata in SQLite table `services`, records deployments in SQLite table `deployments` using WAL mode, builds under `/tmp/opsi-builds/{project_id}/{deploy_id}/`, and removes the build directory after success or failure.
-
-Progress phases are `queued`, `cloning`, `building`, `applying`, `watching`, `success`, `rollback`, and `failed`. Progress events include project/service scope. Only deploy-time rollout failures before readiness passes are rollback-safe; those call `kubectl rollout undo deployment/{service_name}` and store `rollback_safe` plus `rollback_reason`.
+The public Agent API has no direct deployment RPC. Cloud resolves the accepted
+BuildRecord, topology, policy, routing, and durable job into an immutable
+`AgentCommand`; the Agent polls that command, pulls its digest, reconciles
+Opsi-owned K3s resources, reports readiness, and participates in rollback or
+rollout reconciliation. Historical SQLite deployment columns remain readable
+for restore compatibility but are not executable input paths.
 
 ## Phase 3 Telemetry
 

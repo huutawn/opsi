@@ -99,9 +99,8 @@ func TestCloudBackupRestoreDRProof(t *testing.T) {
 	}
 	assertPATHashMetadata(t, target, seeded.userID, seeded.rawPAT)
 	assertCount(t, target, `SELECT COUNT(*) FROM project_memberships WHERE project_id=$1`, seeded.projectID, 1)
-	same, err := svc.StartDeployment(seeded.projectID, seeded.serviceID, seeded.userID, "deploy-key", "req-restored")
-	if err != nil || same.ID != seeded.deploymentID {
-		t.Fatalf("restored idempotency unusable: same=%+v err=%v", same, err)
+	if _, _, err := svc.RetryDeployment(seeded.projectID, seeded.deploymentID, "retry-restored", "req-restored"); err == nil || !strings.Contains(err.Error(), registry.LegacyDeploymentRetired) {
+		t.Fatalf("restored legacy retry was not rejected: err=%v", err)
 	}
 	audit, err := svc.ListAudit(seeded.projectID)
 	if err != nil || !hasAudit(audit, "DR_SECRET_REDACTION_CHECK") {
@@ -246,12 +245,11 @@ func seedCloudDRState(t *testing.T, db *sql.DB) seededCloud {
 		t.Fatal(err)
 	}
 	seed.serviceID = service.ID
-	job, err := svc.StartDeployment(project.ID, service.ID, seed.userID, "deploy-key", "req-1")
-	if err != nil {
+	seed.deploymentID = "dep-dr-legacy"
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO deployment_jobs(id,org_id,project_id,environment_id,runtime_id,service_id,status,idempotency_key,intent_hash,requested_by,agent_id,node_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'queued','deploy-key','legacy-intent',$7,$8,$9,$10,$10)`, seed.deploymentID, seed.orgID, project.ID, service.EnvironmentID, service.RuntimeID, service.ID, seed.userID, agent.ID, node.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	seed.deploymentID = job.ID
-	svc.Audit(seed.orgID, project.ID, seed.userID, "DR_SECRET_REDACTION_CHECK", "deployment", job.ID, "success", map[string]any{"raw": "redacted"})
+	svc.Audit(seed.orgID, project.ID, seed.userID, "DR_SECRET_REDACTION_CHECK", "deployment", seed.deploymentID, "success", map[string]any{"raw": "redacted"})
 	_, err = db.ExecContext(context.Background(), `
 INSERT INTO relay_jobs(id, org_id, project_id, runtime_id, agent_id, target_service_id, target_service_name, target_service_type, type, status, body_hash, redacted_body, idempotency_key, created_by, expires_at)
 VALUES('relay-dr-proof', $1, $2, $3, $4, $5, 'api', 'application', 'deploy', 'queued', 'sha256:redacted', '{"event":"deploy"}', 'relay-key', $6, $7)

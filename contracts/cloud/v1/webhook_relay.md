@@ -1,49 +1,26 @@
 # Cloud Webhook Relay Contract v1
 
-Cloud owns short-lived GitHub webhook relay metadata only. Payload TTL is 24 hours maximum. Cloud must not persist raw operational logs, metrics, Kubernetes secrets, kubeconfig, or application secrets.
+Cloud retains historical relay metadata for restore/read compatibility and owns
+the canonical Agent PollJob transport. It must not persist raw operational
+logs, metrics, Kubernetes secrets, kubeconfig, or application secrets.
 
-## Receive GitHub Webhook
+## Retired Generic Relay
 
-```http
-POST /v1/webhooks/github
-X-GitHub-Event: push
-X-Hub-Signature-256: sha256=<hex-hmac>
-X-GitHub-Delivery: <delivery-id>
-Content-Type: application/json
-```
+The generic GitHub push relay and its route-scoped signature envelope are
+retired. Historical `relay_jobs` and `relay_events` rows remain readable for
+restore/audit purposes, but runtime code never enqueues, claims, or delivers
+them.
 
-Cloud verifies repository/project/service routing policy, stores the body and signature envelope with a 24 hour TTL, and returns quickly. Cloud maps repo and branch to `project_id` + `service_id`; Agent verifies the signature and enforces the project/service scope before deployment.
-
-Success:
-
-```http
-202 Accepted
-```
-
-## Agent Long Poll
+## Agent PollJob
 
 ```http
 GET /v1/agents/{agent_id}/webhooks/next?project_id=proj_123&wait=30s
 Authorization: Bearer <agent-token>
 ```
 
-Success with event:
-
-```json
-{
-  "project_id": "proj_123",
-  "service_id": "svc_api",
-  "service_name": "api",
-  "service_type": "backend",
-  "repo_url": "https://github.com/acme/api.git",
-  "ref": "refs/heads/main",
-  "after": "abcdef1234567890",
-  "branch": "main",
-  "triggered_by": "github:webhook",
-  "body": "{...original GitHub push body...}",
-  "signature": "sha256=<hex-hmac>"
-}
-```
+Success with event is a canonical immutable deployment lease containing a
+versioned `AgentCommand` with the accepted image digest, workload, authority
+snapshot, lease token, and rollout intent when applicable.
 
 No pending event:
 
@@ -51,4 +28,6 @@ No pending event:
 204 No Content
 ```
 
-Agent verifies `signature` locally with its configured `deployment.webhook_secret`, then deploys only inside the provided `project_id` and `service_id` scope.
+The Agent verifies the command schema, target identity, lease token, and digest
+before invoking `ProductionAdapter` or `ReconcileRollout`. Build, Git, and
+arbitrary manifest inputs are never accepted by this transport.

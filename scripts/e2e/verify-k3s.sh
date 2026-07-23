@@ -7,22 +7,17 @@ RUN_ID="${OPSI_E2E_RUN_ID:-e2e-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 ARTIFACT_DIR="${OPSI_E2E_ARTIFACT_DIR:-$ROOT/.tmp/e2e-k3s/$RUN_ID}"
 LOCAL_URL="${OPSI_E2E_LOCAL_URL:-http://127.0.0.1:9780}"
 PROJECT_ID="${OPSI_E2E_PROJECT_ID:-}"
-USER_ID="${OPSI_E2E_USER_ID:-e2e-owner@example.com}"
-USER_ROLE="${OPSI_E2E_USER_ROLE:-Owner}"
-SERVICE_NAME="${OPSI_E2E_SERVICE_NAME:-opsi-e2e-sample}"
-SERVICE_ID="${OPSI_E2E_SERVICE_ID:-$SERVICE_NAME}"
-BAD_SERVICE_NAME="${OPSI_E2E_BAD_SERVICE_NAME:-opsi-e2e-sample-bad}"
-BAD_SERVICE_ID="${OPSI_E2E_BAD_SERVICE_ID:-$BAD_SERVICE_NAME}"
-SERVICE_BRANCH="${OPSI_E2E_SERVICE_BRANCH:-main}"
-SERVICE_REPO="${OPSI_E2E_SERVICE_REPO:-}"
-SERVICE_SHA="${OPSI_E2E_SERVICE_SHA:-}"
-BAD_SERVICE_SHA="${OPSI_E2E_BAD_SERVICE_SHA:-}"
-SERVICE_CONTEXT="${OPSI_E2E_SERVICE_CONTEXT:-test/e2e/sample-service}"
-SERVICE_DOCKERFILE="${OPSI_E2E_SERVICE_DOCKERFILE:-test/e2e/sample-service/Dockerfile}"
-SERVICE_MANIFEST="${OPSI_E2E_SERVICE_MANIFEST:-test/e2e/sample-service/k8s/deployment.yaml}"
-BAD_SERVICE_CONTEXT="${OPSI_E2E_BAD_SERVICE_CONTEXT:-test/e2e/sample-service-bad}"
-BAD_SERVICE_DOCKERFILE="${OPSI_E2E_BAD_SERVICE_DOCKERFILE:-test/e2e/sample-service-bad/Dockerfile}"
-BAD_SERVICE_MANIFEST="${OPSI_E2E_BAD_SERVICE_MANIFEST:-test/e2e/sample-service-bad/k8s/deployment.yaml}"
+BUILD_RECORD_ID="${OPSI_E2E_BUILD_RECORD_ID:-}"
+BAD_BUILD_RECORD_ID="${OPSI_E2E_BAD_BUILD_RECORD_ID:-}"
+ENVIRONMENT_ID="${OPSI_E2E_ENVIRONMENT_ID:-}"
+SERVICE_KEY="${OPSI_E2E_SERVICE_KEY:-}"
+SERVICE_NAME="$SERVICE_KEY"
+REPLICAS="${OPSI_E2E_REPLICAS:-}"
+CONTAINER_PORT="${OPSI_E2E_CONTAINER_PORT:-}"
+CPU_REQUEST="${OPSI_E2E_CPU_REQUEST:-}"
+MEMORY_REQUEST="${OPSI_E2E_MEMORY_REQUEST:-}"
+CPU_LIMIT="${OPSI_E2E_CPU_LIMIT:-}"
+MEMORY_LIMIT="${OPSI_E2E_MEMORY_LIMIT:-}"
 TARGET_HOST="${OPSI_E2E_VPS_HOST:-}"
 TARGET_SSH_USER="${OPSI_E2E_VPS_SSH_USER:-root}"
 TARGET_SSH_PORT="${OPSI_E2E_VPS_SSH_PORT:-22}"
@@ -46,12 +41,21 @@ Required env for full run:
   OPSI_E2E_LOCAL_URL
   OPSI_E2E_VPS_HOST
   OPSI_E2E_VPS_SSH_PASSWORD
-  OPSI_E2E_SERVICE_REPO
-  OPSI_E2E_SERVICE_SHA
+  OPSI_E2E_BUILD_RECORD_ID
+  OPSI_E2E_BAD_BUILD_RECORD_ID
+  OPSI_E2E_ENVIRONMENT_ID
+  OPSI_E2E_SERVICE_KEY
+  OPSI_E2E_REPLICAS
+  OPSI_E2E_CONTAINER_PORT
+  OPSI_E2E_CPU_REQUEST
+  OPSI_E2E_MEMORY_REQUEST
+  OPSI_E2E_CPU_LIMIT
+  OPSI_E2E_MEMORY_LIMIT
   OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE
 
-The local URL must be the CLI local backend. This script never calls Cloud
-directly for runtime workflows.
+  The local URL must be the CLI local backend. Immutable BuildRecords and
+  topology/policy authority are resolved by Cloud; this script supplies no
+  source, manifest, digest, or caller identity.
 EOF
 }
 
@@ -123,8 +127,9 @@ preflight() {
   need_env OPSI_E2E_PROJECT_ID
   need_env OPSI_E2E_VPS_HOST
   need_env OPSI_E2E_VPS_SSH_PASSWORD
-  need_env OPSI_E2E_SERVICE_REPO
-  need_env OPSI_E2E_SERVICE_SHA
+  for name in OPSI_E2E_BUILD_RECORD_ID OPSI_E2E_BAD_BUILD_RECORD_ID OPSI_E2E_ENVIRONMENT_ID OPSI_E2E_SERVICE_KEY OPSI_E2E_REPLICAS OPSI_E2E_CONTAINER_PORT OPSI_E2E_CPU_REQUEST OPSI_E2E_MEMORY_REQUEST OPSI_E2E_CPU_LIMIT OPSI_E2E_MEMORY_LIMIT; do
+    need_env "$name"
+  done
   if [ -z "$TOTP_CODE" ] && { [ -z "$OTP_REQUEST_ID" ] || [ -z "$OTP_CODE" ]; }; then
     fail "missing second factor: set OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE"
   fi
@@ -174,18 +179,34 @@ file, kind = sys.argv[1], sys.argv[2]
 e = os.environ
 if kind == "bootstrap":
     data = {"role":"first_server","public_host":e["OPSI_E2E_VPS_HOST"],"ssh_port":int(e.get("OPSI_E2E_VPS_SSH_PORT","22")),"ssh_username":e.get("OPSI_E2E_VPS_SSH_USER","root"),"auth_method":"password","ssh_password":e["OPSI_E2E_VPS_SSH_PASSWORD"]}
-elif kind == "service":
-    data = {"name":e.get("OPSI_E2E_SERVICE_NAME","opsi-e2e-sample"),"type":"application","source_type":"git","repo_url":e["OPSI_E2E_SERVICE_REPO"],"branch":e.get("OPSI_E2E_SERVICE_BRANCH","main"),"git_sha":e["OPSI_E2E_SERVICE_SHA"],"build_method":"dockerfile","build_context":e.get("OPSI_E2E_SERVICE_CONTEXT","test/e2e/sample-service"),"dockerfile":e.get("OPSI_E2E_SERVICE_DOCKERFILE","test/e2e/sample-service/Dockerfile"),"manifest_path":e.get("OPSI_E2E_SERVICE_MANIFEST","test/e2e/sample-service/k8s/deployment.yaml"),"watch_paths":[e.get("OPSI_E2E_SERVICE_CONTEXT","test/e2e/sample-service") + "/**"],"container_port":8080,"health_path":"/health","replicas":1,"resource_requests":{"cpu":"50m","memory":"64Mi"},"resource_limits":{"cpu":"250m","memory":"256Mi"}}
-elif kind == "bad_service":
-    data = {"name":e.get("OPSI_E2E_BAD_SERVICE_NAME","opsi-e2e-sample-bad"),"type":"application","source_type":"git","repo_url":e["OPSI_E2E_SERVICE_REPO"],"branch":e.get("OPSI_E2E_SERVICE_BRANCH","main"),"git_sha":e.get("OPSI_E2E_BAD_SERVICE_SHA") or e["OPSI_E2E_SERVICE_SHA"],"build_method":"dockerfile","build_context":e.get("OPSI_E2E_BAD_SERVICE_CONTEXT","test/e2e/sample-service-bad"),"dockerfile":e.get("OPSI_E2E_BAD_SERVICE_DOCKERFILE","test/e2e/sample-service-bad/Dockerfile"),"manifest_path":e.get("OPSI_E2E_BAD_SERVICE_MANIFEST","test/e2e/sample-service-bad/k8s/deployment.yaml"),"watch_paths":[e.get("OPSI_E2E_BAD_SERVICE_CONTEXT","test/e2e/sample-service-bad") + "/**"],"container_port":8080,"health_path":"/health","replicas":1,"resource_requests":{"cpu":"50m","memory":"64Mi"},"resource_limits":{"cpu":"250m","memory":"256Mi"}}
+elif kind in {"deployment", "bad_deployment"}:
+    build_record_id = e["OPSI_E2E_BUILD_RECORD_ID"] if kind == "deployment" else e["OPSI_E2E_BAD_BUILD_RECORD_ID"]
+    data = {
+        "schema_version":"opsi.deployment_job/v1",
+        "build_record_id":build_record_id,
+        "environment_id":e["OPSI_E2E_ENVIRONMENT_ID"],
+        "workload":{
+            "schema_version":"opsi.workload_spec/v1",
+            "service_key":e["OPSI_E2E_SERVICE_KEY"],
+            "application_container_name":"app",
+            "replicas":int(e["OPSI_E2E_REPLICAS"]),
+            "container_port":int(e["OPSI_E2E_CONTAINER_PORT"]),
+            "resources":{
+                "requests":{"cpu":e["OPSI_E2E_CPU_REQUEST"],"memory":e["OPSI_E2E_MEMORY_REQUEST"]},
+                "limits":{"cpu":e["OPSI_E2E_CPU_LIMIT"],"memory":e["OPSI_E2E_MEMORY_LIMIT"]},
+            },
+            "termination_grace_period_seconds":30,
+            "exposure":{"mode":"internal"},
+        },
+    }
 elif kind == "secret":
-    data = {"service_id":e.get("OPSI_E2E_SERVICE_ID", e.get("OPSI_E2E_SERVICE_NAME","opsi-e2e-sample")),"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default","user_id":e.get("OPSI_E2E_USER_ID","e2e-owner@example.com"),"role":e.get("OPSI_E2E_USER_ROLE","Owner")}
+    data = {"service_id":e["OPSI_E2E_SERVICE_ID"],"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default"}
 elif kind == "second_factor":
-    data = {"service_id":e.get("OPSI_E2E_SERVICE_ID", e.get("OPSI_E2E_SERVICE_NAME","opsi-e2e-sample")),"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default","user_id":e.get("OPSI_E2E_USER_ID","e2e-owner@example.com"),"role":e.get("OPSI_E2E_USER_ROLE","Owner"),"reveal":True}
+    data = {"service_id":e["OPSI_E2E_SERVICE_ID"],"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default","reveal":True}
     if e.get("OPSI_E2E_TOTP_CODE"): data["totp_code"] = e["OPSI_E2E_TOTP_CODE"]
     else: data.update({"otp_request_id":e["OPSI_E2E_OTP_REQUEST_ID"],"otp_code":e["OPSI_E2E_OTP_CODE"]})
 elif kind == "incident_resolve":
-    data = {"user_id":e.get("OPSI_E2E_USER_ID","e2e-owner@example.com"),"role":e.get("OPSI_E2E_USER_ROLE","Owner")}
+    data = {}
 else:
     raise SystemExit("unknown json kind")
 open(file, "w").write(json.dumps(data))
@@ -209,39 +230,14 @@ wait_deployment_status() {
   local deploy_id="$1" expect="$2" start now body value
   start="$(date +%s)"
   while :; do
-    body="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments" - "deploy-list-$deploy_id" 0)" || true
-    value="$(printf '%s' "$body" | python3 -c 'import json, sys
-d = json.load(sys.stdin)
-for item in d.get("deployments", []):
-    if item.get("id") == sys.argv[1]:
-        print(item.get("status", ""))
-        raise SystemExit(0)' "$deploy_id" 2>/dev/null || true)"
+    body="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$deploy_id" - "deployment-$deploy_id" 0)" || true
+    value="$(printf '%s' "$body" | json_get status 2>/dev/null || true)"
     [ "$value" = "$expect" ] && return 0
     case "$value" in
-      failed|failed_after_rollback|rolled_back|blocked|dead_letter) [ "$expect" = "$value" ] && return 0 ;;
+      failed|succeeded) fail "deployment $deploy_id reached $value while waiting for $expect" ;;
     esac
     now="$(date +%s)"
     [ $((now - start)) -lt "$POLL_SECONDS" ] || fail "timeout waiting for deployment $deploy_id=$expect, last=$value"
-    sleep 10
-  done
-}
-
-wait_deployment_terminal() {
-  local deploy_id="$1" start now body value
-  start="$(date +%s)"
-  while :; do
-    body="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments" - "deploy-list-$deploy_id" 0)" || true
-    value="$(printf '%s' "$body" | python3 -c 'import json, sys
-d = json.load(sys.stdin)
-for item in d.get("deployments", []):
-    if item.get("id") == sys.argv[1]:
-        print(item.get("status", ""))
-        raise SystemExit(0)' "$deploy_id" 2>/dev/null || true)"
-    case "$value" in
-      failed|failed_after_rollback|rolled_back|blocked|dead_letter|succeeded) return 0 ;;
-    esac
-    now="$(date +%s)"
-    [ $((now - start)) -lt "$POLL_SECONDS" ] || fail "timeout waiting for deployment $deploy_id terminal state, last=$value"
     sleep 10
   done
 }
@@ -321,7 +317,7 @@ run_e2e() {
   preflight
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
-  local f body id good_deploy_id bad_deploy_id incidents incident_id incident_detail resolve audit deployment_events
+  local f body id good_deploy_id bad_deploy_id service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record
   f="$(mktemp)"; write_json "$f" bootstrap
   body="$(api_file POST "/api/local/projects/$PROJECT_ID/nodes/bootstrap" "$f" bootstrap 1)" || fail "bootstrap session create failed"
   rm -f "$f"
@@ -331,15 +327,14 @@ run_e2e() {
   wait_json_field "/api/local/projects/$PROJECT_ID/readiness" status ready readiness
   log "step 2/11 Agent heartbeat/readiness verified"
 
-  f="$(mktemp)"; write_json "$f" service
-  body="$(api_file POST "/api/local/projects/$PROJECT_ID/services" "$f" service-create 1)" || fail "service create failed"
+  f="$(mktemp)"; write_json "$f" deployment
+  body="$(api_file POST "/api/local/projects/$PROJECT_ID/deployments" "$f" deploy-create 1)" || fail "immutable deployment create failed"
   rm -f "$f"
-  SERVICE_ID="$(printf '%s' "$body" | json_get id)" || fail "service response missing id"
-  export OPSI_E2E_SERVICE_ID="$SERVICE_ID"
-  body="$(api_file POST "/api/local/projects/$PROJECT_ID/services/$SERVICE_ID/deployments" <(printf '{"requested_by":"%s"}' "$USER_ID") deploy-start 1)" || fail "deployment start failed"
   good_deploy_id="$(printf '%s' "$body" | json_get id)" || fail "deployment response missing id"
   wait_deployment_status "$good_deploy_id" succeeded
-  log "step 3/11 service created and deployed: service=$SERVICE_ID deployment=$good_deploy_id"
+  service_id="$(printf '%s' "$body" | json_get service_id)" || fail "canonical deployment response missing service_id"
+  export OPSI_E2E_SERVICE_ID="$service_id"
+  log "step 3/11 immutable deployment succeeded: service=$service_id service_key=$SERVICE_KEY deployment=$good_deploy_id build_record=$BUILD_RECORD_ID"
   verify_runtime
   log "step 4/11 K3s rollout/runtime verified"
 
@@ -353,28 +348,26 @@ run_e2e() {
   rm -f "$f"
   log "step 5/11 secret create/rotate/reveal path ran via local Agent facade"
 
-  api_file GET "/api/local/projects/$PROJECT_ID/telemetry/summary?service_id=$SERVICE_ID" - telemetry-summary 0 >/dev/null || fail "telemetry summary failed"
-  api_file GET "/api/local/projects/$PROJECT_ID/logs?service_id=$SERVICE_ID&limit=50" - logs 0 >/dev/null || fail "logs failed"
+  api_file GET "/api/local/projects/$PROJECT_ID/telemetry/summary?service_id=$service_id" - telemetry-summary 0 >/dev/null || fail "telemetry summary failed"
+  api_file GET "/api/local/projects/$PROJECT_ID/logs?service_id=$service_id&limit=50" - logs 0 >/dev/null || fail "logs failed"
   log "step 6/11 sanitized telemetry/logs fetched through local backend"
 
-  f="$(mktemp)"; write_json "$f" bad_service
-  body="$(api_file POST "/api/local/projects/$PROJECT_ID/services" "$f" bad-service-create 1)" || fail "bad service create failed"
+  f="$(mktemp)"; write_json "$f" bad_deployment
+  body="$(api_file POST "/api/local/projects/$PROJECT_ID/deployments" "$f" bad-deploy-create 1)" || fail "bad immutable deployment create failed"
   rm -f "$f"
-  BAD_SERVICE_ID="$(printf '%s' "$body" | json_get id)" || fail "bad service response missing id"
-  body="$(api_file POST "/api/local/projects/$PROJECT_ID/services/$BAD_SERVICE_ID/deployments" <(printf '{"requested_by":"%s"}' "$USER_ID") bad-deploy-start 1)" || fail "bad deployment start failed"
   bad_deploy_id="$(printf '%s' "$body" | json_get id)" || fail "bad deployment response missing id"
-  wait_deployment_terminal "$bad_deploy_id"
-  log "step 7/11 controlled incident trigger executed via failing rollout: deployment=$bad_deploy_id"
-  incidents="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents?user_id=$USER_ID&role=$USER_ROLE&status=open&limit=10" - incidents 0)" || fail "incident list failed"
-  incident_id="$(printf '%s' "$incidents" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("incidents", d if isinstance(d,list) else []); targets=set(sys.argv[1:]); print(next((item.get("incident_id","") for item in a if item.get("service_id") in targets), ""))' "$BAD_SERVICE_ID" "$BAD_SERVICE_NAME")"
+  wait_deployment_status "$bad_deploy_id" failed
+  log "step 7/11 controlled immutable failure reached canonical failed state: deployment=$bad_deploy_id build_record=$BAD_BUILD_RECORD_ID"
+  incidents="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents?status=open&limit=10" - incidents 0)" || fail "incident list failed"
+  incident_id="$(printf '%s' "$incidents" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("incidents", d if isinstance(d,list) else []); print(next((item.get("incident_id","") for item in a if item.get("service_id") == sys.argv[1]), ""))' "$service_id")"
   [ -n "$incident_id" ] || fail "no controlled incident found; E2E does not pass without a real Agent incident"
-  incident_detail="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents/$incident_id?user_id=$USER_ID&role=$USER_ROLE" - incident-detail 0)" || fail "incident detail failed"
+  incident_detail="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents/$incident_id" - incident-detail 0)" || fail "incident detail failed"
   printf '%s' "$incident_detail" | verify_incident_detail "$incident_id" || fail "incident detail violated factual contract"
   f="$(mktemp)"; write_json "$f" incident_resolve
   resolve="$(api_file POST "/api/local/projects/$PROJECT_ID/incidents/$incident_id/resolve" "$f" incident-resolve 1)" || fail "incident resolve failed"
   rm -f "$f"
   if [ "$(printf '%s' "$resolve" | json_get status 2>/dev/null || true)" != "resolved" ]; then
-    incident_detail="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents/$incident_id?user_id=$USER_ID&role=$USER_ROLE" - incident-detail-resolved 0)" || fail "resolved incident detail failed"
+    incident_detail="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents/$incident_id" - incident-detail-resolved 0)" || fail "resolved incident detail failed"
     [ "$(printf '%s' "$incident_detail" | json_get incident.status 2>/dev/null || true)" = "resolved" ] || fail "incident status was not resolved"
   fi
   verify_agent_incident_resolve_audit "$incident_id"
@@ -383,9 +376,12 @@ run_e2e() {
   deployment_events="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$good_deploy_id/events" - deployment-events 0)" || fail "deployment events fetch failed"
   printf '%s' "$deployment_events" | grep -q 'DEPLOYMENT_SUCCEEDED' || fail "deployment success event missing"
   audit="$(api_file GET "/api/local/projects/$PROJECT_ID/audit" - audit 0)" || fail "audit fetch failed"
-  printf '%s' "$audit" | grep -q 'DEPLOYMENT_STARTED' || fail "deployment audit event missing"
-  printf '%s' "$audit" | grep -q 'SERVICE_CREATED' || fail "service audit event missing"
-  log "step 9/11 deployment events plus Cloud and Agent audit evidence verified"
+  printf '%s' "$audit" | grep -q 'IMMUTABLE_DEPLOYMENT_CREATED' || fail "immutable deployment audit event missing"
+  deployment_record="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$good_deploy_id" - deployment-evidence 0)" || fail "canonical deployment evidence fetch failed"
+  for evidence in "$good_deploy_id" "$BUILD_RECORD_ID" 'sha256:' 'runtime_id' 'node_id' 'agent_id' 'succeeded'; do
+    printf '%s' "$deployment_record" | grep -q "$evidence" || fail "canonical deployment evidence missing $evidence"
+  done
+  log "step 9/11 immutable deployment evidence verified: job=$good_deploy_id build_record=$BUILD_RECORD_ID"
   check_artifacts_clean || fail "redaction failed: artifact contains sensitive value"
   log "step 10/11 artifacts verified without sensitive payloads"
   manual_cleanup
@@ -406,10 +402,17 @@ self_test() {
     fail "self-test missing prereq did not fail"
   fi
   grep -Eq "missing (env|tool):" /tmp/opsi-e2e-preflight.out || fail "self-test missing prereq message unclear"
-  grep -q "/api/local/projects" "$0" || fail "self-test local backend path missing"
+  grep -q 'POST "/api/local/projects/\$PROJECT_ID/deployments"' "$0" || fail "self-test canonical deployment endpoint missing"
+  grep -q 'GET "/api/local/projects/\$PROJECT_ID/deployments/\$deploy_id"' "$0" || fail "self-test canonical deployment polling missing"
+  grep -q 'build_record_id' "$0" || fail "self-test BuildRecord request construction missing"
   grep -q "k3s kubectl" "$0" || fail "self-test real K3s check missing"
   grep -q "X-Local-Session" "$0" || fail "self-test local session guard missing"
   grep -q 'incidents/\$incident_id/resolve' "$0" || fail "self-test incident resolve path missing"
+  legacy_scope='services''/'
+  if grep -q "$legacy_scope" "$0"; then fail "self-test found a service-scoped deployment surface"; fi
+  for forbidden in 'repo''_url' 'git''_sha' 'docker''file' 'manifest''_path' 'requested''_by' 'user''_id' 'role''='; do
+    if grep -q "$forbidden" "$0"; then fail "self-test found retired caller/source field: $forbidden"; fi
+  done
   grep -q "Manual cleanup" "$0" || fail "self-test cleanup path missing"
   log "self-test: ok"
 }

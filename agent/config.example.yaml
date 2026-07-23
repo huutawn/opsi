@@ -9,31 +9,9 @@ auth:
 deployment:
   project_id: dev-project
   service_id: example-app
-  service_name: example-app
-  service_type: backend
-  repo_url: https://github.com/example/app.git
-  branch: main
   namespace: default
-  build_context: .
-  dockerfile: Dockerfile
-  manifest_path: k8s/deployment.yaml
   public_endpoint: ""
-  watch_paths:
-    - "**"
-  termination_grace_period_seconds: 30
-  resource_requests:
-    cpu: 100m
-    memory: 128Mi
-  resource_limits:
-    cpu: 500m
-    memory: 512Mi
-  registry: ""
-  builder_mode: containerd
-  nerdctl_path: nerdctl
-  containerd_namespace: k8s.io
-  webhook_secret: dev-webhook-secret
   dry_run: true
-  build_root: /tmp/opsi-builds
   rollout_timeout: 10m
   poll_interval: 5s
 telemetry:

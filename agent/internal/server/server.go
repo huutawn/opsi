@@ -58,13 +58,6 @@ func (s *StatusService) Status(ctx context.Context, _ *agentv1.StatusRequest) (*
 	}, nil
 }
 
-type DeploymentService struct {
-	cfg          config.Config
-	engine       *deploy.Engine
-	auth         secret.AuthVerifier
-	serviceStore *svcatalog.Store
-}
-
 type TelemetryService struct {
 	store telemetry.Store
 	auth  secret.AuthVerifier
@@ -350,88 +343,6 @@ func (s *TelemetryService) QueryTelemetry(ctx context.Context, req *agentv1.Tele
 	return resp, nil
 }
 
-func NewDeploymentService(cfg config.Config, engine *deploy.Engine, auth secret.AuthVerifier, serviceStore *svcatalog.Store) *DeploymentService {
-	return &DeploymentService{cfg: cfg, engine: engine, auth: auth, serviceStore: serviceStore}
-}
-
-func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.DeploymentService_DeployServer) error {
-	resolved, err := deploy.RequestFromContract(req, s.cfg.Deployment)
-	if err != nil {
-		return status.Error(codes.InvalidArgument, err.Error())
-	}
-	if s.auth != nil {
-		if _, err := authorize(stream.Context(), s.auth, resolved.ProjectID, secret.RoleOwner, secret.RoleDeveloper); err != nil {
-			return err
-		}
-	}
-	resolved, err = s.validateDependencies(stream.Context(), resolved)
-	if err != nil {
-		return err
-	}
-	_, err = s.engine.Deploy(stream.Context(), resolved, func(event *deploy.ProgressEvent) error {
-		out := &agentv1.ProgressEvent{
-			OperationID: event.OperationID,
-			ProjectID:   event.ProjectID,
-			ServiceID:   event.ServiceID,
-			ServiceName: event.ServiceName,
-			Phase:       event.Phase,
-			Message:     event.Message,
-			Percent:     event.Percent,
-		}
-		if event.Err != nil {
-			out.Error = &agentv1.ServiceError{Code: agentv1.ErrorCodeInternal, Message: event.Err.Error()}
-		}
-		return stream.Send(out)
-	})
-	if err != nil {
-		return status.Error(codes.Internal, err.Error())
-	}
-	return nil
-}
-
-func (s *DeploymentService) validateDependencies(ctx context.Context, req deploy.Request) (deploy.Request, error) {
-	if len(req.DependsOn) == 0 {
-		return req, nil
-	}
-	if s.serviceStore == nil {
-		return req, status.Error(codes.FailedPrecondition, "service catalog store is not configured")
-	}
-	defaultOwner := map[string]string{}
-	unprefixedOwner := map[string]string{}
-	for i, dep := range req.DependsOn {
-		service, err := s.serviceStore.GetManagedService(ctx, req.ProjectID, dep.Name)
-		if err != nil {
-			return req, status.Error(codes.Internal, err.Error())
-		}
-		if service == nil {
-			return req, status.Errorf(codes.FailedPrecondition, "dependency service %q is not registered", dep.Name)
-		}
-		keys, ok := svcatalog.EnvKeysForType(service.Type)
-		if !ok {
-			return req, status.Errorf(codes.FailedPrecondition, "dependency service %q has unknown type %q", dep.Name, service.Type)
-		}
-		req.DependsOn[i].EnvKeys = keys
-		for _, key := range keys {
-			if dep.ExposeAsDefault {
-				if owner := defaultOwner[key]; owner != "" {
-					return req, status.Errorf(codes.FailedPrecondition, "dependency default env collision on %s between %s and %s; only one dependency may expose_as_default", key, owner, dep.Name)
-				}
-				defaultOwner[key] = dep.Name
-			}
-			if dep.EnvPrefix == "" && !dep.ExposeAsDefault {
-				if owner := unprefixedOwner[key]; owner != "" {
-					return req, status.Errorf(codes.FailedPrecondition, "dependency env collision on %s between %s and %s; set env_prefix or expose_as_default on exactly one dependency", key, owner, dep.Name)
-				}
-				unprefixedOwner[key] = dep.Name
-			}
-		}
-		if err := s.serviceStore.UpsertBinding(ctx, svcatalog.ServiceBinding{ProjectID: req.ProjectID, AppServiceID: req.ServiceID, DependencyServiceID: service.ID, Namespace: req.Namespace}); err != nil {
-			return req, status.Error(codes.Internal, err.Error())
-		}
-	}
-	return req, nil
-}
-
 func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Logger) error {
 	startedAt := time.Now().UTC()
 	cloudConnection := &cloudrunner.ConnectionState{}
@@ -493,7 +404,6 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	grpcServer := grpc.NewServer(grpcOptions...)
 	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg, cloudConnection.Connected, healthProbe))
 	authVerifier := authVerifier(cfg)
-	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine, authVerifier, serviceStore))
 	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
 	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore), authVerifier))
@@ -591,8 +501,6 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		}
 	}
 	if cfg.CloudRelay.Enabled {
-		deploymentCfg := cfg.Deployment
-		deploymentCfg.ProjectID = firstNonEmpty(deploymentCfg.ProjectID, cfg.CloudRelay.ProjectID)
 		pollInterval := parseDurationOr(cfg.CloudRelay.PollInterval, 2*time.Second)
 		longPollWait := parseDurationOr(cfg.CloudRelay.LongPollWait, 30*time.Second)
 		heartbeatInterval := parseDurationOr(cfg.CloudRelay.HeartbeatInterval, 30*time.Second)
@@ -605,7 +513,6 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			},
 			NodeID:            cfg.NodeID,
 			Version:           version,
-			DeploymentConfig:  deploymentCfg,
 			Engine:            engine,
 			NodeLifecycle:     nodelifecycle.Service{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			PollInterval:      pollInterval,
@@ -836,7 +743,7 @@ func statusHealth(health cloudrunner.RuntimeHealth) string {
 
 func serviceManager(cfg config.Config, store *svcatalog.Store) svcatalog.Manager {
 	var applier svcatalog.ManifestApplier = svcatalog.KubectlApplier{KubectlPath: firstNonEmpty(cfg.Secret.KubectlPath, cfg.Telemetry.KubectlPath)}
-	if cfg.Deployment.DryRun || cfg.Deployment.BuilderMode == "dry_run" {
+	if cfg.Deployment.DryRun {
 		applier = svcatalog.DryRunApplier{}
 	}
 	return svcatalog.Manager{Store: store, Applier: applier}
@@ -918,24 +825,9 @@ func deploymentEngineConfig(cfg config.Config) (deploy.EngineConfig, error) {
 		pollInterval = parsed
 	}
 	engineCfg := deploy.EngineConfig{
-		Git:            deploy.ExecGitClient{},
-		Builder:        deploy.ContainerdBuilder{NerdctlPath: cfg.Deployment.NerdctlPath, Namespace: cfg.Deployment.ContainerdNS},
-		K3s:            deploy.KubectlAdapter{},
 		Production:     deploy.ProductionAdapter{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, "kubectl"), K3sPath: "k3s", Timeout: rolloutTimeout, PollInterval: pollInterval},
-		BuildRoot:      cfg.Deployment.BuildRoot,
 		RolloutTimeout: rolloutTimeout,
 		PollInterval:   pollInterval,
-	}
-	switch cfg.Deployment.BuilderMode {
-	case "docker":
-		engineCfg.Builder = deploy.ExecBuilder{}
-	case "dry_run":
-		engineCfg.Builder = deploy.DryRunBuilder{}
-	}
-	if cfg.Deployment.DryRun {
-		engineCfg.Git = deploy.DryRunGitClient{}
-		engineCfg.Builder = deploy.DryRunBuilder{}
-		engineCfg.K3s = deploy.DryRunK3sAdapter{}
 	}
 	return engineCfg, nil
 }

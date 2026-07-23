@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
-	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -82,9 +81,13 @@ func (p staticHealthProbe) Probe(context.Context) (RuntimeHealth, error) {
 }
 
 func (fakeEngine) Deploy(_ context.Context, req deploy.Request, progress deploy.ProgressFunc) (deploy.Record, error) {
-	rec := deploy.Record{DeployID: "local-dep", ProjectID: req.ProjectID, ServiceID: req.ServiceID, ServiceName: req.ServiceName, GitSHA: req.GitSHA, ImageTag: req.ImageTag, Status: deploy.StatusSuccess}
+	if req.Production == nil {
+		return deploy.Record{}, deploy.ErrLegacyDeploymentRetired
+	}
+	command := req.Production
+	rec := deploy.Record{DeployID: command.JobID, ProjectID: command.ProjectID, ServiceID: command.Workload.ServiceKey, ServiceName: command.Workload.ServiceKey, ImageTag: command.Image.Reference, SpecHash: command.SpecHash, Status: deploy.StatusSuccess}
 	if progress != nil {
-		_ = progress(&deploy.ProgressEvent{ProjectID: req.ProjectID, ServiceID: req.ServiceID, Phase: deploy.PhaseSuccess, Percent: 100})
+		_ = progress(&deploy.ProgressEvent{ProjectID: command.ProjectID, ServiceID: command.Workload.ServiceKey, Phase: deploy.PhaseSuccess, Percent: 100})
 	}
 	return rec, nil
 }
@@ -123,21 +126,22 @@ func (f *fakeRolloutEngine) ReconcileRollout(_ context.Context, intent deploymen
 	return record, nil
 }
 
-func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
+func TestRunnerExecutesImmutableLeaseAndReportsResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &ConnectionState{}
+	intent := testCloudRolloutIntent(t)
+	command := intent.Desired.AgentCommand()
+	command.Rollout = nil
+	command.LeaseToken = "lease-immutable"
 	client := &fakeClient{cancel: cancel, leases: []cloudrelay.DeploymentLease{{
-		Kind: "deployment", Action: "deploy",
-		Deployment: cloudrelay.DeploymentJobEnvelope{ID: "dep-1", ManifestHash: "manifest"},
-		Service:    cloudrelay.ServiceEnvelope{ID: "api", Name: "api", Type: "application", SourceType: "git", RepoURL: "https://example.test/repo.git", Branch: "main", GitSHA: "abcdef123456", Namespace: "default"},
+		Kind: "deployment", Action: "deploy", LeaseToken: "lease-immutable",
+		Deployment: cloudrelay.DeploymentJobEnvelope{ID: command.JobID},
+		Command:    &command,
 	}}}
 	runner := Runner{
-		Client: client,
-		Engine: fakeEngine{},
-		NodeID: "node-1",
-		DeploymentConfig: config.DeploymentConfig{
-			ProjectID: "proj", ManifestPath: "k8s/deployment.yaml", BuildContext: ".", Dockerfile: "Dockerfile", Namespace: "default",
-		},
+		Client:            client,
+		Engine:            fakeEngine{},
+		NodeID:            "node-1",
 		PollInterval:      time.Millisecond,
 		LongPollWait:      time.Millisecond,
 		HeartbeatInterval: time.Hour,
@@ -259,53 +263,26 @@ func TestRunnerExecutesNodeLifecycleLeaseAndReportsResult(t *testing.T) {
 	}
 }
 
-func TestRequestFromLeaseRejectsImageSource(t *testing.T) {
-	_, err := RequestFromLease(cloudrelay.DeploymentLease{Service: cloudrelay.ServiceEnvelope{SourceType: "image", Image: "example/api:latest"}}, config.DeploymentConfig{ProjectID: "proj"})
-	if !errors.Is(err, errImageSourceUnsupported) {
+func TestRequestFromLeaseRejectsMissingImmutableCommand(t *testing.T) {
+	_, err := RequestFromLease(cloudrelay.DeploymentLease{})
+	if !errors.Is(err, deploy.ErrLegacyDeploymentRetired) {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestRequestFromLeaseUsesDeploymentIntentBeforeConfig(t *testing.T) {
-	req, err := RequestFromLease(cloudrelay.DeploymentLease{
-		Deployment: cloudrelay.DeploymentJobEnvelope{DeploymentIntent: &cloudrelay.DeploymentIntent{
-			ProjectID: "intent-proj",
-			Source: cloudrelay.DeploymentIntentSource{
-				Type:         "git",
-				RepoURL:      "https://example.test/intent.git",
-				Branch:       "intent-main",
-				GitSHA:       "0123456789abcdef",
-				BuildContext: "services/api",
-				Dockerfile:   "Dockerfile.intent",
-				ManifestPath: "deploy/intent",
-				WatchPaths:   []string{"services/api/**"},
-			},
-			Runtime:   cloudrelay.DeploymentIntentRuntime{ContainerPort: 9090, Replicas: 3},
-			Health:    cloudrelay.DeploymentIntentHealth{Path: "/ready"},
-			Resources: map[string]any{"requests": map[string]string{"cpu": "250m"}, "limits": map[string]string{"memory": "768Mi"}},
-			Bindings:  []cloudrelay.DeploymentIntentBinding{{ServiceID: "svc-db", Alias: "primary-db", EnvPrefix: "DB", ExposeAsDefault: true, EnvKeys: []string{"DATABASE_URL"}}},
-		}},
-		Service: cloudrelay.ServiceEnvelope{ID: "api", Name: "api", Type: "application", SourceType: "git", RepoURL: "https://example.test/service.git", Branch: "service-main", GitSHA: "service-sha", BuildContext: "service", Dockerfile: "Dockerfile.service", ManifestPath: "deploy/service", WatchPaths: []string{"service/**"}, Namespace: "default"},
-	}, config.DeploymentConfig{ProjectID: "cfg-proj", RepoURL: "https://example.test/cfg.git", Branch: "cfg-main", BuildContext: "cfg", Dockerfile: "Dockerfile.cfg", ManifestPath: "deploy/cfg", WatchPaths: []string{"cfg/**"}, Namespace: "default"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if req.ProjectID != "intent-proj" || req.RepoURL != "https://example.test/intent.git" || req.Branch != "intent-main" || req.GitSHA != "0123456789abcdef" || req.BuildContext != "services/api" || req.Dockerfile != "Dockerfile.intent" || req.ManifestPath != "deploy/intent" {
-		t.Fatalf("request used fallback: %+v", req)
-	}
-	if len(req.WatchPaths) != 1 || req.WatchPaths[0] != "services/api/**" {
-		t.Fatalf("watch paths = %#v", req.WatchPaths)
-	}
-	if req.ContainerPort != 9090 || req.HealthPath != "/ready" || req.Replicas != 3 || req.ResourceRequestsJSON != `{"cpu":"250m"}` || req.ResourceLimitsJSON != `{"memory":"768Mi"}` {
-		t.Fatalf("runtime/resources = %+v", req)
-	}
-	if len(req.DependsOn) != 1 || req.DependsOn[0].Name != "primary-db" || req.DependsOn[0].EnvPrefix != "DB" || len(req.DependsOn[0].EnvKeys) != 1 {
-		t.Fatalf("depends_on = %#v", req.DependsOn)
+func TestRequestFromLeaseRejectsMismatchedCommand(t *testing.T) {
+	intent := testCloudRolloutIntent(t)
+	command := intent.Desired.AgentCommand()
+	command.Rollout = nil
+	command.LeaseToken = "lease-1"
+	_, err := RequestFromLease(cloudrelay.DeploymentLease{Action: "deploy", LeaseToken: "lease-2", Deployment: cloudrelay.DeploymentJobEnvelope{ID: command.JobID}, Command: &command})
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestResultFromRecordIncludesIntentHash(t *testing.T) {
-	result := ResultFromRecord(deploy.Record{Status: deploy.StatusSuccess}, nil, cloudrelay.DeploymentLease{Deployment: cloudrelay.DeploymentJobEnvelope{DeploymentIntent: &cloudrelay.DeploymentIntent{Review: cloudrelay.DeploymentIntentReview{IntentHash: "sha256:intent"}}}})
+	result := ResultFromRecord(deploy.Record{Status: deploy.StatusSuccess}, nil, cloudrelay.DeploymentLease{Deployment: cloudrelay.DeploymentJobEnvelope{IntentHash: "sha256:intent"}})
 	if result.IntentHash != "sha256:intent" {
 		t.Fatalf("intent hash = %q", result.IntentHash)
 	}

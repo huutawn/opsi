@@ -28,7 +28,6 @@ import (
 )
 
 type Server struct {
-	Queue        RelayQueue
 	Config       Config
 	OTP          *otp.Service
 	Auth         *auth.Service
@@ -71,7 +70,6 @@ func NewServer(cfg Config) *Server {
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
 	server := &Server{
-		Queue:                   NewQueue(),
 		Config:                  cfg,
 		OTP:                     service,
 		HTTPClient:              newGitHubHTTPClient(),
@@ -130,7 +128,6 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
-	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("/v1/webhooks/github-app", s.handleGitHubAppWebhook)
 	mux.HandleFunc("/v1/build-records", s.handleBuildRecordSubmission)
 	mux.HandleFunc("/v1/auth/pat/verify", s.handlePATVerify)
@@ -155,13 +152,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/internal/alerts", s.handleInternalAlerts)
 	mux.HandleFunc("/api/", s.handleRegistryAPI)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if !s.Config.EnableDebugUI {
-			http.NotFound(w, r)
-			return
-		}
-		s.handleUI(w, r)
-	})
+	mux.HandleFunc("/", http.NotFound)
 	return s.observer.Wrap(mux)
 }
 
@@ -253,11 +244,6 @@ func (s *Server) handleBootstrapWorkerCheckpoint(w http.ResponseWriter, r *http.
 		return
 	}
 	writeJSON(w, http.StatusOK, session.Checkpoint)
-}
-
-func sha256Hex(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
@@ -353,75 +339,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "queued_webhooks": s.Queue.Len()})
-}
-
-func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	var push githubPush
-	if err := json.Unmarshal(body, &push); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid github payload")
-		return
-	}
-	branch := branchFromRef(push.Ref)
-	route, ok := s.matchRoute(push.Repository.CloneURL, push.Repository.FullName, branch)
-	if !ok {
-		writeError(w, http.StatusNotFound, "no relay route for repo/branch")
-		return
-	}
-	signature := firstNonEmpty(r.Header.Get("X-Hub-Signature-256"), r.Header.Get("X-Hub-Signature"))
-	if !validGitHubWebhookSignature(route.WebhookSecret, body, signature) {
-		writeError(w, http.StatusUnauthorized, "github webhook signature is invalid")
-		return
-	}
-	now := time.Now().UTC()
-	ttl := time.Duration(s.Config.TTL)
-	if ttl <= 0 || ttl > 24*time.Hour {
-		ttl = 24 * time.Hour
-	}
-	env := Envelope{
-		ID:             newID(),
-		ProjectID:      route.ProjectID,
-		ServiceID:      route.ServiceID,
-		ServiceName:    route.ServiceName,
-		ServiceType:    route.ServiceType,
-		RepoURL:        firstNonEmpty(route.RepoURL, push.Repository.CloneURL),
-		Ref:            push.Ref,
-		After:          push.After,
-		Branch:         branch,
-		TriggeredBy:    push.Pusher.Name,
-		Body:           string(body),
-		Signature:      signature,
-		IdempotencyKey: firstNonEmpty(r.Header.Get("X-GitHub-Delivery"), sha256Hex(body)),
-		ReceivedAt:     now,
-		ExpiresAt:      now.Add(ttl),
-	}
-	if err := s.Queue.Enqueue(env); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"id": env.ID, "expires_at": env.ExpiresAt})
-}
-
-func validGitHubWebhookSignature(secret string, body []byte, signature string) bool {
-	if len(secret) < 32 || len(body) == 0 || !strings.HasPrefix(signature, "sha256=") {
-		return false
-	}
-	provided, err := hex.DecodeString(strings.TrimPrefix(signature, "sha256="))
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write(body)
-	return hmac.Equal(mac.Sum(nil), provided)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) {
@@ -466,7 +384,7 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		}
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
-		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
 		return
 	}
 	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)
@@ -493,16 +411,16 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	if wait > 30*time.Second {
 		wait = 30 * time.Second
 	}
-	env, err := s.Queue.Next(r.Context(), projectID, wait)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-timer.C:
+		}
 	}
-	if env == nil {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	writeJSON(w, http.StatusOK, env)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type immutableDeploymentProgressStore interface {
@@ -825,37 +743,6 @@ func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
-}
-
-func (s *Server) matchRoute(repoURL, fullName, branch string) (Route, bool) {
-	for _, route := range s.Config.Routes {
-		if route.Branch != "" && route.Branch != branch {
-			continue
-		}
-		if route.RepoURL != "" && route.RepoURL == repoURL {
-			return route, true
-		}
-		if route.RepoFullName != "" && route.RepoFullName == fullName {
-			return route, true
-		}
-	}
-	return Route{}, false
-}
-
-type githubPush struct {
-	Ref        string `json:"ref"`
-	After      string `json:"after"`
-	Repository struct {
-		CloneURL string `json:"clone_url"`
-		FullName string `json:"full_name"`
-	} `json:"repository"`
-	Pusher struct {
-		Name string `json:"name"`
-	} `json:"pusher"`
-}
-
-func branchFromRef(ref string) string {
-	return strings.TrimPrefix(ref, "refs/heads/")
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -40,19 +40,16 @@ verify-postgres:
 	@test -n "$$OPSI_TEST_DATABASE_URL" || { echo "OPSI_TEST_DATABASE_URL required for Postgres tests"; exit 1; }
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresBootstrapLeaseIsAtomicAcrossWorkers$$' | grep -qx 'TestPostgresBootstrapLeaseIsAtomicAcrossWorkers'
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart$$' | grep -qx 'TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresDeploymentJobRestartRetryDeadLetterAndIdempotency$$' | grep -qx 'TestPostgresDeploymentJobRestartRetryDeadLetterAndIdempotency'
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart$$' | grep -qx 'TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart'
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease$$' | grep -qx 'TestPostgresLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease'
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply$$' | grep -qx 'TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply'
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/adminbootstrap -list '^TestPostgresBootstrapOwnerIsIdempotentAcrossRestart$$' | grep -qx 'TestPostgresBootstrapOwnerIsIdempotentAcrossRestart'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/webhookrelay -list '^TestPostgresQueuePersistsSanitizedJobsWhenDatabaseAvailable$$' | grep -qx 'TestPostgresQueuePersistsSanitizedJobsWhenDatabaseAvailable'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/webhookrelay -list '^TestPostgresRelayRetryScheduleSurvivesRestart$$' | grep -qx 'TestPostgresRelayRetryScheduleSurvivesRestart'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresDeploymentJobRestartRetryDeadLetterAndIdempotency$$' -count=1
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart$$' -count=1
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease$$' -count=1
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply$$' -count=1
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresBootstrapLeaseIsAtomicAcrossWorkers$$' -count=1
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart$$' -count=1
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/adminbootstrap -run '^TestPostgresBootstrapOwnerIsIdempotentAcrossRestart$$' -count=1
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/webhookrelay -run '^TestPostgres(QueuePersistsSanitizedJobsWhenDatabaseAvailable|RelayRetryScheduleSurvivesRestart)$$' -count=1
 
 verify-dr:
 	$(RUN) ./scripts/verify-dr.sh
@@ -120,6 +117,10 @@ source-hygiene: verify-source-package-policy
 	@if rg -n 'IngressEnabled|Traefik-safe graceful shutdown defaults|sleep 10' agent cli cloud contracts --glob '!**/*_test.go'; then echo "removed ingress deployment capability found in production code"; exit 1; fi
 	@if rg -n 'bool ingress_enabled|json:"ingress_enabled|yaml:"ingress_enabled|^[[:space:]]*ingress_enabled:' agent cli cloud contracts --glob '!**/*_test.go'; then echo "removed ingress deployment config or contract found"; exit 1; fi
 	@if rg -n '"ingress"' cli/internal/commands --glob '!**/*_test.go'; then echo "removed --ingress CLI flag found"; exit 1; fi
+	@if rg -n 'runLegacyDevDeployment|RequestFromWebhook|PollWebhook|PollDeployment|ExecGitClient|ContainerdBuilder|KubectlAdapter|handleGitHubWebhook|NewPostgresQueue|EnableDebugUI|queued_webhooks' agent cli cloud contracts --glob '!**/*_test.go'; then echo "retired delivery implementation found"; exit 1; fi
+	@if rg -n '"/v1/webhooks/github"|services/.*/deployments|routes\[\].*webhook_secret' agent cli cloud contracts deploy scripts --glob '!**/*_test.go'; then echo "retired delivery route found"; exit 1; fi
+	@if rg -n 'git clone|buildx build|nerdctl.*build|renderManifestFile|/tmp/opsi-builds' agent --glob '!**/*_test.go'; then echo "Agent source-build path found"; exit 1; fi
+	@for symbol in StartImmutableDeployment AgentCommand PollJob ProductionAdapter ReconcileRollout; do rg -n "$$symbol" agent cloud contracts >/dev/null || { echo "canonical symbol missing: $$symbol"; exit 1; }; done
 
 package-source: verify-source-package-policy
 	$(RUN) ./scripts/source-package.sh build dist/opsi-source.tar.gz

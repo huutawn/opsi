@@ -227,13 +227,12 @@ def validate_source_texts(
     env = parse_env(env_text)
     cloud = parse_json(cloud_text, "cloud.example.json")
     worker = parse_json(worker_text, "bootstrap-worker.example.json")
-    if not isinstance(cloud.get("routes"), list):
-        fail("cloud example must define routes as an array")
+    if "routes" in cloud or "enable_debug_ui" in cloud or "OPSI_CLOUD_ENABLE_DEBUG_UI" in env:
+        fail("staging configuration contains retired relay/debug settings")
     validate_oidc(cloud, runtime=False)
 
     expected_flags = {
         "OPSI_CLOUD_PRODUCTION": True,
-        "OPSI_CLOUD_ENABLE_DEBUG_UI": False,
         "OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES": True,
         "OPSI_CLOUD_OTP_DEV_ECHO": False,
     }
@@ -344,9 +343,10 @@ def validate_source_texts(
 
 
 def validate_runtime_values(env: dict[str, str], cloud: dict[str, object], worker: dict[str, object], secrets: dict[str, str]) -> None:
+    if "routes" in cloud or "enable_debug_ui" in cloud or "OPSI_CLOUD_ENABLE_DEBUG_UI" in env:
+        fail("runtime staging configuration contains retired relay/debug settings")
     for name, expected in {
         "OPSI_CLOUD_PRODUCTION": True,
-        "OPSI_CLOUD_ENABLE_DEBUG_UI": False,
         "OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES": True,
         "OPSI_CLOUD_OTP_DEV_ECHO": False,
     }.items():

@@ -49,30 +49,13 @@ type CloudRelayConfig struct {
 }
 
 type DeploymentConfig struct {
-	ProjectID                     string            `yaml:"project_id"`
-	ServiceID                     string            `yaml:"service_id"`
-	ServiceName                   string            `yaml:"service_name"`
-	ServiceType                   string            `yaml:"service_type"`
-	RepoURL                       string            `yaml:"repo_url"`
-	Branch                        string            `yaml:"branch"`
-	Namespace                     string            `yaml:"namespace"`
-	BuildContext                  string            `yaml:"build_context"`
-	Dockerfile                    string            `yaml:"dockerfile"`
-	ManifestPath                  string            `yaml:"manifest_path"`
-	PublicEndpoint                string            `yaml:"public_endpoint"`
-	WatchPaths                    []string          `yaml:"watch_paths"`
-	TerminationGracePeriodSeconds int               `yaml:"termination_grace_period_seconds"`
-	ResourceRequests              map[string]string `yaml:"resource_requests"`
-	ResourceLimits                map[string]string `yaml:"resource_limits"`
-	Registry                      string            `yaml:"registry"`
-	BuilderMode                   string            `yaml:"builder_mode"`
-	NerdctlPath                   string            `yaml:"nerdctl_path"`
-	ContainerdNS                  string            `yaml:"containerd_namespace"`
-	WebhookSecret                 string            `yaml:"webhook_secret"`
-	DryRun                        bool              `yaml:"dry_run"`
-	BuildRoot                     string            `yaml:"build_root"`
-	RolloutTimeout                string            `yaml:"rollout_timeout"`
-	PollInterval                  string            `yaml:"poll_interval"`
+	ProjectID      string `yaml:"project_id"`
+	ServiceID      string `yaml:"service_id"`
+	Namespace      string `yaml:"namespace"`
+	PublicEndpoint string `yaml:"public_endpoint"`
+	DryRun         bool   `yaml:"dry_run"`
+	RolloutTimeout string `yaml:"rollout_timeout"`
+	PollInterval   string `yaml:"poll_interval"`
 }
 
 type TelemetryConfig struct {
@@ -107,25 +90,12 @@ func Default() Config {
 		Auth:          AuthConfig{Enabled: false, VerifyCacheTTL: "15m"},
 		CloudRelay:    CloudRelayConfig{Enabled: false, PollInterval: "2s", LongPollWait: "30s", HeartbeatInterval: "30s", SignRequests: true},
 		Deployment: DeploymentConfig{
-			ProjectID:                     "dev-project",
-			ServiceID:                     "example-app",
-			ServiceName:                   "example-app",
-			ServiceType:                   "backend",
-			Branch:                        "main",
-			Namespace:                     "default",
-			BuildContext:                  ".",
-			Dockerfile:                    "Dockerfile",
-			PublicEndpoint:                "",
-			WatchPaths:                    []string{"**"},
-			TerminationGracePeriodSeconds: 30,
-			ResourceRequests:              map[string]string{"cpu": "100m", "memory": "128Mi"},
-			ResourceLimits:                map[string]string{"cpu": "500m", "memory": "512Mi"},
-			BuilderMode:                   "containerd",
-			NerdctlPath:                   "nerdctl",
-			ContainerdNS:                  "k8s.io",
-			BuildRoot:                     "/tmp/opsi-builds",
-			RolloutTimeout:                "10m",
-			PollInterval:                  "5s",
+			ProjectID:      "dev-project",
+			ServiceID:      "example-app",
+			Namespace:      "default",
+			PublicEndpoint: "",
+			RolloutTimeout: "10m",
+			PollInterval:   "5s",
 		},
 		Telemetry: TelemetryConfig{
 			Enabled:                true,
@@ -164,8 +134,29 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &removed); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	if _, exists := removed.Deployment["ingress_enabled"]; exists {
-		return Config{}, errors.New("deployment.ingress_enabled has been removed; gateway exposure is not implemented")
+	for _, key := range []string{
+		"ingress_enabled",
+		"service_name",
+		"service_type",
+		"repo_url",
+		"branch",
+		"build_context",
+		"dockerfile",
+		"manifest_path",
+		"watch_paths",
+		"termination_grace_period_seconds",
+		"resource_requests",
+		"resource_limits",
+		"registry",
+		"builder_mode",
+		"nerdctl_path",
+		"containerd_namespace",
+		"webhook_secret",
+		"build_root",
+	} {
+		if _, exists := removed.Deployment[key]; exists {
+			return Config{}, fmt.Errorf("deployment.%s has been removed with the legacy Git/build/manifest pipeline", key)
+		}
 	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
@@ -259,14 +250,6 @@ func (c Config) Validate() error {
 		if _, err := time.ParseDuration(c.Deployment.RolloutTimeout); err != nil {
 			return fmt.Errorf("deployment.rollout_timeout: %w", err)
 		}
-	}
-	if c.Deployment.TerminationGracePeriodSeconds < 0 {
-		return errors.New("deployment.termination_grace_period_seconds must be >= 0")
-	}
-	switch c.Deployment.BuilderMode {
-	case "", "containerd", "docker", "dry_run":
-	default:
-		return fmt.Errorf("deployment.builder_mode must be containerd, docker, or dry_run")
 	}
 	if c.Telemetry.Interval != "" {
 		if _, err := time.ParseDuration(c.Telemetry.Interval); err != nil {

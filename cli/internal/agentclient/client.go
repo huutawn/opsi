@@ -44,33 +44,6 @@ func (c *Client) Status(ctx context.Context) (*agentv1.StatusResponse, error) {
 	return agentv1.NewStatusServiceClient(conn).Status(ctx, &agentv1.StatusRequest{})
 }
 
-func (c *Client) Deploy(ctx context.Context, req *agentv1.DeployRequest, onEvent func(*agentv1.ProgressEvent) error) error {
-	conn, err := c.dial(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	stream, err := agentv1.NewDeploymentServiceClient(conn).Deploy(ctx, req)
-	if err != nil {
-		return err
-	}
-	for {
-		event, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if onEvent != nil {
-			if err := onEvent(event); err != nil {
-				return err
-			}
-		}
-	}
-}
-
 func (c *Client) Sync(ctx context.Context, req *agentv1.SyncRequest, onChunk func(*agentv1.SyncChunk) error) error {
 	conn, err := c.dial(ctx)
 	if err != nil {

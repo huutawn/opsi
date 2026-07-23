@@ -2,9 +2,9 @@
 
 Shared API contracts live here. This layer must not contain business logic.
 
-`contracts/agent/v1/status.proto` is the public Agent contract source for `StatusService`, `DeploymentService`, and `TelemetryService`. `contracts/go` contains a small hand-written Go gRPC binding because `protoc`/`buf` is not required by the current workspace. Later phases may replace the hand-written binding with generated code without changing the RPC shape.
+`contracts/agent/v1/status.proto` is the public Agent contract source for `StatusService` and `TelemetryService`. Deployment execution is delivered through the Cloud Agent PollJob transport as an immutable `deploymentv1.AgentCommand`; there is no public direct-deploy RPC. `contracts/go` contains a small hand-written Go gRPC binding because `protoc`/`buf` is not required by the current workspace.
 
-`contracts/cloud/v1/webhook_relay.md` defines the Phase 2 Cloud webhook relay contract for GitHub webhook ingestion and Agent long-poll delivery. `cloud/` now has a local in-memory implementation of that contract for dev/test validation.
+`contracts/cloud/v1/webhook_relay.md` documents the historical relay schema and the retained GitHub App/PollJob transport boundary. Generic GitHub push relay execution has been retired; relay tables remain only for restore/read compatibility.
 
 ## Build/Test
 

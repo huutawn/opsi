@@ -51,121 +51,11 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 	}
 
 	serviceID := createService(t, handler, project.ID)
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{"requested_by":"user-1"}`)))
-	req.Header.Set("Idempotency-Key", "dep-key")
-	req.Header.Set("X-Request-ID", "req-2")
+	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{}`)))
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("expected project readiness guard, got %d body=%s", w.Code, w.Body.String())
-	}
-	var apiErr struct {
-		Code       string `json:"error_code"`
-		NextAction string `json:"next_action"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&apiErr); err != nil {
-		t.Fatal(err)
-	}
-	if apiErr.Code != "PROJECT_NOT_READY" || apiErr.NextAction != "add_first_server" {
-		t.Fatalf("unexpected error: %+v", apiErr)
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/nodes", bytes.NewReader([]byte(`{"name":"vps-1","role":"server","status":"healthy","public_host":"203.0.113.10"}`)))
-	req.Header.Set("Idempotency-Key", "node-key")
-	req.Header.Set("X-Request-ID", "req-3")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("node status=%d body=%s", w.Code, w.Body.String())
-	}
-	var node struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&node); err != nil {
-		t.Fatal(err)
-	}
-	agentToken := registerDeployAgent(t, handler, project.ID, node.ID, "agent-key")
-
-	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/readiness", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("readiness status=%d body=%s", w.Code, w.Body.String())
-	}
-	var readiness struct {
-		Status    string `json:"status"`
-		CanDeploy bool   `json:"can_deploy"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&readiness); err != nil {
-		t.Fatal(err)
-	}
-	if readiness.Status != "ready" || !readiness.CanDeploy {
-		t.Fatalf("unexpected readiness: %+v", readiness)
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{"requested_by":"user-1"}`)))
-	req.Header.Set("Idempotency-Key", "dep-key-ready")
-	req.Header.Set("X-Request-ID", "req-4")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("deploy status=%d body=%s", w.Code, w.Body.String())
-	}
-	var deploy struct {
-		ID                 string `json:"id"`
-		Status             string `json:"status"`
-		DeploymentPlanHash string `json:"deployment_plan_hash"`
-		ManifestHash       string `json:"manifest_hash"`
-		IntentHash         string `json:"intent_hash"`
-		NodeID             string `json:"node_id"`
-		AgentID            string `json:"agent_id"`
-		DeploymentIntent   struct {
-			IntentVersion string `json:"intent_version"`
-			Source        struct {
-				BuildContext string `json:"build_context"`
-				Dockerfile   string `json:"dockerfile"`
-				ManifestPath string `json:"manifest_path"`
-			} `json:"source"`
-		} `json:"deployment_intent"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&deploy); err != nil {
-		t.Fatal(err)
-	}
-	if deploy.Status != "queued" || deploy.DeploymentPlanHash == "" || deploy.ManifestHash == "" || deploy.IntentHash == "" || deploy.NodeID == "" || deploy.AgentID == "" || deploy.DeploymentIntent.IntentVersion == "" {
-		t.Fatalf("unexpected deploy: %+v", deploy)
-	}
-	if deploy.DeploymentIntent.Source.BuildContext != "." || deploy.DeploymentIntent.Source.Dockerfile != "Dockerfile" || deploy.DeploymentIntent.Source.ManifestPath == "" {
-		t.Fatalf("unexpected deployment intent: %+v", deploy.DeploymentIntent)
-	}
-	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+node.ID+"/webhooks/next?project_id="+project.ID+"&wait=0s", nil)
-	req.Header.Set("Authorization", "Bearer "+agentToken)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"kind":"deployment"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"intent_hash":"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"deployment_intent"`)) {
-		t.Fatalf("lease status=%d body=%s", w.Code, w.Body.String())
-	}
-	var lease struct {
-		LeaseToken string `json:"lease_token"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&lease); err != nil {
-		t.Fatal(err)
-	}
-	req = httptest.NewRequest(http.MethodPost, "/v1/agents/"+node.ID+"/deployments/"+deploy.ID+"/result?project_id="+project.ID, bytes.NewReader([]byte(`{"status":"succeeded","lease_token":"`+lease.LeaseToken+`","final_revision_ref":"rev-1","rollback_eligible":true}`)))
-	req.Header.Set("Authorization", "Bearer "+agentToken)
-	req.Header.Set("X-Request-ID", "req-result")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"status":"succeeded"`)) {
-		t.Fatalf("result status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{"requested_by":"user-1"}`)))
-	req.Header.Set("Idempotency-Key", "dep-key-locked")
-	req.Header.Set("X-Request-ID", "req-5")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("expected lock released after result, got %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("retired service-scoped deployment status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -380,18 +270,8 @@ func TestRegistryAPIReadModelsForUI(t *testing.T) {
 		t.Fatalf("unexpected node list: %+v", nodes)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services/"+serviceID+"/deployments", bytes.NewReader([]byte(`{"requested_by":"ui"}`)))
-	req.Header.Set("Idempotency-Key", "ui-deploy")
-	req.Header.Set("X-Request-ID", "req-ui-deploy")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("deploy status=%d body=%s", w.Code, w.Body.String())
-	}
-
 	for _, path := range []string{
 		"/api/projects/" + project.ID + "/services",
-		"/api/projects/" + project.ID + "/deployments",
 		"/api/projects/" + project.ID + "/bootstrap-sessions",
 		"/api/projects/" + project.ID + "/audit",
 	} {
@@ -401,33 +281,9 @@ func TestRegistryAPIReadModelsForUI(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("%s status=%d body=%s", path, w.Code, w.Body.String())
 		}
-		if !bytes.Contains(w.Body.Bytes(), []byte(serviceID)) && path != "/api/projects/"+project.ID+"/audit" && path != "/api/projects/"+project.ID+"/bootstrap-sessions" {
+		if !bytes.Contains(w.Body.Bytes(), []byte(serviceID)) && path == "/api/projects/"+project.ID+"/services" {
 			t.Fatalf("%s missing service id: %s", path, w.Body.String())
 		}
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/deployments", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("deployments status=%d body=%s", w.Code, w.Body.String())
-	}
-	var deploys struct {
-		Deployments []struct {
-			ID string `json:"id"`
-		} `json:"deployments"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&deploys); err != nil {
-		t.Fatal(err)
-	}
-	if len(deploys.Deployments) != 1 {
-		t.Fatalf("expected one deployment, got %+v", deploys)
-	}
-	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/deployments/"+deploys.Deployments[0].ID+"/events", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("deployment queued")) {
-		t.Fatalf("deployment events status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -673,44 +529,13 @@ func TestInternalAlertmanagerWebhookIsRedactedAndTokenGated(t *testing.T) {
 	}
 }
 
-func TestUIShellRequiresDebugFlag(t *testing.T) {
+func TestCloudRootReturnsNotFound(t *testing.T) {
 	handler := NewServer(Config{}).Handler()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("ui status=%d body=%s", w.Code, w.Body.String())
-	}
-}
-
-func TestDebugUIShellServesWorkflow(t *testing.T) {
-	handler := NewServer(Config{EnableDebugUI: true}).Handler()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("ui status=%d body=%s", w.Code, w.Body.String())
-	}
-	body := w.Body.Bytes()
-	for _, want := range [][]byte{
-		[]byte("Servers / Nodes"),
-		[]byte("Add first server"),
-		[]byte("Topology will appear after at least one healthy server and one deployed service."),
-		[]byte("type=\"password\""),
-		[]byte("Reconnect-safe"),
-	} {
-		if !bytes.Contains(body, want) {
-			t.Fatalf("ui missing %q", want)
-		}
-	}
-	for _, forbidden := range [][]byte{
-		[]byte("ssh "),
-		[]byte("opsi deploy"),
-		[]byte("localStorage.setItem(\"opsi_pat\""),
-	} {
-		if bytes.Contains(body, forbidden) {
-			t.Fatalf("ui contains forbidden workflow/text %q", forbidden)
-		}
 	}
 }
 

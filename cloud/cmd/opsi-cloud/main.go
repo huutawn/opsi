@@ -97,7 +97,6 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		if err := postgres.Migrate(context.Background(), db); err != nil {
 			return fmt.Errorf("migrate postgres: %w", err)
 		}
-		relay.Queue = webhookrelay.NewPostgresQueue(db)
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
 		postgresRegistry := registry.PostgresService{DB: db}
 		relay.Registry = postgresRegistry

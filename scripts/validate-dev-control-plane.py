@@ -31,7 +31,6 @@ CLOUD_ENV_NAMES = (
     "OPSI_CLOUD_DATABASE_URL",
     "OPSI_CLOUD_PUBLIC_BASE_URL",
     "OPSI_CLOUD_PRODUCTION",
-    "OPSI_CLOUD_ENABLE_DEBUG_UI",
     "OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES",
     "OPSI_CLOUD_OTP_DEV_ECHO",
     "OPSI_CLOUD_OTP_OUTBOX_PATH",
@@ -290,8 +289,8 @@ def validate_source() -> int:
     for token in (":80", "/internal/*", "/api/internal/*", "/metrics", "respond @internal 404"):
         if token not in caddy:
             fail(f"development Caddy route protection is missing {token}")
-    if not isinstance(cloud.get("routes"), list):
-        fail("development cloud example must define routes as an array")
+    if "routes" in cloud or "enable_debug_ui" in cloud or "OPSI_CLOUD_ENABLE_DEBUG_UI" in env:
+        fail("development configuration contains retired relay/debug settings")
     print("development control-plane source configuration is structurally valid")
     return 0
 
@@ -313,6 +312,8 @@ def validate_runtime() -> int:
     legacy_auth = cloud.get("auth")
     if isinstance(legacy_auth, dict) and legacy_auth:
         fail("legacy auth config is no longer supported; use github_app")
+    if "routes" in cloud or "enable_debug_ui" in cloud or "OPSI_CLOUD_ENABLE_DEBUG_UI" in env:
+        fail("runtime configuration contains retired relay/debug settings")
 
     if any(is_placeholder(value) for value in env.values()):
         fail(f"placeholder remains in {ENV_PATH.relative_to(ROOT)}")

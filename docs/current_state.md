@@ -3,11 +3,31 @@
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-22 |
+| Last updated | 2026-07-23 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
+
+## R5-011-S2 checkpoint
+
+`R5-011-S2 — SINGLE_IMMUTABLE_DELIVERY_PATH_PASS` is locally implemented:
+direct Git/build/manifest Agent execution, CLI direct deploy, Local/Cloud
+service-scoped deployment creation, generic GitHub push relay, and Cloud debug
+UI/configuration are removed. The only executable delivery path is
+GitHub Actions BuildRecord -> immutable OCI digest -> Cloud topology/policy/
+routing -> durable DeploymentJob/RolloutIntent -> Agent PollJob ->
+ProductionAdapter/ReconcileRollout -> K3s readiness and rollback.
+
+Historical deployment columns and relay tables remain only for restore/read
+compatibility. Legacy queued jobs cannot be leased to an Agent. Health command
+output is bounded to 256 KiB per command with a five-second timeout and
+fail-closed overflow/truncation behavior.
+
+Verification is local and PostgreSQL-backed; no VPS, DNS, TLS, public endpoint,
+or full K3s E2E acceptance was performed. Full E2E status is `MANUAL_GATED`.
+R5-011 remains `PARTIAL`; R5-011.4 has not started. R5-012 and MCP/AI work are
+outside this checkpoint.
 
 ## M0 boundary state
 
@@ -81,14 +101,14 @@ bindings live under `contracts/`; business logic remains in the owning domain.
   `checksums.txt`, and stable `release.json` SHA-256 metadata. A local verifier
   rebuilds twice with separate Go caches and compares the binary and metadata
   byte-for-byte within the same source tree and Go toolchain.
-- Status, deployment, service management, telemetry, secret, and incident gRPC
+- Status, service management, telemetry, secret, and incident gRPC
   services; HTTP health; TLS 1.3 configuration with optional client certificate
   verification.
 - SQLite WAL stores for deployment, services, managed services/bindings,
   telemetry, incidents, and runtime audit.
-- Git-source deployment with safe relative-path validation, containerd-first
-  build, Docker fallback, dry-run adapters, rollout watch, deploy-time rollback,
-  rollback verification, redacted errors, and service binding injection.
+- Immutable AgentCommand execution with digest pull, Opsi-owned resource
+  reconciliation, rollout readiness/rollback, redacted errors, and service
+  binding injection.
 - Managed PostgreSQL/Redis renderers and external service registration with
   project-scoped storage and deletion/purge distinction.
 - Kubernetes/cAdvisor/runtime telemetry collection, bounded logs, retention,
@@ -97,10 +117,9 @@ bindings live under `contracts/`; business logic remains in the owning domain.
   Owner plus OTP/TOTP reveal gate, rotation/restart, and redacted audit.
 - Deterministic bounded incident context from metric windows and log
   fingerprints, plus list/get/resolve authorization, MTTR, and resolve audit.
-- Cloud relay client and runner for signed heartbeat, deployment lease/result,
-  legacy `DeploymentIntent`-scoped Git execution, and the R5-010 immutable-image
-  command/result contract. Production image jobs never enter the Git clone or
-  Dockerfile build branch.
+- Cloud relay client and runner for signed heartbeat, canonical PollJob
+  deployment lease/result, immutable AgentCommand execution, and rollout
+  reconciliation. Historical deployment fields are not executable input.
 
 Agent does not currently provide public incident evidence or a unified action
 policy/approval/executor contract.
@@ -151,8 +170,8 @@ Safe ActionPlane client.
 - Organization/project/membership metadata, RBAC, PAT verification and GitHub
   App user authorization grant mediation, OTP, Agent/node registration, bootstrap sessions,
   deployment job envelopes, webhook relay, audit, and support metadata.
-- GitHub webhook routes require a per-route secret and Cloud verifies the
-  SHA-256 HMAC before accepting and sanitizing the payload.
+- Generic GitHub push relay execution and route-scoped webhook secrets are
+  retired; only the GitHub App webhook remains active.
 - The browser login path uses fixed GitHub authorization, token, and `/user`
   endpoints with PKCE S256 and five-minute one-time in-memory state. Provider is
   fixed to `github`; subject is the canonical decimal positive numeric GitHub
@@ -179,8 +198,9 @@ Safe ActionPlane client.
   enabled. PostgreSQL atomically inserts each delivery ID, applies the mutation,
   and records non-sensitive audit metadata; duplicate delivery IDs remain
   idempotent after Cloud restart. The 24-hour, 10,000-entry P08 replay store is
-  retained as the fast in-memory layer. The legacy `/v1/webhooks/github` route
-  and `routes[].webhook_secret` behavior remain unchanged.
+  retained as the fast in-memory layer. Historical relay tables remain
+  readable for restore compatibility, but runtime code does not enqueue or
+  claim them.
 - PostgreSQL and in-memory registries store installation/repository lifecycle
   status without physical deletion, link a verified installation to a project,
   enforce one active project claim per repository, and bind monorepo service
@@ -378,17 +398,14 @@ the destructive-step Worker restart moves to mandatory R5-017 evidence on a
 disposable VPS or fresh reset with a deterministic staging-only barrier or fault
 mechanism. R5-018/MCP is blocked until that deferred R5-017 gate passes.
 
-Git-based deployment exists and can apply user-provided manifests. Such a
-manifest may contain its own Service, Ingress, Gateway, TLS, lifecycle, or
-shutdown configuration; those resources are user-owned input, not an
-Opsi-managed gateway. `IngressEnabled` was removed from active contracts/config,
-with a fail-fast error retained for old configuration.
+Legacy Git/build/manifest deployment and user-owned Kubernetes resource input
+are retired. `IngressEnabled` was removed from active contracts/config, with a
+fail-fast error retained for old configuration.
 
 R5-010 now implements the local migration path as:
 
 ```text
-legacy/manual Git build (development compatibility only)
--> accepted BuildRecord + exact R5-009 route
+GitHub Actions BuildRecord + exact R5-009 route
 -> durable immutable-image DeploymentJob
 -> Agent digest pull + Opsi Deployment/ClusterIP Service
 ```
@@ -401,8 +418,8 @@ implementation extends the existing job/engine rather than adding a parallel
 deployment engine. It snapshots BuildRecord/topology/policy/routing/workload
 authority, uses lease-bound monotonic progress, renders owned Deployment and
 ClusterIP Service resources, rejects foreign collisions, and verifies the
-named application container imageID. The Git clone/build path remains only for
-legacy/manual development use.
+named application container imageID. No source clone, image build, arbitrary
+manifest, or service-scoped deployment fallback remains.
 
 Full Go test/vet, focused race, disposable PostgreSQL
 migration/restart/concurrency, UI lint/build/source-state, deterministic Agent

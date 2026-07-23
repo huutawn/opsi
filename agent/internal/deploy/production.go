@@ -24,8 +24,7 @@ const (
 	MaxCommandErrorBytes  = 512
 )
 
-// ProductionRuntime is the only Agent execution boundary for immutable image jobs.
-// The legacy Git/Build/K3s adapters remain available for development compatibility.
+// ProductionRuntime is the Agent execution boundary for immutable image jobs.
 type ProductionRuntime interface {
 	Deploy(context.Context, deploymentv1.AgentCommand, ProgressFunc) (Record, error)
 }

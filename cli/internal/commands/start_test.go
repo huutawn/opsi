@@ -357,17 +357,11 @@ func TestLocalGitHubInstallationClaimRedeemsOnceWithoutBrowserCredential(t *test
 	}
 }
 
-func TestLocalDeploymentRejectsImageBeforeCloudPost(t *testing.T) {
-	cloudPost := false
+func TestLegacyLocalServiceDeploymentEndpointReturnsNotFound(t *testing.T) {
+	cloudCalled := false
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/api/projects/proj-1/services" {
-			_, _ = w.Write([]byte(`{"services":[{"id":"svc-1","source_type":"image"}]}`))
-			return
-		}
-		if r.Method == http.MethodPost {
-			cloudPost = true
-		}
-		t.Fatalf("unexpected Cloud request: %s %s", r.Method, r.URL.Path)
+		cloudCalled = true
+		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer cloud.Close()
 	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, nil))
@@ -385,7 +379,7 @@ func TestLocalDeploymentRejectsImageBeforeCloudPost(t *testing.T) {
 	}
 	_ = res.Body.Close()
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/services/svc-1/deployments", bytes.NewReader([]byte(`{"requested_by":"ui"}`)))
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/services/svc-1/deployments", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,19 +390,11 @@ func TestLocalDeploymentRejectsImageBeforeCloudPost(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusBadRequest {
+	if res.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d", res.StatusCode)
 	}
-	var body struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	if body.Error.Code != "IMAGE_DEPLOY_NOT_SUPPORTED" || cloudPost {
-		t.Fatalf("code=%q cloudPost=%v", body.Error.Code, cloudPost)
+	if cloudCalled {
+		t.Fatal("legacy local deployment route reached Cloud")
 	}
 }
 

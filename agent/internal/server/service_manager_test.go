@@ -3,15 +3,11 @@ package server
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/opsi-dev/opsi/agent/internal/config"
-	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/svcatalog"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -22,14 +18,6 @@ type roleVerifier struct{ role secret.Role }
 func (v roleVerifier) VerifyAuth(context.Context, secret.AuthContext) (secret.AuthContext, error) {
 	return secret.AuthContext{ProjectID: "demo", UserID: "user", Role: v.role}, nil
 }
-
-type fakeDeployStream struct {
-	grpc.ServerStream
-	ctx context.Context
-}
-
-func (s fakeDeployStream) Context() context.Context          { return s.ctx }
-func (s fakeDeployStream) Send(*agentv1.ProgressEvent) error { return nil }
 
 func TestServiceManagerCreateAndGet(t *testing.T) {
 	store, err := svcatalog.OpenStore(filepath.Join(t.TempDir(), "opsi.db"))
@@ -110,59 +98,11 @@ func TestServiceManagerListCatalog(t *testing.T) {
 	}
 }
 
-func TestDeploymentDependencyValidation(t *testing.T) {
-	store, err := svcatalog.OpenStore(filepath.Join(t.TempDir(), "opsi.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	ctx := context.Background()
-	for _, service := range []svcatalog.ManagedService{
-		{ID: "primary-db", ProjectID: "demo", Name: "primary-db", Type: "postgresql", Namespace: "default", Mode: "managed", Host: "primary-db.default.svc.cluster.local", Port: "5432", SecretName: "opsi-svc-primary-db"},
-		{ID: "analytics-db", ProjectID: "demo", Name: "analytics-db", Type: "postgresql", Namespace: "default", Mode: "managed", Host: "analytics-db.default.svc.cluster.local", Port: "5432", SecretName: "opsi-svc-analytics-db"},
-		{ID: "cache", ProjectID: "demo", Name: "cache", Type: "redis", Namespace: "default", Mode: "managed", Host: "cache.default.svc.cluster.local", Port: "6379", SecretName: "opsi-svc-cache"},
-	} {
-		if err := store.UpsertManagedService(ctx, service); err != nil {
-			t.Fatal(err)
-		}
-	}
-	svc := &DeploymentService{serviceStore: store}
-	req := deploy.Request{ProjectID: "demo", ServiceID: "api", Namespace: "default", DependsOn: []deploy.ServiceDependency{{Name: "primary-db"}, {Name: "cache"}}}
-	if _, err := svc.validateDependencies(ctx, req); err != nil {
-		t.Fatal(err)
-	}
-	req.DependsOn = []deploy.ServiceDependency{{Name: "primary-db", EnvPrefix: "PRIMARY", ExposeAsDefault: true}, {Name: "analytics-db", EnvPrefix: "ANALYTICS"}}
-	enriched, err := svc.validateDependencies(ctx, req)
-	if err != nil {
-		t.Fatalf("prefixed same-type deps should pass: %v", err)
-	}
-	if len(enriched.DependsOn[0].EnvKeys) == 0 || enriched.DependsOn[0].EnvPrefix != "PRIMARY" {
-		t.Fatalf("missing enriched env keys: %+v", enriched.DependsOn)
-	}
-	req.DependsOn = []deploy.ServiceDependency{{Name: "primary-db"}, {Name: "analytics-db"}}
-	if _, err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "env collision") {
-		t.Fatalf("expected collision error, got %v", err)
-	}
-	req.DependsOn = []deploy.ServiceDependency{{Name: "primary-db", EnvPrefix: "PRIMARY", ExposeAsDefault: true}, {Name: "analytics-db", EnvPrefix: "ANALYTICS", ExposeAsDefault: true}}
-	if _, err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "default env collision") {
-		t.Fatalf("expected default collision error, got %v", err)
-	}
-	req.DependsOn = []deploy.ServiceDependency{{Name: "missing"}}
-	if _, err := svc.validateDependencies(ctx, req); err == nil || !strings.Contains(err.Error(), "not registered") {
-		t.Fatalf("expected missing dependency error, got %v", err)
-	}
-}
-
 func TestAgentRBACMatrixDeniesViewerMutations(t *testing.T) {
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer pat"))
 	manager := NewServiceManagerService(nil, svcatalog.Manager{}, roleVerifier{role: secret.RoleViewer})
 	if _, err := manager.CreateManagedService(ctx, &agentv1.CreateManagedServiceRequest{ProjectID: "demo", Name: "cache", Type: "redis"}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("viewer create status = %v err=%v", status.Code(err), err)
-	}
-	deployer := NewDeploymentService(configForRBAC(), nil, roleVerifier{role: secret.RoleViewer}, nil)
-	err := deployer.Deploy(&agentv1.DeployRequest{ProjectID: "demo", ServiceID: "api", ServiceName: "api", RepoURL: "https://example.test/repo.git", GitSHA: "abcdef", ManifestPath: "k8s/deployment.yaml"}, fakeDeployStream{ctx: ctx})
-	if status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("viewer deploy status = %v err=%v", status.Code(err), err)
 	}
 }
 
@@ -177,11 +117,4 @@ func TestAgentRBACMatrixAllowsDeveloperMutations(t *testing.T) {
 	if _, err := manager.CreateManagedService(ctx, &agentv1.CreateManagedServiceRequest{ProjectID: "demo", Name: "cache", Type: "redis"}); err != nil {
 		t.Fatalf("developer create: %v", err)
 	}
-}
-
-func configForRBAC() config.Config {
-	cfg := config.Default()
-	cfg.Deployment.ProjectID = "demo"
-	cfg.Deployment.ManifestPath = "k8s/deployment.yaml"
-	return cfg
 }

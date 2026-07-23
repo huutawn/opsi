@@ -220,8 +220,8 @@ for line in env_text.splitlines():
 env_dst.write_text("\n".join(lines) + "\n")
 
 cloud = json.loads(cloud_src.read_text())
-if not isinstance(cloud.get("routes"), list):
-    raise SystemExit("cloud example must contain routes")
+if "routes" in cloud or "enable_debug_ui" in cloud:
+    raise SystemExit("cloud example contains retired relay/debug settings")
 cloud_dst.write_text(json.dumps(cloud, indent=2) + "\n")
 
 worker = json.loads(worker_src.read_text())

@@ -198,15 +198,6 @@ func TestLoadConfigProductionRejectsPlaceholderSecrets(t *testing.T) {
 	}
 }
 
-func TestLoadConfigProductionRejectsPlaceholderRouteSecret(t *testing.T) {
-	clearCloudEnv(t)
-	config := validProductionConfig(t) + `,"routes":[{"project_id":"proj-1","service_id":"svc-1","repo_full_name":"example/api","branch":"main","webhook_secret":"REPLACE_WITH_ROUTE_WEBHOOK_SECRET_123456"}]`
-	_, err := LoadConfig(writeCloudConfig(t, `{`+config+`}`))
-	if err == nil || !strings.Contains(err.Error(), "placeholder") {
-		t.Fatalf("placeholder route secret error=%v", err)
-	}
-}
-
 func TestLoadConfigReadsSecretsFromFiles(t *testing.T) {
 	clearCloudEnv(t)
 	writeSecret := func(name, value string) string {
@@ -301,57 +292,20 @@ func TestLoadConfigProductionRequiresSMTPAndForbidsOTPOutbox(t *testing.T) {
 	}
 }
 
-func TestLoadConfigProductionRejectsDebugUI(t *testing.T) {
-	clearCloudEnv(t)
-	_, err := LoadConfig(writeCloudConfig(t, `{`+validProductionConfig(t)+`,"enable_debug_ui":true}`))
-	if err == nil || !strings.Contains(err.Error(), "production forbids enable_debug_ui") {
-		t.Fatalf("expected debug UI validation error, got %v", err)
-	}
-	for _, secret := range []string{"secret-db", "secret-worker-token", "secret-bootstrap-key", "secret-alert-token", "secret-client"} {
-		if strings.Contains(err.Error(), secret) {
-			t.Fatalf("validation error leaked sensitive config value %q: %q", secret, err)
-		}
-	}
-}
-
-func TestLoadConfigProductionDebugUIDisabledPasses(t *testing.T) {
-	clearCloudEnv(t)
-	cfg, err := LoadConfig(writeCloudConfig(t, `{`+validProductionConfig(t)+`,"enable_debug_ui":false}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.EnableDebugUI {
-		t.Fatal("production debug UI must stay disabled")
-	}
-}
-
-func TestLoadConfigNonProductionDebugUIExplicitlyEnabledPasses(t *testing.T) {
-	clearCloudEnv(t)
-	cfg, err := LoadConfig(writeCloudConfig(t, `{"enable_debug_ui":true}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.EnableDebugUI {
-		t.Fatal("non-production explicit debug UI should remain enabled")
-	}
-}
-
-func TestLoadConfigRejectsUnsignedWebhookRoute(t *testing.T) {
-	clearCloudEnv(t)
-	data := `{"routes":[{"project_id":"proj-1","service_id":"svc-1","repo_full_name":"example/api","branch":"main"}]}`
-	if _, err := LoadConfig(writeCloudConfig(t, data)); err == nil || !strings.Contains(err.Error(), "webhook_secret") {
-		t.Fatalf("unsigned webhook route error=%v", err)
-	}
-}
-
-func TestLoadConfigDefaultDoesNotEnableDebugUI(t *testing.T) {
-	clearCloudEnv(t)
-	cfg, err := LoadConfig("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.EnableDebugUI {
-		t.Fatal("default config must not enable debug UI")
+func TestLoadConfigRejectsRetiredDeliveryKeys(t *testing.T) {
+	for _, data := range []string{
+		`{"enable_debug_ui":true}`,
+		`{"enable_debug_ui":false}`,
+		`{"routes":[]}`,
+		`{"routes":[{"webhook_secret":"retired"}]}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			clearCloudEnv(t)
+			_, err := LoadConfig(writeCloudConfig(t, data))
+			if err == nil || !strings.Contains(err.Error(), "removed") {
+				t.Fatalf("retired delivery config error=%v", err)
+			}
+		})
 	}
 }
 
@@ -568,7 +522,6 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 		"OPSI_CLOUD_DATABASE_URL":             "postgres://env.example/opsi",
 		"OPSI_CLOUD_PUBLIC_BASE_URL":          "http://cloud.example.test",
 		"OPSI_CLOUD_PRODUCTION":               "false",
-		"OPSI_CLOUD_ENABLE_DEBUG_UI":          "true",
 		"OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES": "true",
 		"OPSI_CLOUD_OTP_DEV_ECHO":             "true",
 		"OPSI_CLOUD_OTP_OUTBOX_PATH":          "/tmp/otp.log",
@@ -770,15 +723,12 @@ func TestConfigHasNoRuntimeAuthField(t *testing.T) {
 	}
 }
 
-func TestLoadConfigParsesBooleanEnvironment(t *testing.T) {
+func TestLoadConfigRejectsRetiredDebugUIEnvironment(t *testing.T) {
 	clearCloudEnv(t)
-	t.Setenv("OPSI_CLOUD_ENABLE_DEBUG_UI", "true")
-	cfg, err := LoadConfig("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.EnableDebugUI {
-		t.Fatal("expected enable debug UI environment override")
+	t.Setenv("OPSI_CLOUD_ENABLE_DEBUG_UI", "false")
+	_, err := LoadConfig("")
+	if err == nil || !strings.Contains(err.Error(), "OPSI_CLOUD_ENABLE_DEBUG_UI") {
+		t.Fatalf("retired debug UI environment error=%v", err)
 	}
 }
 
@@ -797,15 +747,6 @@ func TestLoadConfigRejectsInvalidDurationEnvironment(t *testing.T) {
 	_, err := LoadConfig("")
 	if err == nil || !strings.Contains(err.Error(), "OPSI_CLOUD_TTL") {
 		t.Fatalf("invalid duration error=%v", err)
-	}
-}
-
-func TestLoadConfigValidatesProductionAfterEnvironmentOverride(t *testing.T) {
-	clearCloudEnv(t)
-	path := writeCloudConfig(t, `{`+validProductionConfig(t)+`,"enable_debug_ui":true}`)
-	t.Setenv("OPSI_CLOUD_ENABLE_DEBUG_UI", "false")
-	if _, err := LoadConfig(path); err != nil {
-		t.Fatalf("environment override should run before production validation: %v", err)
 	}
 }
 

@@ -262,15 +262,11 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			return
 		}
 		var req struct {
-			RequestedBy string `json:"requested_by"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if req.RequestedBy == "" {
-			req.RequestedBy = principal.UserID
-		}
-		value, err := s.Registry.RollbackDeployment(projectID, parts[3], req.RequestedBy, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"))
+		value, err := s.Registry.RollbackDeployment(projectID, parts[3], principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"))
 		if err == nil {
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "DEPLOYMENT_ROLLBACK_STARTED", "deployment_job", value.ID, "success", map[string]any{"source_deployment_id": parts[3], "service_id": value.ServiceID})
 		}
@@ -557,35 +553,6 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "SERVICE_CREATED", "service", value.ID, "success", map[string]any{"type": value.Type})
 		}
 		writeRegistryResult(w, r, value, err, http.StatusCreated)
-		return
-	}
-	if len(parts) == 5 && parts[2] == "services" && parts[4] == "deployments" && r.Method == http.MethodPost {
-		if !requireWriteHeaders(w, r) {
-			return
-		}
-		if !s.requireRole(w, r, principal, projectID, "deployment_job", parts[3], "owner", "admin", "developer") {
-			return
-		}
-		if !s.limits.Allow("deploy:"+projectID, 60, time.Minute) {
-			s.observer.Inc("rate_limited_total")
-			writeRegistryError(w, registry.APIError{Status: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "deployment rate limit exceeded", RequestID: r.Header.Get("X-Request-ID")})
-			return
-		}
-		var req struct {
-			RequestedBy string `json:"requested_by"`
-		}
-		if !decodeJSON(w, r, &req) {
-			return
-		}
-		if req.RequestedBy == "" {
-			req.RequestedBy = principal.UserID
-		}
-		value, err := s.Registry.StartDeployment(projectID, parts[3], req.RequestedBy, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"))
-		if err == nil {
-			s.observer.Inc("deployment_jobs_total")
-			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "DEPLOYMENT_STARTED", "deployment_job", value.ID, "success", map[string]any{"service_id": value.ServiceID})
-		}
-		writeRegistryResult(w, r, value, err, http.StatusAccepted)
 		return
 	}
 	http.NotFound(w, r)

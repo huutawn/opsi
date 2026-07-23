@@ -25,11 +25,9 @@ type Config struct {
 	DatabaseURL            string            `json:"database_url"`
 	PublicBaseURL          string            `json:"public_base_url"`
 	Production             bool              `json:"production"`
-	EnableDebugUI          bool              `json:"enable_debug_ui"`
 	OTP                    OTPConfig         `json:"otp"`
 	SMTP                   SMTPConfig        `json:"smtp"`
 	Alerts                 AlertConfig       `json:"alerts"`
-	Routes                 []Route           `json:"routes"`
 	BootstrapWorkerToken   string            `json:"bootstrap_worker_token"`
 	BootstrapSecretKey     string            `json:"bootstrap_secret_key"`
 	RequireAgentSignatures bool              `json:"require_agent_signatures"`
@@ -77,17 +75,6 @@ func (c GitHubAppConfig) InstallationEnabled() bool {
 	return c.AppID != 0 || c.PrivateKeyPath != "" || c.WebhookSecret != ""
 }
 
-type Route struct {
-	ProjectID     string `json:"project_id"`
-	ServiceID     string `json:"service_id"`
-	ServiceName   string `json:"service_name"`
-	ServiceType   string `json:"service_type"`
-	RepoURL       string `json:"repo_url"`
-	RepoFullName  string `json:"repo_full_name"`
-	Branch        string `json:"branch"`
-	WebhookSecret string `json:"webhook_secret"`
-}
-
 type Duration time.Duration
 
 func LoadConfig(path string) (Config, error) {
@@ -109,6 +96,9 @@ func LoadConfig(path string) (Config, error) {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return Config{}, fmt.Errorf("parse cloud config: %w", err)
 		}
+		if err := rejectRetiredDeliveryJSON(data); err != nil {
+			return Config{}, err
+		}
 		if err := rejectLegacyAuthJSON(data); err != nil {
 			return Config{}, err
 		}
@@ -125,6 +115,9 @@ func LoadConfig(path string) (Config, error) {
 func applyEnvOverrides(cfg *Config) error {
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
+		if name == "OPSI_CLOUD_ENABLE_DEBUG_UI" {
+			return fmt.Errorf("%s has been removed with the Cloud debug UI", name)
+		}
 		if strings.HasPrefix(name, legacyAuthEnvPrefix) {
 			return fmt.Errorf("%s is no longer supported; use OPSI_CLOUD_GITHUB_APP_*", name)
 		}
@@ -137,9 +130,6 @@ func applyEnvOverrides(cfg *Config) error {
 	}
 	applyStringEnv("OPSI_CLOUD_PUBLIC_BASE_URL", &cfg.PublicBaseURL)
 	if err := applyBoolEnv("OPSI_CLOUD_PRODUCTION", &cfg.Production); err != nil {
-		return err
-	}
-	if err := applyBoolEnv("OPSI_CLOUD_ENABLE_DEBUG_UI", &cfg.EnableDebugUI); err != nil {
 		return err
 	}
 	if err := applyBoolEnv("OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES", &cfg.RequireAgentSignatures); err != nil {
@@ -328,17 +318,6 @@ func validateConfig(cfg *Config) error {
 	if cfg.Placement.ReservedMemoryBytes < 0 || cfg.Placement.ReservedMemoryBytes > 1<<50 {
 		return fmt.Errorf("placement.reserved_memory_bytes is outside bounded values")
 	}
-	for i, route := range cfg.Routes {
-		if route.ProjectID == "" || route.ServiceID == "" || route.RepoFullName == "" || route.Branch == "" {
-			return fmt.Errorf("routes[%d] requires project_id, service_id, repo_full_name and branch", i)
-		}
-		if len(route.WebhookSecret) < 32 {
-			return fmt.Errorf("routes[%d].webhook_secret must contain at least 32 bytes", i)
-		}
-		if cfg.Production && isProductionPlaceholder(route.WebhookSecret) {
-			return fmt.Errorf("production routes[%d].webhook_secret must not use a placeholder", i)
-		}
-	}
 	if cfg.Production {
 		if cfg.DatabaseURL == "" {
 			return fmt.Errorf("production requires database_url")
@@ -360,9 +339,6 @@ func validateConfig(cfg *Config) error {
 		}
 		if cfg.SMTP.Host == "" || cfg.SMTP.Port == "" || cfg.SMTP.From == "" {
 			return fmt.Errorf("production requires smtp host, port and from")
-		}
-		if cfg.EnableDebugUI {
-			return fmt.Errorf("production forbids enable_debug_ui")
 		}
 		if !cfg.RequireAgentSignatures {
 			return fmt.Errorf("production requires require_agent_signatures=true")
@@ -462,6 +438,19 @@ func rejectLegacyAuthJSON(data []byte) error {
 	var legacy map[string]json.RawMessage
 	if err := json.Unmarshal(envelope.Auth, &legacy); err == nil && len(legacy) > 0 {
 		return fmt.Errorf("legacy auth config is no longer supported; use github_app")
+	}
+	return nil
+}
+
+func rejectRetiredDeliveryJSON(data []byte) error {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(data, &values); err != nil {
+		return nil
+	}
+	for _, key := range []string{"routes", "enable_debug_ui"} {
+		if _, exists := values[key]; exists {
+			return fmt.Errorf("%s has been removed with the legacy relay/debug delivery surfaces", key)
+		}
 	}
 	return nil
 }

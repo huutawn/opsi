@@ -8,10 +8,6 @@ service StatusService {
   rpc Status(StatusRequest) returns (StatusResponse);
 }
 
-service DeploymentService {
-  rpc Deploy(DeployRequest) returns (stream ProgressEvent);
-}
-
 service ServiceManagerService {
   rpc ListCatalog(ListCatalogRequest) returns (ListCatalogResponse);
   rpc CreateManagedService(CreateManagedServiceRequest) returns (ManagedServiceResponse);
@@ -41,60 +37,15 @@ service IncidentService {
 message StatusRequest {}
 
 message StatusResponse {
+	reserved 7;
+	reserved "errors";
+
   string version = 1;
   int64 uptime_seconds = 2;
   string node_id = 3;
   string health = 4;
   bool cloud_connected = 5;
   int64 started_at_unix = 6;
-  repeated ServiceError errors = 7;
-}
-
-message ServiceError {
-  ErrorCode code = 1;
-  string message = 2;
-}
-
-message ProgressEvent {
-  string operation_id = 1;
-  string phase = 2;
-  string message = 3;
-  int32 percent = 4;
-  ServiceError error = 5;
-  string project_id = 6;
-  string service_id = 7;
-  string service_name = 8;
-}
-
-message DeployRequest {
-  reserved 19;
-  reserved "ingress_enabled";
-
-  string project_id = 1;
-  string service_id = 2;
-  string service_name = 3;
-  string service_type = 4;
-  string repo_url = 5;
-  string branch = 6;
-  string git_sha = 7;
-  string namespace = 8;
-  string build_context = 9;
-  string dockerfile = 10;
-  string manifest_path = 11;
-  string registry = 12;
-  string image_tag = 13;
-  string triggered_by = 14;
-  repeated string watch_paths = 15;
-  int32 termination_grace_period_seconds = 16;
-  string resource_requests_json = 17;
-  string resource_limits_json = 18;
-  repeated ServiceDependency depends_on = 20;
-}
-
-message ServiceDependency {
-  string name = 1;
-  string env_prefix = 2;
-  bool expose_as_default = 3;
 }
 
 message ListCatalogRequest {}
@@ -317,14 +268,4 @@ message IncidentResponse {
   int64 created_at_unix = 9;
   int64 resolved_at_unix = 10;
   int64 mttr_seconds = 11;
-}
-
-enum ErrorCode {
-  ERROR_CODE_UNSPECIFIED = 0;
-  ERROR_CODE_AUTH_FAILED = 1;
-  ERROR_CODE_UNAVAILABLE = 2;
-  ERROR_CODE_INVALID_INPUT = 3;
-  ERROR_CODE_TIMEOUT = 4;
-  ERROR_CODE_PERMISSION_DENIED = 5;
-  ERROR_CODE_INTERNAL = 6;
 }

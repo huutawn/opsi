@@ -1,15 +1,23 @@
 package cloudrunner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
-const MaxHealthProbeTimeout = 5 * time.Second
+const (
+	MaxHealthProbeTimeout     = 5 * time.Second
+	MaxHealthCommandOutputLen = 256 * 1024
+)
+
+var errHealthCommandOutputExceeded = errors.New("health command output exceeded the allowed bound")
 
 const (
 	K3SStatusReady       = "ready"
@@ -33,7 +41,58 @@ type HealthCommandRunner interface {
 type ExecHealthCommandRunner struct{}
 
 func (ExecHealthCommandRunner) Run(ctx context.Context, executable string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, executable, args...).Output()
+	commandCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	output := &boundedHealthOutput{limit: MaxHealthCommandOutputLen, cancel: cancel}
+	cmd := exec.CommandContext(commandCtx, executable, args...)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	if output.Exceeded() {
+		return nil, errHealthCommandOutputExceeded
+	}
+	if err != nil {
+		return nil, errors.New("health command failed")
+	}
+	return output.Bytes(), nil
+}
+
+type boundedHealthOutput struct {
+	mu       sync.Mutex
+	buffer   bytes.Buffer
+	limit    int
+	exceeded bool
+	cancel   context.CancelFunc
+}
+
+func (b *boundedHealthOutput) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.exceeded {
+		return len(data), io.ErrShortWrite
+	}
+	remaining := b.limit - b.buffer.Len()
+	if len(data) > remaining {
+		b.exceeded = true
+		if b.cancel != nil {
+			b.cancel()
+		}
+		return len(data), io.ErrShortWrite
+	}
+	_, _ = b.buffer.Write(data)
+	return len(data), nil
+}
+
+func (b *boundedHealthOutput) Exceeded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.exceeded
+}
+
+func (b *boundedHealthOutput) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buffer.Bytes()...)
 }
 
 type KubernetesHealthProbe struct {

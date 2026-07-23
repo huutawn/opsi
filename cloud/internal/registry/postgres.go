@@ -1024,64 +1024,6 @@ func (s PostgresService) CreateService(projectID string, draft ServiceDraft, key
 	return record, tx.Commit()
 }
 
-func (s PostgresService) StartDeployment(projectID, serviceID, requestedBy, key, requestID string) (DeploymentJob, error) {
-	ctx := context.Background()
-	scope := "deploy:" + projectID + ":" + serviceID
-	if id, ok, err := s.idempotentResource(ctx, scope, key); err != nil || ok {
-		if err != nil {
-			return DeploymentJob{}, err
-		}
-		return s.getDeployment(ctx, id)
-	}
-	readiness, err := s.ProjectReadiness(projectID)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	if !readiness.CanDeploy {
-		return DeploymentJob{}, APIError{Status: 409, Code: "PROJECT_NOT_READY", Message: "Add a healthy server before deploying services.", NextAction: readiness.NextAction, RequestID: requestID}
-	}
-	service, err := s.getService(ctx, serviceID)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	if service.ProjectID != projectID {
-		return DeploymentJob{}, ErrNotFound
-	}
-	if err := validateServiceForDeploy(service, requestID); err != nil {
-		return DeploymentJob{}, err
-	}
-	node, agent, err := s.deployAgent(ctx, projectID, service.RuntimeID, requestID)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	now := s.clock()
-	previous, err := s.previousSuccessful(ctx, projectID, serviceID)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	job := deploymentJobForPlan(service, previous, node, agent, key, requestedBy, now)
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	defer tx.Rollback()
-	if err := insertDeployment(ctx, tx, job); err != nil {
-		return DeploymentJob{}, err
-	}
-	if err := acquireDeploymentLock(ctx, tx, projectID, serviceID, job.ID, now, requestID); err != nil {
-		return DeploymentJob{}, err
-	}
-	for _, event := range deploymentQueuedEvents(job, requestID, now) {
-		if err := insertDeploymentEvent(ctx, tx, event); err != nil {
-			return DeploymentJob{}, err
-		}
-	}
-	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
-		return DeploymentJob{}, err
-	}
-	return job, tx.Commit()
-}
-
 func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, requestedBy, key, requestID string) (DeploymentJob, bool, error) {
 	ctx := context.Background()
 	if !validDeploymentIdempotencyKey(key) {
@@ -1220,6 +1162,9 @@ func (s PostgresService) RollbackDeployment(projectID, deploymentID, requestedBy
 	if source.ProjectID != projectID {
 		return DeploymentJob{}, ErrNotFound
 	}
+	if !isProductionDeploymentMode(source.Mode) {
+		return DeploymentJob{}, legacyDeploymentRetiredError(requestID)
+	}
 	if !source.RollbackEligible {
 		reason := source.RollbackBlockedReason
 		if reason == "" {
@@ -1263,37 +1208,7 @@ func (s PostgresService) RollbackDeployment(projectID, deploymentID, requestedBy
 		}
 		return job, tx.Commit()
 	}
-	service, err := s.getService(ctx, source.ServiceID)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	node, agent, err := s.deployAgent(ctx, projectID, service.RuntimeID, requestID)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	now := s.clock()
-	job := deploymentJobForPlan(service, source, node, agent, key, requestedBy, now)
-	job.Status = DeploymentRollingBack
-	job.Action = "rollback"
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return DeploymentJob{}, err
-	}
-	defer tx.Rollback()
-	if err := insertDeployment(ctx, tx, job); err != nil {
-		return DeploymentJob{}, err
-	}
-	if err := acquireDeploymentLock(ctx, tx, projectID, service.ID, job.ID, now, requestID); err != nil {
-		return DeploymentJob{}, err
-	}
-	event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: DeploymentRollingBack, MessageRedacted: "rollback queued", ProgressPercent: 0, RequestID: requestID, CreatedAt: now}
-	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
-		return DeploymentJob{}, err
-	}
-	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
-		return DeploymentJob{}, err
-	}
-	return job, tx.Commit()
+	return DeploymentJob{}, APIError{Status: 409, Code: "ROLLBACK_NOT_AVAILABLE", Message: "immutable image jobs require a durable rollout snapshot before rollback", RequestID: requestID}
 }
 
 func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error) {
@@ -1307,7 +1222,21 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	if err := expireDeploymentLeases(ctx, tx, projectID, now); err != nil {
 		return DeploymentLease{}, false, err
 	}
-	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4,$5) AND (retry_after IS NULL OR retry_after <= $6) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack, deploymentv1.StateQueued, now))
+	legacy, legacyErr := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id=$1 AND node_id=$2 AND status IN ($3,$4) AND (mode IS NULL OR mode NOT IN ('immutable_image','rollout')) ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack))
+	if legacyErr == nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status=$1, failure_code=$2, failure_message_redacted=$3, lease_token=NULL, lease_expires_at=NULL, retry_after=NULL, finished_at=$4, updated_at=$4 WHERE id=$5`, DeploymentFailed, LegacyDeploymentRetired, "legacy deployment jobs are retired", now, legacy.ID); err != nil {
+			return DeploymentLease{}, false, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id=$1 AND deployment_id=$2`, legacy.ServiceID, legacy.ID); err != nil {
+			return DeploymentLease{}, false, err
+		}
+		if err := insertDeploymentEvent(ctx, tx, DeploymentEvent{ID: newID("depevt"), OrgID: legacy.OrgID, ProjectID: legacy.ProjectID, DeploymentID: legacy.ID, ServiceID: legacy.ServiceID, Level: "error", Step: DeploymentFailed, MessageRedacted: "legacy deployment jobs are retired", ProgressPercent: 100, CreatedAt: now}); err != nil {
+			return DeploymentLease{}, false, err
+		}
+	} else if !errors.Is(legacyErr, sql.ErrNoRows) {
+		return DeploymentLease{}, false, legacyErr
+	}
+	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4,$5) AND mode IN ('immutable_image','rollout') AND (retry_after IS NULL OR retry_after <= $6) ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack, deploymentv1.StateQueued, now))
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
 			return DeploymentLease{}, false, err
@@ -1325,11 +1254,7 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 		action = job.Action
 	}
 	leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
-	if isProductionDeploymentMode(job.Mode) {
-		job.Status = deploymentv1.StateLeased
-	} else {
-		job.Status = DeploymentWaitingAgent
-	}
+	job.Status = deploymentv1.StateLeased
 	job.Action = action
 	job.AttemptCount++
 	if job.MaxAttempts == 0 {
@@ -1346,12 +1271,10 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 		return DeploymentLease{}, false, err
 	}
 	event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: now}
-	if isProductionDeploymentMode(job.Mode) {
-		event.SchemaVersion = deploymentv1.EventSchemaVersion
-		event.Step = deploymentv1.StateLeased
-		event.ProgressPercent = 10
-		event.Attempt = job.AttemptCount
-	}
+	event.SchemaVersion = deploymentv1.EventSchemaVersion
+	event.Step = deploymentv1.StateLeased
+	event.ProgressPercent = 10
+	event.Attempt = job.AttemptCount
 	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 		return DeploymentLease{}, false, err
 	}
@@ -1381,6 +1304,9 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	}
 	if job.ProjectID != projectID || job.NodeID != nodeID {
 		return DeploymentJob{}, ErrNotFound
+	}
+	if !isProductionDeploymentMode(job.Mode) {
+		return DeploymentJob{}, legacyDeploymentRetiredError(requestID)
 	}
 	if deploymentTerminalStatus(job.Status) && job.Mode != "rollout" || job.Mode == "rollout" && job.TerminalResult != nil {
 		if job.Mode != "rollout" {
@@ -1634,11 +1560,14 @@ func (s PostgresService) RetryDeployment(projectID, deploymentID, key, requestID
 		return DeploymentJob{}, false, err
 	}
 	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 FOR UPDATE`, deploymentID))
-	if errors.Is(err, sql.ErrNoRows) || err == nil && (job.ProjectID != projectID || !isProductionDeploymentMode(job.Mode)) {
+	if errors.Is(err, sql.ErrNoRows) || err == nil && job.ProjectID != projectID {
 		return DeploymentJob{}, false, ErrNotFound
 	}
 	if err != nil {
 		return DeploymentJob{}, false, err
+	}
+	if !isProductionDeploymentMode(job.Mode) {
+		return DeploymentJob{}, false, legacyDeploymentRetiredError(requestID)
 	}
 	scope := "deploy-retry:v1:" + projectID
 	var existingID string
@@ -1837,14 +1766,6 @@ func scanNodeLifecycle(row rowScanner) (NodeLifecycleJob, error) {
 	j.LeaseExpiresAt = nullTimePtr(leaseExpiresAt)
 	j.FinishedAt = nullTimePtr(finished)
 	return j, err
-}
-
-func (s PostgresService) previousSuccessful(ctx context.Context, projectID, serviceID string) (DeploymentJob, error) {
-	d, err := scanDeployment(s.DB.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND service_id = $2 AND status = $3 ORDER BY created_at DESC LIMIT 1`, projectID, serviceID, DeploymentSucceeded))
-	if errors.Is(err, sql.ErrNoRows) {
-		return DeploymentJob{}, nil
-	}
-	return d, err
 }
 
 func (s PostgresService) deployAgent(ctx context.Context, projectID, runtimeID, requestID string) (Node, Agent, error) {

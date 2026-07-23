@@ -1,6 +1,6 @@
 # Opsi Cloud
 
-Opsi Cloud is the durable control-plane and identity boundary. It does not run workloads or store raw Agent logs/metrics. With PostgreSQL configured it owns organization/project membership, PAT/OAuth identity linkage, OTP requests, node/Agent registration, bootstrap/deployment queues, webhook relay metadata, idempotency, rate limits, and append-only audit events.
+Opsi Cloud is the durable control-plane and identity boundary. It does not run workloads or store raw Agent logs/metrics. With PostgreSQL configured it owns organization/project membership, PAT/OAuth identity linkage, OTP requests, node/Agent registration, bootstrap and immutable deployment jobs, GitHub App inventory, idempotency, rate limits, and append-only audit events.
 
 ## Authentication currently implemented
 
@@ -30,8 +30,9 @@ remain in memory. The flow has not yet been exercised against a real GitHub App.
 
 - Registry APIs for organizations, projects, memberships, nodes, services, bootstrap sessions, deployments, node lifecycle jobs, GitHub inventory, repository claims, and service bindings.
 - Durable PostgreSQL migrations and stores when `database_url` is set.
-- Legacy GitHub push intake at `/v1/webhooks/github` retains route-specific SHA-256 HMAC verification and sanitized Agent relay behavior. Every configured route requires its own webhook secret of at least 32 bytes.
 - GitHub App intake at `/v1/webhooks/github-app` uses the separate App-wide webhook secret, verifies `X-Hub-Signature-256` before JSON decoding, and parses typed `installation`, `installation_repositories`, and `repository` mutations. Unknown events/actions are ignored with `202`. Supported mutations atomically insert the delivery ID and apply inventory changes in one registry transaction; PostgreSQL uniqueness deduplicates delivery after Cloud restart. The bounded P08 in-memory replay store remains as the fast in-process layer.
+- GitHub Actions OIDC BuildRecord submission is the only build handoff. Immutable deployment creation resolves the accepted BuildRecord and active topology/policy/routing snapshot before persisting a durable job; Agents receive only the resulting immutable command through the existing PollJob transport.
+- Historical relay/deployment tables remain for restore and read compatibility. Runtime code does not enqueue, claim, or lease legacy relay jobs.
 - Numeric GitHub installation, account, repository, and owner IDs are authoritative. Installations and repositories are statused rather than physically deleted. One active repository claim belongs to one project; a repository may bind multiple services in that project through distinct service keys, while each service has at most one active GitHub binding. Bindings never target Agent, Node, runtime, or VPS identity.
 - Bootstrap session credential handoff. PostgreSQL mode encrypts SSH credentials and one-time Agent registration tokens with AES-GCM using `bootstrap_secret_key`.
 - Health and Prometheus metrics endpoints.
