@@ -451,6 +451,23 @@ LOCAL_CONTROL_PLANE_UI_PASS`. R5-011 itself remains partial: no DNS,
 certificate provisioning, live Agent/VPS mutation, public endpoint, or
 R5-011.4 acceptance was performed.
 
+R5-011-S1 now repairs the Agent trust boundary and runtime-health truth locally.
+PAT verification uses the Cloud Bearer contract with a project-only body and
+digest-keyed, expiry-bounded cache. Secret and incident RPCs derive authority
+from verified Bearer metadata; caller-provided user, role, and PAT fields are
+removed from public requests and rejected by the Local API, while the CLI and
+UI use protected local credentials without exposing authority controls.
+Heartbeat and status health use a bounded direct-argv kubectl probe for K3s API
+readiness and Kubernetes node conditions. Failures are reported as factual
+`not_ready`/`unavailable` runtime state and disable deployment capability;
+Cloud connectivity remains a separate field. Node's built-in UI source tests
+are included in `make verify`.
+
+Checkpoint: `R5-011-S1 — TRUST_BOUNDARY_AND_HEALTH_TRUTH_PASS`. This is local
+code verification only: no VPS/live exposure proof was performed, R5-011
+remains `PARTIAL`, R5-011.4 has not started, and legacy deployment cleanup was
+not performed. No Cloud, MCP, AI, or staging change is claimed.
+
 ## E2E and production evidence
 
 `scripts/e2e/verify-k3s.sh`, `make verify-e2e-k3s-preflight`, and

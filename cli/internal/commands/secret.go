@@ -19,8 +19,6 @@ type secretFlags struct {
 	serviceID    string
 	name         string
 	namespace    string
-	userID       string
-	role         string
 	patFile      string
 	otpFile      string
 	otpRequestID string
@@ -28,7 +26,7 @@ type secretFlags struct {
 }
 
 func newSecretCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
-	flags := &secretFlags{role: "Owner"}
+	flags := &secretFlags{}
 	cmd := &cobra.Command{Use: "secret", Short: "Manage Agent/K3s secrets"}
 	cmd.AddCommand(newSecretSetupTOTPCommand(configPath, factory, flags))
 	cmd.AddCommand(newSecretMutationCommand(configPath, factory, flags, "create", "Create generated service credentials", func(ctx context.Context, client *agentclient.Client, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
@@ -48,8 +46,8 @@ func newSecretSetupTOTPCommand(configPath *string, factory func() (keychain.Stor
 		Use:   "setup-totp",
 		Short: "Create local TOTP fallback setup URI",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if flags.projectID == "" || flags.userID == "" {
-				return fmt.Errorf("project-id and user-id are required")
+			if flags.projectID == "" {
+				return fmt.Errorf("project-id is required")
 			}
 			cfg, err := config.Load(*configPath)
 			if err != nil {
@@ -61,9 +59,10 @@ func newSecretSetupTOTPCommand(configPath *string, factory func() (keychain.Stor
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 			defer cancel()
-			resp, err := agentclient.New(cfg).SetupTOTP(ctx, &agentv1.SetupTOTPRequest{ProjectID: flags.projectID, UserID: flags.userID, Role: flags.role, PAT: pat})
+			ctx = agentclient.WithPAT(ctx, pat)
+			resp, err := agentclient.New(cfg).SetupTOTP(ctx, &agentv1.SetupTOTPRequest{ProjectID: flags.projectID})
 			if err != nil {
-				return err
+				return redactPATError(err, pat)
 			}
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
 		},
@@ -77,8 +76,8 @@ func newSecretMutationCommand(configPath *string, factory func() (keychain.Store
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if flags.projectID == "" || flags.serviceID == "" || flags.name == "" || flags.userID == "" {
-				return fmt.Errorf("project-id, service-id, name and user-id are required")
+			if flags.projectID == "" || flags.serviceID == "" || flags.name == "" {
+				return fmt.Errorf("project-id, service-id and name are required")
 			}
 			cfg, err := config.Load(*configPath)
 			if err != nil {
@@ -98,10 +97,11 @@ func newSecretMutationCommand(configPath *string, factory func() (keychain.Store
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 			defer cancel()
-			req := &agentv1.SecretRequest{ProjectID: flags.projectID, ServiceID: flags.serviceID, Name: flags.name, Namespace: flags.namespace, UserID: flags.userID, Role: flags.role, PAT: pat, OTPCode: otp, OTPRequestID: flags.otpRequestID, TOTPCode: totp}
+			ctx = agentclient.WithPAT(ctx, pat)
+			req := &agentv1.SecretRequest{ProjectID: flags.projectID, ServiceID: flags.serviceID, Name: flags.name, Namespace: flags.namespace, OTPCode: otp, OTPRequestID: flags.otpRequestID, TOTPCode: totp}
 			resp, err := call(ctx, agentclient.New(cfg), req)
 			if err != nil {
-				return err
+				return redactPATError(err, pat)
 			}
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
 		},
@@ -118,9 +118,14 @@ func newSecretMutationCommand(configPath *string, factory func() (keychain.Store
 
 func addSecretAuthFlags(cmd *cobra.Command, flags *secretFlags) {
 	cmd.Flags().StringVar(&flags.projectID, "project-id", "", "project id")
-	cmd.Flags().StringVar(&flags.userID, "user-id", "", "user id")
-	cmd.Flags().StringVar(&flags.role, "role", flags.role, "project role: Owner, Developer, Viewer")
 	cmd.Flags().StringVar(&flags.patFile, "pat-file", "", "protected PAT file; defaults to OS keychain")
+}
+
+func redactPATError(err error, pat string) error {
+	if err == nil || pat == "" {
+		return err
+	}
+	return fmt.Errorf("%s", strings.ReplaceAll(err.Error(), pat, "[REDACTED]"))
 }
 
 func resolvePAT(path string, factory func() (keychain.Store, error)) (string, error) {

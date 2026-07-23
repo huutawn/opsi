@@ -32,22 +32,27 @@ type StatusService struct {
 	startedAt      time.Time
 	cfg            config.Config
 	cloudConnected func() bool
+	healthProbe    cloudrunner.HealthProbe
 }
 
-func NewStatusService(version string, startedAt time.Time, cfg config.Config, cloudConnected ...func() bool) *StatusService {
-	connected := func() bool { return false }
-	if len(cloudConnected) > 0 && cloudConnected[0] != nil {
-		connected = cloudConnected[0]
+func NewStatusService(version string, startedAt time.Time, cfg config.Config, cloudConnected func() bool, healthProbe ...cloudrunner.HealthProbe) *StatusService {
+	if cloudConnected == nil {
+		cloudConnected = func() bool { return false }
 	}
-	return &StatusService{version: version, startedAt: startedAt, cfg: cfg, cloudConnected: connected}
+	var probe cloudrunner.HealthProbe
+	if len(healthProbe) > 0 {
+		probe = healthProbe[0]
+	}
+	return &StatusService{version: version, startedAt: startedAt, cfg: cfg, cloudConnected: cloudConnected, healthProbe: probe}
 }
 
-func (s *StatusService) Status(context.Context, *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
+func (s *StatusService) Status(ctx context.Context, _ *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
+	health := cloudrunner.ProbeRuntime(ctx, s.healthProbe)
 	return &agentv1.StatusResponse{
 		Version:        s.version,
 		UptimeSeconds:  int64(time.Since(s.startedAt).Seconds()),
 		NodeID:         s.cfg.NodeID,
-		Health:         "ok",
+		Health:         statusHealth(health),
 		CloudConnected: s.cloudConnected(),
 		StartedAtUnix:  s.startedAt.Unix(),
 	}, nil
@@ -68,10 +73,12 @@ type TelemetryService struct {
 type SecretService struct {
 	cfg     config.Config
 	service *secret.Service
+	auth    secret.AuthVerifier
 }
 
 type IncidentService struct {
 	service *incident.Service
+	auth    secret.AuthVerifier
 }
 
 type ServiceManagerService struct {
@@ -84,12 +91,12 @@ func NewTelemetryService(store telemetry.Store, auth secret.AuthVerifier) *Telem
 	return &TelemetryService{store: store, auth: auth}
 }
 
-func NewSecretService(cfg config.Config, service *secret.Service) *SecretService {
-	return &SecretService{cfg: cfg, service: service}
+func NewSecretService(cfg config.Config, service *secret.Service, auth secret.AuthVerifier) *SecretService {
+	return &SecretService{cfg: cfg, service: service, auth: auth}
 }
 
-func NewIncidentService(service *incident.Service) *IncidentService {
-	return &IncidentService{service: service}
+func NewIncidentService(service *incident.Service, auth secret.AuthVerifier) *IncidentService {
+	return &IncidentService{service: service, auth: auth}
 }
 
 func NewServiceManagerService(store *svcatalog.Store, manager svcatalog.Manager, auth secret.AuthVerifier) *ServiceManagerService {
@@ -185,8 +192,11 @@ func (s *ServiceManagerService) DeleteManagedService(ctx context.Context, req *a
 }
 
 func (s *IncidentService) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	records, err := s.service.List(ctx, incident.ListRequest{ProjectID: req.ProjectID, Status: req.Status, Limit: int(req.Limit), UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer)
+	if err != nil {
+		return nil, err
+	}
+	records, err := s.service.List(ctx, incident.ListRequest{ProjectID: auth.ProjectID, Status: req.Status, Limit: int(req.Limit), UserID: auth.UserID, Role: string(auth.Role), PAT: auth.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
@@ -199,8 +209,11 @@ func (s *IncidentService) ListIncidents(ctx context.Context, req *agentv1.Incide
 }
 
 func (s *IncidentService) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, err := s.service.Get(ctx, incident.IncidentRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := s.service.Get(ctx, incident.IncidentRequest{ProjectID: auth.ProjectID, IncidentID: req.IncidentID, UserID: auth.UserID, Role: string(auth.Role), PAT: auth.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
@@ -208,8 +221,11 @@ func (s *IncidentService) GetIncident(ctx context.Context, req *agentv1.Incident
 }
 
 func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, err := s.service.Resolve(ctx, incident.ResolveRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := s.service.Resolve(ctx, incident.ResolveRequest{ProjectID: auth.ProjectID, IncidentID: req.IncidentID, UserID: auth.UserID, Role: string(auth.Role), PAT: auth.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
@@ -217,7 +233,11 @@ func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.Inci
 }
 
 func (s *SecretService) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
-	secretValue, uri, err := s.service.SetupTOTP(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: firstNonEmpty(req.PAT, bearerToken(ctx))})
+	auth, err := verifyRequestAuth(ctx, s.auth, req.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	secretValue, uri, err := s.service.SetupTOTP(ctx, auth)
 	if err != nil {
 		return nil, mapSecretError(err)
 	}
@@ -225,8 +245,11 @@ func (s *SecretService) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPReq
 }
 
 func (s *SecretService) CreateSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	value, err := s.service.Create(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg))
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	value, err := s.service.Create(ctx, auth, refFromSecretRequest(req, s.cfg))
 	if err != nil {
 		return nil, mapSecretError(err)
 	}
@@ -234,8 +257,11 @@ func (s *SecretService) CreateSecret(ctx context.Context, req *agentv1.SecretReq
 }
 
 func (s *SecretService) RevealSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	value, err := s.service.Reveal(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner)
+	if err != nil {
+		return nil, err
+	}
+	value, err := s.service.Reveal(ctx, auth, refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
 	if err != nil {
 		return nil, mapSecretError(err)
 	}
@@ -243,8 +269,11 @@ func (s *SecretService) RevealSecret(ctx context.Context, req *agentv1.SecretReq
 }
 
 func (s *SecretService) RotateSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	value, err := s.service.Rotate(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner)
+	if err != nil {
+		return nil, err
+	}
+	value, err := s.service.Rotate(ctx, auth, refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
 	if err != nil {
 		return nil, mapSecretError(err)
 	}
@@ -430,6 +459,10 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		return err
 	}
 	engine := deploy.NewEngine(store, engineCfg)
+	healthProbe := cloudrunner.KubernetesHealthProbe{
+		KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl"),
+		Runner:      cloudrunner.ExecHealthCommandRunner{},
+	}
 
 	grpcListener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -458,13 +491,13 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		grpcOptions = append(grpcOptions, grpc.UnaryInterceptor(statusAuthInterceptor(authVerifier(cfg), firstNonEmpty(cfg.CloudRelay.ProjectID, cfg.Deployment.ProjectID))))
 	}
 	grpcServer := grpc.NewServer(grpcOptions...)
-	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg, cloudConnection.Connected))
+	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg, cloudConnection.Connected, healthProbe))
 	authVerifier := authVerifier(cfg)
 	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine, authVerifier, serviceStore))
 	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
-	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore, authVerifier)))
-	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(telemetryStore, authVerifier)))
+	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore), authVerifier))
+	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(telemetryStore), authVerifier))
 
 	healthServer := &http.Server{
 		Handler:           healthHandler(version, startedAt, cfg, cloudConnection.Connected),
@@ -578,6 +611,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			PollInterval:      pollInterval,
 			LongPollWait:      longPollWait,
 			HeartbeatInterval: heartbeatInterval,
+			HealthProbe:       healthProbe,
 			ConnectionState:   cloudConnection,
 			Logger:            logger,
 		}
@@ -614,7 +648,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	return healthServer.Shutdown(shutdownCtx)
 }
 
-func secretService(cfg config.Config, audit secret.AuditSink, auth secret.AuthVerifier) *secret.Service {
+func secretService(cfg config.Config, audit secret.AuditSink) *secret.Service {
 	timeout := 10 * time.Second
 	if cfg.Secret.CloudOTPTimeout != "" {
 		if parsed, err := time.ParseDuration(cfg.Secret.CloudOTPTimeout); err == nil {
@@ -629,7 +663,6 @@ func secretService(cfg config.Config, audit secret.AuditSink, auth secret.AuthVe
 	return &secret.Service{
 		Store:            store,
 		TOTPStore:        store,
-		Auth:             auth,
 		Audit:            audit,
 		OTP:              secret.HTTPOTPClient{Endpoint: cfg.CloudEndpoint},
 		Encryption:       secret.StaticEncryptionVerifier(cfg.Secret.EncryptionAtRestConfirmed),
@@ -668,9 +701,9 @@ func statusAuthInterceptor(verifier secret.AuthVerifier, projectID string) grpc.
 }
 
 func authorize(ctx context.Context, verifier secret.AuthVerifier, projectID string, allowed ...secret.Role) (secret.AuthContext, error) {
-	verified, err := verifier.VerifyAuth(ctx, secret.AuthContext{ProjectID: projectID, PAT: bearerToken(ctx)})
+	verified, err := verifyRequestAuth(ctx, verifier, projectID)
 	if err != nil {
-		return secret.AuthContext{}, status.Error(codes.Unauthenticated, err.Error())
+		return secret.AuthContext{}, err
 	}
 	if err := secret.RequireRole(verified, allowed...); err != nil {
 		return secret.AuthContext{}, status.Error(codes.PermissionDenied, err.Error())
@@ -678,8 +711,22 @@ func authorize(ctx context.Context, verifier secret.AuthVerifier, projectID stri
 	return verified, nil
 }
 
-func authFromSecretRequest(req *agentv1.SecretRequest) secret.AuthContext {
-	return secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT}
+func verifyRequestAuth(ctx context.Context, verifier secret.AuthVerifier, projectID string) (secret.AuthContext, error) {
+	if projectID == "" {
+		return secret.AuthContext{}, status.Error(codes.InvalidArgument, "project_id is required")
+	}
+	if verifier == nil {
+		return secret.AuthContext{}, status.Error(codes.Unauthenticated, "Agent authentication is unavailable")
+	}
+	pat := bearerToken(ctx)
+	if pat == "" {
+		return secret.AuthContext{}, status.Error(codes.Unauthenticated, "Authorization Bearer token is required")
+	}
+	verified, err := verifier.VerifyAuth(ctx, secret.AuthContext{ProjectID: projectID, PAT: pat})
+	if err != nil {
+		return secret.AuthContext{}, status.Error(codes.Unauthenticated, "Agent authentication failed")
+	}
+	return verified, nil
 }
 
 func bearerToken(ctx context.Context) string {
@@ -692,12 +739,6 @@ func bearerToken(ctx context.Context) string {
 		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
 			return parts[1]
 		}
-		if token := strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")); token != "" && token != value {
-			return token
-		}
-	}
-	if values := md.Get("x-opsi-pat"); len(values) > 0 {
-		return values[0]
 	}
 	return ""
 }
@@ -776,12 +817,21 @@ func incidentResponse(rec *telemetry.IncidentRecord) *agentv1.IncidentResponse {
 	return resp
 }
 
-func incidentService(store telemetry.Store, auth secret.AuthVerifier) *incident.Service {
+func incidentService(store telemetry.Store) *incident.Service {
 	return &incident.Service{
 		Store: store,
 		Audit: store.(secret.AuditSink),
-		Auth:  auth,
 	}
+}
+
+func statusHealth(health cloudrunner.RuntimeHealth) string {
+	if health.NodeReady && health.K3SStatus == cloudrunner.K3SStatusReady {
+		return "ok"
+	}
+	if health.K3SStatus == cloudrunner.K3SStatusUnavailable {
+		return "unavailable"
+	}
+	return "degraded"
 }
 
 func serviceManager(cfg config.Config, store *svcatalog.Store) svcatalog.Manager {

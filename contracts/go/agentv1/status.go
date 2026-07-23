@@ -235,9 +235,6 @@ type TelemetryLogEntry struct {
 
 type SetupTOTPRequest struct {
 	ProjectID string `json:"project_id"`
-	UserID    string `json:"user_id"`
-	Role      string `json:"role"`
-	PAT       string `json:"pat"`
 }
 
 type SetupTOTPResponse struct {
@@ -250,9 +247,6 @@ type SecretRequest struct {
 	ServiceID    string `json:"service_id"`
 	Name         string `json:"name"`
 	Namespace    string `json:"namespace"`
-	UserID       string `json:"user_id"`
-	Role         string `json:"role"`
-	PAT          string `json:"pat"`
 	OTPCode      string `json:"otp_code"`
 	TOTPCode     string `json:"totp_code"`
 	OTPRequestID string `json:"otp_request_id"`
@@ -271,25 +265,16 @@ type IncidentListRequest struct {
 	ProjectID string `json:"project_id"`
 	Status    string `json:"status"`
 	Limit     int32  `json:"limit"`
-	UserID    string `json:"user_id"`
-	Role      string `json:"role"`
-	PAT       string `json:"pat"`
 }
 
 type IncidentGetRequest struct {
 	ProjectID  string `json:"project_id"`
 	IncidentID string `json:"incident_id"`
-	UserID     string `json:"user_id"`
-	Role       string `json:"role"`
-	PAT        string `json:"pat"`
 }
 
 type IncidentResolveRequest struct {
 	ProjectID  string `json:"project_id"`
 	IncidentID string `json:"incident_id"`
-	UserID     string `json:"user_id"`
-	Role       string `json:"role"`
-	PAT        string `json:"pat"`
 }
 
 type IncidentListResponse struct {

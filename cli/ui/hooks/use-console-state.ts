@@ -262,12 +262,7 @@ export function useConsoleState() {
 	 const form = new FormData(event.currentTarget);
 	 patch({ busy: "incident-list", incidentDetail: null, incidentError: "" });
 	 try {
-	   const result = await client.incidents(
-	     currentProject.id,
-	     String(form.get("user_id") ?? ""),
-	     String(form.get("role") ?? ""),
-	     String(form.get("status") ?? ""),
-	   );
+	   const result = await client.incidents(currentProject.id, String(form.get("status") ?? ""));
 	   patch({ incidents: result.incidents ?? [] });
 	 } catch (error) {
 	   patch({ incidentError: (error as Error).message });
@@ -283,12 +278,7 @@ export function useConsoleState() {
 	 const incidentID = String(form.get("incident_id") ?? "");
 	 patch({ busy: "incident-get", incidentDetail: null, incidentError: "" });
 	 try {
-	   const result = await client.incident(
-	     currentProject.id,
-	     incidentID,
-	     String(form.get("user_id") ?? ""),
-	     String(form.get("role") ?? ""),
-	   );
+	   const result = await client.incident(currentProject.id, incidentID);
 	   patch({ incidentDetail: result.incident });
 	 } catch (error) {
 	   patch({ incidentError: (error as Error).message });
@@ -304,7 +294,7 @@ export function useConsoleState() {
     const incidentID = String(form.get("incident_id") ?? "");
 	 patch({ busy: "incident-resolve", incidentError: "" });
 	 try {
-	   const result = await client.resolveIncident(currentProject.id, incidentID, incidentBody(form));
+	   const result = await client.resolveIncident(currentProject.id, incidentID);
 	   patch({
 	     incidentDetail: result.incident,
 	     incidents: state.incidents.map((item) => (item.incident_id === result.incident.incident_id ? result.incident : item)),
@@ -353,18 +343,9 @@ function secretBody(form: FormData) {
     service_id: form.get("service_id"),
     name: form.get("name"),
     namespace: form.get("namespace"),
-    user_id: form.get("user_id"),
-    role: form.get("role"),
     otp_request_id: form.get("otp_request_id"),
     otp_code: form.get("otp_code"),
     totp_code: form.get("totp_code"),
-  };
-}
-
-function incidentBody(form: FormData) {
-  return {
-    user_id: form.get("user_id"),
-    role: form.get("role"),
   };
 }
 

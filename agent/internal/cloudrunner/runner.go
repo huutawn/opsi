@@ -56,6 +56,7 @@ type Runner struct {
 	PollInterval      time.Duration
 	LongPollWait      time.Duration
 	HeartbeatInterval time.Duration
+	HealthProbe       HealthProbe
 	ConnectionState   *ConnectionState
 	Logger            *slog.Logger
 }
@@ -103,11 +104,12 @@ func (r Runner) heartbeatLoop(ctx context.Context) {
 }
 
 func (r Runner) sendHeartbeat(ctx context.Context) {
+	health := ProbeRuntime(ctx, r.HealthProbe)
 	err := r.Client.Heartbeat(ctx, r.NodeID, cloudrelay.Heartbeat{
 		Version:      r.Version,
-		NodeReady:    true,
-		K3SStatus:    "ready",
-		Capabilities: map[string]any{"deploy": true, "node_lifecycle": r.NodeLifecycle != nil},
+		NodeReady:    health.NodeReady,
+		K3SStatus:    health.K3SStatus,
+		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil},
 	})
 	if err != nil {
 		r.ConnectionState.SetConnected(false)

@@ -9,12 +9,6 @@ export function IncidentsView({ console }: { console: ConsoleController }) {
       {console.state.incidentError ? <p role="alert">{console.state.incidentError}</p> : null}
       <Panel title="Incidents">
         <form className="grid" onSubmit={console.actions.incidentList}>
-          <input aria-label="User ID" className="field" name="user_id" required />
-          <select className="select" defaultValue="Viewer" name="role">
-            <option>Owner</option>
-            <option>Developer</option>
-            <option>Viewer</option>
-          </select>
           <select className="select" defaultValue="" name="status">
             <option value="">All statuses</option>
             <option value="open">Open</option>
@@ -43,12 +37,6 @@ export function IncidentsView({ console }: { console: ConsoleController }) {
       <Panel title="Incident detail">
         <form className="grid" onSubmit={console.actions.incidentGet}>
           <input aria-label="Incident ID" className="field" name="incident_id" required />
-          <input aria-label="User ID" className="field" name="user_id" required />
-          <select className="select" defaultValue="Viewer" name="role">
-            <option>Owner</option>
-            <option>Developer</option>
-            <option>Viewer</option>
-          </select>
           <button disabled={console.state.busy === "incident-get"} type="submit">
             {console.state.busy === "incident-get" ? "Loading..." : "Get detail"}
           </button>
@@ -69,12 +57,6 @@ export function IncidentsView({ console }: { console: ConsoleController }) {
       <Panel title="Resolve incident">
         <form className="grid" onSubmit={console.actions.incidentResolve}>
           <input aria-label="Incident ID" className="field" name="incident_id" required />
-          <input aria-label="User ID" className="field" name="user_id" required />
-          <select className="select" defaultValue="Developer" name="role">
-            <option>Owner</option>
-            <option>Developer</option>
-            <option>Viewer</option>
-          </select>
           <button disabled={console.state.busy === "incident-resolve"} type="submit">
             Resolve
           </button>

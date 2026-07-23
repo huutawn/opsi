@@ -455,7 +455,7 @@ func TestLocalSecretCreateUsesAgentNotCloudAndRedactsValue(t *testing.T) {
 	defer server.Close()
 	session := localTestSession(t, server.URL)
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets", strings.NewReader(`{"service_id":"svc-1","name":"db","namespace":"app","user_id":"owner","role":"Owner"}`))
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets", strings.NewReader(`{"service_id":"svc-1","name":"db","namespace":"app"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +528,7 @@ func TestLocalSecretRevealRequiresExplicitIntent(t *testing.T) {
 	defer server.Close()
 	session := localTestSession(t, server.URL)
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets/db/reveal", strings.NewReader(`{"service_id":"svc-1","user_id":"owner","role":"Owner","totp_code":"123456"}`))
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets/db/reveal", strings.NewReader(`{"service_id":"svc-1","totp_code":"123456"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +555,7 @@ func TestLocalSecretRevealUsesAgentWithNoStorePolicy(t *testing.T) {
 	defer server.Close()
 	session := localTestSession(t, server.URL)
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets/db/reveal", strings.NewReader(`{"service_id":"svc-1","user_id":"owner","role":"Owner","totp_code":"123456","reveal":true}`))
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets/db/reveal", strings.NewReader(`{"service_id":"svc-1","totp_code":"123456","reveal":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +586,7 @@ func TestLocalSecretAgentErrorIsRedacted(t *testing.T) {
 	defer server.Close()
 	session := localTestSession(t, server.URL)
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets/db/rotate", strings.NewReader(`{"service_id":"svc-1","user_id":"owner","role":"Owner","totp_code":"123456"}`))
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets/db/rotate", strings.NewReader(`{"service_id":"svc-1","totp_code":"123456"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -721,16 +721,20 @@ func TestLocalIncidentListUsesAgentNotCloud(t *testing.T) {
 		cloudCalled = true
 	}))
 	defer cloud.Close()
-	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, nil))
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("keychain-pat"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, func() (keychain.Store, error) { return store, nil }))
 	defer server.Close()
 
-	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents?user_id=viewer&role=Viewer")
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusOK || cloudCalled || agent.listCalls != 1 || !strings.Contains(string(body), `"incidents"`) {
+	if res.StatusCode != http.StatusOK || cloudCalled || agent.listCalls != 1 || agent.lastAuth != "Bearer keychain-pat" || !strings.Contains(string(body), `"incidents"`) {
 		t.Fatalf("status=%d cloud=%v calls=%d body=%s", res.StatusCode, cloudCalled, agent.listCalls, body)
 	}
 }
@@ -742,7 +746,7 @@ func TestLocalIncidentDetailUsesAgentAndReturnsFactsOnly(t *testing.T) {
 	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: "http://127.0.0.1:1"}, nil))
 	defer server.Close()
 
-	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents/inc-1?user_id=viewer&role=Viewer")
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents/inc-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +813,7 @@ func TestLocalIncidentResolveRequiresSessionAndIdempotency(t *testing.T) {
 	defer server.Close()
 
 	newRequest := func() *http.Request {
-		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/resolve", strings.NewReader(`{"user_id":"dev","role":"Developer"}`))
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/resolve", strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -847,6 +851,67 @@ func TestLocalIncidentResolveRequiresSessionAndIdempotency(t *testing.T) {
 	if res.StatusCode != http.StatusOK || agent.resolveCalls != 1 || agent.lastResolve.ProjectID != "proj-1" || agent.lastResolve.IncidentID != "inc-1" {
 		body, _ := io.ReadAll(res.Body)
 		t.Fatalf("status=%d calls=%d req=%+v body=%s", res.StatusCode, agent.resolveCalls, agent.lastResolve, body)
+	}
+}
+
+func TestLocalSecretAndIncidentRejectBrowserAuthority(t *testing.T) {
+	secretAgent := &localSecretServer{}
+	secretAddr, stopSecret := startLocalSecretServer(t, secretAgent)
+	defer stopSecret()
+	incidentAgent := &localIncidentServer{}
+	incidentAddr, stopIncident := startLocalIncidentServer(t, incidentAgent)
+	defer stopIncident()
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("keychain-pat"); err != nil {
+		t.Fatal(err)
+	}
+	factory := func() (keychain.Store, error) { return store, nil }
+
+	tests := []struct {
+		name      string
+		agentAddr string
+		method    string
+		path      string
+		body      string
+	}{
+		{name: "secret user", agentAddr: secretAddr, method: http.MethodPost, path: "/api/local/projects/proj-1/secrets", body: `{"service_id":"svc-1","name":"db","user_id":"owner"}`},
+		{name: "secret role", agentAddr: secretAddr, method: http.MethodPost, path: "/api/local/projects/proj-1/secrets", body: `{"service_id":"svc-1","name":"db","role":"Owner"}`},
+		{name: "secret pat", agentAddr: secretAddr, method: http.MethodPost, path: "/api/local/projects/proj-1/secrets", body: `{"service_id":"svc-1","name":"db","pat":"browser-pat"}`},
+		{name: "secret query", agentAddr: secretAddr, method: http.MethodPost, path: "/api/local/projects/proj-1/secrets?role=Owner", body: `{"service_id":"svc-1","name":"db"}`},
+		{name: "incident query", agentAddr: incidentAddr, method: http.MethodGet, path: "/api/local/projects/proj-1/incidents?role=Owner", body: ""},
+		{name: "incident query mixed case", agentAddr: incidentAddr, method: http.MethodGet, path: "/api/local/projects/proj-1/incidents?User_ID=owner", body: ""},
+		{name: "incident body", agentAddr: incidentAddr, method: http.MethodPost, path: "/api/local/projects/proj-1/incidents/inc-1/resolve", body: `{"pat":"browser-pat"}`},
+		{name: "incident resolve query", agentAddr: incidentAddr, method: http.MethodPost, path: "/api/local/projects/proj-1/incidents/inc-1/resolve?pat=browser-pat", body: `{}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: tt.agentAddr}, factory))
+			defer server.Close()
+			var body io.Reader
+			if tt.body != "" {
+				body = strings.NewReader(tt.body)
+			}
+			req, err := http.NewRequest(tt.method, server.URL+tt.path, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.method == http.MethodPost {
+				req.Header.Set("X-Local-Session", localTestSession(t, server.URL))
+				req.Header.Set("Idempotency-Key", "authority-reject")
+			}
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer res.Body.Close()
+			data, _ := io.ReadAll(res.Body)
+			if res.StatusCode != http.StatusBadRequest || !strings.Contains(string(data), "CALLER_AUTHORITY_FORBIDDEN") || strings.Contains(string(data), "browser-pat") {
+				t.Fatalf("status=%d body=%s", res.StatusCode, data)
+			}
+		})
+	}
+	if secretAgent.createCalls != 0 || incidentAgent.listCalls != 0 || incidentAgent.resolveCalls != 0 {
+		t.Fatalf("authority payload reached Agent: secret=%d incident_list=%d incident_resolve=%d", secretAgent.createCalls, incidentAgent.listCalls, incidentAgent.resolveCalls)
 	}
 }
 

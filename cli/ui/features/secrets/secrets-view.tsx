@@ -56,11 +56,6 @@ export function SecretsView({ console }: { console: ConsoleController }) {
             </select>
             <input className="field" name="name" placeholder="secret name" required />
             <input className="field" name="namespace" placeholder="namespace" />
-            <input className="field" name="user_id" placeholder="user id" required />
-            <select className="select" name="role">
-              <option>Owner</option>
-              <option>Developer</option>
-            </select>
             <button disabled={console.state.busy === "secret-create"} type="submit">
               Create
             </button>
@@ -109,10 +104,6 @@ function SecretMutationFields({ services, defaultServiceID }: { services: Array<
       </select>
       <input className="field" name="name" placeholder="secret name" required />
       <input className="field" name="namespace" placeholder="namespace" />
-      <input className="field" name="user_id" placeholder="user id" required />
-      <select className="select" name="role">
-        <option>Owner</option>
-      </select>
       <input className="field" name="otp_request_id" placeholder="OTP request id" />
       <input autoComplete="one-time-code" className="field" name="otp_code" placeholder="OTP code" />
       <input autoComplete="one-time-code" className="field" name="totp_code" placeholder="TOTP code" />

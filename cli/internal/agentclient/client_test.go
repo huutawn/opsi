@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/json"
 	"math/big"
 	"net"
 	"strings"
@@ -19,12 +20,32 @@ import (
 	"github.com/opsi-dev/opsi/cli/internal/config"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestNormalizeFingerprint(t *testing.T) {
 	got := normalizeFingerprint("AA:BB:CC")
 	if got != "aabbcc" {
 		t.Fatalf("unexpected fingerprint %q", got)
+	}
+}
+
+func TestWithPATUsesAuthorizationMetadataOnly(t *testing.T) {
+	const pat = "pat-metadata-canary"
+	ctx := WithPAT(context.Background(), pat)
+	md, ok := metadata.FromOutgoingContext(ctx)
+	if !ok || len(md.Get("authorization")) != 1 || md.Get("authorization")[0] != "Bearer "+pat {
+		t.Fatalf("metadata = %#v", md)
+	}
+	if len(md.Get("x-opsi-pat")) != 0 {
+		t.Fatalf("legacy metadata = %#v", md.Get("x-opsi-pat"))
+	}
+	data, err := json.Marshal(agentv1.SecretRequest{ProjectID: "project-1", ServiceID: "service-1", Name: "db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), pat) || strings.Contains(string(data), `"pat"`) || strings.Contains(string(data), `"user_id"`) || strings.Contains(string(data), `"role"`) {
+		t.Fatalf("serialized request contains caller authority: %s", data)
 	}
 }
 

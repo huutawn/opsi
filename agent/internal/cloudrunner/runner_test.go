@@ -22,6 +22,7 @@ type fakeClient struct {
 	progress    []deploymentv1.Progress
 	nodeResults []cloudrelay.NodeLifecycleResult
 	heartbeats  int
+	heartbeat   cloudrelay.Heartbeat
 	cancel      context.CancelFunc
 }
 
@@ -60,8 +61,9 @@ func (f *fakeClient) CompleteNodeLifecycle(_ context.Context, _ string, _ string
 	return nil
 }
 
-func (f *fakeClient) Heartbeat(context.Context, string, cloudrelay.Heartbeat) error {
+func (f *fakeClient) Heartbeat(_ context.Context, _ string, heartbeat cloudrelay.Heartbeat) error {
 	f.heartbeats++
+	f.heartbeat = heartbeat
 	return nil
 }
 
@@ -72,6 +74,12 @@ func (fakeLifecycle) Execute(context.Context, nodelifecycle.Request) nodelifecyc
 }
 
 type fakeEngine struct{}
+
+type staticHealthProbe RuntimeHealth
+
+func (p staticHealthProbe) Probe(context.Context) (RuntimeHealth, error) {
+	return RuntimeHealth(p), nil
+}
 
 func (fakeEngine) Deploy(_ context.Context, req deploy.Request, progress deploy.ProgressFunc) (deploy.Record, error) {
 	rec := deploy.Record{DeployID: "local-dep", ProjectID: req.ProjectID, ServiceID: req.ServiceID, ServiceName: req.ServiceName, GitSHA: req.GitSHA, ImageTag: req.ImageTag, Status: deploy.StatusSuccess}
@@ -133,6 +141,7 @@ func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
 		PollInterval:      time.Millisecond,
 		LongPollWait:      time.Millisecond,
 		HeartbeatInterval: time.Hour,
+		HealthProbe:       staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady},
 		ConnectionState:   connection,
 	}
 	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
@@ -143,6 +152,9 @@ func TestRunnerExecutesDryRunLeaseAndReportsResult(t *testing.T) {
 	}
 	if client.heartbeats == 0 {
 		t.Fatal("heartbeat was not sent")
+	}
+	if !client.heartbeat.NodeReady || client.heartbeat.K3SStatus != K3SStatusReady || client.heartbeat.Capabilities["deploy"] != true {
+		t.Fatalf("heartbeat = %+v", client.heartbeat)
 	}
 	if !connection.Connected() {
 		t.Fatal("successful heartbeat/poll did not update Cloud connection state")
@@ -188,6 +200,34 @@ func TestConnectionStateFailsClosedAfterCloudError(t *testing.T) {
 	Runner{Client: &failingCloudClient{}, ConnectionState: state}.sendHeartbeat(context.Background())
 	if state.Connected() {
 		t.Fatal("Cloud connection state remained true after a heartbeat error")
+	}
+}
+
+func TestHeartbeatHealthAndCapabilitiesFailClosed(t *testing.T) {
+	tests := []struct {
+		name          string
+		probe         HealthProbe
+		engine        DeployEngine
+		lifecycle     NodeLifecycleExecutor
+		wantStatus    string
+		wantReady     bool
+		wantDeploy    bool
+		wantLifecycle bool
+	}{
+		{name: "ready", probe: staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady}, engine: fakeEngine{}, wantStatus: K3SStatusReady, wantReady: true, wantDeploy: true},
+		{name: "unavailable", probe: staticHealthProbe{K3SStatus: K3SStatusUnavailable}, engine: fakeEngine{}, wantStatus: K3SStatusUnavailable},
+		{name: "not ready", probe: staticHealthProbe{K3SStatus: K3SStatusNotReady}, engine: fakeEngine{}, wantStatus: K3SStatusNotReady},
+		{name: "missing probe", engine: fakeEngine{}, wantStatus: K3SStatusUnavailable},
+		{name: "lifecycle does not imply health", lifecycle: fakeLifecycle{}, wantStatus: K3SStatusUnavailable, wantLifecycle: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &fakeClient{}
+			Runner{Client: client, Engine: tt.engine, NodeLifecycle: tt.lifecycle, HealthProbe: tt.probe}.sendHeartbeat(context.Background())
+			if client.heartbeat.NodeReady != tt.wantReady || client.heartbeat.K3SStatus != tt.wantStatus || client.heartbeat.Capabilities["deploy"] != tt.wantDeploy || client.heartbeat.Capabilities["node_lifecycle"] != tt.wantLifecycle {
+				t.Fatalf("heartbeat = %+v", client.heartbeat)
+			}
+		})
 	}
 }
 

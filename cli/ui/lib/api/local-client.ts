@@ -393,23 +393,23 @@ export class LocalClient {
     });
   }
 
-  incidents(projectID: string, userID: string, role: string, status = "") {
-    const query = new URLSearchParams({ user_id: userID, role });
-    if (status) query.set("status", status);
-    return this.call<IncidentListResult>(`/api/local/projects/${projectID}/incidents?${query}`);
+  incidents(projectID: string, status = "") {
+	const query = new URLSearchParams();
+	if (status) query.set("status", status);
+	const suffix = query.toString() ? `?${query.toString()}` : "";
+	return this.call<IncidentListResult>(`/api/local/projects/${projectID}/incidents${suffix}`);
   }
 
-  incident(projectID: string, incidentID: string, userID: string, role: string) {
-    const query = new URLSearchParams({ user_id: userID, role });
-    return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}?${query}`);
+  incident(projectID: string, incidentID: string) {
+	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}`);
   }
 
-  resolveIncident(projectID: string, incidentID: string, body: Record<string, unknown>) {
-    return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/resolve`, {
-      method: "POST",
-      write: true,
-      body: JSON.stringify(body),
-    });
+  resolveIncident(projectID: string, incidentID: string) {
+	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/resolve`, {
+	  method: "POST",
+	  write: true,
+	  body: JSON.stringify({}),
+	});
   }
 
   private async call<T>(path: string, init: RequestOptions = {}) {

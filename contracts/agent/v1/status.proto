@@ -243,10 +243,10 @@ message TelemetryLogEntry {
 }
 
 message SetupTOTPRequest {
+  reserved 2, 3, 4;
+  reserved "user_id", "role", "pat";
+
   string project_id = 1;
-  string user_id = 2;
-  string role = 3;
-  string pat = 4;
 }
 
 message SetupTOTPResponse {
@@ -255,13 +255,13 @@ message SetupTOTPResponse {
 }
 
 message SecretRequest {
+  reserved 5, 6, 7;
+  reserved "user_id", "role", "pat";
+
   string project_id = 1;
   string service_id = 2;
   string name = 3;
   string namespace = 4;
-  string user_id = 5;
-  string role = 6;
-  string pat = 7;
   string otp_code = 8;
   string totp_code = 9;
   string otp_request_id = 10;
@@ -277,28 +277,28 @@ message SecretResponse {
 }
 
 message IncidentListRequest {
+  reserved 4, 5, 6;
+  reserved "user_id", "role", "pat";
+
   string project_id = 1;
   string status = 2;
   int32 limit = 3;
-  string user_id = 4;
-  string role = 5;
-  string pat = 6;
 }
 
 message IncidentGetRequest {
+  reserved 3, 4, 5;
+  reserved "user_id", "role", "pat";
+
   string project_id = 1;
   string incident_id = 2;
-  string user_id = 3;
-  string role = 4;
-  string pat = 5;
 }
 
 message IncidentResolveRequest {
+  reserved 3, 4, 5;
+  reserved "user_id", "role", "pat";
+
   string project_id = 1;
   string incident_id = 2;
-  string user_id = 3;
-  string role = 4;
-  string pat = 5;
 }
 
 message IncidentListResponse {

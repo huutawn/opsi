@@ -463,6 +463,9 @@ func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Con
 		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
 		return true
 	}
+	if rejectCallerAuthorityQuery(w, r) {
+		return true
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
 		writeLocalError(w, r, http.StatusNotImplemented, "SECRETS_OPERATION_UNSUPPORTED", "this secret operation is not supported by the local Agent API")
@@ -529,11 +532,15 @@ func readLocalSecretRequest(w http.ResponseWriter, r *http.Request, projectID, p
 		return localSecretRequest{}, false
 	}
 	allowed := map[string]bool{
-		"service_id": true, "name": true, "namespace": true, "user_id": true, "role": true,
+		"service_id": true, "name": true, "namespace": true,
 		"otp_code": true, "otp_request_id": true, "totp_code": true, "reveal": true, "explicit_intent": true,
 	}
 	for key := range raw {
 		lower := strings.ToLower(key)
+		if isCallerAuthorityField(lower) {
+			writeLocalError(w, r, http.StatusBadRequest, "CALLER_AUTHORITY_FORBIDDEN", "authentication and identity fields are managed by the local backend")
+			return localSecretRequest{}, false
+		}
 		if !allowed[lower] {
 			writeLocalError(w, r, http.StatusBadRequest, "SECRET_INPUT_UNSUPPORTED", "secret request contains an unsupported field")
 			return localSecretRequest{}, false
@@ -548,14 +555,12 @@ func readLocalSecretRequest(w http.ResponseWriter, r *http.Request, projectID, p
 		ServiceID:    jsonString(raw, "service_id"),
 		Name:         name,
 		Namespace:    jsonString(raw, "namespace"),
-		UserID:       jsonString(raw, "user_id"),
-		Role:         jsonString(raw, "role"),
 		OTPCode:      jsonString(raw, "otp_code"),
 		OTPRequestID: jsonString(raw, "otp_request_id"),
 		TOTPCode:     jsonString(raw, "totp_code"),
 	}
-	if req.ServiceID == "" || req.Name == "" || req.UserID == "" || req.Role == "" {
-		writeLocalError(w, r, http.StatusBadRequest, "SECRET_REQUIRED_FIELDS_MISSING", "service_id, name, user_id and role are required")
+	if req.ServiceID == "" || req.Name == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "SECRET_REQUIRED_FIELDS_MISSING", "service_id and name are required")
 		return localSecretRequest{}, false
 	}
 	return localSecretRequest{SecretRequest: req, explicitReveal: jsonBool(raw, "reveal") || strings.EqualFold(jsonString(raw, "explicit_intent"), "reveal")}, true
@@ -656,6 +661,9 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
 		return true
 	}
+	if rejectCallerAuthorityQuery(w, r) {
+		return true
+	}
 	if r.Method == http.MethodGet {
 		req, ok := readLocalIncidentQuery(w, r, projectID)
 		if !ok {
@@ -671,7 +679,7 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 				writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ID_REQUIRED", "incident_id is required")
 				return true
 			}
-			callLocalIncidentGetAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID, UserID: req.UserID, Role: req.Role})
+			callLocalIncidentGetAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID})
 			return true
 		}
 		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local incident route is not implemented")
@@ -694,48 +702,49 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 	if !ok {
 		return true
 	}
-	callLocalIncidentResolveAgent(w, r, cfg, factory, &agentv1.IncidentResolveRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role})
+	callLocalIncidentResolveAgent(w, r, cfg, factory, req)
 	return true
-}
-
-type localIncidentRequest struct {
-	ProjectID  string
-	IncidentID string
-	UserID     string
-	Role       string
 }
 
 func readLocalIncidentQuery(w http.ResponseWriter, r *http.Request, projectID string) (*agentv1.IncidentListRequest, bool) {
 	query := r.URL.Query()
 	limit, _ := strconv.ParseInt(query.Get("limit"), 10, 32)
-	req := &agentv1.IncidentListRequest{ProjectID: projectID, Status: strings.TrimSpace(query.Get("status")), Limit: int32(limit), UserID: strings.TrimSpace(query.Get("user_id")), Role: strings.TrimSpace(query.Get("role"))}
-	if req.UserID == "" || req.Role == "" {
-		writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_REQUIRED_FIELDS_MISSING", "user_id and role are required")
-		return nil, false
-	}
-	return req, true
+	return &agentv1.IncidentListRequest{ProjectID: projectID, Status: strings.TrimSpace(query.Get("status")), Limit: int32(limit)}, true
 }
 
-func readLocalIncidentRequest(w http.ResponseWriter, r *http.Request, projectID, incidentID string) (localIncidentRequest, bool) {
+func readLocalIncidentRequest(w http.ResponseWriter, r *http.Request, projectID, incidentID string) (*agentv1.IncidentResolveRequest, bool) {
 	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err := dec.Decode(&raw); err != nil {
 		writeLocalError(w, r, http.StatusBadRequest, "INVALID_INCIDENT_REQUEST", "invalid incident request")
-		return localIncidentRequest{}, false
+		return nil, false
 	}
-	allowed := map[string]bool{"user_id": true, "role": true}
 	for key := range raw {
-		if !allowed[strings.ToLower(key)] {
+		lower := strings.ToLower(key)
+		if isCallerAuthorityField(lower) {
+			writeLocalError(w, r, http.StatusBadRequest, "CALLER_AUTHORITY_FORBIDDEN", "authentication and identity fields are managed by the local backend")
+			return nil, false
+		}
+		if lower != "" {
 			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_INPUT_UNSUPPORTED", "incident request contains an unsupported field")
-			return localIncidentRequest{}, false
+			return nil, false
 		}
 	}
-	req := localIncidentRequest{ProjectID: projectID, IncidentID: incidentID, UserID: jsonString(raw, "user_id"), Role: jsonString(raw, "role")}
-	if req.UserID == "" || req.Role == "" {
-		writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_REQUIRED_FIELDS_MISSING", "user_id and role are required")
-		return localIncidentRequest{}, false
+	return &agentv1.IncidentResolveRequest{ProjectID: projectID, IncidentID: incidentID}, true
+}
+
+func isCallerAuthorityField(field string) bool {
+	return field == "pat" || field == "user_id" || field == "role"
+}
+
+func rejectCallerAuthorityQuery(w http.ResponseWriter, r *http.Request) bool {
+	for field := range r.URL.Query() {
+		if isCallerAuthorityField(strings.ToLower(field)) {
+			writeLocalError(w, r, http.StatusBadRequest, "CALLER_AUTHORITY_FORBIDDEN", "authentication and identity fields are managed by the local backend")
+			return true
+		}
 	}
-	return req, true
+	return false
 }
 
 func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentListRequest) {

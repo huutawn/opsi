@@ -80,6 +80,27 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   certificate/DNS acceptance. No VPS, staging deployment, MCP, AI, or R5-012
   action was performed.
 
+### R5-011-S1 — Agent trust boundary and truthful runtime health
+
+- Starting revision was `95227edb6ed3def2c3c5dde209465d9746610ecc` on
+  `developer`, with `HEAD == origin/developer` and a clean worktree at entry.
+- Agent PAT verification now uses `Authorization: Bearer`, a project-only JSON
+  body, digest-keyed identity caching, exact project matching, complete verified
+  identity, and expiry-boundary fail-closed behavior. Secret and incident Agent
+  RPC authority is derived only from verified Bearer metadata; CLI, Local API,
+  and Local UI no longer accept caller-selected user/role/PAT authority.
+- Heartbeats and gRPC status use a bounded direct-argv kubectl probe for API
+  readiness and Kubernetes node Ready conditions. Runtime failures report
+  `not_ready`/`unavailable`, disable deploy capability, and make status
+  `degraded`/`unavailable`; Cloud connectivity remains separate.
+- UI source tests run through Node's built-in test runner and `make verify`
+  includes `ui-test`. Local/code verification passed with Go `1.26.4`, Node
+  `24.16.0`, and npm `11.17.0`; the exact revision has not been deployed or
+  exercised against a VPS/live public endpoint.
+- Checkpoint: `R5-011-S1 — TRUST_BOUNDARY_AND_HEALTH_TRUTH_PASS`. R5-011 remains
+  `PARTIAL`; R5-011.4 has not started, legacy deployment cleanup was not done,
+  and no Cloud, MCP, AI, or staging changes were made.
+
 ### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
 
 - R5-009 local acceptance passed on 2026-07-19 with disposable PostgreSQL,
