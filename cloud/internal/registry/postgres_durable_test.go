@@ -354,6 +354,40 @@ func TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly(t *testing.T
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM service_deployment_locks WHERE service_id=$1`, record.ID).Scan(&locks); err != nil || locks != 0 {
 		t.Fatalf("deployment lock count=%d err=%v", locks, err)
 	}
+
+	postJob, reused, err := fresh().StartImmutableDeployment(snapshot, userID, "post-mutation-key", "post-create")
+	if err != nil || reused {
+		t.Fatalf("post-mutation job=%+v reused=%v err=%v", postJob, reused, err)
+	}
+	postLease, ok, err := fresh().LeaseDeployment(project.ID, postJob.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("post-mutation lease=%+v ok=%v err=%v", postLease, ok, err)
+	}
+	if _, err := fresh().ProgressImmutableDeployment(project.ID, postJob.NodeID, postJob.ID, "applying", rolloutProgress(postLease, deploymentv1.RolloutStateApplying, "7", "")); err != nil {
+		t.Fatal(err)
+	}
+	forged := preMutationRolloutResult(postLease, deploymentv1.RolloutCodePreflightFailed)
+	if _, err := fresh().CompleteDeployment(project.ID, postJob.NodeID, postJob.ID, "forged-pre-mutation", forged); apiCode(err) != "DEPLOYMENT_RESULT_MISMATCH" {
+		t.Fatalf("forged pre-mutation err=%v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM service_deployment_locks WHERE service_id=$1`, record.ID).Scan(&locks); err != nil || locks != 1 {
+		t.Fatalf("forged result lock count=%d err=%v", locks, err)
+	}
+	if _, err := fresh().ProgressImmutableDeployment(project.ID, postJob.NodeID, postJob.ID, "failed", rolloutProgress(postLease, deploymentv1.RolloutStateFailed, "8", deploymentv1.RolloutCodeNoKnownGood)); err != nil {
+		t.Fatal(err)
+	}
+	postResult := rolloutResult(postLease, deploymentv1.RolloutStateFailed, "8", "", "", "", deploymentv1.RolloutCodeNoKnownGood)
+	postFinished, err := fresh().CompleteDeployment(project.ID, postJob.NodeID, postJob.ID, "post-mutation-result", postResult)
+	if err != nil || postFinished.TerminalResult == nil || postFinished.TerminalResult.FailurePhase != deploymentv1.FailurePhasePostMutation {
+		t.Fatalf("post-mutation result=%+v err=%v", postFinished, err)
+	}
+	postPersisted, err := fresh().GetDeployment(project.ID, postJob.ID)
+	if err != nil || postPersisted.TerminalResult == nil || postPersisted.TerminalResult.FailurePhase != deploymentv1.FailurePhasePostMutation {
+		t.Fatalf("post-mutation persisted=%+v err=%v", postPersisted, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM service_deployment_locks WHERE service_id=$1`, record.ID).Scan(&locks); err != nil || locks != 0 {
+		t.Fatalf("factual terminal lock count=%d err=%v", locks, err)
+	}
 }
 
 func postgresImmutableSnapshot(t *testing.T, service PostgresService, projectID, suffix string) (ServiceRecord, deploymentv1.JobSnapshot) {

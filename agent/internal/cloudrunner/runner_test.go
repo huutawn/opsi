@@ -88,6 +88,22 @@ type fakeRolloutEngine struct {
 	reconcileErr   error
 }
 
+type sequenceRolloutEngine struct {
+	records []deploymentv1.RolloutRecord
+	errors  []error
+	calls   int
+}
+
+func (f *sequenceRolloutEngine) ReconcilePending(context.Context, deploy.ProgressFunc) ([]deploymentv1.RolloutRecord, error) {
+	return nil, nil
+}
+
+func (f *sequenceRolloutEngine) ReconcileRollout(context.Context, deploymentv1.RolloutIntent, deploy.ProgressFunc) (deploymentv1.RolloutRecord, error) {
+	index := f.calls
+	f.calls++
+	return f.records[index], f.errors[index]
+}
+
 func (f *fakeRolloutEngine) ReconcilePending(context.Context, deploy.ProgressFunc) ([]deploymentv1.RolloutRecord, error) {
 	f.pendingCalls++
 	return nil, nil
@@ -132,6 +148,15 @@ func TestRunnerReportsCanonicalPreMutationFailureWithoutWAL(t *testing.T) {
 		{name: "ownership conflict", hasPrevious: true, err: deploymentv1.NewRolloutError(deploymentv1.RolloutCodeOwnershipConflict, "deployment is owned by another controller", false), wantCode: deploymentv1.RolloutCodeOwnershipConflict},
 		{name: "generic preflight", err: fmt.Errorf("preflight token=top-secret %s", strings.Repeat("x", deploymentv1.MaxRolloutErrorBytes+100)), wantCode: deploymentv1.RolloutCodePreflightFailed},
 	}
+	for index := range tests {
+		if failure, ok := tests[index].err.(*deploymentv1.RolloutError); ok {
+			failure.FailurePhase = deploymentv1.FailurePhasePreMutation
+		} else {
+			failure := deploymentv1.NewRolloutError(deploymentv1.RolloutCodePreflightFailed, tests[index].err.Error(), false)
+			failure.FailurePhase = deploymentv1.FailurePhasePreMutation
+			tests[index].err = failure
+		}
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			intent := base
@@ -154,7 +179,10 @@ func TestRunnerReportsCanonicalPreMutationFailureWithoutWAL(t *testing.T) {
 			lease.Command = &command
 			engine := &fakeRolloutEngine{reconcileErr: tt.err}
 			runner := Runner{Engine: engine, NodeID: intent.Target.NodeID}
-			result := runner.executeRollout(context.Background(), lease)
+			result, terminal := runner.executeRollout(context.Background(), lease)
+			if !terminal {
+				t.Fatal("pre-mutation failure was not terminal")
+			}
 			if result.Status != deploymentv1.StateFailed || result.RolloutResult == nil {
 				t.Fatalf("result=%+v", result)
 			}
@@ -166,6 +194,9 @@ func TestRunnerReportsCanonicalPreMutationFailureWithoutWAL(t *testing.T) {
 			if agent.FailureCode != tt.wantCode || len(agent.FailureMessageRedacted) > deploymentv1.MaxRolloutErrorBytes || strings.Contains(agent.FailureMessageRedacted, "top-secret") {
 				t.Fatalf("failure=%+v", agent)
 			}
+			if agent.FailurePhase != deploymentv1.FailurePhasePreMutation {
+				t.Fatalf("failure phase=%q", agent.FailurePhase)
+			}
 			if len(agent.Resources) != 0 || agent.ReadinessEvidenceHash != "" {
 				t.Fatalf("pre-mutation evidence was fabricated: %+v", agent)
 			}
@@ -176,9 +207,95 @@ func TestRunnerReportsCanonicalPreMutationFailureWithoutWAL(t *testing.T) {
 			} else if agent.CurrentDigest != "" || agent.KnownGoodID != "" || agent.KnownGoodHash != "" {
 				t.Fatalf("failed rollout fabricated known-good: %+v", agent)
 			}
-			replay := runner.executeRollout(context.Background(), lease)
+			replay, terminal := runner.executeRollout(context.Background(), lease)
+			if !terminal {
+				t.Fatal("pre-mutation replay was not terminal")
+			}
 			if !reflect.DeepEqual(result.RolloutResult, replay.RolloutResult) || result.FailureCode != replay.FailureCode {
 				t.Fatalf("preflight retry was not exact: first=%+v replay=%+v", result, replay)
+			}
+		})
+	}
+}
+
+func TestRunnerDoesNotCompleteNonterminalFailedRollout(t *testing.T) {
+	intent := testCloudRolloutIntent(t)
+	intent.PreviousKnownGoodID = "known-good-a"
+	intent.PreviousKnownGoodHash = strings.Repeat("b", 64)
+	intent.PreviousDigest = "sha256:" + strings.Repeat("b", 64)
+	intent.IntentHash = ""
+	intent, err := intent.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := intent.Desired.AgentCommand()
+	command.Rollout = &intent
+	command.LeaseToken = "lease-post-mutation"
+	lease := cloudrelay.DeploymentLease{Kind: "deployment", Action: intent.Operation, LeaseToken: command.LeaseToken, Deployment: cloudrelay.DeploymentJobEnvelope{ID: intent.Desired.DeploymentJobID}, Command: &command}
+	record := deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateFailed, Version: 4, StateHash: strings.Repeat("f", 64), Error: deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "partial apply failed", false), Resources: []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "2", FunctionalHash: strings.Repeat("e", 64)}}, CreatedAt: intent.CreatedAt, UpdatedAt: intent.CreatedAt}
+	engine := &fakeRolloutEngine{record: record, reconcileErr: deploymentv1.NewRolloutError(deploymentv1.RolloutCodeInvalidTransition, "failed to enter rolling_back", true)}
+	client := &fakeClient{}
+
+	Runner{Client: client, Engine: engine, NodeID: intent.Target.NodeID}.handleLease(context.Background(), lease)
+
+	if len(client.results) != 0 {
+		t.Fatalf("nonterminal failed WAL record was reported as terminal: %+v", client.results)
+	}
+	if engine.reconcileCalls != rolloutReconcileAttempts {
+		t.Fatalf("bounded reconcile calls=%d", engine.reconcileCalls)
+	}
+}
+
+func TestRunnerDoesNotInventPreMutationWhenWALReadIsUnknown(t *testing.T) {
+	intent := testCloudRolloutIntent(t)
+	command := intent.Desired.AgentCommand()
+	command.Rollout = &intent
+	command.LeaseToken = "lease-unknown-wal"
+	lease := cloudrelay.DeploymentLease{Kind: "deployment", Action: intent.Operation, LeaseToken: command.LeaseToken, Deployment: cloudrelay.DeploymentJobEnvelope{ID: intent.Desired.DeploymentJobID}, Command: &command}
+	engine := &fakeRolloutEngine{reconcileErr: errors.New("rollout WAL read failed")}
+	client := &fakeClient{}
+
+	Runner{Client: client, Engine: engine, NodeID: intent.Target.NodeID}.handleLease(context.Background(), lease)
+
+	if engine.reconcileCalls != rolloutReconcileAttempts || len(client.results) != 0 {
+		t.Fatalf("calls=%d results=%+v", engine.reconcileCalls, client.results)
+	}
+}
+
+func TestRunnerBoundedResumeCompletesOnlyFactualRollbackTerminal(t *testing.T) {
+	intent := testCloudRolloutIntent(t)
+	intent.PreviousKnownGoodID = "known-good-a"
+	intent.PreviousKnownGoodHash = strings.Repeat("b", 64)
+	intent.PreviousDigest = "sha256:" + strings.Repeat("b", 64)
+	intent.IntentHash = ""
+	intent, err := intent.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := intent.Desired.AgentCommand()
+	command.Rollout = &intent
+	command.LeaseToken = "lease-resume"
+	lease := cloudrelay.DeploymentLease{Kind: "deployment", Action: intent.Operation, LeaseToken: command.LeaseToken, Deployment: cloudrelay.DeploymentJobEnvelope{ID: intent.Desired.DeploymentJobID}, Command: &command}
+	now := time.Now().UTC()
+	failure := deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "desired apply failed", false)
+	failed := deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateFailed, Version: 4, StateHash: strings.Repeat("4", 64), Error: failure, CreatedAt: now, UpdatedAt: now}
+	resources := []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "3", FunctionalHash: strings.Repeat("e", 64)}}
+	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: true, LocalRoutingReady: true, WorkloadEvidenceHash: strings.Repeat("1", 64), ServiceEvidenceHash: strings.Repeat("2", 64), ExposureEvidenceHash: strings.Repeat("3", 64), ApplicationImageIDHash: strings.Repeat("4", 64), LocalProbeEvidenceHash: strings.Repeat("5", 64), ObservedAt: now}
+
+	for _, tc := range []struct {
+		name      string
+		terminal  deploymentv1.RolloutRecord
+		wantState string
+	}{
+		{name: "rolled back", terminal: deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateRolledBack, Version: 6, StateHash: strings.Repeat("6", 64), Error: failure, Resources: resources, Evidence: &evidence, CreatedAt: now, UpdatedAt: now, TerminalAt: &now}, wantState: deploymentv1.RolloutStateRolledBack},
+		{name: "rollback failed", terminal: deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateRollbackFailed, Version: 6, StateHash: strings.Repeat("7", 64), Error: deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "rollback apply failed", false), Resources: resources, CreatedAt: now, UpdatedAt: now, TerminalAt: &now}, wantState: deploymentv1.RolloutStateRollbackFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := &sequenceRolloutEngine{records: []deploymentv1.RolloutRecord{failed, tc.terminal}, errors: []error{errors.New("failed to enter rolling_back"), tc.terminal.Error}}
+			client := &fakeClient{}
+			Runner{Client: client, Engine: engine, NodeID: intent.Target.NodeID}.handleLease(context.Background(), lease)
+			if engine.calls != rolloutReconcileAttempts || len(client.results) != 1 || client.results[0].RolloutResult == nil || client.results[0].RolloutResult.RolloutState != tc.wantState || client.results[0].RolloutResult.FailurePhase != deploymentv1.FailurePhasePostMutation {
+				t.Fatalf("calls=%d results=%+v", engine.calls, client.results)
 			}
 		})
 	}

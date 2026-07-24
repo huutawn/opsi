@@ -9,6 +9,25 @@
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
+## Corrective Prompt 06 checkpoint
+
+`ROLLOUT_FAILURE_PHASE_TRUTHFUL_PASS` adds bounded `pre_mutation` and
+`post_mutation` failure phases to terminal Agent results. A WAL `failed` record
+with no `TerminalAt` is not a terminal result: Runner performs one bounded
+same-lease resume and does not call Cloud completion unless the WAL reaches a
+factual terminal state. Therefore a partial Kubernetes mutation cannot be
+reported as the previous digest or known-good still running.
+
+Pre-mutation is limited to stale known-good validation, ownership/preflight,
+BeginRollout failure, and cancellation while prepared before `ApplyRollout`.
+`NO_KNOWN_GOOD` is post-mutation only. Cloud in-memory and PostgreSQL validation
+reject forged pre-mutation results after applying/waiting/failed/rolling-back
+progress, retain the service lock for nonfactual results, and preserve exact
+terminal replay and JSON durability without a database migration.
+
+No SSH, live VPS/K3s E2E, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
 ## Corrective Prompt 05 checkpoint
 
 `PRE_MUTATION_FAILURE_REPORTING_PASS` closes the pre-WAL result gap. Once an

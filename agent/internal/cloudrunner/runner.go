@@ -59,6 +59,8 @@ type NodeLifecycleExecutor interface {
 	Execute(context.Context, nodelifecycle.Request) nodelifecycle.Result
 }
 
+const rolloutReconcileAttempts = 2
+
 func (r Runner) Run(ctx context.Context) error {
 	if r.Client == nil || r.Engine == nil {
 		return errors.New("cloud runner client and engine are required")
@@ -155,7 +157,10 @@ func (r Runner) handleNodeLifecycle(ctx context.Context, lease cloudrelay.NodeLi
 }
 
 func (r Runner) handleLease(ctx context.Context, lease cloudrelay.DeploymentLease) {
-	result := r.execute(ctx, lease)
+	result, terminal := r.execute(ctx, lease)
+	if !terminal {
+		return
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		err := r.Client.CompleteDeployment(ctx, r.NodeID, lease.Deployment.ID, result)
 		if err == nil {
@@ -183,17 +188,17 @@ func (r Runner) executeNodeLifecycle(ctx context.Context, lease cloudrelay.NodeL
 	return cloudrelay.NodeLifecycleResult{Status: result.Status, LeaseToken: lease.LeaseToken, FailureCode: result.FailureCode, FailureMessageRedacted: result.FailureMessageRedacted, Verified: result.Verified}
 }
 
-func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
+func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease) (cloudrelay.DeploymentResult, bool) {
 	if lease.Command == nil || lease.Command.Rollout == nil {
-		return deploymentFailure(lease, "LEGACY_DEPLOYMENT_RETIRED", "deployment commands without RolloutIntent are retired")
+		return deploymentFailure(lease, "LEGACY_DEPLOYMENT_RETIRED", "deployment commands without RolloutIntent are retired"), true
 	}
 	return r.executeRollout(ctx, lease)
 }
 
-func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
+func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentLease) (cloudrelay.DeploymentResult, bool) {
 	intent, err := RolloutIntentFromLease(lease, r.NodeID)
 	if err != nil {
-		return deploymentFailure(lease, "ROLLOUT_COMMAND_INVALID", err.Error())
+		return deploymentFailure(lease, "ROLLOUT_COMMAND_INVALID", err.Error()), true
 	}
 	var progressMu sync.Mutex
 	var latest *deploymentv1.Progress
@@ -221,21 +226,29 @@ func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentL
 			}
 		}
 	}()
-	record, reconcileErr := r.Engine.ReconcileRollout(ctx, intent, func(event *deploy.ProgressEvent) error {
-		if event == nil || event.Rollout == nil {
+	defer close(done)
+	for attempt := 0; attempt < rolloutReconcileAttempts; attempt++ {
+		record, reconcileErr := r.Engine.ReconcileRollout(ctx, intent, func(event *deploy.ProgressEvent) error {
+			if event == nil || event.Rollout == nil {
+				return nil
+			}
+			progress := progressFromRollout(*event.Rollout, lease.LeaseToken, event.Percent, event.Message)
+			progressMu.Lock()
+			latest = &progress
+			progressMu.Unlock()
+			if err := r.Client.ProgressDeployment(ctx, r.NodeID, lease.Deployment.ID, progress); err != nil {
+				r.log().Warn("cloud rollout progress report failed", "deployment_id", lease.Deployment.ID, "state", progress.State, "error", err)
+			}
 			return nil
+		})
+		if result, terminal := resultFromRollout(intent, record, reconcileErr, lease); terminal {
+			return result, true
 		}
-		progress := progressFromRollout(*event.Rollout, lease.LeaseToken, event.Percent, event.Message)
-		progressMu.Lock()
-		latest = &progress
-		progressMu.Unlock()
-		if err := r.Client.ProgressDeployment(ctx, r.NodeID, lease.Deployment.ID, progress); err != nil {
-			r.log().Warn("cloud rollout progress report failed", "deployment_id", lease.Deployment.ID, "state", progress.State, "error", err)
+		if ctx.Err() != nil {
+			break
 		}
-		return nil
-	})
-	close(done)
-	return resultFromRollout(intent, record, reconcileErr, lease)
+	}
+	return cloudrelay.DeploymentResult{}, false
 }
 
 func deploymentFailure(lease cloudrelay.DeploymentLease, code, message string) cloudrelay.DeploymentResult {

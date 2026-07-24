@@ -376,6 +376,7 @@ type AgentResult struct {
 	ServiceName            string             `json:"service_name"`
 	AvailableReplicas      int32              `json:"available_replicas"`
 	FailureCode            string             `json:"failure_code,omitempty"`
+	FailurePhase           string             `json:"failure_phase,omitempty"`
 	FailureMessageRedacted string             `json:"failure_message_redacted,omitempty"`
 	RolloutID              string             `json:"rollout_id,omitempty"`
 	RolloutState           string             `json:"rollout_state,omitempty"`

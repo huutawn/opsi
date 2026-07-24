@@ -4,6 +4,21 @@ Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
+### Corrective Prompt 06 — ROLLOUT_FAILURE_PHASE_TRUTHFUL_PASS
+
+- Terminal rollout results carry bounded `pre_mutation` or `post_mutation`
+  failure phase; failure-code inequality is not mutation evidence.
+- Runner rejects `failed` WAL records with `TerminalAt=nil`, performs one
+  bounded same-lease resume, and calls `CompleteDeployment` only for factual
+  terminal results (`rolled_back`, `rollback_failed`, terminal failed, success).
+- Cloud in-memory and PostgreSQL paths reject forged pre-mutation results after
+  mutation progress, keep the service lock until a factual terminal result,
+  and persist/replay the phase through existing terminal-result JSON.
+- `NO_KNOWN_GOOD` remains post-mutation/no-snapshot only. No database migration,
+  rollout state, dependency, route, worker, or legacy delivery path was added.
+- No SSH, live E2E, VPS, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
 ### Corrective Prompt 05 — PRE_MUTATION_FAILURE_REPORTING_PASS
 
 - Pre-WAL failures after a canonical rollout lease now report deterministic

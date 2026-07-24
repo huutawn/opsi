@@ -465,6 +465,19 @@ E2E harness refuses incidents older than broken deployment B even when the
 action was performed; R5-011 remains `PARTIAL` and R5-011.4 remains
 `MANUAL_GATED`.
 
+**Corrective Prompt 06 checkpoint (2026-07-24):** `DONE /
+ROLLOUT_FAILURE_PHASE_TRUTHFUL_PASS`. Terminal Agent results now carry bounded
+`pre_mutation` or `post_mutation` failure phase. A WAL `failed` record with
+`TerminalAt=nil` is nonterminal; Runner performs one bounded same-lease resume
+and never reports previous digest/known-good or calls Cloud completion unless a
+factual terminal state is reached. Cloud in-memory and PostgreSQL validation
+reject forged pre-mutation results after observed mutation progress, keep the
+service lock until factual completion, and persist exact phase-aware replay in
+the existing terminal JSON without migration. `NO_KNOWN_GOOD` remains
+post-mutation/no-snapshot only. No live E2E, SSH/VPS, DNS, TLS, Cloudflare,
+R5-012, MCP, or AI action was performed; R5-011 remains `PARTIAL` and R5-011.4
+remains `MANUAL_GATED`.
+
 ### R5-012 — Main CD và PR preview manual acceptance
 
 **CẦN VPS:** VPS Agent staging; cần test repository GitHub thật.

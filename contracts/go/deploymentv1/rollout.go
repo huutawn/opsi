@@ -40,28 +40,35 @@ const (
 )
 
 const (
-	RolloutCodeInvalid             = "ROLLOUT_INVALID"
-	RolloutCodeConflict            = "ROLLOUT_CONFLICT"
-	RolloutCodeTargetBusy          = "ROLLOUT_TARGET_BUSY"
-	RolloutCodeTerminalImmutable   = "ROLLOUT_TERMINAL_IMMUTABLE"
-	RolloutCodeInvalidTransition   = "ROLLOUT_INVALID_TRANSITION"
-	RolloutCodeNoKnownGood         = "NO_KNOWN_GOOD"
-	RolloutCodeKnownGoodCorrupt    = "KNOWN_GOOD_CORRUPT"
-	RolloutCodeAttemptsExhausted   = "ROLLOUT_ATTEMPTS_EXHAUSTED"
-	RolloutCodeOwnershipConflict   = "K8S_OWNERSHIP_CONFLICT"
-	RolloutCodeResourceChanged     = "K8S_RESOURCE_CHANGED"
-	RolloutCodeReadinessFailed     = "RUNTIME_READINESS_FAILED"
-	RolloutCodeExternalUnavailable = "EXTERNAL_VERIFICATION_UNAVAILABLE"
-	RolloutCodePreflightFailed     = "ROLLOUT_PREFLIGHT_FAILED"
-	RolloutCodeRuntimeFailed       = "ROLLOUT_RUNTIME_FAILED"
+	RolloutCodeInvalid                 = "ROLLOUT_INVALID"
+	RolloutCodeConflict                = "ROLLOUT_CONFLICT"
+	RolloutCodeTargetBusy              = "ROLLOUT_TARGET_BUSY"
+	RolloutCodeTerminalImmutable       = "ROLLOUT_TERMINAL_IMMUTABLE"
+	RolloutCodeInvalidTransition       = "ROLLOUT_INVALID_TRANSITION"
+	RolloutCodeNoKnownGood             = "NO_KNOWN_GOOD"
+	RolloutCodeKnownGoodCorrupt        = "KNOWN_GOOD_CORRUPT"
+	RolloutCodeAttemptsExhausted       = "ROLLOUT_ATTEMPTS_EXHAUSTED"
+	RolloutCodeOwnershipConflict       = "K8S_OWNERSHIP_CONFLICT"
+	RolloutCodeResourceChanged         = "K8S_RESOURCE_CHANGED"
+	RolloutCodeReadinessFailed         = "RUNTIME_READINESS_FAILED"
+	RolloutCodeExternalUnavailable     = "EXTERNAL_VERIFICATION_UNAVAILABLE"
+	RolloutCodePreflightFailed         = "ROLLOUT_PREFLIGHT_FAILED"
+	RolloutCodeRuntimeFailed           = "ROLLOUT_RUNTIME_FAILED"
+	RolloutCodeCancelledBeforeMutation = "CANCELLED_BEFORE_MUTATION"
+)
+
+const (
+	FailurePhasePreMutation  = "pre_mutation"
+	FailurePhasePostMutation = "post_mutation"
 )
 
 var rolloutHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type RolloutError struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable,omitempty"`
+	Code         string `json:"code"`
+	Message      string `json:"message"`
+	Retryable    bool   `json:"retryable,omitempty"`
+	FailurePhase string `json:"failure_phase,omitempty"`
 }
 
 func (e *RolloutError) Error() string {
@@ -413,6 +420,33 @@ func IsTerminalRolloutState(state string) bool {
 	switch state {
 	case RolloutStateSucceeded, RolloutStateRolledBack, RolloutStateRollbackFailed:
 		return true
+	default:
+		return false
+	}
+}
+
+func IsRolloutFailurePhase(phase string) bool {
+	return phase == FailurePhasePreMutation || phase == FailurePhasePostMutation
+}
+
+func RolloutMutationObserved(state string) bool {
+	switch state {
+	case RolloutStateApplying, RolloutStateWaiting, RolloutStateFailed, RolloutStateRollingBack, RolloutStateRolledBack, RolloutStateRollbackFailed, RolloutStateSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsFactualTerminalRollout(record RolloutRecord) bool {
+	if record.TerminalAt == nil {
+		return false
+	}
+	switch record.State {
+	case RolloutStateSucceeded, RolloutStateRolledBack, RolloutStateRollbackFailed:
+		return true
+	case RolloutStateFailed:
+		return record.Error != nil
 	default:
 		return false
 	}

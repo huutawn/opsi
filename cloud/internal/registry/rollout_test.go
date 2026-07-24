@@ -320,6 +320,34 @@ func TestPreMutationFailurePreservesPreviousKnownGood(t *testing.T) {
 	}
 }
 
+func TestObservedMutationRejectsForgedPreMutationUntilFactualTerminalResult(t *testing.T) {
+	service, projectID := readyRegistry(t)
+	record := createRegistryService(t, service, projectID, "api-phase", "Dockerfile", "deploy/api", "svc-phase")
+	snapshot := immutableSnapshot(t, service, projectID, record.ID, "phase")
+	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "phase-key", "create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, job)
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "1", "")
+	forged := preMutationRolloutResult(lease, deploymentv1.RolloutCodePreflightFailed)
+	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "forged-pre-mutation", forged); apiCode(err) != "DEPLOYMENT_RESULT_MISMATCH" {
+		t.Fatalf("forged pre-mutation result err=%v", err)
+	}
+	if _, locked := service.deployLocks[job.ServiceID]; !locked || service.deployments[job.ID].TerminalResult != nil {
+		t.Fatalf("forged result released lock or persisted terminal state: lock=%v job=%+v", locked, service.deployments[job.ID])
+	}
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "2", deploymentv1.RolloutCodeNoKnownGood)
+	factual := rolloutResult(lease, deploymentv1.RolloutStateFailed, "2", "", "", "", deploymentv1.RolloutCodeNoKnownGood)
+	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "post-mutation", factual)
+	if err != nil || finished.TerminalResult == nil || finished.TerminalResult.FailurePhase != deploymentv1.FailurePhasePostMutation {
+		t.Fatalf("factual result=%+v err=%v", finished, err)
+	}
+	if _, locked := service.deployLocks[job.ServiceID]; locked {
+		t.Fatal("factual terminal result kept the service lock")
+	}
+}
+
 func rolloutRegistryFixture(t *testing.T, suffix string) (*Service, string, DeploymentJob) {
 	t.Helper()
 	service, projectID := readyRegistry(t)
@@ -407,7 +435,11 @@ func rolloutResult(lease DeploymentLease, state, hashCharacter, currentDigest, k
 	if state == deploymentv1.RolloutStateSucceeded || state == deploymentv1.RolloutStateRolledBack {
 		readinessHash = strings.Repeat("e", 64)
 	}
-	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, RolloutID: intent.RolloutID, RolloutState: state, IntentHash: intent.IntentHash, StateHash: strings.Repeat(hashCharacter, 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: currentDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: knownGoodID, KnownGoodHash: knownGoodHash, ReadinessEvidenceHash: readinessHash, FailureCode: failureCode, FailureMessageRedacted: "sanitized rollout failure", Attempt: intent.Attempt}
+	failurePhase := ""
+	if failureCode != "" {
+		failurePhase = deploymentv1.FailurePhasePostMutation
+	}
+	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, RolloutID: intent.RolloutID, RolloutState: state, IntentHash: intent.IntentHash, StateHash: strings.Repeat(hashCharacter, 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: currentDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: knownGoodID, KnownGoodHash: knownGoodHash, ReadinessEvidenceHash: readinessHash, FailureCode: failureCode, FailurePhase: failurePhase, FailureMessageRedacted: "sanitized rollout failure", Attempt: intent.Attempt}
 	if state == deploymentv1.RolloutStateSucceeded || state == deploymentv1.RolloutStateRolledBack {
 		agentResult.Resources = []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}
 	}
@@ -416,7 +448,7 @@ func rolloutResult(lease DeploymentLease, state, hashCharacter, currentDigest, k
 
 func preMutationRolloutResult(lease DeploymentLease, failureCode string) DeploymentResult {
 	intent := lease.Command.Rollout
-	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateFailed, RolloutID: intent.RolloutID, RolloutState: deploymentv1.RolloutStateFailed, IntentHash: intent.IntentHash, StateHash: strings.Repeat("9", 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: intent.PreviousDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: intent.PreviousKnownGoodID, KnownGoodHash: intent.PreviousKnownGoodHash, FailureCode: failureCode, FailureMessageRedacted: "sanitized preflight failure", Attempt: intent.Attempt}
+	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateFailed, RolloutID: intent.RolloutID, RolloutState: deploymentv1.RolloutStateFailed, IntentHash: intent.IntentHash, StateHash: strings.Repeat("9", 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: intent.PreviousDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: intent.PreviousKnownGoodID, KnownGoodHash: intent.PreviousKnownGoodHash, FailureCode: failureCode, FailurePhase: deploymentv1.FailurePhasePreMutation, FailureMessageRedacted: "sanitized preflight failure", Attempt: intent.Attempt}
 	return DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateFailed, LeaseToken: lease.LeaseToken, IntentHash: intent.IntentHash, FailureCode: failureCode, FailureMessageRedacted: agentResult.FailureMessageRedacted, RolloutResult: agentResult}
 }
 

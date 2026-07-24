@@ -242,7 +242,7 @@ func validateRolloutProgress(job DeploymentJob, progress deploymentv1.Progress) 
 }
 
 func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) error {
-	if result == nil || job.RolloutIntent == nil || result.SchemaVersion != deploymentv1.ResultSchemaVersion || result.RolloutID != job.RolloutIntent.RolloutID || result.IntentHash != job.RolloutIntent.IntentHash {
+	if result == nil || job.RolloutIntent == nil || result.SchemaVersion != deploymentv1.ResultSchemaVersion || result.RolloutID != job.RolloutIntent.RolloutID || result.IntentHash != job.RolloutIntent.IntentHash || result.Status != result.RolloutState {
 		return fmt.Errorf("rollout result identity is invalid")
 	}
 	if result.WorkloadSpecHash != job.RolloutIntent.Desired.WorkloadSpecHash || result.ExposureSpecHash != job.RolloutIntent.Desired.ExposureSpecHash || result.DesiredDigest != job.RolloutIntent.Desired.Image.Digest || result.PreviousDigest != job.RolloutIntent.PreviousDigest || !validRolloutHash(result.StateHash) || !validOptionalRolloutHash(result.ReadinessEvidenceHash) || result.Attempt != job.RolloutIntent.Attempt || !validSanitizedResources(result.Resources) || len(result.FailureCode) > 128 || len(result.FailureMessageRedacted) > deploymentv1.MaxRolloutErrorBytes {
@@ -251,31 +251,37 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 	if result.RolloutState != job.RolloutState && !deploymentv1.CanTransitionRollout(job.RolloutState, result.RolloutState) {
 		return fmt.Errorf("rollout terminal result is out of order")
 	}
+	if result.FailureCode == "" && result.FailurePhase != "" || result.FailureCode != "" && !deploymentv1.IsRolloutFailurePhase(result.FailurePhase) {
+		return fmt.Errorf("rollout failure phase is invalid")
+	}
 	switch result.RolloutState {
 	case deploymentv1.RolloutStateSucceeded:
-		if result.CurrentDigest != result.DesiredDigest || result.KnownGoodID == "" || !validRolloutHash(result.KnownGoodHash) || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 {
+		if result.FailureCode != "" || result.CurrentDigest != result.DesiredDigest || result.KnownGoodID == "" || !validRolloutHash(result.KnownGoodHash) || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 {
 			return fmt.Errorf("successful rollout result lacks factual known-good metadata")
 		}
 	case deploymentv1.RolloutStateRolledBack:
-		if result.CurrentDigest == "" || result.CurrentDigest != result.PreviousDigest || result.KnownGoodID != job.RolloutIntent.PreviousKnownGoodID || result.KnownGoodHash != job.RolloutIntent.PreviousKnownGoodHash || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 {
+		if result.CurrentDigest == "" || result.CurrentDigest != result.PreviousDigest || result.KnownGoodID != job.RolloutIntent.PreviousKnownGoodID || result.KnownGoodHash != job.RolloutIntent.PreviousKnownGoodHash || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 || result.FailureCode != "" && result.FailurePhase != deploymentv1.FailurePhasePostMutation {
 			return fmt.Errorf("rolled-back result does not match the expected previous known-good")
 		}
 	case deploymentv1.RolloutStateRollbackFailed:
-		if result.FailureCode == "" {
+		if result.FailureCode == "" || result.FailurePhase != deploymentv1.FailurePhasePostMutation || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
 			return fmt.Errorf("rollback_failed requires a typed failure")
 		}
 	case deploymentv1.RolloutStateFailed:
 		if result.FailureCode == "" {
 			return fmt.Errorf("terminal failed rollout requires a typed failure")
 		}
-		if result.FailureCode == deploymentv1.RolloutCodeNoKnownGood {
-			if job.RolloutIntent.PreviousKnownGoodID != "" || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
-				return fmt.Errorf("NO_KNOWN_GOOD cannot claim a current or known-good runtime")
+		if result.FailurePhase == deploymentv1.FailurePhasePreMutation {
+			if deploymentv1.RolloutMutationObserved(job.RolloutState) {
+				return fmt.Errorf("pre-mutation failure conflicts with observed rollout progress")
+			}
+			if result.FailureCode == deploymentv1.RolloutCodeNoKnownGood || result.CurrentDigest != job.RolloutIntent.PreviousDigest || result.KnownGoodID != job.RolloutIntent.PreviousKnownGoodID || result.KnownGoodHash != job.RolloutIntent.PreviousKnownGoodHash || result.ReadinessEvidenceHash != "" || len(result.Resources) != 0 {
+				return fmt.Errorf("pre-mutation failure does not match the previous known-good runtime")
 			}
 			break
 		}
-		if result.CurrentDigest != job.RolloutIntent.PreviousDigest || result.KnownGoodID != job.RolloutIntent.PreviousKnownGoodID || result.KnownGoodHash != job.RolloutIntent.PreviousKnownGoodHash || result.ReadinessEvidenceHash != "" || len(result.Resources) != 0 {
-			return fmt.Errorf("pre-mutation failure does not match the previous known-good runtime")
+		if !deploymentv1.RolloutMutationObserved(job.RolloutState) || result.FailureCode != deploymentv1.RolloutCodeNoKnownGood || job.RolloutIntent.PreviousKnownGoodID != "" || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
+			return fmt.Errorf("post-mutation failed result is not factual")
 		}
 	default:
 		return fmt.Errorf("rollout result state is not terminal")

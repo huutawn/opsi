@@ -16,18 +16,34 @@ func (e *Engine) ReconcileRollout(ctx context.Context, intent deploymentv1.Rollo
 	}
 	canonical, err := intent.Canonicalize()
 	if err != nil {
-		return deploymentv1.RolloutRecord{}, deploymentv1.NewRolloutError(deploymentv1.RolloutCodeInvalid, err.Error(), false)
+		return deploymentv1.RolloutRecord{}, preMutationRolloutFailure(err, deploymentv1.RolloutCodeInvalid)
+	}
+	existing, err := e.Store.GetRollout(ctx, canonical.RolloutID)
+	if err != nil {
+		return deploymentv1.RolloutRecord{}, err
+	}
+	if existing != nil {
+		if existing.Intent.IntentHash != canonical.IntentHash {
+			return deploymentv1.RolloutRecord{}, preMutationRolloutFailure(deploymentv1.NewRolloutError(deploymentv1.RolloutCodeConflict, "rollout id already has a different intent", false), deploymentv1.RolloutCodeConflict)
+		}
+		if existing.TerminalAt != nil {
+			return *existing, nil
+		}
+		if existing.Intent.Operation == deploymentv1.RolloutOperationRollback && existing.State == deploymentv1.RolloutStatePrepared {
+			return e.startExplicitRollback(context.WithoutCancel(ctx), *existing, progress)
+		}
+		return e.resumeRollout(ctx, *existing, nil, progress)
 	}
 	if err := e.validatePreviousKnownGood(ctx, canonical); err != nil {
-		return deploymentv1.RolloutRecord{}, err
+		return deploymentv1.RolloutRecord{}, preMutationRolloutFailure(err, deploymentv1.RolloutCodeConflict)
 	}
 	plan, err := e.Reconciler.PrepareRollout(ctx, canonical.Desired)
 	if err != nil {
-		return deploymentv1.RolloutRecord{}, err
+		return deploymentv1.RolloutRecord{}, preMutationRolloutFailure(err, deploymentv1.RolloutCodePreflightFailed)
 	}
 	record, err := e.Store.BeginRollout(ctx, canonical, planObservedIdentities(plan))
 	if err != nil {
-		return deploymentv1.RolloutRecord{}, err
+		return deploymentv1.RolloutRecord{}, preMutationRolloutFailure(err, deploymentv1.RolloutCodePreflightFailed)
 	}
 	if record.TerminalAt != nil {
 		return *record, nil
@@ -79,7 +95,7 @@ func (e *Engine) resumeRollout(ctx context.Context, record deploymentv1.RolloutR
 	switch record.State {
 	case deploymentv1.RolloutStatePrepared:
 		if err := ctx.Err(); err != nil {
-			failure := deploymentv1.NewRolloutError("CANCELLED_BEFORE_MUTATION", "rollout cancelled before Kubernetes mutation", false)
+			failure := deploymentv1.NewRolloutError(deploymentv1.RolloutCodeCancelledBeforeMutation, "rollout cancelled before Kubernetes mutation", false)
 			terminal, transitionErr := e.Store.TransitionRollout(context.WithoutCancel(ctx), record.Intent.RolloutID, deploymentv1.RolloutStateFailed, failure, record.Resources, nil, true)
 			if transitionErr != nil {
 				return record, transitionErr
@@ -261,6 +277,28 @@ func boundedRolloutFailure(err error) *deploymentv1.RolloutError {
 		return deploymentv1.NewRolloutError(failure.Code, RedactSensitive(failure.Message), failure.Retryable)
 	}
 	return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, RedactSensitive(err.Error()), false)
+}
+
+func preMutationRolloutFailure(err error, fallbackCode string) *deploymentv1.RolloutError {
+	var typed *deploymentv1.RolloutError
+	if errors.As(err, &typed) && typed.Code != "" {
+		failure := deploymentv1.NewRolloutError(typed.Code, typed.Message, typed.Retryable)
+		failure.FailurePhase = deploymentv1.FailurePhasePreMutation
+		return failure
+	}
+	var storeFailure *rolloutStoreError
+	if errors.As(err, &storeFailure) && storeFailure.Code != "" {
+		failure := deploymentv1.NewRolloutError(storeFailure.Code, storeFailure.Msg, false)
+		failure.FailurePhase = deploymentv1.FailurePhasePreMutation
+		return failure
+	}
+	message := "rollout preflight failed"
+	if err != nil {
+		message = err.Error()
+	}
+	failure := deploymentv1.NewRolloutError(fallbackCode, message, false)
+	failure.FailurePhase = deploymentv1.FailurePhasePreMutation
+	return failure
 }
 
 func emitRolloutProgress(progress ProgressFunc, rollout deploymentv1.RolloutRecord, phase, message string, percent int32, err error) error {

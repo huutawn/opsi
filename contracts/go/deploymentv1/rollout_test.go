@@ -101,6 +101,24 @@ func TestRolloutIntentAndTransitionAllowlist(t *testing.T) {
 	}
 }
 
+func TestRolloutFailurePhaseAndFactualTerminalAreBounded(t *testing.T) {
+	if !IsRolloutFailurePhase(FailurePhasePreMutation) || !IsRolloutFailurePhase(FailurePhasePostMutation) || IsRolloutFailurePhase("") || IsRolloutFailurePhase("unknown") {
+		t.Fatal("rollout failure phase allowlist is not bounded")
+	}
+	if RolloutMutationObserved(RolloutStatePrepared) || !RolloutMutationObserved(RolloutStateApplying) || !RolloutMutationObserved(RolloutStateFailed) || !RolloutMutationObserved(RolloutStateRollingBack) {
+		t.Fatal("rollout mutation observation boundary is incorrect")
+	}
+	now := time.Unix(3, 0).UTC()
+	record := RolloutRecord{State: RolloutStateFailed, Error: NewRolloutError(RolloutCodeRuntimeFailed, "failed", false)}
+	if IsFactualTerminalRollout(record) {
+		t.Fatal("nonterminal failed record was accepted as factual terminal")
+	}
+	record.TerminalAt = &now
+	if !IsFactualTerminalRollout(record) {
+		t.Fatal("terminal failed record was not recognized")
+	}
+}
+
 func TestRolloutContractSupportsExplicitRollbackAndNeverSerializesNestedLeaseToken(t *testing.T) {
 	snapshot := validRuntimeSnapshot(t)
 	intent, err := (RolloutIntent{SchemaVersion: RolloutSchemaVersion, RolloutID: "rollout-rollback", Operation: RolloutOperationRollback, Target: snapshot.Target, Desired: snapshot, PreviousKnownGoodID: "rollout-a", PreviousKnownGoodHash: strings.Repeat("e", 64), PreviousDigest: "sha256:" + strings.Repeat("a", 64), ExpectedKnownGoodID: "rollout-b", ExpectedKnownGoodHash: strings.Repeat("f", 64), Attempt: 1, CreatedAt: time.Unix(2, 0).UTC()}).Canonicalize()

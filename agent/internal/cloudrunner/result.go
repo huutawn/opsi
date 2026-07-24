@@ -24,9 +24,17 @@ func progressFromRollout(record deploymentv1.RolloutRecord, leaseToken string, p
 	return progress
 }
 
-func resultFromRollout(intent deploymentv1.RolloutIntent, record deploymentv1.RolloutRecord, reconcileErr error, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
-	if record.Intent.RolloutID == "" {
+func resultFromRollout(intent deploymentv1.RolloutIntent, record deploymentv1.RolloutRecord, reconcileErr error, lease cloudrelay.DeploymentLease) (cloudrelay.DeploymentResult, bool) {
+	preMutation := record.Intent.RolloutID == ""
+	if preMutation {
+		failure := rolloutFailure(reconcileErr, deploymentv1.RolloutCodePreflightFailed)
+		if failure.FailurePhase != deploymentv1.FailurePhasePreMutation {
+			return cloudrelay.DeploymentResult{}, false
+		}
 		record = preMutationFailureRecord(intent, reconcileErr)
+	}
+	if !preMutation && !deploymentv1.IsFactualTerminalRollout(record) {
+		return cloudrelay.DeploymentResult{}, false
 	}
 	result := cloudrelay.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, LeaseToken: lease.LeaseToken, Status: record.State, IntentHash: record.Intent.IntentHash}
 	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: record.State, RolloutID: record.Intent.RolloutID, RolloutState: record.State, IntentHash: record.Intent.IntentHash, StateHash: record.StateHash, SpecHash: record.Intent.Desired.WorkloadSpecHash, WorkloadSpecHash: record.Intent.Desired.WorkloadSpecHash, ExposureSpecHash: record.Intent.Desired.ExposureSpecHash, DesiredDigest: record.Intent.Desired.Image.Digest, PreviousDigest: record.Intent.PreviousDigest, Resources: append([]deploymentv1.ResourceIdentity(nil), record.Resources...), Attempt: record.Intent.Attempt}
@@ -41,6 +49,12 @@ func resultFromRollout(intent deploymentv1.RolloutIntent, record deploymentv1.Ro
 		failure := rolloutFailure(reconcileErr, deploymentv1.RolloutCodeRuntimeFailed)
 		agentResult.FailureCode = failure.Code
 		agentResult.FailureMessageRedacted = failure.Message
+	}
+	if agentResult.FailureCode != "" {
+		agentResult.FailurePhase = deploymentv1.FailurePhasePostMutation
+		if preMutation || record.State == deploymentv1.RolloutStateFailed && agentResult.FailureCode == deploymentv1.RolloutCodeCancelledBeforeMutation {
+			agentResult.FailurePhase = deploymentv1.FailurePhasePreMutation
+		}
 	}
 	switch record.State {
 	case deploymentv1.RolloutStateSucceeded:
@@ -63,7 +77,7 @@ func resultFromRollout(intent deploymentv1.RolloutIntent, record deploymentv1.Ro
 		result.Status = deploymentv1.RolloutStateRollbackFailed
 	case deploymentv1.RolloutStateFailed:
 		result.Status = deploymentv1.StateFailed
-		if agentResult.FailureCode != deploymentv1.RolloutCodeNoKnownGood {
+		if agentResult.FailurePhase == deploymentv1.FailurePhasePreMutation {
 			agentResult.CurrentDigest = record.Intent.PreviousDigest
 			agentResult.KnownGoodID = record.Intent.PreviousKnownGoodID
 			agentResult.KnownGoodHash = record.Intent.PreviousKnownGoodHash
@@ -76,7 +90,7 @@ func resultFromRollout(intent deploymentv1.RolloutIntent, record deploymentv1.Ro
 	result.FailureCode = agentResult.FailureCode
 	result.FailureMessageRedacted = agentResult.FailureMessageRedacted
 	result.RolloutResult = agentResult
-	return result
+	return result, true
 }
 
 func preMutationFailureRecord(intent deploymentv1.RolloutIntent, err error) deploymentv1.RolloutRecord {
@@ -90,7 +104,9 @@ func preMutationFailureRecord(intent deploymentv1.RolloutIntent, err error) depl
 func rolloutFailure(err error, fallbackCode string) *deploymentv1.RolloutError {
 	var typed *deploymentv1.RolloutError
 	if errors.As(err, &typed) && typed.Code != "" {
-		return deploymentv1.NewRolloutError(typed.Code, deploy.RedactSensitive(typed.Message), typed.Retryable)
+		failure := deploymentv1.NewRolloutError(typed.Code, deploy.RedactSensitive(typed.Message), typed.Retryable)
+		failure.FailurePhase = typed.FailurePhase
+		return failure
 	}
 	message := "rollout reconciliation failed"
 	if err != nil {
