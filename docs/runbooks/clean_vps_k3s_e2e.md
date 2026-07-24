@@ -76,15 +76,27 @@ node lifecycle jobs; it is not a generic webhook relay.
 2. The accepted `OPSI_E2E_BUILD_RECORD_ID` is submitted to the project-scoped
    deployment endpoint. The resulting durable DeploymentJob/RolloutIntent is
    routed by the exact TopologyPlan and DeploymentPolicy.
-3. Agent `PollJob` consumes the job through `ProductionAdapter`/
-   `ReconcileRollout`, deploys the immutable OCI digest, and Opsi-owned K3s
-   resources become healthy. Evidence includes the BuildRecord, digest, job,
-   runtime/node/Agent identity, readiness, events, and audit.
-4. The known-bad `OPSI_E2E_BAD_BUILD_RECORD_ID` must fail deployment readiness
-   and produce factual failure/incident evidence. The script verifies factual
-   incident list/detail/resolve and the `incident.resolve` audit.
-5. The script writes redacted evidence and cleanup guidance. It rejects any
+3. Agent `PollJob` consumes the job through `ReconcileRollout` and its
+   `ProductionAdapter`, deploys the immutable OCI digest, and Opsi-owned K3s
+   resources become healthy. Evidence includes desired/current digest,
+   known-good identity/hash, readiness hash, resource identities, and exact
+   runtime/node/Agent identity.
+4. The known-bad `OPSI_E2E_BAD_BUILD_RECORD_ID` must follow `failed ->
+   rolling_back -> rolled_back`. `failed`, `rollback_failed`, `succeeded`, or
+   `cancelled` are immediate harness failures while waiting. The final record
+   must keep desired digest B while current and previous digest equal A and the
+   A known-good identity/hash remain unchanged.
+5. K3s readiness is checked again after rollback. Every ready application
+   container imageID must match digest A, so the harness cannot print PASS while
+   the target workload is unhealthy. The script then verifies factual incident
+   list/detail/resolve and the `incident.resolve` audit.
+6. The script writes redacted evidence and cleanup guidance. It rejects any
    artifact containing a PEM private-key marker or sensitive value.
+
+`make verify-e2e-k3s-selfcheck` replaces `ssh-keyscan` through a temporary PATH
+stub and tests correct, wrong, zero-match, and duplicate-match fingerprints
+without network access. Local JSON fixtures cover succeeded A, rolled-back B,
+failed, rollback-failed, cancelled, and incorrect rollback metadata.
 
 No Git clone, source SHA, Docker build, arbitrary manifest, caller-selected
 authority, service-scoped deployment, or generic webhook relay participates in

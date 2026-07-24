@@ -129,11 +129,11 @@ func (s PostgresService) StartExposureRollout(projectID, actorUserID, key, reque
 		return DeploymentJob{}, false, err
 	}
 	now := s.clock()
-	intent, err := buildRolloutIntent(base, preview.Desired, previousID, previousHash, previousDigest, "", "", deploymentv1.RolloutOperationApply, now)
+	intent, err := buildRolloutIntent(base, &preview.Desired, previousID, previousHash, previousDigest, "", "", deploymentv1.RolloutOperationApply, now)
 	if err != nil {
 		return DeploymentJob{}, false, APIError{Status: 400, Code: "ROLLOUT_INTENT_INVALID", Message: err.Error(), RequestID: requestID}
 	}
-	job := rolloutDeploymentJob(base, intent, preview.Desired, actorUserID, key, payloadHash, now)
+	job := rolloutDeploymentJob(base, intent, &preview.Desired, actorUserID, key, payloadHash, now)
 	if err := insertDeployment(ctx, tx, job); err != nil {
 		return DeploymentJob{}, false, err
 	}

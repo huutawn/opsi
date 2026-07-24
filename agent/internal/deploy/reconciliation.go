@@ -126,11 +126,14 @@ func (a ProductionAdapter) PrepareRollout(ctx context.Context, snapshot deployme
 	if err != nil {
 		return RolloutPlan{}, deploymentv1.NewRolloutError("WORKLOAD_RENDER_FAILED", err.Error(), false)
 	}
-	exposure, err := renderExposure(ctx, command, snapshot.Exposure, a.TLSResolver)
-	if err != nil {
-		return RolloutPlan{}, err
+	var exposure RenderedExposure
+	if snapshot.HasExternalExposure() {
+		exposure, err = renderExposure(ctx, command, snapshot.Exposure, a.TLSResolver)
+		if err != nil {
+			return RolloutPlan{}, err
+		}
 	}
-	objects, err := rolloutObjects(resources, exposure)
+	objects, err := rolloutObjects(resources, exposure, snapshot.HasExternalExposure())
 	if err != nil {
 		return RolloutPlan{}, err
 	}
@@ -147,19 +150,21 @@ func (a ProductionAdapter) PrepareRollout(ctx context.Context, snapshot deployme
 			}
 		}
 	}
-	// Exposure route conflicts are checked even when the workload Service is
-	// absent: first rollout must be allowed to create both resources together.
-	if serviceObservation := plan.Observed[2]; serviceObservation.Exists {
-		if _, err := a.PreflightExposure(ctx, command, snapshot.Exposure, a.TLSResolver); err != nil {
-			return RolloutPlan{}, err
-		}
-	} else {
-		all, err := a.listIngresses(ctx)
-		if err != nil {
-			return RolloutPlan{}, err
-		}
-		if err := preflightRouteConflicts(all, snapshot.Exposure, exposure); err != nil {
-			return RolloutPlan{}, err
+	if snapshot.HasExternalExposure() {
+		// Exposure route conflicts are checked even when the workload Service is
+		// absent: first rollout must be allowed to create both resources together.
+		if serviceObservation := plan.Observed[2]; serviceObservation.Exists {
+			if _, err := a.PreflightExposure(ctx, command, snapshot.Exposure, a.TLSResolver); err != nil {
+				return RolloutPlan{}, err
+			}
+		} else {
+			all, err := a.listIngresses(ctx)
+			if err != nil {
+				return RolloutPlan{}, err
+			}
+			if err := preflightRouteConflicts(all, snapshot.Exposure, exposure); err != nil {
+				return RolloutPlan{}, err
+			}
 		}
 	}
 	_ = namespace
@@ -289,9 +294,12 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 	if err != nil {
 		return deploymentv1.ReadinessEvidence{}, nil, false, err
 	}
-	ingress, err := a.getJSON(ctx, "ingress", plan.Exposure.IngressName, plan.Exposure.Namespace)
-	if err != nil {
-		return deploymentv1.ReadinessEvidence{}, nil, false, err
+	var ingress map[string]any
+	if plan.Snapshot.HasExternalExposure() {
+		ingress, err = a.getJSON(ctx, "ingress", plan.Exposure.IngressName, plan.Exposure.Namespace)
+		if err != nil {
+			return deploymentv1.ReadinessEvidence{}, nil, false, err
+		}
 	}
 	pods, err := a.getJSON(ctx, "pods", "", plan.Resources.Namespace, plan.Resources.Selector)
 	if err != nil {
@@ -310,15 +318,22 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 	workloadReady := generation > 0 && observedGeneration >= generation && available >= desiredReplicas && readyCount >= desiredReplicas && imageID != "" && deploymentHasExactAppImage(deployment, command.Image.Reference)
 	serviceReady := ownedWorkloadObject(service, plan.Resources.Service) && serviceObjectHasExactPort(service, command.Workload.ContainerPort) && equalLogical(serviceJSON(service, "selector"), plan.Resources.Selector)
 	endpointReady := endpointsReady(endpoints, int(command.Workload.ContainerPort), desiredReplicas)
-	ingressReady := ownedExposureIdentity(ingress, plan.Snapshot.Exposure, plan.Exposure.IngressName) && ingressGenerationReady(ingress) && ingressMatches(ingress, plan.Exposure.Ingress)
+	ingressReady := true
+	if plan.Snapshot.HasExternalExposure() {
+		ingressReady = ownedExposureIdentity(ingress, plan.Snapshot.Exposure, plan.Exposure.IngressName) && ingressGenerationReady(ingress) && ingressMatches(ingress, plan.Exposure.Ingress)
+	}
 	runtimeReady := workloadReady && serviceReady && endpointReady && ingressReady
-	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: runtimeReady, LocalRoutingReady: !a.RequireLocalRouting, ExternalReady: false, ObservedAt: time.Now().UTC()}
+	localEvidence := hashValue(map[string]any{"service": serviceReady, "endpoints": endpointReady, "port": command.Workload.ContainerPort})
+	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: runtimeReady, LocalRoutingReady: serviceReady && endpointReady, LocalProbeEvidenceHash: localEvidence, ExternalReady: false, ObservedAt: time.Now().UTC()}
 	evidence.WorkloadEvidenceHash = hashValue(map[string]any{"generation": generation, "observed": observedGeneration, "available": available, "desired": desiredReplicas})
 	evidence.ServiceEvidenceHash = hashValue(map[string]any{"selector": serviceJSON(service, "selector"), "port": command.Workload.ContainerPort, "endpoints": endpointReady})
-	evidence.ExposureEvidenceHash = hashValue(map[string]any{"generation": number(metadataValue(ingress, "generation")), "spec": ingress["spec"], "ownership": ingressReady})
+	evidence.ExposureEvidenceHash = hashValue(map[string]any{"external": plan.Snapshot.HasExternalExposure(), "generation": number(metadataValue(ingress, "generation")), "spec": ingress["spec"], "ownership": ingressReady})
 	evidence.ApplicationImageIDHash = hashString(imageID)
-	resources := []deploymentv1.ResourceIdentity{resourceIdentityFromObject("Deployment", deployment), resourceIdentityFromObject("Service", service), resourceIdentityFromObject("Ingress", ingress)}
-	if a.RequireLocalRouting {
+	resources := []deploymentv1.ResourceIdentity{resourceIdentityFromObject("Deployment", deployment), resourceIdentityFromObject("Service", service)}
+	if plan.Snapshot.HasExternalExposure() {
+		resources = append(resources, resourceIdentityFromObject("Ingress", ingress))
+	}
+	if a.RequireLocalRouting && plan.Snapshot.HasExternalExposure() {
 		if a.RoutingProbe == nil {
 			return evidence, resources, false, deploymentv1.NewRolloutError(deploymentv1.RolloutCodeExternalUnavailable, "local routing probe is not configured", false)
 		}
@@ -414,12 +429,14 @@ func hasForeignSpecManager(object map[string]any, allowed string) bool {
 	return false
 }
 
-func rolloutObjects(resources renderedResources, exposure RenderedExposure) ([]rolloutObject, error) {
+func rolloutObjects(resources renderedResources, exposure RenderedExposure, includeExposure bool) ([]rolloutObject, error) {
 	objects := []rolloutObject{
 		{Kind: "Namespace", Name: resources.Namespace, Manager: ProductionFieldManager, Object: resources.NamespaceObject},
 		{Kind: "Deployment", Namespace: resources.Namespace, Name: resources.DeploymentName, Manager: ProductionFieldManager, Object: resources.Deployment},
 		{Kind: "Service", Namespace: resources.Namespace, Name: resources.ServiceName, Manager: ProductionFieldManager, Object: resources.Service},
-		{Kind: "Ingress", Namespace: exposure.Namespace, Name: exposure.IngressName, Manager: exposure.FieldManager, Object: exposure.Ingress},
+	}
+	if includeExposure {
+		objects = append(objects, rolloutObject{Kind: "Ingress", Namespace: exposure.Namespace, Name: exposure.IngressName, Manager: exposure.FieldManager, Object: exposure.Ingress})
 	}
 	for index := range objects {
 		objects[index].Functional = objectFunctionalHash(objects[index].Object)

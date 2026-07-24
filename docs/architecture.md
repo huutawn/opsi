@@ -4,7 +4,7 @@
 |---|---|
 | Version | 6.1 |
 | Status | Active architecture map |
-| Last updated | 2026-07-23 |
+| Last updated | 2026-07-24 |
 | Requirements | `docs/opsi_srs.md` |
 | Implementation truth | `docs/current_state.md`, `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
@@ -28,7 +28,7 @@ Cloud
        -> Agent PollJob
 
 Agent
-  -> ProductionAdapter/ReconcileRollout
+  -> ReconcileRollout -> ProductionAdapter
   -> Opsi-owned K3s resources
   -> local SQLite/runtime stores
 ```
@@ -113,11 +113,17 @@ storage-only. They are not execution authority.
 
 The sole executable delivery path is GitHub Actions OIDC -> accepted
 `BuildRecord` -> immutable OCI digest -> `TopologyPlan` + `DeploymentPolicy` +
-routing -> durable `DeploymentJob`/`RolloutIntent` -> Agent `PollJob` ->
-`ProductionAdapter`/`ReconcileRollout` -> Opsi-owned K3s resources -> factual
-readiness and known-good rollback. Agent source clone/build, caller-supplied
+routing -> durable `DeploymentJob` + canonical `RolloutIntent` -> Agent `PollJob`
+-> `ReconcileRollout` -> `ProductionAdapter` -> Opsi-owned K3s resources ->
+factual readiness and known-good rollback. Agent source clone/build, caller-supplied
 manifests, direct deployment RPC, service-scoped deployment creation, and the
 generic push relay are retired. Opsi does not yet provision DNS or certificates.
+
+New BuildRecord deployments never create active `immutable_image` jobs. A
+missing RolloutIntent is a retired historical command and fails closed before
+Kubernetes mutation. No-external workloads use an empty exposure snapshot and
+never render a hidden Ingress; existing authoritative exposure is preserved on
+image redeployment.
 
 ### 1.6 Current incident path
 

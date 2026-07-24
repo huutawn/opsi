@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
-	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
@@ -30,18 +29,4 @@ func RolloutIntentFromLease(lease cloudrelay.DeploymentLease, nodeID string) (de
 		return deploymentv1.RolloutIntent{}, errors.New("rollout command workload or image does not match its immutable intent")
 	}
 	return intent, nil
-}
-
-func RequestFromLease(lease cloudrelay.DeploymentLease) (deploy.Request, error) {
-	if lease.Command == nil {
-		return deploy.Request{}, deploy.ErrLegacyDeploymentRetired
-	}
-	if lease.Command.Rollout != nil {
-		return deploy.Request{}, errors.New("rollout command must use rollout reconciliation")
-	}
-	if lease.Command.JobID != lease.Deployment.ID || lease.Command.LeaseToken == "" || lease.Command.LeaseToken != lease.LeaseToken || lease.Action != "deploy" {
-		return deploy.Request{}, errors.New("immutable deployment command does not match its lease")
-	}
-	request := deploy.Request{Production: lease.Command}
-	return request, request.Validate()
 }

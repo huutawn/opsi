@@ -22,22 +22,7 @@ type CloudClient interface {
 	Heartbeat(context.Context, string, cloudrelay.Heartbeat) error
 }
 
-var errImageSourceUnsupported = errors.New("immutable deployment command required")
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 type DeployEngine interface {
-	Deploy(context.Context, deploy.Request, deploy.ProgressFunc) (deploy.Record, error)
-}
-
-type RolloutEngine interface {
 	ReconcileRollout(context.Context, deploymentv1.RolloutIntent, deploy.ProgressFunc) (deploymentv1.RolloutRecord, error)
 	ReconcilePending(context.Context, deploy.ProgressFunc) ([]deploymentv1.RolloutRecord, error)
 }
@@ -87,13 +72,11 @@ func (r Runner) Run(ctx context.Context) error {
 	if r.HeartbeatInterval <= 0 {
 		r.HeartbeatInterval = 30 * time.Second
 	}
-	if rollouts, ok := r.Engine.(RolloutEngine); ok {
-		recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		if _, err := rollouts.ReconcilePending(recoveryCtx, nil); err != nil {
-			r.log().Warn("pending rollout reconciliation failed", "error", err)
-		}
-		cancelRecovery()
+	recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	if _, err := r.Engine.ReconcilePending(recoveryCtx, nil); err != nil {
+		r.log().Warn("pending rollout reconciliation failed", "error", err)
 	}
+	cancelRecovery()
 	r.sendHeartbeat(ctx)
 	go r.heartbeatLoop(ctx)
 	return r.jobLoop(ctx)
@@ -172,42 +155,7 @@ func (r Runner) handleNodeLifecycle(ctx context.Context, lease cloudrelay.NodeLi
 }
 
 func (r Runner) handleLease(ctx context.Context, lease cloudrelay.DeploymentLease) {
-	var progressMu sync.Mutex
-	state := deploymentv1.StateLeased
-	report := func(next, message string) {
-		if lease.Command == nil || lease.Command.Rollout != nil {
-			return
-		}
-		progressMu.Lock()
-		state = next
-		progressMu.Unlock()
-		if err := r.Client.ProgressDeployment(ctx, r.NodeID, lease.Deployment.ID, deploymentv1.Progress{SchemaVersion: deploymentv1.EventSchemaVersion, LeaseToken: lease.LeaseToken, State: next, MessageRedacted: message}); err != nil {
-			r.log().Warn("cloud deployment progress report failed", "deployment_id", lease.Deployment.ID, "state", next, "error", err)
-		}
-	}
-	report(deploymentv1.StateLeased, "Agent accepted immutable deployment command")
-	done := make(chan struct{})
-	if lease.Command != nil && lease.Command.Rollout == nil {
-		go func() {
-			ticker := time.NewTicker(time.Minute)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					progressMu.Lock()
-					current := state
-					progressMu.Unlock()
-					report(current, "Agent deployment lease heartbeat")
-				}
-			}
-		}()
-	}
-	result := r.execute(ctx, lease, report)
-	close(done)
+	result := r.execute(ctx, lease)
 	for attempt := 0; attempt < 3; attempt++ {
 		err := r.Client.CompleteDeployment(ctx, r.NodeID, lease.Deployment.ID, result)
 		if err == nil {
@@ -235,54 +183,17 @@ func (r Runner) executeNodeLifecycle(ctx context.Context, lease cloudrelay.NodeL
 	return cloudrelay.NodeLifecycleResult{Status: result.Status, LeaseToken: lease.LeaseToken, FailureCode: result.FailureCode, FailureMessageRedacted: result.FailureMessageRedacted, Verified: result.Verified}
 }
 
-func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease, report func(string, string)) cloudrelay.DeploymentResult {
-	if lease.Command != nil && lease.Command.Rollout != nil {
-		return r.executeRollout(ctx, lease)
+func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
+	if lease.Command == nil || lease.Command.Rollout == nil {
+		return deploymentFailure(lease, "LEGACY_DEPLOYMENT_RETIRED", "deployment commands without RolloutIntent are retired")
 	}
-	if lease.Action != "" && lease.Action != "deploy" {
-		return deploymentFailure(lease, "ACTION_UNSUPPORTED", "deployment action is not supported")
-	}
-	if lease.Command != nil && lease.Command.NodeID != r.NodeID {
-		return deploymentFailure(lease, "DEPLOYMENT_TARGET_MISMATCH", "deployment command target does not match this Agent node")
-	}
-	req, err := RequestFromLease(lease)
-	if err != nil {
-		if errors.Is(err, deploy.ErrLegacyDeploymentRetired) {
-			return deploymentFailure(lease, "LEGACY_DEPLOYMENT_RETIRED", "legacy deployment jobs are retired")
-		}
-		return deploymentFailure(lease, failureCode(err), err.Error())
-	}
-	record, err := r.Engine.Deploy(ctx, req, func(event *deploy.ProgressEvent) error {
-		r.log().Info("cloud deployment progress", "deployment_id", lease.Deployment.ID, "phase", event.Phase, "percent", event.Percent)
-		if lease.Command != nil && report != nil {
-			switch event.Phase {
-			case deploy.PhasePulling:
-				report(deploymentv1.StatePulling, event.Message)
-			case deploy.PhaseApplying:
-				report(deploymentv1.StateApplying, event.Message)
-			case deploy.PhaseWatching:
-				report(deploymentv1.StateWaitingReady, event.Message)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		if record.Status == "" {
-			record.Status = deploy.StatusFailed
-		}
-		record.Error = err.Error()
-	}
-	return ResultFromRecord(record, err, lease)
+	return r.executeRollout(ctx, lease)
 }
 
 func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
 	intent, err := RolloutIntentFromLease(lease, r.NodeID)
 	if err != nil {
 		return deploymentFailure(lease, "ROLLOUT_COMMAND_INVALID", err.Error())
-	}
-	rollouts, ok := r.Engine.(RolloutEngine)
-	if !ok {
-		return deploymentFailure(lease, "ROLLOUT_UNSUPPORTED", "rollout reconciliation is not configured")
 	}
 	var progressMu sync.Mutex
 	var latest *deploymentv1.Progress
@@ -310,7 +221,7 @@ func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentL
 			}
 		}
 	}()
-	record, reconcileErr := rollouts.ReconcileRollout(ctx, intent, func(event *deploy.ProgressEvent) error {
+	record, reconcileErr := r.Engine.ReconcileRollout(ctx, intent, func(event *deploy.ProgressEvent) error {
 		if event == nil || event.Rollout == nil {
 			return nil
 		}

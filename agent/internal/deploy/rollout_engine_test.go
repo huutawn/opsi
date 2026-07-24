@@ -25,15 +25,30 @@ func TestRolloutHealthyAThenBrokenBRollsBackExactA(t *testing.T) {
 	if err != nil || recordA.State != deploymentv1.RolloutStateSucceeded {
 		t.Fatalf("A record=%+v err=%v", recordA, err)
 	}
+	if recordA.Evidence == nil || len(recordA.Resources) == 0 || recordA.Intent.Desired.Image.Digest != a.Image.Digest {
+		t.Fatalf("healthy A omitted factual readiness/resources: %+v", recordA)
+	}
 	knownA, err := store.CurrentKnownGood(context.Background(), a.Target)
-	if err != nil || knownA == nil || knownA.Runtime.Image.Digest != a.Image.Digest {
+	if err != nil || knownA == nil || knownA.ID == "" || knownA.SnapshotHash == "" || knownA.EvidenceHash == "" || knownA.Runtime.Image.Digest != a.Image.Digest {
 		t.Fatalf("known-good A=%+v err=%v", knownA, err)
 	}
 	b := testRuntimeSnapshot(t, "job-b", "b")
 	runtime.failReadiness[b.DeploymentJobID] = errors.New("application never became ready")
-	recordB, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-b", b, knownA), nil)
+	var states []string
+	recordB, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-b", b, knownA), func(event *ProgressEvent) error {
+		if event != nil && event.Rollout != nil {
+			states = append(states, event.Rollout.State)
+		}
+		return nil
+	})
 	if recordB.State != deploymentv1.RolloutStateRolledBack || err == nil {
 		t.Fatalf("B record=%+v err=%v", recordB, err)
+	}
+	if !containsOrderedStates(states, deploymentv1.RolloutStateFailed, deploymentv1.RolloutStateRollingBack, deploymentv1.RolloutStateRolledBack) {
+		t.Fatalf("B progress states=%v", states)
+	}
+	if recordB.Intent.Desired.Image.Digest != b.Image.Digest || recordB.Intent.PreviousDigest != a.Image.Digest || recordB.Evidence == nil || len(recordB.Resources) == 0 {
+		t.Fatalf("B rollback omitted desired/previous/readiness/resources: %+v", recordB)
 	}
 	if runtime.current.DeploymentJobID != a.DeploymentJobID || runtime.current.Image.Digest != a.Image.Digest {
 		t.Fatalf("rollback restored %+v instead of exact A", runtime.current)
@@ -53,9 +68,18 @@ func TestRolloutFailureWithoutKnownGoodIsTerminalFailed(t *testing.T) {
 	snapshot := testRuntimeSnapshot(t, "job-broken", "c")
 	runtime.failReadiness[snapshot.DeploymentJobID] = errors.New("unready")
 	engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
-	record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-broken", snapshot, nil), nil)
+	var states []string
+	record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-broken", snapshot, nil), func(event *ProgressEvent) error {
+		if event != nil && event.Rollout != nil {
+			states = append(states, event.Rollout.State)
+		}
+		return nil
+	})
 	if record.State != deploymentv1.RolloutStateFailed || record.TerminalAt == nil || rolloutErrorCode(err) != deploymentv1.RolloutCodeNoKnownGood {
 		t.Fatalf("record=%+v err=%v", record, err)
+	}
+	if containsOrderedStates(states, deploymentv1.RolloutStateRollingBack) || record.Intent.PreviousKnownGoodID != "" {
+		t.Fatalf("failure without known-good claimed rollback: states=%v record=%+v", states, record)
 	}
 	if known, err := store.CurrentKnownGood(context.Background(), snapshot.Target); err != nil || known != nil {
 		t.Fatalf("failed rollout created known-good: %+v err=%v", known, err)
@@ -448,12 +472,23 @@ func testRolloutIntent(t *testing.T, rolloutID string, desired deploymentv1.Runt
 	if previous != nil {
 		intent.PreviousKnownGoodID = previous.ID
 		intent.PreviousKnownGoodHash = previous.SnapshotHash
+		intent.PreviousDigest = previous.Runtime.Image.Digest
 	}
 	canonical, err := intent.Canonicalize()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return canonical
+}
+
+func containsOrderedStates(states []string, expected ...string) bool {
+	index := 0
+	for _, state := range states {
+		if index < len(expected) && state == expected[index] {
+			index++
+		}
+	}
+	return index == len(expected)
 }
 
 type fakeRolloutRuntime struct {

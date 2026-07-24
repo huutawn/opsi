@@ -72,30 +72,16 @@ func (fakeLifecycle) Execute(context.Context, nodelifecycle.Request) nodelifecyc
 	return nodelifecycle.Result{Status: nodelifecycle.StatusCompleted, Verified: true}
 }
 
-type fakeEngine struct{}
-
 type staticHealthProbe RuntimeHealth
 
 func (p staticHealthProbe) Probe(context.Context) (RuntimeHealth, error) {
 	return RuntimeHealth(p), nil
 }
 
-func (fakeEngine) Deploy(_ context.Context, req deploy.Request, progress deploy.ProgressFunc) (deploy.Record, error) {
-	if req.Production == nil {
-		return deploy.Record{}, deploy.ErrLegacyDeploymentRetired
-	}
-	command := req.Production
-	rec := deploy.Record{DeployID: command.JobID, ProjectID: command.ProjectID, ServiceID: command.Workload.ServiceKey, ServiceName: command.Workload.ServiceKey, ImageTag: command.Image.Reference, SpecHash: command.SpecHash, Status: deploy.StatusSuccess}
-	if progress != nil {
-		_ = progress(&deploy.ProgressEvent{ProjectID: command.ProjectID, ServiceID: command.Workload.ServiceKey, Phase: deploy.PhaseSuccess, Percent: 100})
-	}
-	return rec, nil
-}
-
 type fakeRolloutEngine struct {
-	fakeEngine
-	pendingCalls int
-	intent       deploymentv1.RolloutIntent
+	pendingCalls   int
+	reconcileCalls int
+	intent         deploymentv1.RolloutIntent
 }
 
 func (f *fakeRolloutEngine) ReconcilePending(context.Context, deploy.ProgressFunc) ([]deploymentv1.RolloutRecord, error) {
@@ -104,6 +90,7 @@ func (f *fakeRolloutEngine) ReconcilePending(context.Context, deploy.ProgressFun
 }
 
 func (f *fakeRolloutEngine) ReconcileRollout(_ context.Context, intent deploymentv1.RolloutIntent, progress deploy.ProgressFunc) (deploymentv1.RolloutRecord, error) {
+	f.reconcileCalls++
 	f.intent = intent
 	now := time.Now().UTC()
 	resources := []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}
@@ -126,7 +113,7 @@ func (f *fakeRolloutEngine) ReconcileRollout(_ context.Context, intent deploymen
 	return record, nil
 }
 
-func TestRunnerExecutesImmutableLeaseAndReportsResult(t *testing.T) {
+func TestRunnerRejectsCommandWithoutRolloutBeforeMutation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &ConnectionState{}
 	intent := testCloudRolloutIntent(t)
@@ -138,9 +125,10 @@ func TestRunnerExecutesImmutableLeaseAndReportsResult(t *testing.T) {
 		Deployment: cloudrelay.DeploymentJobEnvelope{ID: command.JobID},
 		Command:    &command,
 	}}}
+	engine := &fakeRolloutEngine{}
 	runner := Runner{
 		Client:            client,
-		Engine:            fakeEngine{},
+		Engine:            engine,
 		NodeID:            "node-1",
 		PollInterval:      time.Millisecond,
 		LongPollWait:      time.Millisecond,
@@ -151,7 +139,7 @@ func TestRunnerExecutesImmutableLeaseAndReportsResult(t *testing.T) {
 	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("run err = %v", err)
 	}
-	if len(client.results) != 1 || client.results[0].Status != "succeeded" {
+	if len(client.results) != 1 || client.results[0].Status != deploymentv1.StateFailed || client.results[0].FailureCode != "LEGACY_DEPLOYMENT_RETIRED" || engine.reconcileCalls != 0 {
 		t.Fatalf("result = %#v", client.results)
 	}
 	if client.heartbeats == 0 {
@@ -218,10 +206,10 @@ func TestHeartbeatHealthAndCapabilitiesFailClosed(t *testing.T) {
 		wantDeploy    bool
 		wantLifecycle bool
 	}{
-		{name: "ready", probe: staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady}, engine: fakeEngine{}, wantStatus: K3SStatusReady, wantReady: true, wantDeploy: true},
-		{name: "unavailable", probe: staticHealthProbe{K3SStatus: K3SStatusUnavailable}, engine: fakeEngine{}, wantStatus: K3SStatusUnavailable},
-		{name: "not ready", probe: staticHealthProbe{K3SStatus: K3SStatusNotReady}, engine: fakeEngine{}, wantStatus: K3SStatusNotReady},
-		{name: "missing probe", engine: fakeEngine{}, wantStatus: K3SStatusUnavailable},
+		{name: "ready", probe: staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusReady, wantReady: true, wantDeploy: true},
+		{name: "unavailable", probe: staticHealthProbe{K3SStatus: K3SStatusUnavailable}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusUnavailable},
+		{name: "not ready", probe: staticHealthProbe{K3SStatus: K3SStatusNotReady}, engine: &fakeRolloutEngine{}, wantStatus: K3SStatusNotReady},
+		{name: "missing probe", engine: &fakeRolloutEngine{}, wantStatus: K3SStatusUnavailable},
 		{name: "lifecycle does not imply health", lifecycle: fakeLifecycle{}, wantStatus: K3SStatusUnavailable, wantLifecycle: true},
 	}
 	for _, tt := range tests {
@@ -248,7 +236,7 @@ func TestRunnerExecutesNodeLifecycleLeaseAndReportsResult(t *testing.T) {
 	}}}
 	runner := Runner{
 		Client:            client,
-		Engine:            fakeEngine{},
+		Engine:            &fakeRolloutEngine{},
 		NodeLifecycle:     fakeLifecycle{},
 		NodeID:            "node-1",
 		PollInterval:      time.Millisecond,
@@ -263,36 +251,14 @@ func TestRunnerExecutesNodeLifecycleLeaseAndReportsResult(t *testing.T) {
 	}
 }
 
-func TestRequestFromLeaseRejectsMissingImmutableCommand(t *testing.T) {
-	_, err := RequestFromLease(cloudrelay.DeploymentLease{})
-	if !errors.Is(err, deploy.ErrLegacyDeploymentRetired) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestRequestFromLeaseRejectsMismatchedCommand(t *testing.T) {
+func TestRolloutIntentFromLeaseRejectsMismatchedCommand(t *testing.T) {
 	intent := testCloudRolloutIntent(t)
 	command := intent.Desired.AgentCommand()
-	command.Rollout = nil
+	command.Rollout = &intent
 	command.LeaseToken = "lease-1"
-	_, err := RequestFromLease(cloudrelay.DeploymentLease{Action: "deploy", LeaseToken: "lease-2", Deployment: cloudrelay.DeploymentJobEnvelope{ID: command.JobID}, Command: &command})
+	_, err := RolloutIntentFromLease(cloudrelay.DeploymentLease{Action: deploymentv1.RolloutOperationApply, LeaseToken: "lease-2", Deployment: cloudrelay.DeploymentJobEnvelope{ID: command.JobID}, Command: &command}, intent.Target.NodeID)
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestResultFromRecordIncludesIntentHash(t *testing.T) {
-	result := ResultFromRecord(deploy.Record{Status: deploy.StatusSuccess}, nil, cloudrelay.DeploymentLease{Deployment: cloudrelay.DeploymentJobEnvelope{IntentHash: "sha256:intent"}})
-	if result.IntentHash != "sha256:intent" {
-		t.Fatalf("intent hash = %q", result.IntentHash)
-	}
-}
-
-func TestResultFromRecordRedactsFailureMessage(t *testing.T) {
-	secret := "top-secret-token"
-	result := ResultFromRecord(deploy.Record{Status: deploy.StatusFailed}, errors.New("kubectl failed password="+secret+" https://user:"+secret+"@example.test/repo.git"), cloudrelay.DeploymentLease{})
-	if strings.Contains(result.FailureMessageRedacted, secret) {
-		t.Fatalf("failure message leaked secret: %q", result.FailureMessageRedacted)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -153,6 +154,12 @@ func (s RuntimeSnapshot) Validate() error {
 	if err != nil || workloadHash != s.WorkloadSpecHash || s.Workload.ServiceKey != s.Target.ServiceKey {
 		return errors.New("workload snapshot hash or identity is invalid")
 	}
+	if s.ExposureSpecHash == "" {
+		if !reflect.DeepEqual(s.Exposure, exposurev1.ExposureSpec{}) {
+			return errors.New("no-external runtime snapshot must omit ExposureSpec")
+		}
+		return s.Authority.Validate()
+	}
 	exposure, err := s.Exposure.Canonicalize()
 	if err != nil || exposure.SpecHash != s.ExposureSpecHash ||
 		exposure.ProjectID != s.Target.ProjectID || exposure.EnvironmentID != s.Target.EnvironmentID ||
@@ -161,6 +168,10 @@ func (s RuntimeSnapshot) Validate() error {
 		return errors.New("exposure snapshot hash or identity is invalid")
 	}
 	return s.Authority.Validate()
+}
+
+func (s RuntimeSnapshot) HasExternalExposure() bool {
+	return s.ExposureSpecHash != ""
 }
 
 // Hash includes every runtime-authority field. Exposure metadata is the only

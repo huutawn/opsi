@@ -78,10 +78,12 @@ not been proven on a clean target VPS; that evidence belongs to P06.
 
 The public Agent API has no direct deployment RPC. Cloud resolves the accepted
 BuildRecord, topology, policy, routing, and durable job into an immutable
-`AgentCommand`; the Agent polls that command, pulls its digest, reconciles
-Opsi-owned K3s resources, reports readiness, and participates in rollback or
-rollout reconciliation. Historical SQLite deployment columns remain readable
-for restore compatibility but are not executable input paths.
+`AgentCommand` carrying a canonical `RolloutIntent`; the Agent polls that
+command, pulls its digest, reconciles Opsi-owned K3s resources, reports
+readiness, and participates in rollback reconciliation. Commands without a
+RolloutIntent fail closed before Kubernetes mutation. Historical SQLite
+deployment columns remain readable for restore compatibility but are not
+executable input paths.
 
 The poll transport may retain the historical `/webhooks/next` route name, but
 it carries only canonical deployment or node lifecycle jobs. It is not a

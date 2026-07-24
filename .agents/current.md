@@ -4,6 +4,24 @@ Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
+### R5-011-S4 — SINGLE_ROLLOUT_EXECUTION_PATH_PASS
+
+- The discovered blocker was active BuildRecord `immutable_image` jobs beside
+  rollout reconciliation. New BuildRecord deployments now create only durable
+  `rollout` jobs with a canonical `RolloutIntent`.
+- Agent commands without an intent fail with `LEGACY_DEPLOYMENT_RETIRED` before
+  Kubernetes mutation. `Engine.Deploy` and `ProductionAdapter.Deploy` are no
+  longer executable delivery entry points; PollJob enters `ReconcileRollout`.
+- Queued historical rows are terminalized without blocking the next canonical
+  lease. No-external workloads render no Ingress, while image redeployments
+  preserve existing authoritative exposure.
+- The local harness requires healthy A -> broken B -> restored A and validates
+  exact digests, known-good/readiness/resource evidence, terminal states, and
+  final K3s imageID readiness. Its self-test uses a local ssh-keyscan stub and
+  JSON fixtures without network access.
+- No SSH, VPS, DNS, TLS, release, public endpoint, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
 ### R5-011-S3 — MANUAL_ACCEPTANCE_TRUTH_REPAIR
 
 - Correction only: the manual K3s acceptance is PEM-only, pins one exact SSH

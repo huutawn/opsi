@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -1467,7 +1466,7 @@ func (s *Service) CreateService(projectID string, draft ServiceDraft, key string
 	return record, nil
 }
 
-// StartImmutableDeployment is the canonical R5-010 create path. The caller
+// StartImmutableDeployment is the canonical BuildRecord rollout create path. The caller
 // supplies an authority snapshot produced by BuildRecord + routing services;
 // this method only persists the snapshot and never accepts source or manifest data.
 func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, requestedBy, key, requestID string) (DeploymentJob, bool, error) {
@@ -1519,13 +1518,25 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	snapshot.CreatedAt = now
 	snapshot.ActorUserID = requestedBy
 	snapshot.IdempotencyKey = key
-	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "immutable_image", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: snapshot.Authority.EnvironmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: "deploy", IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: snapshot.Authority.EnvironmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
 	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
+	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
+	exposure, err := exposureForDeployment(s.latestExposureLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID), job.ID)
+	if err != nil {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "EXPOSURE_SPEC_INVALID", Message: "authoritative exposure could not be preserved", RequestID: requestID}
+	}
+	intent, err := buildRolloutIntent(job, exposure, previousID, previousHash, previousDigest, "", "", deploymentv1.RolloutOperationApply, now)
+	if err != nil {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "ROLLOUT_INTENT_INVALID", Message: err.Error(), RequestID: requestID}
+	}
+	job.IntentHash, job.RolloutIntent, job.RolloutState = intent.IntentHash, &intent, deploymentv1.RolloutStatePrepared
+	job.DesiredDigest, job.PreviousDigest, job.KnownGoodID, job.KnownGoodHash = intent.Desired.Image.Digest, intent.PreviousDigest, intent.PreviousKnownGoodID, intent.PreviousKnownGoodHash
+	job.ExposureSpec = exposure
 	if err := s.acquireDeploymentLockLocked(service.ID, job.ID, now, requestID); err != nil {
 		return DeploymentJob{}, false, err
 	}
 	s.deployments[job.ID] = job
-	s.deployEvents[job.ID] = []DeploymentEvent{{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: deploymentv1.StateQueued, MessageRedacted: "immutable image deployment queued", ProgressPercent: 0, Attempt: job.AttemptCount, CreatedAt: now}}
+	s.deployEvents[job.ID] = []DeploymentEvent{rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable BuildRecord rollout prepared", 0, requestID, now, "")}
 	s.idempotency["deploy:v1:"+snapshot.ProjectID+":"+key] = job
 	return job, false, nil
 }
@@ -1547,8 +1558,8 @@ func (s *Service) ReplayImmutableDeployment(projectID, key, payloadHash string) 
 	return existing, true, nil
 }
 
-func (s *Service) ImmutableDeploymentCommand(job DeploymentJob) *deploymentv1.AgentCommand {
-	if job.Snapshot == nil {
+func (s *Service) DeploymentCommand(job DeploymentJob) *deploymentv1.AgentCommand {
+	if job.Snapshot == nil || job.RolloutIntent == nil {
 		return nil
 	}
 	return &deploymentv1.AgentCommand{SchemaVersion: deploymentv1.CommandSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, AgentID: job.AgentID, LeaseToken: job.LeaseToken, Attempt: int32(job.AttemptCount), Image: job.Snapshot.Image, Workload: job.Snapshot.Workload, SpecHash: job.SpecHash, Rollout: job.RolloutIntent}
@@ -1582,22 +1593,21 @@ func (s *Service) RollbackDeployment(projectID, deploymentID, requestedBy, key, 
 		return DeploymentJob{}, APIError{Status: 409, Code: "ROLLBACK_NOT_AVAILABLE", Message: reason, RequestID: requestID}
 	}
 	if source.Mode == "rollout" {
-		if source.RolloutIntent == nil || source.ExposureSpec == nil || source.RolloutIntent.PreviousKnownGoodID == "" || source.TerminalResult == nil || source.TerminalResult.RolloutState != deploymentv1.RolloutStateSucceeded || source.TerminalResult.KnownGoodID == "" {
+		if source.RolloutIntent == nil || source.RolloutIntent.PreviousKnownGoodID == "" || source.TerminalResult == nil || source.TerminalResult.RolloutState != deploymentv1.RolloutStateSucceeded || source.TerminalResult.KnownGoodID == "" {
 			return DeploymentJob{}, APIError{Status: 409, Code: "ROLLBACK_NOT_AVAILABLE", Message: "only a succeeded rollout with an exact previous known-good snapshot can be rolled back", RequestID: requestID}
 		}
 		jobID := newID("dep")
-		exposure := *source.ExposureSpec
-		exposure.DeploymentJobID = jobID
-		exposure.SpecHash = ""
-		canonical, err := exposure.Canonicalize()
+		exposure, err := exposureForDeployment(source.ExposureSpec, jobID)
 		if err != nil {
 			return DeploymentJob{}, err
 		}
-		intent, err := buildRolloutIntent(source, canonical, source.RolloutIntent.PreviousKnownGoodID, source.RolloutIntent.PreviousKnownGoodHash, source.RolloutIntent.PreviousDigest, source.TerminalResult.KnownGoodID, source.TerminalResult.KnownGoodHash, deploymentv1.RolloutOperationRollback, s.clock())
+		base := source
+		base.ID = jobID
+		intent, err := buildRolloutIntent(base, exposure, source.RolloutIntent.PreviousKnownGoodID, source.RolloutIntent.PreviousKnownGoodHash, source.RolloutIntent.PreviousDigest, source.TerminalResult.KnownGoodID, source.TerminalResult.KnownGoodHash, deploymentv1.RolloutOperationRollback, s.clock())
 		if err != nil {
 			return DeploymentJob{}, err
 		}
-		job := rolloutDeploymentJob(source, intent, canonical, requestedBy, key, hashJSON(map[string]string{"source": deploymentID, "operation": "rollback"}), s.clock())
+		job := rolloutDeploymentJob(source, intent, exposure, requestedBy, key, hashJSON(map[string]string{"source": deploymentID, "operation": "rollback"}), s.clock())
 		if err := s.acquireDeploymentLockLocked(job.ServiceID, job.ID, job.CreatedAt, requestID); err != nil {
 			return DeploymentJob{}, err
 		}
@@ -1651,7 +1661,7 @@ func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bo
 		event := DeploymentEvent{ID: newID("depevt"), OrgID: job.OrgID, ProjectID: projectID, DeploymentID: id, ServiceID: job.ServiceID, Level: "info", Step: EventAgentJobAccepted, MessageRedacted: "agent accepted deployment job", ProgressPercent: 20, CreatedAt: job.UpdatedAt}
 		event.SchemaVersion, event.Step, event.ProgressPercent, event.Attempt = deploymentv1.EventSchemaVersion, deploymentv1.StateLeased, 10, job.AttemptCount
 		s.deployEvents[id] = append(s.deployEvents[id], event)
-		return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken, Command: s.ImmutableDeploymentCommand(job)}, true, nil
+		return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken, Command: s.DeploymentCommand(job)}, true, nil
 	}
 	return DeploymentLease{}, false, nil
 }
@@ -1696,10 +1706,7 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	if !isProductionDeploymentMode(job.Mode) {
 		return DeploymentJob{}, legacyDeploymentRetiredError(requestID)
 	}
-	if deploymentTerminalStatus(job.Status) && job.Mode != "rollout" || job.Mode == "rollout" && job.TerminalResult != nil {
-		if job.Mode != "rollout" {
-			return job, nil
-		}
+	if job.TerminalResult != nil {
 		if exactTerminalReplay(job, result) {
 			return job, nil
 		}
@@ -1715,16 +1722,10 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	if job.IntentHash != "" && result.IntentHash != "" && result.IntentHash != job.IntentHash {
 		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "deployment result intent hash does not match leased job", RequestID: requestID}
 	}
-	if job.Mode == "immutable_image" && result.Status != deploymentv1.StateSucceeded && result.Status != deploymentv1.StateFailed {
-		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_STATUS_INVALID", Message: "immutable deployment result must be succeeded or failed", RequestID: requestID}
-	}
-	if job.Mode == "rollout" && result.RolloutResult == nil {
+	if result.RolloutResult == nil {
 		return DeploymentJob{}, APIError{Status: 409, Code: "ROLLOUT_RESULT_INVALID", Message: "rollout deployment requires a sanitized rollout result", RequestID: requestID}
 	}
-	status := normalizedDeploymentResultStatus(result.Status)
-	if job.Mode == "rollout" {
-		status = result.RolloutResult.RolloutState
-	}
+	status := result.RolloutResult.RolloutState
 	job.Status = status
 	job.FailureCode = result.FailureCode
 	job.FailureMessageRedacted = RedactString(result.FailureMessageRedacted)
@@ -1737,39 +1738,28 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	job.LeaseExpiresAt = nil
 	job.FinishedAt = &now
 	job.UpdatedAt = now
-	if job.Mode == "rollout" {
-		rollout := result.RolloutResult
-		if err := validateRolloutResult(job, rollout); err != nil {
-			return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: err.Error(), RequestID: requestID}
-		}
-		copy := *rollout
-		copy.LeaseToken = ""
-		copy.FailureMessageRedacted = RedactString(copy.FailureMessageRedacted)
-		job.TerminalResult = &copy
-		job.RolloutState = copy.RolloutState
-		job.RolloutStateHash = copy.StateHash
-		job.DesiredDigest = copy.DesiredDigest
-		job.CurrentDigest = copy.CurrentDigest
-		job.PreviousDigest = copy.PreviousDigest
-		job.KnownGoodID = copy.KnownGoodID
-		job.KnownGoodHash = copy.KnownGoodHash
-		job.ReadinessEvidenceHash = copy.ReadinessEvidenceHash
-		job.RolloutVersion++
-		job.RollbackEligible = copy.RolloutState == deploymentv1.RolloutStateSucceeded && job.RolloutIntent.PreviousKnownGoodID != ""
-	} else if job.Mode == "immutable_image" {
-		if result.SchemaVersion != deploymentv1.ResultSchemaVersion || result.SpecHash != job.SpecHash || job.Snapshot == nil || result.ApplicationImage != job.Snapshot.Image.Reference || !deploymentResultHasExactDigest(result.ApplicationImageID, job.Snapshot.Image.Digest) && status == DeploymentSucceeded {
-			return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "Agent result does not match the immutable deployment command", RequestID: requestID}
-		}
-		job.TerminalResult = &deploymentv1.AgentResult{SchemaVersion: result.SchemaVersion, LeaseToken: result.LeaseToken, Status: status, SpecHash: result.SpecHash, ApplicationImage: result.ApplicationImage, ApplicationImageID: result.ApplicationImageID, Namespace: result.Namespace, DeploymentName: result.DeploymentName, ServiceName: result.ServiceName, AvailableReplicas: result.AvailableReplicas, FailureCode: result.FailureCode, FailureMessageRedacted: job.FailureMessageRedacted}
+	rollout := result.RolloutResult
+	if err := validateRolloutResult(job, rollout); err != nil {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: err.Error(), RequestID: requestID}
 	}
+	copy := *rollout
+	copy.LeaseToken = ""
+	copy.FailureMessageRedacted = RedactString(copy.FailureMessageRedacted)
+	job.TerminalResult = &copy
+	job.RolloutState = copy.RolloutState
+	job.RolloutStateHash = copy.StateHash
+	job.DesiredDigest = copy.DesiredDigest
+	job.CurrentDigest = copy.CurrentDigest
+	job.PreviousDigest = copy.PreviousDigest
+	job.KnownGoodID = copy.KnownGoodID
+	job.KnownGoodHash = copy.KnownGoodHash
+	job.ReadinessEvidenceHash = copy.ReadinessEvidenceHash
+	job.RolloutVersion++
+	job.RollbackEligible = copy.RolloutState == deploymentv1.RolloutStateSucceeded && job.RolloutIntent.PreviousKnownGoodID != ""
 	s.deployments[deploymentID] = job
-	if job.Mode == "rollout" {
-		event := rolloutEvent(job, job.RolloutState, "Agent reported terminal rollout result", 100, requestID, now, job.RolloutStateHash)
-		event.EvidenceHash = job.ReadinessEvidenceHash
-		s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], event)
-	} else {
-		s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], deploymentCompletionEvents(job, requestID, now)...)
-	}
+	event := rolloutEvent(job, job.RolloutState, "Agent reported terminal rollout result", 100, requestID, now, job.RolloutStateHash)
+	event.EvidenceHash = job.ReadinessEvidenceHash
+	s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], event)
 	if deploymentTerminalStatus(status) {
 		delete(s.deployLocks, job.ServiceID)
 	}
@@ -1784,18 +1774,14 @@ func (s *Service) ProgressImmutableDeployment(projectID, nodeID, deploymentID, r
 		return DeploymentJob{}, ErrNotFound
 	}
 	now := s.clock()
-	if job.Mode == "rollout" && job.TerminalResult != nil || job.Mode != "rollout" && (deploymentTerminalStatus(job.Status) || job.Status == deploymentv1.StateCancelled) {
+	if job.TerminalResult != nil {
 		return job, nil
 	}
 	if job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) || progress.LeaseToken == "" || progress.LeaseToken != job.LeaseToken {
 		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STALE_LEASE", Message: "deployment progress lease is stale", RequestID: requestID}
 	}
-	if job.Mode == "rollout" {
-		if err := validateRolloutProgress(job, progress); err != nil {
-			return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STATE_INVALID", Message: err.Error(), RequestID: requestID}
-		}
-	} else if !validImmutableTransition(job.Status, progress.State) {
-		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STATE_INVALID", Message: "deployment state transition is not monotonic", RequestID: requestID}
+	if err := validateRolloutProgress(job, progress); err != nil {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STATE_INVALID", Message: err.Error(), RequestID: requestID}
 	}
 	message := RedactString(progress.MessageRedacted)
 	if len(message) > 512 {
@@ -1804,30 +1790,26 @@ func (s *Service) ProgressImmutableDeployment(projectID, nodeID, deploymentID, r
 	if message == "" {
 		message = "deployment progress updated"
 	}
-	rolloutReplay := job.Mode == "rollout" && job.RolloutState == progress.State && job.RolloutStateHash == progress.StateHash
-	if job.Mode == "rollout" {
-		if !rolloutReplay {
-			if !deploymentv1.IsTerminalRolloutState(progress.State) {
-				job.Status = progress.State
-			}
-			job.RolloutState = progress.State
-			job.RolloutStateHash = progress.StateHash
-			job.RolloutVersion++
-			job.DesiredDigest = progress.DesiredDigest
-			job.CurrentDigest = progress.CurrentDigest
-			job.PreviousDigest = progress.PreviousDigest
-			job.ReadinessEvidenceHash = progress.ReadinessEvidenceHash
-			job.FailureCode = progress.FailureCode
+	rolloutReplay := job.RolloutState == progress.State && job.RolloutStateHash == progress.StateHash
+	if !rolloutReplay {
+		if !deploymentv1.IsTerminalRolloutState(progress.State) {
+			job.Status = progress.State
 		}
-	} else {
-		job.Status = progress.State
+		job.RolloutState = progress.State
+		job.RolloutStateHash = progress.StateHash
+		job.RolloutVersion++
+		job.DesiredDigest = progress.DesiredDigest
+		job.CurrentDigest = progress.CurrentDigest
+		job.PreviousDigest = progress.PreviousDigest
+		job.ReadinessEvidenceHash = progress.ReadinessEvidenceHash
+		job.FailureCode = progress.FailureCode
 	}
 	leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
 	job.LeaseExpiresAt = &leaseExpiresAt
 	job.UpdatedAt = now
 	s.deployments[deploymentID] = job
 	if !rolloutReplay && len(s.deployEvents[deploymentID]) < 199 {
-		percent := immutableProgressPercent(progress.State)
+		percent := rolloutProgressPercent(progress.State)
 		if progress.ProgressPercent > 0 {
 			percent = int(progress.ProgressPercent)
 		}
@@ -1836,12 +1818,7 @@ func (s *Service) ProgressImmutableDeployment(projectID, nodeID, deploymentID, r
 	return job, nil
 }
 
-func validImmutableTransition(current, next string) bool {
-	rank := map[string]int{deploymentv1.StateLeased: 1, deploymentv1.StatePulling: 2, deploymentv1.StateApplying: 3, deploymentv1.StateWaitingReady: 4}
-	return rank[next] != 0 && (rank[next] == rank[current] || rank[next] == rank[current]+1)
-}
-
-func immutableProgressPercent(state string) int {
+func rolloutProgressPercent(state string) int {
 	switch state {
 	case deploymentv1.StateLeased:
 		return 10
@@ -2155,28 +2132,6 @@ func cloneServiceBindings(in []ServiceBinding) []ServiceBinding {
 	return out
 }
 
-func deploymentCompletionEvents(job DeploymentJob, requestID string, now time.Time) []DeploymentEvent {
-	level, message := "info", "immutable image deployment succeeded"
-	if job.Status != deploymentv1.StateSucceeded {
-		level, message = "error", job.FailureMessageRedacted
-		if message == "" {
-			message = "immutable image deployment failed"
-		}
-	}
-	return []DeploymentEvent{{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: level, Step: job.Status, MessageRedacted: message, ProgressPercent: 100, Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now}}
-}
-
-func normalizedDeploymentResultStatus(status string) string {
-	switch status {
-	case DeploymentSucceeded, "success":
-		return DeploymentSucceeded
-	case DeploymentRolledBack:
-		return DeploymentRolledBack
-	default:
-		return DeploymentFailed
-	}
-}
-
 func deploymentLeaseActiveStatus(status string) bool {
 	return status == DeploymentWaitingAgent || status == deploymentv1.StateLeased || status == deploymentv1.StatePulling || status == deploymentv1.StateApplying || status == deploymentv1.StateWaitingReady || status == deploymentv1.RolloutStatePrepared || status == deploymentv1.RolloutStateApplying || status == deploymentv1.RolloutStateWaiting || status == deploymentv1.RolloutStateFailed || status == deploymentv1.RolloutStateRollingBack
 }
@@ -2191,11 +2146,7 @@ func deploymentTerminalStatus(status string) bool {
 }
 
 func isProductionDeploymentMode(mode string) bool {
-	return mode == "immutable_image" || mode == "rollout"
-}
-
-func deploymentResultHasExactDigest(imageID, digest string) bool {
-	return imageID == digest || strings.HasSuffix(imageID, "@"+digest) || strings.HasSuffix(imageID, "://"+digest)
+	return mode == "rollout"
 }
 
 func (s *Service) acquireDeploymentLockLocked(serviceID, deploymentID string, now time.Time, requestID string) error {

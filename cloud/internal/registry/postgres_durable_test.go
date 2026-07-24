@@ -55,11 +55,11 @@ func TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart(t *testing.T
 		t.Fatalf("immutable replay=%+v reused=%v err=%v", replay, reused, err)
 	}
 	jobs, err := restarted.ListDeployments(project.ID)
-	if err != nil || len(jobs) != 1 || jobs[0].Snapshot == nil || jobs[0].Mode != "immutable_image" {
+	if err != nil || len(jobs) != 1 || jobs[0].Snapshot == nil || jobs[0].Mode != "rollout" || jobs[0].RolloutIntent == nil {
 		t.Fatalf("immutable snapshot did not survive restart: jobs=%+v err=%v", jobs, err)
 	}
 	lease, ok, err := restarted.LeaseDeployment(project.ID, job.NodeID)
-	if err != nil || !ok || lease.Command == nil || lease.Deployment.AttemptCount != 1 {
+	if err != nil || !ok || lease.Command == nil || lease.Command.Rollout == nil || lease.Deployment.AttemptCount != 1 {
 		t.Fatalf("immutable lease=%+v ok=%v err=%v", lease, ok, err)
 	}
 	events, err := restarted.DeploymentEvents(project.ID, job.ID)
@@ -67,7 +67,7 @@ func TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart(t *testing.T
 		t.Fatalf("immutable events=%+v err=%v", events, err)
 	}
 	for _, event := range events {
-		if event.SchemaVersion != deploymentv1.EventSchemaVersion {
+		if event.SchemaVersion != deploymentv1.RolloutEventVersion && event.SchemaVersion != deploymentv1.EventSchemaVersion {
 			t.Fatalf("immutable Postgres event omitted version: %+v", event)
 		}
 	}
@@ -184,7 +184,16 @@ func TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply(t *t
 	if err != nil || !ok {
 		t.Fatalf("base lease ok=%v err=%v", ok, err)
 	}
-	base, err := service.CompleteDeployment(project.ID, baseJob.NodeID, baseJob.ID, "base-result", DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.StateSucceeded, LeaseToken: baseLease.LeaseToken, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference, ApplicationImageID: "containerd://" + snapshot.Image.Digest, AvailableReplicas: 1})
+	for _, progress := range []deploymentv1.Progress{
+		rolloutProgress(baseLease, deploymentv1.RolloutStateApplying, "1", ""),
+		rolloutProgress(baseLease, deploymentv1.RolloutStateWaiting, "2", ""),
+		rolloutProgress(baseLease, deploymentv1.RolloutStateSucceeded, "3", ""),
+	} {
+		if _, err := fresh().ProgressImmutableDeployment(project.ID, baseJob.NodeID, baseJob.ID, "base-progress-"+progress.State, progress); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base, err := service.CompleteDeployment(project.ID, baseJob.NodeID, baseJob.ID, "base-result", rolloutResult(baseLease, deploymentv1.RolloutStateSucceeded, "3", baseJob.DesiredDigest, baseJob.RolloutIntent.RolloutID, strings.Repeat("a", 64), ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +312,7 @@ func postgresImmutableSnapshot(t *testing.T, service PostgresService, projectID,
 	if err != nil {
 		t.Fatal(err)
 	}
-	return record, deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: spec, SpecHash: specHash, PayloadHash: "payload-" + suffix, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + suffix, ProjectID: projectID, ServiceID: record.ID, ServiceKey: record.Name, ActiveBindingID: "binding-" + suffix, Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID, NodeID: node.ID, AgentID: agent.ID}}
+	return record, deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: spec, SpecHash: specHash, PayloadHash: "payload-" + suffix, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + suffix, ProjectID: projectID, ServiceID: record.ID, ServiceKey: record.Name, ActiveBindingID: "binding-" + suffix, Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, TopologyPlanID: "topology-" + suffix, TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), DeploymentPolicyID: "policy-" + suffix, DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("2", 64), RoutingDecisionHash: strings.Repeat("3", 64), EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID, NodeID: node.ID, AgentID: agent.ID}}
 }
 
 func hasDeploymentStep(events []DeploymentEvent, step string) bool {

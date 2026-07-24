@@ -27,7 +27,7 @@ func immutableSnapshot(t *testing.T, service *Service, projectID, serviceID, key
 	if err != nil {
 		t.Fatal(err)
 	}
-	return deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: spec, SpecHash: specHash, PayloadHash: "payload-" + key, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + key, ProjectID: projectID, ServiceID: serviceID, ServiceKey: record.Name, ActiveBindingID: "binding-1", Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID, NodeID: nodes[0].ID, AgentID: agent.ID}}
+	return deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: spec, SpecHash: specHash, PayloadHash: "payload-" + key, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + key, ProjectID: projectID, ServiceID: serviceID, ServiceKey: record.Name, ActiveBindingID: "binding-1", Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, TopologyPlanID: "topology-" + key, TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), DeploymentPolicyID: "policy-" + key, DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("2", 64), RoutingDecisionHash: strings.Repeat("3", 64), EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID, NodeID: nodes[0].ID, AgentID: agent.ID}}
 }
 
 func TestImmutableDeploymentStateMachineAndIdempotency(t *testing.T) {
@@ -37,6 +37,9 @@ func TestImmutableDeploymentStateMachineAndIdempotency(t *testing.T) {
 	job, reused, err := service.StartImmutableDeployment(snapshot, "user-1", "deploy-one", "req-1")
 	if err != nil || reused || job.Status != deploymentv1.StateQueued {
 		t.Fatalf("create job=%+v reused=%v err=%v", job, reused, err)
+	}
+	if job.Mode != "rollout" || job.RolloutIntent == nil || job.RolloutIntent.Desired.Image.Digest != snapshot.Image.Digest {
+		t.Fatalf("BuildRecord deployment did not create a canonical rollout: mode=%q intent=%+v", job.Mode, job.RolloutIntent)
 	}
 	replay, reused, err := service.StartImmutableDeployment(snapshot, "user-1", "deploy-one", "req-2")
 	if err != nil || !reused || replay.ID != job.ID || replay.Status != deploymentv1.StateQueued {
@@ -55,17 +58,18 @@ func TestImmutableDeploymentStateMachineAndIdempotency(t *testing.T) {
 	if err != nil || !ok || lease.Command == nil || lease.Deployment.Status != deploymentv1.StateLeased {
 		t.Fatalf("lease=%+v ok=%v err=%v", lease, ok, err)
 	}
-	if _, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "progress", deploymentv1.Progress{SchemaVersion: deploymentv1.EventSchemaVersion, LeaseToken: lease.LeaseToken, State: deploymentv1.StateApplying, MessageRedacted: "applying"}); err == nil {
+	if _, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "progress", rolloutProgress(lease, deploymentv1.RolloutStateWaiting, "0", "")); err == nil {
 		t.Fatal("accepted non-monotonic progress")
 	}
-	if _, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "progress", deploymentv1.Progress{SchemaVersion: deploymentv1.EventSchemaVersion, LeaseToken: lease.LeaseToken, State: deploymentv1.StatePulling, MessageRedacted: "pulling"}); err != nil {
-		t.Fatal(err)
-	}
-	result := DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: "succeeded", LeaseToken: lease.LeaseToken, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference, ApplicationImageID: "docker-pullable://" + snapshot.Image.Reference, AvailableReplicas: 1}
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "1", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateWaiting, "2", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateSucceeded, "3", "")
+	result := rolloutResult(lease, deploymentv1.RolloutStateSucceeded, "3", job.DesiredDigest, job.RolloutIntent.RolloutID, strings.Repeat("a", 64), "")
 	spoofed := result
-	spoofed.ApplicationImageID += "-evil"
+	spoofed.RolloutResult = cloneRolloutResult(result.RolloutResult)
+	spoofed.RolloutResult.CurrentDigest = "sha256:" + strings.Repeat("f", 64)
 	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "spoofed", spoofed); apiCode(err) != "DEPLOYMENT_RESULT_MISMATCH" {
-		t.Fatalf("accepted non-exact application imageID: %v", err)
+		t.Fatalf("accepted mismatched current digest: %v", err)
 	}
 	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "complete", result)
 	if err != nil || finished.Status != deploymentv1.StateSucceeded || finished.TerminalResult == nil {
@@ -76,19 +80,18 @@ func TestImmutableDeploymentStateMachineAndIdempotency(t *testing.T) {
 		t.Fatalf("terminal replay=%+v err=%v", finishedAgain, err)
 	}
 	staleTerminal := result
-	staleTerminal.Status = deploymentv1.StateFailed
-	staleTerminal.FailureCode = "STALE"
-	unchanged, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "stale-different", staleTerminal)
-	if err != nil || unchanged.Status != deploymentv1.StateSucceeded || unchanged.FailureCode != "" {
-		t.Fatalf("stale result changed terminal job: %+v err=%v", unchanged, err)
+	staleTerminal.RolloutResult = cloneRolloutResult(result.RolloutResult)
+	staleTerminal.RolloutResult.StateHash = strings.Repeat("f", 64)
+	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "stale-different", staleTerminal); apiCode(err) != "DEPLOYMENT_TERMINAL_IMMUTABLE" {
+		t.Fatalf("stale result changed terminal job: %v", err)
 	}
 	events, err := service.DeploymentEvents(projectID, job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, event := range events {
-		if event.SchemaVersion != deploymentv1.EventSchemaVersion {
-			t.Fatalf("immutable event omitted versioned contract: %+v", event)
+		if event.SchemaVersion != deploymentv1.RolloutEventVersion && event.SchemaVersion != deploymentv1.EventSchemaVersion {
+			t.Fatalf("rollout event omitted versioned contract: %+v", event)
 		}
 	}
 }

@@ -5,12 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 )
 
 func testAgentCommand(t *testing.T) deploymentv1.AgentCommand {
@@ -72,32 +72,25 @@ func TestRenderProductionResourcesIsDeterministicAndOwned(t *testing.T) {
 	}
 }
 
-func TestProductionPullUsesDigestAndRejectsPrivateCredentialFallback(t *testing.T) {
-	command := testAgentCommand(t)
-	runner := &recordingRunner{outputs: map[string][]byte{
-		"inspecti": []byte(`{"status":{"repoDigests":["ghcr.io/example/api@sha256:` + strings.Repeat("a", 64) + `"]}}`),
-	}}
-	adapter := ProductionAdapter{Runner: runner, Credentials: AnonymousRegistryCredentials{}, K3sPath: "k3s"}
-	imageID, err := adapter.pull(context.Background(), command.Image)
-	if err != nil || !strings.Contains(imageID, command.Image.Digest) {
-		t.Fatalf("pull imageID=%q err=%v", imageID, err)
+func TestNoExternalRolloutRendersNoIngress(t *testing.T) {
+	snapshot := testRuntimeSnapshot(t, "job-internal", "a")
+	snapshot.Exposure = exposurev1.ExposureSpec{}
+	snapshot.ExposureSpecHash = ""
+	_, resources, _, err := renderProductionResources(snapshot.AgentCommand())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 || runner.calls[0][0] != "k3s" || runner.calls[0][1] != "crictl" || runner.calls[0][2] != "pull" || runner.calls[0][3] != command.Image.Reference {
-		t.Fatalf("pull argv = %#v", runner.calls)
+	objects, err := rolloutObjects(resources, RenderedExposure{}, snapshot.HasExternalExposure())
+	if err != nil {
+		t.Fatal(err)
 	}
-	private := ProductionAdapter{Runner: runner, Credentials: staticCredentials{value: RegistryCredential{Username: "user", Secret: "secret"}}, K3sPath: "k3s"}
-	if _, err := private.pull(context.Background(), command.Image); !errors.Is(err, errors.New("PRIVATE_REGISTRY_CREDENTIAL_UNSUPPORTED")) && !strings.Contains(err.Error(), "PRIVATE_REGISTRY_CREDENTIAL_UNSUPPORTED") {
-		t.Fatalf("private credential error = %v", err)
+	if len(objects) != 3 {
+		t.Fatalf("no-external rollout rendered %d objects, want namespace/deployment/service", len(objects))
 	}
-}
-
-func TestRuntimeImageIDRequiresExactRequestedDigest(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("b", 64)
-	if _, ok := runtimeImageID([]byte(`{"status":{"repoDigests":["ghcr.io/example/api@sha256:`+strings.Repeat("a", 64)+`"]}}`), digest); ok {
-		t.Fatal("accepted a different runtime digest")
-	}
-	if id, ok := runtimeImageID([]byte(`{"status":{"repoDigests":["ghcr.io/example/api@`+digest+`"]}}`), digest); !ok || !strings.HasSuffix(id, "@"+digest) {
-		t.Fatalf("runtime digest = %q ok=%v", id, ok)
+	for _, object := range objects {
+		if object.Kind == "Ingress" {
+			t.Fatal("no-external rollout rendered a hidden Ingress")
+		}
 	}
 }
 
@@ -144,47 +137,6 @@ func TestApplicationReadinessReportsRequestedDigestDuringMixedRollout(t *testing
 	}
 }
 
-func TestOwnershipCheckRejectsForeignCollision(t *testing.T) {
-	command := testAgentCommand(t)
-	_, resources, namespace, err := renderProductionResources(command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foreign, _ := json.Marshal(map[string]any{"metadata": map[string]any{"labels": map[string]any{"app.kubernetes.io/managed-by": "someone-else"}}})
-	runner := &recordingRunner{outputs: map[string][]byte{"namespace": foreign}}
-	adapter := ProductionAdapter{Runner: runner, KubectlPath: "kubectl"}
-	if err := adapter.verifyOwnership(context.Background(), resources, namespace, command); err == nil || !strings.Contains(err.Error(), "not Opsi-owned") {
-		t.Fatalf("foreign ownership err=%v", err)
-	}
-}
-
-func TestEngineProductionBranchDoesNotRequireGitOrBuilder(t *testing.T) {
-	command := testAgentCommand(t)
-	store := openTestStore(t)
-	runtime := &fakeProductionRuntime{}
-	engine := NewEngine(store, EngineConfig{Production: runtime})
-	record, err := engine.Deploy(context.Background(), Request{Production: &command}, nil)
-	if err != nil || record.Status != StatusSuccess {
-		t.Fatalf("record=%+v err=%v", record, err)
-	}
-	if _, err := engine.Deploy(context.Background(), Request{Production: &command}, nil); err != nil || runtime.calls != 1 {
-		t.Fatalf("same-job retry was not idempotent: calls=%d err=%v", runtime.calls, err)
-	}
-	second := command
-	second.JobID = "dep-2"
-	second.LeaseToken = "lease-2"
-	if _, err := engine.Deploy(context.Background(), Request{Production: &second}, nil); err != nil || runtime.calls != 2 {
-		t.Fatalf("new job with same image/spec did not reconcile: calls=%d err=%v", runtime.calls, err)
-	}
-}
-
-type fakeProductionRuntime struct{ calls int }
-
-func (f *fakeProductionRuntime) Deploy(_ context.Context, command deploymentv1.AgentCommand, _ ProgressFunc) (Record, error) {
-	f.calls++
-	return Record{DeployID: command.JobID, ProjectID: command.ProjectID, ServiceID: command.Workload.ServiceKey, ServiceName: command.Workload.ServiceKey, ImageTag: command.Image.Reference, ImageID: "docker-pullable://" + command.Image.Reference, SpecHash: command.SpecHash, Status: StatusSuccess}, nil
-}
-
 type recordingRunner struct {
 	calls   [][]string
 	outputs map[string][]byte
@@ -199,10 +151,4 @@ func (r *recordingRunner) Run(_ context.Context, _ []byte, name string, args ...
 		}
 	}
 	return nil, nil
-}
-
-type staticCredentials struct{ value RegistryCredential }
-
-func (s staticCredentials) Credentials(context.Context, deploymentv1.ImmutableImage) (RegistryCredential, error) {
-	return s.value, nil
 }

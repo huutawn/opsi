@@ -3,11 +3,33 @@
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-23 |
+| Last updated | 2026-07-24 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
+
+## R5-011-S4 correction checkpoint
+
+The discovered blocker was direct BuildRecord execution through active
+`immutable_image` jobs. New project-scoped BuildRecord deployments now create
+one durable `rollout` job with a canonical `RolloutIntent`; Agent PollJob always
+enters `ReconcileRollout` and then `ProductionAdapter`. A missing intent returns
+`LEGACY_DEPLOYMENT_RETIRED` before Kubernetes mutation. Historical immutable
+rows remain readable for restore/history, while queued legacy rows are
+terminalized fail-closed and cannot block the next canonical rollout lease.
+No-external workloads use an empty exposure snapshot with no hidden Ingress,
+and image redeployments preserve existing authoritative exposure.
+
+Healthy rollouts persist desired/current digest, known-good identity/hash,
+readiness evidence, runtime/node/Agent identity, and resource identities.
+Broken B follows `failed -> rolling_back -> rolled_back` and must restore exact
+healthy A; `rollback_failed` remains a distinct failure. The E2E harness waits
+for `rolled_back`, validates digest-A restoration, and fails closed on every
+other terminal state.
+
+No VPS, DNS, TLS, public endpoint, R5-011, or R5-011.4 acceptance was performed.
+R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
 
 ## R5-011-S3 correction checkpoint
 
@@ -24,7 +46,7 @@ service-scoped deployment creation, generic GitHub push relay, and Cloud debug
 UI/configuration are removed. The only executable delivery path is
 GitHub Actions OIDC -> accepted BuildRecord -> immutable OCI digest -> Cloud topology/policy/
 routing -> durable DeploymentJob/RolloutIntent -> Agent PollJob ->
-ProductionAdapter/ReconcileRollout -> Opsi-owned K3s resources -> factual
+ReconcileRollout -> ProductionAdapter -> Opsi-owned K3s resources -> factual
 readiness and known-good rollback.
 
 Historical deployment columns and relay tables remain only for restore/read

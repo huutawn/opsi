@@ -90,11 +90,11 @@ func (s *Service) StartExposureRollout(projectID, actorUserID, key, requestID st
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_ID_CONFLICT", Message: "deployment_job_id already exists", RequestID: requestID}
 	}
 	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID)
-	intent, err := buildRolloutIntent(base, preview.Desired, previousID, previousHash, previousDigest, "", "", deploymentv1.RolloutOperationApply, now)
+	intent, err := buildRolloutIntent(base, &preview.Desired, previousID, previousHash, previousDigest, "", "", deploymentv1.RolloutOperationApply, now)
 	if err != nil {
 		return DeploymentJob{}, false, APIError{Status: 400, Code: "ROLLOUT_INTENT_INVALID", Message: err.Error(), RequestID: requestID}
 	}
-	job := rolloutDeploymentJob(base, intent, preview.Desired, actorUserID, key, payloadHash, now)
+	job := rolloutDeploymentJob(base, intent, &preview.Desired, actorUserID, key, payloadHash, now)
 	if err := s.acquireDeploymentLockLocked(job.ServiceID, job.ID, now, requestID); err != nil {
 		return DeploymentJob{}, false, err
 	}
@@ -104,16 +104,35 @@ func (s *Service) StartExposureRollout(projectID, actorUserID, key, requestID st
 	return job, false, nil
 }
 
-func buildRolloutIntent(base DeploymentJob, exposure exposurev1.ExposureSpec, previousID, previousHash, previousDigest, expectedID, expectedHash, operation string, now time.Time) (deploymentv1.RolloutIntent, error) {
+func buildRolloutIntent(base DeploymentJob, exposure *exposurev1.ExposureSpec, previousID, previousHash, previousDigest, expectedID, expectedHash, operation string, now time.Time) (deploymentv1.RolloutIntent, error) {
 	target := deploymentv1.RuntimeTarget{ProjectID: base.ProjectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceKey: base.Snapshot.Workload.ServiceKey, NodeID: base.NodeID, AgentID: base.AgentID}
-	runtime := deploymentv1.RuntimeSnapshot{SchemaVersion: deploymentv1.RuntimeSnapshotVersion, Target: target, DeploymentJobID: exposure.DeploymentJobID, Image: base.Snapshot.Image, Workload: base.Snapshot.Workload, WorkloadSpecHash: base.Snapshot.SpecHash, Exposure: exposure, ExposureSpecHash: exposure.SpecHash, Authority: deploymentv1.RuntimeAuthority{TopologyPlanID: base.Snapshot.Authority.TopologyPlanID, TopologyRevision: base.Snapshot.Authority.TopologyRevision, TopologyHash: base.Snapshot.Authority.TopologyHash, DeploymentPolicyID: base.Snapshot.Authority.DeploymentPolicyID, DeploymentPolicyRevision: base.Snapshot.Authority.DeploymentPolicyRevision, DeploymentPolicyHash: base.Snapshot.Authority.DeploymentPolicyHash, RoutingDecisionHash: base.Snapshot.Authority.RoutingDecisionHash}}
-	rolloutHash := hashJSON(exposure.DeploymentJobID)
+	runtime := deploymentv1.RuntimeSnapshot{SchemaVersion: deploymentv1.RuntimeSnapshotVersion, Target: target, DeploymentJobID: base.ID, Image: base.Snapshot.Image, Workload: base.Snapshot.Workload, WorkloadSpecHash: base.Snapshot.SpecHash, Authority: deploymentv1.RuntimeAuthority{TopologyPlanID: base.Snapshot.Authority.TopologyPlanID, TopologyRevision: base.Snapshot.Authority.TopologyRevision, TopologyHash: base.Snapshot.Authority.TopologyHash, DeploymentPolicyID: base.Snapshot.Authority.DeploymentPolicyID, DeploymentPolicyRevision: base.Snapshot.Authority.DeploymentPolicyRevision, DeploymentPolicyHash: base.Snapshot.Authority.DeploymentPolicyHash, RoutingDecisionHash: base.Snapshot.Authority.RoutingDecisionHash}}
+	if exposure != nil {
+		runtime.DeploymentJobID = exposure.DeploymentJobID
+		runtime.Exposure = *exposure
+		runtime.ExposureSpecHash = exposure.SpecHash
+	}
+	rolloutHash := hashJSON(runtime.DeploymentJobID)
 	intent := deploymentv1.RolloutIntent{SchemaVersion: deploymentv1.RolloutSchemaVersion, RolloutID: "rol-" + rolloutHash[:32], Operation: operation, Target: target, Desired: runtime, PreviousKnownGoodID: previousID, PreviousKnownGoodHash: previousHash, PreviousDigest: previousDigest, ExpectedKnownGoodID: expectedID, ExpectedKnownGoodHash: expectedHash, Attempt: 1, CreatedAt: now}
 	return intent.Canonicalize()
 }
 
-func rolloutDeploymentJob(base DeploymentJob, intent deploymentv1.RolloutIntent, exposure exposurev1.ExposureSpec, actor, key, payloadHash string, now time.Time) DeploymentJob {
-	return DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: exposure.DeploymentJobID, OrgID: base.OrgID, ProjectID: base.ProjectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceID: base.ServiceID, Status: deploymentv1.StateQueued, Action: intent.Operation, IdempotencyKey: key, RequestedBy: actor, AgentID: base.AgentID, NodeID: base.NodeID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: base.Snapshot, SpecHash: base.SpecHash, PayloadHash: payloadHash, IntentHash: intent.IntentHash, BaseDeploymentID: base.ID, RolloutIntent: &intent, RolloutState: deploymentv1.RolloutStatePrepared, DesiredDigest: intent.Desired.Image.Digest, PreviousDigest: intent.PreviousDigest, ExposureSpec: &exposure, KnownGoodID: intent.PreviousKnownGoodID, KnownGoodHash: intent.PreviousKnownGoodHash, CreatedAt: now, UpdatedAt: now}
+func rolloutDeploymentJob(base DeploymentJob, intent deploymentv1.RolloutIntent, exposure *exposurev1.ExposureSpec, actor, key, payloadHash string, now time.Time) DeploymentJob {
+	return DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: intent.Desired.DeploymentJobID, OrgID: base.OrgID, ProjectID: base.ProjectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceID: base.ServiceID, Status: deploymentv1.StateQueued, Action: intent.Operation, IdempotencyKey: key, RequestedBy: actor, AgentID: base.AgentID, NodeID: base.NodeID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: base.Snapshot, SpecHash: base.SpecHash, PayloadHash: payloadHash, IntentHash: intent.IntentHash, BaseDeploymentID: base.ID, RolloutIntent: &intent, RolloutState: deploymentv1.RolloutStatePrepared, DesiredDigest: intent.Desired.Image.Digest, PreviousDigest: intent.PreviousDigest, ExposureSpec: exposure, KnownGoodID: intent.PreviousKnownGoodID, KnownGoodHash: intent.PreviousKnownGoodHash, CreatedAt: now, UpdatedAt: now}
+}
+
+func exposureForDeployment(current *exposurev1.ExposureSpec, deploymentID string) (*exposurev1.ExposureSpec, error) {
+	if current == nil {
+		return nil, nil
+	}
+	desired := *current
+	desired.DeploymentJobID = deploymentID
+	desired.SpecHash = ""
+	canonical, err := desired.Canonicalize()
+	if err != nil {
+		return nil, err
+	}
+	return &canonical, nil
 }
 
 func (s *Service) latestExposureLocked(projectID, environmentID, runtimeID, serviceID string) *exposurev1.ExposureSpec {
@@ -256,16 +275,13 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 }
 
 func exactTerminalReplay(job DeploymentJob, result DeploymentResult) bool {
-	if job.Mode == "rollout" {
-		if job.TerminalResult == nil || result.RolloutResult == nil || result.FailureCode != job.FailureCode || RedactString(result.FailureMessageRedacted) != job.FailureMessageRedacted {
-			return false
-		}
-		candidate := *result.RolloutResult
-		candidate.LeaseToken = ""
-		candidate.FailureMessageRedacted = RedactString(candidate.FailureMessageRedacted)
-		return reflect.DeepEqual(*job.TerminalResult, candidate)
+	if job.TerminalResult == nil || result.RolloutResult == nil || result.FailureCode != job.FailureCode || RedactString(result.FailureMessageRedacted) != job.FailureMessageRedacted {
+		return false
 	}
-	return job.TerminalResult != nil && result.SpecHash == job.TerminalResult.SpecHash && normalizedDeploymentResultStatus(result.Status) == job.Status
+	candidate := *result.RolloutResult
+	candidate.LeaseToken = ""
+	candidate.FailureMessageRedacted = RedactString(candidate.FailureMessageRedacted)
+	return reflect.DeepEqual(*job.TerminalResult, candidate)
 }
 
 func validRolloutHash(value string) bool {

@@ -1067,7 +1067,7 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	snapshot.CreatedAt = now
 	snapshot.ActorUserID = requestedBy
 	snapshot.IdempotencyKey = key
-	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "immutable_image", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: snapshot.Authority.EnvironmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: "deploy", IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: snapshot.Authority.EnvironmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
 	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -1094,13 +1094,32 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	if !errors.Is(err, sql.ErrNoRows) {
 		return DeploymentJob{}, false, err
 	}
+	previousID, previousHash, previousDigest, err := latestPostgresKnownGood(ctx, tx, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	currentExposure, err := latestPostgresExposure(ctx, tx, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	exposure, err := exposureForDeployment(currentExposure, job.ID)
+	if err != nil {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "EXPOSURE_SPEC_INVALID", Message: "authoritative exposure could not be preserved", RequestID: requestID}
+	}
+	intent, err := buildRolloutIntent(job, exposure, previousID, previousHash, previousDigest, "", "", deploymentv1.RolloutOperationApply, now)
+	if err != nil {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "ROLLOUT_INTENT_INVALID", Message: err.Error(), RequestID: requestID}
+	}
+	job.IntentHash, job.RolloutIntent, job.RolloutState = intent.IntentHash, &intent, deploymentv1.RolloutStatePrepared
+	job.DesiredDigest, job.PreviousDigest, job.KnownGoodID, job.KnownGoodHash = intent.Desired.Image.Digest, intent.PreviousDigest, intent.PreviousKnownGoodID, intent.PreviousKnownGoodHash
+	job.ExposureSpec = exposure
 	if err := insertDeployment(ctx, tx, job); err != nil {
 		return DeploymentJob{}, false, err
 	}
 	if err := acquireDeploymentLock(ctx, tx, snapshot.ProjectID, service.ID, job.ID, now, requestID); err != nil {
 		return DeploymentJob{}, false, err
 	}
-	event := DeploymentEvent{SchemaVersion: deploymentv1.EventSchemaVersion, ID: newID("depevt"), OrgID: job.OrgID, ProjectID: job.ProjectID, DeploymentID: job.ID, ServiceID: job.ServiceID, Level: "info", Step: deploymentv1.StateQueued, MessageRedacted: "immutable image deployment queued", ProgressPercent: 0, Attempt: job.AttemptCount, RequestID: requestID, CreatedAt: now}
+	event := rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable BuildRecord rollout prepared", 0, requestID, now, "")
 	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 		return DeploymentJob{}, false, err
 	}
@@ -1134,8 +1153,8 @@ func (s PostgresService) ReplayImmutableDeployment(projectID, key, payloadHash s
 	return job, true, nil
 }
 
-func (s PostgresService) ImmutableDeploymentCommand(job DeploymentJob) *deploymentv1.AgentCommand {
-	if job.Snapshot == nil {
+func (s PostgresService) DeploymentCommand(job DeploymentJob) *deploymentv1.AgentCommand {
+	if job.Snapshot == nil || job.RolloutIntent == nil {
 		return nil
 	}
 	return &deploymentv1.AgentCommand{SchemaVersion: deploymentv1.CommandSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, AgentID: job.AgentID, LeaseToken: job.LeaseToken, Attempt: int32(job.AttemptCount), Image: job.Snapshot.Image, Workload: job.Snapshot.Workload, SpecHash: job.SpecHash, Rollout: job.RolloutIntent}
@@ -1173,22 +1192,22 @@ func (s PostgresService) RollbackDeployment(projectID, deploymentID, requestedBy
 		return DeploymentJob{}, APIError{Status: 409, Code: "ROLLBACK_NOT_AVAILABLE", Message: reason, RequestID: requestID}
 	}
 	if source.Mode == "rollout" {
-		if source.RolloutIntent == nil || source.ExposureSpec == nil || source.RolloutIntent.PreviousKnownGoodID == "" || source.TerminalResult == nil || source.TerminalResult.RolloutState != deploymentv1.RolloutStateSucceeded || source.TerminalResult.KnownGoodID == "" {
+		if source.RolloutIntent == nil || source.RolloutIntent.PreviousKnownGoodID == "" || source.TerminalResult == nil || source.TerminalResult.RolloutState != deploymentv1.RolloutStateSucceeded || source.TerminalResult.KnownGoodID == "" {
 			return DeploymentJob{}, APIError{Status: 409, Code: "ROLLBACK_NOT_AVAILABLE", Message: "only a succeeded rollout with an exact previous known-good snapshot can be rolled back", RequestID: requestID}
 		}
 		jobID := newID("dep")
-		exposure := *source.ExposureSpec
-		exposure.DeploymentJobID, exposure.SpecHash = jobID, ""
-		canonical, canonicalErr := exposure.Canonicalize()
-		if canonicalErr != nil {
-			return DeploymentJob{}, canonicalErr
+		exposure, exposureErr := exposureForDeployment(source.ExposureSpec, jobID)
+		if exposureErr != nil {
+			return DeploymentJob{}, exposureErr
 		}
 		now := s.clock()
-		intent, intentErr := buildRolloutIntent(source, canonical, source.RolloutIntent.PreviousKnownGoodID, source.RolloutIntent.PreviousKnownGoodHash, source.RolloutIntent.PreviousDigest, source.TerminalResult.KnownGoodID, source.TerminalResult.KnownGoodHash, deploymentv1.RolloutOperationRollback, now)
+		base := source
+		base.ID = jobID
+		intent, intentErr := buildRolloutIntent(base, exposure, source.RolloutIntent.PreviousKnownGoodID, source.RolloutIntent.PreviousKnownGoodHash, source.RolloutIntent.PreviousDigest, source.TerminalResult.KnownGoodID, source.TerminalResult.KnownGoodHash, deploymentv1.RolloutOperationRollback, now)
 		if intentErr != nil {
 			return DeploymentJob{}, intentErr
 		}
-		job := rolloutDeploymentJob(source, intent, canonical, requestedBy, key, hashJSON(map[string]string{"source": deploymentID, "operation": "rollback"}), now)
+		job := rolloutDeploymentJob(source, intent, exposure, requestedBy, key, hashJSON(map[string]string{"source": deploymentID, "operation": "rollback"}), now)
 		tx, txErr := s.DB.BeginTx(ctx, nil)
 		if txErr != nil {
 			return DeploymentJob{}, txErr
@@ -1222,7 +1241,7 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	if err := expireDeploymentLeases(ctx, tx, projectID, now); err != nil {
 		return DeploymentLease{}, false, err
 	}
-	legacy, legacyErr := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id=$1 AND node_id=$2 AND status IN ($3,$4) AND (mode IS NULL OR mode NOT IN ('immutable_image','rollout')) ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack))
+	legacy, legacyErr := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id=$1 AND node_id=$2 AND status IN ($3,$4) AND (mode IS NULL OR mode <> 'rollout') ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack))
 	if legacyErr == nil {
 		if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status=$1, failure_code=$2, failure_message_redacted=$3, lease_token=NULL, lease_expires_at=NULL, retry_after=NULL, finished_at=$4, updated_at=$4 WHERE id=$5`, DeploymentFailed, LegacyDeploymentRetired, "legacy deployment jobs are retired", now, legacy.ID); err != nil {
 			return DeploymentLease{}, false, err
@@ -1236,7 +1255,7 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	} else if !errors.Is(legacyErr, sql.ErrNoRows) {
 		return DeploymentLease{}, false, legacyErr
 	}
-	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4,$5) AND mode IN ('immutable_image','rollout') AND (retry_after IS NULL OR retry_after <= $6) ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack, deploymentv1.StateQueued, now))
+	job, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE project_id = $1 AND node_id = $2 AND status IN ($3,$4,$5) AND mode = 'rollout' AND rollout_intent_json IS NOT NULL AND (retry_after IS NULL OR retry_after <= $6) ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`, projectID, nodeID, DeploymentQueued, DeploymentRollingBack, deploymentv1.StateQueued, now))
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
 			return DeploymentLease{}, false, err
@@ -1285,7 +1304,7 @@ func (s PostgresService) LeaseDeployment(projectID, nodeID string) (DeploymentLe
 	if err := tx.Commit(); err != nil {
 		return DeploymentLease{}, false, err
 	}
-	return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken, Command: s.ImmutableDeploymentCommand(job)}, true, nil
+	return DeploymentLease{Deployment: job, Service: service, Action: action, LeaseToken: job.LeaseToken, Command: s.DeploymentCommand(job)}, true, nil
 }
 
 func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error) {
@@ -1308,10 +1327,7 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	if !isProductionDeploymentMode(job.Mode) {
 		return DeploymentJob{}, legacyDeploymentRetiredError(requestID)
 	}
-	if deploymentTerminalStatus(job.Status) && job.Mode != "rollout" || job.Mode == "rollout" && job.TerminalResult != nil {
-		if job.Mode != "rollout" {
-			return job, tx.Commit()
-		}
+	if job.TerminalResult != nil {
 		if exactTerminalReplay(job, result) {
 			return job, tx.Commit()
 		}
@@ -1327,16 +1343,10 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	if job.IntentHash != "" && result.IntentHash != "" && result.IntentHash != job.IntentHash {
 		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "deployment result intent hash does not match leased job", RequestID: requestID}
 	}
-	if job.Mode == "immutable_image" && result.Status != deploymentv1.StateSucceeded && result.Status != deploymentv1.StateFailed {
-		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_STATUS_INVALID", Message: "immutable deployment result must be succeeded or failed", RequestID: requestID}
-	}
-	if job.Mode == "rollout" && result.RolloutResult == nil {
+	if result.RolloutResult == nil {
 		return DeploymentJob{}, APIError{Status: 409, Code: "ROLLOUT_RESULT_INVALID", Message: "rollout deployment requires a sanitized rollout result", RequestID: requestID}
 	}
-	job.Status = normalizedDeploymentResultStatus(result.Status)
-	if job.Mode == "rollout" {
-		job.Status = result.RolloutResult.RolloutState
-	}
+	job.Status = result.RolloutResult.RolloutState
 	job.FailureCode = result.FailureCode
 	job.FailureMessageRedacted = RedactString(result.FailureMessageRedacted)
 	if result.FinalRevisionRef != "" {
@@ -1349,42 +1359,27 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	job.FinishedAt = &now
 	job.UpdatedAt = now
 	terminalJSON := any(nil)
-	if job.Mode == "rollout" {
-		if err := validateRolloutResult(job, result.RolloutResult); err != nil {
-			return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: err.Error(), RequestID: requestID}
-		}
-		copy := *result.RolloutResult
-		copy.LeaseToken = ""
-		copy.FailureMessageRedacted = RedactString(copy.FailureMessageRedacted)
-		job.TerminalResult = &copy
-		job.RolloutState, job.RolloutStateHash = copy.RolloutState, copy.StateHash
-		job.DesiredDigest, job.CurrentDigest, job.PreviousDigest = copy.DesiredDigest, copy.CurrentDigest, copy.PreviousDigest
-		job.KnownGoodID, job.KnownGoodHash, job.ReadinessEvidenceHash = copy.KnownGoodID, copy.KnownGoodHash, copy.ReadinessEvidenceHash
-		job.RolloutVersion++
-		job.RollbackEligible = copy.RolloutState == deploymentv1.RolloutStateSucceeded && job.RolloutIntent.PreviousKnownGoodID != ""
-		encoded, _ := json.Marshal(job.TerminalResult)
-		terminalJSON = string(encoded)
-	} else if job.Mode == "immutable_image" {
-		if result.SchemaVersion != deploymentv1.ResultSchemaVersion || result.SpecHash != job.SpecHash || job.Snapshot == nil || result.ApplicationImage != job.Snapshot.Image.Reference || (job.Status == DeploymentSucceeded && !deploymentResultHasExactDigest(result.ApplicationImageID, job.Snapshot.Image.Digest)) {
-			return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "Agent result does not match the immutable deployment command", RequestID: requestID}
-		}
-		job.TerminalResult = &deploymentv1.AgentResult{SchemaVersion: result.SchemaVersion, LeaseToken: result.LeaseToken, Status: job.Status, SpecHash: result.SpecHash, ApplicationImage: result.ApplicationImage, ApplicationImageID: result.ApplicationImageID, Namespace: result.Namespace, DeploymentName: result.DeploymentName, ServiceName: result.ServiceName, AvailableReplicas: result.AvailableReplicas, FailureCode: result.FailureCode, FailureMessageRedacted: job.FailureMessageRedacted}
-		encoded, _ := json.Marshal(job.TerminalResult)
-		terminalJSON = string(encoded)
+	if err := validateRolloutResult(job, result.RolloutResult); err != nil {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: err.Error(), RequestID: requestID}
 	}
+	copy := *result.RolloutResult
+	copy.LeaseToken = ""
+	copy.FailureMessageRedacted = RedactString(copy.FailureMessageRedacted)
+	job.TerminalResult = &copy
+	job.RolloutState, job.RolloutStateHash = copy.RolloutState, copy.StateHash
+	job.DesiredDigest, job.CurrentDigest, job.PreviousDigest = copy.DesiredDigest, copy.CurrentDigest, copy.PreviousDigest
+	job.KnownGoodID, job.KnownGoodHash, job.ReadinessEvidenceHash = copy.KnownGoodID, copy.KnownGoodHash, copy.ReadinessEvidenceHash
+	job.RolloutVersion++
+	job.RollbackEligible = copy.RolloutState == deploymentv1.RolloutStateSucceeded && job.RolloutIntent.PreviousKnownGoodID != ""
+	encoded, _ := json.Marshal(job.TerminalResult)
+	terminalJSON = string(encoded)
 	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, manifest_hash = NULLIF($2,''), rollback_eligible = $3, rollback_blocked_reason = NULLIF($4,''), failure_code = NULLIF($5,''), failure_message_redacted = NULLIF($6,''), lease_token = NULL, lease_expires_at = NULL, retry_after = NULL, finished_at = $7, updated_at = $7, terminal_result_json = COALESCE(terminal_result_json,$11::jsonb), rollout_state=NULLIF($12,''), rollout_state_hash=NULLIF($13,''), rollout_version=$14, desired_digest=NULLIF($15,''), current_digest=NULLIF($16,''), previous_digest=NULLIF($17,''), known_good_id=NULLIF($18,''), known_good_hash=NULLIF($19,''), readiness_evidence_hash=NULLIF($20,'') WHERE id = $8 AND project_id = $9 AND node_id = $10`, job.Status, job.ManifestHash, job.RollbackEligible, job.RollbackBlockedReason, job.FailureCode, job.FailureMessageRedacted, now, deploymentID, projectID, nodeID, terminalJSON, job.RolloutState, job.RolloutStateHash, job.RolloutVersion, job.DesiredDigest, job.CurrentDigest, job.PreviousDigest, job.KnownGoodID, job.KnownGoodHash, job.ReadinessEvidenceHash); err != nil {
 		return DeploymentJob{}, err
 	}
-	completionEvents := deploymentCompletionEvents(job, requestID, now)
-	if job.Mode == "rollout" {
-		event := rolloutEvent(job, job.RolloutState, "Agent reported terminal rollout result", 100, requestID, now, job.RolloutStateHash)
-		event.EvidenceHash = job.ReadinessEvidenceHash
-		completionEvents = []DeploymentEvent{event}
-	}
-	for _, event := range completionEvents {
-		if err := insertDeploymentEvent(ctx, tx, event); err != nil {
-			return DeploymentJob{}, err
-		}
+	event := rolloutEvent(job, job.RolloutState, "Agent reported terminal rollout result", 100, requestID, now, job.RolloutStateHash)
+	event.EvidenceHash = job.ReadinessEvidenceHash
+	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
+		return DeploymentJob{}, err
 	}
 	if deploymentTerminalStatus(job.Status) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id = $1 AND deployment_id = $2`, job.ServiceID, job.ID); err != nil {
@@ -1408,19 +1403,15 @@ func (s PostgresService) ProgressImmutableDeployment(projectID, nodeID, deployme
 	if err != nil {
 		return DeploymentJob{}, err
 	}
-	if job.Mode == "rollout" && job.TerminalResult != nil || job.Mode != "rollout" && (deploymentTerminalStatus(job.Status) || job.Status == deploymentv1.StateCancelled) {
+	if job.TerminalResult != nil {
 		return job, tx.Commit()
 	}
 	now := s.clock()
 	if job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now) || progress.LeaseToken == "" || progress.LeaseToken != job.LeaseToken {
 		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STALE_LEASE", Message: "deployment progress lease is stale", RequestID: requestID}
 	}
-	if job.Mode == "rollout" {
-		if err := validateRolloutProgress(job, progress); err != nil {
-			return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STATE_INVALID", Message: err.Error(), RequestID: requestID}
-		}
-	} else if !validImmutableTransition(job.Status, progress.State) {
-		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STATE_INVALID", Message: "deployment state transition is not monotonic", RequestID: requestID}
+	if err := validateRolloutProgress(job, progress); err != nil {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_STATE_INVALID", Message: err.Error(), RequestID: requestID}
 	}
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployment_events WHERE deployment_id=$1`, deploymentID).Scan(&count); err != nil {
@@ -1433,10 +1424,10 @@ func (s PostgresService) ProgressImmutableDeployment(projectID, nodeID, deployme
 	if message == "" {
 		message = "deployment progress updated"
 	}
-	rolloutReplay := job.Mode == "rollout" && job.RolloutState == progress.State && job.RolloutStateHash == progress.StateHash
+	rolloutReplay := job.RolloutState == progress.State && job.RolloutStateHash == progress.StateHash
 	leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
 	rolloutVersion := job.RolloutVersion
-	if job.Mode == "rollout" && !rolloutReplay {
+	if !rolloutReplay {
 		rolloutVersion++
 	}
 	if rolloutReplay {
@@ -1447,14 +1438,14 @@ func (s PostgresService) ProgressImmutableDeployment(projectID, nodeID, deployme
 		progress.FailureCode = job.FailureCode
 	}
 	nextStatus := progress.State
-	if job.Mode == "rollout" && deploymentv1.IsTerminalRolloutState(progress.State) {
+	if deploymentv1.IsTerminalRolloutState(progress.State) {
 		nextStatus = job.Status
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status=$1, lease_expires_at=$2, updated_at=$3, rollout_state=CASE WHEN mode='rollout' THEN $5 ELSE rollout_state END, rollout_state_hash=CASE WHEN mode='rollout' THEN NULLIF($6,'') ELSE rollout_state_hash END, rollout_version=CASE WHEN mode='rollout' THEN $7 ELSE rollout_version END, desired_digest=CASE WHEN mode='rollout' THEN NULLIF($8,'') ELSE desired_digest END, current_digest=CASE WHEN mode='rollout' THEN NULLIF($9,'') ELSE current_digest END, previous_digest=CASE WHEN mode='rollout' THEN NULLIF($10,'') ELSE previous_digest END, readiness_evidence_hash=CASE WHEN mode='rollout' THEN NULLIF($11,'') ELSE readiness_evidence_hash END, failure_code=CASE WHEN mode='rollout' THEN NULLIF($12,'') ELSE failure_code END WHERE id=$4`, nextStatus, leaseExpiresAt, now, deploymentID, progress.State, progress.StateHash, rolloutVersion, progress.DesiredDigest, progress.CurrentDigest, progress.PreviousDigest, progress.ReadinessEvidenceHash, progress.FailureCode); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status=$1, lease_expires_at=$2, updated_at=$3, rollout_state=$5, rollout_state_hash=NULLIF($6,''), rollout_version=$7, desired_digest=NULLIF($8,''), current_digest=NULLIF($9,''), previous_digest=NULLIF($10,''), readiness_evidence_hash=NULLIF($11,''), failure_code=NULLIF($12,'') WHERE id=$4`, nextStatus, leaseExpiresAt, now, deploymentID, progress.State, progress.StateHash, rolloutVersion, progress.DesiredDigest, progress.CurrentDigest, progress.PreviousDigest, progress.ReadinessEvidenceHash, progress.FailureCode); err != nil {
 		return DeploymentJob{}, err
 	}
 	if !rolloutReplay && count < 199 {
-		percent := immutableProgressPercent(progress.State)
+		percent := rolloutProgressPercent(progress.State)
 		if progress.ProgressPercent > 0 {
 			percent = int(progress.ProgressPercent)
 		}

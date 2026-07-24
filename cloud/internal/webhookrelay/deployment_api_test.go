@@ -110,7 +110,18 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("base lease ok=%v err=%v", ok, err)
 	}
-	base, err := store.CompleteDeployment(project.ID, node.ID, baseJob.ID, "base-result", registry.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.StateSucceeded, LeaseToken: baseLease.LeaseToken, SpecHash: snapshot.SpecHash, ApplicationImage: image.Reference, ApplicationImageID: "containerd://" + image.Digest, AvailableReplicas: 1})
+	for index, state := range []string{deploymentv1.RolloutStateApplying, deploymentv1.RolloutStateWaiting, deploymentv1.RolloutStateSucceeded} {
+		currentDigest := ""
+		if state == deploymentv1.RolloutStateSucceeded {
+			currentDigest = image.Digest
+		}
+		progress := deploymentv1.Progress{SchemaVersion: deploymentv1.EventSchemaVersion, LeaseToken: baseLease.LeaseToken, State: state, RolloutID: baseJob.RolloutIntent.RolloutID, IntentHash: baseJob.IntentHash, StateHash: strings.Repeat(string(rune('a'+index)), 64), WorkloadSpecHash: baseJob.RolloutIntent.Desired.WorkloadSpecHash, ExposureSpecHash: baseJob.RolloutIntent.Desired.ExposureSpecHash, DesiredDigest: image.Digest, CurrentDigest: currentDigest, PreviousDigest: baseJob.PreviousDigest, Attempt: baseJob.RolloutIntent.Attempt}
+		if _, err := store.ProgressImmutableDeployment(project.ID, node.ID, baseJob.ID, "base-progress", progress); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateSucceeded, RolloutState: deploymentv1.RolloutStateSucceeded, RolloutID: baseJob.RolloutIntent.RolloutID, IntentHash: baseJob.IntentHash, StateHash: strings.Repeat("c", 64), SpecHash: snapshot.SpecHash, WorkloadSpecHash: baseJob.RolloutIntent.Desired.WorkloadSpecHash, ExposureSpecHash: baseJob.RolloutIntent.Desired.ExposureSpecHash, DesiredDigest: image.Digest, CurrentDigest: image.Digest, KnownGoodID: baseJob.RolloutIntent.RolloutID, KnownGoodHash: strings.Repeat("d", 64), ReadinessEvidenceHash: strings.Repeat("e", 64), Attempt: baseJob.RolloutIntent.Attempt, Resources: []deploymentv1.ResourceIdentity{{Kind: "Deployment", Name: "api", UID: "uid", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}}
+	base, err := store.CompleteDeployment(project.ID, node.ID, baseJob.ID, "base-result", registry.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateSucceeded, LeaseToken: baseLease.LeaseToken, IntentHash: baseJob.IntentHash, RolloutResult: baseResult})
 	if err != nil {
 		t.Fatal(err)
 	}

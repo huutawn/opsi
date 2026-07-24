@@ -825,7 +825,7 @@ func deploymentEngineConfig(cfg config.Config) (deploy.EngineConfig, error) {
 		pollInterval = parsed
 	}
 	engineCfg := deploy.EngineConfig{
-		Production:     deploy.ProductionAdapter{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, "kubectl"), K3sPath: "k3s", Timeout: rolloutTimeout, PollInterval: pollInterval},
+		Reconciler:     deploy.ProductionAdapter{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, "kubectl"), Timeout: rolloutTimeout, PollInterval: pollInterval},
 		RolloutTimeout: rolloutTimeout,
 		PollInterval:   pollInterval,
 	}

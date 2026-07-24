@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -67,7 +68,10 @@ func TestDuplicateDeploymentResultIsIdempotent(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
 	}
-	result := DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: DeploymentSucceeded, LeaseToken: lease.LeaseToken, IntentHash: job.IntentHash, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference, ApplicationImageID: "docker-pullable://" + snapshot.Image.Reference, FinalRevisionRef: "rev-1", RollbackEligible: true}
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "1", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateWaiting, "2", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateSucceeded, "3", "")
+	result := rolloutResult(lease, deploymentv1.RolloutStateSucceeded, "3", job.DesiredDigest, job.RolloutIntent.RolloutID, strings.Repeat("a", 64), "")
 	done, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "req-result", result)
 	if err != nil {
 		t.Fatal(err)

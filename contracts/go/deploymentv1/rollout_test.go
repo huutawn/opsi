@@ -63,6 +63,22 @@ func TestRuntimeSnapshotHashSeparatesRuntimeAndDisplayFields(t *testing.T) {
 	}
 }
 
+func TestRuntimeSnapshotSupportsNoExternalExposure(t *testing.T) {
+	snapshot := validRuntimeSnapshot(t)
+	snapshot.Exposure = exposurev1.ExposureSpec{}
+	snapshot.ExposureSpecHash = ""
+	if err := snapshot.Validate(); err != nil || snapshot.HasExternalExposure() {
+		t.Fatalf("no-external snapshot err=%v external=%v", err, snapshot.HasExternalExposure())
+	}
+	if _, err := snapshot.Hash(); err != nil {
+		t.Fatalf("no-external snapshot hash: %v", err)
+	}
+	snapshot.Exposure = validRuntimeSnapshot(t).Exposure
+	if err := snapshot.Validate(); err == nil {
+		t.Fatal("accepted an ExposureSpec without its authoritative hash")
+	}
+}
+
 func TestRolloutIntentAndTransitionAllowlist(t *testing.T) {
 	snapshot := validRuntimeSnapshot(t)
 	intent, err := (RolloutIntent{SchemaVersion: RolloutSchemaVersion, RolloutID: "rollout-1", Target: snapshot.Target, Desired: snapshot, Attempt: 1, CreatedAt: time.Unix(1, 0).UTC()}).Canonicalize()

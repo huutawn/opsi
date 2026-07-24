@@ -61,9 +61,9 @@ GitHub Actions OIDC
 -> accepted BuildRecord
 -> immutable OCI digest
 -> TopologyPlan + DeploymentPolicy + routing
--> durable DeploymentJob/RolloutIntent
+-> durable DeploymentJob + canonical RolloutIntent
 -> Agent PollJob
--> ProductionAdapter/ReconcileRollout
+-> ReconcileRollout -> ProductionAdapter
 -> Opsi-owned K3s resources
 -> factual readiness/known-good rollback
 ```
@@ -71,7 +71,8 @@ GitHub Actions OIDC
 Git commit SHA remains provenance and source identity, not the runtime artifact.
 The Agent Git clone/build and arbitrary manifest execution paths are retired;
 there is one executable delivery path from accepted BuildRecord to immutable
-runtime state.
+runtime state. New BuildRecord deployments never create active
+`immutable_image` jobs; historical rows are read/restore compatibility only.
 
 ## Build and test
 

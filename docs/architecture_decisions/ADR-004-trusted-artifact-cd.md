@@ -394,7 +394,7 @@ Implementation verification is ordered by roadmap P07-P32 and requires targeted
 tests plus the specified GitHub runner, VPS, staging, and production-like
 checkpoints. This accepted decision is not implementation evidence.
 
-## Implementation addendum — 2026-07-23
+## Implementation addendum — 2026-07-24
 
 R5-005 through R5-011-S2 implemented the trusted path described by this ADR.
 The one executable delivery path is:
@@ -404,9 +404,9 @@ GitHub Actions OIDC
 -> accepted BuildRecord
 -> immutable OCI digest
 -> TopologyPlan + DeploymentPolicy + routing
--> durable DeploymentJob/RolloutIntent
+-> durable DeploymentJob + canonical RolloutIntent
 -> Agent PollJob
--> ProductionAdapter/ReconcileRollout
+-> ReconcileRollout -> ProductionAdapter
 -> Opsi-owned K3s resources
 -> factual readiness/known-good rollback
 ```
@@ -419,6 +419,10 @@ lifecycle jobs; it is not a generic webhook relay. GitHub App authorization,
 installation/repository ownership, Actions OIDC verification, BuildRecord
 admission, topology/policy routing, and immutable deployment are implemented
 checkpoints rather than future architecture.
+
+R5-011-S4 removed the remaining direct BuildRecord `immutable_image` execution
+branch. Commands without a RolloutIntent fail before Kubernetes mutation;
+queued historical rows are terminalized while restore/history reads remain.
 
 This addendum records implementation state without changing the original
 decision rationale. Full K3s acceptance remains an operator-run local workflow;

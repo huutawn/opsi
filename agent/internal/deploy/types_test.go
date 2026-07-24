@@ -1,22 +1,6 @@
 package deploy
 
-import (
-	"errors"
-	"testing"
-)
-
-func TestRequestRequiresImmutableCommand(t *testing.T) {
-	if err := (Request{}).Validate(); !errors.Is(err, ErrLegacyDeploymentRetired) {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestRequestAcceptsCanonicalCommand(t *testing.T) {
-	command := testAgentCommand(t)
-	if err := (Request{Production: &command}).Validate(); err != nil {
-		t.Fatal(err)
-	}
-}
+import "testing"
 
 func TestClassifyFailure(t *testing.T) {
 	if decision := ClassifyFailure("rollout timeout", false, 0); !decision.RollbackSafe || decision.FailType != FailTypeDeployTimeFail {

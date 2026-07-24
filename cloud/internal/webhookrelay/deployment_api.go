@@ -282,7 +282,7 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 		result.Changes = append(result.Changes, "workload_spec")
 	}
 	if result.Current == nil || result.Current.Image.Reference != snapshot.Image.Reference {
-		result.Changes = append(result.Changes, "immutable_image")
+		result.Changes = append(result.Changes, "image_digest")
 	}
 	if result.Current == nil || result.Current.Authority.RuntimeID != snapshot.Authority.RuntimeID {
 		result.Changes = append(result.Changes, "target_runtime")

@@ -1,6 +1,6 @@
 # Opsi Security Story
 
-Status: active boundary summary, last updated 2026-07-23. Detailed requirements
+Status: active boundary summary, last updated 2026-07-24. Detailed requirements
 are in `docs/opsi_srs.md`; implementation status is in
 `docs/status_matrix.md`; the trusted artifact decision and implementation
 addendum are in `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
@@ -18,8 +18,9 @@ is storage-only and is never execution authority.
 
 Cloud implements GitHub App user authorization, installation authentication,
 typed App-wide webhook intake, repository ownership, GitHub Actions OIDC, and
-accepted BuildRecords. The generic push relay is retired. Agent accepts only
-canonical immutable deployment jobs and reconciles Opsi-owned resources; Git
+accepted BuildRecords. The generic push relay is retired. New BuildRecord
+deployments create only canonical rollout jobs; Agent accepts only commands
+with a `RolloutIntent` and reconciles Opsi-owned resources; Git
 source build and caller-supplied manifest execution are retired.
 
 ## Credentials and secrets

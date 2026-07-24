@@ -12,6 +12,7 @@ BAD_BUILD_RECORD_ID="${OPSI_E2E_BAD_BUILD_RECORD_ID:-}"
 ENVIRONMENT_ID="${OPSI_E2E_ENVIRONMENT_ID:-}"
 SERVICE_KEY="${OPSI_E2E_SERVICE_KEY:-}"
 SERVICE_NAME="$SERVICE_KEY"
+WORKLOAD_NAMESPACE="default"
 REPLICAS="${OPSI_E2E_REPLICAS:-}"
 CONTAINER_PORT="${OPSI_E2E_CONTAINER_PORT:-}"
 CPU_REQUEST="${OPSI_E2E_CPU_REQUEST:-}"
@@ -195,19 +196,19 @@ select_host_key() {
 
 pin_host_identity() {
   local candidates
-  [[ "$TARGET_HOST" != -* && "$TARGET_HOST" != *[$' \t\r\n']* ]] || fail "invalid OPSI_E2E_VPS_HOST"
-  [[ "$TARGET_SSH_PORT" =~ ^[0-9]+$ ]] && [ "$TARGET_SSH_PORT" -ge 1 ] && [ "$TARGET_SSH_PORT" -le 65535 ] || fail "invalid OPSI_E2E_VPS_SSH_PORT"
-  [[ "$HOST_KEY_SHA256" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]] || fail "invalid OPSI_E2E_VPS_HOST_KEY_SHA256"
+  [[ "$TARGET_HOST" != -* && "$TARGET_HOST" != *[$' \t\r\n']* ]] || return 1
+  [[ "$TARGET_SSH_PORT" =~ ^[0-9]+$ ]] && [ "$TARGET_SSH_PORT" -ge 1 ] && [ "$TARGET_SSH_PORT" -le 65535 ] || return 1
+  [[ "$HOST_KEY_SHA256" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]] || return 1
   candidates="$(mktemp)"
   KNOWN_HOSTS_FILE="$(mktemp)"
   chmod 600 "$candidates" "$KNOWN_HOSTS_FILE"
   if ! timeout 15s ssh-keyscan -T 5 -p "$TARGET_SSH_PORT" "$TARGET_HOST" > "$candidates" 2>/dev/null; then
     rm -f -- "$candidates"
-    fail "SSH host-key scan failed"
+    return 1
   fi
   if ! select_host_key "$candidates" "$HOST_KEY_SHA256" "$KNOWN_HOSTS_FILE"; then
     rm -f -- "$candidates"
-    fail "SSH host-key fingerprint had zero or multiple matches"
+    return 1
   fi
   rm -f -- "$candidates"
 }
@@ -227,7 +228,7 @@ preflight() {
     fail "missing second factor: set OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE"
   fi
   validate_ssh_key_path || fail "OPSI_E2E_SSH_KEY_PATH failed protected private-key validation"
-  pin_host_identity
+  pin_host_identity || fail "SSH host-key fingerprint pinning failed"
   curl -fsS "$LOCAL_URL/health" >/dev/null || fail "local backend unavailable at OPSI_E2E_LOCAL_URL"
   remote_k3s 'test "$(uname -s)" = Linux && test -r /etc/os-release' >/dev/null || fail "SSH key authentication/preflight failed"
   log "preflight: ok"
@@ -341,14 +342,108 @@ wait_deployment_status() {
   while :; do
     body="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$deploy_id" - "deployment-$deploy_id" 0)" || true
     value="$(printf '%s' "$body" | json_get status 2>/dev/null || true)"
-    [ "$value" = "$expect" ] && return 0
-    case "$value" in
-      failed|succeeded) fail "deployment $deploy_id reached $value while waiting for $expect" ;;
-    esac
+    if deployment_wait_decision "$body" "$expect"; then
+      return 0
+    elif [ "$?" -eq 2 ]; then
+      fail "deployment $deploy_id reached $value while waiting for $expect"
+    fi
     now="$(date +%s)"
     [ $((now - start)) -lt "$POLL_SECONDS" ] || fail "timeout waiting for deployment $deploy_id=$expect, last=$value"
     sleep 10
   done
+}
+
+deployment_wait_decision() {
+  local body="$1" expect="$2" value
+  value="$(printf '%s' "$body" | json_get status 2>/dev/null || true)"
+  [ "$value" = "$expect" ] && return 0
+  case "$value" in
+    failed|rollback_failed|succeeded|rolled_back|cancelled) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_healthy_deployment() {
+  python3 -c "$(cat <<'PY'
+import json, re, sys
+
+d = json.load(sys.stdin)
+is_hash = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+digest = d.get("desired_digest", "")
+terminal = d.get("terminal_result") or {}
+intent = d.get("rollout_intent") or {}
+desired = intent.get("desired") or {}
+target = desired.get("target") or {}
+resources = terminal.get("resources") or []
+if d.get("mode") != "rollout" or d.get("status") != "succeeded" or d.get("rollout_state") != "succeeded":
+    raise SystemExit("healthy A is not a succeeded rollout")
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or d.get("current_digest") != digest:
+    raise SystemExit("healthy A digest state is inconsistent")
+if terminal.get("rollout_state") != "succeeded" or terminal.get("desired_digest") != digest or terminal.get("current_digest") != digest:
+    raise SystemExit("healthy A terminal result is inconsistent")
+if not d.get("known_good_id") or not is_hash(d.get("known_good_hash")) or not is_hash(d.get("readiness_evidence_hash")):
+    raise SystemExit("healthy A known-good/readiness evidence is incomplete")
+if terminal.get("known_good_id") != d.get("known_good_id") or terminal.get("known_good_hash") != d.get("known_good_hash") or terminal.get("readiness_evidence_hash") != d.get("readiness_evidence_hash"):
+    raise SystemExit("healthy A terminal evidence drifted")
+if desired.get("deployment_job_id") != d.get("id") or (desired.get("image") or {}).get("digest") != digest:
+    raise SystemExit("healthy A intent is not bound to the job/digest")
+for key in ("runtime_id", "node_id", "agent_id", "service_id"):
+    if not d.get(key):
+        raise SystemExit("healthy A identity is incomplete: " + key)
+if target.get("runtime_id") != d.get("runtime_id") or target.get("node_id") != d.get("node_id") or target.get("agent_id") != d.get("agent_id"):
+    raise SystemExit("healthy A intent target drifted")
+if not resources:
+    raise SystemExit("healthy A resource identities are missing")
+for resource in resources:
+    if not all(resource.get(key) for key in ("kind", "name", "uid", "resource_version")) or not is_hash(resource.get("functional_hash")):
+        raise SystemExit("healthy A resource identity is incomplete")
+deployments = [resource for resource in resources if resource.get("kind") == "Deployment"]
+services = [resource for resource in resources if resource.get("kind") == "Service"]
+if len(deployments) != 1 or len(services) != 1 or deployments[0].get("namespace") != services[0].get("namespace") or deployments[0].get("name") != services[0].get("name"):
+    raise SystemExit("healthy A Deployment/Service identities are inconsistent")
+if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", deployments[0]["namespace"]) or not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", deployments[0]["name"]):
+    raise SystemExit("healthy A Kubernetes identity is unsafe")
+for value in (digest, d["known_good_id"], d["known_good_hash"], d["readiness_evidence_hash"], d["service_id"], d["runtime_id"], d["node_id"], d["agent_id"], deployments[0]["namespace"], deployments[0]["name"]):
+    print(value)
+PY
+)"
+}
+
+validate_rolled_back_deployment() {
+  local digest_a="$1" known_id="$2" known_hash="$3" namespace="$4" deployment_name="$5"
+  python3 -c "$(cat <<'PY'
+import json, re, sys
+
+digest_a, known_id, known_hash, namespace, deployment_name = sys.argv[1:6]
+d = json.load(sys.stdin)
+is_hash = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+terminal = d.get("terminal_result") or {}
+digest_b = d.get("desired_digest", "")
+if d.get("mode") != "rollout" or d.get("status") != "rolled_back" or d.get("rollout_state") != "rolled_back":
+    raise SystemExit("broken B is not rolled_back")
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest_b) or digest_b == digest_a:
+    raise SystemExit("broken B desired digest is invalid")
+if d.get("current_digest") != digest_a or d.get("previous_digest") != digest_a:
+    raise SystemExit("broken B did not restore exact digest A")
+if d.get("known_good_id") != known_id or d.get("known_good_hash") != known_hash:
+    raise SystemExit("broken B replaced known-good A")
+if terminal.get("rollout_state") != "rolled_back" or terminal.get("desired_digest") != digest_b or terminal.get("current_digest") != digest_a or terminal.get("previous_digest") != digest_a:
+    raise SystemExit("broken B terminal digest state drifted")
+if terminal.get("known_good_id") != known_id or terminal.get("known_good_hash") != known_hash:
+    raise SystemExit("broken B terminal known-good drifted")
+if not is_hash(d.get("readiness_evidence_hash")) or terminal.get("readiness_evidence_hash") != d.get("readiness_evidence_hash"):
+    raise SystemExit("broken B readiness evidence is incomplete")
+resources = terminal.get("resources") or []
+if not resources:
+    raise SystemExit("broken B resource identities are missing")
+for resource in resources:
+    if not all(resource.get(key) for key in ("kind", "name", "uid", "resource_version")) or not is_hash(resource.get("functional_hash")):
+        raise SystemExit("broken B resource identity is incomplete")
+if not any(resource.get("kind") == "Deployment" and resource.get("namespace") == namespace and resource.get("name") == deployment_name for resource in resources):
+    raise SystemExit("broken B did not report the restored Deployment identity")
+print(digest_b)
+PY
+)" "$digest_a" "$known_id" "$known_hash" "$namespace" "$deployment_name"
 }
 
 check_artifacts_clean() {
@@ -375,8 +470,30 @@ remote_k3s() {
 }
 
 verify_runtime() {
-  remote_k3s "sudo k3s kubectl -n default rollout status deployment/$SERVICE_NAME --timeout=120s" | redact > "$ARTIFACT_DIR/k3s-rollout.redacted.log" || fail "K3s rollout status failed"
-  remote_k3s "sudo k3s kubectl -n default get deploy,svc,pods -l app.kubernetes.io/name=$SERVICE_NAME -o wide" | redact > "$ARTIFACT_DIR/k3s-runtime.redacted.log" || fail "K3s runtime state failed"
+  local digest="${1:-}" label="${2:-k3s}"
+  remote_k3s "sudo k3s kubectl -n $WORKLOAD_NAMESPACE rollout status deployment/$SERVICE_NAME --timeout=120s" | redact > "$ARTIFACT_DIR/$label-rollout.redacted.log" || fail "K3s rollout status failed"
+  remote_k3s "sudo k3s kubectl -n $WORKLOAD_NAMESPACE get deploy,svc,pods -l app.kubernetes.io/name=$SERVICE_NAME -o wide" | redact > "$ARTIFACT_DIR/$label-runtime.redacted.log" || fail "K3s runtime state failed"
+  if [ -n "$digest" ]; then
+    local raw
+    raw="$(mktemp)"
+    remote_k3s "sudo k3s kubectl -n $WORKLOAD_NAMESPACE get pods -l app.kubernetes.io/name=$SERVICE_NAME -o json" > "$raw" || { rm -f -- "$raw"; fail "K3s pod JSON fetch failed"; }
+    redact < "$raw" > "$ARTIFACT_DIR/$label-pods.redacted.json"
+    python3 - "$raw" "$digest" <<'PY' || { rm -f -- "$raw"; fail "K3s final application image did not match the expected digest"; }
+import json, sys
+path, digest = sys.argv[1:]
+data = json.load(open(path))
+pods = data.get("items") or []
+if not pods:
+    raise SystemExit("no workload pods")
+for pod in pods:
+    statuses = ((pod.get("status") or {}).get("containerStatuses") or [])
+    apps = [item for item in statuses if item.get("name") == "app"]
+    specs = [item for item in (((pod.get("spec") or {}).get("containers")) or []) if item.get("name") == "app"]
+    if not apps or not specs or any(not item.get("ready") or digest not in item.get("imageID", "") for item in apps) or any(not item.get("image", "").endswith("@" + digest) for item in specs):
+        raise SystemExit("application container is not ready on the expected digest")
+PY
+    rm -f -- "$raw"
+  fi
 }
 
 verify_incident_detail() {
@@ -419,7 +536,7 @@ manual_cleanup() {
   cat > "$ARTIFACT_DIR/cleanup.txt" <<EOF
 Manual cleanup for run $RUN_ID:
   Re-establish the same PEM-only, fingerprint-pinned SSH boundary before any target cleanup.
-  Delete only the Opsi-owned Deployment/Service labeled app.kubernetes.io/name=$SERVICE_NAME.
+  Delete only the Opsi-owned Deployment/Service in namespace $WORKLOAD_NAMESPACE labeled app.kubernetes.io/name=$SERVICE_NAME.
   Review the reset script with --dry-run before any separately authorized reset.
   Review $LOCAL_URL via local UI and revoke/remove E2E project resources created with idempotency prefix $RUN_ID.
 EOF
@@ -429,7 +546,8 @@ run_e2e() {
   preflight
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
-  local f body id good_deploy_id bad_deploy_id service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record
+  local f body id good_deploy_id bad_deploy_id service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record good_values bad_digest
+  local -a good_fields
   BOOTSTRAP_REQUEST_FILE="$(mktemp)"
   chmod 600 "$BOOTSTRAP_REQUEST_FILE"
   write_json "$BOOTSTRAP_REQUEST_FILE" bootstrap "$OPSI_E2E_SSH_KEY_PATH"
@@ -452,10 +570,21 @@ run_e2e() {
   good_deploy_id="$(printf '%s' "$body" | json_get id)" || fail "deployment response missing id"
   wait_deployment_status "$good_deploy_id" succeeded
   service_id="$(printf '%s' "$body" | json_get service_id)" || fail "canonical deployment response missing service_id"
+  deployment_record="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$good_deploy_id" - deployment-a-evidence 0)" || fail "healthy A deployment evidence fetch failed"
+  good_values="$(printf '%s' "$deployment_record" | validate_healthy_deployment)" || fail "healthy A rollout evidence is incomplete"
+  mapfile -t good_fields <<< "$good_values"
+  [ "${#good_fields[@]}" -eq 10 ] || fail "healthy A rollout evidence field count is invalid"
+  GOOD_DIGEST="${good_fields[0]}"
+  GOOD_KNOWN_ID="${good_fields[1]}"
+  GOOD_KNOWN_HASH="${good_fields[2]}"
+  GOOD_READINESS_HASH="${good_fields[3]}"
+  [ "$service_id" = "${good_fields[4]}" ] || fail "healthy A service identity drifted"
+  WORKLOAD_NAMESPACE="${good_fields[8]}"
+  SERVICE_NAME="${good_fields[9]}"
   export OPSI_E2E_SERVICE_ID="$service_id"
-  log "step 3/11 immutable deployment succeeded: service=$service_id service_key=$SERVICE_KEY deployment=$good_deploy_id build_record=$BUILD_RECORD_ID"
-  verify_runtime
-  log "step 4/11 K3s rollout/runtime verified"
+  log "step 3/11 healthy A rollout succeeded: service=$service_id deployment=$good_deploy_id digest=$GOOD_DIGEST known_good=$GOOD_KNOWN_ID readiness=$GOOD_READINESS_HASH runtime=${good_fields[5]} node=${good_fields[6]} agent=${good_fields[7]}"
+  verify_runtime "$GOOD_DIGEST" healthy-a
+  log "step 4/11 healthy A K3s readiness and exact image/imageID verified"
 
   f="$(mktemp)"; write_json "$f" secret
   api_file POST "/api/local/projects/$PROJECT_ID/secrets" "$f" secret-create 1 >/dev/null || fail "secret create failed"
@@ -475,8 +604,15 @@ run_e2e() {
   body="$(api_file POST "/api/local/projects/$PROJECT_ID/deployments" "$f" bad-deploy-create 1)" || fail "bad immutable deployment create failed"
   rm -f "$f"
   bad_deploy_id="$(printf '%s' "$body" | json_get id)" || fail "bad deployment response missing id"
-  wait_deployment_status "$bad_deploy_id" failed
-  log "step 7/11 controlled immutable failure reached canonical failed state: deployment=$bad_deploy_id build_record=$BAD_BUILD_RECORD_ID"
+  wait_deployment_status "$bad_deploy_id" rolled_back
+  deployment_record="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$bad_deploy_id" - deployment-b-evidence 0)" || fail "broken B deployment evidence fetch failed"
+  bad_digest="$(printf '%s' "$deployment_record" | validate_rolled_back_deployment "$GOOD_DIGEST" "$GOOD_KNOWN_ID" "$GOOD_KNOWN_HASH" "$WORKLOAD_NAMESPACE" "$SERVICE_NAME")" || fail "broken B rollback evidence did not restore exact A"
+  verify_runtime "$GOOD_DIGEST" restored-a
+  deployment_events="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$bad_deploy_id/events" - deployment-b-events 0)" || fail "broken B rollout events fetch failed"
+  for state in failed rolling_back rolled_back; do
+    printf '%s' "$deployment_events" | grep -q "\"step\":\"$state\"" || fail "broken B rollout event missing $state"
+  done
+  log "step 7/11 broken B rolled back and K3s restored healthy A: deployment=$bad_deploy_id desired_digest=$bad_digest restored_digest=$GOOD_DIGEST"
   incidents="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents?status=open&limit=10" - incidents 0)" || fail "incident list failed"
   incident_id="$(printf '%s' "$incidents" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("incidents", d if isinstance(d,list) else []); print(next((item.get("incident_id","") for item in a if item.get("service_id") == sys.argv[1]), ""))' "$service_id")"
   [ -n "$incident_id" ] || fail "no controlled incident found; E2E does not pass without a real Agent incident"
@@ -493,19 +629,20 @@ run_e2e() {
   log "step 8/11 factual incident list/detail/resolve lifecycle verified: incident=$incident_id"
 
   deployment_events="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$good_deploy_id/events" - deployment-events 0)" || fail "deployment events fetch failed"
-  printf '%s' "$deployment_events" | grep -q 'DEPLOYMENT_SUCCEEDED' || fail "deployment success event missing"
+  printf '%s' "$deployment_events" | grep -q '"step":"succeeded"' || fail "deployment success event missing"
   audit="$(api_file GET "/api/local/projects/$PROJECT_ID/audit" - audit 0)" || fail "audit fetch failed"
   printf '%s' "$audit" | grep -q 'IMMUTABLE_DEPLOYMENT_CREATED' || fail "immutable deployment audit event missing"
   deployment_record="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$good_deploy_id" - deployment-evidence 0)" || fail "canonical deployment evidence fetch failed"
-  for evidence in "$good_deploy_id" "$BUILD_RECORD_ID" 'sha256:' 'runtime_id' 'node_id' 'agent_id' 'succeeded'; do
+  for evidence in "$good_deploy_id" "$BUILD_RECORD_ID" "$GOOD_DIGEST" "$GOOD_KNOWN_ID" "$GOOD_KNOWN_HASH" "$GOOD_READINESS_HASH" 'runtime_id' 'node_id' 'agent_id' 'resources' 'succeeded'; do
     printf '%s' "$deployment_record" | grep -q "$evidence" || fail "canonical deployment evidence missing $evidence"
   done
-  log "step 9/11 immutable deployment evidence verified: job=$good_deploy_id build_record=$BUILD_RECORD_ID"
+  log "step 9/11 BuildRecord rollout evidence verified: job=$good_deploy_id build_record=$BUILD_RECORD_ID"
   check_artifacts_clean || fail "redaction failed: artifact contains sensitive value"
   log "step 10/11 artifacts verified without sensitive payloads"
   manual_cleanup
   log "step 11/11 cleanup instructions written"
-  log "PASS: clean VPS/K3s E2E proof complete"
+  verify_runtime "$GOOD_DIGEST" final-a
+  log "PASS: healthy A -> broken B -> restored A; target workload is ready on digest A"
 }
 
 self_test() {
@@ -551,6 +688,70 @@ PY
   if select_host_key "$fixture" "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" "$match"; then
     fail "self-test accepted incorrect host fingerprint"
   fi
+  cat > "$SELF_TEST_DIR/ssh-keyscan" <<'SH'
+#!/usr/bin/env sh
+printf '%s\n' "${OPSI_SELFTEST_SCAN_CALLED:?}" > "${OPSI_SELFTEST_SCAN_MARKER:?}"
+case "${OPSI_SELFTEST_SCAN_MODE:-correct}" in
+  zero) exit 0 ;;
+  duplicate) printf '%s\n%s\n' "$OPSI_SELFTEST_HOST_LINE" "$OPSI_SELFTEST_HOST_LINE" ;;
+  *) printf '%s\n' "$OPSI_SELFTEST_HOST_LINE" ;;
+esac
+SH
+  chmod 700 "$SELF_TEST_DIR/ssh-keyscan"
+  OPSI_SELFTEST_SCAN_MARKER="$SELF_TEST_DIR/scan-called" OPSI_SELFTEST_SCAN_CALLED=local OPSI_SELFTEST_HOST_LINE="fixture $key_public" PATH="$SELF_TEST_DIR:$PATH" TARGET_HOST=fixture TARGET_SSH_PORT=22 HOST_KEY_SHA256="$expected" pin_host_identity || fail "self-test host-key pin rejected correct fingerprint"
+  [ -s "$SELF_TEST_DIR/scan-called" ] || fail "self-test ssh-keyscan stub was not exercised"
+  rm -f -- "$KNOWN_HOSTS_FILE"
+  OPSI_SELFTEST_SCAN_MODE=correct HOST_KEY_SHA256="SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" PATH="$SELF_TEST_DIR:$PATH" TARGET_HOST=fixture TARGET_SSH_PORT=22 pin_host_identity && fail "self-test host-key pin accepted wrong fingerprint"
+  rm -f -- "$KNOWN_HOSTS_FILE"
+  OPSI_SELFTEST_SCAN_MODE=zero HOST_KEY_SHA256="$expected" PATH="$SELF_TEST_DIR:$PATH" TARGET_HOST=fixture TARGET_SSH_PORT=22 pin_host_identity && fail "self-test host-key pin accepted zero matches"
+  rm -f -- "$KNOWN_HOSTS_FILE"
+  OPSI_SELFTEST_SCAN_MODE=duplicate HOST_KEY_SHA256="$expected" PATH="$SELF_TEST_DIR:$PATH" TARGET_HOST=fixture TARGET_SSH_PORT=22 pin_host_identity && fail "self-test host-key pin accepted duplicate matches"
+  rm -f -- "$KNOWN_HOSTS_FILE"
+  hash_a="$(printf '%064d' 0 | tr 0 a)"
+  digest_a="sha256:$hash_a"
+  python3 - "$SELF_TEST_DIR" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+hash_a = "a" * 64
+digest_a = "sha256:" + hash_a
+digest_b = "sha256:" + "b" * 64
+resource = {"kind":"Deployment","namespace":"opsi","name":"api","uid":"uid-api","resource_version":"1","functional_hash":"c" * 64}
+service = {"kind":"Service","namespace":"opsi","name":"api","uid":"uid-service","resource_version":"1","functional_hash":"b" * 64}
+def base(status, digest, current="", previous="", known_id="", known_hash="", failure=""):
+    intent = {"desired":{"deployment_job_id":"dep-fixture","image":{"digest":digest},"target":{"runtime_id":"runtime-1","node_id":"node-1","agent_id":"agent-1"}}}
+    terminal = {"rollout_state":status,"desired_digest":digest,"current_digest":current,"previous_digest":previous,"known_good_id":known_id,"known_good_hash":known_hash,"readiness_evidence_hash":"d" * 64,"resources":[resource,service]}
+    return {"id":"dep-fixture","mode":"rollout","status":status,"rollout_state":status,"desired_digest":digest,"current_digest":current,"previous_digest":previous,"known_good_id":known_id,"known_good_hash":known_hash,"readiness_evidence_hash":"d" * 64,"service_id":"service-1","runtime_id":"runtime-1","node_id":"node-1","agent_id":"agent-1","rollout_intent":intent,"terminal_result":terminal,"failure_code":failure}
+healthy = base("succeeded", digest_a, digest_a, known_id="known-a", known_hash=hash_a)
+rolled = base("rolled_back", digest_b, digest_a, digest_a, "known-a", hash_a, "READINESS_FAILED")
+fixtures = {"healthy-a.json":healthy,"rolled-back-b.json":rolled,"failed.json":{"status":"failed"},"rollback-failed.json":{"status":"rollback_failed"},"cancelled.json":{"status":"cancelled"}}
+for name, value in fixtures.items():
+    (root / name).write_text(json.dumps(value))
+PY
+  printf '%s' "$(<"$SELF_TEST_DIR/healthy-a.json")" | validate_healthy_deployment >/dev/null || fail "self-test healthy A fixture was rejected"
+  printf '%s' "$(<"$SELF_TEST_DIR/rolled-back-b.json")" | validate_rolled_back_deployment "$digest_a" known-a "$hash_a" opsi api >/dev/null || fail "self-test rolled-back B fixture was rejected"
+  for field in current_digest previous_digest known_good_id known_good_hash; do
+    python3 - "$SELF_TEST_DIR/rolled-back-b.json" "$field" "$digest_a" "$hash_a" <<'PY' || fail "self-test rollback fixture mutation setup failed"
+import json, sys
+path, field, digest_a, hash_a = sys.argv[1:]
+data = json.load(open(path))
+data.update({"current_digest": digest_a, "previous_digest": digest_a, "known_good_id": "known-a", "known_good_hash": hash_a})
+data[field] = {"current_digest":"sha256:" + "e" * 64, "previous_digest":"sha256:" + "f" * 64, "known_good_id":"wrong-known-good", "known_good_hash":"e" * 64}[field]
+json.dump(data, open(path, "w"))
+PY
+    if printf '%s' "$(<"$SELF_TEST_DIR/rolled-back-b.json")" | validate_rolled_back_deployment "$digest_a" known-a "$hash_a" opsi api >/dev/null 2>&1; then
+      fail "self-test accepted rolled-back record with wrong $field"
+    fi
+  done
+  deployment_wait_decision "$(<"$SELF_TEST_DIR/healthy-a.json")" succeeded || fail "self-test did not accept succeeded A"
+  deployment_wait_decision "$(<"$SELF_TEST_DIR/rolled-back-b.json")" rolled_back || fail "self-test did not accept rolled_back B"
+  for fixture in healthy-a failed rollback-failed cancelled; do
+    if deployment_wait_decision "$(<"$SELF_TEST_DIR/$fixture.json")" rolled_back; then
+      fail "self-test accepted terminal $fixture while waiting for rollback"
+    else
+      decision=$?
+    fi
+    [ "$decision" -eq 2 ] || fail "self-test did not fail closed for terminal $fixture"
+  done
   pem_marker='-----BEGIN OPENSSH '"PRIVATE KEY-----"
   printf '%s\n' "$pem_marker" > "$ARTIFACT_DIR/pem-leak.txt"
   if check_artifacts_clean >/dev/null 2>&1; then fail "self-test artifact validation accepted a PEM marker"; fi

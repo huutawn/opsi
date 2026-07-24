@@ -80,7 +80,7 @@ func TestExposureAutomaticRollbackKeepsDesiredAndFactualKnownGood(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	baseB := immutableDeploymentWithDigest(t, service, projectID, base, "b")
+	baseB := base
 	bRequest := rolloutExposureRequest(t, baseB, "dep-exposure-b", "api.example.com", "/v2")
 	bJob, _, err := service.StartExposureRollout(projectID, "user-1", "exposure-b", "req-b", bRequest)
 	if err != nil || bJob.RolloutIntent.PreviousKnownGoodID != aKnownID || bJob.PreviousDigest != aJob.DesiredDigest {
@@ -94,7 +94,7 @@ func TestExposureAutomaticRollbackKeepsDesiredAndFactualKnownGood(t *testing.T) 
 	reportRolloutProgress(t, service, projectID, bLease, deploymentv1.RolloutStateRolledBack, "8", deploymentv1.RolloutCodeReadinessFailed)
 	bResult := rolloutResult(bLease, deploymentv1.RolloutStateRolledBack, "8", aJob.DesiredDigest, aKnownID, aKnownHash, deploymentv1.RolloutCodeReadinessFailed)
 	finished, err := service.CompleteDeployment(projectID, bJob.NodeID, bJob.ID, "result-b", bResult)
-	if err != nil || finished.DesiredDigest == finished.CurrentDigest || finished.DesiredDigest != baseB.Snapshot.Image.Digest || finished.CurrentDigest != aJob.DesiredDigest || finished.PreviousDigest != aJob.DesiredDigest || finished.KnownGoodID != aKnownID {
+	if err != nil || finished.DesiredDigest != baseB.Snapshot.Image.Digest || finished.CurrentDigest != aJob.DesiredDigest || finished.PreviousDigest != aJob.DesiredDigest || finished.KnownGoodID != aKnownID {
 		t.Fatalf("rolled back B=%+v err=%v", finished, err)
 	}
 	preview, err := service.PreviewExposure(projectID, "user-1", rolloutExposureRequest(t, base, "dep-exposure-c", "api.example.com", "/v3"))
@@ -118,6 +118,35 @@ func TestExposureAutomaticRollbackKeepsDesiredAndFactualKnownGood(t *testing.T) 
 	}
 }
 
+func TestBuildRecordImageRedeployPreservesAuthoritativeExposure(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "image-exposure")
+	exposureRequest := rolloutExposureRequest(t, base, "dep-image-exposure", "api.example.com", "/")
+	exposureJob, _, err := service.StartExposureRollout(projectID, "user-1", "image-exposure-route", "route-request", exposureRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeSuccessfulRollout(t, service, projectID, exposureJob, "known-exposure", strings.Repeat("b", 64), "4")
+	if exposureJob.RolloutIntent == nil {
+		t.Fatal("exposure rollout did not carry its canonical intent")
+	}
+
+	snapshot := *base.Snapshot
+	snapshot.Image.Digest = "sha256:" + strings.Repeat("c", 64)
+	snapshot.Image.Reference = snapshot.Image.Repository + "@" + snapshot.Image.Digest
+	snapshot.Authority.BuildRecord.Build.OCIDigest = snapshot.Image.Digest
+	snapshot.PayloadHash += "-redeploy"
+	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "image-redeploy", "redeploy-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Mode != "rollout" || job.RolloutIntent == nil || job.ExposureSpec == nil {
+		t.Fatalf("redeploy lost canonical rollout/exposure: %+v", job)
+	}
+	if job.RolloutIntent.Desired.ExposureSpecHash == "" || job.RolloutIntent.Desired.Exposure.Hostname != "api.example.com" || job.RolloutIntent.Desired.Exposure.Path != "/" {
+		t.Fatalf("redeploy did not preserve authoritative exposure: %+v", job.RolloutIntent.Desired.Exposure)
+	}
+}
+
 func TestExposureExplicitRollbackTargetsPreviousAndPinsExpectedCurrentKnownGood(t *testing.T) {
 	service, projectID, baseA := rolloutRegistryFixture(t, "explicit")
 	aRequest := rolloutExposureRequest(t, baseA, "dep-explicit-a", "api.example.com", "/a")
@@ -127,7 +156,7 @@ func TestExposureExplicitRollbackTargetsPreviousAndPinsExpectedCurrentKnownGood(
 	}
 	aKnownID, aKnownHash := "known-explicit-a", strings.Repeat("a", 64)
 	aFinished := completeSuccessfulRollout(t, service, projectID, aJob, aKnownID, aKnownHash, "1")
-	baseB := immutableDeploymentWithDigest(t, service, projectID, baseA, "b")
+	baseB := baseA
 	bRequest := rolloutExposureRequest(t, baseB, "dep-explicit-b", "api.example.com", "/b")
 	bJob, _, err := service.StartExposureRollout(projectID, "user-1", "explicit-b", "req-b", bRequest)
 	if err != nil {
@@ -237,35 +266,15 @@ func rolloutRegistryFixture(t *testing.T, suffix string) (*Service, string, Depl
 	if err != nil || !ok {
 		t.Fatalf("base lease ok=%v err=%v", ok, err)
 	}
-	result := DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.StateSucceeded, LeaseToken: lease.LeaseToken, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference, ApplicationImageID: "containerd://" + snapshot.Image.Digest, AvailableReplicas: 1}
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "1", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateWaiting, "2", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateSucceeded, "3", "")
+	result := rolloutResult(lease, deploymentv1.RolloutStateSucceeded, "3", job.DesiredDigest, job.RolloutIntent.RolloutID, strings.Repeat("a", 64), "")
 	base, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "base-result", result)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service, projectID, base
-}
-
-func immutableDeploymentWithDigest(t *testing.T, service *Service, projectID string, base DeploymentJob, character string) DeploymentJob {
-	t.Helper()
-	snapshot := *base.Snapshot
-	digest := "sha256:" + strings.Repeat(character, 64)
-	snapshot.Image.Digest = digest
-	snapshot.Image.Reference = snapshot.Image.Repository + "@" + digest
-	snapshot.Authority.BuildRecord.Build.OCIDigest = digest
-	snapshot.PayloadHash += "-" + character
-	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "base-"+character, "base-"+character)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lease, ok, err := service.LeaseDeployment(projectID, job.NodeID)
-	if err != nil || !ok || lease.Command == nil || lease.Command.Rollout != nil {
-		t.Fatalf("immutable B lease=%+v ok=%v err=%v", lease, ok, err)
-	}
-	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "base-result-"+character, DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.StateSucceeded, LeaseToken: lease.LeaseToken, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference, ApplicationImageID: "containerd://" + digest, AvailableReplicas: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return finished
 }
 
 func rolloutExposureRequest(t *testing.T, base DeploymentJob, jobID, hostname, path string) deploymentv1.ExposureMutationRequest {

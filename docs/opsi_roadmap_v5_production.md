@@ -427,7 +427,7 @@ generic GitHub push relay, and inline debug configuration are retired. The only
 executable path is GitHub Actions OIDC -> accepted BuildRecord -> immutable OCI
 digest -> TopologyPlan + DeploymentPolicy + routing -> durable
 DeploymentJob/RolloutIntent -> Agent PollJob ->
-ProductionAdapter/ReconcileRollout -> Opsi-owned K3s resources -> factual
+ReconcileRollout -> ProductionAdapter -> Opsi-owned K3s resources -> factual
 readiness/known-good rollback. The historical `/webhooks/next` route name is a
 canonical job transport, not a generic relay.
 
@@ -437,6 +437,20 @@ protected PEM/OpenSSH key file and exact pinned SSH host fingerprint; the false
 GitHub-hosted K3s workflow and obsolete readiness/future-work snapshots were
 deleted. No VPS, release, DNS, TLS, public endpoint, R5-012, MCP, or AI action
 was performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
+**Correction checkpoint R5-011-S4 (2026-07-24):** `DONE /
+SINGLE_ROLLOUT_EXECUTION_PATH_PASS`. The discovered blocker was new BuildRecord
+deployments creating executable `immutable_image` jobs beside rollout
+reconciliation. New jobs now always persist a canonical `RolloutIntent`, and
+Agent PollJob always enters `ReconcileRollout` then `ProductionAdapter`.
+Commands without an intent fail with `LEGACY_DEPLOYMENT_RETIRED` before
+Kubernetes mutation. Queued historical jobs are terminalized without blocking
+canonical leases; no-external workloads create no Ingress, and image
+redeployments preserve authoritative exposure. The E2E harness now requires
+healthy A -> broken B -> restored A with exact digest/known-good/readiness and
+resource evidence. No VPS, release, DNS, TLS, public endpoint, R5-012, MCP, or
+AI action was performed. R5-011 remains `PARTIAL`; R5-011.4 remains
+`MANUAL_GATED`.
 
 ### R5-012 — Main CD và PR preview manual acceptance
 

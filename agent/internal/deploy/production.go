@@ -24,11 +24,6 @@ const (
 	MaxCommandErrorBytes  = 512
 )
 
-// ProductionRuntime is the Agent execution boundary for immutable image jobs.
-type ProductionRuntime interface {
-	Deploy(context.Context, deploymentv1.AgentCommand, ProgressFunc) (Record, error)
-}
-
 type CommandRunner interface {
 	Run(context.Context, []byte, string, ...string) ([]byte, error)
 }
@@ -81,154 +76,17 @@ func (b *boundedCommandBuffer) Write(data []byte) (int, error) {
 	return written, nil
 }
 
-// RegistryCredentialProvider is deliberately separate from command execution.
-// The R5-010 live path is anonymous public OCI; private credentials remain a
-// typed, scoped extension and are never passed through argv or logs.
-type RegistryCredentialProvider interface {
-	Credentials(context.Context, deploymentv1.ImmutableImage) (RegistryCredential, error)
-}
-
-type RegistryCredential struct {
-	Username string
-	Secret   string
-}
-
-type AnonymousRegistryCredentials struct{}
-
-func (AnonymousRegistryCredentials) Credentials(context.Context, deploymentv1.ImmutableImage) (RegistryCredential, error) {
-	return RegistryCredential{}, nil
-}
-
-// ProductionAdapter pulls by digest, renders Opsi-owned resources, and checks
-// readiness using the application container name instead of container position.
+// ProductionAdapter is the RolloutRuntime implementation for Opsi-owned K3s resources.
 type ProductionAdapter struct {
 	Runner              CommandRunner
-	Credentials         RegistryCredentialProvider
 	TLSResolver         TLSSecretResolver
 	RoutingProbe        RoutingProbe
 	RequireLocalRouting bool
 	KubectlPath         string
-	K3sPath             string
 	PollInterval        time.Duration
 	Timeout             time.Duration
 	ReadTimeout         time.Duration
 	MaxOutputBytes      int
-}
-
-func (a ProductionAdapter) Deploy(ctx context.Context, command deploymentv1.AgentCommand, progress ProgressFunc) (Record, error) {
-	if a.Runner == nil {
-		a.Runner = ExecCommandRunner{}
-	}
-	if a.KubectlPath == "" {
-		a.KubectlPath = "kubectl"
-	}
-	if a.K3sPath == "" {
-		a.K3sPath = "k3s"
-	}
-	if a.PollInterval <= 0 {
-		a.PollInterval = time.Second
-	}
-	if a.Timeout <= 0 {
-		a.Timeout = 10 * time.Minute
-	}
-	if a.Credentials == nil {
-		a.Credentials = AnonymousRegistryCredentials{}
-	}
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout)
-	defer cancel()
-	start := time.Now().UTC()
-	record := Record{DeployID: command.JobID, ProjectID: command.ProjectID, ServiceID: command.Workload.ServiceKey, ServiceName: command.Workload.ServiceKey, StartedAt: start, ImageTag: command.Image.Reference, Status: StatusRunning, TriggeredBy: "cloud", SpecHash: command.SpecHash}
-	if err := emitProduction(progress, record, PhasePulling, "pulling immutable OCI image", 15, nil); err != nil {
-		return record, err
-	}
-	imageID, err := a.pull(ctx, command.Image)
-	if err != nil {
-		return productionFailure(record, progress, "IMAGE_PULL_FAILED", err)
-	}
-	record.ImageID = imageID
-	if err := emitProduction(progress, record, PhaseApplying, "applying Opsi-owned Deployment and ClusterIP Service", 50, nil); err != nil {
-		return record, err
-	}
-	rendered, resources, namespace, err := renderProductionResources(command)
-	if err != nil {
-		return productionFailure(record, progress, "WORKLOAD_RENDER_FAILED", err)
-	}
-	if err := a.verifyOwnership(ctx, resources, namespace, command); err != nil {
-		return productionFailure(record, progress, "K8S_RESOURCE_OWNERSHIP_CONFLICT", err)
-	}
-	if _, err := a.Runner.Run(ctx, rendered, a.KubectlPath, "apply", "--server-side", "--field-manager="+ProductionFieldManager, "-f", "-"); err != nil {
-		return productionFailure(record, progress, "K8S_APPLY_FAILED", err)
-	}
-	record.Namespace = namespace
-	record.DeploymentName = resources.DeploymentName
-	record.KubernetesServiceName = resources.ServiceName
-	if err := emitProduction(progress, record, PhaseWatching, "waiting for application container readiness", 70, nil); err != nil {
-		return record, err
-	}
-	ready, observedImageID, available, err := a.waitReady(ctx, resources, namespace, command)
-	if err != nil {
-		return productionFailure(record, progress, "K8S_READINESS_FAILED", err)
-	}
-	if !ready || !containsExactDigest(observedImageID, command.Image.Digest) {
-		return productionFailure(record, progress, "K8S_IMAGE_ID_MISMATCH", errors.New("application container imageID does not match requested digest"))
-	}
-	record.AvailableReplicas = available
-	record.FinishedAt = time.Now().UTC()
-	record.Status = StatusSuccess
-	_ = emitProduction(progress, record, PhaseSuccess, "deployment succeeded", 100, nil)
-	return record, nil
-}
-
-func (a ProductionAdapter) pull(ctx context.Context, image deploymentv1.ImmutableImage) (string, error) {
-	if err := image.Validate(); err != nil {
-		return "", err
-	}
-	credentials, err := a.Credentials.Credentials(ctx, image)
-	if err != nil {
-		return "", err
-	}
-	if credentials.Username != "" || credentials.Secret != "" {
-		return "", errors.New("PRIVATE_REGISTRY_CREDENTIAL_UNSUPPORTED")
-	}
-	if _, err := a.Runner.Run(ctx, nil, a.K3sPath, "crictl", "pull", image.Reference); err != nil {
-		if looksLikeRegistryAuthFailure(err) {
-			return "", errors.New("REGISTRY_AUTH_REQUIRED")
-		}
-		return "", err
-	}
-	out, err := a.Runner.Run(ctx, nil, a.K3sPath, "crictl", "inspecti", image.Reference)
-	if err != nil {
-		return "", err
-	}
-	imageID, ok := runtimeImageID(out, image.Digest)
-	if !ok {
-		return "", errors.New("runtime image identity did not contain requested digest")
-	}
-	return imageID, nil
-}
-
-func looksLikeRegistryAuthFailure(err error) bool {
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "unauthorized") || strings.Contains(message, "authentication required") || strings.Contains(message, "401")
-}
-
-func runtimeImageID(data []byte, digest string) (string, bool) {
-	var document map[string]any
-	if json.Unmarshal(data, &document) != nil {
-		return "", false
-	}
-	status, _ := document["status"].(map[string]any)
-	if id, _ := status["id"].(string); id == digest {
-		return id, true
-	}
-	if digests, _ := status["repoDigests"].([]any); len(digests) > 0 {
-		for _, value := range digests {
-			if ref, ok := value.(string); ok && strings.HasSuffix(ref, "@"+digest) {
-				return ref, true
-			}
-		}
-	}
-	return "", false
 }
 
 type renderedResources struct {
@@ -239,90 +97,6 @@ type renderedResources struct {
 	Deployment      map[string]any
 	Service         map[string]any
 	NamespaceObject map[string]any
-}
-
-func (a ProductionAdapter) verifyOwnership(ctx context.Context, resources renderedResources, namespace string, command deploymentv1.AgentCommand) error {
-	checks := []struct {
-		kind string
-		name string
-		obj  map[string]any
-	}{
-		{kind: "namespace", name: namespace, obj: resources.NamespaceObject},
-		{kind: "deployment", name: resources.DeploymentName, obj: resources.Deployment},
-		{kind: "service", name: resources.ServiceName, obj: resources.Service},
-	}
-	for _, check := range checks {
-		args := []string{"get", check.kind, check.name, "-o", "json", "--ignore-not-found", "--show-managed-fields"}
-		if check.kind != "namespace" {
-			args = []string{"get", check.kind, check.name, "-n", namespace, "-o", "json", "--ignore-not-found", "--show-managed-fields"}
-		}
-		out, err := a.Runner.Run(ctx, nil, a.KubectlPath, args...)
-		if err != nil {
-			return errors.New("Kubernetes ownership read failed")
-		}
-		if len(out) > a.kubernetesOutputLimit() {
-			return errors.New("Kubernetes ownership response exceeded the allowed bound")
-		}
-		if len(bytes.TrimSpace(out)) == 0 {
-			continue
-		}
-		var current map[string]any
-		if err := decodeSingleJSON(out, &current); err != nil {
-			return errors.New("existing Kubernetes resource returned invalid JSON")
-		}
-		metadata, _ := current["metadata"].(map[string]any)
-		labels, _ := metadata["labels"].(map[string]any)
-		managedBy, _ := labels["app.kubernetes.io/managed-by"].(string)
-		project, _ := labels["opsi.dev/project"].(string)
-		environment, _ := labels["opsi.dev/environment"].(string)
-		owned := managedBy == "opsi" && project == safeLabel(command.ProjectID) && environment == safeLabel(command.EnvironmentID)
-		if check.kind != "namespace" {
-			runtime, _ := labels["opsi.dev/runtime"].(string)
-			service, _ := labels["opsi.dev/service"].(string)
-			owned = owned && runtime == safeLabel(command.RuntimeID) && service == safeLabel(command.Workload.ServiceKey)
-		}
-		if !owned {
-			return fmt.Errorf("existing %s/%s is not Opsi-owned", check.kind, check.name)
-		}
-	}
-	return nil
-}
-
-func (a ProductionAdapter) waitReady(ctx context.Context, resources renderedResources, namespace string, command deploymentv1.AgentCommand) (bool, string, int32, error) {
-	deadline := time.NewTimer(a.Timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(a.PollInterval)
-	defer ticker.Stop()
-	for {
-		deploymentJSON, err := a.getJSON(ctx, "deployment", resources.DeploymentName, namespace)
-		if err != nil {
-			return false, "", 0, err
-		}
-		metadata, _ := deploymentJSON["metadata"].(map[string]any)
-		status, _ := deploymentJSON["status"].(map[string]any)
-		generation := number(metadata["generation"])
-		observed := number(status["observedGeneration"])
-		desired := int32(number(deploymentJSONNested(deploymentJSON, "spec", "replicas")))
-		available := int32(number(status["availableReplicas"]))
-		if desired == 0 {
-			desired = command.Workload.Replicas
-		}
-		pods, err := a.getJSON(ctx, "pods", "", namespace, resources.Selector)
-		if err != nil {
-			return false, "", available, err
-		}
-		imageID, readyCount := applicationPodReadiness(pods, command.Image.Digest)
-		if observed >= generation && available >= desired && int32(readyCount) >= desired {
-			return true, imageID, available, nil
-		}
-		select {
-		case <-ctx.Done():
-			return false, imageID, available, ctx.Err()
-		case <-deadline.C:
-			return false, imageID, available, errors.New("deployment readiness timeout")
-		case <-ticker.C:
-		}
-	}
 }
 
 func (a ProductionAdapter) getJSON(ctx context.Context, kind, name, namespace string, selector ...map[string]string) (map[string]any, error) {
@@ -520,16 +294,4 @@ func cloneStringMap(values map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
-}
-
-func emitProduction(progress ProgressFunc, record Record, phase, message string, percent int32, err error) error {
-	return emit(progress, record, phase, message, percent, err)
-}
-
-func productionFailure(record Record, progress ProgressFunc, code string, cause error) (Record, error) {
-	record.Status = StatusFailed
-	record.Error = code + ": " + RedactSensitive(cause.Error())
-	record.FinishedAt = time.Now().UTC()
-	_ = emitProduction(progress, record, PhaseFailed, record.Error, 100, errors.New(record.Error))
-	return record, cause
 }
