@@ -523,6 +523,24 @@ def walk(value):
 walk(data)' "$incident_id"
 }
 
+select_fresh_incident() {
+  local service_id="$1" minimum_created_at="$2"
+  python3 -c 'import json, sys
+service_id, minimum_created_at = sys.argv[1], int(sys.argv[2])
+data = json.load(sys.stdin)
+incidents = data.get("incidents", data if isinstance(data, list) else [])
+fresh = []
+for incident in incidents:
+    try:
+        created_at = int(incident.get("created_at_unix", 0))
+    except (TypeError, ValueError):
+        continue
+    if incident.get("service_id") == service_id and created_at >= minimum_created_at:
+        fresh.append((created_at, incident.get("incident_id", "")))
+fresh.sort(reverse=True)
+print(fresh[0][1] if fresh else "")' "$service_id" "$minimum_created_at"
+}
+
 verify_agent_incident_resolve_audit() {
   local incident_id="$1" project_q incident_q
   printf -v project_q '%q' "$PROJECT_ID"
@@ -546,7 +564,7 @@ run_e2e() {
   preflight
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
-  local f body id good_deploy_id bad_deploy_id service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record good_values bad_digest
+  local f body id good_deploy_id bad_deploy_id bad_deployment_started_at service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record good_values bad_digest
   local -a good_fields
   BOOTSTRAP_REQUEST_FILE="$(mktemp)"
   chmod 600 "$BOOTSTRAP_REQUEST_FILE"
@@ -601,6 +619,7 @@ run_e2e() {
   log "step 6/11 sanitized telemetry/logs fetched through local backend"
 
   f="$(mktemp)"; write_json "$f" bad_deployment
+  bad_deployment_started_at="$(date +%s)"
   body="$(api_file POST "/api/local/projects/$PROJECT_ID/deployments" "$f" bad-deploy-create 1)" || fail "bad immutable deployment create failed"
   rm -f "$f"
   bad_deploy_id="$(printf '%s' "$body" | json_get id)" || fail "bad deployment response missing id"
@@ -614,8 +633,8 @@ run_e2e() {
   done
   log "step 7/11 broken B rolled back and K3s restored healthy A: deployment=$bad_deploy_id desired_digest=$bad_digest restored_digest=$GOOD_DIGEST"
   incidents="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents?status=open&limit=10" - incidents 0)" || fail "incident list failed"
-  incident_id="$(printf '%s' "$incidents" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("incidents", d if isinstance(d,list) else []); print(next((item.get("incident_id","") for item in a if item.get("service_id") == sys.argv[1]), ""))' "$service_id")"
-  [ -n "$incident_id" ] || fail "no controlled incident found; E2E does not pass without a real Agent incident"
+  incident_id="$(printf '%s' "$incidents" | select_fresh_incident "$service_id" "$bad_deployment_started_at")"
+  [ -n "$incident_id" ] || fail "no fresh controlled incident found; E2E does not resolve incidents created before broken deployment B"
   incident_detail="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents/$incident_id" - incident-detail 0)" || fail "incident detail failed"
   printf '%s' "$incident_detail" | verify_incident_detail "$incident_id" || fail "incident detail violated factual contract"
   f="$(mktemp)"; write_json "$f" incident_resolve
@@ -646,7 +665,7 @@ run_e2e() {
 }
 
 self_test() {
-  local key_public fixture match original_key forbidden pem_marker expected request
+  local key_public fixture match original_key forbidden pem_marker expected request incident_fixture
   mkdir -p "$ARTIFACT_DIR"
   OPSI_E2E_APP_SECRET_VALUE="app-secret" OPSI_E2E_TOTP_CODE="123456" OPSI_E2E_OTP_CODE="" \
     bash -c 'printf "token=abc kubeconfig=raw app-secret 123456" | '"$0"' --redact-only' > "$ARTIFACT_DIR/redaction-test.txt"
@@ -760,6 +779,11 @@ PY
   printf '{"incident":{"incident_id":"inc-self-test","status":"open"}}' | verify_incident_detail inc-self-test || fail "self-test factual incident detail failed"
   if printf '{"incident":{"incident_id":"inc-self-test","action_%s":"legacy"}}' hash | verify_incident_detail inc-self-test >/dev/null 2>&1; then
     fail "self-test legacy incident field was accepted"
+  fi
+  incident_fixture='{"incidents":[{"incident_id":"inc-old","service_id":"service-1","created_at_unix":99},{"incident_id":"inc-fresh","service_id":"service-1","created_at_unix":101},{"incident_id":"inc-other","service_id":"service-2","created_at_unix":102}]}'
+  [ "$(printf '%s' "$incident_fixture" | select_fresh_incident service-1 100)" = "inc-fresh" ] || fail "self-test did not select the fresh controlled incident"
+  if printf '%s' '{"incidents":[{"incident_id":"inc-old","service_id":"service-1","created_at_unix":99}]}' | select_fresh_incident service-1 100 | grep -q .; then
+    fail "self-test accepted an incident created before broken deployment B"
   fi
   if env -i PATH="$PATH" OPSI_E2E_ARTIFACT_DIR="$ARTIFACT_DIR/missing" "$0" --preflight >/tmp/opsi-e2e-preflight.out 2>&1; then
     fail "self-test missing prereq did not fail"

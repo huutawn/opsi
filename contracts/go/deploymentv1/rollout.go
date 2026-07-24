@@ -52,6 +52,8 @@ const (
 	RolloutCodeResourceChanged     = "K8S_RESOURCE_CHANGED"
 	RolloutCodeReadinessFailed     = "RUNTIME_READINESS_FAILED"
 	RolloutCodeExternalUnavailable = "EXTERNAL_VERIFICATION_UNAVAILABLE"
+	RolloutCodePreflightFailed     = "ROLLOUT_PREFLIGHT_FAILED"
+	RolloutCodeRuntimeFailed       = "ROLLOUT_RUNTIME_FAILED"
 )
 
 var rolloutHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)

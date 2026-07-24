@@ -86,6 +86,90 @@ func TestRolloutFailureWithoutKnownGoodIsTerminalFailed(t *testing.T) {
 	}
 }
 
+func TestRolloutPreWALFailuresReturnNoRecordAndDoNotMutate(t *testing.T) {
+	t.Run("stale previous known-good", func(t *testing.T) {
+		store := openTestStore(t)
+		runtime := newFakeRolloutRuntime()
+		engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+		a := testRuntimeSnapshot(t, "job-a", "a")
+		if record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-a", a, nil), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+			t.Fatalf("seed A record=%+v err=%v", record, err)
+		}
+		knownA, _ := store.CurrentKnownGood(context.Background(), a.Target)
+		b := testRuntimeSnapshot(t, "job-b", "b")
+		intent := testRolloutIntent(t, "rollout-b", b, knownA)
+		intent.PreviousKnownGoodHash = strings.Repeat("f", 64)
+		intent.IntentHash = ""
+		intent, err := intent.Canonicalize()
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.prepareCalls, runtime.applyCalls, runtime.rollbackCalls = 0, 0, 0
+		runtime.rollbackTargetID = a.DeploymentJobID
+		record, err := engine.ReconcileRollout(context.Background(), intent, nil)
+		if rolloutErrorCode(err) != deploymentv1.RolloutCodeConflict || record.Intent.RolloutID != "" || runtime.prepareCalls != 0 || runtime.applyCalls != 0 || runtime.rollbackCalls != 0 {
+			t.Fatalf("record=%+v err=%v prepare=%d apply=%d rollback=%d", record, err, runtime.prepareCalls, runtime.applyCalls, runtime.rollbackCalls)
+		}
+		current, _ := store.CurrentKnownGood(context.Background(), a.Target)
+		if current == nil || current.ID != knownA.ID || current.SnapshotHash != knownA.SnapshotHash || runtime.current.Image.Digest != a.Image.Digest {
+			t.Fatalf("preflight changed known-good/runtime: current=%+v runtime=%+v", current, runtime.current)
+		}
+	})
+
+	t.Run("ownership conflict during prepare", func(t *testing.T) {
+		store := openTestStore(t)
+		runtime := newFakeRolloutRuntime()
+		engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+		a := testRuntimeSnapshot(t, "job-a", "a")
+		if _, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-a", a, nil), nil); err != nil {
+			t.Fatal(err)
+		}
+		knownA, _ := store.CurrentKnownGood(context.Background(), a.Target)
+		b := testRuntimeSnapshot(t, "job-b", "b")
+		runtime.failPrepare[b.DeploymentJobID] = deploymentv1.NewRolloutError(deploymentv1.RolloutCodeOwnershipConflict, "deployment is owned by another controller", false)
+		runtime.prepareCalls, runtime.applyCalls, runtime.rollbackCalls = 0, 0, 0
+		runtime.rollbackTargetID = a.DeploymentJobID
+		record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-b", b, knownA), nil)
+		if rolloutErrorCode(err) != deploymentv1.RolloutCodeOwnershipConflict || record.Intent.RolloutID != "" || runtime.prepareCalls != 1 || runtime.applyCalls != 0 || runtime.rollbackCalls != 0 {
+			t.Fatalf("record=%+v err=%v prepare=%d apply=%d rollback=%d", record, err, runtime.prepareCalls, runtime.applyCalls, runtime.rollbackCalls)
+		}
+		current, _ := store.CurrentKnownGood(context.Background(), a.Target)
+		if current == nil || current.ID != knownA.ID || runtime.current.Image.Digest != a.Image.Digest {
+			t.Fatalf("preflight changed known-good/runtime: current=%+v runtime=%+v", current, runtime.current)
+		}
+	})
+
+	t.Run("generic prepare failure without known-good", func(t *testing.T) {
+		store := openTestStore(t)
+		runtime := newFakeRolloutRuntime()
+		snapshot := testRuntimeSnapshot(t, "job-b", "b")
+		runtime.failPrepare[snapshot.DeploymentJobID] = errors.New("generic preflight failure")
+		engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+		record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-b", snapshot, nil), nil)
+		if err == nil || record.Intent.RolloutID != "" || runtime.prepareCalls != 1 || runtime.applyCalls != 0 || runtime.rollbackCalls != 0 {
+			t.Fatalf("record=%+v err=%v prepare=%d apply=%d rollback=%d", record, err, runtime.prepareCalls, runtime.applyCalls, runtime.rollbackCalls)
+		}
+		if current, _ := store.CurrentKnownGood(context.Background(), snapshot.Target); current != nil || runtime.current.DeploymentJobID != "" {
+			t.Fatalf("preflight fabricated known-good/runtime: current=%+v runtime=%+v", current, runtime.current)
+		}
+	})
+
+	t.Run("begin rollout conflict", func(t *testing.T) {
+		store := openTestStore(t)
+		runtime := newFakeRolloutRuntime()
+		a := testRuntimeSnapshot(t, "job-a", "a")
+		if _, err := store.BeginRollout(context.Background(), testRolloutIntent(t, "rollout-a", a, nil), nil); err != nil {
+			t.Fatal(err)
+		}
+		b := testRuntimeSnapshot(t, "job-b", "b")
+		engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+		record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-b", b, nil), nil)
+		if err == nil || record.Intent.RolloutID != "" || runtime.prepareCalls != 1 || runtime.applyCalls != 0 || runtime.rollbackCalls != 0 {
+			t.Fatalf("record=%+v err=%v prepare=%d apply=%d rollback=%d", record, err, runtime.prepareCalls, runtime.applyCalls, runtime.rollbackCalls)
+		}
+	})
+}
+
 func TestRolloutApplyAndReadinessRollbackFailuresAreTerminal(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -492,10 +576,15 @@ func containsOrderedStates(states []string, expected ...string) bool {
 }
 
 type fakeRolloutRuntime struct {
-	current         deploymentv1.RuntimeSnapshot
-	failApply       map[string]error
-	failReadiness   map[string]error
-	resourceVersion int
+	current          deploymentv1.RuntimeSnapshot
+	failPrepare      map[string]error
+	failApply        map[string]error
+	failReadiness    map[string]error
+	resourceVersion  int
+	prepareCalls     int
+	applyCalls       int
+	rollbackCalls    int
+	rollbackTargetID string
 }
 
 type sequenceRunner struct {
@@ -597,14 +686,22 @@ func (r *sequenceRunner) Run(_ context.Context, input []byte, name string, args 
 }
 
 func newFakeRolloutRuntime() *fakeRolloutRuntime {
-	return &fakeRolloutRuntime{failApply: map[string]error{}, failReadiness: map[string]error{}}
+	return &fakeRolloutRuntime{failPrepare: map[string]error{}, failApply: map[string]error{}, failReadiness: map[string]error{}}
 }
 
 func (f *fakeRolloutRuntime) PrepareRollout(_ context.Context, snapshot deploymentv1.RuntimeSnapshot) (RolloutPlan, error) {
+	f.prepareCalls++
+	if err := f.failPrepare[snapshot.DeploymentJobID]; err != nil {
+		return RolloutPlan{}, err
+	}
 	return RolloutPlan{Snapshot: snapshot}, nil
 }
 
 func (f *fakeRolloutRuntime) ApplyRollout(_ context.Context, plan RolloutPlan) ([]deploymentv1.ResourceIdentity, error) {
+	f.applyCalls++
+	if plan.Snapshot.DeploymentJobID == f.rollbackTargetID {
+		f.rollbackCalls++
+	}
 	if err := f.failApply[plan.Snapshot.DeploymentJobID]; err != nil {
 		return nil, err
 	}

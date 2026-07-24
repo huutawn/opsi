@@ -452,6 +452,19 @@ resource evidence. No VPS, release, DNS, TLS, public endpoint, R5-012, MCP, or
 AI action was performed. R5-011 remains `PARTIAL`; R5-011.4 remains
 `MANUAL_GATED`.
 
+**Corrective Prompt 05 checkpoint (2026-07-24):** `DONE /
+PRE_MUTATION_FAILURE_REPORTING_PASS`. Pre-WAL failures now produce one
+deterministic terminal `failed` result from the canonical leased
+`RolloutIntent`, preserve typed errors and the factual previous known-good, and
+carry no fabricated readiness/resources. Cloud in-memory and PostgreSQL paths
+accept the strict pre-mutation shape, release the service lock, persist one
+immutable terminal result, and accept exact replay after a lost response or
+restart. `NO_KNOWN_GOOD` remains the post-mutation/no-snapshot case. The manual
+E2E harness refuses incidents older than broken deployment B even when the
+`service_id` matches. No live E2E, VPS, DNS, TLS, Cloudflare, R5-012, MCP, or AI
+action was performed; R5-011 remains `PARTIAL` and R5-011.4 remains
+`MANUAL_GATED`.
+
 ### R5-012 — Main CD và PR preview manual acceptance
 
 **CẦN VPS:** VPS Agent staging; cần test repository GitHub thật.

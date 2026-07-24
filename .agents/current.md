@@ -4,6 +4,22 @@ Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
+### Corrective Prompt 05 — PRE_MUTATION_FAILURE_REPORTING_PASS
+
+- Pre-WAL failures after a canonical rollout lease now report deterministic
+  `failed` results from the leased `RolloutIntent`, not an empty WAL record.
+- Typed rollout codes are preserved; generic preflight uses
+  `ROLLOUT_PREFLIGHT_FAILED`. No readiness/resources are fabricated, and the
+  factual previous known-good/current digest is retained when present.
+- In-memory and PostgreSQL completion accept the strict pre-mutation shape,
+  release the service lock, persist one immutable terminal result, accept exact
+  replay after restart/lost response, and never turn the cause into lease
+  attempts exhausted. `NO_KNOWN_GOOD` remains post-mutation/no-snapshot only.
+- The manual E2E incident selector requires matching `service_id` plus
+  `created_at_unix` no older than the timestamp immediately before broken B.
+- No SSH, live E2E, VPS, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
 ### R5-011-S4 — SINGLE_ROLLOUT_EXECUTION_PATH_PASS
 
 - The discovered blocker was active BuildRecord `immutable_image` jobs beside

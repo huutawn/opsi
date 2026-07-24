@@ -191,9 +191,10 @@ func TestExposureExplicitRollbackTargetsPreviousAndPinsExpectedCurrentKnownGood(
 }
 
 func TestExposureNoKnownGoodStaleLeaseOutOfOrderAndConcurrentApply(t *testing.T) {
-	service, projectID, base := rolloutRegistryFixture(t, "negative")
-	request := rolloutExposureRequest(t, base, "dep-exposure-negative", "negative.example.com", "/")
-	job, _, err := service.StartExposureRollout(projectID, "user-1", "negative-key", "req", request)
+	service, projectID := readyRegistry(t)
+	record := createRegistryService(t, service, projectID, "api-negative", "Dockerfile", "deploy/api", "svc-negative")
+	snapshot := immutableSnapshot(t, service, projectID, record.ID, "negative")
+	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "negative-key", "req")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +244,79 @@ func TestExposureNoKnownGoodStaleLeaseOutOfOrderAndConcurrentApply(t *testing.T)
 	}
 	if winners != 1 || locked != 1 {
 		t.Fatalf("concurrent apply winners=%d locked=%d", winners, locked)
+	}
+}
+
+func TestPreMutationFailureWithoutKnownGoodIsAcceptedAndImmutable(t *testing.T) {
+	service, projectID := readyRegistry(t)
+	record := createRegistryService(t, service, projectID, "api-preflight-empty", "Dockerfile", "deploy/api", "svc-preflight-empty")
+	snapshot := immutableSnapshot(t, service, projectID, record.ID, "preflight-empty")
+	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "preflight-empty", "create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, job)
+	result := preMutationRolloutResult(lease, deploymentv1.RolloutCodePreflightFailed)
+
+	spoofed := result
+	spoofed.FailureCode = deploymentv1.RolloutCodeConflict
+	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "spoofed-failure", spoofed); apiCode(err) != "DEPLOYMENT_RESULT_MISMATCH" {
+		t.Fatalf("accepted mismatched failure metadata: %v", err)
+	}
+	spoofed = result
+	spoofed.RolloutResult = cloneRolloutResult(result.RolloutResult)
+	spoofed.RolloutResult.RolloutID = "rollout-spoofed"
+	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "spoofed", spoofed); apiCode(err) != "DEPLOYMENT_RESULT_MISMATCH" {
+		t.Fatalf("accepted spoofed rollout identity: %v", err)
+	}
+	spoofed = result
+	spoofed.RolloutResult = cloneRolloutResult(result.RolloutResult)
+	spoofed.RolloutResult.CurrentDigest = result.RolloutResult.DesiredDigest
+	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "spoofed-current", spoofed); apiCode(err) != "DEPLOYMENT_RESULT_MISMATCH" {
+		t.Fatalf("accepted fabricated current digest: %v", err)
+	}
+	spoofed = result
+	spoofed.RolloutResult = cloneRolloutResult(result.RolloutResult)
+	spoofed.RolloutResult.KnownGoodID = "known-spoofed"
+	spoofed.RolloutResult.KnownGoodHash = strings.Repeat("f", 64)
+	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "spoofed-known-good", spoofed); apiCode(err) != "DEPLOYMENT_RESULT_MISMATCH" {
+		t.Fatalf("accepted fabricated known-good: %v", err)
+	}
+	stale := result
+	stale.LeaseToken = "stale-token"
+	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "stale", stale); apiCode(err) != "DEPLOYMENT_STALE_LEASE" {
+		t.Fatalf("accepted stale preflight result: %v", err)
+	}
+
+	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "failed", result)
+	if err != nil || finished.Status != deploymentv1.RolloutStateFailed || finished.FailureCode != deploymentv1.RolloutCodePreflightFailed || finished.TerminalResult == nil || finished.CurrentDigest != "" || finished.KnownGoodID != "" || finished.ReadinessEvidenceHash != "" || len(finished.TerminalResult.Resources) != 0 {
+		t.Fatalf("finished=%+v err=%v", finished, err)
+	}
+	events := len(service.deployEvents[job.ID])
+	replay, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "failed-replay", result)
+	if err != nil || replay.RolloutStateHash != finished.RolloutStateHash || replay.FailureCode != finished.FailureCode || len(service.deployEvents[job.ID]) != events {
+		t.Fatalf("terminal replay=%+v err=%v events=%d/%d", replay, err, events, len(service.deployEvents[job.ID]))
+	}
+	if _, locked := service.deployLocks[job.ServiceID]; locked {
+		t.Fatal("pre-mutation terminal failure kept the service deployment lock")
+	}
+	if leased, ok, err := service.LeaseDeployment(projectID, job.NodeID); err != nil || ok || leased.Deployment.ID == job.ID {
+		t.Fatalf("terminal failed job was leased again: lease=%+v ok=%v err=%v", leased, ok, err)
+	}
+}
+
+func TestPreMutationFailurePreservesPreviousKnownGood(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "preflight-known")
+	request := rolloutExposureRequest(t, base, "dep-preflight-known", "api.example.com", "/preflight")
+	job, _, err := service.StartExposureRollout(projectID, "user-1", "preflight-known", "create", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, job)
+	result := preMutationRolloutResult(lease, deploymentv1.RolloutCodeOwnershipConflict)
+	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "failed", result)
+	if err != nil || finished.FailureCode != deploymentv1.RolloutCodeOwnershipConflict || finished.CurrentDigest != job.RolloutIntent.PreviousDigest || finished.KnownGoodID != job.RolloutIntent.PreviousKnownGoodID || finished.KnownGoodHash != job.RolloutIntent.PreviousKnownGoodHash || finished.ReadinessEvidenceHash != "" || len(finished.TerminalResult.Resources) != 0 {
+		t.Fatalf("finished=%+v err=%v", finished, err)
 	}
 }
 
@@ -338,6 +412,12 @@ func rolloutResult(lease DeploymentLease, state, hashCharacter, currentDigest, k
 		agentResult.Resources = []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}
 	}
 	return DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, LeaseToken: lease.LeaseToken, IntentHash: intent.IntentHash, FailureCode: failureCode, FailureMessageRedacted: agentResult.FailureMessageRedacted, RolloutResult: agentResult}
+}
+
+func preMutationRolloutResult(lease DeploymentLease, failureCode string) DeploymentResult {
+	intent := lease.Command.Rollout
+	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateFailed, RolloutID: intent.RolloutID, RolloutState: deploymentv1.RolloutStateFailed, IntentHash: intent.IntentHash, StateHash: strings.Repeat("9", 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: intent.PreviousDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: intent.PreviousKnownGoodID, KnownGoodHash: intent.PreviousKnownGoodHash, FailureCode: failureCode, FailureMessageRedacted: "sanitized preflight failure", Attempt: intent.Attempt}
+	return DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateFailed, LeaseToken: lease.LeaseToken, IntentHash: intent.IntentHash, FailureCode: failureCode, FailureMessageRedacted: agentResult.FailureMessageRedacted, RolloutResult: agentResult}
 }
 
 func cloneRolloutResult(result *deploymentv1.AgentResult) *deploymentv1.AgentResult {

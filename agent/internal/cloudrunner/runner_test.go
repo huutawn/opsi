@@ -3,6 +3,8 @@ package cloudrunner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +84,8 @@ type fakeRolloutEngine struct {
 	pendingCalls   int
 	reconcileCalls int
 	intent         deploymentv1.RolloutIntent
+	record         deploymentv1.RolloutRecord
+	reconcileErr   error
 }
 
 func (f *fakeRolloutEngine) ReconcilePending(context.Context, deploy.ProgressFunc) ([]deploymentv1.RolloutRecord, error) {
@@ -92,6 +96,9 @@ func (f *fakeRolloutEngine) ReconcilePending(context.Context, deploy.ProgressFun
 func (f *fakeRolloutEngine) ReconcileRollout(_ context.Context, intent deploymentv1.RolloutIntent, progress deploy.ProgressFunc) (deploymentv1.RolloutRecord, error) {
 	f.reconcileCalls++
 	f.intent = intent
+	if f.reconcileErr != nil || f.record.Intent.RolloutID != "" {
+		return f.record, f.reconcileErr
+	}
 	now := time.Now().UTC()
 	resources := []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}
 	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: true, LocalRoutingReady: true, WorkloadEvidenceHash: strings.Repeat("1", 64), ServiceEvidenceHash: strings.Repeat("2", 64), ExposureEvidenceHash: strings.Repeat("3", 64), ApplicationImageIDHash: strings.Repeat("4", 64), LocalProbeEvidenceHash: strings.Repeat("5", 64), ObservedAt: now}
@@ -111,6 +118,70 @@ func (f *fakeRolloutEngine) ReconcileRollout(_ context.Context, intent deploymen
 		}
 	}
 	return record, nil
+}
+
+func TestRunnerReportsCanonicalPreMutationFailureWithoutWAL(t *testing.T) {
+	base := testCloudRolloutIntent(t)
+	tests := []struct {
+		name        string
+		hasPrevious bool
+		err         error
+		wantCode    string
+	}{
+		{name: "stale previous known-good", hasPrevious: true, err: deploymentv1.NewRolloutError(deploymentv1.RolloutCodeConflict, "previous known-good reference is stale", false), wantCode: deploymentv1.RolloutCodeConflict},
+		{name: "ownership conflict", hasPrevious: true, err: deploymentv1.NewRolloutError(deploymentv1.RolloutCodeOwnershipConflict, "deployment is owned by another controller", false), wantCode: deploymentv1.RolloutCodeOwnershipConflict},
+		{name: "generic preflight", err: fmt.Errorf("preflight token=top-secret %s", strings.Repeat("x", deploymentv1.MaxRolloutErrorBytes+100)), wantCode: deploymentv1.RolloutCodePreflightFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			intent := base
+			if tt.hasPrevious {
+				intent.PreviousKnownGoodID = "known-good-a"
+				intent.PreviousKnownGoodHash = strings.Repeat("a", 64)
+				intent.PreviousDigest = "sha256:" + strings.Repeat("a", 64)
+			} else {
+				intent.PreviousKnownGoodID, intent.PreviousKnownGoodHash, intent.PreviousDigest = "", "", ""
+			}
+			intent.IntentHash = ""
+			intent, err := intent.Canonicalize()
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease := cloudrelay.DeploymentLease{Kind: "deployment", Action: intent.Operation, LeaseToken: "lease-preflight", Deployment: cloudrelay.DeploymentJobEnvelope{ID: intent.Desired.DeploymentJobID}}
+			command := intent.Desired.AgentCommand()
+			command.Rollout = &intent
+			command.LeaseToken = lease.LeaseToken
+			lease.Command = &command
+			engine := &fakeRolloutEngine{reconcileErr: tt.err}
+			runner := Runner{Engine: engine, NodeID: intent.Target.NodeID}
+			result := runner.executeRollout(context.Background(), lease)
+			if result.Status != deploymentv1.StateFailed || result.RolloutResult == nil {
+				t.Fatalf("result=%+v", result)
+			}
+			agent := result.RolloutResult
+			expectedStateHash := preMutationFailureRecord(intent, tt.err).StateHash
+			if agent.RolloutID != intent.RolloutID || agent.IntentHash != intent.IntentHash || agent.WorkloadSpecHash != intent.Desired.WorkloadSpecHash || agent.ExposureSpecHash != intent.Desired.ExposureSpecHash || agent.DesiredDigest != intent.Desired.Image.Digest || agent.PreviousDigest != intent.PreviousDigest || agent.Attempt != intent.Attempt || agent.StateHash != expectedStateHash {
+				t.Fatalf("canonical identity lost: %+v", agent)
+			}
+			if agent.FailureCode != tt.wantCode || len(agent.FailureMessageRedacted) > deploymentv1.MaxRolloutErrorBytes || strings.Contains(agent.FailureMessageRedacted, "top-secret") {
+				t.Fatalf("failure=%+v", agent)
+			}
+			if len(agent.Resources) != 0 || agent.ReadinessEvidenceHash != "" {
+				t.Fatalf("pre-mutation evidence was fabricated: %+v", agent)
+			}
+			if tt.hasPrevious {
+				if agent.CurrentDigest != intent.PreviousDigest || agent.KnownGoodID != intent.PreviousKnownGoodID || agent.KnownGoodHash != intent.PreviousKnownGoodHash {
+					t.Fatalf("previous snapshot was not preserved: %+v", agent)
+				}
+			} else if agent.CurrentDigest != "" || agent.KnownGoodID != "" || agent.KnownGoodHash != "" {
+				t.Fatalf("failed rollout fabricated known-good: %+v", agent)
+			}
+			replay := runner.executeRollout(context.Background(), lease)
+			if !reflect.DeepEqual(result.RolloutResult, replay.RolloutResult) || result.FailureCode != replay.FailureCode {
+				t.Fatalf("preflight retry was not exact: first=%+v replay=%+v", result, replay)
+			}
+		})
+	}
 }
 
 func TestRunnerRejectsCommandWithoutRolloutBeforeMutation(t *testing.T) {

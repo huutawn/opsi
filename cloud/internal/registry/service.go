@@ -1725,6 +1725,9 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	if result.RolloutResult == nil {
 		return DeploymentJob{}, APIError{Status: 409, Code: "ROLLOUT_RESULT_INVALID", Message: "rollout deployment requires a sanitized rollout result", RequestID: requestID}
 	}
+	if result.FailureCode != result.RolloutResult.FailureCode || RedactString(result.FailureMessageRedacted) != RedactString(result.RolloutResult.FailureMessageRedacted) {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "rollout result failure metadata does not match its terminal result", RequestID: requestID}
+	}
 	status := result.RolloutResult.RolloutState
 	job.Status = status
 	job.FailureCode = result.FailureCode

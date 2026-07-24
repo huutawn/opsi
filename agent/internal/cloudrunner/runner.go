@@ -235,7 +235,7 @@ func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentL
 		return nil
 	})
 	close(done)
-	return resultFromRollout(record, reconcileErr, lease)
+	return resultFromRollout(intent, record, reconcileErr, lease)
 }
 
 func deploymentFailure(lease cloudrelay.DeploymentLease, code, message string) cloudrelay.DeploymentResult {

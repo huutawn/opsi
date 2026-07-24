@@ -265,8 +265,17 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 			return fmt.Errorf("rollback_failed requires a typed failure")
 		}
 	case deploymentv1.RolloutStateFailed:
-		if result.FailureCode != deploymentv1.RolloutCodeNoKnownGood {
-			return fmt.Errorf("terminal failed rollout requires NO_KNOWN_GOOD")
+		if result.FailureCode == "" {
+			return fmt.Errorf("terminal failed rollout requires a typed failure")
+		}
+		if result.FailureCode == deploymentv1.RolloutCodeNoKnownGood {
+			if job.RolloutIntent.PreviousKnownGoodID != "" || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
+				return fmt.Errorf("NO_KNOWN_GOOD cannot claim a current or known-good runtime")
+			}
+			break
+		}
+		if result.CurrentDigest != job.RolloutIntent.PreviousDigest || result.KnownGoodID != job.RolloutIntent.PreviousKnownGoodID || result.KnownGoodHash != job.RolloutIntent.PreviousKnownGoodHash || result.ReadinessEvidenceHash != "" || len(result.Resources) != 0 {
+			return fmt.Errorf("pre-mutation failure does not match the previous known-good runtime")
 		}
 	default:
 		return fmt.Errorf("rollout result state is not terminal")

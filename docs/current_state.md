@@ -9,6 +9,28 @@
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
+## Corrective Prompt 05 checkpoint
+
+`PRE_MUTATION_FAILURE_REPORTING_PASS` closes the pre-WAL result gap. Once an
+Agent accepts a canonical leased `RolloutIntent`, failures in previous
+known-good validation, Kubernetes ownership preflight, or WAL creation produce
+a deterministic `failed` result anchored to that intent. Typed `RolloutError`
+codes are preserved; generic read-only preflight errors use
+`ROLLOUT_PREFLIGHT_FAILED`. The result contains no readiness/resource claims,
+keeps the previous known-good/current digest when one exists, and keeps those
+fields empty when none exists.
+
+In-memory and PostgreSQL completion accept that strict no-mutation shape,
+release the service lock, preserve exact terminal replay, and do not lease the
+job again. `NO_KNOWN_GOOD` remains reserved for a desired runtime that failed
+after mutation with no rollback snapshot. The manual E2E incident selector now
+requires `created_at_unix` at or after the timestamp captured immediately before
+broken deployment B, so an older incident for the same service cannot be
+resolved by the test.
+
+No SSH, live VPS/K3s E2E, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
 ## R5-011-S4 correction checkpoint
 
 The discovered blocker was direct BuildRecord execution through active

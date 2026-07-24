@@ -1346,6 +1346,9 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	if result.RolloutResult == nil {
 		return DeploymentJob{}, APIError{Status: 409, Code: "ROLLOUT_RESULT_INVALID", Message: "rollout deployment requires a sanitized rollout result", RequestID: requestID}
 	}
+	if result.FailureCode != result.RolloutResult.FailureCode || RedactString(result.FailureMessageRedacted) != RedactString(result.RolloutResult.FailureMessageRedacted) {
+		return DeploymentJob{}, APIError{Status: 409, Code: "DEPLOYMENT_RESULT_MISMATCH", Message: "rollout result failure metadata does not match its terminal result", RequestID: requestID}
+	}
 	job.Status = result.RolloutResult.RolloutState
 	job.FailureCode = result.FailureCode
 	job.FailureMessageRedacted = RedactString(result.FailureMessageRedacted)

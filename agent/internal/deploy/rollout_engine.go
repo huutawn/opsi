@@ -260,7 +260,7 @@ func boundedRolloutFailure(err error) *deploymentv1.RolloutError {
 	if errors.As(err, &failure) {
 		return deploymentv1.NewRolloutError(failure.Code, RedactSensitive(failure.Message), failure.Retryable)
 	}
-	return deploymentv1.NewRolloutError("ROLLOUT_RUNTIME_FAILED", RedactSensitive(err.Error()), false)
+	return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, RedactSensitive(err.Error()), false)
 }
 
 func emitRolloutProgress(progress ProgressFunc, rollout deploymentv1.RolloutRecord, phase, message string, percent int32, err error) error {

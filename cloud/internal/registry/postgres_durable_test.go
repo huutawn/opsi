@@ -286,6 +286,76 @@ func TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply(t *t
 	}
 }
 
+func TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly(t *testing.T) {
+	dsn := requirePostgresTestDSN(t, "pre-mutation rollout durability")
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := postgres.Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	suffix := strings.ToLower(newID("preflightpg"))
+	orgID, userID := "org-"+suffix, "user-"+suffix
+	if _, err := db.ExecContext(ctx, `INSERT INTO users(id,email) VALUES($1,$2)`, userID, userID+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO organizations(id,name,slug) VALUES($1,$2,$3)`, orgID, "Preflight", "preflight-"+suffix); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM organizations WHERE id=$1`, orgID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+	now := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	fresh := func() PostgresService { return PostgresService{DB: db, Now: func() time.Time { return now }} }
+	service := fresh()
+	project, err := service.CreateProject(orgID, "Preflight", "preflight-"+suffix, userID, "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, snapshot := postgresImmutableSnapshot(t, service, project.ID, suffix)
+	job, _, err := service.StartImmutableDeployment(snapshot, userID, "preflight-key", "create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, ok, err := service.LeaseDeployment(project.ID, job.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("lease=%+v ok=%v err=%v", lease, ok, err)
+	}
+	result := preMutationRolloutResult(lease, deploymentv1.RolloutCodePreflightFailed)
+	finished, err := service.CompleteDeployment(project.ID, job.NodeID, job.ID, "failed", result)
+	if err != nil || finished.TerminalResult == nil || finished.FailureCode != deploymentv1.RolloutCodePreflightFailed || finished.CurrentDigest != "" || finished.KnownGoodID != "" {
+		t.Fatalf("finished=%+v err=%v", finished, err)
+	}
+	restarted := fresh()
+	persisted, err := restarted.GetDeployment(project.ID, job.ID)
+	if err != nil || persisted.TerminalResult == nil || persisted.RolloutStateHash != result.RolloutResult.StateHash || persisted.FailureCode != result.FailureCode {
+		t.Fatalf("persisted=%+v err=%v", persisted, err)
+	}
+	events, err := restarted.DeploymentEvents(project.ID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := restarted.CompleteDeployment(project.ID, job.NodeID, job.ID, "failed-replay", result)
+	if err != nil || replay.RolloutStateHash != persisted.RolloutStateHash || replay.FailureCode != persisted.FailureCode {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	replayedEvents, _ := restarted.DeploymentEvents(project.ID, job.ID)
+	if len(replayedEvents) != len(events) {
+		t.Fatalf("terminal replay duplicated history: %d/%d", len(events), len(replayedEvents))
+	}
+	if leased, ok, err := restarted.LeaseDeployment(project.ID, job.NodeID); err != nil || ok || leased.Deployment.ID == job.ID {
+		t.Fatalf("terminal failed job was leased again: lease=%+v ok=%v err=%v", leased, ok, err)
+	}
+	var locks int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM service_deployment_locks WHERE service_id=$1`, record.ID).Scan(&locks); err != nil || locks != 0 {
+		t.Fatalf("deployment lock count=%d err=%v", locks, err)
+	}
+}
+
 func postgresImmutableSnapshot(t *testing.T, service PostgresService, projectID, suffix string) (ServiceRecord, deploymentv1.JobSnapshot) {
 	t.Helper()
 	node, err := service.UpsertNode(projectID, "server-"+suffix, "server", NodeHealthy, "203.0.113.77", "", "node-key")

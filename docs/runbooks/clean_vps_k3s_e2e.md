@@ -89,14 +89,18 @@ node lifecycle jobs; it is not a generic webhook relay.
 5. K3s readiness is checked again after rollback. Every ready application
    container imageID must match digest A, so the harness cannot print PASS while
    the target workload is unhealthy. The script then verifies factual incident
-   list/detail/resolve and the `incident.resolve` audit.
+   list/detail/resolve and the `incident.resolve` audit. It records a Unix
+   timestamp immediately before creating broken deployment B and resolves only
+   an incident for the same service with `created_at_unix` at or after that
+   boundary; an older incident cannot satisfy the acceptance.
 6. The script writes redacted evidence and cleanup guidance. It rejects any
    artifact containing a PEM private-key marker or sensitive value.
 
 `make verify-e2e-k3s-selfcheck` replaces `ssh-keyscan` through a temporary PATH
 stub and tests correct, wrong, zero-match, and duplicate-match fingerprints
 without network access. Local JSON fixtures cover succeeded A, rolled-back B,
-failed, rollback-failed, cancelled, and incorrect rollback metadata.
+failed, rollback-failed, cancelled, incorrect rollback metadata, rejection of a
+stale same-service incident, and selection of a fresh controlled incident.
 
 No Git clone, source SHA, Docker build, arbitrary manifest, caller-selected
 authority, service-scoped deployment, or generic webhook relay participates in
