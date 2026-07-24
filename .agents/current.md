@@ -4,6 +4,22 @@ Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
+### Corrective Prompt 07 — UNRESOLVED_ROLLOUT_OWNERSHIP_PASS
+
+- A canonical rollout owns its service until Cloud commits a factual Agent
+  `TerminalResult` or safely cancels it before the first lease.
+- Lease expiry requeues and renews the same owner. Max-attempt exhaustion keeps
+  `DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED` retryable without deleting the lock or
+  manufacturing terminal truth.
+- In-memory and PostgreSQL acquisition reject another deployment despite an
+  expired/missing lock row, while retry renews the same deployment ID and
+  bounded attempt window idempotently.
+- Cancellation requires zero attempts and prepared/queued history. Disposable
+  PostgreSQL 16 tests cover restart, expired/missing rows, retry/create races,
+  rollback safety, and factual terminal release without a migration.
+- No SSH, live E2E, VPS, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
 ### Corrective Prompt 06 — ROLLOUT_FAILURE_PHASE_TRUTHFUL_PASS
 
 - Terminal rollout results carry bounded `pre_mutation` or `post_mutation`

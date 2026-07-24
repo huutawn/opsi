@@ -1622,7 +1622,9 @@ func (s *Service) RollbackDeployment(projectID, deploymentID, requestedBy, key, 
 func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.expireDeploymentLeasesLocked(projectID)
+	if err := s.expireDeploymentLeasesLocked(projectID); err != nil {
+		return DeploymentLease{}, false, err
+	}
 	s.retireQueuedLegacyDeploymentLocked(projectID, nodeID)
 	for id, job := range s.deployments {
 		if job.ProjectID != projectID || job.NodeID != nodeID || !isProductionDeploymentMode(job.Mode) || (job.Status != DeploymentQueued && job.Status != DeploymentRollingBack) {
@@ -1643,6 +1645,9 @@ func (s *Service) LeaseDeployment(projectID, nodeID string) (DeploymentLease, bo
 			action = job.Action
 		}
 		now := s.clock()
+		if err := s.acquireDeploymentLockLocked(job.ServiceID, job.ID, now, ""); err != nil {
+			return DeploymentLease{}, false, err
+		}
 		leaseExpiresAt := now.Add(defaultDeploymentLeaseDuration)
 		job.Status = deploymentv1.StateLeased
 		job.Action = action
@@ -1763,9 +1768,7 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	event := rolloutEvent(job, job.RolloutState, "Agent reported terminal rollout result", 100, requestID, now, job.RolloutStateHash)
 	event.EvidenceHash = job.ReadinessEvidenceHash
 	s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], event)
-	if deploymentTerminalStatus(status) {
-		delete(s.deployLocks, job.ServiceID)
-	}
+	delete(s.deployLocks, job.ServiceID)
 	return job, nil
 }
 
@@ -1836,7 +1839,7 @@ func rolloutProgressPercent(state string) int {
 	}
 }
 
-func (s *Service) expireDeploymentLeasesLocked(projectID string) {
+func (s *Service) expireDeploymentLeasesLocked(projectID string) error {
 	now := s.clock()
 	for id, job := range s.deployments {
 		if job.ProjectID != projectID || !deploymentLeaseActiveStatus(job.Status) || job.LeaseExpiresAt == nil || job.LeaseExpiresAt.After(now) {
@@ -1849,6 +1852,11 @@ func (s *Service) expireDeploymentLeasesLocked(projectID string) {
 		if job.MaxAttempts == 0 {
 			job.MaxAttempts = defaultDeploymentMaxAttempts
 		}
+		if isProductionDeploymentMode(job.Mode) {
+			if err := s.acquireDeploymentLockLocked(job.ServiceID, job.ID, now, ""); err != nil {
+				return err
+			}
+		}
 		if job.AttemptCount >= job.MaxAttempts {
 			job.Status = DeploymentDeadLetter
 			if isProductionDeploymentMode(job.Mode) {
@@ -1857,7 +1865,6 @@ func (s *Service) expireDeploymentLeasesLocked(projectID string) {
 			job.FailureCode = "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED"
 			job.FailureMessageRedacted = "deployment lease attempts exhausted"
 			job.FinishedAt = &now
-			delete(s.deployLocks, job.ServiceID)
 			step := EventDeploymentDeadLetter
 			if isProductionDeploymentMode(job.Mode) {
 				step = deploymentv1.StateFailed
@@ -1891,6 +1898,7 @@ func (s *Service) expireDeploymentLeasesLocked(projectID string) {
 		}
 		s.deployments[id] = job
 	}
+	return nil
 }
 
 func (s *Service) DeploymentEvents(projectID, deploymentID string) ([]DeploymentEvent, error) {
@@ -1935,11 +1943,11 @@ func (s *Service) CancelDeployment(projectID, deploymentID, key, requestID strin
 	if !ok || job.ProjectID != projectID {
 		return DeploymentJob{}, false, ErrNotFound
 	}
-	if deploymentTerminalStatus(job.Status) || job.Status == deploymentv1.StateCancelled {
+	if job.TerminalResult != nil || job.Status == deploymentv1.StateCancelled || !isProductionDeploymentMode(job.Mode) && deploymentTerminalStatus(job.Status) {
 		s.idempotency[scope] = deploymentID
 		return job, false, nil
 	}
-	if job.Status != deploymentv1.StateQueued {
+	if job.Status != deploymentv1.StateQueued || job.AttemptCount != 0 || job.TerminalResult != nil || job.RolloutState != "" && job.RolloutState != deploymentv1.RolloutStatePrepared {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "CANCEL_UNSAFE", Message: "deployment has reached an Agent or runtime mutation stage", NextAction: "watch_deployment", RequestID: requestID}
 	}
 	now := s.clock()
@@ -2153,11 +2161,33 @@ func isProductionDeploymentMode(mode string) bool {
 }
 
 func (s *Service) acquireDeploymentLockLocked(serviceID, deploymentID string, now time.Time, requestID string) error {
-	if lock, ok := s.deployLocks[serviceID]; ok && lock.ExpiresAt.After(now) {
-		return APIError{Status: 409, Code: "DEPLOYMENT_LOCKED", Message: "Another deployment is already active for this service.", NextAction: "watch_existing_deployment", RequestID: requestID}
+	if lock, ok := s.deployLocks[serviceID]; ok && lock.DeploymentID != deploymentID {
+		if owner, exists := s.deployments[lock.DeploymentID]; exists && canonicalDeploymentOwnsService(owner) {
+			return deploymentLockedError(requestID, owner.ID)
+		}
+		delete(s.deployLocks, serviceID)
+	}
+	for _, job := range s.deployments {
+		if job.ID != deploymentID && job.ServiceID == serviceID && canonicalDeploymentOwnsService(job) {
+			s.deployLocks[serviceID] = deploymentLock{DeploymentID: job.ID, ExpiresAt: now.Add(30 * time.Minute)}
+			return deploymentLockedError(requestID, job.ID)
+		}
 	}
 	s.deployLocks[serviceID] = deploymentLock{DeploymentID: deploymentID, ExpiresAt: now.Add(30 * time.Minute)}
 	return nil
+}
+
+func canonicalDeploymentOwnsService(job DeploymentJob) bool {
+	safelyCancelled := job.Status == deploymentv1.StateCancelled && job.AttemptCount == 0 && (job.RolloutState == "" || job.RolloutState == deploymentv1.RolloutStatePrepared)
+	return isProductionDeploymentMode(job.Mode) && job.TerminalResult == nil && !safelyCancelled
+}
+
+func deploymentLockedError(requestID, deploymentID string) error {
+	message := "Existing deployment requires retry or recovery before another rollout can start."
+	if deploymentID != "" {
+		message = fmt.Sprintf("Deployment %s requires retry or recovery before another rollout can start.", deploymentID)
+	}
+	return APIError{Status: 409, Code: "DEPLOYMENT_LOCKED", Message: message, NextAction: "watch_existing_deployment", RequestID: requestID}
 }
 
 func hashJSON(value any) string {

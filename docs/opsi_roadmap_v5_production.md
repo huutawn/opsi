@@ -478,6 +478,20 @@ post-mutation/no-snapshot only. No live E2E, SSH/VPS, DNS, TLS, Cloudflare,
 R5-012, MCP, or AI action was performed; R5-011 remains `PARTIAL` and R5-011.4
 remains `MANUAL_GATED`.
 
+**Corrective Prompt 07 checkpoint (2026-07-24):** `DONE /
+UNRESOLVED_ROLLOUT_OWNERSHIP_PASS`. A canonical rollout without a factual Agent
+`TerminalResult` remains the sole service owner across lease expiry,
+max-attempt exhaustion, lock TTL expiry, and Cloud/PostgreSQL restart. Lease
+recovery renews the same deployment; exhaustion retains the existing failed
+and retry API representation without deleting ownership or fabricating
+terminal truth. In-memory and PostgreSQL acquisition fail closed against
+expired/missing lock rows by consulting unresolved deployment records; retry
+renews the same ID and bounded attempt window, while cancellation is limited to
+zero-attempt prepared jobs. Disposable PostgreSQL 16 covers restart,
+retry/create concurrency, transaction rollback, and factual terminal release.
+No live E2E, SSH/VPS, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+performed; R5-011 remains `PARTIAL` and R5-011.4 remains `MANUAL_GATED`.
+
 ### R5-012 — Main CD và PR preview manual acceptance
 
 **CẦN VPS:** VPS Agent staging; cần test repository GitHub thật.

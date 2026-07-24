@@ -76,6 +76,172 @@ func TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart(t *testing.T
 	}
 }
 
+func TestPostgresUnresolvedRolloutRetainsServiceOwnership(t *testing.T) {
+	dsn := requirePostgresTestDSN(t, "unresolved rollout ownership")
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := postgres.Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	suffix := strings.ToLower(newID("ownershippg"))
+	orgID, userID := "org-"+suffix, "user-"+suffix
+	if _, err := db.ExecContext(ctx, `INSERT INTO users(id,email) VALUES($1,$2)`, userID, userID+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO organizations(id,name,slug) VALUES($1,$2,$3)`, orgID, "Ownership", "ownership-"+suffix); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM organizations WHERE id=$1`, orgID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	fresh := func() PostgresService { return PostgresService{DB: db, Now: func() time.Time { return now }} }
+	service := fresh()
+	project, err := service.CreateProject(orgID, "Ownership", "ownership-"+suffix, userID, "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, snapshot := postgresImmutableSnapshot(t, service, project.ID, suffix)
+	variant := func(key string) deploymentv1.JobSnapshot {
+		copy := snapshot
+		copy.PayloadHash = "payload-" + key
+		copy.Authority.BuildRecord.ID = "br-" + key
+		return copy
+	}
+	queued, _, err := service.StartImmutableDeployment(variant("queued"), userID, "queued-key", "queued")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(31 * time.Minute)
+	if _, _, err := fresh().StartImmutableDeployment(variant("queued-blocked"), userID, "queued-blocked-key", "queued-blocked"); apiCode(err) != "DEPLOYMENT_LOCKED" {
+		t.Fatalf("queued rollout lost ownership after TTL: %v", err)
+	}
+	cancelled, _, err := fresh().CancelDeployment(project.ID, queued.ID, "cancel-queued", "cancel-queued")
+	if err != nil || cancelled.Status != deploymentv1.StateCancelled {
+		t.Fatalf("safe cancel=%+v err=%v", cancelled, err)
+	}
+
+	job, _, err := fresh().StartImmutableDeployment(variant("leased"), userID, "leased-key", "leased")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstLease, ok, err := fresh().LeaseDeployment(project.ID, job.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("first lease=%+v ok=%v err=%v", firstLease, ok, err)
+	}
+	now = now.Add(31 * time.Minute)
+	if _, ok, err := fresh().LeaseDeployment(project.ID, job.NodeID); err != nil || ok {
+		t.Fatalf("expired lease bypassed backoff ok=%v err=%v", ok, err)
+	}
+	requeued, err := fresh().GetDeployment(project.ID, job.ID)
+	if err != nil || requeued.AttemptCount != 1 || requeued.TerminalResult != nil || requeued.RetryAfter == nil {
+		t.Fatalf("requeued=%+v err=%v", requeued, err)
+	}
+	if _, _, err := fresh().CancelDeployment(project.ID, job.ID, "cancel-requeued", "cancel-requeued"); apiCode(err) != "CANCEL_UNSAFE" {
+		t.Fatalf("requeued leased rollout cancellation err=%v", err)
+	}
+	now = *requeued.RetryAfter
+	if _, err := db.ExecContext(ctx, `UPDATE deployment_jobs SET max_attempts=2 WHERE id=$1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	secondLease, ok, err := fresh().LeaseDeployment(project.ID, job.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("second lease=%+v ok=%v err=%v", secondLease, ok, err)
+	}
+	if _, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "applying", rolloutProgress(secondLease, deploymentv1.RolloutStateApplying, "4", "")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "waiting", rolloutProgress(secondLease, deploymentv1.RolloutStateWaiting, "5", "")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "failed", rolloutProgress(secondLease, deploymentv1.RolloutStateFailed, "6", deploymentv1.RolloutCodeNoKnownGood)); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
+	if _, ok, err := fresh().LeaseDeployment(project.ID, job.NodeID); err != nil || ok {
+		t.Fatalf("exhausted lease ok=%v err=%v", ok, err)
+	}
+	exhausted, err := fresh().GetDeployment(project.ID, job.ID)
+	if err != nil || exhausted.Status != deploymentv1.StateFailed || exhausted.FailureCode != "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" || exhausted.TerminalResult != nil {
+		t.Fatalf("exhausted=%+v err=%v", exhausted, err)
+	}
+	var lockOwner string
+	if err := db.QueryRowContext(ctx, `SELECT deployment_id FROM service_deployment_locks WHERE service_id=$1`, record.ID).Scan(&lockOwner); err != nil || lockOwner != job.ID {
+		t.Fatalf("exhausted lock owner=%q err=%v", lockOwner, err)
+	}
+	if _, _, err := fresh().StartImmutableDeployment(variant("restart-blocked"), userID, "restart-blocked-key", "restart-blocked"); apiCode(err) != "DEPLOYMENT_LOCKED" || !strings.Contains(err.Error(), job.ID) {
+		t.Fatalf("restart allowed replacement rollout: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE service_deployment_locks SET expires_at=$1 WHERE service_id=$2`, now.Add(-time.Hour), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fresh().StartImmutableDeployment(variant("expired-lock-blocked"), userID, "expired-lock-blocked-key", "expired-lock-blocked"); apiCode(err) != "DEPLOYMENT_LOCKED" {
+		t.Fatalf("expired lock allowed replacement rollout: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id=$1`, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fresh().StartImmutableDeployment(variant("missing-lock-blocked"), userID, "missing-lock-blocked-key", "missing-lock-blocked"); apiCode(err) != "DEPLOYMENT_LOCKED" {
+		t.Fatalf("missing lock allowed replacement rollout: %v", err)
+	}
+	retried, reused, err := fresh().RetryDeployment(project.ID, job.ID, "retry-one", "retry-one")
+	if err != nil || reused || retried.ID != job.ID || retried.Status != deploymentv1.StateQueued {
+		t.Fatalf("retry=%+v reused=%v err=%v", retried, reused, err)
+	}
+	if replay, reused, err := fresh().RetryDeployment(project.ID, job.ID, "retry-one", "retry-one-replay"); err != nil || !reused || replay.ID != job.ID {
+		t.Fatalf("retry replay=%+v reused=%v err=%v", replay, reused, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT deployment_id FROM service_deployment_locks WHERE service_id=$1`, record.ID).Scan(&lockOwner); err != nil || lockOwner != job.ID {
+		t.Fatalf("retry did not restore ownership: owner=%q err=%v", lockOwner, err)
+	}
+
+	thirdLease, ok, err := fresh().LeaseDeployment(project.ID, job.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("third lease=%+v ok=%v err=%v", thirdLease, ok, err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE deployment_jobs SET max_attempts=attempt_count WHERE id=$1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
+	if _, ok, err := fresh().LeaseDeployment(project.ID, job.NodeID); err != nil || ok {
+		t.Fatalf("second exhaustion ok=%v err=%v", ok, err)
+	}
+	var retryJob DeploymentJob
+	var retryReused bool
+	var retryErr, createErr error
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		retryJob, retryReused, retryErr = fresh().RetryDeployment(project.ID, job.ID, "retry-concurrent", "retry-concurrent")
+	}()
+	go func() {
+		defer wait.Done()
+		_, _, createErr = fresh().StartImmutableDeployment(variant("concurrent-new"), userID, "concurrent-new-key", "concurrent-new")
+	}()
+	wait.Wait()
+	if retryErr != nil || retryReused || retryJob.ID != job.ID || apiCode(createErr) != "DEPLOYMENT_LOCKED" {
+		t.Fatalf("concurrent retry=%+v reused=%v retryErr=%v createErr=%v", retryJob, retryReused, retryErr, createErr)
+	}
+
+	finalLease, ok, err := fresh().LeaseDeployment(project.ID, job.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("final lease=%+v ok=%v err=%v", finalLease, ok, err)
+	}
+	finished, err := fresh().CompleteDeployment(project.ID, job.NodeID, job.ID, "terminal", rolloutResult(finalLease, deploymentv1.RolloutStateFailed, "6", "", "", "", deploymentv1.RolloutCodeNoKnownGood))
+	if err != nil || finished.TerminalResult == nil {
+		t.Fatalf("terminal=%+v err=%v", finished, err)
+	}
+	if _, _, err := fresh().StartImmutableDeployment(variant("after-terminal"), userID, "after-terminal-key", "after-terminal"); err != nil {
+		t.Fatalf("factual terminal did not release ownership: %v", err)
+	}
+}
+
 func TestPostgresLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease(t *testing.T) {
 	dsn := requirePostgresTestDSN(t, "legacy deployment retirement")
 	db, err := sql.Open("pgx", dsn)
@@ -417,22 +583,4 @@ func postgresImmutableSnapshot(t *testing.T, service PostgresService, projectID,
 		t.Fatal(err)
 	}
 	return record, deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: spec, SpecHash: specHash, PayloadHash: "payload-" + suffix, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + suffix, ProjectID: projectID, ServiceID: record.ID, ServiceKey: record.Name, ActiveBindingID: "binding-" + suffix, Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, TopologyPlanID: "topology-" + suffix, TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), DeploymentPolicyID: "policy-" + suffix, DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("2", 64), RoutingDecisionHash: strings.Repeat("3", 64), EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID, NodeID: node.ID, AgentID: agent.ID}}
-}
-
-func hasDeploymentStep(events []DeploymentEvent, step string) bool {
-	for _, event := range events {
-		if event.Step == step {
-			return true
-		}
-	}
-	return false
-}
-
-func hasAuditAction(events []AuditEvent, action string) bool {
-	for _, event := range events {
-		if event.Action == action {
-			return true
-		}
-	}
-	return false
 }

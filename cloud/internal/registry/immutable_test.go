@@ -117,6 +117,15 @@ func TestImmutableDeploymentExpiredLeaseUsesBoundedBackoff(t *testing.T) {
 	if queued.Status != deploymentv1.StateQueued || queued.RetryAfter == nil || !queued.RetryAfter.After(now) {
 		t.Fatalf("queued retry backoff missing: %+v", queued)
 	}
+	if lock, ok := service.deployLocks[job.ServiceID]; !ok || lock.DeploymentID != job.ID || !lock.ExpiresAt.After(now) {
+		t.Fatalf("expired lease lost service ownership: lock=%+v ok=%v", lock, ok)
+	}
+	if _, _, err := service.StartImmutableDeployment(immutableSnapshot(t, service, projectID, created.ID, "blocked-during-backoff"), "user-1", "deploy-blocked-during-backoff", "blocked"); apiCode(err) != "DEPLOYMENT_LOCKED" {
+		t.Fatalf("concurrent deployment during backoff err=%v", err)
+	}
+	if _, _, err := service.CancelDeployment(projectID, job.ID, "cancel-requeued", "cancel-requeued"); apiCode(err) != "CANCEL_UNSAFE" {
+		t.Fatalf("requeued leased deployment cancellation err=%v", err)
+	}
 	events, err := service.DeploymentEvents(projectID, job.ID)
 	if err != nil || events[len(events)-1].SchemaVersion != deploymentv1.EventSchemaVersion || events[len(events)-1].Attempt != 1 {
 		t.Fatalf("versioned lease-expiry event missing: events=%+v err=%v", events, err)
@@ -129,11 +138,17 @@ func TestImmutableDeploymentExpiredLeaseUsesBoundedBackoff(t *testing.T) {
 
 func TestImmutableDeploymentCancellationIsSafeOnlyBeforeLease(t *testing.T) {
 	service, projectID := readyRegistry(t)
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
 	created := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api", "svc-cancel")
 	snapshot := immutableSnapshot(t, service, projectID, created.ID, "cancel")
 	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "deploy-cancel", "req")
 	if err != nil {
 		t.Fatal(err)
+	}
+	now = now.Add(31 * time.Minute)
+	if _, _, err := service.StartImmutableDeployment(immutableSnapshot(t, service, projectID, created.ID, "ttl-blocked"), "user-1", "deploy-ttl-blocked", "ttl-blocked"); apiCode(err) != "DEPLOYMENT_LOCKED" {
+		t.Fatalf("queued deployment lost ownership after lock TTL: %v", err)
 	}
 	cancelled, reused, err := service.CancelDeployment(projectID, job.ID, "cancel-key", "cancel")
 	if err != nil || reused || cancelled.Status != deploymentv1.StateCancelled {
@@ -175,6 +190,9 @@ func TestImmutableDeploymentExpiredLeaseRetryKeepsJobID(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
 	}
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "1", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateWaiting, "2", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "3", deploymentv1.RolloutCodeNoKnownGood)
 	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
 	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "expired", DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.StateFailed, LeaseToken: lease.LeaseToken, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference}); apiCode(err) != "DEPLOYMENT_LEASE_EXPIRED" {
 		t.Fatalf("expired result err=%v", err)
@@ -185,6 +203,12 @@ func TestImmutableDeploymentExpiredLeaseRetryKeepsJobID(t *testing.T) {
 	failed := service.deployments[job.ID]
 	if failed.Status != deploymentv1.StateFailed || failed.FailureCode != "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" || failed.TerminalResult != nil {
 		t.Fatalf("failed job=%+v", failed)
+	}
+	if lock, ok := service.deployLocks[job.ServiceID]; !ok || lock.DeploymentID != job.ID {
+		t.Fatalf("lease exhaustion lost service ownership: lock=%+v ok=%v", lock, ok)
+	}
+	if _, _, err := service.StartImmutableDeployment(immutableSnapshot(t, service, projectID, created.ID, "blocked-after-exhaustion"), "user-1", "deploy-blocked-after-exhaustion", "blocked"); apiCode(err) != "DEPLOYMENT_LOCKED" || !strings.Contains(err.Error(), job.ID) {
+		t.Fatalf("lease-exhausted deployment allowed replacement: %v", err)
 	}
 	retried, reused, err := service.RetryDeployment(projectID, job.ID, "retry-one", "retry")
 	if err != nil || reused || retried.ID != job.ID || retried.Status != deploymentv1.StateQueued || retried.MaxAttempts <= retried.AttemptCount {

@@ -1384,10 +1384,8 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 		return DeploymentJob{}, err
 	}
-	if deploymentTerminalStatus(job.Status) {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id = $1 AND deployment_id = $2`, job.ServiceID, job.ID); err != nil {
-			return DeploymentJob{}, err
-		}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id = $1 AND deployment_id = $2`, job.ServiceID, job.ID); err != nil {
+		return DeploymentJob{}, err
 	}
 	return job, tx.Commit()
 }
@@ -1511,13 +1509,13 @@ func (s PostgresService) CancelDeployment(projectID, deploymentID, key, requestI
 	if err != nil {
 		return DeploymentJob{}, false, err
 	}
-	if deploymentTerminalStatus(job.Status) || job.Status == deploymentv1.StateCancelled {
+	if job.TerminalResult != nil || job.Status == deploymentv1.StateCancelled || !isProductionDeploymentMode(job.Mode) && deploymentTerminalStatus(job.Status) {
 		if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
 			return DeploymentJob{}, false, err
 		}
 		return job, false, tx.Commit()
 	}
-	if job.Status != deploymentv1.StateQueued {
+	if job.Status != deploymentv1.StateQueued || job.AttemptCount != 0 || job.TerminalResult != nil || job.RolloutState != "" && job.RolloutState != deploymentv1.RolloutStatePrepared {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "CANCEL_UNSAFE", Message: "deployment has reached an Agent or runtime mutation stage", NextAction: "watch_deployment", RequestID: requestID}
 	}
 	now := s.clock()
@@ -1807,12 +1805,20 @@ func (s PostgresService) lifecycleAgent(ctx context.Context, projectID, runtimeI
 }
 
 func acquireDeploymentLock(ctx context.Context, tx *sql.Tx, projectID, serviceID, deploymentID string, now time.Time, requestID string) error {
-	res, err := tx.ExecContext(ctx, `INSERT INTO service_deployment_locks(service_id, project_id, deployment_id, expires_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT (service_id) DO UPDATE SET deployment_id = EXCLUDED.deployment_id, expires_at = EXCLUDED.expires_at, updated_at = EXCLUDED.updated_at WHERE service_deployment_locks.expires_at <= $5`, serviceID, projectID, deploymentID, now.Add(30*time.Minute), now)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "deployment-service:"+serviceID); err != nil {
 		return err
 	}
-	if rows, _ := res.RowsAffected(); rows == 0 {
-		return APIError{Status: 409, Code: "DEPLOYMENT_LOCKED", Message: "Another deployment is already active for this service.", NextAction: "watch_existing_deployment", RequestID: requestID}
+	var ownerID string
+	err := tx.QueryRowContext(ctx, `SELECT id FROM deployment_jobs WHERE service_id=$1 AND id<>$2 AND mode='rollout' AND COALESCE(terminal_result_json,'{}'::jsonb)='{}'::jsonb AND NOT (status=$3 AND COALESCE(attempt_count,0)=0 AND COALESCE(rollout_state,'') IN ('',$4)) ORDER BY created_at,id LIMIT 1`, serviceID, deploymentID, deploymentv1.StateCancelled, deploymentv1.RolloutStatePrepared).Scan(&ownerID)
+	if err == nil {
+		return deploymentLockedError(requestID, ownerID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO service_deployment_locks(service_id, project_id, deployment_id, expires_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT (service_id) DO UPDATE SET project_id=EXCLUDED.project_id, deployment_id=EXCLUDED.deployment_id, expires_at=EXCLUDED.expires_at, updated_at=EXCLUDED.updated_at`, serviceID, projectID, deploymentID, now.Add(30*time.Minute), now)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -1856,6 +1862,15 @@ func expireDeploymentLeases(ctx context.Context, tx *sql.Tx, projectID string, n
 		if job.MaxAttempts == 0 {
 			job.MaxAttempts = defaultDeploymentMaxAttempts
 		}
+		if isProductionDeploymentMode(job.Mode) {
+			res, err := tx.ExecContext(ctx, `INSERT INTO service_deployment_locks(service_id,project_id,deployment_id,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT (service_id) DO UPDATE SET expires_at=EXCLUDED.expires_at,updated_at=EXCLUDED.updated_at WHERE service_deployment_locks.deployment_id=EXCLUDED.deployment_id`, job.ServiceID, job.ProjectID, job.ID, now.Add(30*time.Minute), now)
+			if err != nil {
+				return err
+			}
+			if affected, _ := res.RowsAffected(); affected == 0 {
+				return deploymentLockedError("", "")
+			}
+		}
 		nextStatus := DeploymentQueued
 		if isProductionDeploymentMode(job.Mode) {
 			nextStatus = deploymentv1.StateQueued
@@ -1872,9 +1887,6 @@ func expireDeploymentLeases(ctx context.Context, tx *sql.Tx, projectID string, n
 				nextStatus, step = deploymentv1.StateFailed, deploymentv1.StateFailed
 			}
 			finishedAt = now
-			if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id = $1 AND deployment_id = $2`, job.ServiceID, job.ID); err != nil {
-				return err
-			}
 		} else {
 			if isProductionDeploymentMode(job.Mode) {
 				retryAfter = now.Add(deploymentRetryBackoff(job.AttemptCount))

@@ -9,6 +9,25 @@
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 | Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
+## Corrective Prompt 07 checkpoint
+
+`UNRESOLVED_ROLLOUT_OWNERSHIP_PASS` makes a canonical rollout with no factual
+`TerminalResult` the durable owner of its service. Lease expiry requeues the
+same deployment and renews ownership; max-attempt exhaustion may retain the
+existing failed/error presentation for explicit retry, but it does not release
+the lock or fabricate an Agent terminal result. Lock TTL is no longer takeover
+authority.
+
+In-memory and PostgreSQL acquisition recover from expired or missing lock rows
+by checking unresolved canonical deployment records. Retry renews the same
+deployment ID and bounded attempt window; cancellation is safe only before the
+first lease. PostgreSQL restart, retry/new-deployment concurrency, transaction
+rollback, and factual terminal lock release are covered by disposable
+PostgreSQL 16 tests without a migration.
+
+No SSH, live VPS/K3s E2E, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
+
 ## Corrective Prompt 06 checkpoint
 
 `ROLLOUT_FAILURE_PHASE_TRUTHFUL_PASS` adds bounded `pre_mutation` and
