@@ -20,10 +20,12 @@ MEMORY_REQUEST="${OPSI_E2E_MEMORY_REQUEST:-}"
 CPU_LIMIT="${OPSI_E2E_CPU_LIMIT:-}"
 MEMORY_LIMIT="${OPSI_E2E_MEMORY_LIMIT:-}"
 TARGET_HOST="${OPSI_E2E_VPS_HOST:-}"
-TARGET_SSH_USER="${OPSI_E2E_VPS_SSH_USER:-root}"
+TARGET_SSH_USER="${OPSI_E2E_VPS_SSH_USER:-}"
 TARGET_SSH_PORT="${OPSI_E2E_VPS_SSH_PORT:-22}"
 OPSI_E2E_SSH_KEY_PATH="${OPSI_E2E_SSH_KEY_PATH:-}"
 HOST_KEY_SHA256="${OPSI_E2E_VPS_HOST_KEY_SHA256:-}"
+PUBLIC_HOSTNAME="${OPSI_E2E_PUBLIC_HOSTNAME:-}"
+PUBLIC_PORT="${OPSI_E2E_PUBLIC_PORT:-80}"
 SECRET_NAME="${OPSI_E2E_SECRET_NAME:-opsi-e2e-secret}"
 TOTP_CODE="${OPSI_E2E_TOTP_CODE:-}"
 OTP_REQUEST_ID="${OPSI_E2E_OTP_REQUEST_ID:-}"
@@ -66,6 +68,7 @@ Required env for full run:
   OPSI_E2E_CPU_LIMIT
   OPSI_E2E_MEMORY_LIMIT
   OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE
+  OPSI_E2E_PUBLIC_HOSTNAME
 
   The local URL must be the CLI local backend. Immutable BuildRecords and
   topology/policy authority are resolved by Cloud; this script supplies no
@@ -224,6 +227,8 @@ preflight() {
   for name in OPSI_E2E_BUILD_RECORD_ID OPSI_E2E_BAD_BUILD_RECORD_ID OPSI_E2E_ENVIRONMENT_ID OPSI_E2E_SERVICE_KEY OPSI_E2E_REPLICAS OPSI_E2E_CONTAINER_PORT OPSI_E2E_CPU_REQUEST OPSI_E2E_MEMORY_REQUEST OPSI_E2E_CPU_LIMIT OPSI_E2E_MEMORY_LIMIT; do
     need_env "$name"
   done
+  need_env OPSI_E2E_VPS_SSH_USER
+  need_env OPSI_E2E_PUBLIC_HOSTNAME
   if [ -z "$TOTP_CODE" ] && { [ -z "$OTP_REQUEST_ID" ] || [ -z "$OTP_CODE" ]; }; then
     fail "missing second factor: set OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE"
   fi
@@ -309,6 +314,30 @@ elif kind in {"deployment", "bad_deployment"}:
             "exposure":{"mode":"internal"},
         },
     }
+elif kind == "exposure":
+    import hashlib
+    exposure = {
+        "schema_version":"opsi.exposure_spec/v1",
+        "project_id":e["OPSI_E2E_PROJECT_ID"],
+        "environment_id":e["OPSI_E2E_ENVIRONMENT_ID"],
+        "runtime_id":e["OPSI_E2E_RUNTIME_ID"],
+        "service_key":e["OPSI_E2E_SERVICE_KEY"],
+        "deployment_job_id":e["OPSI_E2E_EXPOSURE_DEPLOYMENT_ID"],
+        "hostname":e["OPSI_E2E_PUBLIC_HOSTNAME"].strip().lower().rstrip("."),
+        "path":"/",
+        "service_port":int(e["OPSI_E2E_CONTAINER_PORT"]),
+        "tls":{"mode":"disabled"},
+        "spec_hash":"",
+    }
+    canonical = json.dumps(exposure, separators=(",", ":")).encode()
+    exposure["spec_hash"] = hashlib.sha256(canonical).hexdigest()
+    data = {
+        "schema_version":"opsi.exposure_mutation/v1",
+        "base_deployment_job_id":e["OPSI_E2E_EXPOSURE_BASE_DEPLOYMENT_ID"],
+        "exposure":exposure,
+    }
+    if e.get("OPSI_E2E_EXPOSURE_STATE_HASH"):
+        data["expected_state_hash"] = e["OPSI_E2E_EXPOSURE_STATE_HASH"]
 elif kind == "secret":
     data = {"service_id":e["OPSI_E2E_SERVICE_ID"],"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default"}
 elif kind == "second_factor":
@@ -446,6 +475,120 @@ PY
 )" "$digest_a" "$known_id" "$known_hash" "$namespace" "$deployment_name"
 }
 
+validate_exposure_preview() {
+  local base_id="$1" expected_host="$2" expected_env="$3" expected_runtime="$4" expected_service="$5" expected_port="$6"
+  python3 - "$base_id" "$expected_host" "$expected_env" "$expected_runtime" "$expected_service" "$expected_port" 3<&0 <<'PY'
+import json, os, re, sys
+base_id, host, env, runtime, service, port = sys.argv[1:]
+d = json.load(os.fdopen(3))
+desired = d.get("desired") or {}
+if d.get("schema_version") != "opsi.exposure_preview/v1" or d.get("base_deployment_job_id") != base_id:
+    raise SystemExit("exposure preview identity is invalid")
+if d.get("eligible") is not True or d.get("decision_code") != "EXPOSURE_READY":
+    raise SystemExit("exposure preview is not eligible")
+if not re.fullmatch(r"[0-9a-f]{64}", d.get("state_hash", "")):
+    raise SystemExit("exposure preview state_hash is invalid")
+if desired.get("schema_version") != "opsi.exposure_spec/v1" or desired.get("project_id") != os.environ["OPSI_E2E_PROJECT_ID"]:
+    raise SystemExit("exposure preview project/spec identity is invalid")
+if (desired.get("hostname"), desired.get("environment_id"), desired.get("runtime_id"), desired.get("service_key"), str(desired.get("service_port"))) != (host, env, runtime, service, port):
+    raise SystemExit("exposure preview target drifted")
+if desired.get("path") != "/" or (desired.get("tls") or {}).get("mode") != "disabled":
+    raise SystemExit("exposure preview route/TLS is invalid")
+if desired.get("deployment_job_id") != os.environ.get("OPSI_E2E_EXPOSURE_DEPLOYMENT_ID", desired.get("deployment_job_id")) or not desired.get("deployment_job_id", "").startswith("dep-") or not re.fullmatch(r"[0-9a-f]{64}", desired.get("spec_hash", "")):
+    raise SystemExit("exposure preview desired identity/hash is invalid")
+print(d["state_hash"])
+PY
+}
+
+validate_exposure_rollout() {
+  local base_id="$1" expected_host="$2" expected_env="$3" expected_runtime="$4" expected_service="$5" expected_port="$6" expected_namespace="$7" expected_service_name="$8"
+  python3 - "$base_id" "$expected_host" "$expected_env" "$expected_runtime" "$expected_service" "$expected_port" "$expected_namespace" "$expected_service_name" 3<&0 <<'PY'
+import json, os, re, sys
+base_id, host, env, runtime, service, port, namespace, service_name = sys.argv[1:]
+d = json.load(os.fdopen(3))
+spec = d.get("exposure_spec") or {}
+terminal = d.get("terminal_result") or {}
+resources = terminal.get("resources") or []
+if d.get("status") != "succeeded" or d.get("rollout_state") != "succeeded" or d.get("base_deployment_id") != base_id:
+    raise SystemExit("exposure rollout did not succeed")
+if (spec.get("hostname"), spec.get("path"), spec.get("environment_id"), spec.get("runtime_id"), spec.get("service_key"), str(spec.get("service_port"))) != (host, "/", env, runtime, service, port):
+    raise SystemExit("exposure rollout spec drifted")
+if spec.get("deployment_job_id") != os.environ.get("OPSI_E2E_EXPOSURE_DEPLOYMENT_ID", spec.get("deployment_job_id")) or (spec.get("tls") or {}).get("mode") != "disabled" or not re.fullmatch(r"[0-9a-f]{64}", spec.get("spec_hash", "")):
+    raise SystemExit("exposure rollout spec hash/TLS is invalid")
+by_kind = {item.get("kind"): item for item in resources}
+if set(by_kind) != {"Deployment", "Service", "Ingress"}:
+    raise SystemExit("exposure rollout must report Deployment, Service and Ingress")
+for kind, item in by_kind.items():
+    if item.get("namespace") != namespace or not item.get("name") or not item.get("uid") or not item.get("resource_version") or not re.fullmatch(r"[0-9a-f]{64}", item.get("functional_hash", "")):
+        raise SystemExit("exposure resource identity is incomplete: " + kind)
+if by_kind["Service"].get("name") != service_name or by_kind["Deployment"].get("name") != service_name:
+    raise SystemExit("exposure workload resource names drifted")
+print(namespace)
+print(by_kind["Ingress"]["name"])
+print(by_kind["Service"]["name"])
+print(port)
+PY
+}
+
+verify_ingress() {
+  local namespace="$1" ingress_name="$2" service_name="$3" service_port="$4" expected_host="$5" expected_path="$6" raw
+  raw="$(mktemp)"
+  remote_k3s "sudo k3s kubectl -n $(printf '%q' "$namespace") get ingress $(printf '%q' "$ingress_name") -o json" > "$raw" || { rm -f "$raw"; fail "Traefik Ingress fetch failed"; }
+  python3 - "$raw" "$namespace" "$ingress_name" "$service_name" "$service_port" "$expected_host" "$expected_path" <<'PY' || { rm -f "$raw"; fail "Traefik Ingress/backend validation failed"; }
+import json, sys
+path, namespace, ingress_name, service_name, service_port, expected_host, expected_path = sys.argv[1:]
+d = json.load(open(path))
+meta = d.get("metadata") or {}
+spec = d.get("spec") or {}
+if d.get("kind") != "Ingress" or meta.get("namespace") != namespace or meta.get("name") != ingress_name or spec.get("ingressClassName") != "traefik":
+    raise SystemExit("Ingress identity/class mismatch")
+if any(not key.startswith("opsi.dev/") for key in (meta.get("annotations") or {})):
+    raise SystemExit("unsafe Ingress annotation present")
+rules = spec.get("rules") or []
+if len(rules) != 1 or rules[0].get("host") != expected_host:
+    raise SystemExit("Ingress hostname mismatch")
+paths = ((rules[0].get("http") or {}).get("paths") or [])
+if len(paths) != 1:
+    raise SystemExit("Ingress path count mismatch")
+route = paths[0]
+backend = ((route.get("backend") or {}).get("service") or {})
+port = (backend.get("port") or {}).get("number")
+if route.get("path") != expected_path or route.get("pathType") != "Prefix" or backend.get("name") != service_name or str(port) != service_port:
+    raise SystemExit("Ingress route/backend mismatch")
+print("ingress=verified")
+PY
+  rm -f "$raw"
+}
+
+public_endpoint_hash() {
+  local label="$1" body status size digest
+  body="$(mktemp)"
+  status="$(curl --resolve "$PUBLIC_HOSTNAME:$PUBLIC_PORT:$TARGET_HOST" --connect-timeout 10 --max-time 30 --max-filesize 1048576 -sS -o "$body" -w '%{http_code}' "http://$PUBLIC_HOSTNAME:$PUBLIC_PORT/")" || { rm -f "$body"; fail "public endpoint request failed"; }
+  size="$(wc -c < "$body" | tr -d ' ')"
+  digest="$(sha256sum "$body" | awk '{print $1}')"
+  [ "$status" = "200" ] || { rm -f "$body"; fail "public endpoint returned unexpected HTTP status: $status"; }
+  printf 'status=%s size=%s sha256=%s\n' "$status" "$size" "$digest" > "$ARTIFACT_DIR/$label-public-response.txt"
+  rm -f "$body"
+  printf '%s' "$digest"
+}
+
+validate_restored_response_hash() {
+  [[ "$1" =~ ^[0-9a-f]{64}$ && "$1" = "$2" ]]
+}
+
+validate_rollback_events() {
+  python3 -c 'import json, sys
+d = json.load(sys.stdin)
+events = d.get("events", d if isinstance(d, list) else [])
+steps = [event.get("step") for event in events]
+position = -1
+for expected in ("failed", "rolling_back", "rolled_back"):
+    try:
+        position = steps.index(expected, position + 1)
+    except ValueError:
+        raise SystemExit("rollback event sequence is incomplete")'
+}
+
 check_artifacts_clean() {
   python3 - "$ARTIFACT_DIR" "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE" <<'PY'
 import pathlib, re, sys
@@ -472,7 +615,7 @@ remote_k3s() {
 verify_runtime() {
   local digest="${1:-}" label="${2:-k3s}"
   remote_k3s "sudo k3s kubectl -n $WORKLOAD_NAMESPACE rollout status deployment/$SERVICE_NAME --timeout=120s" | redact > "$ARTIFACT_DIR/$label-rollout.redacted.log" || fail "K3s rollout status failed"
-  remote_k3s "sudo k3s kubectl -n $WORKLOAD_NAMESPACE get deploy,svc,pods -l app.kubernetes.io/name=$SERVICE_NAME -o wide" | redact > "$ARTIFACT_DIR/$label-runtime.redacted.log" || fail "K3s runtime state failed"
+  remote_k3s "sudo k3s kubectl -n $WORKLOAD_NAMESPACE get deploy,svc,pods,endpoints -l app.kubernetes.io/name=$SERVICE_NAME -o wide" | redact > "$ARTIFACT_DIR/$label-runtime.redacted.log" || fail "K3s runtime state failed"
   if [ -n "$digest" ]; then
     local raw
     raw="$(mktemp)"
@@ -564,8 +707,9 @@ run_e2e() {
   preflight
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
-  local f body id good_deploy_id bad_deploy_id bad_deployment_started_at service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record good_values bad_digest
+  local f body id good_deploy_id bad_deploy_id exposure_deploy_id bad_deployment_started_at service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record good_values bad_digest exposure_record exposure_values exposure_preview restored_hash
   local -a good_fields
+  local -a exposure_fields
   BOOTSTRAP_REQUEST_FILE="$(mktemp)"
   chmod 600 "$BOOTSTRAP_REQUEST_FILE"
   write_json "$BOOTSTRAP_REQUEST_FILE" bootstrap "$OPSI_E2E_SSH_KEY_PATH"
@@ -596,6 +740,7 @@ run_e2e() {
   GOOD_KNOWN_ID="${good_fields[1]}"
   GOOD_KNOWN_HASH="${good_fields[2]}"
   GOOD_READINESS_HASH="${good_fields[3]}"
+  export OPSI_E2E_RUNTIME_ID="${good_fields[5]}"
   [ "$service_id" = "${good_fields[4]}" ] || fail "healthy A service identity drifted"
   WORKLOAD_NAMESPACE="${good_fields[8]}"
   SERVICE_NAME="${good_fields[9]}"
@@ -603,6 +748,27 @@ run_e2e() {
   log "step 3/11 healthy A rollout succeeded: service=$service_id deployment=$good_deploy_id digest=$GOOD_DIGEST known_good=$GOOD_KNOWN_ID readiness=$GOOD_READINESS_HASH runtime=${good_fields[5]} node=${good_fields[6]} agent=${good_fields[7]}"
   verify_runtime "$GOOD_DIGEST" healthy-a
   log "step 4/11 healthy A K3s readiness and exact image/imageID verified"
+
+  export OPSI_E2E_EXPOSURE_BASE_DEPLOYMENT_ID="$good_deploy_id"
+  exposure_deploy_id="dep-$(printf '%s' "$RUN_ID-$good_deploy_id" | sha256sum | awk '{print substr($1,1,24)}')"
+  export OPSI_E2E_EXPOSURE_DEPLOYMENT_ID="$exposure_deploy_id"
+  f="$(mktemp)"; write_json "$f" exposure
+  exposure_preview="$(api_file POST "/api/local/projects/$PROJECT_ID/exposures/preview" "$f" exposure-preview 0)" || fail "exposure preview failed"
+  rm -f "$f"
+  export OPSI_E2E_EXPOSURE_STATE_HASH="$(printf '%s' "$exposure_preview" | validate_exposure_preview "$good_deploy_id" "$PUBLIC_HOSTNAME" "$ENVIRONMENT_ID" "$OPSI_E2E_RUNTIME_ID" "$SERVICE_KEY" "$CONTAINER_PORT")" || fail "exposure preview contract validation failed"
+  f="$(mktemp)"; write_json "$f" exposure
+  body="$(api_file POST "/api/local/projects/$PROJECT_ID/exposures" "$f" exposure-apply 1)" || fail "exposure apply failed"
+  rm -f "$f"
+  exposure_deploy_id="$(printf '%s' "$body" | json_get id)" || fail "exposure apply response missing id"
+  [ "$exposure_deploy_id" = "$OPSI_E2E_EXPOSURE_DEPLOYMENT_ID" ] || fail "exposure apply deployment identity drifted"
+  wait_deployment_status "$exposure_deploy_id" succeeded
+  exposure_record="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$exposure_deploy_id" - exposure-evidence 0)" || fail "exposure rollout evidence fetch failed"
+  exposure_values="$(printf '%s' "$exposure_record" | validate_exposure_rollout "$good_deploy_id" "$PUBLIC_HOSTNAME" "$ENVIRONMENT_ID" "$OPSI_E2E_RUNTIME_ID" "$SERVICE_KEY" "$CONTAINER_PORT" "$WORKLOAD_NAMESPACE" "$SERVICE_NAME")" || fail "exposure rollout resource identities are incomplete"
+  mapfile -t exposure_fields <<< "$exposure_values"
+  [ "${#exposure_fields[@]}" -eq 4 ] || fail "exposure rollout identity field count is invalid"
+  verify_ingress "${exposure_fields[0]}" "${exposure_fields[1]}" "${exposure_fields[2]}" "${exposure_fields[3]}" "$PUBLIC_HOSTNAME" "/"
+  PUBLIC_A_HASH="$(public_endpoint_hash public-a)"
+  log "step 5/14 exposure preview/apply, Traefik backend and direct public routing verified: job=$exposure_deploy_id ingress=${exposure_fields[1]} public_hash=$PUBLIC_A_HASH"
 
   f="$(mktemp)"; write_json "$f" secret
   api_file POST "/api/local/projects/$PROJECT_ID/secrets" "$f" secret-create 1 >/dev/null || fail "secret create failed"
@@ -612,11 +778,11 @@ run_e2e() {
     fail "secret value leaked into reveal output"
   fi
   rm -f "$f"
-  log "step 5/11 secret create/rotate/reveal path ran via local Agent facade"
+  log "step 6/14 secret create/rotate/reveal path ran via local Agent facade"
 
   api_file GET "/api/local/projects/$PROJECT_ID/telemetry/summary?service_id=$service_id" - telemetry-summary 0 >/dev/null || fail "telemetry summary failed"
   api_file GET "/api/local/projects/$PROJECT_ID/logs?service_id=$service_id&limit=50" - logs 0 >/dev/null || fail "logs failed"
-  log "step 6/11 sanitized telemetry/logs fetched through local backend"
+  log "step 7/14 sanitized telemetry/logs fetched through local backend"
 
   f="$(mktemp)"; write_json "$f" bad_deployment
   bad_deployment_started_at="$(date +%s)"
@@ -627,11 +793,12 @@ run_e2e() {
   deployment_record="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$bad_deploy_id" - deployment-b-evidence 0)" || fail "broken B deployment evidence fetch failed"
   bad_digest="$(printf '%s' "$deployment_record" | validate_rolled_back_deployment "$GOOD_DIGEST" "$GOOD_KNOWN_ID" "$GOOD_KNOWN_HASH" "$WORKLOAD_NAMESPACE" "$SERVICE_NAME")" || fail "broken B rollback evidence did not restore exact A"
   verify_runtime "$GOOD_DIGEST" restored-a
+  verify_ingress "${exposure_fields[0]}" "${exposure_fields[1]}" "${exposure_fields[2]}" "${exposure_fields[3]}" "$PUBLIC_HOSTNAME" "/"
+  restored_hash="$(public_endpoint_hash public-restored)"
+  validate_restored_response_hash "$restored_hash" "$PUBLIC_A_HASH" || fail "public endpoint response hash changed after exact rollback"
   deployment_events="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$bad_deploy_id/events" - deployment-b-events 0)" || fail "broken B rollout events fetch failed"
-  for state in failed rolling_back rolled_back; do
-    printf '%s' "$deployment_events" | grep -q "\"step\":\"$state\"" || fail "broken B rollout event missing $state"
-  done
-  log "step 7/11 broken B rolled back and K3s restored healthy A: deployment=$bad_deploy_id desired_digest=$bad_digest restored_digest=$GOOD_DIGEST"
+  printf '%s' "$deployment_events" | validate_rollback_events || fail "broken B rollout event sequence is invalid"
+  log "step 8/14 broken B rolled back and K3s restored healthy A: deployment=$bad_deploy_id desired_digest=$bad_digest restored_digest=$GOOD_DIGEST public_hash=$restored_hash"
   incidents="$(api_file GET "/api/local/projects/$PROJECT_ID/incidents?status=open&limit=10" - incidents 0)" || fail "incident list failed"
   incident_id="$(printf '%s' "$incidents" | select_fresh_incident "$service_id" "$bad_deployment_started_at")"
   [ -n "$incident_id" ] || fail "no fresh controlled incident found; E2E does not resolve incidents created before broken deployment B"
@@ -645,7 +812,7 @@ run_e2e() {
     [ "$(printf '%s' "$incident_detail" | json_get incident.status 2>/dev/null || true)" = "resolved" ] || fail "incident status was not resolved"
   fi
   verify_agent_incident_resolve_audit "$incident_id"
-  log "step 8/11 factual incident list/detail/resolve lifecycle verified: incident=$incident_id"
+  log "step 9/14 factual incident list/detail/resolve lifecycle verified: incident=$incident_id"
 
   deployment_events="$(api_file GET "/api/local/projects/$PROJECT_ID/deployments/$good_deploy_id/events" - deployment-events 0)" || fail "deployment events fetch failed"
   printf '%s' "$deployment_events" | grep -q '"step":"succeeded"' || fail "deployment success event missing"
@@ -655,13 +822,14 @@ run_e2e() {
   for evidence in "$good_deploy_id" "$BUILD_RECORD_ID" "$GOOD_DIGEST" "$GOOD_KNOWN_ID" "$GOOD_KNOWN_HASH" "$GOOD_READINESS_HASH" 'runtime_id' 'node_id' 'agent_id' 'resources' 'succeeded'; do
     printf '%s' "$deployment_record" | grep -q "$evidence" || fail "canonical deployment evidence missing $evidence"
   done
-  log "step 9/11 BuildRecord rollout evidence verified: job=$good_deploy_id build_record=$BUILD_RECORD_ID"
+  log "step 10/14 BuildRecord rollout evidence verified: job=$good_deploy_id build_record=$BUILD_RECORD_ID"
   check_artifacts_clean || fail "redaction failed: artifact contains sensitive value"
-  log "step 10/11 artifacts verified without sensitive payloads"
+  log "step 11/14 artifacts verified without sensitive payloads"
   manual_cleanup
-  log "step 11/11 cleanup instructions written"
+  log "step 12/14 cleanup instructions written"
   verify_runtime "$GOOD_DIGEST" final-a
-  log "PASS: healthy A -> broken B -> restored A; target workload is ready on digest A"
+  log "step 13/14 final A readiness and matching public response hash verified"
+  log "PASS B1: healthy A -> exposure -> broken B -> restored A; PUBLIC_DNS_TLS_PENDING"
 }
 
 self_test() {
@@ -748,6 +916,50 @@ for name, value in fixtures.items():
 PY
   printf '%s' "$(<"$SELF_TEST_DIR/healthy-a.json")" | validate_healthy_deployment >/dev/null || fail "self-test healthy A fixture was rejected"
   printf '%s' "$(<"$SELF_TEST_DIR/rolled-back-b.json")" | validate_rolled_back_deployment "$digest_a" known-a "$hash_a" opsi api >/dev/null || fail "self-test rolled-back B fixture was rejected"
+  python3 - "$SELF_TEST_DIR" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+spec = {"schema_version":"opsi.exposure_spec/v1","project_id":"self-project","environment_id":"env-1","runtime_id":"runtime-1","service_key":"api","deployment_job_id":"dep-exposure-self","hostname":"self.example","path":"/","service_port":8080,"tls":{"mode":"disabled"},"spec_hash":""}
+spec["spec_hash"] = hashlib.sha256(json.dumps(spec, separators=(",", ":")).encode()).hexdigest()
+preview = {"schema_version":"opsi.exposure_preview/v1","base_deployment_job_id":"dep-fixture","desired":spec,"state_hash":"b" * 64,"eligible":True,"decision_code":"EXPOSURE_READY"}
+resources = [{"kind":"Deployment","namespace":"opsi","name":"api","uid":"uid-deploy","resource_version":"1","functional_hash":"a" * 64},{"kind":"Service","namespace":"opsi","name":"api","uid":"uid-service","resource_version":"1","functional_hash":"b" * 64},{"kind":"Ingress","namespace":"opsi","name":"opsi-ingress-api-runtime-1","uid":"uid-ingress","resource_version":"1","functional_hash":"c" * 64}]
+rollout = {"status":"succeeded","rollout_state":"succeeded","base_deployment_id":"dep-fixture","exposure_spec":spec,"terminal_result":{"resources":resources}}
+(root / "exposure-preview.json").write_text(json.dumps(preview))
+(root / "exposure-rollout.json").write_text(json.dumps(rollout))
+(root / "exposure-no-ingress.json").write_text(json.dumps({**rollout,"terminal_result":{"resources":resources[:2]}}))
+PY
+  printf '%s' "$(<"$SELF_TEST_DIR/exposure-preview.json")" | OPSI_E2E_PROJECT_ID=self-project validate_exposure_preview dep-fixture self.example env-1 runtime-1 api 8080 >/dev/null || fail "self-test valid exposure preview was rejected"
+  for mutation in hostname path service_port; do
+    python3 - "$SELF_TEST_DIR/exposure-preview.json" "$mutation" <<'PY'
+import json, sys
+path, mutation = sys.argv[1:]
+data = json.load(open(path))
+field = {"hostname":"hostname","path":"path","service_port":"service_port"}[mutation]
+data["desired"][field] = {"hostname":"","path":"/bad","service_port":9090}[mutation]
+json.dump(data, open(path + ".bad", "w"))
+PY
+    if printf '%s' "$(<"$SELF_TEST_DIR/exposure-preview.json.bad")" | OPSI_E2E_PROJECT_ID=self-project validate_exposure_preview dep-fixture self.example env-1 runtime-1 api 8080 >/dev/null 2>&1; then
+      fail "self-test accepted malformed exposure $mutation"
+    fi
+  done
+  printf '%s' "$(<"$SELF_TEST_DIR/exposure-rollout.json")" | validate_exposure_rollout dep-fixture self.example env-1 runtime-1 api 8080 opsi api >/dev/null || fail "self-test valid exposure rollout was rejected"
+  if printf '%s' "$(<"$SELF_TEST_DIR/exposure-no-ingress.json")" | validate_exposure_rollout dep-fixture self.example env-1 runtime-1 api 8080 opsi api >/dev/null 2>&1; then
+    fail "self-test accepted exposure rollout with missing Ingress identity"
+  fi
+  response_hash="$(printf '%064d' 0 | tr 0 d)"
+  validate_restored_response_hash "$response_hash" "$response_hash" || fail "self-test accepted no restored response hash"
+  if validate_restored_response_hash "$response_hash" "$(printf '%064d' 0 | tr 0 e)"; then
+    fail "self-test accepted a changed restored response hash"
+  fi
+  export OPSI_E2E_PROJECT_ID=self-project OPSI_E2E_ENVIRONMENT_ID=env-1 OPSI_E2E_RUNTIME_ID=runtime-1 OPSI_E2E_SERVICE_KEY=api OPSI_E2E_CONTAINER_PORT=8080 OPSI_E2E_PUBLIC_HOSTNAME=self.example OPSI_E2E_EXPOSURE_BASE_DEPLOYMENT_ID=dep-fixture OPSI_E2E_EXPOSURE_DEPLOYMENT_ID=dep-exposure-self OPSI_E2E_EXPOSURE_STATE_HASH="$(printf '%064d' 0 | tr 0 b)"
+  request="$SELF_TEST_DIR/exposure-request.json"
+  write_json "$request" exposure || fail "self-test valid exposure apply request generation failed"
+  python3 - "$request" <<'PY' || fail "self-test exposure apply request was malformed"
+import json, re, sys
+d = json.load(open(sys.argv[1]))
+if d.get("schema_version") != "opsi.exposure_mutation/v1" or not re.fullmatch(r"[0-9a-f]{64}", d.get("expected_state_hash", "")) or d["exposure"].get("tls", {}).get("mode") != "disabled":
+    raise SystemExit(1)
+PY
   for field in current_digest previous_digest known_good_id known_good_hash; do
     python3 - "$SELF_TEST_DIR/rolled-back-b.json" "$field" "$digest_a" "$hash_a" <<'PY' || fail "self-test rollback fixture mutation setup failed"
 import json, sys
@@ -763,6 +975,10 @@ PY
   done
   deployment_wait_decision "$(<"$SELF_TEST_DIR/healthy-a.json")" succeeded || fail "self-test did not accept succeeded A"
   deployment_wait_decision "$(<"$SELF_TEST_DIR/rolled-back-b.json")" rolled_back || fail "self-test did not accept rolled_back B"
+  printf '%s' '{"events":[{"step":"failed"},{"step":"rolling_back"},{"step":"rolled_back"}]}' | validate_rollback_events || fail "self-test rollback event sequence was rejected"
+  if printf '%s' '{"events":[{"step":"failed"},{"step":"rolled_back"}]}' | validate_rollback_events >/dev/null 2>&1; then
+    fail "self-test accepted incomplete rollback event sequence"
+  fi
   for fixture in healthy-a failed rollback-failed cancelled; do
     if deployment_wait_decision "$(<"$SELF_TEST_DIR/$fixture.json")" rolled_back; then
       fail "self-test accepted terminal $fixture while waiting for rollback"

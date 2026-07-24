@@ -69,6 +69,63 @@ func TestBootstrapPlanV2Contract(t *testing.T) {
 	}
 }
 
+func TestRegisterAgentConfigMatchesCurrentAgent(t *testing.T) {
+	const heredocStart = "cat >\"$config_tmp\" <<EOF\n"
+	start := strings.Index(registerAgentScript, heredocStart)
+	if start < 0 {
+		t.Fatal("register_agent config heredoc not found")
+	}
+	config := registerAgentScript[start+len(heredocStart):]
+	if end := strings.Index(config, "\nEOF"); end >= 0 {
+		config = config[:end] + "\n"
+	} else {
+		t.Fatal("register_agent config heredoc terminator not found")
+	}
+
+	values := map[string]string{
+		"OPSI_NODE_ID":    "test-node",
+		"OPSI_CLOUD_URL":  "https://cloud.example",
+		"OPSI_PROJECT_ID": "test-project",
+		"agent_token":     "test-agent-token",
+	}
+	variables := regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	config = variables.ReplaceAllStringFunc(config, func(raw string) string {
+		name := strings.TrimSuffix(strings.TrimPrefix(raw, "${"), "}")
+		value, ok := values[name]
+		if !ok {
+			t.Fatalf("unresolved heredoc variable %q", name)
+		}
+		return value
+	})
+	if strings.Contains(config, "$") {
+		t.Fatal("generated config contains unresolved shell variables")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "agent.yaml")
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binaryPath := filepath.Join(tmp, "opsi-agent")
+	build := exec.Command("go", "build", "-o", binaryPath, "./agent/cmd/opsi-agent")
+	build.Dir = repoRoot
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build Agent: %v: %s", err, output)
+	}
+	check := exec.Command(binaryPath, "--config", configPath, "--check")
+	if output, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("generated config rejected by Agent: %v: %s", err, output)
+	}
+	for _, retired := range []string{"builder_mode", "build_root"} {
+		if strings.Contains(config, retired) {
+			t.Fatalf("generated config contains retired field %q", retired)
+		}
+	}
+}
+
 func TestRemoteScriptsPassShellSyntaxCheck(t *testing.T) {
 	for name, script := range map[string]string{
 		"preflight":      preflightScript,

@@ -532,8 +532,6 @@ cloud_relay:
   sign_requests: true
 deployment:
   project_id: ${OPSI_PROJECT_ID}
-  builder_mode: containerd
-  build_root: /tmp/opsi-builds
 telemetry:
   enabled: true
 secret:
