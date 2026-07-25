@@ -223,7 +223,8 @@ func validateRolloutProgress(job DeploymentJob, progress deploymentv1.Progress) 
 	if progress.WorkloadSpecHash != job.RolloutIntent.Desired.WorkloadSpecHash || progress.ExposureSpecHash != job.RolloutIntent.Desired.ExposureSpecHash || progress.DesiredDigest != job.RolloutIntent.Desired.Image.Digest || progress.PreviousDigest != job.RolloutIntent.PreviousDigest {
 		return fmt.Errorf("rollout progress hashes or digests do not match the leased intent")
 	}
-	if !validRolloutHash(progress.StateHash) || !validOptionalRolloutHash(progress.ReadinessEvidenceHash) || progress.Attempt != job.RolloutIntent.Attempt || !validSanitizedResources(progress.Resources) || len(progress.FailureCode) > 128 || progress.ProgressPercent < 0 || progress.ProgressPercent > 100 {
+	allowUnmaterialized := progress.State == deploymentv1.RolloutStatePrepared || progress.State == deploymentv1.RolloutStateApplying
+	if !validRolloutHash(progress.StateHash) || !validOptionalRolloutHash(progress.ReadinessEvidenceHash) || progress.Attempt != job.RolloutIntent.Attempt || !validRolloutResources(progress.Resources, allowUnmaterialized) || len(progress.FailureCode) > 128 || progress.ProgressPercent < 0 || progress.ProgressPercent > 100 {
 		return fmt.Errorf("rollout progress metadata exceeds its bound")
 	}
 	if progress.State == deploymentv1.RolloutStateSucceeded && progress.CurrentDigest != progress.DesiredDigest || progress.State == deploymentv1.RolloutStateRolledBack && progress.CurrentDigest != progress.PreviousDigest || progress.State != deploymentv1.RolloutStateSucceeded && progress.State != deploymentv1.RolloutStateRolledBack && progress.CurrentDigest != "" {
@@ -312,11 +313,19 @@ func validOptionalRolloutHash(value string) bool {
 }
 
 func validSanitizedResources(resources []deploymentv1.ResourceIdentity) bool {
+	return validRolloutResources(resources, false)
+}
+
+func validRolloutResources(resources []deploymentv1.ResourceIdentity, allowUnmaterialized bool) bool {
 	if len(resources) > deploymentv1.MaxRolloutResources {
 		return false
 	}
 	for _, resource := range resources {
-		if resource.Kind == "" || len(resource.Kind) > 64 || resource.Name == "" || len(resource.Name) > 253 || len(resource.Namespace) > 253 || resource.UID == "" || len(resource.UID) > 256 || resource.ResourceVersion == "" || len(resource.ResourceVersion) > 256 || !validRolloutHash(resource.FunctionalHash) {
+		if resource.Kind == "" || len(resource.Kind) > 64 || resource.Name == "" || len(resource.Name) > 253 || len(resource.Namespace) > 253 || len(resource.UID) > 256 || len(resource.ResourceVersion) > 256 || !validRolloutHash(resource.FunctionalHash) {
+			return false
+		}
+		unmaterialized := resource.UID == "" && resource.ResourceVersion == ""
+		if resource.UID == "" != (resource.ResourceVersion == "") || unmaterialized && !allowUnmaterialized {
 			return false
 		}
 	}

@@ -64,6 +64,107 @@ func TestExposureRolloutSuccessReplayAndTerminalImmutability(t *testing.T) {
 	}
 }
 
+func TestRolloutProgressResourceValidationByPhase(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "resource-phase")
+	request := rolloutExposureRequest(t, base, "dep-resource-phase", "api.example.com", "/resource-phase")
+	job, _, err := service.StartExposureRollout(projectID, "user-1", "resource-phase", "create", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, job)
+	planned := plannedRolloutResource()
+	materialized := materializedRolloutResource()
+
+	prepared := rolloutProgress(lease, deploymentv1.RolloutStatePrepared, "1", "")
+	prepared.Resources = []deploymentv1.ResourceIdentity{planned}
+	if _, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "prepared-planned", prepared); err != nil {
+		t.Fatalf("prepared planned resource rejected: %v", err)
+	}
+	applying := rolloutProgress(lease, deploymentv1.RolloutStateApplying, "2", "")
+	applying.Resources = []deploymentv1.ResourceIdentity{planned}
+	firstApplying, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "applying-planned", applying)
+	if err != nil {
+		t.Fatalf("applying planned resource rejected: %v", err)
+	}
+	eventsBeforeReplay := len(service.deployEvents[job.ID])
+	replayedApplying, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "applying-planned-replay", applying)
+	if err != nil || replayedApplying.RolloutVersion != firstApplying.RolloutVersion || len(service.deployEvents[job.ID]) != eventsBeforeReplay {
+		t.Fatalf("planned progress replay mutated state/history: versions=%d/%d events=%d/%d err=%v", firstApplying.RolloutVersion, replayedApplying.RolloutVersion, eventsBeforeReplay, len(service.deployEvents[job.ID]), err)
+	}
+
+	waiting := rolloutProgress(lease, deploymentv1.RolloutStateWaiting, "3", "")
+	waiting.Resources = []deploymentv1.ResourceIdentity{planned}
+	beforeReject := service.deployments[job.ID]
+	eventsBeforeReject := len(service.deployEvents[job.ID])
+	if _, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "waiting-planned", waiting); apiCode(err) != "DEPLOYMENT_STATE_INVALID" {
+		t.Fatalf("waiting accepted unmaterialized resource: %v", err)
+	}
+	afterReject := service.deployments[job.ID]
+	if afterReject.RolloutState != beforeReject.RolloutState || afterReject.RolloutStateHash != beforeReject.RolloutStateHash || afterReject.RolloutVersion != beforeReject.RolloutVersion || len(service.deployEvents[job.ID]) != eventsBeforeReject {
+		t.Fatalf("rejected waiting progress mutated state/history: before=%+v after=%+v events=%d/%d", beforeReject, afterReject, eventsBeforeReject, len(service.deployEvents[job.ID]))
+	}
+	waiting.Resources = []deploymentv1.ResourceIdentity{materialized}
+	if _, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "waiting-materialized", waiting); err != nil {
+		t.Fatalf("waiting materialized resource rejected: %v", err)
+	}
+
+	for _, state := range []string{deploymentv1.RolloutStatePrepared, deploymentv1.RolloutStateApplying} {
+		for _, resource := range []deploymentv1.ResourceIdentity{
+			{Kind: planned.Kind, Namespace: planned.Namespace, Name: planned.Name, UID: "uid-api", FunctionalHash: planned.FunctionalHash},
+			{Kind: planned.Kind, Namespace: planned.Namespace, Name: planned.Name, ResourceVersion: "1", FunctionalHash: planned.FunctionalHash},
+		} {
+			progress := rolloutProgress(lease, state, "4", "")
+			progress.Resources = []deploymentv1.ResourceIdentity{resource}
+			if err := validateRolloutProgress(lease.Deployment, progress); err == nil {
+				t.Fatalf("%s accepted partially materialized resource: %+v", state, resource)
+			}
+		}
+	}
+
+	invalidResources := map[string][]deploymentv1.ResourceIdentity{
+		"empty_kind":       {{Namespace: materialized.Namespace, Name: materialized.Name, UID: materialized.UID, ResourceVersion: materialized.ResourceVersion, FunctionalHash: materialized.FunctionalHash}},
+		"empty_name":       {{Kind: materialized.Kind, Namespace: materialized.Namespace, UID: materialized.UID, ResourceVersion: materialized.ResourceVersion, FunctionalHash: materialized.FunctionalHash}},
+		"kind":             {{Kind: strings.Repeat("k", 65), Namespace: materialized.Namespace, Name: materialized.Name, UID: materialized.UID, ResourceVersion: materialized.ResourceVersion, FunctionalHash: materialized.FunctionalHash}},
+		"name":             {{Kind: materialized.Kind, Namespace: materialized.Namespace, Name: strings.Repeat("n", 254), UID: materialized.UID, ResourceVersion: materialized.ResourceVersion, FunctionalHash: materialized.FunctionalHash}},
+		"namespace":        {{Kind: materialized.Kind, Namespace: strings.Repeat("n", 254), Name: materialized.Name, UID: materialized.UID, ResourceVersion: materialized.ResourceVersion, FunctionalHash: materialized.FunctionalHash}},
+		"uid":              {{Kind: materialized.Kind, Namespace: materialized.Namespace, Name: materialized.Name, UID: strings.Repeat("u", 257), ResourceVersion: materialized.ResourceVersion, FunctionalHash: materialized.FunctionalHash}},
+		"resource_version": {{Kind: materialized.Kind, Namespace: materialized.Namespace, Name: materialized.Name, UID: materialized.UID, ResourceVersion: strings.Repeat("r", 257), FunctionalHash: materialized.FunctionalHash}},
+		"functional_hash":  {{Kind: materialized.Kind, Namespace: materialized.Namespace, Name: materialized.Name, UID: materialized.UID, ResourceVersion: materialized.ResourceVersion, FunctionalHash: "invalid"}},
+		"count":            make([]deploymentv1.ResourceIdentity, deploymentv1.MaxRolloutResources+1),
+	}
+	for name, resources := range invalidResources {
+		progress := rolloutProgress(lease, deploymentv1.RolloutStateApplying, "5", "")
+		progress.Resources = resources
+		if err := validateRolloutProgress(lease.Deployment, progress); err == nil {
+			t.Fatalf("applying accepted invalid %s resource metadata", name)
+		}
+	}
+
+	terminalCases := []struct {
+		state         string
+		currentState  string
+		currentDigest string
+		knownGoodID   string
+		knownGoodHash string
+	}{
+		{deploymentv1.RolloutStateSucceeded, deploymentv1.RolloutStateWaiting, job.RolloutIntent.Desired.Image.Digest, "known-good-resource-phase", strings.Repeat("a", 64)},
+		{deploymentv1.RolloutStateRolledBack, deploymentv1.RolloutStateRollingBack, job.RolloutIntent.PreviousDigest, job.RolloutIntent.PreviousKnownGoodID, job.RolloutIntent.PreviousKnownGoodHash},
+	}
+	for _, test := range terminalCases {
+		terminalJob := lease.Deployment
+		terminalJob.RolloutState = test.currentState
+		result := rolloutResult(lease, test.state, "6", test.currentDigest, test.knownGoodID, test.knownGoodHash, "").RolloutResult
+		result.Resources = []deploymentv1.ResourceIdentity{planned}
+		if err := validateRolloutResult(terminalJob, result); err == nil {
+			t.Fatalf("%s terminal result accepted unmaterialized resource", test.state)
+		}
+		result.Resources = []deploymentv1.ResourceIdentity{materialized}
+		if err := validateRolloutResult(terminalJob, result); err != nil {
+			t.Fatalf("%s terminal result rejected materialized resource: %v", test.state, err)
+		}
+	}
+}
+
 func TestExposureAutomaticRollbackKeepsDesiredAndFactualKnownGood(t *testing.T) {
 	service, projectID, base := rolloutRegistryFixture(t, "rollback")
 	aRequest := rolloutExposureRequest(t, base, "dep-exposure-a", "api.example.com", "/v1")
@@ -427,6 +528,17 @@ func rolloutProgress(lease DeploymentLease, state, hashCharacter, failureCode st
 		currentDigest = intent.PreviousDigest
 	}
 	return deploymentv1.Progress{SchemaVersion: deploymentv1.EventSchemaVersion, LeaseToken: lease.LeaseToken, State: state, MessageRedacted: "sanitized rollout progress", ProgressPercent: 50, RolloutID: intent.RolloutID, IntentHash: intent.IntentHash, StateHash: strings.Repeat(hashCharacter, 64), WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: currentDigest, PreviousDigest: intent.PreviousDigest, FailureCode: failureCode, Attempt: intent.Attempt}
+}
+
+func plannedRolloutResource() deploymentv1.ResourceIdentity {
+	return deploymentv1.ResourceIdentity{Kind: "Deployment", Namespace: "opsi", Name: "api", FunctionalHash: strings.Repeat("f", 64)}
+}
+
+func materializedRolloutResource() deploymentv1.ResourceIdentity {
+	resource := plannedRolloutResource()
+	resource.UID = "uid-api"
+	resource.ResourceVersion = "1"
+	return resource
 }
 
 func rolloutResult(lease DeploymentLease, state, hashCharacter, currentDigest, knownGoodID, knownGoodHash, failureCode string) DeploymentResult {

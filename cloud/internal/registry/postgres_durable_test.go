@@ -76,6 +76,104 @@ func TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart(t *testing.T
 	}
 }
 
+func TestPostgresRolloutProgressResourcePhasesSurviveRestartAndReplay(t *testing.T) {
+	dsn := requirePostgresTestDSN(t, "rollout resource phase durability")
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := postgres.Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	suffix := strings.ToLower(newID("resourcepg"))
+	orgID, userID := "org-"+suffix, "user-"+suffix
+	if _, err := db.ExecContext(ctx, `INSERT INTO users(id,email) VALUES($1,$2)`, userID, userID+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO organizations(id,name,slug) VALUES($1,$2,$3)`, orgID, "Resource Phase", "resource-phase-"+suffix); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM organizations WHERE id=$1`, orgID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+	now := time.Date(2026, 7, 25, 8, 0, 0, 0, time.UTC)
+	fresh := func() PostgresService { return PostgresService{DB: db, Now: func() time.Time { return now }} }
+	service := fresh()
+	project, err := service.CreateProject(orgID, "Resource Phase", "resource-phase-"+suffix, userID, "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, snapshot := postgresImmutableSnapshot(t, service, project.ID, suffix)
+	job, _, err := service.StartImmutableDeployment(snapshot, userID, "resource-phase-key", "create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, ok, err := service.LeaseDeployment(project.ID, job.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("lease=%+v ok=%v err=%v", lease, ok, err)
+	}
+	planned := plannedRolloutResource()
+	prepared := rolloutProgress(lease, deploymentv1.RolloutStatePrepared, "1", "")
+	prepared.Resources = []deploymentv1.ResourceIdentity{planned}
+	if _, err := service.ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "prepared-planned", prepared); err != nil {
+		t.Fatalf("prepared planned resource rejected: %v", err)
+	}
+
+	restarted := fresh()
+	applying := rolloutProgress(lease, deploymentv1.RolloutStateApplying, "2", "")
+	applying.Resources = []deploymentv1.ResourceIdentity{planned}
+	firstApplying, err := restarted.ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "applying-planned", applying)
+	if err != nil {
+		t.Fatalf("applying planned resource rejected after restart: %v", err)
+	}
+	eventsBeforeReplay, err := restarted.DeploymentEvents(project.ID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted = fresh()
+	replayedApplying, err := restarted.ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "applying-planned-replay", applying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsAfterReplay, err := restarted.DeploymentEvents(project.ID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedApplying.RolloutVersion != firstApplying.RolloutVersion || len(eventsAfterReplay) != len(eventsBeforeReplay) {
+		t.Fatalf("restart replay mutated durable history: versions=%d/%d events=%d/%d", firstApplying.RolloutVersion, replayedApplying.RolloutVersion, len(eventsBeforeReplay), len(eventsAfterReplay))
+	}
+
+	waiting := rolloutProgress(lease, deploymentv1.RolloutStateWaiting, "3", "")
+	waiting.Resources = []deploymentv1.ResourceIdentity{planned}
+	beforeReject, err := restarted.GetDeployment(project.ID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "waiting-planned", waiting); apiCode(err) != "DEPLOYMENT_STATE_INVALID" {
+		t.Fatalf("waiting accepted unmaterialized resource: %v", err)
+	}
+	restarted = fresh()
+	afterReject, err := restarted.GetDeployment(project.ID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsAfterReject, err := restarted.DeploymentEvents(project.ID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterReject.RolloutState != beforeReject.RolloutState || afterReject.RolloutStateHash != beforeReject.RolloutStateHash || afterReject.RolloutVersion != beforeReject.RolloutVersion || len(eventsAfterReject) != len(eventsAfterReplay) {
+		t.Fatalf("rejected waiting progress mutated durable state/history: before=%+v after=%+v events=%d/%d", beforeReject, afterReject, len(eventsAfterReplay), len(eventsAfterReject))
+	}
+	waiting.Resources = []deploymentv1.ResourceIdentity{materializedRolloutResource()}
+	accepted, err := restarted.ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "waiting-materialized", waiting)
+	if err != nil || accepted.RolloutState != deploymentv1.RolloutStateWaiting || accepted.RolloutVersion != beforeReject.RolloutVersion+1 {
+		t.Fatalf("waiting materialized progress=%+v err=%v", accepted, err)
+	}
+}
+
 func TestPostgresUnresolvedRolloutRetainsServiceOwnership(t *testing.T) {
 	dsn := requirePostgresTestDSN(t, "unresolved rollout ownership")
 	db, err := sql.Open("pgx", dsn)
