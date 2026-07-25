@@ -2,6 +2,7 @@ package registry
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,11 +212,123 @@ func TestImmutableDeploymentExpiredLeaseRetryKeepsJobID(t *testing.T) {
 		t.Fatalf("lease-exhausted deployment allowed replacement: %v", err)
 	}
 	retried, reused, err := service.RetryDeployment(projectID, job.ID, "retry-one", "retry")
-	if err != nil || reused || retried.ID != job.ID || retried.Status != deploymentv1.StateQueued || retried.MaxAttempts <= retried.AttemptCount {
+	if err != nil || reused || retried.ID != job.ID || retried.Status != deploymentv1.StateQueued || retried.MaxAttempts <= retried.AttemptCount || retried.NodeID != job.NodeID || retried.AgentID != job.AgentID {
 		t.Fatalf("retry=%+v reused=%v err=%v", retried, reused, err)
 	}
 	replay, reused, err := service.RetryDeployment(projectID, job.ID, "retry-one", "retry-replay")
 	if err != nil || !reused || replay.ID != job.ID {
 		t.Fatalf("retry replay=%+v reused=%v err=%v", replay, reused, err)
+	}
+}
+
+func TestCanonicalDeploymentOwnershipOnlyReleasesExactConfirmedReset(t *testing.T) {
+	job := DeploymentJob{Mode: "rollout", ProjectID: "project-1", RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1", Status: deploymentv1.StateFailed}
+	node := Node{ID: job.NodeID, ProjectID: job.ProjectID, RuntimeID: job.RuntimeID, AgentID: job.AgentID, Status: NodeOffline, FailureCode: "OPERATOR_CONFIRMED_TARGET_RESET"}
+	agent := Agent{ID: job.AgentID, ProjectID: job.ProjectID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, Status: "revoked"}
+	if canonicalDeploymentOwnsService(job, node, agent) {
+		t.Fatal("exact operator-confirmed target retirement retained ownership")
+	}
+
+	cases := map[string]struct {
+		node  Node
+		agent Agent
+	}{
+		"ordinary offline":        {node: func() Node { copy := node; copy.FailureCode = ""; return copy }(), agent: agent},
+		"agent still active":      {node: node, agent: func() Agent { copy := agent; copy.Status = "active"; return copy }()},
+		"different node reset":    {node: func() Node { copy := node; copy.ID = "node-2"; return copy }(), agent: agent},
+		"node agent mismatch":     {node: func() Node { copy := node; copy.AgentID = "agent-2"; return copy }(), agent: agent},
+		"agent node mismatch":     {node: node, agent: func() Agent { copy := agent; copy.NodeID = "node-2"; return copy }()},
+		"ordinary unresolved job": {node: func() Node { copy := node; copy.Status = NodeHealthy; copy.FailureCode = ""; return copy }(), agent: func() Agent { copy := agent; copy.Status = "active"; return copy }()},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !canonicalDeploymentOwnsService(job, test.node, test.agent) {
+				t.Fatal("non-canonical reset evidence released ownership")
+			}
+		})
+	}
+}
+
+func TestOperatorConfirmedTargetResetReleasesDeploymentOwnership(t *testing.T) {
+	service, projectID := readyRegistry(t)
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	created := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api", "svc-reset")
+	snapshot := immutableSnapshot(t, service, projectID, created.ID, "reset")
+	oldJob, _, err := service.StartImmutableDeployment(snapshot, "user-1", "deploy-reset", "create-old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldJob.MaxAttempts = 1
+	service.deployments[oldJob.ID] = oldJob
+	if _, ok, err := service.LeaseDeployment(projectID, oldJob.NodeID); err != nil || !ok {
+		t.Fatalf("old lease ok=%v err=%v", ok, err)
+	}
+	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
+	if _, ok, err := service.LeaseDeployment(projectID, oldJob.NodeID); err != nil || ok {
+		t.Fatalf("lease exhaustion ok=%v err=%v", ok, err)
+	}
+	exhausted := service.deployments[oldJob.ID]
+	if exhausted.Status != deploymentv1.StateFailed || exhausted.FailureCode != "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" || exhausted.TerminalResult != nil {
+		t.Fatalf("exhausted old job=%+v", exhausted)
+	}
+	eventsBefore, err := service.DeploymentEvents(projectID, oldJob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offline, err := service.MarkNodeOffline(projectID, oldJob.NodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offline.Status != NodeOffline || offline.FailureCode != "OPERATOR_CONFIRMED_TARGET_RESET" || service.agents[oldJob.AgentID].Status != "revoked" {
+		t.Fatalf("reset evidence node=%+v agent=%+v", offline, service.agents[oldJob.AgentID])
+	}
+
+	now = now.Add(time.Second)
+	replacementNode, err := service.UpsertNode(projectID, "vps-2", "server", NodeHealthy, "203.0.113.11", "", "replacement-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementAgent, err := service.RegisterAgent(projectID, replacementNode.ID, "sha256:replacement", "replacement", "v1", "replacement-agent", map[string]any{"deploy": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RecordAgentHeartbeat(projectID, replacementNode.ID, AgentHeartbeat{Version: "v1", NodeReady: true, K3SStatus: "ready", Capabilities: map[string]any{"deploy": true}}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := snapshot
+	replacement.PayloadHash = "payload-replacement"
+	replacement.Authority.BuildRecord.ID = "br-replacement"
+	replacement.Authority.NodeID = replacementNode.ID
+	replacement.Authority.AgentID = replacementAgent.ID
+	var newJob DeploymentJob
+	var createErr, retryErr error
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		newJob, _, createErr = service.StartImmutableDeployment(replacement, "user-1", "deploy-after-reset", "after-reset")
+	}()
+	go func() {
+		defer wait.Done()
+		_, _, retryErr = service.RetryDeployment(projectID, oldJob.ID, "retry-retired", "retry-retired")
+	}()
+	wait.Wait()
+	if createErr != nil || newJob.NodeID != replacementNode.ID || newJob.AgentID != replacementAgent.ID || apiCode(retryErr) != "RETRY_TARGET_RETIRED" {
+		t.Fatalf("replacement deployment=%+v createErr=%v retryErr=%v", newJob, createErr, retryErr)
+	}
+	persisted := service.deployments[oldJob.ID]
+	if persisted.TerminalResult != nil || persisted.IntentHash != exhausted.IntentHash || persisted.RolloutStateHash != exhausted.RolloutStateHash || persisted.FailureCode != exhausted.FailureCode {
+		t.Fatalf("old deployment evidence changed: before=%+v after=%+v", exhausted, persisted)
+	}
+	eventsAfter, err := service.DeploymentEvents(projectID, oldJob.ID)
+	if err != nil || len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("old deployment events changed before=%d after=%d err=%v", len(eventsBefore), len(eventsAfter), err)
+	}
+	if _, ok, err := service.LeaseDeployment(projectID, replacementNode.ID); err != nil || !ok {
+		t.Fatalf("replacement lease ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := service.LeaseDeployment(projectID, oldJob.NodeID); err != nil || ok {
+		t.Fatalf("old job leased after target retirement ok=%v err=%v", ok, err)
 	}
 }

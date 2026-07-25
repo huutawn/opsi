@@ -1119,6 +1119,13 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	if err := acquireDeploymentLock(ctx, tx, snapshot.ProjectID, service.ID, job.ID, now, requestID); err != nil {
 		return DeploymentJob{}, false, err
 	}
+	currentNode, currentAgent, found, err := deploymentTarget(ctx, tx, job)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if !found || !deploymentTargetMatches(job, currentNode, currentAgent) || currentNode.Status != NodeHealthy || currentAgent.Status != "active" || !capabilityEnabled(currentAgent.Capabilities, "deploy") {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "ROUTING_TARGET_CHANGED", Message: "resolved Agent target changed before job creation", RequestID: requestID}
+	}
 	event := rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable BuildRecord rollout prepared", 0, requestID, now, "")
 	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 		return DeploymentJob{}, false, err
@@ -1561,6 +1568,13 @@ func (s PostgresService) RetryDeployment(projectID, deploymentID, key, requestID
 	if !isProductionDeploymentMode(job.Mode) {
 		return DeploymentJob{}, false, legacyDeploymentRetiredError(requestID)
 	}
+	node, agent, found, err := deploymentTarget(ctx, tx, job)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if found && deploymentTargetRetired(job, node, agent) {
+		return DeploymentJob{}, false, retryTargetRetiredError(requestID)
+	}
 	scope := "deploy-retry:v1:" + projectID
 	var existingID string
 	err = tx.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE scope=$1 AND key=$2`, scope, key).Scan(&existingID)
@@ -1808,12 +1822,32 @@ func acquireDeploymentLock(ctx context.Context, tx *sql.Tx, projectID, serviceID
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "deployment-service:"+serviceID); err != nil {
 		return err
 	}
-	var ownerID string
-	err := tx.QueryRowContext(ctx, `SELECT id FROM deployment_jobs WHERE service_id=$1 AND id<>$2 AND mode='rollout' AND COALESCE(terminal_result_json,'{}'::jsonb)='{}'::jsonb AND NOT (status=$3 AND COALESCE(attempt_count,0)=0 AND COALESCE(rollout_state,'') IN ('',$4)) ORDER BY created_at,id LIMIT 1`, serviceID, deploymentID, deploymentv1.StateCancelled, deploymentv1.RolloutStatePrepared).Scan(&ownerID)
-	if err == nil {
-		return deploymentLockedError(requestID, ownerID)
+	rows, err := tx.QueryContext(ctx, `SELECT d.id, COALESCE(d.mode,''), d.project_id, d.runtime_id, d.status, COALESCE(d.attempt_count,0), COALESCE(d.rollout_state,''), d.terminal_result_json IS NOT NULL AND d.terminal_result_json <> '{}'::jsonb, COALESCE(d.node_id,''), COALESCE(d.agent_id,''), COALESCE(n.id,''), COALESCE(n.project_id,''), COALESCE(n.runtime_id,''), COALESCE(n.agent_id,''), COALESCE(n.status,''), COALESCE(n.failure_code,''), COALESCE(a.id,''), COALESCE(a.project_id,''), COALESCE(a.runtime_id,''), COALESCE(a.node_id,''), COALESCE(a.status,'') FROM deployment_jobs d LEFT JOIN nodes n ON n.id=d.node_id LEFT JOIN agents a ON a.id=d.agent_id WHERE d.service_id=$1 AND d.id<>$2 ORDER BY d.created_at,d.id`, serviceID, deploymentID)
+	if err != nil {
+		return err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	for rows.Next() {
+		var job DeploymentJob
+		var node Node
+		var agent Agent
+		var terminal bool
+		if err := rows.Scan(&job.ID, &job.Mode, &job.ProjectID, &job.RuntimeID, &job.Status, &job.AttemptCount, &job.RolloutState, &terminal, &job.NodeID, &job.AgentID, &node.ID, &node.ProjectID, &node.RuntimeID, &node.AgentID, &node.Status, &node.FailureCode, &agent.ID, &agent.ProjectID, &agent.RuntimeID, &agent.NodeID, &agent.Status); err != nil {
+			rows.Close()
+			return err
+		}
+		if terminal {
+			job.TerminalResult = &deploymentv1.AgentResult{}
+		}
+		if canonicalDeploymentOwnsService(job, node, agent) {
+			rows.Close()
+			return deploymentLockedError(requestID, job.ID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO service_deployment_locks(service_id, project_id, deployment_id, expires_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT (service_id) DO UPDATE SET project_id=EXCLUDED.project_id, deployment_id=EXCLUDED.deployment_id, expires_at=EXCLUDED.expires_at, updated_at=EXCLUDED.updated_at`, serviceID, projectID, deploymentID, now.Add(30*time.Minute), now)
@@ -1821,6 +1855,23 @@ func acquireDeploymentLock(ctx context.Context, tx *sql.Tx, projectID, serviceID
 		return err
 	}
 	return nil
+}
+
+func deploymentTarget(ctx context.Context, tx *sql.Tx, job DeploymentJob) (Node, Agent, bool, error) {
+	var node Node
+	var agent Agent
+	var capabilities string
+	err := tx.QueryRowContext(ctx, `SELECT n.id, n.project_id, n.runtime_id, COALESCE(n.agent_id,''), n.status, COALESCE(n.failure_code,''), a.id, a.project_id, a.runtime_id, a.node_id, a.status, COALESCE(a.capabilities,'{}'::jsonb)::text FROM nodes n JOIN agents a ON a.id=$2 WHERE n.id=$1 FOR SHARE OF n,a`, job.NodeID, job.AgentID).Scan(&node.ID, &node.ProjectID, &node.RuntimeID, &node.AgentID, &node.Status, &node.FailureCode, &agent.ID, &agent.ProjectID, &agent.RuntimeID, &agent.NodeID, &agent.Status, &capabilities)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Node{}, Agent{}, false, nil
+	}
+	if err != nil {
+		return Node{}, Agent{}, false, err
+	}
+	if err := json.Unmarshal([]byte(capabilities), &agent.Capabilities); err != nil {
+		return Node{}, Agent{}, false, err
+	}
+	return node, agent, true, nil
 }
 
 func insertDeployment(ctx context.Context, tx *sql.Tx, job DeploymentJob) error {

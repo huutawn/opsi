@@ -102,6 +102,10 @@ func legacyDeploymentRetiredError(requestID string) error {
 	return APIError{Status: 409, Code: LegacyDeploymentRetired, Message: "legacy deployment jobs are retired", RequestID: requestID}
 }
 
+func retryTargetRetiredError(requestID string) error {
+	return APIError{Status: 409, Code: "RETRY_TARGET_RETIRED", Message: "deployment target was retired after an operator-confirmed reset", NextAction: "create_explicit_redeploy", RequestID: requestID}
+}
+
 func (e APIError) Error() string { return e.Code + ": " + e.Message }
 
 type Project struct {
@@ -1977,6 +1981,9 @@ func (s *Service) RetryDeployment(projectID, deploymentID, key, requestID string
 	if !isProductionDeploymentMode(job.Mode) {
 		return DeploymentJob{}, false, legacyDeploymentRetiredError(requestID)
 	}
+	if deploymentTargetRetired(job, s.nodes[job.NodeID], s.agents[job.AgentID]) {
+		return DeploymentJob{}, false, retryTargetRetiredError(requestID)
+	}
 	scope := "deploy-retry:v1:" + projectID + ":" + key
 	if existingID, exists := s.idempotency[scope].(string); exists {
 		if existingID != deploymentID {
@@ -2162,13 +2169,13 @@ func isProductionDeploymentMode(mode string) bool {
 
 func (s *Service) acquireDeploymentLockLocked(serviceID, deploymentID string, now time.Time, requestID string) error {
 	if lock, ok := s.deployLocks[serviceID]; ok && lock.DeploymentID != deploymentID {
-		if owner, exists := s.deployments[lock.DeploymentID]; exists && canonicalDeploymentOwnsService(owner) {
+		if owner, exists := s.deployments[lock.DeploymentID]; exists && canonicalDeploymentOwnsService(owner, s.nodes[owner.NodeID], s.agents[owner.AgentID]) {
 			return deploymentLockedError(requestID, owner.ID)
 		}
 		delete(s.deployLocks, serviceID)
 	}
 	for _, job := range s.deployments {
-		if job.ID != deploymentID && job.ServiceID == serviceID && canonicalDeploymentOwnsService(job) {
+		if job.ID != deploymentID && job.ServiceID == serviceID && canonicalDeploymentOwnsService(job, s.nodes[job.NodeID], s.agents[job.AgentID]) {
 			s.deployLocks[serviceID] = deploymentLock{DeploymentID: job.ID, ExpiresAt: now.Add(30 * time.Minute)}
 			return deploymentLockedError(requestID, job.ID)
 		}
@@ -2177,9 +2184,20 @@ func (s *Service) acquireDeploymentLockLocked(serviceID, deploymentID string, no
 	return nil
 }
 
-func canonicalDeploymentOwnsService(job DeploymentJob) bool {
+func canonicalDeploymentOwnsService(job DeploymentJob, node Node, agent Agent) bool {
 	safelyCancelled := job.Status == deploymentv1.StateCancelled && job.AttemptCount == 0 && (job.RolloutState == "" || job.RolloutState == deploymentv1.RolloutStatePrepared)
-	return isProductionDeploymentMode(job.Mode) && job.TerminalResult == nil && !safelyCancelled
+	return isProductionDeploymentMode(job.Mode) && job.TerminalResult == nil && !safelyCancelled && !deploymentTargetRetired(job, node, agent)
+}
+
+func deploymentTargetRetired(job DeploymentJob, node Node, agent Agent) bool {
+	return deploymentTargetMatches(job, node, agent) &&
+		node.Status == NodeOffline && node.FailureCode == "OPERATOR_CONFIRMED_TARGET_RESET" && agent.Status == "revoked"
+}
+
+func deploymentTargetMatches(job DeploymentJob, node Node, agent Agent) bool {
+	return job.NodeID != "" && job.AgentID != "" &&
+		node.ID == job.NodeID && node.ProjectID == job.ProjectID && node.RuntimeID == job.RuntimeID && node.AgentID == job.AgentID &&
+		agent.ID == job.AgentID && agent.ProjectID == job.ProjectID && agent.RuntimeID == job.RuntimeID && agent.NodeID == job.NodeID
 }
 
 func deploymentLockedError(requestID, deploymentID string) error {

@@ -340,6 +340,125 @@ func TestPostgresUnresolvedRolloutRetainsServiceOwnership(t *testing.T) {
 	}
 }
 
+func TestPostgresConfirmedResetReleasesOwnershipAcrossRestart(t *testing.T) {
+	dsn := requirePostgresTestDSN(t, "confirmed reset ownership recovery")
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := postgres.Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	suffix := strings.ToLower(newID("resetownershippg"))
+	orgID, userID := "org-"+suffix, "user-"+suffix
+	if _, err := db.ExecContext(ctx, `INSERT INTO users(id,email) VALUES($1,$2)`, userID, userID+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO organizations(id,name,slug) VALUES($1,$2,$3)`, orgID, "Reset Ownership", "reset-ownership-"+suffix); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM organizations WHERE id=$1`, orgID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+	fresh := func() PostgresService { return PostgresService{DB: db, Now: func() time.Time { return now }} }
+	project, err := fresh().CreateProject(orgID, "Reset Ownership", "reset-ownership-"+suffix, userID, "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, snapshot := postgresImmutableSnapshot(t, fresh(), project.ID, suffix)
+	oldJob, _, err := fresh().StartImmutableDeployment(snapshot, userID, "old-key", "old-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE deployment_jobs SET max_attempts=1 WHERE id=$1`, oldJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := fresh().LeaseDeployment(project.ID, oldJob.NodeID); err != nil || !ok {
+		t.Fatalf("old lease ok=%v err=%v", ok, err)
+	}
+	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
+	if _, ok, err := fresh().LeaseDeployment(project.ID, oldJob.NodeID); err != nil || ok {
+		t.Fatalf("lease exhaustion ok=%v err=%v", ok, err)
+	}
+	exhausted, err := fresh().GetDeployment(project.ID, oldJob.ID)
+	if err != nil || exhausted.Status != deploymentv1.StateFailed || exhausted.FailureCode != "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" || exhausted.TerminalResult != nil {
+		t.Fatalf("exhausted=%+v err=%v", exhausted, err)
+	}
+	eventsBefore, err := fresh().DeploymentEvents(project.ID, oldJob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh().MarkNodeOffline(project.ID, oldJob.NodeID); err != nil {
+		t.Fatal(err)
+	}
+	oldNode, err := fresh().getNode(ctx, oldJob.NodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAgent, err := fresh().getAgent(ctx, oldJob.AgentID)
+	if err != nil || oldNode.Status != NodeOffline || oldNode.FailureCode != "OPERATOR_CONFIRMED_TARGET_RESET" || oldAgent.Status != "revoked" {
+		t.Fatalf("reset node=%+v agent=%+v err=%v", oldNode, oldAgent, err)
+	}
+
+	now = now.Add(time.Second)
+	replacementNode, err := fresh().UpsertNode(project.ID, "replacement-"+suffix, "server", NodeHealthy, "203.0.113.78", "", "replacement-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementAgent, err := fresh().RegisterAgent(project.ID, replacementNode.ID, "sha256:replacement", "replacement", "v1", "replacement-agent", map[string]any{"deploy": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh().RecordAgentHeartbeat(project.ID, replacementNode.ID, AgentHeartbeat{Version: "v1", NodeReady: true, K3SStatus: "ready", Capabilities: map[string]any{"deploy": true}}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := snapshot
+	replacement.PayloadHash = "payload-replacement-" + suffix
+	replacement.Authority.BuildRecord.ID = "br-replacement-" + suffix
+	replacement.Authority.NodeID = replacementNode.ID
+	replacement.Authority.AgentID = replacementAgent.ID
+	if _, err := db.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id=$1`, record.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var newJob DeploymentJob
+	var createErr, retryErr error
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		newJob, _, createErr = fresh().StartImmutableDeployment(replacement, userID, "replacement-key", "replacement-create")
+	}()
+	go func() {
+		defer wait.Done()
+		_, _, retryErr = fresh().RetryDeployment(project.ID, oldJob.ID, "retired-retry", "retired-retry")
+	}()
+	wait.Wait()
+	if createErr != nil || newJob.NodeID != replacementNode.ID || newJob.AgentID != replacementAgent.ID || apiCode(retryErr) != "RETRY_TARGET_RETIRED" {
+		t.Fatalf("new=%+v createErr=%v retryErr=%v", newJob, createErr, retryErr)
+	}
+
+	restarted := fresh()
+	persisted, err := restarted.GetDeployment(project.ID, oldJob.ID)
+	if err != nil || persisted.TerminalResult != nil || persisted.IntentHash != exhausted.IntentHash || persisted.RolloutStateHash != exhausted.RolloutStateHash || persisted.FailureCode != exhausted.FailureCode {
+		t.Fatalf("old evidence before=%+v after=%+v err=%v", exhausted, persisted, err)
+	}
+	eventsAfter, err := restarted.DeploymentEvents(project.ID, oldJob.ID)
+	if err != nil || len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("old events changed before=%d after=%d err=%v", len(eventsBefore), len(eventsAfter), err)
+	}
+	if lease, ok, err := restarted.LeaseDeployment(project.ID, replacementNode.ID); err != nil || !ok || lease.Deployment.ID != newJob.ID {
+		t.Fatalf("replacement lease=%+v ok=%v err=%v", lease, ok, err)
+	}
+	if _, ok, err := restarted.LeaseDeployment(project.ID, oldJob.NodeID); err != nil || ok {
+		t.Fatalf("retired old target lease ok=%v err=%v", ok, err)
+	}
+}
+
 func TestPostgresLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease(t *testing.T) {
 	dsn := requirePostgresTestDSN(t, "legacy deployment retirement")
 	db, err := sql.Open("pgx", dsn)
