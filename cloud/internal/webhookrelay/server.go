@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -505,13 +506,13 @@ func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Requ
 		if job.Status == registry.DeploymentFailed {
 			s.observer.Inc("deployment_failures_total")
 		}
-		outcome := "failed"
-		if job.Status == registry.DeploymentSucceeded || job.Status == registry.DeploymentRolledBack {
-			outcome = "success"
-		}
-		s.Registry.Audit(job.OrgID, projectID, "agent", "DEPLOYMENT_AGENT_RESULT_RECORDED", "deployment_job", job.ID, outcome, map[string]any{"status": job.Status, "failure_code": job.FailureCode})
 	} else {
-		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_RESULT_REJECTED", "deployment_job", deploymentID, "denied", map[string]any{"error": err.Error()})
+		code := "DEPLOYMENT_RESULT_REJECTED"
+		var apiError registry.APIError
+		if errors.As(err, &apiError) && apiError.Code != "" {
+			code = apiError.Code
+		}
+		s.Registry.Audit(agent.OrgID, projectID, "agent", "DEPLOYMENT_AGENT_RESULT_REJECTED", "deployment_job", deploymentID, "denied", map[string]any{"error_code": code, "deployment_id": deploymentID})
 	}
 	writeRegistryResult(w, r, job, err, http.StatusOK)
 }

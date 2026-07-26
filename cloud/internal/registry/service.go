@@ -1772,6 +1772,8 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	event := rolloutEvent(job, job.RolloutState, "Agent reported terminal rollout result", 100, requestID, now, job.RolloutStateHash)
 	event.EvidenceHash = job.ReadinessEvidenceHash
 	s.deployEvents[deploymentID] = append(s.deployEvents[deploymentID], event)
+	actorType, actorUserID := machineAuditActor("agent")
+	s.audit = append(s.audit, AuditEvent{ID: newID("aud"), OrgID: job.OrgID, ProjectID: projectID, ActorUserID: actorUserID, ActorType: actorType, Action: "DEPLOYMENT_AGENT_RESULT_RECORDED", ResourceType: "deployment_job", ResourceID: job.ID, Result: deploymentAuditOutcome(job.Status), MetadataRedacted: deploymentAuditMetadata(job), CreatedAt: now})
 	delete(s.deployLocks, job.ServiceID)
 	return job, nil
 }
@@ -2217,7 +2219,33 @@ func hashJSON(value any) string {
 func (s *Service) Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.audit = append(s.audit, AuditEvent{ID: newID("aud"), OrgID: orgID, ProjectID: projectID, ActorUserID: actorUserID, ActorType: "user", Action: action, ResourceType: resourceType, ResourceID: resourceID, Result: result, MetadataRedacted: RedactMap(metadata), CreatedAt: s.clock()})
+	actorType, actorUserID := machineAuditActor(actorUserID)
+	s.audit = append(s.audit, AuditEvent{ID: newID("aud"), OrgID: orgID, ProjectID: projectID, ActorUserID: actorUserID, ActorType: actorType, Action: action, ResourceType: resourceType, ResourceID: resourceID, Result: result, MetadataRedacted: RedactMap(metadata), CreatedAt: s.clock()})
+}
+
+func machineAuditActor(actorUserID string) (string, string) {
+	if actorUserID == "agent" || actorUserID == "worker" {
+		return actorUserID, ""
+	}
+	return "user", actorUserID
+}
+
+func deploymentAuditOutcome(status string) string {
+	if status == deploymentv1.RolloutStateSucceeded || status == deploymentv1.RolloutStateRolledBack {
+		return "success"
+	}
+	return "failure"
+}
+
+func deploymentAuditMetadata(job DeploymentJob) map[string]any {
+	metadata := map[string]any{"status": job.Status, "failure_code": job.FailureCode, "deployment_id": job.ID}
+	if job.RolloutStateHash != "" {
+		metadata["state_hash"] = job.RolloutStateHash
+	}
+	if job.RolloutIntent != nil && job.RolloutIntent.RolloutID != "" {
+		metadata["rollout_id"] = job.RolloutIntent.RolloutID
+	}
+	return metadata
 }
 
 func (s *Service) AuditWorkload(projectID, action, resourceID, result string, metadata map[string]any) {

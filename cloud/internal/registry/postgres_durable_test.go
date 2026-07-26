@@ -713,6 +713,11 @@ func TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly(t *testing.T
 	if err != nil || finished.TerminalResult == nil || finished.FailureCode != deploymentv1.RolloutCodePreflightFailed || finished.CurrentDigest != "" || finished.KnownGoodID != "" {
 		t.Fatalf("finished=%+v err=%v", finished, err)
 	}
+	var auditCount int
+	var actorType, actorUserID, outcome, auditMetadata string
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(actor_type),''), COALESCE(MAX(actor_user_id),''), COALESCE(MAX(result),''), COALESCE(MAX(metadata_redacted::text),'') FROM cloud_audit_events WHERE action='DEPLOYMENT_AGENT_RESULT_RECORDED' AND resource_id=$1`, job.ID).Scan(&auditCount, &actorType, &actorUserID, &outcome, &auditMetadata); err != nil || auditCount != 1 || actorType != "agent" || actorUserID != "" || outcome != "failure" || !strings.Contains(auditMetadata, deploymentv1.RolloutCodePreflightFailed) || strings.Contains(auditMetadata, lease.LeaseToken) {
+		t.Fatalf("terminal audit count=%d actor=%q/%q outcome=%q metadata=%q err=%v", auditCount, actorType, actorUserID, outcome, auditMetadata, err)
+	}
 	restarted := fresh()
 	persisted, err := restarted.GetDeployment(project.ID, job.ID)
 	if err != nil || persisted.TerminalResult == nil || persisted.RolloutStateHash != result.RolloutResult.StateHash || persisted.FailureCode != result.FailureCode {
@@ -729,6 +734,9 @@ func TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly(t *testing.T
 	replayedEvents, _ := restarted.DeploymentEvents(project.ID, job.ID)
 	if len(replayedEvents) != len(events) {
 		t.Fatalf("terminal replay duplicated history: %d/%d", len(events), len(replayedEvents))
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cloud_audit_events WHERE action='DEPLOYMENT_AGENT_RESULT_RECORDED' AND resource_id=$1`, job.ID).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("terminal replay audit count=%d err=%v", auditCount, err)
 	}
 	if leased, ok, err := restarted.LeaseDeployment(project.ID, job.NodeID); err != nil || ok || leased.Deployment.ID == job.ID {
 		t.Fatalf("terminal failed job was leased again: lease=%+v ok=%v err=%v", leased, ok, err)
@@ -770,6 +778,50 @@ func TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly(t *testing.T
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM service_deployment_locks WHERE service_id=$1`, record.ID).Scan(&locks); err != nil || locks != 0 {
 		t.Fatalf("factual terminal lock count=%d err=%v", locks, err)
+	}
+
+	rollbackJob, reused, err := fresh().StartImmutableDeployment(snapshot, userID, "audit-rollback-key", "audit-rollback-create")
+	if err != nil || reused {
+		t.Fatalf("audit rollback job=%+v reused=%v err=%v", rollbackJob, reused, err)
+	}
+	rollbackLease, ok, err := fresh().LeaseDeployment(project.ID, rollbackJob.NodeID)
+	if err != nil || !ok {
+		t.Fatalf("audit rollback lease=%+v ok=%v err=%v", rollbackLease, ok, err)
+	}
+	var eventsBefore int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployment_events WHERE deployment_id=$1`, rollbackJob.ID).Scan(&eventsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE OR REPLACE FUNCTION opsi_test_reject_terminal_audit() RETURNS trigger AS $$ BEGIN IF NEW.action='DEPLOYMENT_AGENT_RESULT_RECORDED' THEN RAISE EXCEPTION 'injected audit failure'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER opsi_test_reject_terminal_audit_trigger BEFORE INSERT ON cloud_audit_events FOR EACH ROW EXECUTE FUNCTION opsi_test_reject_terminal_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DROP TRIGGER IF EXISTS opsi_test_reject_terminal_audit_trigger ON cloud_audit_events`)
+		_, _ = db.ExecContext(ctx, `DROP FUNCTION IF EXISTS opsi_test_reject_terminal_audit()`)
+	})
+	if _, err := fresh().CompleteDeployment(project.ID, rollbackJob.NodeID, rollbackJob.ID, "audit-rollback", preMutationRolloutResult(rollbackLease, deploymentv1.RolloutCodePreflightFailed)); err == nil {
+		t.Fatal("completion succeeded despite required audit failure")
+	}
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER opsi_test_reject_terminal_audit_trigger ON cloud_audit_events`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP FUNCTION opsi_test_reject_terminal_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	var terminalJSON sql.NullString
+	var leaseToken sql.NullString
+	var eventsAfter int
+	if err := db.QueryRowContext(ctx, `SELECT terminal_result_json::text, lease_token FROM deployment_jobs WHERE id=$1`, rollbackJob.ID).Scan(&terminalJSON, &leaseToken); err != nil || terminalJSON.Valid || !leaseToken.Valid {
+		t.Fatalf("completion was not rolled back: terminal=%+v lease=%+v err=%v", terminalJSON, leaseToken, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployment_events WHERE deployment_id=$1`, rollbackJob.ID).Scan(&eventsAfter); err != nil || eventsAfter != eventsBefore {
+		t.Fatalf("audit failure event count=%d/%d err=%v", eventsBefore, eventsAfter, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM service_deployment_locks WHERE service_id=$1 AND deployment_id=$2`, record.ID, rollbackJob.ID).Scan(&locks); err != nil || locks != 1 {
+		t.Fatalf("audit failure released service lock count=%d err=%v", locks, err)
 	}
 }
 

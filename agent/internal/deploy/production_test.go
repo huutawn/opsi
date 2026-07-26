@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,96 @@ import (
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 )
+
+func TestExecCommandRunnerSeparatesSuccessfulStdoutAndStderr(t *testing.T) {
+	runner := ExecCommandRunner{}
+	clean, err := runner.Run(context.Background(), nil, "sh", "-c", "printf clean")
+	if err != nil || string(clean) != "clean" {
+		t.Fatalf("clean output=%q err=%v", clean, err)
+	}
+	jsonOutput := `{"items":[]}`
+	out, err := runner.Run(context.Background(), nil, "sh", "-c", "printf '%s' '"+jsonOutput+"'; printf '%s' 'Warning: v1 Endpoints is deprecated' >&2")
+	if err != nil || string(out) != jsonOutput {
+		t.Fatalf("output=%q err=%v", out, err)
+	}
+	var value map[string]any
+	if err := decodeSingleJSON(out, &value); err != nil {
+		t.Fatalf("stdout JSON was contaminated by stderr: %v", err)
+	}
+}
+
+func TestExecCommandRunnerFailureDiagnostics(t *testing.T) {
+	runner := ExecCommandRunner{}
+	for _, tc := range []struct {
+		name       string
+		command    string
+		contains   string
+		notContain string
+	}{
+		{name: "stderr preferred", command: "printf stdout; printf stderr >&2; exit 1", contains: "stderr", notContain: "stdout"},
+		{name: "stdout fallback", command: "printf stdout; exit 1", contains: "stdout"},
+		{name: "secret redacted", command: "printf 'token=supersecret' >&2; exit 1", contains: "[REDACTED]", notContain: "supersecret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runner.Run(context.Background(), nil, "sh", "-c", tc.command)
+			if err == nil || out != nil || !strings.Contains(err.Error(), tc.contains) || tc.notContain != "" && strings.Contains(err.Error(), tc.notContain) {
+				t.Fatalf("output=%q err=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestExecCommandRunnerFailsClosedOnEitherStreamOverflow(t *testing.T) {
+	runner := ExecCommandRunner{}
+	for index, command := range []string{
+		"yes x | head -c 262145",
+		"(yes x | head -c 262145) >&2",
+	} {
+		if out, err := runner.Run(context.Background(), nil, "sh", "-c", command); err == nil || out != nil || err.Error() != "command output exceeded the allowed bound" {
+			t.Fatalf("case=%d output length=%d err=%v", index, len(out), err)
+		}
+	}
+}
+
+func TestExecCommandRunnerCancellationDoesNotExposeOutput(t *testing.T) {
+	runner := ExecCommandRunner{}
+	for _, tc := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+	}{
+		{name: "timeout", ctx: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 10*time.Millisecond)
+		}},
+		{name: "cancelled", ctx: func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, func() {}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			out, err := runner.Run(ctx, nil, "sh", "-c", "printf 'token=supersecret' >&2; sleep 1")
+			if err == nil || out != nil || err.Error() != "command cancelled" || strings.Contains(err.Error(), "supersecret") {
+				t.Fatalf("output=%q err=%v", out, err)
+			}
+			if !errors.Is(ctx.Err(), context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("context error=%v", ctx.Err())
+			}
+		})
+	}
+}
+
+func TestExecCommandRunnerDoesNotMakeMalformedStdoutValid(t *testing.T) {
+	out, err := (ExecCommandRunner{}).Run(context.Background(), nil, "sh", "-c", "printf 'warning{\\\"items\\\":[]}'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if decodeSingleJSON(out, &value) == nil {
+		t.Fatalf("malformed stdout was accepted: %q", out)
+	}
+}
 
 func testAgentCommand(t *testing.T) deploymentv1.AgentCommand {
 	t.Helper()

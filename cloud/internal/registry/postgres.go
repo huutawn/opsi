@@ -1391,6 +1391,9 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	if err := insertDeploymentEvent(ctx, tx, event); err != nil {
 		return DeploymentJob{}, err
 	}
+	if err := insertCloudAudit(ctx, tx, job.OrgID, projectID, "agent", "DEPLOYMENT_AGENT_RESULT_RECORDED", "deployment_job", job.ID, deploymentAuditOutcome(job.Status), deploymentAuditMetadata(job)); err != nil {
+		return DeploymentJob{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM service_deployment_locks WHERE service_id = $1 AND deployment_id = $2`, job.ServiceID, job.ID); err != nil {
 		return DeploymentJob{}, err
 	}
@@ -1617,7 +1620,8 @@ func (s PostgresService) RetryDeployment(projectID, deploymentID, key, requestID
 
 func (s PostgresService) Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) {
 	data, _ := json.Marshal(RedactMap(metadata))
-	_, _ = s.DB.ExecContext(context.Background(), `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_user_id, actor_type, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),'user',$5,$6,$7,$8,$9,$10)`, newID("aud"), orgID, projectID, actorUserID, action, resourceType, resourceID, result, string(data), s.clock())
+	actorType, actorUserID := machineAuditActor(actorUserID)
+	_, _ = s.DB.ExecContext(context.Background(), `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_user_id, actor_type, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7,$8,$9,$10,$11)`, newID("aud"), orgID, projectID, actorUserID, actorType, action, resourceType, resourceID, result, string(data), s.clock())
 }
 
 func (s PostgresService) AuditWorkload(projectID, action, resourceID, result string, metadata map[string]any) {
@@ -2009,11 +2013,7 @@ func expireNodeLifecycleLeases(ctx context.Context, tx *sql.Tx, projectID string
 
 func insertCloudAudit(ctx context.Context, tx *sql.Tx, orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) error {
 	data, _ := json.Marshal(RedactMap(metadata))
-	actorType := "user"
-	if actorUserID == "agent" || actorUserID == "worker" {
-		actorType = actorUserID
-		actorUserID = ""
-	}
+	actorType, actorUserID := machineAuditActor(actorUserID)
 	_, err := tx.ExecContext(ctx, `INSERT INTO cloud_audit_events(id, org_id, project_id, actor_user_id, actor_type, action, resource_type, resource_id, result, metadata_redacted, created_at) VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7,$8,$9,$10,now())`, newID("aud"), orgID, projectID, actorUserID, actorType, action, resourceType, resourceID, result, string(data))
 	return err
 }

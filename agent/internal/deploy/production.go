@@ -35,15 +35,22 @@ func (ExecCommandRunner) Run(ctx context.Context, input []byte, name string, arg
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
 	}
-	output := &boundedCommandBuffer{limit: MaxCommandOutputBytes}
-	cmd.Stdout = output
-	cmd.Stderr = output
+	stdout := &boundedCommandBuffer{limit: MaxCommandOutputBytes}
+	stderr := &boundedCommandBuffer{limit: MaxCommandOutputBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	err := cmd.Run()
-	if output.overflow {
+	if stdout.overflow || stderr.overflow {
 		return nil, errors.New("command output exceeded the allowed bound")
 	}
+	if ctx.Err() != nil {
+		return nil, errors.New("command cancelled")
+	}
 	if err != nil {
-		message := strings.TrimSpace(string(output.Bytes()))
+		message := strings.TrimSpace(string(stderr.Bytes()))
+		if message == "" {
+			message = strings.TrimSpace(string(stdout.Bytes()))
+		}
 		if len(message) > MaxCommandErrorBytes {
 			message = message[:MaxCommandErrorBytes]
 		}
@@ -52,18 +59,18 @@ func (ExecCommandRunner) Run(ctx context.Context, input []byte, name string, arg
 		}
 		return nil, fmt.Errorf("%s failed: %s", name, RedactSensitive(message))
 	}
-	return append([]byte(nil), output.Bytes()...), nil
+	return append([]byte(nil), stdout.Bytes()...), nil
 }
 
 type boundedCommandBuffer struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	limit    int
 	overflow bool
 }
 
 func (b *boundedCommandBuffer) Write(data []byte) (int, error) {
 	written := len(data)
-	remaining := b.limit - b.Len()
+	remaining := b.limit - b.buffer.Len()
 	if remaining <= 0 {
 		b.overflow = true
 		return written, nil
@@ -72,9 +79,11 @@ func (b *boundedCommandBuffer) Write(data []byte) (int, error) {
 		b.overflow = true
 		data = data[:remaining]
 	}
-	_, _ = b.Buffer.Write(data)
+	_, _ = b.buffer.Write(data)
 	return written, nil
 }
+
+func (b *boundedCommandBuffer) Bytes() []byte { return b.buffer.Bytes() }
 
 // ProductionAdapter is the RolloutRuntime implementation for Opsi-owned K3s resources.
 type ProductionAdapter struct {

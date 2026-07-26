@@ -421,6 +421,72 @@ func TestPreMutationFailurePreservesPreviousKnownGood(t *testing.T) {
 	}
 }
 
+func TestTerminalResultRecordsOneMachineAuditAndReplaysExactly(t *testing.T) {
+	service, projectID, finished := rolloutRegistryFixture(t, "audit-success")
+	countRecorded := func() int {
+		count := 0
+		for _, audit := range service.audit {
+			if audit.Action == "DEPLOYMENT_AGENT_RESULT_RECORDED" && audit.ResourceID == finished.ID {
+				if audit.ActorType != "agent" || audit.ActorUserID != "" {
+					t.Fatalf("machine audit actor=%+v", audit)
+				}
+				count++
+			}
+		}
+		return count
+	}
+	if countRecorded() != 1 {
+		t.Fatalf("recorded audit count=%d", countRecorded())
+	}
+	result := DeploymentResult{FailureCode: finished.FailureCode, FailureMessageRedacted: finished.FailureMessageRedacted, RolloutResult: cloneRolloutResult(finished.TerminalResult)}
+	events := len(service.deployEvents[finished.ID])
+	if _, err := service.CompleteDeployment(projectID, finished.NodeID, finished.ID, "replay", result); err != nil {
+		t.Fatal(err)
+	}
+	if countRecorded() != 1 || len(service.deployEvents[finished.ID]) != events {
+		t.Fatalf("replay duplicated terminal records: audits=%d events=%d/%d", countRecorded(), len(service.deployEvents[finished.ID]), events)
+	}
+	var wait sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, _ = service.CompleteDeployment(projectID, finished.NodeID, finished.ID, "concurrent-replay", result)
+		}()
+	}
+	wait.Wait()
+	if countRecorded() != 1 || len(service.deployEvents[finished.ID]) != events {
+		t.Fatalf("concurrent replay duplicated terminal records: audits=%d events=%d/%d", countRecorded(), len(service.deployEvents[finished.ID]), events)
+	}
+}
+
+func TestFailedTerminalResultRecordsFailureAudit(t *testing.T) {
+	service, projectID := readyRegistry(t)
+	record := createRegistryService(t, service, projectID, "audit-failed", "Dockerfile", "deploy/api", "svc-audit-failed")
+	snapshot := immutableSnapshot(t, service, projectID, record.ID, "audit-failed")
+	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "audit-failed", "create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, job)
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "1", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateWaiting, "2", "")
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "3", deploymentv1.RolloutCodeNoKnownGood)
+	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "failed", rolloutResult(lease, deploymentv1.RolloutStateFailed, "3", "", "", "", deploymentv1.RolloutCodeNoKnownGood))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, audit := range service.audit {
+		if audit.Action == "DEPLOYMENT_AGENT_RESULT_RECORDED" && audit.ResourceID == finished.ID {
+			if audit.Result != "failure" || audit.MetadataRedacted["failure_code"] != deploymentv1.RolloutCodeNoKnownGood {
+				t.Fatalf("failure audit=%+v", audit)
+			}
+			return
+		}
+	}
+	t.Fatal("missing failure terminal audit")
+}
+
 func TestObservedMutationRejectsForgedPreMutationUntilFactualTerminalResult(t *testing.T) {
 	service, projectID := readyRegistry(t)
 	record := createRegistryService(t, service, projectID, "api-phase", "Dockerfile", "deploy/api", "svc-phase")

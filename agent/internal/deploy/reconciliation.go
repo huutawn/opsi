@@ -29,6 +29,49 @@ type RoutingProbeResult struct {
 	EvidenceHash string
 }
 
+const (
+	maxEndpointSliceItems     = 256
+	maxEndpointSliceEndpoints = 4096
+)
+
+type endpointSliceList struct {
+	APIVersion string          `json:"apiVersion"`
+	Kind       string          `json:"kind"`
+	Metadata   map[string]any  `json:"metadata"`
+	Items      []endpointSlice `json:"items"`
+}
+
+type endpointSlice struct {
+	Metadata    map[string]any `json:"metadata"`
+	AddressType string         `json:"addressType"`
+	Endpoints   []endpointSliceEndpoint
+	Ports       []endpointSlicePort `json:"ports"`
+}
+
+type endpointSliceEndpoint struct {
+	Addresses          []string                `json:"addresses"`
+	Conditions         endpointSliceConditions `json:"conditions"`
+	Hostname           *string                 `json:"hostname,omitempty"`
+	TargetRef          map[string]any          `json:"targetRef,omitempty"`
+	DeprecatedTopology map[string]string       `json:"deprecatedTopology,omitempty"`
+	NodeName           *string                 `json:"nodeName,omitempty"`
+	Zone               *string                 `json:"zone,omitempty"`
+	Hints              map[string]any          `json:"hints,omitempty"`
+}
+
+type endpointSliceConditions struct {
+	Ready       *bool `json:"ready,omitempty"`
+	Serving     *bool `json:"serving,omitempty"`
+	Terminating *bool `json:"terminating,omitempty"`
+}
+
+type endpointSlicePort struct {
+	Name        *string `json:"name,omitempty"`
+	Protocol    *string `json:"protocol,omitempty"`
+	Port        *int32  `json:"port,omitempty"`
+	AppProtocol *string `json:"appProtocol,omitempty"`
+}
+
 // BoundedHTTPProbe is a local trusted probe for disposable/Agent-local
 // Traefik routing. It accepts only an explicit loopback address and canonical
 // ExposureSpec host/path; redirects, metadata addresses, and Unix sockets are
@@ -290,7 +333,7 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 	if err != nil {
 		return deploymentv1.ReadinessEvidence{}, nil, false, err
 	}
-	endpoints, err := a.getJSON(ctx, "endpoints", plan.Resources.ServiceName, plan.Resources.Namespace)
+	endpointSlices, err := a.getEndpointSlices(ctx, plan.Resources.ServiceName, plan.Resources.Namespace)
 	if err != nil {
 		return deploymentv1.ReadinessEvidence{}, nil, false, err
 	}
@@ -317,16 +360,16 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 	imageID, readyCount := applicationPodReadiness(pods, command.Image.Digest)
 	workloadReady := generation > 0 && observedGeneration >= generation && available >= desiredReplicas && readyCount >= desiredReplicas && imageID != "" && deploymentHasExactAppImage(deployment, command.Image.Reference)
 	serviceReady := ownedWorkloadObject(service, plan.Resources.Service) && serviceObjectHasExactPort(service, command.Workload.ContainerPort) && equalLogical(serviceJSON(service, "selector"), plan.Resources.Selector)
-	endpointReady := endpointsReady(endpoints, int(command.Workload.ContainerPort), desiredReplicas)
+	endpointReady, readyEndpoints, sliceCount := endpointSlicesReady(endpointSlices, plan.Resources.ServiceName, int(command.Workload.ContainerPort), desiredReplicas)
 	ingressReady := true
 	if plan.Snapshot.HasExternalExposure() {
 		ingressReady = ownedExposureIdentity(ingress, plan.Snapshot.Exposure, plan.Exposure.IngressName) && ingressGenerationReady(ingress) && ingressMatches(ingress, plan.Exposure.Ingress)
 	}
 	runtimeReady := workloadReady && serviceReady && endpointReady && ingressReady
-	localEvidence := hashValue(map[string]any{"service": serviceReady, "endpoints": endpointReady, "port": command.Workload.ContainerPort})
+	localEvidence := hashValue(map[string]any{"service": serviceReady, "endpoint_slices": endpointReady, "ready_endpoints": readyEndpoints, "desired": desiredReplicas, "port": command.Workload.ContainerPort, "slices": sliceCount})
 	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: runtimeReady, LocalRoutingReady: serviceReady && endpointReady, LocalProbeEvidenceHash: localEvidence, ExternalReady: false, ObservedAt: time.Now().UTC()}
 	evidence.WorkloadEvidenceHash = hashValue(map[string]any{"generation": generation, "observed": observedGeneration, "available": available, "desired": desiredReplicas})
-	evidence.ServiceEvidenceHash = hashValue(map[string]any{"selector": serviceJSON(service, "selector"), "port": command.Workload.ContainerPort, "endpoints": endpointReady})
+	evidence.ServiceEvidenceHash = hashValue(map[string]any{"selector": serviceJSON(service, "selector"), "port": command.Workload.ContainerPort, "endpoint_slices": endpointReady, "ready_endpoints": readyEndpoints, "desired": desiredReplicas})
 	evidence.ExposureEvidenceHash = hashValue(map[string]any{"external": plan.Snapshot.HasExternalExposure(), "generation": number(metadataValue(ingress, "generation")), "spec": ingress["spec"], "ownership": ingressReady})
 	evidence.ApplicationImageIDHash = hashString(imageID)
 	resources := []deploymentv1.ResourceIdentity{resourceIdentityFromObject("Deployment", deployment), resourceIdentityFromObject("Service", service)}
@@ -510,25 +553,75 @@ func deploymentHasExactAppImage(object map[string]any, image string) bool {
 	return false
 }
 
-func endpointsReady(object map[string]any, port, replicas int) bool {
-	subsets, _ := object["subsets"].([]any)
-	addresses := 0
-	for _, raw := range subsets {
-		subset, _ := raw.(map[string]any)
-		items, _ := subset["addresses"].([]any)
-		ports, _ := subset["ports"].([]any)
-		portMatch := false
-		for _, rawPort := range ports {
-			item, _ := rawPort.(map[string]any)
-			if number(item["port"]) == port {
-				portMatch = true
+func (a ProductionAdapter) getEndpointSlices(ctx context.Context, serviceName, namespace string) (endpointSliceList, error) {
+	out, err := a.Runner.Run(ctx, nil, a.KubectlPath, "get", "endpointslices.discovery.k8s.io", "-n", namespace, "-l", "kubernetes.io/service-name="+serviceName, "-o", "json")
+	if err != nil {
+		return endpointSliceList{}, err
+	}
+	if len(out) > a.kubernetesOutputLimit() {
+		return endpointSliceList{}, errors.New("Kubernetes response exceeded the allowed bound")
+	}
+	var list endpointSliceList
+	if err := decodeSingleJSON(out, &list); err != nil || list.APIVersion != "discovery.k8s.io/v1" || list.Kind != "EndpointSliceList" {
+		return endpointSliceList{}, errors.New("Kubernetes returned invalid EndpointSlice JSON")
+	}
+	return list, nil
+}
+
+func endpointSlicesReady(list endpointSliceList, serviceName string, port, replicas int) (bool, int, int) {
+	if replicas < 1 || len(list.Items) == 0 || len(list.Items) > maxEndpointSliceItems {
+		return false, 0, len(list.Items)
+	}
+	seen := make(map[string]struct{}, replicas)
+	ready := 0
+	endpointCount := 0
+	for _, slice := range list.Items {
+		labels, _ := slice.Metadata["labels"].(map[string]any)
+		if labels["kubernetes.io/service-name"] != serviceName || !endpointSlicePortMatches(slice.Ports, port) {
+			return false, 0, len(list.Items)
+		}
+		for _, endpoint := range slice.Endpoints {
+			endpointCount++
+			if endpointCount > maxEndpointSliceEndpoints || len(endpoint.Addresses) == 0 {
+				return false, 0, len(list.Items)
+			}
+			if endpoint.Conditions.Ready == nil || !*endpoint.Conditions.Ready || endpoint.Conditions.Terminating != nil && *endpoint.Conditions.Terminating {
+				continue
+			}
+			unique := false
+			for _, address := range endpoint.Addresses {
+				canonical, ok := validEndpointAddress(slice.AddressType, address)
+				if !ok {
+					continue
+				}
+				if _, duplicate := seen[canonical]; !duplicate {
+					unique = true
+				}
+				seen[canonical] = struct{}{}
+			}
+			if unique {
+				ready++
 			}
 		}
-		if portMatch {
-			addresses += len(items)
+	}
+	return ready >= replicas, ready, len(list.Items)
+}
+
+func endpointSlicePortMatches(ports []endpointSlicePort, expected int) bool {
+	for _, port := range ports {
+		if port.Port != nil && int(*port.Port) == expected {
+			return true
 		}
 	}
-	return addresses >= replicas
+	return false
+}
+
+func validEndpointAddress(addressType, address string) (string, bool) {
+	ip := net.ParseIP(strings.TrimSpace(address))
+	if ip == nil || addressType == "IPv4" && ip.To4() == nil || addressType == "IPv6" && ip.To4() != nil || addressType != "IPv4" && addressType != "IPv6" {
+		return "", false
+	}
+	return ip.String(), true
 }
 
 func ingressGenerationReady(object map[string]any) bool {

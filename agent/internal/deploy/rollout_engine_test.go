@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -549,6 +551,95 @@ func TestRolloutReadinessUsesAppDigestServiceEndpointsAndIngress(t *testing.T) {
 	if evidence.ExternalReady || evidence.ExternalEvidenceHash != "" {
 		t.Fatalf("local readiness fabricated public evidence: %+v", evidence)
 	}
+	if evidence.WorkloadEvidenceHash == "" || evidence.ServiceEvidenceHash == "" || evidence.ApplicationImageIDHash == "" {
+		t.Fatalf("readiness omitted factual evidence hashes: %+v", evidence)
+	}
+}
+
+func TestEndpointSliceReadinessFailsClosedAndDeduplicatesAddresses(t *testing.T) {
+	base := endpointSliceListFixture("api", 8080, "10.0.0.1")
+	second := endpointSliceListFixture("api", 8080, "10.0.0.2")
+	base.Items = append(base.Items, second.Items...)
+	if ready, count, slices := endpointSlicesReady(base, "api", 8080, 2); !ready || count != 2 || slices != 2 {
+		t.Fatalf("healthy slices ready=%v count=%d slices=%d", ready, count, slices)
+	}
+	for name, mutate := range map[string]func(*endpointSliceList){
+		"ready false": func(list *endpointSliceList) { value := false; list.Items[0].Endpoints[0].Conditions.Ready = &value },
+		"terminating": func(list *endpointSliceList) {
+			value := true
+			list.Items[0].Endpoints[0].Conditions.Terminating = &value
+		},
+		"wrong label": func(list *endpointSliceList) {
+			list.Items[0].Metadata["labels"].(map[string]any)["kubernetes.io/service-name"] = "other"
+		},
+		"missing port": func(list *endpointSliceList) { list.Items[0].Ports[0].Port = nil },
+		"zero address": func(list *endpointSliceList) { list.Items[0].Endpoints[0].Addresses = nil },
+		"wrong port":   func(list *endpointSliceList) { value := int32(9090); list.Items[0].Ports[0].Port = &value },
+	} {
+		t.Run(name, func(t *testing.T) {
+			list := endpointSliceListFixture("api", 8080, "10.0.0.1")
+			mutate(&list)
+			if ready, _, _ := endpointSlicesReady(list, "api", 8080, 1); ready {
+				t.Fatal("invalid EndpointSlice state was accepted")
+			}
+		})
+	}
+	duplicate := endpointSliceListFixture("api", 8080, "10.0.0.1")
+	duplicate.Items = append(duplicate.Items, endpointSliceListFixture("api", 8080, "10.0.0.1").Items...)
+	if ready, count, _ := endpointSlicesReady(duplicate, "api", 8080, 2); ready || count != 1 {
+		t.Fatalf("duplicate address inflated replicas: ready=%v count=%d", ready, count)
+	}
+	if ready, _, _ := endpointSlicesReady(endpointSliceList{}, "api", 8080, 1); ready {
+		t.Fatal("empty EndpointSlice list was accepted")
+	}
+	overItems := endpointSliceListFixture("api", 8080, "10.0.0.1")
+	overItems.Items = make([]endpointSlice, maxEndpointSliceItems+1)
+	if ready, _, _ := endpointSlicesReady(overItems, "api", 8080, 1); ready {
+		t.Fatal("oversized EndpointSlice list was accepted")
+	}
+	overEndpoints := endpointSliceListFixture("api", 8080, "10.0.0.1")
+	overEndpoints.Items[0].Endpoints = make([]endpointSliceEndpoint, maxEndpointSliceEndpoints+1)
+	if ready, _, _ := endpointSlicesReady(overEndpoints, "api", 8080, 1); ready {
+		t.Fatal("oversized EndpointSlice endpoints were accepted")
+	}
+}
+
+func TestEndpointSliceDecodeIsStrictAndExecRunnerKeepsWarningOutOfEvidence(t *testing.T) {
+	malformed := &exposureRunner{outputs: map[string][]byte{kubectlKey("get", "endpointslices.discovery.k8s.io", "-n", "opsi", "-l", "kubernetes.io/service-name=api", "-o", "json"): []byte(`{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList","items":[{"unexpected":true}]}`)}, errors: map[string]error{}}
+	if _, err := (ProductionAdapter{Runner: malformed, KubectlPath: "kubectl"}).getEndpointSlices(context.Background(), "api", "opsi"); err == nil {
+		t.Fatal("malformed EndpointSlice item was accepted")
+	}
+	over := &exposureRunner{outputs: map[string][]byte{kubectlKey("get", "endpointslices.discovery.k8s.io", "-n", "opsi", "-l", "kubernetes.io/service-name=api", "-o", "json"): []byte(`{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList","items":[]}`)}, errors: map[string]error{}}
+	if _, err := (ProductionAdapter{Runner: over, KubectlPath: "kubectl", MaxOutputBytes: 8}).getEndpointSlices(context.Background(), "api", "opsi"); err == nil {
+		t.Fatal("oversized EndpointSlice output was accepted")
+	}
+
+	snapshot := testRuntimeSnapshot(t, "job-exec-endpointslice", "a")
+	snapshot.Exposure = exposurev1.ExposureSpec{}
+	snapshot.ExposureSpecHash = ""
+	plan, fixture := readinessFixture(t, snapshot)
+	dir := t.TempDir()
+	paths := map[string]string{}
+	write := func(key, name string) {
+		path := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(path, fixture.outputs[key], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths[name] = path
+	}
+	write(kubectlKey("get", "deployment", plan.Resources.DeploymentName, "-n", plan.Resources.Namespace, "-o", "json"), "deployment")
+	write(kubectlKey("get", "service", plan.Resources.ServiceName, "-n", plan.Resources.Namespace, "-o", "json"), "service")
+	write(kubectlKey("get", "endpointslices.discovery.k8s.io", "-n", plan.Resources.Namespace, "-l", "kubernetes.io/service-name="+plan.Resources.ServiceName, "-o", "json"), "slices")
+	write(kubectlKey("get", "pods", "-n", plan.Resources.Namespace, "-l", selectorString(plan.Resources.Selector), "-o", "json"), "pods")
+	script := filepath.Join(dir, "kubectl")
+	content := fmt.Sprintf("#!/bin/sh\ncase \"$2\" in\ndeployment) exec cat %s;;\nservice) exec cat %s;;\nendpointslices.discovery.k8s.io) printf 'Warning: deprecated legacy API' >&2; exec cat %s;;\npods) exec cat %s;;\n*) exit 1;;\nesac\n", paths["deployment"], paths["service"], paths["slices"], paths["pods"])
+	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	evidence, _, ready, err := (ProductionAdapter{Runner: ExecCommandRunner{}, KubectlPath: script, MaxOutputBytes: 1 << 20}).readinessOnce(context.Background(), plan)
+	if err != nil || !ready || evidence.ServiceEvidenceHash == "" || strings.Contains(evidence.ServiceEvidenceHash, "deprecated") {
+		t.Fatalf("EndpointSlice warning contaminated readiness: ready=%v err=%v evidence=%+v", ready, err, evidence)
+	}
 }
 
 func TestRolloutReadinessFailsClosedForStaleAndMismatchedState(t *testing.T) {
@@ -702,9 +793,12 @@ func readinessFixture(t *testing.T, snapshot deploymentv1.RuntimeSnapshot) (Roll
 	if err != nil {
 		t.Fatal(err)
 	}
-	exposure, err := renderExposure(context.Background(), command, snapshot.Exposure, nil)
-	if err != nil {
-		t.Fatal(err)
+	var exposure RenderedExposure
+	if snapshot.HasExternalExposure() {
+		exposure, err = renderExposure(context.Background(), command, snapshot.Exposure, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	deployment := cloneMap(resources.Deployment)
 	deploymentMetadata := deployment["metadata"].(map[string]any)
@@ -716,16 +810,23 @@ func readinessFixture(t *testing.T, snapshot deploymentv1.RuntimeSnapshot) (Roll
 	serviceMetadata := service["metadata"].(map[string]any)
 	serviceMetadata["uid"] = "uid-service"
 	serviceMetadata["resourceVersion"] = "1"
-	ingress := cloneMap(exposure.Ingress)
-	ingressMetadata := ingress["metadata"].(map[string]any)
-	ingressMetadata["uid"] = "uid-ingress"
-	ingressMetadata["resourceVersion"] = "1"
-	ingressMetadata["generation"] = 1
-	endpoints := map[string]any{
-		"metadata": map[string]any{"name": resources.ServiceName, "namespace": namespace},
-		"subsets": []any{map[string]any{
-			"addresses": []any{map[string]any{"ip": "10.0.0.1"}},
-			"ports":     []any{map[string]any{"name": "http", "port": command.Workload.ContainerPort}},
+	var ingress map[string]any
+	if snapshot.HasExternalExposure() {
+		ingress = cloneMap(exposure.Ingress)
+		ingressMetadata := ingress["metadata"].(map[string]any)
+		ingressMetadata["uid"] = "uid-ingress"
+		ingressMetadata["resourceVersion"] = "1"
+		ingressMetadata["generation"] = 1
+	}
+	endpointSlices := map[string]any{
+		"apiVersion": "discovery.k8s.io/v1",
+		"kind":       "EndpointSliceList",
+		"metadata":   map[string]any{"resourceVersion": "1"},
+		"items": []any{map[string]any{
+			"metadata":    map[string]any{"name": resources.ServiceName + "-abc", "namespace": namespace, "labels": map[string]any{"kubernetes.io/service-name": resources.ServiceName}},
+			"addressType": "IPv4",
+			"ports":       []any{map[string]any{"name": "http", "port": command.Workload.ContainerPort, "protocol": "TCP"}},
+			"endpoints":   []any{map[string]any{"addresses": []any{"10.0.0.1"}, "conditions": map[string]any{"ready": true, "terminating": false}}},
 		}},
 	}
 	pods := map[string]any{"items": []any{map[string]any{"status": map[string]any{"containerStatuses": []any{
@@ -733,13 +834,25 @@ func readinessFixture(t *testing.T, snapshot deploymentv1.RuntimeSnapshot) (Roll
 		map[string]any{"name": deploymentv1.ApplicationContainer, "ready": true, "imageID": "containerd://" + command.Image.Digest},
 	}}}}}
 	outputs := map[string][]byte{
-		kubectlKey("get", "deployment", resources.DeploymentName, "-n", namespace, "-o", "json"):           mustJSON(t, deployment),
-		kubectlKey("get", "service", resources.ServiceName, "-n", namespace, "-o", "json"):                 mustJSON(t, service),
-		kubectlKey("get", "endpoints", resources.ServiceName, "-n", namespace, "-o", "json"):               mustJSON(t, endpoints),
-		kubectlKey("get", "ingress", exposure.IngressName, "-n", namespace, "-o", "json"):                  mustJSON(t, ingress),
-		kubectlKey("get", "pods", "-n", namespace, "-l", selectorString(resources.Selector), "-o", "json"): mustJSON(t, pods),
+		kubectlKey("get", "deployment", resources.DeploymentName, "-n", namespace, "-o", "json"):                                                       mustJSON(t, deployment),
+		kubectlKey("get", "service", resources.ServiceName, "-n", namespace, "-o", "json"):                                                             mustJSON(t, service),
+		kubectlKey("get", "endpointslices.discovery.k8s.io", "-n", namespace, "-l", "kubernetes.io/service-name="+resources.ServiceName, "-o", "json"): mustJSON(t, endpointSlices),
+		kubectlKey("get", "pods", "-n", namespace, "-l", selectorString(resources.Selector), "-o", "json"):                                             mustJSON(t, pods),
+	}
+	if snapshot.HasExternalExposure() {
+		outputs[kubectlKey("get", "ingress", exposure.IngressName, "-n", namespace, "-o", "json")] = mustJSON(t, ingress)
 	}
 	return RolloutPlan{Snapshot: snapshot, Command: command, Resources: resources, Exposure: exposure}, &exposureRunner{outputs: outputs, errors: map[string]error{}}
+}
+
+func endpointSliceListFixture(serviceName string, port int32, addresses ...string) endpointSliceList {
+	ready, terminating := true, false
+	return endpointSliceList{APIVersion: "discovery.k8s.io/v1", Kind: "EndpointSliceList", Items: []endpointSlice{{
+		Metadata:    map[string]any{"labels": map[string]any{"kubernetes.io/service-name": serviceName}},
+		AddressType: "IPv4",
+		Ports:       []endpointSlicePort{{Port: &port}},
+		Endpoints:   []endpointSliceEndpoint{{Addresses: addresses, Conditions: endpointSliceConditions{Ready: &ready, Terminating: &terminating}}},
+	}}}
 }
 
 func readinessKey(kind string, snapshot deploymentv1.RuntimeSnapshot) string {

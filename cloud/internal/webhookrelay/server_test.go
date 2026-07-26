@@ -13,7 +13,59 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
+
+type capturedAudit struct {
+	actor    string
+	action   string
+	metadata map[string]any
+}
+
+type deploymentResultRegistry struct {
+	registry.API
+	completeErr error
+	audits      []capturedAudit
+}
+
+func (r *deploymentResultRegistry) VerifyAgent(projectID, nodeID, token string) (registry.Agent, error) {
+	return registry.Agent{ID: "agent-1", OrgID: "org-1", ProjectID: projectID, NodeID: nodeID}, nil
+}
+
+func (r *deploymentResultRegistry) CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result registry.DeploymentResult) (registry.DeploymentJob, error) {
+	return registry.DeploymentJob{ID: deploymentID, OrgID: "org-1", ProjectID: projectID, NodeID: nodeID, Status: registry.DeploymentSucceeded}, r.completeErr
+}
+
+func (r *deploymentResultRegistry) Audit(_, _ string, actorUserID, action, _, _ string, _ string, metadata map[string]any) {
+	r.audits = append(r.audits, capturedAudit{actor: actorUserID, action: action, metadata: metadata})
+}
+
+func TestAgentDeploymentResultAuditOwnership(t *testing.T) {
+	request := func(store *deploymentResultRegistry) *httptest.ResponseRecorder {
+		server := NewServer(Config{})
+		server.Registry = store
+		req := httptest.NewRequest(http.MethodPost, "/v1/agents/node-1/deployments/dep-1/result?project_id=proj-1", strings.NewReader(`{"lease_token":"lease-secret","failure_message_redacted":"terminal-secret"}`))
+		req.Header.Set("Authorization", "Bearer agent-token")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	success := &deploymentResultRegistry{}
+	if rec := request(success); rec.Code != http.StatusOK || len(success.audits) != 0 {
+		t.Fatalf("success status=%d audits=%+v body=%s", rec.Code, success.audits, rec.Body.String())
+	}
+
+	rejected := &deploymentResultRegistry{completeErr: registry.APIError{Status: http.StatusConflict, Code: "DEPLOYMENT_STALE_LEASE", Message: "lease-secret terminal-secret"}}
+	if rec := request(rejected); rec.Code != http.StatusConflict || len(rejected.audits) != 1 {
+		t.Fatalf("rejection status=%d audits=%+v body=%s", rec.Code, rejected.audits, rec.Body.String())
+	}
+	audit := rejected.audits[0]
+	encoded, _ := json.Marshal(audit.metadata)
+	if audit.actor != "agent" || audit.action != "DEPLOYMENT_AGENT_RESULT_REJECTED" || audit.metadata["error_code"] != "DEPLOYMENT_STALE_LEASE" || strings.Contains(string(encoded), "lease-secret") || strings.Contains(string(encoded), "terminal-secret") {
+		t.Fatalf("rejection audit=%+v", audit)
+	}
+}
 
 func TestHealthFailsClosedWhenDependencyCheckFails(t *testing.T) {
 	server := NewServer(Config{})
