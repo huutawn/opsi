@@ -604,6 +604,45 @@ func TestEndpointSliceReadinessFailsClosedAndDeduplicatesAddresses(t *testing.T)
 	}
 }
 
+func TestEndpointSliceLiveShapeRequiresCanonicalItemIdentity(t *testing.T) {
+	validItem := `{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"api-abc","namespace":"opsi","labels":{"kubernetes.io/service-name":"api"}},"addressType":"IPv4","ports":[{"name":"http","port":8080,"protocol":"TCP"}],"endpoints":[{"addresses":["192.0.2.10"],"conditions":{"ready":true,"serving":true,"terminating":false}}]}`
+	for _, tc := range []struct {
+		name       string
+		item       string
+		listField  string
+		wantReady  bool
+		wantDecode bool
+	}{
+		{name: "live shape", item: validItem, wantReady: true},
+		{name: "missing apiVersion", item: strings.Replace(validItem, `"apiVersion":"discovery.k8s.io/v1",`, "", 1)},
+		{name: "wrong apiVersion", item: strings.Replace(validItem, "discovery.k8s.io/v1", "discovery.k8s.io/v1beta1", 1)},
+		{name: "missing kind", item: strings.Replace(validItem, `"kind":"EndpointSlice",`, "", 1)},
+		{name: "wrong kind", item: strings.Replace(validItem, "EndpointSlice", "Endpoints", 1)},
+		{name: "unknown list field", item: validItem, listField: `,"unexpected":true`, wantDecode: true},
+		{name: "unknown item field", item: strings.Replace(validItem, "{", `{"unexpected":true,`, 1), wantDecode: true},
+		{name: "unknown endpoint field", item: strings.Replace(validItem, `"addresses"`, `"unexpected":true,"addresses"`, 1), wantDecode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(fmt.Sprintf(`{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList","metadata":{"resourceVersion":"1"},"items":[%s]%s}`, tc.item, tc.listField))
+			runner := &exposureRunner{outputs: map[string][]byte{kubectlKey("get", "endpointslices.discovery.k8s.io", "-n", "opsi", "-l", "kubernetes.io/service-name=api", "-o", "json"): payload}, errors: map[string]error{}}
+			list, err := (ProductionAdapter{Runner: runner, KubectlPath: "kubectl"}).getEndpointSlices(context.Background(), "api", "opsi")
+			if tc.wantDecode {
+				if err == nil {
+					t.Fatal("unknown EndpointSlice field was accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("live-shaped EndpointSlice decode failed: %v", err)
+			}
+			ready, _, _ := endpointSlicesReady(list, "api", 8080, 1)
+			if ready != tc.wantReady {
+				t.Fatalf("ready=%v want=%v", ready, tc.wantReady)
+			}
+		})
+	}
+}
+
 func TestEndpointSliceDecodeIsStrictAndExecRunnerKeepsWarningOutOfEvidence(t *testing.T) {
 	malformed := &exposureRunner{outputs: map[string][]byte{kubectlKey("get", "endpointslices.discovery.k8s.io", "-n", "opsi", "-l", "kubernetes.io/service-name=api", "-o", "json"): []byte(`{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList","items":[{"unexpected":true}]}`)}, errors: map[string]error{}}
 	if _, err := (ProductionAdapter{Runner: malformed, KubectlPath: "kubectl"}).getEndpointSlices(context.Background(), "api", "opsi"); err == nil {
@@ -637,8 +676,13 @@ func TestEndpointSliceDecodeIsStrictAndExecRunnerKeepsWarningOutOfEvidence(t *te
 		t.Fatal(err)
 	}
 	evidence, _, ready, err := (ProductionAdapter{Runner: ExecCommandRunner{}, KubectlPath: script, MaxOutputBytes: 1 << 20}).readinessOnce(context.Background(), plan)
-	if err != nil || !ready || evidence.ServiceEvidenceHash == "" || strings.Contains(evidence.ServiceEvidenceHash, "deprecated") {
+	if err != nil || !ready {
 		t.Fatalf("EndpointSlice warning contaminated readiness: ready=%v err=%v evidence=%+v", ready, err, evidence)
+	}
+	for _, hash := range []string{evidence.WorkloadEvidenceHash, evidence.ServiceEvidenceHash, evidence.ExposureEvidenceHash, evidence.ApplicationImageIDHash, evidence.LocalProbeEvidenceHash} {
+		if !rolloutHash(hash) {
+			t.Fatalf("readiness evidence exposed non-hash payload: %q", hash)
+		}
 	}
 }
 
@@ -823,6 +867,8 @@ func readinessFixture(t *testing.T, snapshot deploymentv1.RuntimeSnapshot) (Roll
 		"kind":       "EndpointSliceList",
 		"metadata":   map[string]any{"resourceVersion": "1"},
 		"items": []any{map[string]any{
+			"apiVersion":  "discovery.k8s.io/v1",
+			"kind":        "EndpointSlice",
 			"metadata":    map[string]any{"name": resources.ServiceName + "-abc", "namespace": namespace, "labels": map[string]any{"kubernetes.io/service-name": resources.ServiceName}},
 			"addressType": "IPv4",
 			"ports":       []any{map[string]any{"name": "http", "port": command.Workload.ContainerPort, "protocol": "TCP"}},
@@ -848,6 +894,8 @@ func readinessFixture(t *testing.T, snapshot deploymentv1.RuntimeSnapshot) (Roll
 func endpointSliceListFixture(serviceName string, port int32, addresses ...string) endpointSliceList {
 	ready, terminating := true, false
 	return endpointSliceList{APIVersion: "discovery.k8s.io/v1", Kind: "EndpointSliceList", Items: []endpointSlice{{
+		APIVersion:  "discovery.k8s.io/v1",
+		Kind:        "EndpointSlice",
 		Metadata:    map[string]any{"labels": map[string]any{"kubernetes.io/service-name": serviceName}},
 		AddressType: "IPv4",
 		Ports:       []endpointSlicePort{{Port: &port}},

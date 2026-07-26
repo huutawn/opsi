@@ -42,6 +42,8 @@ type endpointSliceList struct {
 }
 
 type endpointSlice struct {
+	APIVersion  string         `json:"apiVersion"`
+	Kind        string         `json:"kind"`
 	Metadata    map[string]any `json:"metadata"`
 	AddressType string         `json:"addressType"`
 	Endpoints   []endpointSliceEndpoint
@@ -577,7 +579,7 @@ func endpointSlicesReady(list endpointSliceList, serviceName string, port, repli
 	endpointCount := 0
 	for _, slice := range list.Items {
 		labels, _ := slice.Metadata["labels"].(map[string]any)
-		if labels["kubernetes.io/service-name"] != serviceName || !endpointSlicePortMatches(slice.Ports, port) {
+		if slice.APIVersion != "discovery.k8s.io/v1" || slice.Kind != "EndpointSlice" || labels["kubernetes.io/service-name"] != serviceName || !endpointSlicePortMatches(slice.Ports, port) {
 			return false, 0, len(list.Items)
 		}
 		for _, endpoint := range slice.Endpoints {
