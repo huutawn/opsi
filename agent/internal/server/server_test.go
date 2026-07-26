@@ -13,6 +13,7 @@ import (
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrunner"
 	"github.com/opsi-dev/opsi/agent/internal/config"
+	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/incident"
 	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
@@ -116,6 +117,21 @@ func TestRunServesHealthAndStatus(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not stop")
+	}
+}
+
+func TestDeploymentEngineConfigRequiresTrustedLocalRoutingProbe(t *testing.T) {
+	engineCfg, err := deploymentEngineConfig(config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, ok := engineCfg.Reconciler.(deploy.ProductionAdapter)
+	if !ok || !adapter.RequireLocalRouting || adapter.RoutingProbe == nil {
+		t.Fatalf("production reconciler must require a routing probe: %#v", engineCfg.Reconciler)
+	}
+	probe, ok := adapter.RoutingProbe.(deploy.BoundedHTTPProbe)
+	if !ok || probe.Scheme != "http" || probe.Address != "127.0.0.1" || probe.Port != 80 || probe.Timeout != 5*time.Second || probe.MaxBody != 16*1024 {
+		t.Fatalf("unexpected trusted routing probe: %#v", adapter.RoutingProbe)
 	}
 }
 

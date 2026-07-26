@@ -825,7 +825,14 @@ func deploymentEngineConfig(cfg config.Config) (deploy.EngineConfig, error) {
 		pollInterval = parsed
 	}
 	engineCfg := deploy.EngineConfig{
-		Reconciler:     deploy.ProductionAdapter{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, "kubectl"), Timeout: rolloutTimeout, PollInterval: pollInterval},
+		Reconciler: deploy.ProductionAdapter{
+			Runner:              deploy.ExecCommandRunner{},
+			RoutingProbe:        deploy.BoundedHTTPProbe{Scheme: "http", Address: "127.0.0.1", Port: 80, Timeout: 5 * time.Second, MaxBody: 16 * 1024},
+			RequireLocalRouting: true,
+			KubectlPath:         firstNonEmpty(cfg.Telemetry.KubectlPath, "kubectl"),
+			Timeout:             rolloutTimeout,
+			PollInterval:        pollInterval,
+		},
 		RolloutTimeout: rolloutTimeout,
 		PollInterval:   pollInterval,
 	}
