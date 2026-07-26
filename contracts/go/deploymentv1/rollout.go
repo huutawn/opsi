@@ -32,8 +32,10 @@ const (
 	RolloutStateRollingBack    = "rolling_back"
 	RolloutStateRolledBack     = "rolled_back"
 	RolloutStateRollbackFailed = "rollback_failed"
+	RolloutStateCleaned        = "cleaned"
 	RolloutOperationApply      = "apply"
 	RolloutOperationRollback   = "rollback"
+	RolloutOperationCleanup    = "preview_cleanup"
 	MaxRolloutAttempts         = 3
 	MaxRolloutErrorBytes       = 1024
 	MaxRolloutResources        = 8
@@ -144,6 +146,7 @@ type RuntimeSnapshot struct {
 	Exposure         exposurev1.ExposureSpec `json:"exposure"`
 	ExposureSpecHash string                  `json:"exposure_spec_hash"`
 	Authority        RuntimeAuthority        `json:"authority"`
+	Preview          *PreviewSpec            `json:"preview,omitempty"`
 }
 
 func (s RuntimeSnapshot) Validate() error {
@@ -152,6 +155,11 @@ func (s RuntimeSnapshot) Validate() error {
 	}
 	if err := s.Target.Validate(); err != nil {
 		return err
+	}
+	if s.Preview != nil {
+		if err := s.Preview.Validate(); err != nil || s.Preview.ServiceKey != s.Target.ServiceKey {
+			return errors.New("preview authority is invalid")
+		}
 	}
 	if !validOpaqueID(s.DeploymentJobID) {
 		return errors.New("deployment_job_id is invalid")
@@ -207,6 +215,7 @@ func (s RuntimeSnapshot) AgentCommand() AgentCommand {
 		Image:         s.Image,
 		Workload:      s.Workload,
 		SpecHash:      s.WorkloadSpecHash,
+		Preview:       s.Preview,
 	}
 }
 
@@ -224,6 +233,11 @@ type RolloutIntent struct {
 	Attempt               int32           `json:"attempt"`
 	CreatedAt             time.Time       `json:"created_at"`
 	IntentHash            string          `json:"intent_hash"`
+}
+
+type PreviewCleanupRequest struct {
+	DeploymentID string `json:"deployment_id"`
+	Reason       string `json:"reason"`
 }
 
 type RolloutRecord struct {
@@ -264,7 +278,7 @@ func (i RolloutIntent) Canonicalize() (RolloutIntent, error) {
 	if out.Operation == "" {
 		out.Operation = RolloutOperationApply
 	}
-	if out.Operation != RolloutOperationApply && out.Operation != RolloutOperationRollback {
+	if out.Operation != RolloutOperationApply && out.Operation != RolloutOperationRollback && out.Operation != RolloutOperationCleanup {
 		return RolloutIntent{}, errors.New("rollout operation is invalid")
 	}
 	if err := out.Target.Validate(); err != nil {
@@ -299,6 +313,9 @@ func (i RolloutIntent) Canonicalize() (RolloutIntent, error) {
 	}
 	if out.Operation == RolloutOperationRollback && (out.PreviousKnownGoodID == "" || out.ExpectedKnownGoodID == "") {
 		return RolloutIntent{}, errors.New("explicit rollback requires target and expected current known-good references")
+	}
+	if out.Operation == RolloutOperationCleanup && (out.Desired.Preview == nil || out.PreviousKnownGoodID != "" || out.ExpectedKnownGoodID != "") {
+		return RolloutIntent{}, errors.New("preview cleanup requires preview authority and no known-good references")
 	}
 	payload := out
 	payload.IntentHash = ""
@@ -418,7 +435,7 @@ func (s KnownGoodSnapshot) Validate() error {
 
 func IsTerminalRolloutState(state string) bool {
 	switch state {
-	case RolloutStateSucceeded, RolloutStateRolledBack, RolloutStateRollbackFailed:
+	case RolloutStateSucceeded, RolloutStateRolledBack, RolloutStateRollbackFailed, RolloutStateCleaned:
 		return true
 	default:
 		return false
@@ -456,7 +473,7 @@ func CanTransitionRollout(from, to string) bool {
 	allowed := map[string]map[string]bool{
 		RolloutStatePrepared:    {RolloutStateApplying: true, RolloutStateRollingBack: true, RolloutStateFailed: true},
 		RolloutStateApplying:    {RolloutStateWaiting: true, RolloutStateFailed: true},
-		RolloutStateWaiting:     {RolloutStateSucceeded: true, RolloutStateFailed: true},
+		RolloutStateWaiting:     {RolloutStateSucceeded: true, RolloutStateCleaned: true, RolloutStateFailed: true},
 		RolloutStateFailed:      {RolloutStateRollingBack: true},
 		RolloutStateRollingBack: {RolloutStateRolledBack: true, RolloutStateRollbackFailed: true},
 	}

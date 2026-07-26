@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,6 +107,7 @@ type renderedResources struct {
 	Deployment      map[string]any
 	Service         map[string]any
 	NamespaceObject map[string]any
+	Quota           map[string]any
 }
 
 func (a ProductionAdapter) getJSON(ctx context.Context, kind, name, namespace string, selector ...map[string]string) (map[string]any, error) {
@@ -219,6 +221,13 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 	}
 	namespace := stableDNSName("opsi", command.ProjectID, command.EnvironmentID)
 	resourceName := stableDNSName("opsi", spec.ServiceKey, command.RuntimeID)
+	if command.Preview != nil {
+		if err := command.Preview.Validate(); err != nil || command.Preview.ServiceKey != spec.ServiceKey || spec.Replicas > command.Preview.MaxReplicas {
+			return nil, renderedResources{}, "", errors.New("preview authority does not match workload")
+		}
+		namespace = command.Preview.Namespace
+		resourceName = stableDNSName("opsi", spec.ServiceKey, command.RuntimeID, namespace)
+	}
 	selector := map[string]string{
 		"app.kubernetes.io/managed-by": "opsi",
 		"opsi.dev/project":             safeLabel(command.ProjectID),
@@ -265,11 +274,21 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 	}
 	namespaceObject := map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": namespace, "labels": map[string]string{"app.kubernetes.io/managed-by": "opsi", "opsi.dev/project": safeLabel(command.ProjectID), "opsi.dev/environment": safeLabel(command.EnvironmentID)}}}
 	docs := []any{namespaceObject, deployment, service}
+	var quota map[string]any
+	if command.Preview != nil {
+		previewLabels := namespaceObject["metadata"].(map[string]any)["labels"].(map[string]string)
+		previewLabels["opsi.dev/preview"] = safeLabel(command.Preview.Namespace)
+		previewLabels["opsi.dev/repository"] = safeLabel(strconv.FormatUint(command.Preview.RepositoryID, 10))
+		previewLabels["opsi.dev/pr"] = strconv.Itoa(command.Preview.PRNumber)
+		previewLabels["opsi.dev/service"] = safeLabel(command.Preview.ServiceKey)
+		quota = map[string]any{"apiVersion": "v1", "kind": "ResourceQuota", "metadata": map[string]any{"name": "opsi-preview", "namespace": namespace, "labels": previewLabels}, "spec": map[string]any{"hard": map[string]any{"requests.cpu": command.Preview.CPU, "requests.memory": command.Preview.Memory, "limits.cpu": command.Preview.CPU, "limits.memory": command.Preview.Memory, "pods": strconv.Itoa(int(command.Preview.MaxReplicas) + 2)}}}
+		docs = []any{namespaceObject, quota, deployment, service}
+	}
 	data, err := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "List", "items": docs})
 	if err != nil {
 		return nil, renderedResources{}, "", err
 	}
-	return data, renderedResources{Namespace: namespace, DeploymentName: resourceName, ServiceName: resourceName, Selector: selector, Deployment: deployment, Service: service, NamespaceObject: namespaceObject}, namespace, nil
+	return data, renderedResources{Namespace: namespace, DeploymentName: resourceName, ServiceName: resourceName, Selector: selector, Deployment: deployment, Service: service, NamespaceObject: namespaceObject, Quota: quota}, namespace, nil
 }
 
 func stableDNSName(prefix string, identities ...string) string {

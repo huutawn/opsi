@@ -218,6 +218,16 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
     finally { setLoading(false); }
   }
 
+  const previews = console.state.deployments.filter((item) => item.snapshot?.preview);
+  async function cleanupPreview(preview: DeploymentJob) {
+    setLoading(true); setError("");
+    try {
+      const result = await client.previewCleanup(projectID, preview.id, `ui-preview-cleanup-${preview.id}`, "manual");
+      setJob(result); setSelectedJobID(result.id); await console.actions.load(); setDisconnected(false);
+    } catch (reason) { setError((reason as Error).message); }
+    finally { setLoading(false); }
+  }
+
   useEffect(() => {
     if (!selectedJobID || !projectID) return;
     if (job && ["succeeded", "failed", "rolled_back", "rollback_failed", "cancelled"].includes(job.status) && Boolean(job.terminal_result)) return;
@@ -289,6 +299,19 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
           {job?.rollback_eligible && <div className="callout"><span>Explicit rollback restores the exact previous Agent known-good snapshot and can reduce availability while readiness is rechecked.</span><label><input checked={confirmRollback} onChange={(event) => setConfirmRollback(event.target.checked)} type="checkbox" /> Confirm rollback consequence</label><button disabled={!confirmRollback || loading} onClick={() => void explicitRollback()} type="button">Rollback exact known-good</button></div>}
           <EventsList events={events} />
         </> : console.state.deployments.length ? <DeploymentsTable console={console} /> : <Empty text="No DeploymentJob selected. Preview an accepted BuildRecord to begin." />}
+      </Panel>
+      <Panel title="Pull request previews">
+        {previews.length === 0 ? <Empty text="No same-repository previews are active." /> : previews.map((preview) => {
+          const authority = preview.snapshot?.preview;
+          const route = preview.exposure_spec ? `${preview.exposure_spec.hostname}${preview.exposure_spec.path}` : "pending route";
+          return <div className="specList compact" key={preview.id}>
+            <div><span>Preview / state</span><b>{preview.id} / {preview.status}</b></div>
+            <div><span>URL</span><b>{route}</b></div>
+            <div><span>SHA / digest</span><b>{authority?.head_sha ?? "-"} / {preview.desired_digest ?? "-"}</b></div>
+            <div><span>Expires</span><b>{authority ? new Date(authority.expires_at).toLocaleString() : "-"}</b></div>
+            <button disabled={loading || ["cleaned", "succeeded"].includes(preview.rollout_state ?? "")} onClick={() => void cleanupPreview(preview)} type="button">Clean up preview</button>
+          </div>;
+        })}
       </Panel>
     </section>
   );

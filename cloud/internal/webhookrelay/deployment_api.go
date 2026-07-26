@@ -29,6 +29,10 @@ type immutableDeploymentReplayReader interface {
 	ReplayImmutableDeployment(string, string, string) (registry.DeploymentJob, bool, error)
 }
 
+type previewCleanupStore interface {
+	StartPreviewCleanup(string, string, string, string, deploymentv1.PreviewCleanupRequest) (registry.DeploymentJob, bool, error)
+}
+
 type exposureLifecycleStore interface {
 	PreviewExposure(string, string, deploymentv1.ExposureMutationRequest) (deploymentv1.ExposurePreview, error)
 	StartExposureRollout(string, string, string, string, deploymentv1.ExposureMutationRequest) (registry.DeploymentJob, bool, error)
@@ -166,7 +170,7 @@ func (s *Server) handleDeploymentAPI(w http.ResponseWriter, r *http.Request, pro
 		}
 		job, reused, err := starter.StartImmutableDeployment(preview.Snapshot, principal.UserID, request.IdempotencyKey, r.Header.Get("X-Request-ID"))
 		job.Reused = reused
-		if err == nil {
+		if err == nil && !reused {
 			s.Registry.Audit(job.OrgID, projectID, principal.UserID, "IMMUTABLE_DEPLOYMENT_CREATED", "deployment_job", job.ID, "success", map[string]any{"build_record_id": preview.Snapshot.Authority.BuildRecord.ID, "oci_digest": preview.Snapshot.Image.Digest, "runtime_id": job.RuntimeID, "node_id": job.NodeID, "agent_id": job.AgentID, "spec_hash": job.SpecHash, "reused": reused})
 		}
 		writeRegistryResult(w, r, job, err, http.StatusAccepted)
@@ -183,6 +187,27 @@ func (s *Server) handleDeploymentAPI(w http.ResponseWriter, r *http.Request, pro
 		}
 		job, err := reader.GetDeployment(projectID, parts[3])
 		writeRegistryResult(w, r, job, err, http.StatusOK)
+		return true
+	}
+	if len(parts) == 5 && parts[4] == "cleanup" && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "deployment_job", parts[3], "owner", "admin", "developer") {
+			return true
+		}
+		store, ok := s.Registry.(previewCleanupStore)
+		if !ok {
+			writeRegistryError(w, registry.APIError{Status: 503, Code: "PREVIEW_CLEANUP_UNAVAILABLE", Message: "preview cleanup is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+			return true
+		}
+		var request deploymentv1.PreviewCleanupRequest
+		if !decodeStrictDeploymentJSON(w, r, &request) {
+			return true
+		}
+		if request.DeploymentID == "" {
+			request.DeploymentID = parts[3]
+		}
+		job, reused, err := store.StartPreviewCleanup(projectID, principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), request)
+		job.Reused = reused
+		writeRegistryResult(w, r, job, err, http.StatusAccepted)
 		return true
 	}
 	if len(parts) == 5 && parts[4] == "cancel" && r.Method == http.MethodPost {

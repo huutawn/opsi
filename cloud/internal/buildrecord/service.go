@@ -185,7 +185,8 @@ func validateSubmission(identity githuboidc.VerifiedIdentity, request buildrecor
 
 func policyAllows(policies []githuboidc.WorkloadPolicy, identity githuboidc.VerifiedIdentity, request buildrecordv1.Submission) bool {
 	for _, policy := range policies {
-		if policy.RepositoryID != identity.RepositoryID || policy.ServiceKey != request.ServiceKey || !contains(policy.WorkflowRefs, identity.WorkflowRef) || !contains(policy.Refs, identity.Ref) || !contains(policy.Events, identity.EventName) || !contains(policy.OCIRepositories, request.OCIRepository) {
+		refAllowed := contains(policy.Refs, identity.Ref) || identity.EventName == "pull_request" && strings.HasPrefix(identity.Ref, "refs/pull/") && strings.HasSuffix(identity.Ref, "/merge")
+		if policy.RepositoryID != identity.RepositoryID || policy.ServiceKey != request.ServiceKey || !contains(policy.WorkflowRefs, identity.WorkflowRef) || !refAllowed || !contains(policy.Events, identity.EventName) || !contains(policy.OCIRepositories, request.OCIRepository) {
 			continue
 		}
 		if len(policy.JobWorkflowRefs) > 0 && !contains(policy.JobWorkflowRefs, identity.JobWorkflowRef) {

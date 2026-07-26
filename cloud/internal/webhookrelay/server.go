@@ -370,6 +370,8 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	s.recoverAutomaticDeliveries(r.Context(), projectID)
+	s.enqueueExpiredPreviewCleanup(projectID, agent.ID)
 	lease, ok, err := s.Registry.LeaseDeployment(projectID, nodeID)
 	if err != nil {
 		writeRegistryFailure(w, r, err)
@@ -422,6 +424,34 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) recoverAutomaticDeliveries(ctx context.Context, projectID string) {
+	result, err := s.BuildRecords.List(ctx, projectID, buildrecord.ListFilter{Status: "succeeded", Limit: 100})
+	if err != nil {
+		return
+	}
+	for _, record := range result.Records {
+		_, _, _ = s.ensureAutomaticDelivery(ctx, record)
+	}
+}
+
+func (s *Server) enqueueExpiredPreviewCleanup(projectID, actor string) {
+	store, ok := s.Registry.(previewCleanupStore)
+	if !ok {
+		return
+	}
+	jobs, err := s.Registry.ListDeployments(projectID)
+	if err != nil {
+		return
+	}
+	now := s.clock()
+	for _, job := range jobs {
+		if job.Snapshot == nil || job.Snapshot.Preview == nil || !now.After(job.Snapshot.Preview.ExpiresAt) || job.Action == deploymentv1.RolloutOperationCleanup {
+			continue
+		}
+		_, _, _ = store.StartPreviewCleanup(projectID, actor, "ttl:"+job.ID, "ttl-expiry", deploymentv1.PreviewCleanupRequest{DeploymentID: job.ID, Reason: "ttl_expired"})
+	}
 }
 
 type immutableDeploymentProgressStore interface {

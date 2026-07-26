@@ -136,6 +136,31 @@ type RolloutRuntime interface {
 	ObserveReadiness(context.Context, RolloutPlan) (deploymentv1.ReadinessEvidence, []deploymentv1.ResourceIdentity, error)
 }
 
+func (a ProductionAdapter) CleanupPreview(ctx context.Context, snapshot deploymentv1.RuntimeSnapshot) error {
+	if snapshot.Preview == nil || snapshot.Preview.Validate() != nil || snapshot.Target.ProjectID == "" || snapshot.Target.ServiceKey != snapshot.Preview.ServiceKey {
+		return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeInvalid, "preview cleanup authority is invalid", false)
+	}
+	a = a.withDefaults()
+	namespace, err := a.getJSON(ctx, "namespace", snapshot.Preview.Namespace, "")
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil
+		}
+		return deploymentv1.NewRolloutError(deploymentv1.RolloutCodePreflightFailed, "preview namespace could not be read", false)
+	}
+	metadata, _ := namespace["metadata"].(map[string]any)
+	labels := stringMap(metadata["labels"])
+	if labels["app.kubernetes.io/managed-by"] != "opsi" || labels["opsi.dev/project"] != safeLabel(snapshot.Target.ProjectID) ||
+		labels["opsi.dev/preview"] != safeLabel(snapshot.Preview.Namespace) || labels["opsi.dev/repository"] != safeLabel(strconv.FormatUint(snapshot.Preview.RepositoryID, 10)) ||
+		labels["opsi.dev/pr"] != strconv.Itoa(snapshot.Preview.PRNumber) || labels["opsi.dev/service"] != safeLabel(snapshot.Preview.ServiceKey) {
+		return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeOwnershipConflict, "preview namespace ownership does not match cleanup intent", false)
+	}
+	if _, err := a.Runner.Run(ctx, nil, a.KubectlPath, "delete", "namespace", snapshot.Preview.Namespace, "--wait=true", "--timeout=2m"); err != nil {
+		return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "preview namespace deletion failed", true)
+	}
+	return nil
+}
+
 type RolloutPlan struct {
 	Snapshot       deploymentv1.RuntimeSnapshot
 	Command        deploymentv1.AgentCommand
@@ -434,6 +459,12 @@ func (a ProductionAdapter) verifyRolloutOwnership(current map[string]any, desire
 		if labels["app.kubernetes.io/managed-by"] != "opsi" || labels["opsi.dev/project"] != safeLabel(snapshot.Target.ProjectID) || labels["opsi.dev/environment"] != safeLabel(snapshot.Target.EnvironmentID) {
 			return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeOwnershipConflict, "existing Namespace is not Opsi-owned", false)
 		}
+	case "ResourceQuota":
+		metadata, _ := current["metadata"].(map[string]any)
+		labels := stringMap(metadata["labels"])
+		if labels["app.kubernetes.io/managed-by"] != "opsi" || labels["opsi.dev/project"] != safeLabel(snapshot.Target.ProjectID) || labels["opsi.dev/preview"] == "" {
+			return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeOwnershipConflict, "existing preview quota is not Opsi-owned", false)
+		}
 	case "Deployment", "Service":
 		if !ownedWorkloadObject(current, desired.Object) || hasUnsupportedWorkloadAnnotations(current) || hasForeignSpecManager(current, desired.Manager) {
 			return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeOwnershipConflict, "existing workload resource is not safely Opsi-owned", false)
@@ -479,6 +510,9 @@ func rolloutObjects(resources renderedResources, exposure RenderedExposure, incl
 		{Kind: "Namespace", Name: resources.Namespace, Manager: ProductionFieldManager, Object: resources.NamespaceObject},
 		{Kind: "Deployment", Namespace: resources.Namespace, Name: resources.DeploymentName, Manager: ProductionFieldManager, Object: resources.Deployment},
 		{Kind: "Service", Namespace: resources.Namespace, Name: resources.ServiceName, Manager: ProductionFieldManager, Object: resources.Service},
+	}
+	if resources.Quota != nil {
+		objects = append(objects, rolloutObject{Kind: "ResourceQuota", Namespace: resources.Namespace, Name: "opsi-preview", Manager: ProductionFieldManager, Object: resources.Quota})
 	}
 	if includeExposure {
 		objects = append(objects, rolloutObject{Kind: "Ingress", Namespace: exposure.Namespace, Name: exposure.IngressName, Manager: exposure.FieldManager, Object: exposure.Ingress})

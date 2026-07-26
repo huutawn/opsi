@@ -17,6 +17,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
@@ -31,6 +32,8 @@ var (
 	policyPlatform   = regexp.MustCompile(`^[a-z0-9]+/[a-z0-9_]+(?:/[a-z0-9_.-]+)?$`)
 	policyHash       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	policyOCI        = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$`)
+	policyCPU        = regexp.MustCompile(`^(?:[1-9][0-9]{0,6}m|[1-9][0-9]{0,3})$`)
+	policyMemory     = regexp.MustCompile(`^[1-9][0-9]{0,9}(?:Ki|Mi|Gi|Ti)?$`)
 )
 
 var ErrNotFound = errors.New("deployment policy not found")
@@ -181,6 +184,26 @@ func (s Service) Route(ctx context.Context, projectID string, request deployment
 	}
 	decision.TopologyPlanID = plan.ID
 	decision.TopologyRevision = plan.Revision
+	policies, err := s.Store.List(ctx, projectID)
+	if err != nil {
+		return decision, err
+	}
+	if request.Automatic {
+		matches := make([]deploymentpolicyv1.Policy, 0, 2)
+		for _, policy := range policies {
+			if policy.Draft.Enabled && automaticPolicyMatches(policy.Draft, record) {
+				matches = append(matches, policy)
+			}
+		}
+		if len(matches) == 0 {
+			return reject(decision, "ROUTING_AUTOMATIC_DISABLED", "no active policy authorizes this automatic delivery")
+		}
+		if len(matches) > 1 {
+			return reject(decision, "ROUTING_POLICY_AMBIGUOUS", "more than one active policy authorizes this automatic delivery")
+		}
+		request.EnvironmentID = matches[0].Draft.EnvironmentID
+		decision.EnvironmentID = request.EnvironmentID
+	}
 	serviceAssignments := make([]topologyv1.Assignment, 0, 1)
 	for _, assignment := range plan.Assignments {
 		if assignment.ServiceKey == record.ServiceKey {
@@ -203,13 +226,11 @@ func (s Service) Route(ctx context.Context, projectID string, request deployment
 		return reject(decision, "ROUTING_TOPOLOGY_MISMATCH", "TopologyPlan must contain exactly one matching service assignment")
 	}
 	assignment := assignments[0]
-	policies, err := s.Store.List(ctx, projectID)
-	if err != nil {
-		return decision, err
-	}
 	matches := make([]deploymentpolicyv1.Policy, 0, 2)
 	for _, policy := range policies {
-		if policy.Draft.Enabled && policyMatches(policy.Draft, record, request.EnvironmentID) && contains(policy.Draft.AllowedRuntimeIDs, assignment.RuntimeID) {
+		matchesAutomatically := request.Automatic && policy.Draft.Enabled && automaticPolicyMatches(policy.Draft, record)
+		matchesNormally := !request.Automatic && policy.Draft.Enabled && policyMatches(policy.Draft, record, request.EnvironmentID)
+		if (matchesAutomatically || matchesNormally) && policy.Draft.EnvironmentID == request.EnvironmentID && contains(policy.Draft.AllowedRuntimeIDs, assignment.RuntimeID) {
 			matches = append(matches, policy)
 		}
 	}
@@ -259,6 +280,46 @@ func (s Service) Route(ctx context.Context, projectID string, request deployment
 	decision.Message = "BuildRecord is eligible for this runtime and Agent"
 	decision.DecisionHash = decisionHash(decision)
 	return decision, nil
+}
+
+func automaticPolicyMatches(policy deploymentpolicyv1.Draft, record buildrecordv1.Record) bool {
+	if policy.ProjectID != record.ProjectID || policy.RepositoryID != record.RepositoryID || !contains(policy.ServiceKeys, record.ServiceKey) || !contains(policy.WorkflowRefs, record.Workload.WorkflowRef) || !contains(policy.AllowedPlatforms, record.Build.Platform) || !contains(policy.AllowedConfigHashes, record.Build.ConfigHash) || !contains(policy.AllowedBuildPlanHashes, record.Build.PlanHash) {
+		return false
+	}
+	if record.Workload.JobWorkflowRef == "" {
+		if len(policy.JobWorkflowRefs) > 0 {
+			return false
+		}
+	} else if !contains(policy.JobWorkflowRefs, record.Workload.JobWorkflowRef) {
+		return false
+	}
+	if record.Workload.EventName == "push" {
+		return policy.AutomaticMain && contains(policy.AllowedEvents, "push") && record.Workload.Ref == "refs/heads/main" && contains(policy.AllowedGitRefs, "refs/heads/main") && policyAllowsOCI(policy, record)
+	}
+	if record.Workload.EventName == "pull_request" {
+		return policy.Preview.Enabled && contains(policy.AllowedEvents, "pull_request") && strings.HasPrefix(record.Workload.Ref, "refs/pull/") && strings.HasSuffix(record.Workload.Ref, "/merge") && policyAllowsOCI(policy, record)
+	}
+	return false
+}
+
+func policyAllowsOCI(policy deploymentpolicyv1.Draft, record buildrecordv1.Record) bool {
+	if contains(policy.AllowedOCIRepositories, record.Build.OCIRepository) {
+		return true
+	}
+	for _, prefix := range policy.AllowedOCIPrefixes {
+		prefix = strings.TrimSuffix(prefix, "/")
+		if record.Build.OCIRepository == prefix || strings.HasPrefix(record.Build.OCIRepository, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func validatePolicyResource(cpu, memory string) error {
+	if !policyCPU.MatchString(cpu) || !policyMemory.MatchString(memory) {
+		return errors.New("preview CPU and memory quotas are invalid")
+	}
+	return nil
 }
 
 func policyMatches(policy deploymentpolicyv1.Draft, record buildrecordv1.Record, environmentID string) bool {
@@ -345,6 +406,18 @@ func normalizeDraft(projectID string, d deploymentpolicyv1.Draft) (deploymentpol
 	}
 	if len(d.AllowedOCIRepositories) == 0 && len(d.AllowedOCIPrefixes) == 0 {
 		return d, "", invalid("DEPLOYMENT_POLICY_OCI_INVALID", "at least one exact OCI repository or bounded prefix is required")
+	}
+	if d.AutomaticMain && (!contains(d.AllowedEvents, "push") || !contains(d.AllowedGitRefs, "refs/heads/main")) {
+		return d, "", invalid("DEPLOYMENT_POLICY_AUTOMATIC_INVALID", "automatic main delivery requires push and refs/heads/main")
+	}
+	if d.Preview.Enabled {
+		d.Preview.HostnameSuffix = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d.Preview.HostnameSuffix)), ".")
+		if _, err := exposurev1.NormalizeHostname(d.Preview.HostnameSuffix); err != nil || d.Preview.TTLSeconds < 60 || d.Preview.TTLSeconds > 604800 || d.Preview.MaxReplicas < 1 || d.Preview.MaxReplicas > 20 {
+			return d, "", invalid("DEPLOYMENT_POLICY_PREVIEW_INVALID", "preview hostname, TTL, and replica bounds are invalid")
+		}
+		if err := validatePolicyResource(d.Preview.CPU, d.Preview.Memory); err != nil {
+			return d, "", invalid("DEPLOYMENT_POLICY_PREVIEW_INVALID", err.Error())
+		}
 	}
 	for _, prefix := range d.AllowedOCIPrefixes {
 		if !strings.HasSuffix(prefix, "/") || strings.ContainsAny(prefix, "*?[](){}|\\") {

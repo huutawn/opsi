@@ -62,6 +62,7 @@ type BuildTarget struct {
 	Dockerfile     string   `json:"dockerfile"`
 	Platform       string   `json:"platform"`
 	ProductionRefs []string `json:"production_refs,omitempty"`
+	PreviewEnabled bool     `json:"preview_enabled,omitempty"`
 }
 
 type ChangedServicePlan struct {
@@ -404,7 +405,7 @@ func finalizePlan(plan ChangedServicePlan, cfg ConfigV2) ChangedServicePlan {
 					productionRefs = append(productionRefs, "refs/heads/"+branch)
 				}
 			}
-			plan.Matrix = append(plan.Matrix, BuildTarget{Key: service.Key, Context: service.Build.Context, Dockerfile: service.Build.Dockerfile, Platform: service.Build.Platform, ProductionRefs: productionRefs})
+			plan.Matrix = append(plan.Matrix, BuildTarget{Key: service.Key, Context: service.Build.Context, Dockerfile: service.Build.Dockerfile, Platform: service.Build.Platform, ProductionRefs: productionRefs, PreviewEnabled: service.Deploy.Preview.Enabled && service.Deploy.Preview.PullRequests})
 		}
 	}
 	plan.PlanHash = ""

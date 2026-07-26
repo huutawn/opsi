@@ -167,7 +167,7 @@ func latestPostgresExposure(ctx context.Context, queryer rolloutQueryer, project
 
 func latestPostgresKnownGood(ctx context.Context, tx *sql.Tx, projectID, environmentID, runtimeID, serviceID string) (string, string, string, error) {
 	var id, hash, digest string
-	err := tx.QueryRowContext(ctx, `SELECT COALESCE(known_good_id,''), COALESCE(known_good_hash,''), COALESCE(current_digest,'') FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND known_good_id IS NOT NULL AND known_good_id <> '' ORDER BY updated_at DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID).Scan(&id, &hash, &digest)
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(known_good_id,''), COALESCE(known_good_hash,''), COALESCE(current_digest,'') FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND snapshot_json->'preview' IS NULL AND known_good_id IS NOT NULL AND known_good_id <> '' ORDER BY updated_at DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID).Scan(&id, &hash, &digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", "", nil
 	}

@@ -29,6 +29,8 @@ jobs:
       has-services: ${{ steps.matrix.outputs.has-services }}
       publish-matrix: ${{ steps.matrix.outputs.publish-matrix }}
       has-publish-services: ${{ steps.matrix.outputs.has-publish-services }}
+      preview-matrix: ${{ steps.matrix.outputs.preview-matrix }}
+      has-preview-services: ${{ steps.matrix.outputs.has-preview-services }}
       config-hash: ${{ steps.matrix.outputs.config-hash }}
       plan-hash: ${{ steps.matrix.outputs.plan-hash }}
       reason-codes: ${{ steps.matrix.outputs.reason-codes }}
@@ -84,6 +86,7 @@ jobs:
           if not isinstance(reasons, list) or len(reasons) > 128:
               raise SystemExit("invalid or oversized Opsi reason list")
           publish = []
+          preview = []
           for target in matrix:
               refs = target.get("production_refs", [])
               if not isinstance(refs, list) or len(refs) > 64:
@@ -92,14 +95,19 @@ jobs:
                   raise SystemExit("invalid production ref")
               if sys.argv[3] == "push" and sys.argv[4] in refs:
                   publish.append(target)
+              if sys.argv[3] == "pull_request" and target.get("preview_enabled") is True:
+                  preview.append(target)
           compact = json.dumps({"service": matrix}, separators=(",", ":"), sort_keys=True)
           publish_compact = json.dumps({"service": publish}, separators=(",", ":"), sort_keys=True)
+          preview_compact = json.dumps({"service": preview}, separators=(",", ":"), sort_keys=True)
           reason_json = json.dumps(reasons, separators=(",", ":"), sort_keys=True)
           with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as output:
               output.write("matrix=" + compact + chr(10))
               output.write("has-services=" + ("true" if matrix else "false") + chr(10))
               output.write("publish-matrix=" + publish_compact + chr(10))
               output.write("has-publish-services=" + ("true" if publish else "false") + chr(10))
+              output.write("preview-matrix=" + preview_compact + chr(10))
+              output.write("has-preview-services=" + ("true" if preview else "false") + chr(10))
               output.write("config-hash=" + str(plan.get("config_hash", "")) + chr(10))
               output.write("plan-hash=" + str(plan.get("plan_hash", "")) + chr(10))
               output.write("reason-codes=" + reason_json + chr(10))
@@ -209,8 +217,90 @@ jobs:
             --oci-repository "$OPSI_OCI_REPOSITORY" \
             --oci-digest "$OPSI_DIGEST"
         shell: bash
+
+  preview-publish-and-record:
+    needs: plan
+    if: needs.plan.outputs.has-preview-services == 'true' && github.event_name == 'pull_request' && github.event.repository.fork == false && github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    concurrency:
+      group: opsi-cd-preview-${{ github.repository_id }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.preview-matrix) }}
+    steps:
+      - name: Check out exact pull request head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out immutable Opsi helper source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: huutawn/opsi
+          ref: %s
+          path: __opsi_tool_source
+          persist-credentials: false
+      - name: Set up pinned Go toolchain
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: __opsi_tool_source/cli/go.mod
+          cache: false
+      - name: Build immutable Opsi helper
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/opsi-bin"
+          go build -C "$GITHUB_WORKSPACE/__opsi_tool_source/cli" -o "$RUNNER_TEMP/opsi-bin/opsi" ./cmd/opsi
+          echo "$RUNNER_TEMP/opsi-bin" >> "$GITHUB_PATH"
+        shell: bash
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Log in to public GHCR with GitHub token
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push immutable preview image
+        id: publish
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: ${{ matrix.service.context }}
+          file: ${{ matrix.service.dockerfile }}
+          platforms: ${{ matrix.service.platform }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ matrix.service.key }}:pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          provenance: true
+      - name: Submit verified preview BuildRecord
+        env:
+          OPSI_CLOUD_URL: ${{ vars.OPSI_CLOUD_URL }}
+          OPSI_DIGEST: ${{ steps.publish.outputs.digest }}
+          OPSI_OCI_REPOSITORY: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ matrix.service.key }}
+          OPSI_CONFIG_HASH: ${{ needs.plan.outputs.config-hash }}
+          OPSI_PLAN_HASH: ${{ needs.plan.outputs.plan-hash }}
+          OPSI_PLATFORM: ${{ matrix.service.platform }}
+          OPSI_SERVICE_KEY: ${{ matrix.service.key }}
+        run: |
+          set -eu
+          test -n "$OPSI_DIGEST"
+          opsi internal build-record submit-from-github-actions \
+            --cloud-url "$OPSI_CLOUD_URL" \
+            --service-key "$OPSI_SERVICE_KEY" \
+            --config-hash "$OPSI_CONFIG_HASH" \
+            --plan-hash "$OPSI_PLAN_HASH" \
+            --platform "$OPSI_PLATFORM" \
+            --oci-repository "$OPSI_OCI_REPOSITORY" \
+            --oci-digest "$OPSI_DIGEST"
+        shell: bash
 `
 
 func RenderWorkflow(config ...ConfigV2) []byte {
-	return []byte(fmt.Sprintf(workflowTemplate, opsiSourceRevision, opsiSourceRevision))
+	return []byte(fmt.Sprintf(workflowTemplate, opsiSourceRevision, opsiSourceRevision, opsiSourceRevision))
 }

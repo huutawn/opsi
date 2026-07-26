@@ -328,6 +328,10 @@ export class LocalClient {
     return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments/${encodeURIComponent(deploymentID)}/retry`, { method: "POST", write: true, idempotencyKey, body: "{}" });
   }
 
+  previewCleanup(projectID: string, deploymentID: string, idempotencyKey: string, reason = "manual") {
+    return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments/${encodeURIComponent(deploymentID)}/cleanup`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify({ deployment_id: deploymentID, reason }) });
+  }
+
   exposurePreview(projectID: string, body: import("../contracts/registry").ExposureMutationRequest) {
     return this.call<import("../contracts/registry").ExposurePreview>(`/api/local/projects/${projectID}/exposures/preview`, { method: "POST", body: JSON.stringify(body) });
   }

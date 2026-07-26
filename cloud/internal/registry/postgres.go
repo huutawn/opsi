@@ -1067,7 +1067,11 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	snapshot.CreatedAt = now
 	snapshot.ActorUserID = requestedBy
 	snapshot.IdempotencyKey = key
-	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: snapshot.Authority.EnvironmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
+	environmentID := snapshot.Authority.EnvironmentID
+	if snapshot.Preview != nil {
+		environmentID = snapshot.Preview.Namespace
+	}
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: environmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
 	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -1098,11 +1102,16 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	if err != nil {
 		return DeploymentJob{}, false, err
 	}
-	currentExposure, err := latestPostgresExposure(ctx, tx, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
-	if err != nil {
-		return DeploymentJob{}, false, err
+	var exposure *exposurev1.ExposureSpec
+	if snapshot.Preview != nil {
+		exposure, err = previewExposureForDeployment(job, snapshot.Preview)
+	} else {
+		currentExposure, lookupErr := latestPostgresExposure(ctx, tx, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
+		if lookupErr != nil {
+			return DeploymentJob{}, false, lookupErr
+		}
+		exposure, err = exposureForDeployment(currentExposure, job.ID)
 	}
-	exposure, err := exposureForDeployment(currentExposure, job.ID)
 	if err != nil {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "EXPOSURE_SPEC_INVALID", Message: "authoritative exposure could not be preserved", RequestID: requestID}
 	}
@@ -1160,11 +1169,77 @@ func (s PostgresService) ReplayImmutableDeployment(projectID, key, payloadHash s
 	return job, true, nil
 }
 
+func (s PostgresService) StartPreviewCleanup(projectID, actorUserID, key, requestID string, request deploymentv1.PreviewCleanupRequest) (DeploymentJob, bool, error) {
+	if !validDeploymentIdempotencyKey(key) || !validDeploymentIdempotencyKey(request.DeploymentID) || !validCleanupReason(request.Reason) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "PREVIEW_CLEANUP_INVALID", Message: "preview cleanup identity or reason is invalid", RequestID: requestID}
+	}
+	ctx := context.Background()
+	payloadHash := hashJSON(request)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	defer tx.Rollback()
+	scope := "preview-cleanup:v1:" + projectID
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, scope+":"+key); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	var existingID string
+	err = tx.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE scope=$1 AND key=$2`, scope, key).Scan(&existingID)
+	if err == nil {
+		job, scanErr := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 AND project_id=$2`, existingID, projectID))
+		if scanErr != nil {
+			return DeploymentJob{}, false, scanErr
+		}
+		if job.PayloadHash != payloadHash {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used with a different cleanup payload", RequestID: requestID}
+		}
+		job.Reused = true
+		return job, true, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return DeploymentJob{}, false, err
+	}
+	base, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 AND project_id=$2 FOR UPDATE`, request.DeploymentID, projectID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DeploymentJob{}, false, APIError{Status: 404, Code: "PREVIEW_NOT_FOUND", Message: "preview deployment was not found", RequestID: requestID}
+		}
+		return DeploymentJob{}, false, err
+	}
+	if base.Snapshot == nil || base.Snapshot.Preview == nil || base.RolloutIntent == nil {
+		return DeploymentJob{}, false, APIError{Status: 404, Code: "PREVIEW_NOT_FOUND", Message: "preview deployment was not found", RequestID: requestID}
+	}
+	now := s.clock()
+	id := newID("dep")
+	desired := base.RolloutIntent.Desired
+	desired.DeploymentJobID = id
+	desired.Exposure = exposurev1.ExposureSpec{}
+	desired.ExposureSpecHash = ""
+	intent := deploymentv1.RolloutIntent{SchemaVersion: deploymentv1.RolloutSchemaVersion, RolloutID: "rol-" + hashJSON(id)[:32], Operation: deploymentv1.RolloutOperationCleanup, Target: desired.Target, Desired: desired, Attempt: 1, CreatedAt: now}
+	canonical, err := intent.Canonicalize()
+	if err != nil {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "PREVIEW_CLEANUP_INVALID", Message: "preview cleanup authority is invalid", RequestID: requestID}
+	}
+	snapshot := *base.Snapshot
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: id, OrgID: base.OrgID, ProjectID: projectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceID: base.ServiceID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationCleanup, IdempotencyKey: key, RequestedBy: actorUserID, AgentID: base.AgentID, NodeID: base.NodeID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: base.SpecHash, PayloadHash: payloadHash, IntentHash: canonical.IntentHash, BaseDeploymentID: base.ID, RolloutIntent: &canonical, RolloutState: deploymentv1.RolloutStatePrepared, DesiredDigest: base.DesiredDigest, CreatedAt: now, UpdatedAt: now}
+	if err := insertDeployment(ctx, tx, job); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertDeploymentEvent(ctx, tx, rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable preview cleanup prepared", 0, requestID, now, "")); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	return job, false, tx.Commit()
+}
+
 func (s PostgresService) DeploymentCommand(job DeploymentJob) *deploymentv1.AgentCommand {
 	if job.Snapshot == nil || job.RolloutIntent == nil {
 		return nil
 	}
-	return &deploymentv1.AgentCommand{SchemaVersion: deploymentv1.CommandSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, AgentID: job.AgentID, LeaseToken: job.LeaseToken, Attempt: int32(job.AttemptCount), Image: job.Snapshot.Image, Workload: job.Snapshot.Workload, SpecHash: job.SpecHash, Rollout: job.RolloutIntent}
+	return &deploymentv1.AgentCommand{SchemaVersion: deploymentv1.CommandSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, AgentID: job.AgentID, LeaseToken: job.LeaseToken, Attempt: int32(job.AttemptCount), Image: job.Snapshot.Image, Workload: job.Snapshot.Workload, SpecHash: job.SpecHash, Rollout: job.RolloutIntent, Preview: job.Snapshot.Preview}
 }
 
 func (s PostgresService) RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error) {

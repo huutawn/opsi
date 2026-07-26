@@ -7,23 +7,34 @@ import "time"
 const SchemaVersion = "opsi.deployment_policy/v1"
 
 type Draft struct {
-	SchemaVersion          string   `json:"schema_version"`
-	ProjectID              string   `json:"project_id"`
-	RepositoryID           uint64   `json:"repository_id"`
-	ServiceKeys            []string `json:"service_keys"`
-	WorkflowRefs           []string `json:"workflow_refs"`
-	JobWorkflowRefs        []string `json:"job_workflow_refs,omitempty"`
-	AllowedEvents          []string `json:"allowed_events"`
-	AllowedGitRefs         []string `json:"allowed_git_refs"`
-	EnvironmentID          string   `json:"environment_id"`
-	AllowedRuntimeIDs      []string `json:"allowed_runtime_ids"`
-	AllowedOCIRepositories []string `json:"allowed_oci_repositories"`
-	AllowedOCIPrefixes     []string `json:"allowed_oci_prefixes,omitempty"`
-	AllowedPlatforms       []string `json:"allowed_platforms"`
-	AllowedConfigHashes    []string `json:"allowed_config_hashes"`
-	AllowedBuildPlanHashes []string `json:"allowed_build_plan_hashes"`
-	AllowUnknownCapacity   bool     `json:"allow_unknown_capacity"`
-	Enabled                bool     `json:"enabled"`
+	SchemaVersion          string        `json:"schema_version"`
+	ProjectID              string        `json:"project_id"`
+	RepositoryID           uint64        `json:"repository_id"`
+	ServiceKeys            []string      `json:"service_keys"`
+	WorkflowRefs           []string      `json:"workflow_refs"`
+	JobWorkflowRefs        []string      `json:"job_workflow_refs,omitempty"`
+	AllowedEvents          []string      `json:"allowed_events"`
+	AllowedGitRefs         []string      `json:"allowed_git_refs"`
+	EnvironmentID          string        `json:"environment_id"`
+	AllowedRuntimeIDs      []string      `json:"allowed_runtime_ids"`
+	AllowedOCIRepositories []string      `json:"allowed_oci_repositories"`
+	AllowedOCIPrefixes     []string      `json:"allowed_oci_prefixes,omitempty"`
+	AllowedPlatforms       []string      `json:"allowed_platforms"`
+	AllowedConfigHashes    []string      `json:"allowed_config_hashes"`
+	AllowedBuildPlanHashes []string      `json:"allowed_build_plan_hashes"`
+	AllowUnknownCapacity   bool          `json:"allow_unknown_capacity"`
+	Enabled                bool          `json:"enabled"`
+	AutomaticMain          bool          `json:"automatic_main,omitempty"`
+	Preview                PreviewPolicy `json:"preview,omitempty"`
+}
+
+type PreviewPolicy struct {
+	Enabled        bool   `json:"enabled"`
+	HostnameSuffix string `json:"hostname_suffix,omitempty"`
+	TTLSeconds     int64  `json:"ttl_seconds,omitempty"`
+	MaxReplicas    int32  `json:"max_replicas,omitempty"`
+	CPU            string `json:"cpu,omitempty"`
+	Memory         string `json:"memory,omitempty"`
 }
 
 type Policy struct {
@@ -79,6 +90,7 @@ type DisableRequest struct {
 type RoutingRequest struct {
 	BuildRecordID string `json:"build_record_id"`
 	EnvironmentID string `json:"environment_id"`
+	Automatic     bool   `json:"automatic,omitempty"`
 }
 
 type RoutingDecision struct {

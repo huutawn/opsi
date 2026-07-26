@@ -241,6 +241,10 @@ func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentL
 			}
 			return nil
 		})
+		if intent.Operation == deploymentv1.RolloutOperationCleanup && record.State == deploymentv1.RolloutStateCleaned && record.TerminalAt != nil {
+			rolloutResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateCleaned, Namespace: intent.Desired.Preview.Namespace, RolloutID: intent.RolloutID, RolloutState: record.State, IntentHash: intent.IntentHash, StateHash: record.StateHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, PreviousDigest: intent.PreviousDigest, Attempt: intent.Attempt}
+			return cloudrelay.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateCleaned, LeaseToken: lease.LeaseToken, SpecHash: intent.Desired.WorkloadSpecHash, ApplicationImage: intent.Desired.Image.Reference, Namespace: intent.Desired.Preview.Namespace, RolloutResult: rolloutResult}, true
+		}
 		if result, terminal := resultFromRollout(intent, record, reconcileErr, lease); terminal {
 			return result, true
 		}

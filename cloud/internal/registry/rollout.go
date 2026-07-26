@@ -107,6 +107,7 @@ func (s *Service) StartExposureRollout(projectID, actorUserID, key, requestID st
 func buildRolloutIntent(base DeploymentJob, exposure *exposurev1.ExposureSpec, previousID, previousHash, previousDigest, expectedID, expectedHash, operation string, now time.Time) (deploymentv1.RolloutIntent, error) {
 	target := deploymentv1.RuntimeTarget{ProjectID: base.ProjectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceKey: base.Snapshot.Workload.ServiceKey, NodeID: base.NodeID, AgentID: base.AgentID}
 	runtime := deploymentv1.RuntimeSnapshot{SchemaVersion: deploymentv1.RuntimeSnapshotVersion, Target: target, DeploymentJobID: base.ID, Image: base.Snapshot.Image, Workload: base.Snapshot.Workload, WorkloadSpecHash: base.Snapshot.SpecHash, Authority: deploymentv1.RuntimeAuthority{TopologyPlanID: base.Snapshot.Authority.TopologyPlanID, TopologyRevision: base.Snapshot.Authority.TopologyRevision, TopologyHash: base.Snapshot.Authority.TopologyHash, DeploymentPolicyID: base.Snapshot.Authority.DeploymentPolicyID, DeploymentPolicyRevision: base.Snapshot.Authority.DeploymentPolicyRevision, DeploymentPolicyHash: base.Snapshot.Authority.DeploymentPolicyHash, RoutingDecisionHash: base.Snapshot.Authority.RoutingDecisionHash}}
+	runtime.Preview = base.Snapshot.Preview
 	if exposure != nil {
 		runtime.DeploymentJobID = exposure.DeploymentJobID
 		runtime.Exposure = *exposure
@@ -129,6 +130,29 @@ func exposureForDeployment(current *exposurev1.ExposureSpec, deploymentID string
 	desired.DeploymentJobID = deploymentID
 	desired.SpecHash = ""
 	canonical, err := desired.Canonicalize()
+	if err != nil {
+		return nil, err
+	}
+	return &canonical, nil
+}
+
+func previewExposureForDeployment(job DeploymentJob, preview *deploymentv1.PreviewSpec) (*exposurev1.ExposureSpec, error) {
+	if preview == nil {
+		return nil, nil
+	}
+	spec := exposurev1.ExposureSpec{
+		SchemaVersion:   exposurev1.SchemaVersion,
+		ProjectID:       job.ProjectID,
+		EnvironmentID:   job.EnvironmentID,
+		RuntimeID:       job.RuntimeID,
+		ServiceKey:      preview.ServiceKey,
+		DeploymentJobID: job.ID,
+		Hostname:        preview.Hostname,
+		Path:            "/",
+		ServicePort:     job.Snapshot.Workload.ContainerPort,
+		TLS:             exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled},
+	}
+	canonical, err := spec.Canonicalize()
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +198,7 @@ func (s *Service) latestKnownGoodLocked(projectID, environmentID, runtimeID, ser
 	var selected *DeploymentJob
 	for id := range s.deployments {
 		job := s.deployments[id]
-		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && job.TerminalResult != nil && job.TerminalResult.KnownGoodID != "" && (selected == nil || job.UpdatedAt.After(selected.UpdatedAt)) {
+		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && job.Snapshot != nil && job.Snapshot.Preview == nil && job.TerminalResult != nil && job.TerminalResult.KnownGoodID != "" && (selected == nil || job.UpdatedAt.After(selected.UpdatedAt)) {
 			copy := job
 			selected = &copy
 		}
@@ -259,6 +283,10 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 	case deploymentv1.RolloutStateSucceeded:
 		if result.FailureCode != "" || result.CurrentDigest != result.DesiredDigest || result.KnownGoodID == "" || !validRolloutHash(result.KnownGoodHash) || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 {
 			return fmt.Errorf("successful rollout result lacks factual known-good metadata")
+		}
+	case deploymentv1.RolloutStateCleaned:
+		if job.RolloutIntent.Operation != deploymentv1.RolloutOperationCleanup || result.FailureCode != "" || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
+			return fmt.Errorf("cleaned preview result is invalid")
 		}
 	case deploymentv1.RolloutStateRolledBack:
 		if result.CurrentDigest == "" || result.CurrentDigest != result.PreviousDigest || result.KnownGoodID != job.RolloutIntent.PreviousKnownGoodID || result.KnownGoodHash != job.RolloutIntent.PreviousKnownGoodHash || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 || result.FailureCode != "" && result.FailurePhase != deploymentv1.FailurePhasePostMutation {

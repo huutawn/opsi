@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -34,6 +35,87 @@ const (
 	githubInstallationTokenSkew    = 2 * time.Minute
 	githubSharedRequestTimeout     = 30 * time.Second
 )
+
+type GitHubPullRequest struct {
+	Number           int
+	State            string
+	HeadSHA          string
+	BaseRef          string
+	BaseRepositoryID uint64
+	HeadRepositoryID uint64
+}
+
+func (c *GitHubAppClient) PullRequest(ctx context.Context, installationID int64, repository string, number int) (GitHubPullRequest, error) {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 || !validGitHubPathPart(parts[0]) || !validGitHubPathPart(parts[1]) || number < 1 || number > 1_000_000_000 {
+		return GitHubPullRequest{}, errors.New("GitHub pull request identity is invalid")
+	}
+	token, _, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return GitHubPullRequest{}, errors.New("GitHub pull request authority is unavailable")
+	}
+	endpoint := "https://api.github.com/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]) + "/pulls/" + strconv.Itoa(number)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return GitHubPullRequest{}, errors.New("GitHub pull request request could not be created")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
+	request.Header.Set("User-Agent", githubUserAgent)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return GitHubPullRequest{}, errors.New("GitHub pull request authority is unavailable")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return GitHubPullRequest{}, fmt.Errorf("GitHub pull request authority returned status %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, githubResponseMaxBytes+1))
+	if err != nil || len(body) > githubResponseMaxBytes {
+		return GitHubPullRequest{}, errors.New("GitHub pull request response is invalid")
+	}
+	var payload struct {
+		Number int    `json:"number"`
+		State  string `json:"state"`
+		Head   struct {
+			SHA  string `json:"sha"`
+			Repo *struct {
+				ID uint64 `json:"id"`
+			} `json:"repo"`
+		} `json:"head"`
+		Base struct {
+			Ref  string `json:"ref"`
+			Repo *struct {
+				ID uint64 `json:"id"`
+			} `json:"repo"`
+		} `json:"base"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Number != number || payload.Head.Repo == nil || payload.Base.Repo == nil || !validSHA40(payload.Head.SHA) {
+		return GitHubPullRequest{}, errors.New("GitHub pull request response is invalid")
+	}
+	return GitHubPullRequest{Number: number, State: payload.State, HeadSHA: payload.Head.SHA, BaseRef: payload.Base.Ref, BaseRepositoryID: payload.Base.Repo.ID, HeadRepositoryID: payload.Head.Repo.ID}, nil
+}
+
+func validSHA40(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func validGitHubPathPart(value string) bool {
+	if value == "" || len(value) > 100 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || strings.ContainsRune("._-", char)) {
+			return false
+		}
+	}
+	return true
+}
 
 type installationToken struct {
 	Token     string

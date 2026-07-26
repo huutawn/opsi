@@ -77,10 +77,10 @@ func TestWorkflowPinsActionsAndOpsiSource(t *testing.T) {
 			t.Fatalf("mutable action reference: %s", line)
 		}
 	}
-	if len(opsiSourceRevision) != 40 || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(opsiSourceRevision) || strings.Count(text, "ref: "+opsiSourceRevision) != 2 {
+	if len(opsiSourceRevision) != 40 || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(opsiSourceRevision) || strings.Count(text, "ref: "+opsiSourceRevision) != 3 {
 		t.Fatalf("Opsi source pin is not exact: %q", opsiSourceRevision)
 	}
-	if strings.Count(text, "persist-credentials: false") != 5 {
+	if strings.Count(text, "persist-credentials: false") != 7 {
 		t.Fatal("every repository checkout must disable credential persistence")
 	}
 }

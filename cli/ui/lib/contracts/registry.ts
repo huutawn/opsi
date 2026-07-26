@@ -159,7 +159,11 @@ export type DeploymentPolicyDraft = {
   schema_version: "opsi.deployment_policy/v1"; project_id: string; repository_id: number; service_keys: string[]; workflow_refs: string[]; job_workflow_refs?: string[];
   allowed_events: string[]; allowed_git_refs: string[]; environment_id: string; allowed_runtime_ids: string[]; allowed_oci_repositories: string[]; allowed_oci_prefixes?: string[];
   allowed_platforms: string[]; allowed_config_hashes: string[]; allowed_build_plan_hashes: string[]; allow_unknown_capacity: boolean; enabled: boolean;
+  automatic_main?: boolean;
+  preview?: { enabled: boolean; hostname_suffix?: string; ttl_seconds?: number; max_replicas?: number; cpu?: string; memory?: string };
 };
+
+export type PreviewSpec = { namespace: string; hostname: string; repository_id: number; repository_owner_id: number; pr_number: number; head_sha: string; service_key: string; cpu: string; memory: string; max_replicas: number; created_at: string; expires_at: string };
 export type DeploymentPolicy = { schema_version: string; id: string; revision: number; state_hash: string; policy_hash: string; policy: DeploymentPolicyDraft; created_by: string; applied_by: string; created_at: string; applied_at: string };
 export type DeploymentPolicyPreview = { policy: DeploymentPolicyDraft; policy_hash: string; state_hash: string };
 export type DeploymentPolicyApplyResult = { policy: DeploymentPolicy; reused: boolean };
@@ -235,6 +239,7 @@ export type DeploymentJob = {
 		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; deployment_policy_id: string; deployment_policy_revision: number; runtime_id: string; node_id: string; agent_id: string };
 		workload: WorkloadSpec;
 		spec_hash: string;
+		preview?: PreviewSpec;
 	};
 };
 

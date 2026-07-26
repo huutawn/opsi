@@ -1522,10 +1522,19 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	snapshot.CreatedAt = now
 	snapshot.ActorUserID = requestedBy
 	snapshot.IdempotencyKey = key
-	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: snapshot.Authority.EnvironmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
+	environmentID := snapshot.Authority.EnvironmentID
+	if snapshot.Preview != nil {
+		environmentID = snapshot.Preview.Namespace
+	}
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: environmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
 	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
 	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
-	exposure, err := exposureForDeployment(s.latestExposureLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID), job.ID)
+	var exposure *exposurev1.ExposureSpec
+	if snapshot.Preview != nil {
+		exposure, err = previewExposureForDeployment(job, snapshot.Preview)
+	} else {
+		exposure, err = exposureForDeployment(s.latestExposureLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID), job.ID)
+	}
 	if err != nil {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "EXPOSURE_SPEC_INVALID", Message: "authoritative exposure could not be preserved", RequestID: requestID}
 	}
@@ -1562,11 +1571,56 @@ func (s *Service) ReplayImmutableDeployment(projectID, key, payloadHash string) 
 	return existing, true, nil
 }
 
+func (s *Service) StartPreviewCleanup(projectID, actorUserID, key, requestID string, request deploymentv1.PreviewCleanupRequest) (DeploymentJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !validDeploymentIdempotencyKey(key) || !validDeploymentIdempotencyKey(request.DeploymentID) || !validCleanupReason(request.Reason) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "PREVIEW_CLEANUP_INVALID", Message: "preview cleanup identity or reason is invalid", RequestID: requestID}
+	}
+	payloadHash := hashJSON(request)
+	scope := "preview-cleanup:v1:" + projectID + ":" + key
+	if existing, ok := s.idempotency[scope].(DeploymentJob); ok {
+		if existing.PayloadHash != payloadHash {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used with a different cleanup payload", RequestID: requestID}
+		}
+		if current, exists := s.deployments[existing.ID]; exists {
+			existing = current
+		}
+		existing.Reused = true
+		return existing, true, nil
+	}
+	base, ok := s.deployments[request.DeploymentID]
+	if !ok || base.ProjectID != projectID || base.Snapshot == nil || base.Snapshot.Preview == nil || base.RolloutIntent == nil {
+		return DeploymentJob{}, false, APIError{Status: 404, Code: "PREVIEW_NOT_FOUND", Message: "preview deployment was not found", RequestID: requestID}
+	}
+	now := s.clock()
+	id := newID("dep")
+	desired := base.RolloutIntent.Desired
+	desired.DeploymentJobID = id
+	desired.Exposure = exposurev1.ExposureSpec{}
+	desired.ExposureSpecHash = ""
+	intent := deploymentv1.RolloutIntent{SchemaVersion: deploymentv1.RolloutSchemaVersion, RolloutID: "rol-" + hashJSON(id)[:32], Operation: deploymentv1.RolloutOperationCleanup, Target: desired.Target, Desired: desired, Attempt: 1, CreatedAt: now}
+	canonical, err := intent.Canonicalize()
+	if err != nil {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "PREVIEW_CLEANUP_INVALID", Message: "preview cleanup authority is invalid", RequestID: requestID}
+	}
+	snapshot := *base.Snapshot
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: id, OrgID: base.OrgID, ProjectID: projectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceID: base.ServiceID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationCleanup, IdempotencyKey: key, RequestedBy: actorUserID, AgentID: base.AgentID, NodeID: base.NodeID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: base.SpecHash, PayloadHash: payloadHash, IntentHash: canonical.IntentHash, BaseDeploymentID: base.ID, RolloutIntent: &canonical, RolloutState: deploymentv1.RolloutStatePrepared, DesiredDigest: base.DesiredDigest, CreatedAt: now, UpdatedAt: now}
+	s.deployments[job.ID] = job
+	s.deployEvents[job.ID] = []DeploymentEvent{rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable preview cleanup prepared", 0, requestID, now, "")}
+	s.idempotency[scope] = job
+	return job, false, nil
+}
+
+func validCleanupReason(reason string) bool {
+	return reason == "manual" || reason == "pr_closed" || reason == "ttl_expired"
+}
+
 func (s *Service) DeploymentCommand(job DeploymentJob) *deploymentv1.AgentCommand {
 	if job.Snapshot == nil || job.RolloutIntent == nil {
 		return nil
 	}
-	return &deploymentv1.AgentCommand{SchemaVersion: deploymentv1.CommandSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, AgentID: job.AgentID, LeaseToken: job.LeaseToken, Attempt: int32(job.AttemptCount), Image: job.Snapshot.Image, Workload: job.Snapshot.Workload, SpecHash: job.SpecHash, Rollout: job.RolloutIntent}
+	return &deploymentv1.AgentCommand{SchemaVersion: deploymentv1.CommandSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, RuntimeID: job.RuntimeID, NodeID: job.NodeID, AgentID: job.AgentID, LeaseToken: job.LeaseToken, Attempt: int32(job.AttemptCount), Image: job.Snapshot.Image, Workload: job.Snapshot.Workload, SpecHash: job.SpecHash, Rollout: job.RolloutIntent, Preview: job.Snapshot.Preview}
 }
 
 func (s *Service) RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error) {
@@ -2158,7 +2212,7 @@ func deploymentLeaseActiveStatus(status string) bool {
 
 func deploymentTerminalStatus(status string) bool {
 	switch status {
-	case DeploymentSucceeded, DeploymentFailed, DeploymentRolledBack, DeploymentDeadLetter, deploymentv1.StateCancelled, deploymentv1.RolloutStateRollbackFailed:
+	case DeploymentSucceeded, DeploymentFailed, DeploymentRolledBack, DeploymentDeadLetter, deploymentv1.StateCancelled, deploymentv1.RolloutStateRollbackFailed, deploymentv1.RolloutStateCleaned:
 		return true
 	default:
 		return false

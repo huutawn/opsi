@@ -14,6 +14,7 @@ import (
 	"time"
 
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
+	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 )
 
 const (
@@ -38,6 +39,7 @@ const (
 
 var (
 	serviceKeyPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	shaPattern            = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	envNamePattern        = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 	digestPattern         = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	repositoryPattern     = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$`)
@@ -122,6 +124,34 @@ type WorkloadSpec struct {
 	SecretReferences             []SecretReference     `json:"secret_references,omitempty"`
 	Environment                  []EnvironmentVariable `json:"environment,omitempty"`
 	Exposure                     ExposureIntent        `json:"exposure"`
+}
+
+// PreviewSpec is Cloud-issued authority for an isolated same-repository PR.
+type PreviewSpec struct {
+	Namespace         string    `json:"namespace"`
+	Hostname          string    `json:"hostname"`
+	RepositoryID      uint64    `json:"repository_id"`
+	RepositoryOwnerID uint64    `json:"repository_owner_id"`
+	PRNumber          int       `json:"pr_number"`
+	HeadSHA           string    `json:"head_sha"`
+	ServiceKey        string    `json:"service_key"`
+	CPU               string    `json:"cpu"`
+	Memory            string    `json:"memory"`
+	MaxReplicas       int32     `json:"max_replicas"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+}
+
+func (p PreviewSpec) Validate() error {
+	if !validOpaqueID(p.Namespace) ||
+		p.RepositoryID == 0 || p.RepositoryOwnerID == 0 || p.PRNumber < 1 || !shaPattern.MatchString(p.HeadSHA) ||
+		!serviceKeyPattern.MatchString(p.ServiceKey) || p.CreatedAt.IsZero() || !p.ExpiresAt.After(p.CreatedAt) || p.MaxReplicas < 1 || p.MaxReplicas > 20 {
+		return errors.New("preview authority is invalid")
+	}
+	if _, err := exposurev1.NormalizeHostname(p.Hostname); err != nil {
+		return errors.New("preview hostname is invalid")
+	}
+	return validateResources(Resources{Requests: ResourceValues{CPU: p.CPU, Memory: p.Memory}, Limits: ResourceValues{CPU: p.CPU, Memory: p.Memory}})
 }
 
 func (s WorkloadSpec) Normalize() WorkloadSpec {
@@ -295,6 +325,7 @@ type JobSnapshot struct {
 	IdempotencyKey string            `json:"idempotency_key"`
 	PayloadHash    string            `json:"payload_hash"`
 	CreatedAt      time.Time         `json:"created_at"`
+	Preview        *PreviewSpec      `json:"preview,omitempty"`
 }
 
 type CreateRequest struct {
@@ -342,6 +373,7 @@ type AgentCommand struct {
 	Workload      WorkloadSpec   `json:"workload"`
 	SpecHash      string         `json:"spec_hash"`
 	Rollout       *RolloutIntent `json:"rollout,omitempty"`
+	Preview       *PreviewSpec   `json:"preview,omitempty"`
 }
 
 type Progress struct {
