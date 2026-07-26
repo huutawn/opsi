@@ -56,7 +56,7 @@ func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer
 	defer listener.Close()
 
 	server := &http.Server{
-		Handler:           newStartMux(resolveUIDir(), devUI, cfg, factory),
+		Handler:           newStartMux(resolveUIDir(), devUI, cfg, factory, configPath),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -80,7 +80,46 @@ func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer
 	}
 }
 
-func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error)) *http.ServeMux {
+type agentConfigReloadError struct{}
+
+func (agentConfigReloadError) Error() string { return "Agent configuration reload failed" }
+
+type agentConfigResolver struct {
+	startup    config.Config
+	configPath string
+}
+
+func newAgentConfigResolver(startup config.Config, configPath string) agentConfigResolver {
+	return agentConfigResolver{startup: startup, configPath: configPath}
+}
+
+func (r agentConfigResolver) snapshot() (config.Config, error) {
+	if r.configPath == "" {
+		return r.startup, nil
+	}
+	loaded, err := config.Load(r.configPath)
+	if err != nil {
+		return config.Config{}, agentConfigReloadError{}
+	}
+	snapshot := r.startup
+	snapshot.AgentAddr = loaded.AgentAddr
+	snapshot.TLS = loaded.TLS
+	return snapshot, nil
+}
+
+func resolveAgentSnapshot(startup config.Config, resolver ...agentConfigResolver) (config.Config, error) {
+	if len(resolver) == 0 {
+		return startup, nil
+	}
+	return resolver[0].snapshot()
+}
+
+func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error), configPaths ...string) *http.ServeMux {
+	configPath := ""
+	if len(configPaths) > 0 {
+		configPath = configPaths[0]
+	}
+	agentResolver := newAgentConfigResolver(cfg, configPath)
 	localSession := newLocalSessionToken()
 	authFlow := &localAuthFlow{states: map[string]time.Time{}, installationClaims: map[string]time.Time{}}
 	mux := http.NewServeMux()
@@ -143,7 +182,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"authenticated":   authenticated,
 			"cloud_connected": cloudState,
-			"agent_connected": probeAgent(r.Context(), cfg, factory),
+			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
 			"token_status":    tokenState,
 			"org_id":          identity.OrgID,
 			"project_id":      identity.ProjectID,
@@ -155,7 +194,12 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		ctx, cancel := context.WithTimeout(r.Context(), 800*time.Millisecond)
 		defer cancel()
 		ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
-		status, err := agentclient.New(cfg).Status(ctx)
+		agentCfg, err := agentResolver.snapshot()
+		if err != nil {
+			writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONFIG_RELOAD_FAILED", "Agent configuration is unavailable")
+			return
+		}
+		status, err := agentclient.New(agentCfg).Status(ctx)
 		w.Header().Set("content-type", "application/json")
 		if err != nil {
 			writeLocalError(w, r, http.StatusBadGateway, "AGENT_UNAVAILABLE", "Agent status is unavailable")
@@ -165,6 +209,9 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	})
 	registerRepositoryCDRoutes(mux, localSession)
 	mux.HandleFunc("/api/local/", func(w http.ResponseWriter, r *http.Request) {
+		if handleLocalAgentRoutes(w, r, cfg, factory, localSession, agentResolver) {
+			return
+		}
 		proxyLocalRegistry(w, r, cfg, factory, localSession, authFlow)
 	})
 	mux.Handle("/", newUIHandler(uiDir, devUI))
@@ -369,11 +416,15 @@ func logoutLocalSession(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	writeLocalJSON(w, http.StatusOK, map[string]any{"authenticated": false, "revoked": true})
 }
 
-func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error)) string {
+func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) string {
 	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
 	defer cancel()
 	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
-	if _, err := agentclient.New(cfg).Status(ctx); err != nil {
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		return "failed"
+	}
+	if _, err := agentclient.New(agentCfg).Status(ctx); err != nil {
 		return "failed"
 	}
 	return "ok"
@@ -453,7 +504,25 @@ func storeFromFactory(factory func() (keychain.Store, error)) (keychain.Store, e
 	return factory()
 }
 
-func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+func handleLocalAgentRoutes(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), localSession string, resolver agentConfigResolver) bool {
+	if retiredLocalServiceDeployment(r.URL.Path, r.Method) {
+		return false
+	}
+	if isMutation(r.Method) && !isPlacementPreview(r.URL.Path) {
+		if r.Header.Get("X-Local-Session") != localSession {
+			writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_SESSION_REQUIRED", "mutating local requests require X-Local-Session")
+			return true
+		}
+		if !requireLocalIdempotencyKey(w, r) {
+			return true
+		}
+	}
+	return localTelemetry(w, r, cfg, factory, resolver) ||
+		localSecretOperation(w, r, cfg, factory, resolver) ||
+		localIncidentOperation(w, r, cfg, factory, resolver)
+}
+
+func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "secrets" {
 		return false
@@ -476,7 +545,7 @@ func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Con
 		if !ok {
 			return true
 		}
-		callLocalSecretAgent(w, r, cfg, factory, "created", req.SecretRequest, false)
+		callLocalSecretAgent(w, r, cfg, factory, "created", req.SecretRequest, false, resolver...)
 		return true
 	}
 	if len(parts) != 7 {
@@ -502,13 +571,13 @@ func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Con
 			writeLocalError(w, r, http.StatusBadRequest, "SECRET_SECOND_FACTOR_REQUIRED", "secret reveal requires OTP or TOTP")
 			return true
 		}
-		callLocalSecretAgent(w, r, cfg, factory, "revealed", req.SecretRequest, true)
+		callLocalSecretAgent(w, r, cfg, factory, "revealed", req.SecretRequest, true, resolver...)
 	case "rotate":
 		if !req.hasSecondFactor() {
 			writeLocalError(w, r, http.StatusBadRequest, "SECRET_SECOND_FACTOR_REQUIRED", "secret rotation requires OTP or TOTP")
 			return true
 		}
-		callLocalSecretAgent(w, r, cfg, factory, "rotated", req.SecretRequest, false)
+		callLocalSecretAgent(w, r, cfg, factory, "rotated", req.SecretRequest, false, resolver...)
 	default:
 		writeLocalError(w, r, http.StatusNotImplemented, "SECRETS_OPERATION_UNSUPPORTED", "this secret operation is not supported by the local Agent API")
 	}
@@ -587,17 +656,19 @@ func jsonBool(raw map[string]json.RawMessage, key string) bool {
 	return json.Unmarshal(data, &value) == nil && value
 }
 
-func callLocalSecretAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), statusText string, req *agentv1.SecretRequest, includePassword bool) {
+func callLocalSecretAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), statusText string, req *agentv1.SecretRequest, includePassword bool, resolver ...agentConfigResolver) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if pat := optionalPAT(factory); pat != "" {
 		ctx = agentclient.WithPAT(ctx, pat)
 	}
-	client := agentclient.New(cfg)
-	var (
-		resp *agentv1.SecretResponse
-		err  error
-	)
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentSecretError(w, r, err)
+		return
+	}
+	client := agentclient.New(agentCfg)
+	var resp *agentv1.SecretResponse
 	switch statusText {
 	case "created":
 		resp, err = client.CreateSecret(ctx, req)
@@ -632,6 +703,10 @@ func callLocalSecretAgent(w http.ResponseWriter, r *http.Request, cfg config.Con
 func writeLocalAgentSecretError(w http.ResponseWriter, r *http.Request, err error) {
 	statusCode := http.StatusBadGateway
 	code := "AGENT_SECRET_OPERATION_FAILED"
+	if _, ok := err.(agentConfigReloadError); ok {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONFIG_RELOAD_FAILED", "Agent configuration is unavailable")
+		return
+	}
 	switch grpcstatus.Code(err) {
 	case codes.InvalidArgument:
 		statusCode, code = http.StatusBadRequest, "INVALID_SECRET_REQUEST"
@@ -651,7 +726,7 @@ func writeLocalAgentSecretError(w http.ResponseWriter, r *http.Request, err erro
 	writeLocalError(w, r, statusCode, code, "Agent secret operation failed")
 }
 
-func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "incidents" {
 		return false
@@ -670,7 +745,7 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 			return true
 		}
 		if len(parts) == 5 {
-			callLocalIncidentListAgent(w, r, cfg, factory, req)
+			callLocalIncidentListAgent(w, r, cfg, factory, req, resolver...)
 			return true
 		}
 		if len(parts) == 6 {
@@ -679,7 +754,7 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 				writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ID_REQUIRED", "incident_id is required")
 				return true
 			}
-			callLocalIncidentGetAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID})
+			callLocalIncidentGetAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID}, resolver...)
 			return true
 		}
 		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local incident route is not implemented")
@@ -702,7 +777,7 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 	if !ok {
 		return true
 	}
-	callLocalIncidentResolveAgent(w, r, cfg, factory, req)
+	callLocalIncidentResolveAgent(w, r, cfg, factory, req, resolver...)
 	return true
 }
 
@@ -747,13 +822,18 @@ func rejectCallerAuthorityQuery(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentListRequest) {
+func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentListRequest, resolver ...agentConfigResolver) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if pat := optionalPAT(factory); pat != "" {
 		ctx = agentclient.WithPAT(ctx, pat)
 	}
-	resp, err := agentclient.New(cfg).ListIncidents(ctx, req)
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	resp, err := agentclient.New(agentCfg).ListIncidents(ctx, req)
 	if err != nil {
 		writeLocalAgentIncidentError(w, r, err)
 		return
@@ -763,13 +843,18 @@ func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg conf
 	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incidents": resp.Incidents})
 }
 
-func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest) {
+func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest, resolver ...agentConfigResolver) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if pat := optionalPAT(factory); pat != "" {
 		ctx = agentclient.WithPAT(ctx, pat)
 	}
-	resp, err := agentclient.New(cfg).GetIncident(ctx, req)
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	resp, err := agentclient.New(agentCfg).GetIncident(ctx, req)
 	if err != nil {
 		writeLocalAgentIncidentError(w, r, err)
 		return
@@ -779,13 +864,18 @@ func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg confi
 	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incident": resp})
 }
 
-func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentResolveRequest) {
+func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentResolveRequest, resolver ...agentConfigResolver) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if pat := optionalPAT(factory); pat != "" {
 		ctx = agentclient.WithPAT(ctx, pat)
 	}
-	resp, err := agentclient.New(cfg).ResolveIncident(ctx, req)
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	resp, err := agentclient.New(agentCfg).ResolveIncident(ctx, req)
 	if err != nil {
 		writeLocalAgentIncidentError(w, r, err)
 		return
@@ -803,6 +893,10 @@ func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg c
 func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err error) {
 	statusCode := http.StatusBadGateway
 	code := "AGENT_INCIDENT_OPERATION_FAILED"
+	if _, ok := err.(agentConfigReloadError); ok {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONFIG_RELOAD_FAILED", "Agent configuration is unavailable")
+		return
+	}
 	switch grpcstatus.Code(err) {
 	case codes.InvalidArgument:
 		statusCode, code = http.StatusBadRequest, "INVALID_INCIDENT_REQUEST"
@@ -824,7 +918,7 @@ func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err er
 	writeLocalError(w, r, statusCode, code, "Agent incident operation failed")
 }
 
-func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
 	req, view, ok := localTelemetryRequest(w, r)
 	if !ok {
 		return false
@@ -841,7 +935,12 @@ func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, f
 	if pat := optionalPAT(factory); pat != "" {
 		ctx = agentclient.WithPAT(ctx, pat)
 	}
-	resp, err := agentclient.New(cfg).QueryTelemetry(ctx, req)
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentTelemetryError(w, r, err)
+		return true
+	}
+	resp, err := agentclient.New(agentCfg).QueryTelemetry(ctx, req)
 	w.Header().Set("content-type", "application/json")
 	if err != nil {
 		writeLocalAgentTelemetryError(w, r, err)
@@ -935,6 +1034,10 @@ func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.Tel
 func writeLocalAgentTelemetryError(w http.ResponseWriter, r *http.Request, err error) {
 	statusCode := http.StatusBadGateway
 	code := "AGENT_TELEMETRY_UNAVAILABLE"
+	if _, ok := err.(agentConfigReloadError); ok {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONFIG_RELOAD_FAILED", "Agent configuration is unavailable")
+		return
+	}
 	switch grpcstatus.Code(err) {
 	case codes.InvalidArgument:
 		statusCode, code = http.StatusBadRequest, "INVALID_TELEMETRY_REQUEST"

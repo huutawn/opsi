@@ -1,10 +1,21 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,16 +23,524 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+func TestRunStartKeepsSessionAndReconnectsAfterConfigSave(t *testing.T) {
+	addrA, callsA, stopA := startCommandIdentifiedStatusServer(t, "agent-a")
+	defer stopA()
+	addrB, callsB, stopB := startCommandIdentifiedStatusServer(t, "agent-b")
+	defer stopB()
+
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	initial := config.Config{AgentAddr: addrA, CloudURL: "http://cloud-startup"}
+	if err := config.Save(configPath, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	outReader, outWriter := io.Pipe()
+	runErr := make(chan error, 1)
+	go func() { runErr <- runStart(ctx, "127.0.0.1:0", "", configPath, outWriter, nil) }()
+	line, err := bufio.NewReader(outReader).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	localURL := strings.TrimSpace(strings.TrimPrefix(line, "Local Web UI listening on "))
+	statusURL := fmt.Sprintf("%s/api/local/status", localURL)
+	session := localTestSession(t, localURL)
+
+	var first agentv1.StatusResponse
+	getStatus := func() agentv1.StatusResponse {
+		res, err := http.Get(statusURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(res.Body)
+			t.Fatalf("status=%d body=%s", res.StatusCode, body)
+		}
+		var got agentv1.StatusResponse
+		if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	first = getStatus()
+	if first.NodeID != "agent-a" {
+		t.Fatalf("initial status node=%q", first.NodeID)
+	}
+	callsBeforeSwitch := callsA.Load()
+	if err := config.Save(configPath, config.Config{AgentAddr: addrB, CloudURL: "http://cloud-changed"}); err != nil {
+		t.Fatal(err)
+	}
+	second := getStatus()
+	if second.NodeID != "agent-b" {
+		t.Fatalf("reloaded status node=%q", second.NodeID)
+	}
+	if reloadedSession := localTestSession(t, localURL); reloadedSession != session {
+		t.Fatalf("local session changed after Agent reconnect")
+	}
+	if callsA.Load() != callsBeforeSwitch || callsB.Load() < 2 {
+		t.Fatalf("post-switch calls used old Agent: a=%d before=%d b=%d", callsA.Load(), callsBeforeSwitch, callsB.Load())
+	}
+	if err := cancelAndWait(cancel, runErr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func cancelAndWait(cancel context.CancelFunc, runErr <-chan error) error {
+	cancel()
+	select {
+	case err := <-runErr:
+		return err
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("local server did not stop")
+	}
+}
+
+type commandIdentifiedStatusServer struct {
+	agentv1.UnimplementedStatusServiceServer
+	nodeID string
+	calls  *atomic.Int64
+}
+
+func (s commandIdentifiedStatusServer) Status(context.Context, *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
+	s.calls.Add(1)
+	return &agentv1.StatusResponse{NodeID: s.nodeID, Health: "ok", Version: "test"}, nil
+}
+
+func startCommandIdentifiedStatusServer(t *testing.T, nodeID string) (string, *atomic.Int64, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	calls := &atomic.Int64{}
+	agentv1.RegisterStatusServiceServer(server, commandIdentifiedStatusServer{nodeID: nodeID, calls: calls})
+	go func() { _ = server.Serve(listener) }()
+	return listener.Addr().String(), calls, server.Stop
+}
+
+func TestLocalAgentFacadesReconnectTogether(t *testing.T) {
+	addrA, agentA, stopA := startLocalFacadeAgent(t, "agent-a")
+	defer stopA()
+	addrB, agentB, stopB := startLocalFacadeAgent(t, "agent-b")
+	defer stopB()
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	if err := config.Save(configPath, config.Config{AgentAddr: addrA, CloudURL: "http://cloud-a"}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: addrA, CloudURL: "http://cloud-a"}, nil, configPath))
+	defer server.Close()
+	session := localTestSession(t, server.URL)
+
+	get := func(path string) {
+		res, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(res.Body)
+			t.Fatalf("GET %s status=%d body=%s", path, res.StatusCode, body)
+		}
+	}
+	post := func(path, body, key string) {
+		req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Local-Session", session)
+		req.Header.Set("Idempotency-Key", key)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			response, _ := io.ReadAll(res.Body)
+			t.Fatalf("POST %s status=%d body=%s", path, res.StatusCode, response)
+		}
+	}
+
+	get("/api/local/status")
+	statusCallsBeforeSwitch := agentA.statusCalls.Load()
+	if err := config.Save(configPath, config.Config{AgentAddr: addrB, CloudURL: "http://cloud-b"}); err != nil {
+		t.Fatal(err)
+	}
+	get("/api/local/status")
+	post("/api/local/projects/proj-1/secrets", `{"service_id":"svc-1","name":"db","namespace":"app"}`, "facade-secret")
+	get("/api/local/projects/proj-1/telemetry/summary?since_unix=1")
+	get("/api/local/projects/proj-1/logs?service_id=svc-1")
+	get("/api/local/projects/proj-1/incidents")
+	get("/api/local/projects/proj-1/incidents/inc-1")
+	post("/api/local/projects/proj-1/incidents/inc-1/resolve", `{}`, "facade-incident")
+
+	if agentA.statusCalls.Load() != statusCallsBeforeSwitch || agentA.secretCalls.Load() != 0 || agentA.telemetryCalls.Load() != 0 || agentA.incidentListCalls.Load() != 0 || agentA.incidentGetCalls.Load() != 0 || agentA.incidentResolveCalls.Load() != 0 {
+		t.Fatalf("old Agent received post-switch calls: %+v", agentA)
+	}
+	if agentB.statusCalls.Load() != 1 || agentB.secretCalls.Load() != 1 || agentB.telemetryCalls.Load() != 2 || agentB.incidentListCalls.Load() != 1 || agentB.incidentGetCalls.Load() != 1 || agentB.incidentResolveCalls.Load() != 1 {
+		t.Fatalf("new Agent facade calls incomplete: %+v", agentB)
+	}
+}
+
+func TestAgentConfigReloadFailsClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{name: "malformed", mutate: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("agent_addr: [private-certificate-material"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "missing address", mutate: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("agent_addr: \"\"\ncloud_url: http://cloud.invalid\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "remote missing pin", mutate: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("agent_addr: 203.0.113.10:9443\ncloud_url: http://cloud.invalid\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "missing file", mutate: func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentAddr, agentCalls, stopAgent := startCommandIdentifiedStatusServer(t, "agent-a")
+			defer stopAgent()
+			cloudCalls := &atomic.Int64{}
+			cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { cloudCalls.Add(1) }))
+			defer cloud.Close()
+			configPath := filepath.Join(t.TempDir(), "cli.yaml")
+			startup := config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}
+			if err := config.Save(configPath, startup); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(newStartMux(t.TempDir(), "", startup, nil, configPath))
+			defer server.Close()
+			res, err := http.Get(server.URL + "/api/local/status")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("initial status=%d", res.StatusCode)
+			}
+			callsBeforeReload := agentCalls.Load()
+			tt.mutate(t, configPath)
+
+			res, err = http.Get(server.URL + "/api/local/status")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(res.Body)
+			_ = res.Body.Close()
+			if res.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "AGENT_CONFIG_RELOAD_FAILED") {
+				t.Fatalf("reload status=%d body=%s", res.StatusCode, body)
+			}
+			for _, secret := range []string{configPath, agentAddr, "203.0.113.10", "private-certificate-material"} {
+				if strings.Contains(string(body), secret) {
+					t.Fatalf("reload error leaked config material %q: %s", secret, body)
+				}
+			}
+			if agentCalls.Load() != callsBeforeReload || cloudCalls.Load() != 0 {
+				t.Fatalf("reload failure fell back: agent=%d before=%d cloud=%d", agentCalls.Load(), callsBeforeReload, cloudCalls.Load())
+			}
+		})
+	}
+}
+
+func TestAgentReloadDoesNotChangeCloudAuthority(t *testing.T) {
+	addrA, _, stopA := startCommandIdentifiedStatusServer(t, "agent-a")
+	defer stopA()
+	addrB, _, stopB := startCommandIdentifiedStatusServer(t, "agent-b")
+	defer stopB()
+	cloudACalls, cloudBCalls := &atomic.Int64{}, &atomic.Int64{}
+	cloudA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cloudACalls.Add(1)
+		_, _ = w.Write([]byte(`{"projects":[]}`))
+	}))
+	defer cloudA.Close()
+	cloudB := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { cloudBCalls.Add(1) }))
+	defer cloudB.Close()
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	startup := config.Config{AgentAddr: addrA, CloudURL: cloudA.URL}
+	if err := config.Save(configPath, startup); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", startup, nil, configPath))
+	defer server.Close()
+	assertStatusNode(t, server.URL, "agent-a")
+	if err := config.Save(configPath, config.Config{AgentAddr: addrB, CloudURL: cloudB.URL}); err != nil {
+		t.Fatal(err)
+	}
+	assertStatusNode(t, server.URL, "agent-b")
+	res, err := http.Get(server.URL + "/api/local/projects?org_id=org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || cloudACalls.Load() != 1 || cloudBCalls.Load() != 0 {
+		t.Fatalf("Cloud authority changed: status=%d a=%d b=%d", res.StatusCode, cloudACalls.Load(), cloudBCalls.Load())
+	}
+}
+
+func TestAgentConfigReloadConcurrentRequestsUseWholeSnapshots(t *testing.T) {
+	addrA, _, stopA := startCommandIdentifiedStatusServer(t, "agent-a")
+	defer stopA()
+	addrB, _, stopB := startCommandIdentifiedStatusServer(t, "agent-b")
+	defer stopB()
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	startup := config.Config{AgentAddr: addrA, CloudURL: "http://cloud-a"}
+	if err := config.Save(configPath, startup); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", startup, nil, configPath))
+	defer server.Close()
+
+	start := make(chan struct{})
+	results := make(chan string, 32)
+	var wait sync.WaitGroup
+	for range 32 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			nodeID, err := getStatusNode(server.URL)
+			if err != nil {
+				results <- "error: " + err.Error()
+				return
+			}
+			results <- nodeID
+		}()
+	}
+	close(start)
+	if err := config.Save(configPath, config.Config{AgentAddr: addrB, CloudURL: "http://cloud-b"}); err != nil {
+		t.Fatal(err)
+	}
+	wait.Wait()
+	close(results)
+	for nodeID := range results {
+		if nodeID != "agent-a" && nodeID != "agent-b" {
+			t.Fatalf("request observed partial config: %q", nodeID)
+		}
+	}
+	for range 8 {
+		assertStatusNode(t, server.URL, "agent-b")
+	}
+}
+
+func TestAgentConfigReloadRotatesTLSIdentity(t *testing.T) {
+	addrA, pinA, stopA := startLocalTLSStatusAgent(t, "agent-a")
+	defer stopA()
+	addrB, pinB, stopB := startLocalTLSStatusAgent(t, "agent-b")
+	defer stopB()
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	startup := config.Config{AgentAddr: addrA, CloudURL: "http://cloud-a", TLS: config.TLSConfig{PinnedServerCertSHA256: pinA, ServerName: "127.0.0.1"}}
+	if err := config.Save(configPath, startup); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", startup, nil, configPath))
+	defer server.Close()
+	assertStatusNode(t, server.URL, "agent-a")
+
+	wrongPin := config.Config{AgentAddr: addrB, CloudURL: "http://cloud-b", TLS: config.TLSConfig{PinnedServerCertSHA256: pinA, ServerName: "127.0.0.1"}}
+	if err := config.Save(configPath, wrongPin); err != nil {
+		t.Fatal(err)
+	}
+	assertSanitizedAgentFailure(t, server.URL, pinA, pinB, addrB)
+
+	valid := wrongPin
+	valid.TLS.PinnedServerCertSHA256 = pinB
+	if err := config.Save(configPath, valid); err != nil {
+		t.Fatal(err)
+	}
+	assertStatusNode(t, server.URL, "agent-b")
+
+	wrongName := valid
+	wrongName.TLS.ServerName = "wrong-agent-name.invalid"
+	if err := config.Save(configPath, wrongName); err != nil {
+		t.Fatal(err)
+	}
+	assertSanitizedAgentFailure(t, server.URL, pinA, pinB, addrB, wrongName.TLS.ServerName)
+}
+
+func assertSanitizedAgentFailure(t *testing.T, localURL string, forbidden ...string) {
+	t.Helper()
+	res, err := http.Get(localURL + "/api/local/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "AGENT_UNAVAILABLE") {
+		t.Fatalf("Agent TLS failure status=%d body=%s", res.StatusCode, body)
+	}
+	for _, value := range forbidden {
+		if strings.Contains(string(body), value) {
+			t.Fatalf("Agent TLS failure leaked %q: %s", value, body)
+		}
+	}
+}
+
+func startLocalTLSStatusAgent(t *testing.T, nodeID string) (string, string, func()) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: "agent.test"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Minute),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		BasicConstraintsValid: true,
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := tls.Certificate{Certificate: [][]byte{certificateDER}, PrivateKey: privateKey}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13})))
+	calls := &atomic.Int64{}
+	agentv1.RegisterStatusServiceServer(server, commandIdentifiedStatusServer{nodeID: nodeID, calls: calls})
+	go func() { _ = server.Serve(listener) }()
+	fingerprint := sha256.Sum256(certificateDER)
+	return listener.Addr().String(), hex.EncodeToString(fingerprint[:]), server.Stop
+}
+
+func assertStatusNode(t *testing.T, localURL, want string) {
+	t.Helper()
+	got, err := getStatusNode(localURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("status node=%q want=%q", got, want)
+	}
+}
+
+func getStatusNode(localURL string) (string, error) {
+	res, err := http.Get(localURL + "/api/local/status")
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return "", fmt.Errorf("status=%d body=%s", res.StatusCode, body)
+	}
+	var status agentv1.StatusResponse
+	if err := json.NewDecoder(res.Body).Decode(&status); err != nil {
+		return "", err
+	}
+	return status.NodeID, nil
+}
+
+type localFacadeAgent struct {
+	agentv1.UnimplementedStatusServiceServer
+	agentv1.UnimplementedSecretServiceServer
+	agentv1.UnimplementedTelemetryServiceServer
+	agentv1.UnimplementedIncidentServiceServer
+	id                   string
+	statusCalls          atomic.Int64
+	secretCalls          atomic.Int64
+	telemetryCalls       atomic.Int64
+	incidentListCalls    atomic.Int64
+	incidentGetCalls     atomic.Int64
+	incidentResolveCalls atomic.Int64
+}
+
+func (s *localFacadeAgent) Status(context.Context, *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
+	s.statusCalls.Add(1)
+	return &agentv1.StatusResponse{NodeID: s.id, Health: "ok", Version: "test"}, nil
+}
+
+func (s *localFacadeAgent) CreateSecret(_ context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	s.secretCalls.Add(1)
+	return &agentv1.SecretResponse{ProjectID: req.ProjectID, ServiceID: req.ServiceID, Name: req.Name, Namespace: req.Namespace, Username: s.id, Password: "not-for-create"}, nil
+}
+
+func (s *localFacadeAgent) RevealSecret(_ context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	s.secretCalls.Add(1)
+	return &agentv1.SecretResponse{ProjectID: req.ProjectID, ServiceID: req.ServiceID, Name: req.Name, Namespace: req.Namespace, Username: s.id, Password: "secret"}, nil
+}
+
+func (s *localFacadeAgent) RotateSecret(_ context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
+	s.secretCalls.Add(1)
+	return &agentv1.SecretResponse{ProjectID: req.ProjectID, ServiceID: req.ServiceID, Name: req.Name, Namespace: req.Namespace, Username: s.id}, nil
+}
+
+func (s *localFacadeAgent) QueryTelemetry(_ context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error) {
+	s.telemetryCalls.Add(1)
+	return &agentv1.TelemetryQueryResponse{ProjectID: req.ProjectID, Source: "agent", Summary: &agentv1.TelemetryRuntimeSummary{SinceUnix: req.SinceUnix, EndUnix: 2, MetricCount: 1, LogCount: 1}}, nil
+}
+
+func (s *localFacadeAgent) Sync(_ *agentv1.SyncRequest, stream agentv1.TelemetryService_SyncServer) error {
+	return stream.Send(&agentv1.SyncChunk{Done: true})
+}
+
+func (s *localFacadeAgent) ListIncidents(_ context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+	s.incidentListCalls.Add(1)
+	return &agentv1.IncidentListResponse{Incidents: []agentv1.IncidentResponse{*localIncidentResponse(req.ProjectID, s.id)}}, nil
+}
+
+func (s *localFacadeAgent) GetIncident(_ context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
+	s.incidentGetCalls.Add(1)
+	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
+}
+
+func (s *localFacadeAgent) ResolveIncident(_ context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
+	s.incidentResolveCalls.Add(1)
+	response := localIncidentResponse(req.ProjectID, req.IncidentID)
+	response.Status = "resolved"
+	return response, nil
+}
+
+func startLocalFacadeAgent(t *testing.T, id string) (string, *localFacadeAgent, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &localFacadeAgent{id: id}
+	server := grpc.NewServer()
+	agentv1.RegisterStatusServiceServer(server, agent)
+	agentv1.RegisterSecretServiceServer(server, agent)
+	agentv1.RegisterTelemetryServiceServer(server, agent)
+	agentv1.RegisterIncidentServiceServer(server, agent)
+	go func() { _ = server.Serve(listener) }()
+	return listener.Addr().String(), agent, server.Stop
+}
 
 func TestStartMuxServesHealthAndBuiltUI(t *testing.T) {
 	dir := t.TempDir()
