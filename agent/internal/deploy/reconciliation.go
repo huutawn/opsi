@@ -564,7 +564,10 @@ func (a ProductionAdapter) getEndpointSlices(ctx context.Context, serviceName, n
 		return endpointSliceList{}, errors.New("Kubernetes response exceeded the allowed bound")
 	}
 	var list endpointSliceList
-	if err := decodeSingleJSON(out, &list); err != nil || list.APIVersion != "discovery.k8s.io/v1" || list.Kind != "EndpointSliceList" {
+	if err := decodeSingleJSON(out, &list); err != nil {
+		return endpointSliceList{}, errors.New("Kubernetes returned invalid EndpointSlice JSON")
+	}
+	if !((list.APIVersion == "v1" && list.Kind == "List") || (list.APIVersion == "discovery.k8s.io/v1" && list.Kind == "EndpointSliceList")) {
 		return endpointSliceList{}, errors.New("Kubernetes returned invalid EndpointSlice JSON")
 	}
 	return list, nil

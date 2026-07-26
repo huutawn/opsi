@@ -604,36 +604,44 @@ func TestEndpointSliceReadinessFailsClosedAndDeduplicatesAddresses(t *testing.T)
 	}
 }
 
-func TestEndpointSliceLiveShapeRequiresCanonicalItemIdentity(t *testing.T) {
+func TestEndpointSliceKubectlListEnvelopeAndIdentity(t *testing.T) {
 	validItem := `{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"api-abc","namespace":"opsi","labels":{"kubernetes.io/service-name":"api"}},"addressType":"IPv4","ports":[{"name":"http","port":8080,"protocol":"TCP"}],"endpoints":[{"addresses":["192.0.2.10"],"conditions":{"ready":true,"serving":true,"terminating":false}}]}`
 	for _, tc := range []struct {
-		name       string
-		item       string
-		listField  string
-		wantReady  bool
-		wantDecode bool
+		name          string
+		topIdentity   string
+		item          string
+		listField     string
+		wantReady     bool
+		wantDecodeErr bool
 	}{
-		{name: "live shape", item: validItem, wantReady: true},
-		{name: "missing apiVersion", item: strings.Replace(validItem, `"apiVersion":"discovery.k8s.io/v1",`, "", 1)},
-		{name: "wrong apiVersion", item: strings.Replace(validItem, "discovery.k8s.io/v1", "discovery.k8s.io/v1beta1", 1)},
-		{name: "missing kind", item: strings.Replace(validItem, `"kind":"EndpointSlice",`, "", 1)},
-		{name: "wrong kind", item: strings.Replace(validItem, "EndpointSlice", "Endpoints", 1)},
-		{name: "unknown list field", item: validItem, listField: `,"unexpected":true`, wantDecode: true},
-		{name: "unknown item field", item: strings.Replace(validItem, "{", `{"unexpected":true,`, 1), wantDecode: true},
-		{name: "unknown endpoint field", item: strings.Replace(validItem, `"addresses"`, `"unexpected":true,"addresses"`, 1), wantDecode: true},
+		{name: "factual kubectl generic list", topIdentity: `"apiVersion":"v1","kind":"List"`, item: validItem, wantReady: true},
+		{name: "typed EndpointSliceList", topIdentity: `"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList"`, item: validItem, wantReady: true},
+		{name: "cross paired v1 EndpointSliceList", topIdentity: `"apiVersion":"v1","kind":"EndpointSliceList"`, item: validItem, wantDecodeErr: true},
+		{name: "cross paired discovery List", topIdentity: `"apiVersion":"discovery.k8s.io/v1","kind":"List"`, item: validItem, wantDecodeErr: true},
+		{name: "missing top apiVersion", topIdentity: `"kind":"List"`, item: validItem, wantDecodeErr: true},
+		{name: "missing top kind", topIdentity: `"apiVersion":"v1"`, item: validItem, wantDecodeErr: true},
+		{name: "unknown top apiVersion", topIdentity: `"apiVersion":"v2","kind":"List"`, item: validItem, wantDecodeErr: true},
+		{name: "unknown top kind", topIdentity: `"apiVersion":"v1","kind":"EndpointSlices"`, item: validItem, wantDecodeErr: true},
+		{name: "missing item apiVersion", topIdentity: `"apiVersion":"v1","kind":"List"`, item: strings.Replace(validItem, `"apiVersion":"discovery.k8s.io/v1",`, "", 1)},
+		{name: "wrong item apiVersion", topIdentity: `"apiVersion":"v1","kind":"List"`, item: strings.Replace(validItem, "discovery.k8s.io/v1", "discovery.k8s.io/v1beta1", 1)},
+		{name: "missing item kind", topIdentity: `"apiVersion":"v1","kind":"List"`, item: strings.Replace(validItem, `"kind":"EndpointSlice",`, "", 1)},
+		{name: "wrong item kind", topIdentity: `"apiVersion":"v1","kind":"List"`, item: strings.Replace(validItem, "EndpointSlice", "Endpoints", 1)},
+		{name: "unknown list field", topIdentity: `"apiVersion":"v1","kind":"List"`, item: validItem, listField: `,"unexpected":true`, wantDecodeErr: true},
+		{name: "unknown item field", topIdentity: `"apiVersion":"v1","kind":"List"`, item: strings.Replace(validItem, "{", `{"unexpected":true,`, 1), wantDecodeErr: true},
+		{name: "unknown endpoint field", topIdentity: `"apiVersion":"v1","kind":"List"`, item: strings.Replace(validItem, `"addresses"`, `"unexpected":true,"addresses"`, 1), wantDecodeErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			payload := []byte(fmt.Sprintf(`{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList","metadata":{"resourceVersion":"1"},"items":[%s]%s}`, tc.item, tc.listField))
+			payload := []byte(fmt.Sprintf(`{%s,"metadata":{"resourceVersion":"1"},"items":[%s]%s}`, tc.topIdentity, tc.item, tc.listField))
 			runner := &exposureRunner{outputs: map[string][]byte{kubectlKey("get", "endpointslices.discovery.k8s.io", "-n", "opsi", "-l", "kubernetes.io/service-name=api", "-o", "json"): payload}, errors: map[string]error{}}
 			list, err := (ProductionAdapter{Runner: runner, KubectlPath: "kubectl"}).getEndpointSlices(context.Background(), "api", "opsi")
-			if tc.wantDecode {
+			if tc.wantDecodeErr {
 				if err == nil {
-					t.Fatal("unknown EndpointSlice field was accepted")
+					t.Fatal("invalid EndpointSlice list was accepted")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("live-shaped EndpointSlice decode failed: %v", err)
+				t.Fatalf("EndpointSlice list decode failed: %v", err)
 			}
 			ready, _, _ := endpointSlicesReady(list, "api", 8080, 1)
 			if ready != tc.wantReady {
