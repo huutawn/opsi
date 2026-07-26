@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,7 +126,7 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exposure, err := (exposurev1.ExposureSpec{SchemaVersion: exposurev1.SchemaVersion, ProjectID: project.ID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceKey: workload.ServiceKey, DeploymentJobID: "dep-exposure", Hostname: "api.example.com", Path: "/", ServicePort: workload.ContainerPort, TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled}}).Canonicalize()
+	exposure, err := (exposurev1.ExposureSpec{SchemaVersion: exposurev1.SchemaVersion, ProjectID: project.ID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceKey: workload.ServiceKey, DeploymentJobID: "dep-exposure", Hostname: "api.example.com", Path: "/", ServicePort: workload.ContainerPort, TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled}, Metadata: &exposurev1.Metadata{DisplayName: "Public API", Rationale: "request-body-secret-marker"}}).Canonicalize()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,9 +170,95 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	if created.Code != http.StatusAccepted || bytes.Contains(created.Body.Bytes(), []byte("owner-pat")) || bytes.Contains(created.Body.Bytes(), []byte("lease_token")) || bytes.Contains(created.Body.Bytes(), []byte("raw_manifest")) {
 		t.Fatalf("created status=%d body=%s", created.Code, created.Body.String())
 	}
+	countCreatedAudits := func() int {
+		audits, err := store.ListAudit(project.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, audit := range audits {
+			if audit.Action == "EXPOSURE_ROLLOUT_CREATED" && audit.ResourceID == exposure.DeploymentJobID {
+				count++
+			}
+		}
+		return count
+	}
+	if count := countCreatedAudits(); count != 1 {
+		t.Fatalf("initial created audit count=%d", count)
+	}
+	var createdJob registry.DeploymentJob
+	if err := json.Unmarshal(created.Body.Bytes(), &createdJob); err != nil || createdJob.ID != exposure.DeploymentJobID || createdJob.Reused {
+		t.Fatalf("created job=%+v err=%v", createdJob, err)
+	}
+	audits, err := store.ListAudit(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, audit := range audits {
+		if audit.Action != "EXPOSURE_ROLLOUT_CREATED" || audit.ResourceID != exposure.DeploymentJobID {
+			continue
+		}
+		metadata, _ := json.Marshal(audit.MetadataRedacted)
+		if len(audit.MetadataRedacted) != 5 || bytes.Contains(metadata, body) || bytes.Contains(metadata, []byte("owner-pat")) || bytes.Contains(metadata, []byte("request-body-secret-marker")) {
+			t.Fatalf("unsafe creation audit metadata=%s", metadata)
+		}
+	}
+	events, err := store.DeploymentEvents(project.ID, exposure.DeploymentJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replay := call(http.MethodPost, "/api/projects/"+project.ID+"/exposures", "owner-pat", "exposure-key", body)
 	if replay.Code != http.StatusAccepted || !bytes.Contains(replay.Body.Bytes(), []byte(`"reused":true`)) {
 		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	var replayJob registry.DeploymentJob
+	if err := json.Unmarshal(replay.Body.Bytes(), &replayJob); err != nil || replayJob.ID != createdJob.ID || !replayJob.Reused {
+		t.Fatalf("replay job=%+v err=%v", replayJob, err)
+	}
+	if count := countCreatedAudits(); count != 1 {
+		t.Fatalf("replay created audit count=%d", count)
+	}
+
+	const concurrentReplays = 8
+	responses := make(chan *httptest.ResponseRecorder, concurrentReplays)
+	var wait sync.WaitGroup
+	for range concurrentReplays {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			responses <- call(http.MethodPost, "/api/projects/"+project.ID+"/exposures", "owner-pat", "exposure-key", body)
+		}()
+	}
+	wait.Wait()
+	close(responses)
+	for response := range responses {
+		var job registry.DeploymentJob
+		if err := json.Unmarshal(response.Body.Bytes(), &job); response.Code != http.StatusAccepted || err != nil || job.ID != createdJob.ID || !job.Reused {
+			t.Fatalf("concurrent replay status=%d job=%+v err=%v", response.Code, job, err)
+		}
+	}
+	if count := countCreatedAudits(); count != 1 {
+		t.Fatalf("concurrent replay created audit count=%d", count)
+	}
+
+	conflicting := mutation
+	conflicting.Exposure.Hostname = "other.example.com"
+	conflicting.Exposure.SpecHash = ""
+	conflicting.Exposure, err = conflicting.Exposure.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictingBody, _ := json.Marshal(conflicting)
+	conflict := call(http.MethodPost, "/api/projects/"+project.ID+"/exposures", "owner-pat", "exposure-key", conflictingBody)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	if count := countCreatedAudits(); count != 1 {
+		t.Fatalf("conflict created audit count=%d", count)
+	}
+	afterEvents, err := store.DeploymentEvents(project.ID, exposure.DeploymentJobID)
+	if err != nil || len(afterEvents) != len(events) {
+		t.Fatalf("replay events=%d initial=%d err=%v", len(afterEvents), len(events), err)
 	}
 	detail := call(http.MethodGet, "/api/projects/"+project.ID+"/exposures/"+exposure.DeploymentJobID, "viewer-pat", "", nil)
 	if detail.Code != http.StatusOK {

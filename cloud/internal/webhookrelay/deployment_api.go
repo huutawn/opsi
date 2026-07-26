@@ -65,7 +65,7 @@ func (s *Server) handleExposureAPI(w http.ResponseWriter, r *http.Request, proje
 		}
 		job, reused, err := store.StartExposureRollout(projectID, principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), request)
 		job.Reused = reused
-		if err == nil {
+		if err == nil && !reused {
 			s.Registry.Audit(job.OrgID, projectID, principal.UserID, "EXPOSURE_ROLLOUT_CREATED", "deployment_job", job.ID, "success", map[string]any{"base_deployment_id": job.BaseDeploymentID, "rollout_id": job.RolloutIntent.RolloutID, "intent_hash": job.RolloutIntent.IntentHash, "exposure_spec_hash": job.ExposureSpec.SpecHash, "reused": reused})
 		}
 		writeRegistryResult(w, r, job, err, http.StatusAccepted)
