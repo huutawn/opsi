@@ -45,7 +45,7 @@ func newStartCommand(configPath *string, factory func() (keychain.Store, error))
 }
 
 func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer, factory func() (keychain.Store, error)) error {
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadSelected(configPath)
 	if err != nil {
 		return err
 	}

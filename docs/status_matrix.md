@@ -14,6 +14,8 @@ truthful documentation. It does not imply production readiness. `DOC_ONLY`
 means the documented target and boundaries are established but runtime
 capability is not implemented.
 
+| MANUAL-CLI-R5-013 | Canonical manual CLI, protected secret output, config/no-fallback behavior, and prerelease installer | CLI | PARTIAL / LOCAL_IMPLEMENTATION | `docs/manual_cli_capability_matrix.md`; focused CLI secret tests; release installer checks | Organization/member APIs and secret RPC idempotency remain factual backend gaps; R5-012 remains deferred | R5-013 | P0 |
+
 Legacy `Pxx` labels retained in evidence text identify historical implementation
 prompts only. They do not define current execution order; all new work follows
 `docs/opsi_roadmap_v5_production.md` and its `R5-xxx` gates.

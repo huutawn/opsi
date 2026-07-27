@@ -1,6 +1,6 @@
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
-LDFLAGS := -X main.version=$(VERSION)
 GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf '%040d' 0)
+LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(GIT_COMMIT)
 AGENT_VERSION ?= $(VERSION)
 AGENT_COMMIT ?= $(GIT_COMMIT)
 AGENT_RELEASE_DIR ?= dist/agent
@@ -18,7 +18,7 @@ DEV_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/dev-contro
 STAGING_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml
 STAGING_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env.example -f deploy/staging-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres build build-cli-release agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -92,6 +92,14 @@ build:
 	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi ./cmd/opsi
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-cloud ./cmd/opsi-cloud
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker
+
+build-cli-release:
+	$(RUN) mkdir -p dist/cli
+	@for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+		os=$${target%/*}; arch=$${target#*/}; \
+		GOOS=$$os GOARCH=$$arch env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -trimpath -ldflags "$(LDFLAGS)" -o "dist/cli/opsi-$(VERSION)-$$os-$$arch" ./cli/cmd/opsi; \
+	done
+	@cd dist/cli && sha256sum opsi-* > checksums.txt
 
 agent-release:
 	$(RUN) env AGENT_VERSION="$(AGENT_VERSION)" AGENT_COMMIT="$(AGENT_COMMIT)" OUT_DIR="$(AGENT_RELEASE_DIR)" GOCACHE="$(GOCACHE)" GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/build-agent-release.sh

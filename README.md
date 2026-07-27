@@ -1,5 +1,9 @@
 # Opsi
 
+R5-013 manual CLI capability and installation references:
+`docs/manual_cli_capability_matrix.md` and `docs/runbooks/install_cli.md`.
+R5-012 remains `R5_012_IMPLEMENTED / LIVE_BLOCKED / BUG_DEFERRED`.
+
 Opsi is a local-first operations control-plane prototype. Current implementation
 truth lives in `docs/current_state.md`; target requirements live in
 `docs/opsi_srs.md`; capability evidence lives in `docs/status_matrix.md`; the

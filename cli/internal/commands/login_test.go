@@ -2,7 +2,10 @@ package commands
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,6 +107,67 @@ func TestLoginReplacesExistingPAT(t *testing.T) {
 	}
 	if got != "token-2" {
 		t.Fatalf("unexpected PAT after replacement: %q", got)
+	}
+}
+
+func TestAuthLifecycleKeepsPATInKeychainAndOutOfOutput(t *testing.T) {
+	const oldPAT = "auth-old-pat-canary"
+	const newPAT = "auth-new-pat-canary"
+	var authorization []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = append(authorization, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/pat/verify":
+			_, _ = w.Write([]byte(`{"project_id":"proj-1","role":"Owner"}`))
+		case "/v1/auth/pat/rotate":
+			_, _ = w.Write([]byte(`{"token":"` + newPAT + `","session":{"project_id":"proj-1","role":"Owner"}}`))
+		case "/v1/auth/pat/revoke":
+			_, _ = w.Write([]byte(`{"revoked":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	if err := os.WriteFile(configPath, []byte("cloud_url: "+server.URL+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT(oldPAT); err != nil {
+		t.Fatal(err)
+	}
+	run := func(action string) string {
+		t.Helper()
+		command := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return store, nil }, HTTPClient: server.Client()})
+		var output bytes.Buffer
+		command.SetOut(&output)
+		command.SetArgs([]string{"--config", configPath, "auth", action, "--project-id", "proj-1"})
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(output.String(), oldPAT) || strings.Contains(output.String(), newPAT) {
+			t.Fatalf("auth %s leaked PAT: %s", action, output.String())
+		}
+		var result map[string]any
+		if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+			t.Fatalf("auth %s output: %v", action, err)
+		}
+		return output.String()
+	}
+
+	run("verify")
+	run("rotate")
+	if got, err := store.GetPAT(); err != nil || got != newPAT {
+		t.Fatalf("rotated PAT=%q err=%v", got, err)
+	}
+	run("revoke")
+	if _, err := store.GetPAT(); !errors.Is(err, keychain.ErrPATNotFound) {
+		t.Fatalf("revoked PAT remained in keychain: %v", err)
+	}
+	if len(authorization) != 3 || authorization[0] != "Bearer "+oldPAT || authorization[1] != "Bearer "+oldPAT || authorization[2] != "Bearer "+newPAT {
+		t.Fatalf("authorization sequence=%v", authorization)
 	}
 }
 

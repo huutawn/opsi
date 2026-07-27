@@ -130,9 +130,18 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 	if err != nil || strings.TrimSpace(pat) == "" {
 		return errors.New("Cloud PAT not found in OS keychain; run opsi login --pat-file PATH")
 	}
-	cliConfig, err := config.Load(configPath)
-	if err != nil {
-		return err
+	cliConfig := config.Config{}
+	if configPath == "" {
+		if options.CloudURL == "" {
+			return errors.New("--config or --cloud-url is required for Cloud init")
+		}
+		cliConfig = config.Default()
+	} else {
+		var err error
+		cliConfig, err = config.LoadSelected(configPath)
+		if err != nil {
+			return err
+		}
 	}
 	cloudURL := cliConfig.CloudURL
 	if options.CloudURL != "" {

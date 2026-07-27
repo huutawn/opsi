@@ -103,16 +103,51 @@ type DeploymentEvent struct {
 }
 
 type APIError struct {
-	Status  int
-	Code    string
-	Message string
+	Status     int
+	Code       string
+	Message    string
+	RequestID  string
+	NextAction string
+}
+
+type Project struct {
+	ID        string    `json:"id"`
+	OrgID     string    `json:"org_id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	Status    string    `json:"status"`
+	CreatedBy string    `json:"created_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type AuditEvent struct {
+	ID               string         `json:"id"`
+	OrgID            string         `json:"org_id"`
+	ProjectID        string         `json:"project_id,omitempty"`
+	ActorUserID      string         `json:"actor_user_id,omitempty"`
+	ActorType        string         `json:"actor_type"`
+	Action           string         `json:"action"`
+	ResourceType     string         `json:"resource_type"`
+	ResourceID       string         `json:"resource_id"`
+	Result           string         `json:"result"`
+	MetadataRedacted map[string]any `json:"metadata_redacted,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
 }
 
 func (e *APIError) Error() string {
-	if e.Code == "" {
-		return fmt.Sprintf("Cloud API returned status %d: %s", e.Status, e.Message)
+	code := e.Code
+	if code == "" {
+		code = fmt.Sprintf("HTTP_%d", e.Status)
 	}
-	return fmt.Sprintf("Cloud API %s (status %d): %s", e.Code, e.Status, e.Message)
+	value := fmt.Sprintf("Cloud API %s (status %d): %s", code, e.Status, e.Message)
+	if e.RequestID != "" {
+		value += " (request_id=" + e.RequestID + ")"
+	}
+	if e.NextAction != "" {
+		value += " (next_action=" + e.NextAction + ")"
+	}
+	return value
 }
 
 type Service struct {
@@ -125,6 +160,9 @@ type Service struct {
 type Node struct {
 	ID                 string `json:"id"`
 	ProjectID          string `json:"project_id"`
+	Name               string `json:"name"`
+	Role               string `json:"role"`
+	Status             string `json:"status"`
 	PublicHost         string `json:"public_host"`
 	AgentID            string `json:"agent_id"`
 	AgentVersion       string `json:"agent_version"`

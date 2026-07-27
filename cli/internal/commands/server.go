@@ -34,13 +34,13 @@ type serverFlags struct {
 
 func newServerCommand(configPath *string, options Options) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "server",
-		Aliases: []string{"node"},
-		Short:   "Bootstrap and inspect Opsi servers",
+		Use:   "server",
+		Short: "Bootstrap and inspect Opsi servers",
 	}
 	cmd.AddCommand(newServerBootstrapCommand(configPath, options))
 	cmd.AddCommand(newServerStatusCommand(configPath, options))
 	cmd.AddCommand(newServerEventsCommand(configPath, options))
+	cmd.AddCommand(newServerRetryCommand(configPath, options))
 	cmd.AddCommand(newServerConnectCommand(configPath, options))
 	cmd.AddCommand(newServerAgentUpgradeCommand(configPath, options))
 	cmd.AddCommand(newServerDecommissionCommand(configPath, options))
@@ -372,7 +372,7 @@ func newServerConnectCommand(configPath *string, options Options) *cobra.Command
 			if node.AgentID == "" || node.AgentEndpoint == "" || node.AgentPort < 1 || node.AgentPort > 65535 || node.AgentTLSServerName == "" || len(node.AgentCertSHA256) != 64 {
 				return errors.New("node has no complete direct TLS Agent metadata")
 			}
-			cfg, err := config.Load(*configPath)
+			cfg, err := config.LoadSelected(*configPath)
 			if err != nil {
 				return err
 			}
@@ -432,6 +432,9 @@ func newServerBootstrapCommand(configPath *string, options Options) *cobra.Comma
 			if request.SSHPrivateKey == "" && request.SSHPassword == "" {
 				return errors.New("bootstrap credential is empty")
 			}
+			if flags.idempotencyKey == "" {
+				return errors.New("idempotency-key is required")
+			}
 
 			client, err := newCommandCloudClient(*configPath, options)
 			if err != nil {
@@ -453,7 +456,31 @@ func newServerBootstrapCommand(configPath *string, options Options) *cobra.Comma
 	cmd.Flags().StringVar(&flags.sshUsername, "ssh-username", flags.sshUsername, "target SSH username")
 	cmd.Flags().StringVar(&flags.authMethod, "auth-method", flags.authMethod, "SSH authentication: private_key or password")
 	cmd.Flags().StringVar(&flags.credentialFile, "credential-file", "", "protected SSH credential file; use /dev/stdin for piped input")
-	cmd.Flags().StringVar(&flags.idempotencyKey, "idempotency-key", "", "stable retry key; generated when omitted")
+	cmd.Flags().StringVar(&flags.idempotencyKey, "idempotency-key", "", "stable retry key")
+	return cmd
+}
+
+func newServerRetryCommand(configPath *string, options Options) *cobra.Command {
+	flags := &serverFlags{}
+	cmd := &cobra.Command{Use: "retry", Short: "Retry a dead-lettered bootstrap session", RunE: func(cmd *cobra.Command, _ []string) error {
+		if flags.projectID == "" || flags.sessionID == "" || flags.idempotencyKey == "" {
+			return errors.New("project-id, session-id and idempotency-key are required")
+		}
+		client, err := newCommandCloudClient(*configPath, options)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+		defer cancel()
+		session, err := client.RetryBootstrapSession(ctx, flags.projectID, flags.sessionID, flags.idempotencyKey)
+		if err != nil {
+			return fmt.Errorf("retry bootstrap session: %w", err)
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(session)
+	}}
+	cmd.Flags().StringVar(&flags.projectID, "project-id", "", "project id")
+	cmd.Flags().StringVar(&flags.sessionID, "session-id", "", "bootstrap session id")
+	cmd.Flags().StringVar(&flags.idempotencyKey, "idempotency-key", "", "stable retry key")
 	return cmd
 }
 
@@ -521,7 +548,7 @@ func newServerEventsCommand(configPath *string, options Options) *cobra.Command 
 }
 
 func newCommandCloudClient(configPath string, options Options) (*cloudclient.Client, error) {
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadSelected(configPath)
 	if err != nil {
 		return nil, err
 	}

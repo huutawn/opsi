@@ -178,7 +178,7 @@ func TestServerConnectSavesOnlyCompletePinnedAgentMetadata(t *testing.T) {
 			t.Fatalf("unexpected Cloud request: %s %s headers=%+v", request.Method, request.URL.Path, request.Header)
 		}
 		response.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(response, `{"nodes":[{"id":"node-1","agent_id":"agent-1","agent_endpoint":"52.77.226.123","agent_port":9443,"agent_tls_server_name":"52.77.226.123","agent_cert_sha256":"`+certPin+`"}]}`)
+		_, _ = io.WriteString(response, `{"nodes":[{"id":"node-1","agent_id":"agent-1","agent_endpoint":"203.0.113.10","agent_port":9443,"agent_tls_server_name":"203.0.113.10","agent_cert_sha256":"`+certPin+`"}]}`)
 	}))
 	defer cloud.Close()
 
@@ -210,7 +210,7 @@ func TestServerConnectSavesOnlyCompletePinnedAgentMetadata(t *testing.T) {
 		t.Fatalf("config contents=%q err=%v", contents, err)
 	}
 	cfg, err := config.Load(configPath)
-	if err != nil || cfg.AgentAddr != "52.77.226.123:9443" || cfg.TLS.ServerName != "52.77.226.123" || cfg.TLS.PinnedServerCertSHA256 != certPin {
+	if err != nil || cfg.AgentAddr != "203.0.113.10:9443" || cfg.TLS.ServerName != "203.0.113.10" || cfg.TLS.PinnedServerCertSHA256 != certPin {
 		t.Fatalf("config=%+v err=%v", cfg, err)
 	}
 }
@@ -222,7 +222,7 @@ func TestServerConnectFailurePreservesExistingConfig(t *testing.T) {
 		want string
 	}{
 		{name: "missing direct TLS metadata", body: `{"nodes":[{"id":"node-1","agent_id":"agent-1"}]}`, want: "no complete direct TLS Agent metadata"},
-		{name: "node outside project response", body: `{"nodes":[{"id":"other-node","agent_id":"agent-1","agent_endpoint":"52.77.226.123","agent_port":9443,"agent_tls_server_name":"52.77.226.123","agent_cert_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]}`, want: "not found in the requested project"},
+		{name: "node outside project response", body: `{"nodes":[{"id":"other-node","agent_id":"agent-1","agent_endpoint":"203.0.113.10","agent_port":9443,"agent_tls_server_name":"203.0.113.10","agent_cert_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]}`, want: "not found in the requested project"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

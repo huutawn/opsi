@@ -3,8 +3,11 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
@@ -25,6 +28,13 @@ type secretFlags struct {
 	totpFile     string
 }
 
+type secretWriteResult struct {
+	Status    string `json:"status"`
+	ProjectID string `json:"project_id"`
+	ServiceID string `json:"service_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+}
+
 func newSecretCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
 	flags := &secretFlags{}
 	cmd := &cobra.Command{Use: "secret", Short: "Manage Agent/K3s secrets"}
@@ -42,12 +52,13 @@ func newSecretCommand(configPath *string, factory func() (keychain.Store, error)
 }
 
 func newSecretSetupTOTPCommand(configPath *string, factory func() (keychain.Store, error), flags *secretFlags) *cobra.Command {
+	var outputFile string
 	cmd := &cobra.Command{
 		Use:   "setup-totp",
 		Short: "Create local TOTP fallback setup URI",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if flags.projectID == "" {
-				return fmt.Errorf("project-id is required")
+			if flags.projectID == "" || outputFile == "" {
+				return errors.New("project-id and output-file are required")
 			}
 			cfg, err := config.Load(*configPath)
 			if err != nil {
@@ -62,22 +73,27 @@ func newSecretSetupTOTPCommand(configPath *string, factory func() (keychain.Stor
 			ctx = agentclient.WithPAT(ctx, pat)
 			resp, err := agentclient.New(cfg).SetupTOTP(ctx, &agentv1.SetupTOTPRequest{ProjectID: flags.projectID})
 			if err != nil {
-				return redactPATError(err, pat)
+				return errors.New("Agent setup request failed")
 			}
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
+			if err := writeProtectedResponse(outputFile, resp); err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(secretWriteResult{Status: "written", ProjectID: flags.projectID})
 		},
 	}
 	addSecretAuthFlags(cmd, flags)
+	cmd.Flags().StringVar(&outputFile, "output-file", "", "new protected file for the sensitive response")
 	return cmd
 }
 
 func newSecretMutationCommand(configPath *string, factory func() (keychain.Store, error), flags *secretFlags, use, short string, call func(context.Context, *agentclient.Client, *agentv1.SecretRequest) (*agentv1.SecretResponse, error)) *cobra.Command {
+	var outputFile string
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if flags.projectID == "" || flags.serviceID == "" || flags.name == "" {
-				return fmt.Errorf("project-id, service-id and name are required")
+			if flags.projectID == "" || flags.serviceID == "" || flags.name == "" || outputFile == "" {
+				return errors.New("project-id, service-id, name and output-file are required")
 			}
 			cfg, err := config.Load(*configPath)
 			if err != nil {
@@ -101,9 +117,12 @@ func newSecretMutationCommand(configPath *string, factory func() (keychain.Store
 			req := &agentv1.SecretRequest{ProjectID: flags.projectID, ServiceID: flags.serviceID, Name: flags.name, Namespace: flags.namespace, OTPCode: otp, OTPRequestID: flags.otpRequestID, TOTPCode: totp}
 			resp, err := call(ctx, agentclient.New(cfg), req)
 			if err != nil {
-				return redactPATError(err, pat)
+				return errors.New("Agent secret request failed")
 			}
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
+			if err := writeProtectedResponse(outputFile, resp); err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(secretWriteResult{Status: "written", ProjectID: flags.projectID, ServiceID: flags.serviceID, Name: flags.name})
 		},
 	}
 	addSecretAuthFlags(cmd, flags)
@@ -113,7 +132,54 @@ func newSecretMutationCommand(configPath *string, factory func() (keychain.Store
 	cmd.Flags().StringVar(&flags.otpFile, "otp-file", "", "protected cloud OTP file; use /dev/stdin for piped input")
 	cmd.Flags().StringVar(&flags.otpRequestID, "otp-request-id", "", "cloud OTP request id")
 	cmd.Flags().StringVar(&flags.totpFile, "totp-file", "", "protected local TOTP file; use /dev/stdin for piped input")
+	cmd.Flags().StringVar(&outputFile, "output-file", "", "new protected file for the sensitive response")
 	return cmd
+}
+
+func writeProtectedResponse(path string, response any) (err error) {
+	return writeProtectedResponseUsing(path, response, func(file *os.File, data []byte) error {
+		_, err := file.Write(data)
+		return err
+	})
+}
+
+func writeProtectedResponseUsing(path string, response any, write func(*os.File, []byte) error) (err error) {
+	data, err := json.Marshal(response)
+	if err != nil {
+		return errors.New("encode protected response")
+	}
+	data = append(data, '\n')
+	if len(data) > maxProtectedSecretBytes {
+		return errors.New("protected response exceeds 1 MiB")
+	}
+
+	fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return errors.New("create protected output file")
+	}
+	file := os.NewFile(uintptr(fd), "protected-output")
+	keep := false
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+		if !keep {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := write(file, data); err != nil {
+		return errors.New("write protected output file")
+	}
+	if err := file.Sync(); err != nil {
+		return errors.New("sync protected output file")
+	}
+	if err := file.Close(); err != nil {
+		file = nil
+		return errors.New("close protected output file")
+	}
+	file = nil
+	keep = true
+	return nil
 }
 
 func addSecretAuthFlags(cmd *cobra.Command, flags *secretFlags) {

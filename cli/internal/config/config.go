@@ -33,7 +33,7 @@ func Default() Config {
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path == "" {
-		return cfg, nil
+		return Config{}, errors.New("selected CLI config is required; use --config")
 	}
 
 	data, err := os.ReadFile(path)
@@ -42,6 +42,28 @@ func Load(path string) (Config, error) {
 	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// LoadSelected rejects the implicit loopback defaults for networked commands.
+func LoadSelected(path string) (Config, error) {
+	if strings.TrimSpace(path) == "" {
+		return Config{}, errors.New("selected CLI config is required; use --config")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if cfg.AgentAddr == "" {
+		cfg.AgentAddr = Default().AgentAddr
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err

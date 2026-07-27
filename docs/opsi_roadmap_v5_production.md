@@ -517,6 +517,11 @@ performed; R5-011 remains `PARTIAL` and R5-011.4 remains `MANUAL_GATED`.
 
 ### R5-013 — Hoàn thiện toàn bộ manual CLI
 
+Current implementation checkpoint: the source-derived matrix is
+`docs/manual_cli_capability_matrix.md`; factual gaps are recorded in
+`bugs/BUG-R5-013-CLI-GAPS-001.md`. R5-012 remains
+`R5_012_IMPLEMENTED / LIVE_BLOCKED / BUG_DEFERRED`.
+
 **Mục tiêu:** CLI là canonical manual interface đầy đủ, không chỉ tập hợp các lệnh rời rạc.
 
 **Quy trình thực hiện:**

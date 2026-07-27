@@ -1,5 +1,12 @@
 # Opsi Current State
 
+## R5-013 manual CLI checkpoint
+
+The canonical manual CLI matrix is `docs/manual_cli_capability_matrix.md`.
+Networked commands fail closed without a selected config, and secret/TOTP
+responses use protected output files. R5-012 remains implemented but live
+blocked; its deferred DeploymentJob defect is recorded under `bugs/`.
+
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |

@@ -1,0 +1,38 @@
+name: release-cli
+
+on:
+  push:
+    tags:
+      - 'r5-013-*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+      - name: Build prerelease CLI artifacts
+        env:
+          VERSION: ${{ github.ref_name }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -eu
+          mkdir -p release-cli
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS=${target%/*}
+            GOARCH=${target#*/}
+            output="release-cli/opsi-${VERSION}-${GOOS}-${GOARCH}"
+            GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags "-X main.version=${VERSION} -X main.revision=${REVISION}" -o "$output" ./cli/cmd/opsi
+          done
+          (cd release-cli && sha256sum opsi-* > checksums.txt)
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" release-cli/* --prerelease --title "${{ github.ref_name }}" --notes "Manual CLI prerelease; revision ${{ github.sha }}"

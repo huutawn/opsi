@@ -1,5 +1,9 @@
 # Opsi CLI
 
+Networked commands require an explicit `--config` snapshot. Secret and TOTP
+responses require `--output-file`; protected output is created as a new `0600`
+file and stdout contains only a sanitized receipt.
+
 CLI is the local command and presentation layer. It stores PAT values in the OS keychain, talks to Cloud and Agent through explicit clients, serves the built Local Web UI, streams deployment progress, and can consume telemetry sync chunks.
 
 ## Build

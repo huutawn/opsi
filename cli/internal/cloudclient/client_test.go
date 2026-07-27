@@ -109,7 +109,7 @@ func TestListNodesContractAndSafeDecodeFailures(t *testing.T) {
 		wantErr     string
 	}{
 		{name: "empty envelope", status: http.StatusOK, contentType: "application/json", body: `{"nodes":[]}`},
-		{name: "direct Agent metadata", status: http.StatusOK, contentType: "application/json", body: `{"nodes":[{"id":"node-1","project_id":"project-1","agent_id":"agent-1","agent_endpoint":"52.77.226.123","agent_port":9443,"agent_tls_server_name":"agent.example.test","agent_cert_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`, wantNodes: 1},
+		{name: "direct Agent metadata", status: http.StatusOK, contentType: "application/json", body: `{"nodes":[{"id":"node-1","project_id":"project-1","agent_id":"agent-1","agent_endpoint":"203.0.113.10","agent_port":9443,"agent_tls_server_name":"agent.example.test","agent_cert_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`, wantNodes: 1},
 		{name: "missing envelope", status: http.StatusOK, contentType: "application/json", body: `{}`, wantErr: "unexpected response schema"},
 		{name: "wrong nodes type", status: http.StatusOK, contentType: "application/json", body: `{"nodes":{}}`, wantErr: "unexpected response schema"},
 		{name: "HTML response", status: http.StatusOK, contentType: "text/html; charset=utf-8", body: `<html>upstream ` + pat + `</html>`, wantErr: "invalid JSON (status 200, content-type \"text/html\")"},
@@ -143,7 +143,7 @@ func TestListNodesContractAndSafeDecodeFailures(t *testing.T) {
 			}
 			if test.wantNodes == 1 {
 				node := nodes[0]
-				if node.AgentID != "agent-1" || node.AgentEndpoint != "52.77.226.123" || node.AgentPort != 9443 || node.AgentTLSServerName != "agent.example.test" || node.AgentCertSHA256 != strings.Repeat("a", 64) {
+				if node.AgentID != "agent-1" || node.AgentEndpoint != "203.0.113.10" || node.AgentPort != 9443 || node.AgentTLSServerName != "agent.example.test" || node.AgentCertSHA256 != strings.Repeat("a", 64) {
 					t.Fatalf("direct Agent metadata changed: %+v", node)
 				}
 			}
@@ -189,7 +189,7 @@ func TestListNodesAgainstExternalHandler(t *testing.T) {
 		t.Fatalf("nodes=%+v err=%v", nodes, err)
 	}
 	node := nodes[0]
-	if node.AgentID != agentID || node.AgentEndpoint != "52.77.226.123" || node.AgentPort != 9443 || node.AgentTLSServerName != "52.77.226.123" || node.AgentCertSHA256 != strings.Repeat("b", 64) {
+	if node.AgentID != agentID || node.AgentEndpoint == "" || node.AgentEndpoint != node.PublicHost || node.AgentPort != 9443 || node.AgentTLSServerName != node.AgentEndpoint || node.AgentCertSHA256 != strings.Repeat("b", 64) {
 		t.Fatalf("direct Agent metadata changed: %+v", node)
 	}
 }
@@ -249,6 +249,35 @@ func TestTransportErrorCannotLeakPAT(t *testing.T) {
 	_, err = client.ListServices(context.Background(), "proj")
 	if err == nil || strings.Contains(err.Error(), pat) {
 		t.Fatalf("PAT leaked from transport error: %v", err)
+	}
+}
+
+func TestAPIErrorIncludesBoundedRequestContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(response, `{"error_code":"CONFLICT","message":"retry later","request_id":"req-123","next_action":"wait_for_agent"}`)
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "context-pat", "test", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ListNodes(context.Background(), "project-1")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.RequestID != "req-123" || apiErr.NextAction != "wait_for_agent" {
+		t.Fatalf("bounded context=%#v err=%v", apiErr, err)
+	}
+
+	server2 := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(response, `{"error_code":"BAD","message":"bad","request_id":"`+strings.Repeat("x", 129)+`","next_action":"unsafe action"}`)
+	}))
+	defer server2.Close()
+	client, _ = New(server2.URL, "context-pat", "test", server2.Client())
+	_, err = client.ListNodes(context.Background(), "project-1")
+	if !errors.As(err, &apiErr) || apiErr.RequestID != "" || apiErr.NextAction != "" {
+		t.Fatalf("unbounded context was exposed: %#v err=%v", apiErr, err)
 	}
 }
 

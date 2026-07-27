@@ -77,6 +77,28 @@ func (c *Client) ListServices(ctx context.Context, projectID string) ([]Service,
 	return response.Services, err
 }
 
+func (c *Client) ListProjects(ctx context.Context, orgID string) ([]Project, error) {
+	var response struct {
+		Projects []Project `json:"projects"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "orgs", orgID, "projects"}, nil, "", &response)
+	return response.Projects, err
+}
+
+func (c *Client) CreateProject(ctx context.Context, orgID, name, slug, key string) (Project, error) {
+	var response Project
+	err := c.do(ctx, http.MethodPost, []string{"api", "orgs", orgID, "projects"}, map[string]string{"name": name, "slug": slug}, key, &response)
+	return response, err
+}
+
+func (c *Client) ListAudit(ctx context.Context, projectID string) ([]AuditEvent, error) {
+	var response struct {
+		Events []AuditEvent `json:"events"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "audit"}, nil, "", &response)
+	return response.Events, err
+}
+
 func (c *Client) ListBuildRecords(ctx context.Context, projectID string, query url.Values) (BuildRecordList, error) {
 	var response BuildRecordList
 	segments := []string{"api", "projects", projectID, "build-records"}
@@ -266,7 +288,7 @@ func (c *Client) ListExposures(ctx context.Context, projectID, serviceID, enviro
 
 func (c *Client) RollbackDeployment(ctx context.Context, projectID, deploymentID, key string) (DeploymentJob, error) {
 	var response DeploymentJob
-	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", deploymentID, "rollback"}, map[string]string{"requested_by": "cli"}, key, &response)
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", deploymentID, "rollback"}, struct{}{}, key, &response)
 	return response, err
 }
 
@@ -274,6 +296,33 @@ func (c *Client) ListNodes(ctx context.Context, projectID string) ([]Node, error
 	var response nodeListResponse
 	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "nodes"}, nil, "", &response)
 	return response.Nodes, err
+}
+
+func (c *Client) GetNode(ctx context.Context, projectID, nodeID string) (map[string]any, error) {
+	var response map[string]any
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "nodes", nodeID}, nil, "", &response)
+	return response, err
+}
+
+func (c *Client) NodeLifecycle(ctx context.Context, projectID, nodeID, action, key string, confirm bool, force bool) (map[string]any, error) {
+	var response map[string]any
+	body := map[string]any{}
+	if action == "remove" && confirm {
+		body["confirm_remove"] = true
+	}
+	endpoint, err := c.endpoint("api", "projects", projectID, "nodes", nodeID, action)
+	if err != nil {
+		return nil, err
+	}
+	if force {
+		endpoint.RawQuery = "force=true"
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, errors.New("encode Cloud request")
+	}
+	err = c.doURL(ctx, http.MethodPost, endpoint, bytes.NewReader(encoded), key, &response)
+	return response, err
 }
 
 func (c *Client) MarkNodeOffline(ctx context.Context, projectID, nodeID, idempotencyKey string) (Node, error) {
@@ -301,6 +350,12 @@ func (c *Client) ListBootstrapSessions(ctx context.Context, projectID string) ([
 func (c *Client) GetBootstrapSession(ctx context.Context, projectID, sessionID string) (BootstrapSession, error) {
 	var response BootstrapSession
 	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "bootstrap-sessions", sessionID}, nil, "", &response)
+	return response, err
+}
+
+func (c *Client) RetryBootstrapSession(ctx context.Context, projectID, sessionID, key string) (BootstrapSession, error) {
+	var response BootstrapSession
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "bootstrap-sessions", sessionID, "retry"}, struct{}{}, key, &response)
 	return response, err
 }
 
@@ -379,6 +434,24 @@ func (c *Client) CreateServiceBinding(ctx context.Context, projectID, serviceID 
 
 func (c *Client) RemoveServiceBinding(ctx context.Context, projectID, bindingID string) error {
 	return c.do(ctx, http.MethodDelete, []string{"v1", "projects", projectID, "github", "bindings", bindingID}, nil, fmt.Sprintf("binding-remove:%s:%s", projectID, bindingID), nil)
+}
+
+func (c *Client) VerifyPAT(ctx context.Context, projectID string) (map[string]any, error) {
+	var response map[string]any
+	err := c.do(ctx, http.MethodPost, []string{"v1", "auth", "pat", "verify"}, map[string]string{"project_id": projectID}, "", &response)
+	return response, err
+}
+
+func (c *Client) RotatePAT(ctx context.Context, projectID string) (map[string]any, error) {
+	var response map[string]any
+	err := c.do(ctx, http.MethodPost, []string{"v1", "auth", "pat", "rotate"}, map[string]string{"project_id": projectID}, "pat-rotate", &response)
+	return response, err
+}
+
+func (c *Client) RevokePAT(ctx context.Context, projectID string) (map[string]any, error) {
+	var response map[string]any
+	err := c.do(ctx, http.MethodPost, []string{"v1", "auth", "pat", "revoke"}, map[string]string{"project_id": projectID}, "pat-revoke", &response)
+	return response, err
 }
 
 func (c *Client) do(ctx context.Context, method string, segments []string, body any, idempotencyKey string, response any) error {
@@ -484,8 +557,10 @@ func readBounded(body io.Reader) ([]byte, error) {
 
 func parseAPIError(status int, data []byte, pat string) error {
 	var payload struct {
-		Code    string `json:"error_code"`
-		Message string `json:"message"`
+		Code       string `json:"error_code"`
+		Message    string `json:"message"`
+		RequestID  string `json:"request_id"`
+		NextAction string `json:"next_action"`
 	}
 	_ = json.Unmarshal(data, &payload)
 	if payload.Code == "" || len(payload.Code) > 128 || strings.IndexFunc(payload.Code, func(value rune) bool {
@@ -499,10 +574,25 @@ func parseAPIError(status int, data []byte, pat string) error {
 	if pat != "" {
 		payload.Message = strings.ReplaceAll(payload.Message, pat, "[REDACTED]")
 	}
+	if !boundedToken(payload.RequestID) {
+		payload.RequestID = ""
+	}
+	if !boundedToken(payload.NextAction) {
+		payload.NextAction = ""
+	}
 	if len(payload.Message) > 1024 || strings.IndexFunc(payload.Message, func(value rune) bool { return value != '\n' && value != '\t' && value < ' ' }) >= 0 {
 		payload.Message = http.StatusText(status)
 	}
-	return &APIError{Status: status, Code: payload.Code, Message: payload.Message}
+	return &APIError{Status: status, Code: payload.Code, Message: payload.Message, RequestID: payload.RequestID, NextAction: payload.NextAction}
+}
+
+func boundedToken(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	return strings.IndexFunc(value, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("_-.:/", r))
+	}) < 0
 }
 
 func randomID() (string, error) {

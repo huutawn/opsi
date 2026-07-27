@@ -38,3 +38,16 @@ func TestValidateRejectsPartialClientCert(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestLoadRequiresSelectedConfigAndCloudURL(t *testing.T) {
+	if _, err := Load(""); err == nil {
+		t.Fatal("missing selected config was accepted")
+	}
+	path := filepath.Join(t.TempDir(), "cli.yaml")
+	if err := os.WriteFile(path, []byte("agent_addr: 127.0.0.1:9443\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSelected(path); err == nil {
+		t.Fatal("selected config silently defaulted cloud_url")
+	}
+}

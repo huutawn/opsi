@@ -1,5 +1,9 @@
 # Opsi Current Snapshot
 
+R5-013 is the active manual CLI work. The source-derived capability matrix is
+`docs/manual_cli_capability_matrix.md`; R5-012 remains implemented/live-blocked
+with its DeploymentJob defect deferred under `bugs/`.
+
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
