@@ -684,6 +684,255 @@ func TestRegistryAPIRBACCrossTenantAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestRegistryAPIProjectCreationUsesAuthenticatedActor(t *testing.T) {
+	trustedHash, err := auth.HashPAT("trusted_pat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newAuth := func(projectID string) *auth.Service {
+		return &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{{
+			UserID: "authenticated-user", OrgID: "org-1", ProjectID: projectID, Role: "Owner", Hash: trustedHash,
+		}}}}
+	}
+
+	server := NewServer(Config{})
+	server.Auth = newAuth("")
+	handler := server.Handler()
+	create := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Demo","slug":"demo","created_by":"attacker-user"}`)))
+		req.Header.Set("Authorization", "Bearer trusted_pat")
+		req.Header.Set("Idempotency-Key", key)
+		req.Header.Set("X-Request-ID", "req-"+key)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+
+	first := create("project-actor")
+	if first.Code != http.StatusCreated || bytes.Contains(first.Body.Bytes(), []byte("attacker-user")) {
+		t.Fatalf("project create status=%d body=%s", first.Code, first.Body.String())
+	}
+	var project registry.Project
+	if err := json.NewDecoder(first.Body).Decode(&project); err != nil {
+		t.Fatal(err)
+	}
+	if project.CreatedBy != "authenticated-user" {
+		t.Fatalf("project actor=%q", project.CreatedBy)
+	}
+	server.Auth = newAuth(project.ID)
+	replay := create("project-actor")
+	if replay.Code != http.StatusCreated || bytes.Contains(replay.Body.Bytes(), []byte("attacker-user")) {
+		t.Fatalf("project replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	var replayed registry.Project
+	if err := json.NewDecoder(replay.Body).Decode(&replayed); err != nil {
+		t.Fatal(err)
+	}
+	if replayed.ID != project.ID || replayed.CreatedBy != "authenticated-user" {
+		t.Fatalf("project replay=%+v first=%+v", replayed, project)
+	}
+	projects, err := server.Registry.ListProjects("org-1")
+	if err != nil || len(projects) != 1 || projects[0].CreatedBy != "authenticated-user" {
+		t.Fatalf("persisted projects=%+v err=%v", projects, err)
+	}
+	events, err := server.Registry.ListAudit(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectEvents := 0
+	for _, event := range events {
+		if event.Action != "PROJECT_CREATED" {
+			continue
+		}
+		projectEvents++
+		if event.ActorUserID != "authenticated-user" {
+			t.Fatalf("project audit actor=%q event=%+v", event.ActorUserID, event)
+		}
+		if bytes.Contains(mustJSON(t, event), []byte("attacker-user")) {
+			t.Fatalf("project audit leaked spoofed actor: %+v", event)
+		}
+	}
+	if projectEvents != 1 {
+		t.Fatalf("project audit count=%d events=%+v", projectEvents, events)
+	}
+
+	emptyServer := NewServer(Config{})
+	emptyServer.Auth = newAuth("")
+	emptyHandler := emptyServer.Handler()
+	emptyRequest := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Empty","slug":"empty","created_by":"attacker-user"}`)))
+		req.Header.Set("Authorization", "Bearer trusted_pat")
+		req.Header.Set("Idempotency-Key", "empty-principal-project")
+		req.Header.Set("X-Request-ID", "req-empty-principal-project")
+		w := httptest.NewRecorder()
+		emptyHandler.ServeHTTP(w, req)
+		return w
+	}
+	emptyPrincipalRequest := httptest.NewRequest(http.MethodPost, "/api/orgs/org-1/projects", bytes.NewReader([]byte(`{"name":"Empty","slug":"empty","created_by":"attacker-user"}`)))
+	emptyPrincipalRequest.Header.Set("Idempotency-Key", "empty-principal-project")
+	emptyPrincipalRequest.Header.Set("X-Request-ID", "req-empty-principal-project")
+	w := httptest.NewRecorder()
+	emptyServer.handleOrgProjects(w, emptyPrincipalRequest, "org-1", auth.VerifyResult{OrgID: "org-1", Role: "owner"})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("empty principal status=%d body=%s", w.Code, w.Body.String())
+	}
+	if projects, err := emptyServer.Registry.ListProjects("org-1"); err != nil || len(projects) != 0 {
+		t.Fatalf("empty principal mutated projects=%+v err=%v", projects, err)
+	}
+	trustedRetry := emptyRequest()
+	if trustedRetry.Code != http.StatusCreated || bytes.Contains(trustedRetry.Body.Bytes(), []byte("attacker-user")) {
+		w := trustedRetry
+		t.Fatalf("trusted retry status=%d body=%s", w.Code, w.Body.String())
+	}
+	var trustedProject registry.Project
+	if err := json.NewDecoder(trustedRetry.Body).Decode(&trustedProject); err != nil {
+		t.Fatal(err)
+	}
+	trustedEvents, err := emptyServer.Registry.ListAudit(trustedProject.ID)
+	if err != nil || len(trustedEvents) != 1 || trustedEvents[0].ActorUserID != "authenticated-user" {
+		t.Fatalf("trusted retry audit=%+v err=%v", trustedEvents, err)
+	}
+}
+
+func TestRegistryAPINodeLifecycleUsesAuthenticatedActor(t *testing.T) {
+	trustedHash, err := auth.HashPAT("trusted_pat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewerHash, err := auth.HashPAT("viewer_pat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-1", "Demo", "demo", "authenticated-user", "lifecycle-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := server.Registry.UpsertNode(project.ID, "executor", "server", registry.NodeHealthy, "203.0.113.10", "", "lifecycle-executor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentHash, err := auth.HashPAT("agent-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.RegisterAgent(project.ID, executor.ID, "sha256:lifecycle", agentHash, "v1", "lifecycle-agent", map[string]any{"node_lifecycle": true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.RecordAgentHeartbeat(project.ID, executor.ID, registry.AgentHeartbeat{NodeReady: true, Capabilities: map[string]any{"node_lifecycle": true}}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := server.Registry.UpsertNode(project.ID, "target", "worker", registry.NodeHealthy, "203.0.113.11", "", "lifecycle-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setAuth := func() {
+		server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{
+			{UserID: "authenticated-user", OrgID: "org-1", ProjectID: project.ID, Role: "Owner", Hash: trustedHash},
+			{UserID: "viewer-user", OrgID: "org-1", ProjectID: project.ID, Role: "Viewer", Hash: viewerHash},
+		}}}
+	}
+	setAuth()
+	handler := server.Handler()
+	request := func(action, key, token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/nodes/"+target.ID+"/"+action, bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Idempotency-Key", key)
+		req.Header.Set("X-Request-ID", "req-"+key)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+
+	drainBody := `{"requested_by":"attacker-user"}`
+	drain := request("drain", "drain-actor", "trusted_pat", drainBody)
+	if drain.Code != http.StatusAccepted || bytes.Contains(drain.Body.Bytes(), []byte("attacker-user")) {
+		t.Fatalf("drain status=%d body=%s", drain.Code, drain.Body.String())
+	}
+	var drainJob registry.NodeLifecycleJob
+	if err := json.NewDecoder(drain.Body).Decode(&drainJob); err != nil {
+		t.Fatal(err)
+	}
+	if drainJob.RequestedBy != "authenticated-user" {
+		t.Fatalf("drain actor=%q job=%+v", drainJob.RequestedBy, drainJob)
+	}
+	drainReplay := request("drain", "drain-actor", "trusted_pat", drainBody)
+	var drainReplayJob registry.NodeLifecycleJob
+	if drainReplay.Code != http.StatusAccepted || json.NewDecoder(drainReplay.Body).Decode(&drainReplayJob) != nil || drainReplayJob.ID != drainJob.ID || drainReplayJob.RequestedBy != "authenticated-user" {
+		t.Fatalf("drain replay status=%d body=%s job=%+v", drainReplay.Code, drainReplay.Body.String(), drainReplayJob)
+	}
+
+	if w := request("drain", "viewer-drain", "viewer_pat", drainBody); w.Code != http.StatusForbidden {
+		t.Fatalf("viewer drain status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := request("remove", "remove-missing-confirmation", "trusted_pat", `{"requested_by":"attacker-user"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("remove without confirmation status=%d body=%s", w.Code, w.Body.String())
+	}
+	removeBody := `{"requested_by":"attacker-user","confirm_remove":true}`
+	remove := request("remove", "remove-actor", "trusted_pat", removeBody)
+	if remove.Code != http.StatusAccepted || bytes.Contains(remove.Body.Bytes(), []byte("attacker-user")) {
+		t.Fatalf("remove status=%d body=%s", remove.Code, remove.Body.String())
+	}
+	var removeJob registry.NodeLifecycleJob
+	if err := json.NewDecoder(remove.Body).Decode(&removeJob); err != nil {
+		t.Fatal(err)
+	}
+	if removeJob.RequestedBy != "authenticated-user" || !removeJob.ConfirmRemove {
+		t.Fatalf("remove job=%+v", removeJob)
+	}
+	removeReplay := request("remove", "remove-actor", "trusted_pat", removeBody)
+	var removeReplayJob registry.NodeLifecycleJob
+	if removeReplay.Code != http.StatusAccepted || json.NewDecoder(removeReplay.Body).Decode(&removeReplayJob) != nil || removeReplayJob.ID != removeJob.ID || removeReplayJob.RequestedBy != "authenticated-user" {
+		t.Fatalf("remove replay status=%d body=%s job=%+v", removeReplay.Code, removeReplay.Body.String(), removeReplayJob)
+	}
+
+	emptyPrincipalRequest := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/nodes/"+target.ID+"/drain", bytes.NewReader([]byte(`{"requested_by":"attacker-user"}`)))
+	emptyPrincipalRequest.Header.Set("Idempotency-Key", "empty-principal-drain")
+	emptyPrincipalRequest.Header.Set("X-Request-ID", "req-empty-principal-drain")
+	w := httptest.NewRecorder()
+	server.handleProjectAPI(w, emptyPrincipalRequest, []string{"projects", project.ID, "nodes", target.ID, "drain"}, auth.VerifyResult{OrgID: "org-1", ProjectID: project.ID, Role: "owner"})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("empty principal drain status=%d body=%s", w.Code, w.Body.String())
+	}
+	emptyRetry := request("drain", "empty-principal-drain", "trusted_pat", `{"requested_by":"attacker-user"}`)
+	if emptyRetry.Code != http.StatusAccepted || bytes.Contains(emptyRetry.Body.Bytes(), []byte("attacker-user")) {
+		t.Fatalf("trusted drain retry status=%d body=%s", emptyRetry.Code, emptyRetry.Body.String())
+	}
+	var emptyRetryJob registry.NodeLifecycleJob
+	if err := json.NewDecoder(emptyRetry.Body).Decode(&emptyRetryJob); err != nil || emptyRetryJob.RequestedBy != "authenticated-user" {
+		t.Fatalf("trusted drain retry job=%+v err=%v", emptyRetryJob, err)
+	}
+
+	events, err := server.Registry.ListAudit(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested := map[string]int{}
+	for _, event := range events {
+		if bytes.Contains(mustJSON(t, event), []byte("attacker-user")) {
+			t.Fatalf("lifecycle audit leaked spoofed actor: %+v", event)
+		}
+		if event.Action == "NODE_LIFECYCLE_REQUESTED" {
+			if event.ActorUserID != "authenticated-user" {
+				t.Fatalf("lifecycle audit actor=%q event=%+v", event.ActorUserID, event)
+			}
+			requested[event.ResourceID]++
+		}
+	}
+	if requested[drainJob.ID] != 1 || requested[removeJob.ID] != 1 || requested[emptyRetryJob.ID] != 1 || len(requested) != 3 {
+		t.Fatalf("lifecycle audit replay counts=%v events=%+v", requested, events)
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	ownerHash, err := auth.HashPAT("owner_pat")
 	if err != nil {

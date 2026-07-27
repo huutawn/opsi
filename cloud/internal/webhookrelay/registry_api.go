@@ -160,26 +160,26 @@ func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID
 		if !requireWriteHeaders(w, r) {
 			return
 		}
+		if s.Auth != nil && principal.UserID == "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusForbidden, Code: "PERMISSION_DENIED", Message: "authenticated principal user ID is required", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
 		if !s.requireRole(w, r, principal, "", "project", orgID, "owner", "admin") {
 			return
 		}
 		var req struct {
-			Name      string `json:"name"`
-			Slug      string `json:"slug"`
-			CreatedBy string `json:"created_by"`
+			Name string `json:"name"`
+			Slug string `json:"slug"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if req.CreatedBy == "" {
-			req.CreatedBy = principal.UserID
-		}
-		project, err := s.Registry.CreateProject(orgID, req.Name, req.Slug, req.CreatedBy, r.Header.Get("Idempotency-Key"))
+		project, err := s.Registry.CreateProject(orgID, req.Name, req.Slug, principal.UserID, r.Header.Get("Idempotency-Key"))
 		if err != nil {
 			writeRegistryFailure(w, r, err)
 			return
 		}
-		s.Registry.Audit(orgID, project.ID, principal.UserID, "PROJECT_CREATED", "project", project.ID, "success", nil)
+		s.auditOnce(orgID, project.ID, principal.UserID, "PROJECT_CREATED", "project", project.ID, "success", nil)
 		writeJSON(w, http.StatusCreated, project)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -316,24 +316,24 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		if !requireWriteHeaders(w, r) {
 			return
 		}
+		if s.Auth != nil && principal.UserID == "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusForbidden, Code: "PERMISSION_DENIED", Message: "authenticated principal user ID is required", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
 		if !s.requireRole(w, r, principal, projectID, "node", parts[3], "owner", "admin") {
 			return
 		}
 		var req struct {
-			RequestedBy   string `json:"requested_by"`
-			ConfirmRemove bool   `json:"confirm_remove"`
+			ConfirmRemove bool `json:"confirm_remove"`
 		}
 		if r.ContentLength != 0 {
 			if !decodeJSON(w, r, &req) {
 				return
 			}
 		}
-		if req.RequestedBy == "" {
-			req.RequestedBy = principal.UserID
-		}
-		job, err := s.Registry.RequestNodeLifecycle(projectID, parts[3], parts[4], req.RequestedBy, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), req.ConfirmRemove, r.URL.Query().Get("force") == "true")
+		job, err := s.Registry.RequestNodeLifecycle(projectID, parts[3], parts[4], principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), req.ConfirmRemove, r.URL.Query().Get("force") == "true")
 		if err == nil {
-			s.Registry.Audit(job.OrgID, projectID, principal.UserID, "NODE_LIFECYCLE_REQUESTED", "node_lifecycle_job", job.ID, "success", map[string]any{"action": job.Action, "target_node_id": job.TargetNodeID, "status": job.Status})
+			s.auditOnce(job.OrgID, projectID, principal.UserID, "NODE_LIFECYCLE_REQUESTED", "node_lifecycle_job", job.ID, "success", map[string]any{"action": job.Action, "target_node_id": job.TargetNodeID, "status": job.Status})
 		} else if nodes, listErr := s.Registry.ListNodes(projectID); listErr == nil {
 			if node, ok := nodeByID(nodes, parts[3]); ok {
 				code := "NODE_LIFECYCLE_REQUEST_FAILED"
@@ -621,6 +621,17 @@ func healthyServerCount(nodes []registry.Node) int {
 		}
 	}
 	return count
+}
+
+func (s *Server) auditOnce(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) {
+	if events, err := s.Registry.ListAudit(projectID); err == nil {
+		for _, event := range events {
+			if event.Action == action && event.ResourceType == resourceType && event.ResourceID == resourceID {
+				return
+			}
+		}
+	}
+	s.Registry.Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result, metadata)
 }
 
 func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, principal auth.VerifyResult, projectID, resourceType, resourceID string, allowed ...string) bool {
