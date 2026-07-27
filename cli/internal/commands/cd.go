@@ -26,7 +26,7 @@ type cdPlanOptions struct {
 	JSON       bool
 }
 
-func newCDCommand(options Options) *cobra.Command {
+func newCDCommand(configPath *string, options Options) *cobra.Command {
 	root := &cobra.Command{Use: "cd", Short: "Inspect repository CD intent without building or deploying"}
 	planOptions := cdPlanOptions{RepoDir: ".", ConfigPath: defaultConfigPath, Event: string(repository.EventPush)}
 	plan := &cobra.Command{Use: "plan", Short: "Resolve affected monorepo services", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -42,17 +42,23 @@ func newCDCommand(options Options) *cobra.Command {
 	root.AddCommand(plan)
 	read := &cdReadOptions{}
 	status := &cobra.Command{Use: "status", Short: "Show main CD delivery status", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		return runCDDelivery(cmd, options, read, false)
+		return runCDDelivery(cmd, configPath, options, read, false)
 	}}
 	bindCDReadFlags(status, read)
 	history := &cobra.Command{Use: "history", Short: "Show main CD delivery history", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		return runCDDelivery(cmd, options, read, true)
+		return runCDDelivery(cmd, configPath, options, read, true)
 	}}
 	bindCDReadFlags(history, read)
 	preview := &cobra.Command{Use: "preview", Short: "Inspect isolated pull request previews"}
-	previewList := &cobra.Command{Use: "list", Short: "List previews", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return runCDPreviews(cmd, options, read, "list") }}
-	previewDetail := &cobra.Command{Use: "detail", Short: "Show one preview", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return runCDPreviews(cmd, options, read, "detail") }}
-	previewCleanup := &cobra.Command{Use: "cleanup", Short: "Request idempotent preview cleanup", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return runCDPreviews(cmd, options, read, "cleanup") }}
+	previewList := &cobra.Command{Use: "list", Short: "List previews", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return runCDPreviews(cmd, configPath, options, read, "list")
+	}}
+	previewDetail := &cobra.Command{Use: "detail", Short: "Show one preview", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return runCDPreviews(cmd, configPath, options, read, "detail")
+	}}
+	previewCleanup := &cobra.Command{Use: "cleanup", Short: "Request idempotent preview cleanup", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return runCDPreviews(cmd, configPath, options, read, "cleanup")
+	}}
 	for _, child := range []*cobra.Command{previewList, previewDetail, previewCleanup} {
 		bindCDReadFlags(child, read)
 	}
@@ -75,11 +81,11 @@ func bindCDReadFlags(command *cobra.Command, flags *cdReadOptions) {
 	command.Flags().BoolVar(&flags.jsonOutput, "json", false, "emit JSON")
 }
 
-func cdClient(cmd *cobra.Command, options Options, projectID string) (*cloudclient.Client, context.Context, context.CancelFunc, error) {
+func cdClient(cmd *cobra.Command, configPath *string, options Options, projectID string) (*cloudclient.Client, context.Context, context.CancelFunc, error) {
 	if err := validateGitHubProjectID(projectID); err != nil {
 		return nil, nil, nil, err
 	}
-	client, err := newCommandCloudClient("", options)
+	client, err := newCommandCloudClient(*configPath, options)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -87,8 +93,8 @@ func cdClient(cmd *cobra.Command, options Options, projectID string) (*cloudclie
 	return client, ctx, cancel, nil
 }
 
-func runCDDelivery(cmd *cobra.Command, options Options, flags *cdReadOptions, history bool) error {
-	client, ctx, cancel, err := cdClient(cmd, options, flags.projectID)
+func runCDDelivery(cmd *cobra.Command, configPath *string, options Options, flags *cdReadOptions, history bool) error {
+	client, ctx, cancel, err := cdClient(cmd, configPath, options, flags.projectID)
 	if err != nil {
 		return err
 	}
@@ -109,8 +115,8 @@ func runCDDelivery(cmd *cobra.Command, options Options, flags *cdReadOptions, hi
 	return nil
 }
 
-func runCDPreviews(cmd *cobra.Command, options Options, flags *cdReadOptions, operation string) error {
-	client, ctx, cancel, err := cdClient(cmd, options, flags.projectID)
+func runCDPreviews(cmd *cobra.Command, configPath *string, options Options, flags *cdReadOptions, operation string) error {
+	client, ctx, cancel, err := cdClient(cmd, configPath, options, flags.projectID)
 	if err != nil {
 		return err
 	}

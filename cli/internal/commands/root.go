@@ -50,7 +50,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.AddCommand(newServerCommand(&configPath, options))
 	root.AddCommand(newLoginCommand(options.KeychainFactory))
 	root.AddCommand(newInitCommand(&configPath, options))
-	root.AddCommand(newCDCommand(options))
+	root.AddCommand(newCDCommand(&configPath, options))
 	root.AddCommand(newGitHubCommand(&configPath, options))
 	root.AddCommand(newBuildRecordCommand(&configPath, options))
 	root.AddCommand(newTopologyCommand(&configPath, options))
