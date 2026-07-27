@@ -1,6 +1,6 @@
 # Local Manual UI Parity Matrix
 
-R5-014 maps the 21 R5-013 `SUPPORTED` capabilities to one Local API and one factual UI path. Every mutation uses the shared review dialog, a stable idempotency key, exact target confirmation where required, and backend-derived success evidence. Loading, failure, retry, permission, and offline behavior are summarized in the final columns.
+R5-014 maps the 21 R5-013 `SUPPORTED` capabilities to one Local API and one factual UI path. Every mutation uses the shared review dialog, a stable idempotency key, exact target confirmation where required, and backend-derived success evidence. Loading, failure, retry, permission, and offline behavior are summarized in the final columns. R5-015 adds the Local incident-evidence source route only; UI redesign and browser evidence rendering remain deferred to R5-017.
 
 | Capability | CLI command | Local API route | UI view/navigation | Kind | Loading / success evidence | Confirmation / failure / retry | Permission / offline | Automated test |
 |---|---|---|---|---|---|---|---|---|

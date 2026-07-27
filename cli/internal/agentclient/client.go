@@ -179,6 +179,15 @@ func (c *Client) GetIncident(ctx context.Context, req *agentv1.IncidentGetReques
 	return agentv1.NewIncidentServiceClient(conn).GetIncident(ctx, req)
 }
 
+func (c *Client) GetIncidentEvidence(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewIncidentServiceClient(conn).GetIncidentEvidence(ctx, req)
+}
+
 func (c *Client) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {

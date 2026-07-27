@@ -101,10 +101,12 @@ signing, or ActionPlane client.
 ### 1.4 Current Agent boundary
 
 Agent owns runtime facts and execution. Current services include status,
-deployment, service management, telemetry, secrets, and incident list/get/resolve.
-The incident package builds bounded deterministic sanitized context and performs
-authorization and resolve audit. It does not perform AI analysis or execute a
-stored RCA/recommended action.
+deployment, service management, telemetry, secrets, and incident
+list/get/evidence/resolve. `GetIncidentEvidence` is one bounded deterministic
+Agent-local builder persisted on the existing incidents row; rollout, telemetry,
+audit, and injectable fake Kubernetes sources contribute factual projections.
+It performs authorization and resolve audit, but no AI analysis or RCA/action
+execution.
 
 Historical `rca_result` and `mitigation_actions_json` database columns are
 storage-only. They are not execution authority.
@@ -130,7 +132,7 @@ image redeployment.
 ```text
 Agent telemetry/detectors
   -> factual incident store
-  -> IncidentService list/get/resolve
+  -> IncidentService list/get/evidence/resolve
   -> CLI local backend
   -> Browser/CLI
 ```

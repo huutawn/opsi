@@ -90,6 +90,12 @@ it carries only canonical deployment or node lifecycle jobs. It is not a
 generic webhook relay, and the Agent has no Git/source or arbitrary-manifest
 deployment path.
 
-## Phase 3 Telemetry
+## Phase 3 Telemetry and Incident Evidence
 
 Agent migrates SQLite tables `metrics`, `logs`, `incidents`, and `audit_log` alongside Phase 2 `services`/`deployments`, with WAL mode enabled. When `telemetry.enabled` is true, the runtime collector writes node/process fallback metrics every `telemetry.interval` and applies raw retention for metrics/logs. `opsi.agent.v1.TelemetryService.Sync` returns project-scoped zstd chunks with delta-encoded metric/log payloads.
+
+`IncidentService.GetIncidentEvidence` builds one bounded
+`opsi.incident_evidence.v1` record from Agent-local SQLite facts plus injectable
+fake Kubernetes/rollout projections. The body and lowercase SHA-256 hash are
+persisted in the Agent `incidents` row; Cloud stores no evidence body. Live
+Agent/VPS and UI/browser acceptance are deferred to R5-017.

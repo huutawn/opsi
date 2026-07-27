@@ -162,9 +162,11 @@ Cloud may store bounded `BuildRecord` metadata, repository ID, commit SHA, image
 digest, workflow/run identifiers, deployment result metadata, and provenance
 references. Cloud must not persist source repository contents, Docker build
 context, raw build logs, raw runtime logs, raw metric streams, app secret values,
-registry password plaintext, kubeconfig, or unrestricted manifests. Future
-`IncidentEvidence v1` remains Agent-owned and contains only bounded facts,
-redacted excerpts, hashes, and sanitization/prompt-injection metadata.
+registry password plaintext, kubeconfig, or unrestricted manifests.
+`IncidentEvidence v1` is Agent-owned and contains only bounded facts, redacted
+excerpts, hashes, coverage/truncation metadata, and explicit untrusted-content
+markers. Its canonical body is persisted only in Agent SQLite; Cloud has no
+evidence payload model, column, table, queue, or API.
 
 ## Current security limitations
 

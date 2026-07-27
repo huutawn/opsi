@@ -1,6 +1,10 @@
 # Opsi Current Snapshot
 
-R5-014 is the active Local API/UI parity work. The canonical mapping is
+R5-015 is the active bounded IncidentEvidence source work.
+`R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
+`R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
+The canonical mapping is
 `docs/manual_ui_parity_matrix.md`; all 21 R5-013 supported capabilities have a
 Local route/view and the three backend gaps remain disabled. Installed bundles
 include `opsi-ui`; Agent-live acceptance is deferred to R5-017 because the

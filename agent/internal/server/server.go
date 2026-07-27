@@ -213,6 +213,18 @@ func (s *IncidentService) GetIncident(ctx context.Context, req *agentv1.Incident
 	return incidentResponse(rec), nil
 }
 
+func (s *IncidentService) GetIncidentEvidence(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer)
+	if err != nil {
+		return nil, err
+	}
+	evidence, err := s.service.GetEvidence(ctx, incident.IncidentRequest{ProjectID: auth.ProjectID, IncidentID: req.IncidentID, UserID: auth.UserID, Role: string(auth.Role), PAT: auth.PAT})
+	if err != nil {
+		return nil, mapIncidentError(err)
+	}
+	return evidence, nil
+}
+
 func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
 	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper)
 	if err != nil {
@@ -407,7 +419,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
 	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore), authVerifier))
-	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(telemetryStore), authVerifier))
+	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(telemetryStore, store, incident.KubernetesEvidenceSource{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")}), authVerifier))
 
 	healthServer := &http.Server{
 		Handler:           healthHandler(version, startedAt, cfg, cloudConnection.Connected),
@@ -633,6 +645,9 @@ func verifyRequestAuth(ctx context.Context, verifier secret.AuthVerifier, projec
 	if err != nil {
 		return secret.AuthContext{}, status.Error(codes.Unauthenticated, "Agent authentication failed")
 	}
+	if verified.ProjectID != projectID {
+		return secret.AuthContext{}, status.Error(codes.PermissionDenied, "project access denied")
+	}
 	return verified, nil
 }
 
@@ -691,15 +706,21 @@ func mapIncidentError(err error) error {
 	message := err.Error()
 	switch {
 	case strings.Contains(message, "PAT") || strings.Contains(message, "cloud auth"):
-		return status.Error(codes.Unauthenticated, message)
+		return status.Error(codes.Unauthenticated, "Agent authentication failed")
 	case message == "permission denied":
-		return status.Error(codes.PermissionDenied, message)
+		return status.Error(codes.PermissionDenied, "incident access denied")
 	case strings.Contains(message, "not found"):
-		return status.Error(codes.NotFound, message)
+		return status.Error(codes.NotFound, "incident not found")
+	case errors.Is(err, incident.ErrEvidenceCorrupt):
+		return status.Error(codes.FailedPrecondition, "stored incident evidence is invalid")
+	case errors.Is(err, incident.ErrEvidenceTooLarge):
+		return status.Error(codes.ResourceExhausted, "incident evidence exceeds the size limit")
+	case errors.Is(err, incident.ErrEvidenceUnavailable):
+		return status.Error(codes.Unavailable, "incident evidence is unavailable")
 	case strings.Contains(message, "invalid") || strings.Contains(message, "required"):
-		return status.Error(codes.InvalidArgument, message)
+		return status.Error(codes.InvalidArgument, "invalid incident request")
 	default:
-		return status.Error(codes.Internal, message)
+		return status.Error(codes.Internal, "incident operation failed")
 	}
 }
 
@@ -724,10 +745,11 @@ func incidentResponse(rec *telemetry.IncidentRecord) *agentv1.IncidentResponse {
 	return resp
 }
 
-func incidentService(store telemetry.Store) *incident.Service {
+func incidentService(store telemetry.Store, rollouts *deploy.SQLiteStore, kubernetes incident.KubernetesEvidenceSource) *incident.Service {
 	return &incident.Service{
-		Store: store,
-		Audit: store.(secret.AuditSink),
+		Store:           store,
+		Audit:           store.(secret.AuditSink),
+		EvidenceBuilder: incident.IncidentContextBuilder{Store: store, Rollouts: rollouts, Kubernetes: kubernetes},
 	}
 }
 

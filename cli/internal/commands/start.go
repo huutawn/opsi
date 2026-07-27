@@ -36,8 +36,9 @@ var (
 )
 
 const (
-	localRequestBodyLimit  = 1 << 20
-	localResponseBodyLimit = 2 << 20
+	localRequestBodyLimit         = 1 << 20
+	localResponseBodyLimit        = 2 << 20
+	incidentEvidenceResponseLimit = 256 << 10
 )
 
 func newStartCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
@@ -57,6 +58,9 @@ func newStartCommand(configPath *string, factory func() (keychain.Store, error))
 func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer, factory func() (keychain.Store, error)) error {
 	cfg, err := config.LoadSelected(configPath)
 	if err != nil {
+		return err
+	}
+	if err := requireSelectedAgentAddress(configPath); err != nil {
 		return err
 	}
 	listener, err := net.Listen("tcp", addr)
@@ -968,6 +972,7 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 	if rejectCallerAuthorityQuery(w, r) {
 		return true
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == http.MethodGet {
 		req, ok := readLocalIncidentQuery(w, r, projectID)
 		if !ok {
@@ -984,6 +989,15 @@ func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.C
 				return true
 			}
 			callLocalIncidentGetAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID}, resolver...)
+			return true
+		}
+		if len(parts) == 7 && parts[6] == "evidence" {
+			incidentID, err := url.PathUnescape(parts[5])
+			if err != nil || incidentID == "" {
+				writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ID_REQUIRED", "incident_id is required")
+				return true
+			}
+			callLocalIncidentEvidenceAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID}, resolver...)
 			return true
 		}
 		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local incident route is not implemented")
@@ -1093,6 +1107,35 @@ func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg confi
 	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incident": resp})
 }
 
+func callLocalIncidentEvidenceAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest, resolver ...agentConfigResolver) {
+	ctx, cancel := context.WithTimeout(r.Context(), incidentEvidenceOperationTimeout)
+	defer cancel()
+	pat, err := resolvePAT("", factory)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	ctx = agentclient.WithPAT(ctx, pat)
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	response, err := agentclient.New(agentCfg).GetIncidentEvidence(ctx, req)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	body, err := json.Marshal(response)
+	if err != nil || len(body) > incidentEvidenceResponseLimit {
+		writeLocalError(w, r, http.StatusBadGateway, "INCIDENT_EVIDENCE_INVALID", "Agent incident evidence response is invalid")
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(append(body, '\n'))
+}
+
 func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentResolveRequest, resolver ...agentConfigResolver) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -1135,6 +1178,8 @@ func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err er
 		statusCode, code = http.StatusForbidden, "INCIDENT_ACCESS_DENIED"
 	case codes.FailedPrecondition:
 		statusCode, code = http.StatusPreconditionFailed, "INCIDENT_PRECONDITION_FAILED"
+	case codes.ResourceExhausted:
+		statusCode, code = http.StatusBadGateway, "INCIDENT_EVIDENCE_TOO_LARGE"
 	case codes.NotFound:
 		statusCode, code = http.StatusNotFound, "INCIDENT_NOT_FOUND"
 	case codes.Unimplemented:

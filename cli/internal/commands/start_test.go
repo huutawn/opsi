@@ -471,13 +471,14 @@ type localFacadeAgent struct {
 	agentv1.UnimplementedSecretServiceServer
 	agentv1.UnimplementedTelemetryServiceServer
 	agentv1.UnimplementedIncidentServiceServer
-	id                   string
-	statusCalls          atomic.Int64
-	secretCalls          atomic.Int64
-	telemetryCalls       atomic.Int64
-	incidentListCalls    atomic.Int64
-	incidentGetCalls     atomic.Int64
-	incidentResolveCalls atomic.Int64
+	id                    string
+	statusCalls           atomic.Int64
+	secretCalls           atomic.Int64
+	telemetryCalls        atomic.Int64
+	incidentListCalls     atomic.Int64
+	incidentGetCalls      atomic.Int64
+	incidentEvidenceCalls atomic.Int64
+	incidentResolveCalls  atomic.Int64
 }
 
 func (s *localFacadeAgent) Status(context.Context, *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
@@ -517,6 +518,11 @@ func (s *localFacadeAgent) ListIncidents(_ context.Context, req *agentv1.Inciden
 func (s *localFacadeAgent) GetIncident(_ context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
 	s.incidentGetCalls.Add(1)
 	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
+}
+
+func (s *localFacadeAgent) GetIncidentEvidence(_ context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+	s.incidentEvidenceCalls.Add(1)
+	return localIncidentEvidence(req.ProjectID, req.IncidentID, s.id), nil
 }
 
 func (s *localFacadeAgent) ResolveIncident(_ context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
@@ -1278,6 +1284,61 @@ func TestLocalIncidentDetailUsesAgentAndReturnsFactsOnly(t *testing.T) {
 	}
 }
 
+func TestLocalIncidentEvidenceUsesAgentNoStoreAndReloadsConfig(t *testing.T) {
+	addrA, agentA, stopA := startLocalFacadeAgent(t, "agent-a")
+	defer stopA()
+	addrB, agentB, stopB := startLocalFacadeAgent(t, "agent-b")
+	defer stopB()
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	initial := config.Config{AgentAddr: addrA, CloudURL: "http://unused.invalid"}
+	if err := config.Save(configPath, initial); err != nil {
+		t.Fatal(err)
+	}
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("local-evidence-pat"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", initial, func() (keychain.Store, error) { return store, nil }, configPath))
+	defer server.Close()
+	getEvidence := func() agentv1.IncidentEvidence {
+		res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents/inc-1/evidence")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		body, _ := io.ReadAll(res.Body)
+		if res.StatusCode != http.StatusOK || res.Header.Get("Cache-Control") != "no-store" || strings.Contains(string(body), "local-evidence-pat") {
+			t.Fatalf("status=%d cache=%q body=%s", res.StatusCode, res.Header.Get("Cache-Control"), body)
+		}
+		var evidence agentv1.IncidentEvidence
+		if err := json.Unmarshal(body, &evidence); err != nil {
+			t.Fatal(err)
+		}
+		return evidence
+	}
+	if evidence := getEvidence(); evidence.Rollout.State != "agent-a" || agentA.incidentEvidenceCalls.Load() != 1 {
+		t.Fatalf("first evidence=%+v calls=%d", evidence, agentA.incidentEvidenceCalls.Load())
+	}
+	if err := config.Save(configPath, config.Config{AgentAddr: addrB, CloudURL: "http://unused.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	if evidence := getEvidence(); evidence.Rollout.State != "agent-b" || agentB.incidentEvidenceCalls.Load() != 1 || agentA.incidentEvidenceCalls.Load() != 1 {
+		t.Fatalf("reloaded evidence=%+v calls_a=%d calls_b=%d", evidence, agentA.incidentEvidenceCalls.Load(), agentB.incidentEvidenceCalls.Load())
+	}
+	if err := os.WriteFile(configPath, []byte("agent_addr: [invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents/inc-1/evidence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "AGENT_CONFIG_RELOAD_FAILED") || agentB.incidentEvidenceCalls.Load() != 1 {
+		t.Fatalf("invalid reload status=%d body=%s calls_b=%d", res.StatusCode, body, agentB.incidentEvidenceCalls.Load())
+	}
+}
+
 func TestRemovedLocalIncidentRoutesReturnNotFound(t *testing.T) {
 	agent := &localIncidentServer{}
 	agentAddr, stop := startLocalIncidentServer(t, agent)
@@ -1888,12 +1949,13 @@ func startLocalSecretServer(t *testing.T, service agentv1.SecretServiceServer) (
 
 type localIncidentServer struct {
 	agentv1.UnimplementedIncidentServiceServer
-	listCalls    int
-	getCalls     int
-	resolveCalls int
-	lastResolve  agentv1.IncidentResolveRequest
-	lastAuth     string
-	err          error
+	listCalls     int
+	getCalls      int
+	evidenceCalls int
+	resolveCalls  int
+	lastResolve   agentv1.IncidentResolveRequest
+	lastAuth      string
+	err           error
 }
 
 func (s *localIncidentServer) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
@@ -1912,6 +1974,15 @@ func (s *localIncidentServer) GetIncident(ctx context.Context, req *agentv1.Inci
 		return nil, s.err
 	}
 	return localIncidentResponse(req.ProjectID, req.IncidentID), nil
+}
+
+func (s *localIncidentServer) GetIncidentEvidence(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+	s.evidenceCalls++
+	s.lastAuth = localAuthHeader(ctx)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return localIncidentEvidence(req.ProjectID, req.IncidentID, "local"), nil
 }
 
 func (s *localIncidentServer) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
@@ -1938,6 +2009,10 @@ func localIncidentResponse(projectID, incidentID string) *agentv1.IncidentRespon
 		AnomalyType:   "crash_loop",
 		CreatedAtUnix: 10,
 	}
+}
+
+func localIncidentEvidence(projectID, incidentID, state string) *agentv1.IncidentEvidence {
+	return &agentv1.IncidentEvidence{SchemaVersion: "opsi.incident_evidence.v1", Identity: agentv1.IncidentEvidenceIdentity{ProjectID: projectID, IncidentID: incidentID, Status: "open"}, Rollout: agentv1.IncidentRolloutEvidence{State: state}, Coverage: []agentv1.IncidentSourceCoverage{{Source: "incident", Status: "available", ItemCount: 1}}, ContentSHA256: strings.Repeat("a", 64)}
 }
 
 func startLocalIncidentServer(t *testing.T, service agentv1.IncidentServiceServer) (string, func()) {

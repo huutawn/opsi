@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ import (
 )
 
 func TestIncidentServiceDescriptorContainsOnlyActiveIncidentRPCs(t *testing.T) {
-	want := map[string]bool{"ListIncidents": true, "GetIncident": true, "ResolveIncident": true}
+	want := map[string]bool{"ListIncidents": true, "GetIncident": true, "GetIncidentEvidence": true, "ResolveIncident": true}
 	if len(agentv1.IncidentService_ServiceDesc.Methods) != len(want) {
 		t.Fatalf("unexpected incident RPC count: %+v", agentv1.IncidentService_ServiceDesc.Methods)
 	}
@@ -62,7 +63,7 @@ func TestGetIncidentIgnoresLegacyRCAAndMitigationData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service := NewIncidentService(incidentService(store), &fixedAuthVerifier{auth: secret.AuthContext{ProjectID: "p1", UserID: "viewer", Role: secret.RoleViewer}})
+	service := NewIncidentService(incidentService(store, nil, incident.KubernetesEvidenceSource{}), &fixedAuthVerifier{auth: secret.AuthContext{ProjectID: "p1", UserID: "viewer", Role: secret.RoleViewer}})
 	resp, err := service.GetIncident(incomingBearer("pat-viewer"), &agentv1.IncidentGetRequest{
 		ProjectID:  "p1",
 		IncidentID: "inc-legacy",
@@ -72,6 +73,33 @@ func TestGetIncidentIgnoresLegacyRCAAndMitigationData(t *testing.T) {
 	}
 	if resp.IncidentID != "inc-legacy" || resp.ProjectID != "p1" || resp.ServiceID != "svc-1" || resp.Status != "resolved" || resp.MTTRSeconds != 60 || resp.ResolvedAtUnix != resolved.Unix() {
 		t.Fatalf("factual incident fields changed: %+v", resp)
+	}
+}
+
+func TestGetIncidentEvidenceUsesVerifiedProjectAndReadRoles(t *testing.T) {
+	store, err := telemetry.OpenSQLiteStore(t.TempDir() + "/telemetry.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.InsertIncident(context.Background(), telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: "svc", Status: "open", CreatedAt: time.Unix(10, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	verifier := &fixedAuthVerifier{}
+	service := NewIncidentService(&incident.Service{Store: store, EvidenceBuilder: incident.IncidentContextBuilder{Store: store, Now: func() time.Time { return time.Unix(20, 0).UTC() }}}, verifier)
+	for _, role := range []secret.Role{secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer} {
+		verifier.auth = secret.AuthContext{ProjectID: "p1", UserID: strings.ToLower(string(role)), Role: role}
+		response, err := service.GetIncidentEvidence(incomingBearer("pat-canary"), &agentv1.IncidentGetRequest{ProjectID: "p1", IncidentID: "inc-1"})
+		if err != nil || response.SchemaVersion != incident.IncidentEvidenceSchemaVersion || response.Identity.ProjectID != "p1" {
+			t.Fatalf("role=%s response=%+v err=%v", role, response, err)
+		}
+	}
+	if _, err := service.GetIncidentEvidence(context.Background(), &agentv1.IncidentGetRequest{ProjectID: "p1", IncidentID: "inc-1"}); grpcstatus.Code(err) != codes.Unauthenticated {
+		t.Fatalf("missing Bearer err=%v", err)
+	}
+	verifier.auth = secret.AuthContext{ProjectID: "p1", UserID: "viewer", Role: secret.RoleViewer}
+	if _, err := service.GetIncidentEvidence(incomingBearer("pat-canary"), &agentv1.IncidentGetRequest{ProjectID: "p2", IncidentID: "inc-1"}); grpcstatus.Code(err) != codes.PermissionDenied {
+		t.Fatalf("cross-project err=%v", err)
 	}
 }
 

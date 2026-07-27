@@ -11,31 +11,33 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 )
 
-func TestSanitizeIncidentContextRejectsSecret(t *testing.T) {
-	_, err := SanitizeIncidentContext(telemetry.IncidentRecord{
+func TestIncidentEvidenceIgnoresSecretLegacyContext(t *testing.T) {
+	evidence, err := (IncidentContextBuilder{Now: func() time.Time { return time.Unix(20, 0).UTC() }}).Build(context.Background(), telemetry.IncidentRecord{
 		ID:          "inc-1",
 		ProjectID:   "p1",
 		ContextJSON: `{"metric":{"password":"secret"}}`,
 		CreatedAt:   time.Unix(10, 0),
 	})
-	if err == nil || !strings.Contains(err.Error(), "sensitive") {
-		t.Fatalf("expected sensitive data rejection, got %v", err)
+	body, _ := json.Marshal(evidence)
+	if err != nil || strings.Contains(string(body), "password") || strings.Contains(string(body), "secret") {
+		t.Fatalf("legacy context leaked into evidence: %s err=%v", body, err)
 	}
 }
 
-func TestSanitizeIncidentContextDropsRawLog(t *testing.T) {
-	ctx, err := SanitizeIncidentContext(telemetry.IncidentRecord{
+func TestIncidentEvidenceDropsLegacyRawLog(t *testing.T) {
+	evidence, err := (IncidentContextBuilder{Now: func() time.Time { return time.Unix(20, 0).UTC() }}).Build(context.Background(), telemetry.IncidentRecord{
 		ID:          "inc-1",
 		ProjectID:   "p1",
 		ContextJSON: `{"metric":{"name":"cpu"},"raw_log":"password=secret"}`,
 		CreatedAt:   time.Unix(10, 0),
 	})
-	if err != nil || ctx.Metric["raw_log"] != nil {
-		t.Fatalf("expected raw log omitted, ctx=%+v err=%v", ctx, err)
+	body, _ := json.Marshal(evidence)
+	if err != nil || strings.Contains(string(body), "raw_log") || strings.Contains(string(body), "password=secret") {
+		t.Fatalf("expected legacy raw log omitted, evidence=%s err=%v", body, err)
 	}
 }
 
-func TestIncidentContextBuilderAddsMetricAndLogEvidence(t *testing.T) {
+func TestIncidentContextBuilderProducesDeterministicPodAndLogEvidence(t *testing.T) {
 	store, err := telemetry.OpenSQLiteStore(t.TempDir() + "/telemetry.db")
 	if err != nil {
 		t.Fatal(err)
@@ -43,8 +45,13 @@ func TestIncidentContextBuilderAddsMetricAndLogEvidence(t *testing.T) {
 	defer store.Close()
 	created := time.Unix(1000, 0).UTC()
 	rec := telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", NodeID: "node-1", ServiceID: "svc", AnomalyType: "cpu_spike", Severity: "P1", Status: "open", CreatedAt: created}
-	if err := store.InsertMetric(context.Background(), telemetry.MetricRecord{ProjectID: "p1", NodeID: "node-1", ServiceID: "svc", Name: "cpu_usage", Value: 96, Unit: "%", ObservedAt: created}); err != nil {
-		t.Fatal(err)
+	for _, metric := range []telemetry.MetricRecord{
+		{ProjectID: "p1", NodeID: "node-1", ServiceID: "svc", PodID: "pod-1", Name: "pod.ready", Value: 1, Unit: "bool", ObservedAt: created},
+		{ProjectID: "p1", NodeID: "node-1", ServiceID: "svc", PodID: "pod-1", Name: "pod.restart_count", Value: 2, Unit: "count", ObservedAt: created},
+	} {
+		if err := store.InsertMetric(context.Background(), metric); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, log := range []telemetry.LogRecord{
 		{ProjectID: "p1", NodeID: "node-1", ServiceID: "svc", Level: "error", Message: "password=secret boom", Fingerprint: "fp-2", ObservedAt: created},
@@ -54,7 +61,7 @@ func TestIncidentContextBuilderAddsMetricAndLogEvidence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	builder := IncidentContextBuilder{Store: store}
+	builder := IncidentContextBuilder{Store: store, Now: func() time.Time { return time.Unix(2000, 0).UTC() }}
 	first, err := builder.Build(context.Background(), rec)
 	if err != nil {
 		t.Fatal(err)
@@ -65,11 +72,11 @@ func TestIncidentContextBuilderAddsMetricAndLogEvidence(t *testing.T) {
 	}
 	firstJSON, _ := json.Marshal(first)
 	secondJSON, _ := json.Marshal(second)
-	if first.MetricSnapshot["cpu_usage"]["value"] != float64(96) || len(first.LogPatterns) != 2 || first.LogPatterns[0]["fingerprint"] != "fp-1" {
-		t.Fatalf("bad context evidence: %s", firstJSON)
+	if len(first.Pods) != 1 || first.Pods[0].ReadyContainers != 1 || first.Pods[0].RestartCount != 2 || len(first.LogFingerprints) != 2 || first.LogFingerprints[0].Fingerprint != "fp-1" {
+		t.Fatalf("bad incident evidence: %s", firstJSON)
 	}
 	if strings.Contains(string(firstJSON), "password=secret") || string(firstJSON) != string(secondJSON) {
-		t.Fatalf("context must be sanitized and deterministic: first=%s second=%s", firstJSON, secondJSON)
+		t.Fatalf("evidence must be sanitized and deterministic: first=%s second=%s", firstJSON, secondJSON)
 	}
 }
 

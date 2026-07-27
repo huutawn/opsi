@@ -38,6 +38,8 @@ inputs are not present.
 
 `opsi sync` prints newline-delimited JSON telemetry chunks from Agent. Chunk payloads are base64 in JSON because the underlying contract field is bytes; the payload content is zstd-compressed delta records. When `--since-unix` is omitted, sync resumes from the per-project timestamp in the sync state file. Configure it with `sync_state_path` or `--state-path`; use `--no-state` to disable state reads/writes.
 
+`opsi incident evidence --config <selected-config> --project-id <project> --incident-id <incident> [--json]` reads the bounded factual evidence body from the authenticated, TLS-pinned Agent. It never falls back to an implicit Agent address. The Local API exposes the same body at `/api/local/projects/:project_id/incidents/:incident_id/evidence` with `Cache-Control: no-store`; UI rendering and browser acceptance are deferred to R5-017.
+
 ## Repository bootstrap
 
 `opsi init --project-id <project> --service-id <service> --service-key <key>`

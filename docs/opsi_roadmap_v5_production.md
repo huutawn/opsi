@@ -584,9 +584,10 @@ R5-017 because the former Agent VPS no longer exists.
 
 **Gate:** UI/CLI parity matrix pass; canonical manual flow chạy bằng UI; no fake success/no PAT/browser direct-client tests.
 
-### R5-015 — IncidentEvidence và manual observability CLI/UI
+### R5-015 — IncidentEvidence source completion (live Agent/UI deferred)
 
-**CẦN VPS:** Agent VPS có workload có thể gây lỗi có kiểm soát.
+**CẦN VPS:** deferred; this source-completion checkpoint uses deterministic
+fake TLS Agent/Kubernetes sources and local disposable SQLite only.
 
 **Mục tiêu:** user chẩn đoán incident thủ công đầy đủ trước khi AI đọc evidence.
 
@@ -594,11 +595,12 @@ R5-017 because the former Agent VPS no longer exists.
 
 1. Define deterministic bounded `IncidentEvidence v1` gồm deployment diff, causal timeline, K8s events/readiness/restarts, redacted log fingerprints/excerpts, coverage/truncation/unavailable marker và hashes.
 2. Tag workload-controlled text là untrusted/prompt-injection; không thêm LLM conclusion.
-3. Agent build/store evidence local; Cloud chỉ giữ metadata/hash nếu cần.
+3. Agent build/store evidence local; R5-015 adds no Cloud evidence body, hash,
+   model, queue, or API.
 4. CLI: telemetry summary, redacted logs query, incident list/get/evidence/resolve, deployment diff và audit correlation.
 5. Local API/UI: topology/health/timeline/evidence tabs, coverage/truncation, source facts và resolve flow.
-6. Induce failing workload thật; verify evidence useful, bounded, stable hash và no-secret.
-7. Cloud non-persistence check cho raw logs/evidence/source.
+6. Live failing-workload proof, Cloud cutover/non-persistence, UI redesign, and
+browser acceptance remain deferred to R5-017.
 
 **Read/modify scope:** Agent incident/telemetry/deploy/evidence, contracts, CLI commands/client/local API, UI observability/incidents, tests/E2E/docs/status.
 

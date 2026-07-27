@@ -2,6 +2,12 @@
 
 ## R5-014 Local API/UI parity checkpoint
 
+`R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
+`R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
+Agent-local SQLite evidence persistence; no live workload or browser proof was
+performed.
+
 The canonical UI matrix is `docs/manual_ui_parity_matrix.md`: 21 supported
 manual capabilities are mapped to relative Local API routes and factual views;
 organization listing, members/RBAC, and secret metadata/listing remain three

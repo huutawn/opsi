@@ -28,7 +28,7 @@ implemented by the manual CLI contract.
 | Deployment preview/apply/status/events/rollback | `/api/projects/{project}/deployments/*` | `opsi deploy ...` | read/mutation | owner/admin/developer | human/JSON | bounded per command | required keys | deploy tests | deployment view | SUPPORTED |
 | Exposure preview/apply/history | `/api/projects/{project}/exposures/*` | `opsi exposure ...` | read/mutation | owner/admin/developer | human/JSON | 30s | required keys | exposure tests | exposure view | SUPPORTED |
 | Telemetry/logs | Agent `TelemetryQuery` RPC | `opsi telemetry query`, `opsi sync` | read | authenticated project operator | human/JSON | 30s | cursor/state | telemetry/sync tests | telemetry/logs | SUPPORTED |
-| Incidents | Agent Incident RPCs | `opsi incident list|get|resolve` | read/mutation | authenticated project operator | JSON/JSON | 30s | Agent resolve RPC has no idempotency field | incident tests | incidents | SUPPORTED |
+| Incidents and evidence | Agent Incident RPCs including `GetIncidentEvidence` | `opsi incident list|get|evidence|resolve` | read/mutation | authenticated project operator | JSON/JSON | 30s | Agent resolve RPC has no idempotency field | incident/evidence/auth/TLS tests | incidents; evidence UI deferred to R5-017 | SUPPORTED / EVIDENCE_SOURCE_PASS |
 | Audit | `/api/projects/{project}/audit` | `opsi audit list` | read | project viewer | JSON/JSON | 30s | n/a | audit/client tests | audit view | SUPPORTED |
 | Configuration/version/install | CLI YAML, keychain, release artifacts | `--config`, `opsi version`, installer | local/read | local user | human/JSON | n/a | atomic files | config/version/installer tests | settings/about | SUPPORTED |
 

@@ -40,6 +40,7 @@ func OpenSQLiteStore(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 	store := &SQLiteStore{db: db}
 	if err := store.Migrate(context.Background()); err != nil {
 		_ = db.Close()
@@ -125,7 +126,10 @@ CREATE TABLE IF NOT EXISTS incidents (
   created_at_unix INTEGER NOT NULL,
   resolved_at_unix INTEGER NOT NULL DEFAULT 0,
   mttr_seconds INTEGER NOT NULL DEFAULT 0,
-  updated_at_unix INTEGER NOT NULL
+  updated_at_unix INTEGER NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '',
+  evidence_sha256 TEXT NOT NULL DEFAULT '',
+  evidence_generated_at_unix INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS incidents_project_status_idx
   ON incidents(project_id, status, updated_at_unix);
@@ -175,14 +179,17 @@ func (s *SQLiteStore) ensureIncidentColumns(ctx context.Context) error {
 		return err
 	}
 	for name, ddl := range map[string]string{
-		"affected_services":       "ALTER TABLE incidents ADD COLUMN affected_services TEXT NOT NULL DEFAULT ''",
-		"affected_nodes":          "ALTER TABLE incidents ADD COLUMN affected_nodes TEXT NOT NULL DEFAULT ''",
-		"affected_pods":           "ALTER TABLE incidents ADD COLUMN affected_pods TEXT NOT NULL DEFAULT ''",
-		"anomaly_type":            "ALTER TABLE incidents ADD COLUMN anomaly_type TEXT NOT NULL DEFAULT ''",
-		"rca_result":              "ALTER TABLE incidents ADD COLUMN rca_result TEXT NOT NULL DEFAULT ''",
-		"mitigation_actions_json": "ALTER TABLE incidents ADD COLUMN mitigation_actions_json TEXT NOT NULL DEFAULT '[]'",
-		"resolved_at_unix":        "ALTER TABLE incidents ADD COLUMN resolved_at_unix INTEGER NOT NULL DEFAULT 0",
-		"mttr_seconds":            "ALTER TABLE incidents ADD COLUMN mttr_seconds INTEGER NOT NULL DEFAULT 0",
+		"affected_services":          "ALTER TABLE incidents ADD COLUMN affected_services TEXT NOT NULL DEFAULT ''",
+		"affected_nodes":             "ALTER TABLE incidents ADD COLUMN affected_nodes TEXT NOT NULL DEFAULT ''",
+		"affected_pods":              "ALTER TABLE incidents ADD COLUMN affected_pods TEXT NOT NULL DEFAULT ''",
+		"anomaly_type":               "ALTER TABLE incidents ADD COLUMN anomaly_type TEXT NOT NULL DEFAULT ''",
+		"rca_result":                 "ALTER TABLE incidents ADD COLUMN rca_result TEXT NOT NULL DEFAULT ''",
+		"mitigation_actions_json":    "ALTER TABLE incidents ADD COLUMN mitigation_actions_json TEXT NOT NULL DEFAULT '[]'",
+		"resolved_at_unix":           "ALTER TABLE incidents ADD COLUMN resolved_at_unix INTEGER NOT NULL DEFAULT 0",
+		"mttr_seconds":               "ALTER TABLE incidents ADD COLUMN mttr_seconds INTEGER NOT NULL DEFAULT 0",
+		"evidence_json":              "ALTER TABLE incidents ADD COLUMN evidence_json TEXT NOT NULL DEFAULT ''",
+		"evidence_sha256":            "ALTER TABLE incidents ADD COLUMN evidence_sha256 TEXT NOT NULL DEFAULT ''",
+		"evidence_generated_at_unix": "ALTER TABLE incidents ADD COLUMN evidence_generated_at_unix INTEGER NOT NULL DEFAULT 0",
 	} {
 		if columns[name] {
 			continue
@@ -300,7 +307,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?)
 
 func (s *SQLiteStore) GetIncident(ctx context.Context, projectID, incidentID string) (*IncidentRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix
+SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix, evidence_json, evidence_sha256, evidence_generated_at_unix
 FROM incidents
 WHERE project_id = ? AND id = ?
 `, projectID, incidentID)
@@ -312,7 +319,7 @@ func (s *SQLiteStore) ListIncidents(ctx context.Context, projectID, status strin
 		limit = 50
 	}
 	query := `
-SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix
+SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix, evidence_json, evidence_sha256, evidence_generated_at_unix
 FROM incidents
 WHERE project_id = ?
 `
@@ -388,7 +395,7 @@ WHERE project_id = ? AND id = ?
 
 func (s *SQLiteStore) FindOpenIncident(ctx context.Context, projectID, serviceID, anomalyType string, since time.Time) (*IncidentRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix
+SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix, evidence_json, evidence_sha256, evidence_generated_at_unix
 FROM incidents
 WHERE project_id = ? AND service_id = ? AND anomaly_type = ? AND status != 'resolved' AND created_at_unix >= ?
 ORDER BY created_at_unix DESC
@@ -446,6 +453,112 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	return nil
 }
 
+func (s *SQLiteStore) EvidenceAuditRecords(ctx context.Context, projectID, incidentID, serviceID string, since, until time.Time, limit int) ([]EvidenceAuditRecord, int, error) {
+	if limit <= 0 || limit > 65 {
+		limit = 65
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM audit_log
+WHERE project_id = ? AND created_at_unix >= ? AND created_at_unix <= ?
+  AND (resource_id = ? OR (? != '' AND resource_id = ?))
+`, projectID, since.Unix(), until.Unix(), incidentID, serviceID, serviceID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count incident audit references: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, action, resource_type, resource_id, result, created_at_unix
+FROM audit_log
+WHERE project_id = ? AND created_at_unix >= ? AND created_at_unix <= ?
+  AND (resource_id = ? OR (? != '' AND resource_id = ?))
+ORDER BY created_at_unix, id
+LIMIT ?
+`, projectID, since.Unix(), until.Unix(), incidentID, serviceID, serviceID, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read incident audit references: %w", err)
+	}
+	defer rows.Close()
+	var records []EvidenceAuditRecord
+	for rows.Next() {
+		var record EvidenceAuditRecord
+		var created int64
+		if err := rows.Scan(&record.ID, &record.Action, &record.ResourceType, &record.ResourceID, &record.Result, &created); err != nil {
+			return nil, 0, err
+		}
+		record.CreatedAt = time.Unix(created, 0).UTC()
+		records = append(records, record)
+	}
+	return records, total, rows.Err()
+}
+
+func (s *SQLiteStore) IncidentEvidenceTelemetry(ctx context.Context, projectID, nodeID, serviceID, podID string, since, until time.Time, limit int) (IncidentEvidenceTelemetry, error) {
+	if limit <= 0 || limit > 65 {
+		limit = 65
+	}
+	args := []any{projectID, since.Unix(), until.Unix(), nodeID, serviceID, podID, nodeID, nodeID, serviceID, serviceID, podID, podID}
+	filter := `project_id = ? AND observed_at_unix >= ? AND observed_at_unix <= ? AND ((? = '' AND ? = '' AND ? = '') OR (? != '' AND node_id = ?) OR (? != '' AND service_id = ?) OR (? != '' AND pod_id = ?))`
+	var result IncidentEvidenceTelemetry
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT fingerprint) FROM logs WHERE `+filter, args...).Scan(&result.TotalLogGroups); err != nil {
+		return result, fmt.Errorf("count incident log fingerprints: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT fingerprint, MIN(level), COUNT(*), MIN(observed_at_unix), MAX(observed_at_unix), MIN(substr(message, 1, 2048)) FROM logs WHERE `+filter+` GROUP BY fingerprint ORDER BY fingerprint LIMIT ?`, append(args, limit)...)
+	if err != nil {
+		return result, fmt.Errorf("read incident log fingerprints: %w", err)
+	}
+	for rows.Next() {
+		var group EvidenceLogGroup
+		var first, last int64
+		if err := rows.Scan(&group.Fingerprint, &group.Level, &group.Count, &first, &last, &group.Excerpt); err != nil {
+			rows.Close()
+			return result, err
+		}
+		group.FirstAt, group.LastAt = time.Unix(first, 0).UTC(), time.Unix(last, 0).UTC()
+		result.LogGroups = append(result.LogGroups, group)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return result, err
+	}
+	if err := rows.Close(); err != nil {
+		return result, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT pod_id) FROM metrics WHERE pod_id != '' AND name IN ('pod.ready','pod.restart_count') AND `+filter, args...).Scan(&result.TotalPods); err != nil {
+		return result, fmt.Errorf("count incident pod evidence: %w", err)
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT pod_id, MIN(node_id), MIN(CASE WHEN name = 'pod.ready' THEN value END), MAX(CASE WHEN name = 'pod.restart_count' THEN value END) FROM metrics WHERE pod_id != '' AND name IN ('pod.ready','pod.restart_count') AND `+filter+` GROUP BY pod_id ORDER BY pod_id LIMIT ?`, append(args, limit)...)
+	if err != nil {
+		return result, fmt.Errorf("read incident pod evidence: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pod EvidencePodRecord
+		var ready, restarts sql.NullFloat64
+		if err := rows.Scan(&pod.PodID, &pod.NodeID, &ready, &restarts); err != nil {
+			return result, err
+		}
+		pod.Ready = ready.Valid && ready.Float64 > 0
+		if restarts.Valid {
+			pod.RestartCount = int32(restarts.Float64)
+		}
+		result.Pods = append(result.Pods, pod)
+	}
+	return result, rows.Err()
+}
+
+func (s *SQLiteStore) PersistIncidentEvidence(ctx context.Context, projectID, incidentID, body, hash string, generatedAt time.Time) error {
+	if body == "" || hash == "" || generatedAt.IsZero() {
+		return errors.New("incident evidence persistence fields are required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+UPDATE incidents
+SET evidence_json = ?, evidence_sha256 = ?, evidence_generated_at_unix = ?
+WHERE project_id = ? AND id = ? AND evidence_json = '' AND evidence_sha256 = '' AND evidence_generated_at_unix = 0
+`, body, hash, generatedAt.Unix(), projectID, incidentID)
+	if err != nil {
+		return fmt.Errorf("persist incident evidence: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) SyncRecords(ctx context.Context, projectID string, since time.Time, until time.Time, resourceIDs []string) ([]SyncRecord, error) {
 	if projectID == "" {
 		return nil, errors.New("project_id is required")
@@ -485,8 +598,8 @@ func (s *SQLiteStore) SyncRecords(ctx context.Context, projectID string, since t
 
 func scanIncident(row interface{ Scan(dest ...any) error }) (*IncidentRecord, error) {
 	var rec IncidentRecord
-	var created, resolved, updated int64
-	if err := row.Scan(&rec.ID, &rec.ProjectID, &rec.NodeID, &rec.ServiceID, &rec.PodID, &rec.AffectedServices, &rec.AffectedNodes, &rec.AffectedPods, &rec.AnomalyType, &rec.Severity, &rec.Status, &rec.ContextJSON, &rec.RCAResult, &rec.MitigationActions, &created, &resolved, &rec.MTTRSeconds, &updated); err != nil {
+	var created, resolved, updated, evidenceGenerated int64
+	if err := row.Scan(&rec.ID, &rec.ProjectID, &rec.NodeID, &rec.ServiceID, &rec.PodID, &rec.AffectedServices, &rec.AffectedNodes, &rec.AffectedPods, &rec.AnomalyType, &rec.Severity, &rec.Status, &rec.ContextJSON, &rec.RCAResult, &rec.MitigationActions, &created, &resolved, &rec.MTTRSeconds, &updated, &rec.EvidenceJSON, &rec.EvidenceSHA256, &evidenceGenerated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -497,6 +610,9 @@ func scanIncident(row interface{ Scan(dest ...any) error }) (*IncidentRecord, er
 		rec.ResolvedAt = time.Unix(resolved, 0).UTC()
 	}
 	rec.UpdatedAt = time.Unix(updated, 0).UTC()
+	if evidenceGenerated > 0 {
+		rec.EvidenceGeneratedAt = time.Unix(evidenceGenerated, 0).UTC()
+	}
 	return &rec, nil
 }
 
@@ -591,7 +707,7 @@ ORDER BY observed_at_unix ASC
 
 func (s *SQLiteStore) incidentRecords(ctx context.Context, projectID string, since, until time.Time, resources map[string]bool) ([]SyncRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix
+SELECT id, project_id, node_id, service_id, pod_id, affected_services, affected_nodes, affected_pods, anomaly_type, severity, status, context_json, rca_result, mitigation_actions_json, created_at_unix, resolved_at_unix, mttr_seconds, updated_at_unix, evidence_json, evidence_sha256, evidence_generated_at_unix
 FROM incidents
 WHERE project_id = ? AND created_at_unix > ? AND created_at_unix <= ?
 ORDER BY created_at_unix ASC

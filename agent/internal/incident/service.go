@@ -4,15 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
+	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 )
 
 const StatusResolved = "resolved"
@@ -24,10 +23,11 @@ type Store interface {
 }
 
 type Service struct {
-	Store Store
-	Audit secret.AuditSink
-	Auth  secret.AuthVerifier
-	Now   func() time.Time
+	Store           Store
+	Audit           secret.AuditSink
+	Auth            secret.AuthVerifier
+	Now             func() time.Time
+	EvidenceBuilder IncidentContextBuilder
 }
 
 type IncidentRequest struct {
@@ -53,24 +53,6 @@ type ResolveRequest struct {
 	UserID     string `json:"user_id"`
 	Role       string `json:"role"`
 	PAT        string `json:"pat,omitempty"`
-}
-
-type IncidentContext struct {
-	SchemaVersion  string                    `json:"schema_version"`
-	IncidentID     string                    `json:"incident_id"`
-	ProjectID      string                    `json:"project_id"`
-	NodeID         string                    `json:"node_id,omitempty"`
-	ServiceID      string                    `json:"service_id,omitempty"`
-	PodID          string                    `json:"pod_id,omitempty"`
-	AnomalyType    string                    `json:"anomaly_type"`
-	Severity       string                    `json:"severity"`
-	Status         string                    `json:"status"`
-	Metric         map[string]any            `json:"metric,omitempty"`
-	LogPattern     map[string]any            `json:"log_pattern,omitempty"`
-	MetricSnapshot map[string]map[string]any `json:"metric_snapshot,omitempty"`
-	LogPatterns    []map[string]any          `json:"log_patterns,omitempty"`
-	Sanitization   map[string]any            `json:"sanitization,omitempty"`
-	CreatedAtUnix  int64                     `json:"created_at_unix"`
 }
 
 func (s *Service) List(ctx context.Context, req ListRequest) ([]telemetry.IncidentRecord, error) {
@@ -102,6 +84,61 @@ func (s *Service) Get(ctx context.Context, req IncidentRequest) (*telemetry.Inci
 	return rec, nil
 }
 
+func (s *Service) GetEvidence(ctx context.Context, req IncidentRequest) (*agentv1.IncidentEvidence, error) {
+	auth, err := s.authorize(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT})
+	if err != nil {
+		return nil, err
+	}
+	if !canRead(auth.Role) {
+		return nil, errors.New("permission denied")
+	}
+	record, err := s.Store.GetIncident(ctx, auth.ProjectID, req.IncidentID)
+	if err != nil || record == nil {
+		return nil, firstErr(err, errors.New("incident not found"))
+	}
+	if record.EvidenceJSON != "" || record.EvidenceSHA256 != "" || !record.EvidenceGeneratedAt.IsZero() {
+		return verifyPersistedIncidentEvidence(record)
+	}
+	persistence, ok := s.Store.(incidentEvidencePersistence)
+	if !ok {
+		return nil, ErrEvidenceUnavailable
+	}
+	builder := s.EvidenceBuilder
+	if builder.Store == nil {
+		builder.Store = s.Store
+	}
+	if builder.Now == nil {
+		builder.Now = s.Now
+	}
+	evidence, err := builder.Build(ctx, *record)
+	if err != nil {
+		return nil, err
+	}
+	body, err := EncodeIncidentEvidence(evidence)
+	if err != nil {
+		return nil, err
+	}
+	if err := persistence.PersistIncidentEvidence(ctx, auth.ProjectID, req.IncidentID, string(body), evidence.ContentSHA256, time.Unix(evidence.GeneratedAtUnix, 0).UTC()); err != nil {
+		return nil, ErrEvidenceUnavailable
+	}
+	persisted, err := s.Store.GetIncident(ctx, auth.ProjectID, req.IncidentID)
+	if err != nil || persisted == nil {
+		return nil, ErrEvidenceUnavailable
+	}
+	return verifyPersistedIncidentEvidence(persisted)
+}
+
+func verifyPersistedIncidentEvidence(record *telemetry.IncidentRecord) (*agentv1.IncidentEvidence, error) {
+	if record == nil || record.EvidenceJSON == "" || record.EvidenceSHA256 == "" || record.EvidenceGeneratedAt.IsZero() {
+		return nil, ErrEvidenceCorrupt
+	}
+	evidence, err := VerifyIncidentEvidence([]byte(record.EvidenceJSON), record.EvidenceSHA256)
+	if err != nil || evidence.GeneratedAtUnix != record.EvidenceGeneratedAt.Unix() {
+		return nil, ErrEvidenceCorrupt
+	}
+	return evidence, nil
+}
+
 func (s *Service) Resolve(ctx context.Context, req ResolveRequest) (*telemetry.IncidentRecord, error) {
 	auth, err := s.authorize(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT})
 	if err != nil {
@@ -113,23 +150,6 @@ func (s *Service) Resolve(ctx context.Context, req ResolveRequest) (*telemetry.I
 	rec, err := s.Store.ResolveIncident(ctx, auth.ProjectID, req.IncidentID, s.now())
 	_ = s.audit(ctx, auth, "incident.resolve", req.IncidentID, result(err), "")
 	return rec, err
-}
-
-func SanitizeIncidentContext(rec telemetry.IncidentRecord) (IncidentContext, error) {
-	out := IncidentContext{SchemaVersion: "opsi.incident_context.v1", IncidentID: rec.ID, ProjectID: rec.ProjectID, NodeID: rec.NodeID, ServiceID: rec.ServiceID, PodID: rec.PodID, AnomalyType: rec.AnomalyType, Severity: rec.Severity, Status: rec.Status, CreatedAtUnix: rec.CreatedAt.Unix()}
-	var raw map[string]any
-	if rec.ContextJSON != "" && rec.ContextJSON != "{}" {
-		if err := json.Unmarshal([]byte(rec.ContextJSON), &raw); err != nil {
-			return out, err
-		}
-	}
-	out.Metric = pickMap(raw, "metric", "metric_snapshot", "resource_trend")
-	out.LogPattern = pickMap(raw, "log_fingerprint", "fingerprint", "pattern")
-	data, _ := json.Marshal(out)
-	if secretLike(string(data)) {
-		return out, errors.New("sanitized incident context still contains sensitive data")
-	}
-	return out, nil
 }
 
 func canResolve(role secret.Role) bool {
@@ -163,20 +183,6 @@ func (s *Service) audit(ctx context.Context, auth secret.AuthContext, action, re
 		meta = fmt.Sprintf(`{"reason":%q}`, reason)
 	}
 	return s.Audit.InsertAudit(ctx, secret.AuditRecord{ID: newID(), ProjectID: auth.ProjectID, Actor: auth.UserID, Action: action, ResourceType: "incident", ResourceID: resourceID, Result: res, MetadataJSON: meta, CreatedAt: s.now()})
-}
-
-func pickMap(raw map[string]any, keys ...string) map[string]any {
-	out := map[string]any{}
-	for _, key := range keys {
-		if v, ok := raw[key]; ok {
-			out[key] = v
-		}
-	}
-	return out
-}
-
-func secretLike(s string) bool {
-	return regexp.MustCompile(`(?i)(password|secret|token|authorization|kubeconfig|private_key|otp|pat)`).MatchString(s)
 }
 
 func result(err error) string {

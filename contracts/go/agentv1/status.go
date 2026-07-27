@@ -237,6 +237,116 @@ type IncidentResponse struct {
 	MTTRSeconds    int64  `json:"mttr_seconds,omitempty"`
 }
 
+type IncidentEvidence struct {
+	SchemaVersion     string                     `json:"schema_version"`
+	Identity          IncidentEvidenceIdentity   `json:"identity"`
+	GeneratedAtUnix   int64                      `json:"generated_at_unix"`
+	ObservationWindow IncidentEvidenceWindow     `json:"observation_window"`
+	Deployment        IncidentDeploymentEvidence `json:"deployment"`
+	Rollout           IncidentRolloutEvidence    `json:"rollout"`
+	Timeline          []IncidentTimelineEntry    `json:"timeline,omitempty"`
+	Pods              []IncidentPodEvidence      `json:"pods,omitempty"`
+	KubernetesEvents  []IncidentKubernetesEvent  `json:"kubernetes_events,omitempty"`
+	LogFingerprints   []IncidentLogFingerprint   `json:"log_fingerprints,omitempty"`
+	AuditReferences   []IncidentAuditReference   `json:"audit_references,omitempty"`
+	Coverage          []IncidentSourceCoverage   `json:"coverage"`
+	Truncations       []IncidentTruncation       `json:"truncations,omitempty"`
+	ContentSHA256     string                     `json:"content_sha256"`
+}
+
+type IncidentEvidenceIdentity struct {
+	IncidentID  string `json:"incident_id"`
+	ProjectID   string `json:"project_id"`
+	ServiceID   string `json:"service_id,omitempty"`
+	NodeID      string `json:"node_id,omitempty"`
+	PodID       string `json:"pod_id,omitempty"`
+	AnomalyType string `json:"anomaly_type,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Status      string `json:"status"`
+}
+
+type IncidentEvidenceWindow struct {
+	StartUnix int64 `json:"start_unix"`
+	EndUnix   int64 `json:"end_unix"`
+}
+
+type IncidentDeploymentEvidence struct {
+	DesiredDigest  string `json:"desired_digest,omitempty"`
+	PreviousDigest string `json:"previous_digest,omitempty"`
+	ObservedDigest string `json:"observed_digest,omitempty"`
+	RestoredDigest string `json:"restored_digest,omitempty"`
+}
+
+type IncidentRolloutEvidence struct {
+	RolloutID        string   `json:"rollout_id,omitempty"`
+	State            string   `json:"state,omitempty"`
+	FailureCode      string   `json:"failure_code,omitempty"`
+	ReadinessHash    string   `json:"readiness_hash,omitempty"`
+	EventCorrelation []string `json:"event_correlation,omitempty"`
+}
+
+type IncidentTimelineEntry struct {
+	ObservedAtUnix   int64  `json:"observed_at_unix"`
+	Source           string `json:"source"`
+	Kind             string `json:"kind"`
+	Detail           string `json:"detail,omitempty"`
+	UntrustedContent bool   `json:"untrusted_content"`
+}
+
+type IncidentPodEvidence struct {
+	Namespace       string `json:"namespace,omitempty"`
+	PodID           string `json:"pod_id"`
+	NodeID          string `json:"node_id,omitempty"`
+	ReadyContainers int32  `json:"ready_containers"`
+	TotalContainers int32  `json:"total_containers"`
+	RestartCount    int32  `json:"restart_count"`
+	ObservedDigest  string `json:"observed_digest,omitempty"`
+}
+
+type IncidentKubernetesEvent struct {
+	ObservedAtUnix   int64  `json:"observed_at_unix"`
+	Namespace        string `json:"namespace,omitempty"`
+	ObjectKind       string `json:"object_kind,omitempty"`
+	ObjectName       string `json:"object_name,omitempty"`
+	Type             string `json:"type,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	Message          string `json:"message,omitempty"`
+	UntrustedContent bool   `json:"untrusted_content"`
+}
+
+type IncidentLogFingerprint struct {
+	Fingerprint       string `json:"fingerprint"`
+	Level             string `json:"level,omitempty"`
+	Count             int32  `json:"count"`
+	FirstObservedUnix int64  `json:"first_observed_unix"`
+	LastObservedUnix  int64  `json:"last_observed_unix"`
+	Excerpt           string `json:"excerpt,omitempty"`
+	UntrustedContent  bool   `json:"untrusted_content"`
+}
+
+type IncidentAuditReference struct {
+	AuditID       string `json:"audit_id"`
+	Action        string `json:"action"`
+	ResourceType  string `json:"resource_type"`
+	ResourceID    string `json:"resource_id"`
+	Result        string `json:"result"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
+}
+
+type IncidentSourceCoverage struct {
+	Source     string `json:"source"`
+	Status     string `json:"status"`
+	ReasonCode string `json:"reason_code,omitempty"`
+	ItemCount  int32  `json:"item_count"`
+	Truncated  bool   `json:"truncated"`
+}
+
+type IncidentTruncation struct {
+	Section      string `json:"section"`
+	OmittedItems int32  `json:"omitted_items"`
+	UTF8Safe     bool   `json:"utf8_safe"`
+}
+
 type JSONCodec struct{}
 
 func (JSONCodec) Name() string { return JSONCodecName }
@@ -774,6 +884,7 @@ var SecretService_ServiceDesc = grpc.ServiceDesc{
 type IncidentServiceServer interface {
 	ListIncidents(context.Context, *IncidentListRequest) (*IncidentListResponse, error)
 	GetIncident(context.Context, *IncidentGetRequest) (*IncidentResponse, error)
+	GetIncidentEvidence(context.Context, *IncidentGetRequest) (*IncidentEvidence, error)
 	ResolveIncident(context.Context, *IncidentResolveRequest) (*IncidentResponse, error)
 }
 
@@ -787,6 +898,10 @@ func (UnimplementedIncidentServiceServer) GetIncident(context.Context, *Incident
 	return nil, status.Error(codes.Unimplemented, "method GetIncident not implemented")
 }
 
+func (UnimplementedIncidentServiceServer) GetIncidentEvidence(context.Context, *IncidentGetRequest) (*IncidentEvidence, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetIncidentEvidence not implemented")
+}
+
 func (UnimplementedIncidentServiceServer) ResolveIncident(context.Context, *IncidentResolveRequest) (*IncidentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveIncident not implemented")
 }
@@ -798,6 +913,7 @@ func RegisterIncidentServiceServer(server grpc.ServiceRegistrar, service Inciden
 type IncidentServiceClient interface {
 	ListIncidents(ctx context.Context, in *IncidentListRequest, opts ...grpc.CallOption) (*IncidentListResponse, error)
 	GetIncident(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
+	GetIncidentEvidence(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentEvidence, error)
 	ResolveIncident(ctx context.Context, in *IncidentResolveRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
 }
 
@@ -818,6 +934,13 @@ func (c *incidentServiceClient) GetIncident(ctx context.Context, in *IncidentGet
 	out := new(IncidentResponse)
 	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
 	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/GetIncident", in, out, opts...)
+	return out, err
+}
+
+func (c *incidentServiceClient) GetIncidentEvidence(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentEvidence, error) {
+	out := new(IncidentEvidence)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/GetIncidentEvidence", in, out, opts...)
 	return out, err
 }
 
@@ -858,6 +981,21 @@ func getIncidentHandler(service any, ctx context.Context, dec func(any) error, i
 	return interceptor(ctx, in, info, handler)
 }
 
+func getIncidentEvidenceHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentGetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(IncidentServiceServer).GetIncidentEvidence(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/GetIncidentEvidence"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(IncidentServiceServer).GetIncidentEvidence(ctx, req.(*IncidentGetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func resolveIncidentHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(IncidentResolveRequest)
 	if err := dec(in); err != nil {
@@ -879,6 +1017,7 @@ var IncidentService_ServiceDesc = grpc.ServiceDesc{
 	Methods: []grpc.MethodDesc{
 		{MethodName: "ListIncidents", Handler: listIncidentsHandler},
 		{MethodName: "GetIncident", Handler: getIncidentHandler},
+		{MethodName: "GetIncidentEvidence", Handler: getIncidentEvidenceHandler},
 		{MethodName: "ResolveIncident", Handler: resolveIncidentHandler},
 	},
 	Streams:  []grpc.StreamDesc{},

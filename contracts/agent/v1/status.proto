@@ -31,6 +31,7 @@ service SecretService {
 service IncidentService {
   rpc ListIncidents(IncidentListRequest) returns (IncidentListResponse);
   rpc GetIncident(IncidentGetRequest) returns (IncidentResponse);
+  rpc GetIncidentEvidence(IncidentGetRequest) returns (IncidentEvidence);
   rpc ResolveIncident(IncidentResolveRequest) returns (IncidentResponse);
 }
 
@@ -268,4 +269,114 @@ message IncidentResponse {
   int64 created_at_unix = 9;
   int64 resolved_at_unix = 10;
   int64 mttr_seconds = 11;
+}
+
+message IncidentEvidence {
+  string schema_version = 1;
+  IncidentEvidenceIdentity identity = 2;
+  int64 generated_at_unix = 3;
+  IncidentEvidenceWindow observation_window = 4;
+  IncidentDeploymentEvidence deployment = 5;
+  IncidentRolloutEvidence rollout = 6;
+  repeated IncidentTimelineEntry timeline = 7;
+  repeated IncidentPodEvidence pods = 8;
+  repeated IncidentKubernetesEvent kubernetes_events = 9;
+  repeated IncidentLogFingerprint log_fingerprints = 10;
+  repeated IncidentAuditReference audit_references = 11;
+  repeated IncidentSourceCoverage coverage = 12;
+  repeated IncidentTruncation truncations = 13;
+  string content_sha256 = 14;
+}
+
+message IncidentEvidenceIdentity {
+  string incident_id = 1;
+  string project_id = 2;
+  string service_id = 3;
+  string node_id = 4;
+  string pod_id = 5;
+  string anomaly_type = 6;
+  string severity = 7;
+  string status = 8;
+}
+
+message IncidentEvidenceWindow {
+  int64 start_unix = 1;
+  int64 end_unix = 2;
+}
+
+message IncidentDeploymentEvidence {
+  string desired_digest = 1;
+  string previous_digest = 2;
+  string observed_digest = 3;
+  string restored_digest = 4;
+}
+
+message IncidentRolloutEvidence {
+  string rollout_id = 1;
+  string state = 2;
+  string failure_code = 3;
+  string readiness_hash = 4;
+  repeated string event_correlation = 5;
+}
+
+message IncidentTimelineEntry {
+  int64 observed_at_unix = 1;
+  string source = 2;
+  string kind = 3;
+  string detail = 4;
+  bool untrusted_content = 5;
+}
+
+message IncidentPodEvidence {
+  string namespace = 1;
+  string pod_id = 2;
+  string node_id = 3;
+  int32 ready_containers = 4;
+  int32 total_containers = 5;
+  int32 restart_count = 6;
+  string observed_digest = 7;
+}
+
+message IncidentKubernetesEvent {
+  int64 observed_at_unix = 1;
+  string namespace = 2;
+  string object_kind = 3;
+  string object_name = 4;
+  string type = 5;
+  string reason = 6;
+  string message = 7;
+  bool untrusted_content = 8;
+}
+
+message IncidentLogFingerprint {
+  string fingerprint = 1;
+  string level = 2;
+  int32 count = 3;
+  int64 first_observed_unix = 4;
+  int64 last_observed_unix = 5;
+  string excerpt = 6;
+  bool untrusted_content = 7;
+}
+
+message IncidentAuditReference {
+  string audit_id = 1;
+  string action = 2;
+  string resource_type = 3;
+  string resource_id = 4;
+  string result = 5;
+  int64 created_at_unix = 6;
+}
+
+message IncidentSourceCoverage {
+  string source = 1;
+  string status = 2;
+  string reason_code = 3;
+  int32 item_count = 4;
+  bool truncated = 5;
+}
+
+message IncidentTruncation {
+  string section = 1;
+  int32 omitted_items = 2;
+  bool utf8_safe = 3;
 }
