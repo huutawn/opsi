@@ -550,6 +550,13 @@ Current implementation checkpoint: the source-derived matrix is
 
 ### R5-014 — Hoàn thiện Local API và UI manual parity
 
+Current implementation checkpoint: `docs/manual_ui_parity_matrix.md` maps
+`21/21 SUPPORTED` capabilities and displays `3/3 BACKEND_GAP` capabilities as
+disabled. The Local backend remains the sole Cloud PAT/Agent TLS owner, and
+release archives contain `opsi` plus adjacent `opsi-ui` assets. Fake Cloud and
+TLS Agent browser harness code exists; live Agent acceptance is deferred to
+R5-017 because the former Agent VPS no longer exists.
+
 **Mục tiêu:** user hoàn thành toàn bộ workflow bằng UI qua CLI local backend, không cần terminal ngoại trừ cài/start CLI.
 
 **Quy trình thực hiện:**

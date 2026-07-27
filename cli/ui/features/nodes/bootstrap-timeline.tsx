@@ -30,6 +30,7 @@ function SessionsTable({ console }: { console: ConsoleController }) {
             <th>Failure</th>
             <th>Created</th>
             <th>Events</th>
+            <th>Retry</th>
           </tr>
         </thead>
         <tbody>
@@ -52,6 +53,12 @@ function SessionsTable({ console }: { console: ConsoleController }) {
                 <button onClick={() => void console.actions.loadBootstrapEvents(item.id)} type="button">
                   Reconnect
                 </button>
+              </td>
+              <td>
+                <button disabled={!['failed', 'dead_letter'].includes(item.status)} onClick={() => console.actions.retryBootstrap(item.id)} type="button">
+                  Retry
+                </button>
+                {!['failed', 'dead_letter'].includes(item.status) ? <span className="muted"> Not retryable</span> : null}
               </td>
             </tr>
           ))}

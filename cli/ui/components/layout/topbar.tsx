@@ -3,13 +3,9 @@ import { LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 
 export function Topbar({
   session,
-  orgID,
-  onOrgID,
   onRefresh,
 }: {
   session: LocalSessionStatus;
-  orgID: string;
-  onOrgID: (value: string) => void;
   onRefresh: () => void;
 }) {
   const client = useMemo(() => new LocalClient(), []);
@@ -27,10 +23,7 @@ export function Topbar({
     <div className="topbar">
       {session?.authenticated ? (
         <>
-          <label>
-            <span className="srOnly">Org ID</span>
-            <input className="field" onChange={(event) => onOrgID(event.target.value)} value={orgID} />
-          </label>
+          <span className="statusPill">Org {session.org_id || "unavailable"}</span>
           <button onClick={onRefresh} type="button">
             Refresh
           </button>

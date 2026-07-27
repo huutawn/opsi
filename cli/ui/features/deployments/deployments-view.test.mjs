@@ -36,8 +36,8 @@ test("manual exposure rollout uses only Local API and renders factual rollback l
     "exposureApply",
     "/api/local/projects/${projectID}/exposures/preview",
     "/api/local/projects/${projectID}/exposures",
-    "confirmExposure",
-    "confirmRollback",
+    "reviewMutation",
+    "confirmation: job.id",
     "rolling_back",
     "rolled_back",
     "rollback_failed",
@@ -49,10 +49,11 @@ test("manual exposure rollout uses only Local API and renders factual rollback l
   ]) {
     assert.match(source, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-  assert.match(componentSource, /change external routing and trigger automatic rollback/);
+  assert.match(componentSource, /Changes external routing and can trigger automatic rollback/);
   assert.match(componentSource, /restores the exact previous Agent known-good snapshot/);
   assert.match(componentSource, /await client\.exposureApply/);
   assert.match(componentSource, /await client\.rollback/);
+  assert.doesNotMatch(componentSource, /window\.confirm/);
   assert.doesNotMatch(componentSource, /fake-success|localStorage|sessionStorage|Authorization|lease_token|raw manifest|kubectl/i);
   assert.doesNotMatch(clientSource, /\/api\/projects\//);
 });

@@ -3,49 +3,20 @@ import type { ConsoleController } from "@/features/console/types";
 
 export function SecretsView({ console }: { console: ConsoleController }) {
   const services = console.state.services.filter((item) => item.type === "application");
-  const dependencies = console.state.services.filter((item) => item.type !== "application");
   const defaultService = services[0];
+  const agentUnavailable = console.session?.agent_connected !== "ok";
 
   return (
     <section className="grid">
       <Panel title="Secret bindings">
-        {services.length ? (
-          <div className="tableWrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Service</th>
-                  <th>Namespace</th>
-                  <th>Bindings</th>
-                  <th>Reveal</th>
-                  <th>Rotate</th>
-                </tr>
-              </thead>
-              <tbody>
-                {services.map((service) => (
-                  <tr key={service.id}>
-                    <td>{service.name}</td>
-                    <td>{service.namespace || "default"}</td>
-                    <td>
-                      {dependencies.length ? dependencies.map((item) => <StatusBadge key={item.id} value={`${item.name}: masked`} />) : "none"}
-                    </td>
-                    <td>
-                      <StatusBadge value="local Agent" />
-                    </td>
-                    <td>
-                      <StatusBadge value="local Agent" />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <Empty text="No application services yet. Secret values never appear here; only masked bindings are shown." />
-        )}
+        <div className="unavailable">
+          <div><b>Secret metadata/listing</b><p>No factual backend API exists. Create, rotate, reveal, and TOTP setup remain explicit Agent operations.</p></div>
+          <StatusBadge value="BACKEND_GAP" />
+        </div>
       </Panel>
       {defaultService ? (
         <Panel title="Agent secret operations">
+          {agentUnavailable ? <p className="muted" role="status">AGENT_UNAVAILABLE: reconnect the configured Agent before submitting secret operations.</p> : null}
           <form className="form" onSubmit={(event) => void console.actions.secretCreate(event)}>
             <select className="select" defaultValue={defaultService.id} name="service_id">
               {services.map((service) => (
@@ -56,22 +27,29 @@ export function SecretsView({ console }: { console: ConsoleController }) {
             </select>
             <input className="field" name="name" placeholder="secret name" required />
             <input className="field" name="namespace" placeholder="namespace" />
-            <button disabled={console.state.busy === "secret-create"} type="submit">
+            <button disabled={agentUnavailable || console.state.busy === "secret-create"} type="submit">
               Create
             </button>
           </form>
           <form className="form" onSubmit={(event) => void console.actions.secretRotate(event)}>
             <SecretMutationFields services={services} defaultServiceID={defaultService.id} />
-            <button disabled={console.state.busy === "secret-rotate"} type="submit">
+            <button disabled={agentUnavailable || console.state.busy === "secret-rotate"} type="submit">
               Rotate
             </button>
           </form>
           <form className="form" onSubmit={(event) => void console.actions.secretReveal(event)}>
             <SecretMutationFields services={services} defaultServiceID={defaultService.id} />
-            <button disabled={console.state.busy === "secret-reveal"} type="submit">
+            <button disabled={agentUnavailable || console.state.busy === "secret-reveal"} type="submit">
               Reveal
             </button>
           </form>
+          <button disabled={agentUnavailable} onClick={console.actions.setupTOTP} type="button">Review TOTP setup</button>
+          {console.state.totpSetup ? (
+            <div className="secretReveal" role="status">
+              <p><b>TOTP setup URI</b> (clears automatically after {console.state.totpSetup.ttl_seconds}s)</p>
+              <textarea className="textarea" readOnly value={console.state.totpSetup.uri + "\nsecret: " + console.state.totpSetup.secret} />
+            </div>
+          ) : null}
           {console.state.secretReveal ? (
             <textarea
               className="textarea"

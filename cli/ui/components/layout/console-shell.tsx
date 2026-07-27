@@ -6,7 +6,8 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { useConsoleState } from "@/hooks/use-console-state";
 import { LocalClient } from "@/lib/api/local-client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ConsoleController } from "@/features/console/types";
 
 export function ConsoleShell() {
   const console = useConsoleState();
@@ -33,13 +34,84 @@ export function ConsoleShell() {
       <main className="main" id="main">
         <Topbar
           session={console.session}
-          orgID={console.orgID}
-          onOrgID={console.setOrgID}
           onRefresh={() => void console.actions.load()}
         />
         <ProjectPicker onSelect={console.setProjectID} project={console.state.project} projects={console.state.projects} />
         <ConsoleRouter console={console} />
       </main>
+      <MutationDialog console={console} />
+    </div>
+  );
+}
+
+function MutationDialog({ console }: { console: ConsoleController }) {
+  const dialog = useRef<HTMLDivElement>(null);
+  const [confirmation, setConfirmation] = useState({ key: "", value: "" });
+  const review = console.review;
+
+  useEffect(() => {
+    if (!review) return;
+    const currentReview = review;
+    const element = dialog.current;
+    const focusable = () => Array.from(element?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled)") ?? []);
+    focusable()[0]?.focus();
+    function keydown(event: KeyboardEvent) {
+      if (event.key === "Escape" && currentReview.status !== "submitting") console.closeReview();
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", keydown);
+    return () => document.removeEventListener("keydown", keydown);
+    // The dialog lifecycle is keyed to one reviewed attempt; retry keeps the same key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [review?.idempotencyKey]);
+
+  if (!review) return null;
+  const confirmationValue = confirmation.key === review.idempotencyKey ? confirmation.value : "";
+  const confirmed = !review.confirmation || confirmationValue === review.confirmation;
+  return (
+    <div className="modalBackdrop">
+      <div aria-labelledby="mutationTitle" aria-modal="true" className="modal" ref={dialog} role="dialog">
+        <p className="eyebrow">Mutation review</p>
+        <h2 id="mutationTitle">{review.operation} {review.targetType}</h2>
+        <dl className="reviewFacts">
+          <div><dt>Project</dt><dd>{review.project}</dd></div>
+          <div><dt>Target</dt><dd>{review.targetType} / {review.targetID}</dd></div>
+          <div><dt>Idempotency</dt><dd><code>{review.idempotencyKey}</code></dd></div>
+        </dl>
+        <h3>Proposed change</h3>
+        <ul>{review.diff.map((item) => <li key={item}>{item}</li>)}</ul>
+        <p className="risk"><b>Risk:</b> {review.risk}</p>
+        {review.confirmation ? (
+          <label>
+            Type <code>{review.confirmation}</code> to confirm
+            <input autoComplete="off" className="field" onChange={(event) => setConfirmation({ key: review.idempotencyKey, value: event.target.value })} value={confirmationValue} />
+          </label>
+        ) : null}
+        {review.status === "submitting" ? <p aria-live="polite" role="status">Submitting to the Local backend...</p> : null}
+        {review.status === "succeeded" ? <p aria-live="polite" className="success" role="status">{review.evidence}</p> : null}
+        {review.status === "failed" ? <div className="errorBox" role="alert"><b>{review.error}</b><span>{review.nextAction}</span></div> : null}
+        <div className="modalActions">
+          <button disabled={review.status === "submitting"} onClick={console.closeReview} type="button">
+            {review.status === "succeeded" ? "Close" : "Cancel"}
+          </button>
+          {review.status !== "succeeded" ? (
+            <button className="primary" disabled={!confirmed || review.status === "submitting"} onClick={() => void console.submitReview()} type="button">
+              {review.status === "failed" ? "Retry same attempt" : review.status === "submitting" ? "Submitting..." : "Confirm and submit"}
+            </button>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }

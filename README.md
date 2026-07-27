@@ -1,7 +1,7 @@
 # Opsi
 
-R5-013 manual CLI capability and installation references:
-`docs/manual_cli_capability_matrix.md` and `docs/runbooks/install_cli.md`.
+R5-014 Local API/UI parity references: `docs/manual_ui_parity_matrix.md`,
+`docs/manual_cli_capability_matrix.md`, and `docs/runbooks/install_cli.md`.
 R5-012 remains `R5_012_IMPLEMENTED / LIVE_BLOCKED / BUG_DEFERRED`.
 
 Opsi is a local-first operations control-plane prototype. Current implementation
@@ -42,6 +42,10 @@ delivery is defined by
   require a new bootstrap session. Verified K3s/Agent installation and Agent
   registration replay are idempotent for at-least-once step execution.
 - Production readiness and complete real VPS/GitHub evidence remain unproven.
+- The Local browser uses relative `/api/local/...` requests only. Cloud PAT and
+  Agent TLS credentials remain in the CLI backend; installed prerelease archives
+  include the binary and adjacent static UI assets. Agent-live R5-014 acceptance
+  is deferred to R5-017 because the former Agent VPS no longer exists.
 - GitHub user access tokens are used only during login or installation-claim
   callbacks and are not persisted or returned to the CLI. Installation claims
   compare the numeric GitHub `/user` identity with the prelinked Opsi identity,

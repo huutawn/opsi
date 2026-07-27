@@ -10,7 +10,8 @@ test("repository CD UI exposes real preview, apply, error, retry, and hash state
   for (const marker of ["previewing", "applying", "success", "error", "Retry apply", "config_hash", "plan_hash", "full_build"]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-  assert.match(source, /window\.confirm/);
+  assert.match(source, /console\.reviewMutation/);
+  assert.doesNotMatch(source, /window\.confirm/);
   assert.doesNotMatch(source, /fake success/i);
 });
 

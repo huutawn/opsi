@@ -1,7 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
+import type { MutationRequest, MutationReview } from "@/features/console/types";
 import type {
   BootstrapSession,
   ConsoleState,
@@ -15,9 +16,10 @@ import type {
 
 export function useConsoleState() {
   const [session, setSession] = useState<LocalSessionStatus | null>(null);
-  const [orgID, setOrgID] = useState("org-1");
   const [active, setActive] = useState("Projects");
   const [projectID, setProjectID] = useState("");
+  const [review, setReview] = useState<(MutationReview & { submit: (key: string) => Promise<string> }) | null>(null);
+  const revealTimer = useRef<number | null>(null);
   const [state, setState] = useState<ConsoleState>({
     status: "loading",
     message: "",
@@ -33,6 +35,7 @@ export function useConsoleState() {
     audit: [],
     support: null,
     secretReveal: null,
+    totpSetup: null,
     incidents: [],
     incidentDetail: null,
     incidentError: "",
@@ -48,23 +51,60 @@ export function useConsoleState() {
     setState((prev) => ({ ...prev, ...value }));
   }
 
-  async function load() {
+  function clearSensitive() {
+    if (revealTimer.current !== null) window.clearTimeout(revealTimer.current);
+    revealTimer.current = null;
+    patch({ secretReveal: null, totpSetup: null });
+  }
+
+  function reviewMutation(request: MutationRequest, submit: (key: string) => Promise<string>) {
+    setReview({ ...request, idempotencyKey: crypto.randomUUID(), status: "reviewing", submit });
+  }
+
+  async function submitReview() {
+    if (!review || review.status === "submitting") return;
+    setReview((current) => (current ? { ...current, status: "submitting", error: "", nextAction: "" } : current));
+    try {
+      const evidence = await review.submit(review.idempotencyKey);
+      setReview((current) => (current ? { ...current, status: "succeeded", evidence } : current));
+    } catch (cause) {
+      const error = cause as LocalAPIError;
+      setReview((current) =>
+        current
+          ? { ...current, status: "failed", error: error.message, nextAction: error.nextAction || "Retry the same reviewed attempt." }
+          : current,
+      );
+    }
+  }
+
+  function closeReview() {
+    setReview((current) => (current?.status === "submitting" ? current : null));
+  }
+
+  async function load(selectedProjectID = "") {
     patch(state.status === "ready" ? { message: "" } : { status: "loading", message: "" });
     try {
-      const session = await client.session();
-      setSession(session);
-      if (!session.authenticated) {
+      const sessionStatus = await client.session(selectedProjectID || undefined);
+      setSession(sessionStatus);
+      if (!sessionStatus.authenticated) {
+        clearSensitive();
+        const cloudUnavailable = sessionStatus.cloud_connected !== "ok";
+        const expired = sessionStatus.token_status === "invalid";
         patch({
-          status: "permission",
-          message: "Sign in with GitHub to load your Opsi projects.",
+          status: cloudUnavailable ? "network" : "permission",
+          message: cloudUnavailable
+            ? "Cloud is unavailable. Local configuration is preserved; retry when Cloud connectivity returns."
+            : expired
+              ? "The saved Cloud session expired. Sign in again to continue."
+              : "Sign in with GitHub to load your Opsi projects.",
           projects: [],
           project: null,
         });
         return;
       }
-      const effectiveOrgID = session.org_id || orgID;
-      if (session.org_id && session.org_id !== orgID) setOrgID(session.org_id);
-      const effectiveProjectID = projectID || session.project_id || "";
+      const effectiveOrgID = sessionStatus.org_id ?? "";
+      if (!effectiveOrgID) throw new Error("Authenticated session did not include an organization ID");
+      const effectiveProjectID = selectedProjectID || projectID || sessionStatus.project_id || "";
       const list = await client.projects(effectiveOrgID);
       const projects = list.projects ?? [];
       const selected = projects.find((item) => item.id === effectiveProjectID) ?? projects[0] ?? null;
@@ -91,6 +131,7 @@ export function useConsoleState() {
       });
     } catch (error) {
       const err = error as Error & { status?: number };
+      if (err.status === 401 || err.status === 403) clearSensitive();
       patch({
         status: err.status === 401 || err.status === 403 ? "permission" : err.status ? "error" : "network",
         message: err.message,
@@ -103,71 +144,91 @@ export function useConsoleState() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(
+    () => () => {
+      if (revealTimer.current !== null) window.clearTimeout(revealTimer.current);
+    },
+    [],
+  );
+
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    patch({ busy: "project" });
-    try {
-      await client.createProject(orgID, { name: form.get("name"), slug: form.get("slug") });
-      event.currentTarget.reset();
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const orgID = session?.org_id ?? "";
+    const name = String(form.get("name") ?? "");
+    const slug = String(form.get("slug") ?? "");
+    reviewMutation(
+      { project: `organization ${orgID}`, targetType: "project", targetID: slug, operation: "create", diff: [`name: ${name}`, `slug: ${slug}`], risk: "Creates a durable Cloud project." },
+      async (key) => {
+        patch({ busy: "project" });
+        try {
+          const created = await client.createProject(orgID, { name, slug }, key);
+          formElement.reset();
+          await load(created.id);
+          return `Project ${created.id} created by the Local backend.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
   }
 
   async function addServer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const authMethod = String(form.get("auth_method"));
-    const secret = String(form.get("secret") ?? "");
-    const body: Record<string, unknown> = {
-      role: form.get("role"),
-      public_host: form.get("public_host"),
-      ssh_port: Number(form.get("ssh_port") || 22),
-      ssh_username: form.get("ssh_username"),
-      auth_method: authMethod,
-    };
-    body[authMethod === "private_key" ? "ssh_private_key" : "ssh_password"] = secret;
-    patch({ busy: "server" });
-    try {
-      const session = await client.createBootstrap(currentProject.id, body);
-      event.currentTarget.reset();
-      patch({ bootstrapEvents: await client.bootstrapEvents(currentProject.id, session.id) });
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
+    const host = String(form.get("public_host") ?? "");
+    const role = String(form.get("role") ?? "");
+    reviewMutation(
+      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, `auth: ${authMethod}`, `ssh port: ${String(form.get("ssh_port") || 22)}`], risk: "Starts the canonical bootstrap worker flow. Credentials are submitted once and stay out of browser storage." },
+      async (key) => {
+        const submitted = new FormData(formElement);
+        const submittedAuth = String(submitted.get("auth_method"));
+        const body: Record<string, unknown> = {
+          role: submitted.get("role"), public_host: submitted.get("public_host"),
+          ssh_port: Number(submitted.get("ssh_port") || 22), ssh_username: submitted.get("ssh_username"), auth_method: submittedAuth,
+        };
+        body[submittedAuth === "private_key" ? "ssh_private_key" : "ssh_password"] = String(submitted.get("secret") ?? "");
+        patch({ busy: "server" });
+        try {
+          const created = await client.createBootstrap(currentProject.id, body, key);
+          formElement.reset();
+          patch({ bootstrapEvents: await client.bootstrapEvents(currentProject.id, created.id) });
+          await load(currentProject.id);
+          return `Bootstrap ${created.id} accepted with status ${created.status}.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
   }
 
   async function createService(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
-    patch({ busy: "service" });
-    try {
-      await client.createService(currentProject.id, {
-        name: form.get("name"),
-        type: form.get("type"),
-        source_type: form.get("source_type"),
-        repo_url: form.get("repo_url"),
-        image: form.get("image"),
-        branch: form.get("branch"),
-        git_sha: form.get("git_sha"),
-        build_method: form.get("build_method"),
-        build_context: form.get("build_context"),
-        dockerfile: form.get("dockerfile"),
-        manifest_path: form.get("manifest_path"),
-        container_port: Number(form.get("container_port") || 0),
-        health_path: form.get("health_path"),
-        replicas: Number(form.get("replicas") || 1),
-      });
-      event.currentTarget.reset();
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const body = {
+      name: form.get("name"), type: form.get("type"), source_type: "image",
+      container_port: Number(form.get("container_port") || 0), health_path: form.get("health_path"), replicas: Number(form.get("replicas") || 1),
+    };
+    reviewMutation(
+      { project: currentProject.name, targetType: "service", targetID: String(body.name ?? ""), operation: "create catalog entry", diff: [`type: ${String(body.type ?? "")}`, `port: ${body.container_port || "unset"}`, `replicas: ${body.replicas}`], risk: "Creates service identity only. Source binding and immutable BuildRecords remain separate." },
+      async (key) => {
+        patch({ busy: "service" });
+        try {
+          const created = await client.createService(currentProject.id, body, key);
+          formElement.reset();
+          await load(currentProject.id);
+          return `Service ${created.id} created with status ${created.status}.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
   }
 
   async function diagnostics(nodeID: string) {
@@ -176,20 +237,38 @@ export function useConsoleState() {
     setActive("Servers / Nodes");
   }
 
-  async function nodeAction(nodeID: string, action: "drain" | "remove") {
+  function nodeAction(nodeID: string, action: "offline" | "drain" | "remove") {
     if (!currentProject) return;
-    patch({ busy: `${action}-${nodeID}` });
-    try {
-      await client.nodeAction(currentProject.id, nodeID, action);
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
+    reviewMutation(
+      { project: currentProject.name, targetType: "node", targetID: nodeID, operation: action, diff: [`node status action: ${action}`], risk: action === "remove" ? "Destructive: removes the node from project inventory after canonical checks." : "May stop scheduling or mark runtime capacity unavailable.", confirmation: action === "remove" ? nodeID : undefined },
+      async (key) => {
+        patch({ busy: `${action}-${nodeID}` });
+        try {
+          const updated = await client.nodeAction(currentProject.id, nodeID, action, key);
+          await load(currentProject.id);
+          return `Node ${nodeID} returned status ${updated.status}.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
   }
 
   async function loadBootstrapEvents(sessionID: string) {
     if (!currentProject) return;
     patch({ bootstrapEvents: await client.bootstrapEvents(currentProject.id, sessionID) });
+  }
+
+  function retryBootstrap(sessionID: string) {
+    if (!currentProject) return;
+    reviewMutation(
+      { project: currentProject.name, targetType: "bootstrap session", targetID: sessionID, operation: "retry", diff: ["resume the same durable checkpoint"], risk: "Retries only a retryable/dead-letter bootstrap session." },
+      async (key) => {
+        const updated = await client.retryBootstrap(currentProject.id, sessionID, key);
+        await load(currentProject.id);
+        return `Bootstrap ${sessionID} returned status ${updated.status}.`;
+      },
+    );
   }
 
   async function loadDeploymentEvents(deploymentID: string) {
@@ -198,62 +277,106 @@ export function useConsoleState() {
     patch({ deploymentEvents: events.events ?? [] });
   }
 
-  async function rollback(deploymentID: string) {
+  function rollback(deploymentID: string) {
     if (!currentProject) return;
-    patch({ busy: `rollback-${deploymentID}` });
-    try {
-      const job = await client.rollback(currentProject.id, deploymentID, `ui-rollback-${deploymentID}`);
-      await loadDeploymentEvents(job.id);
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
+    reviewMutation(
+      { project: currentProject.name, targetType: "deployment", targetID: deploymentID, operation: "rollback", diff: ["restore the exact previous Agent known-good snapshot"], risk: "Destructive runtime mutation; availability can change.", confirmation: deploymentID },
+      async (key) => {
+        patch({ busy: `rollback-${deploymentID}` });
+        try {
+          const job = await client.rollback(currentProject.id, deploymentID, key);
+          await loadDeploymentEvents(job.id);
+          await load(currentProject.id);
+          return `Rollback job ${job.id} accepted with status ${job.status}.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
   }
 
   async function secretCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
-    patch({ busy: "secret-create", secretReveal: null });
-    try {
-      await client.createSecret(currentProject.id, secretBody(form));
-      event.currentTarget.reset();
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const name = String(form.get("name") ?? "");
+    reviewMutation(
+      { project: currentProject.name, targetType: "secret", targetID: name, operation: "create", diff: [`service: ${String(form.get("service_id") ?? "")}`, `namespace: ${String(form.get("namespace") || "default")}`], risk: "Writes a secret through the authenticated Agent. Values are never returned." },
+      async (key) => {
+        clearSensitive();
+        patch({ busy: "secret-create" });
+        try {
+          const result = await client.createSecret(currentProject.id, secretBody(new FormData(formElement)), key);
+          formElement.reset();
+          await load(currentProject.id);
+          return `Secret ${name} ${result.status}.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
   }
 
   async function secretReveal(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const name = String(form.get("name") ?? "");
-    patch({ busy: "secret-reveal", secretReveal: null });
-    try {
-      const revealed = await client.revealSecret(currentProject.id, name, secretBody(form));
-      patch({ secretReveal: revealed });
-      window.setTimeout(() => patch({ secretReveal: null }), (revealed.ttl_seconds ?? 60) * 1000);
-      event.currentTarget.reset();
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
+    reviewMutation(
+      { project: currentProject.name, targetType: "secret", targetID: name, operation: "reveal", diff: [`service: ${String(form.get("service_id") ?? "")}`, "second factor supplied at submission"], risk: "Sensitive value is visible in this tab only until its backend TTL expires." },
+      async (key) => {
+        clearSensitive();
+        patch({ busy: "secret-reveal" });
+        try {
+          const revealed = await client.revealSecret(currentProject.id, name, secretBody(new FormData(formElement)), key);
+          patch({ secretReveal: revealed });
+          revealTimer.current = window.setTimeout(clearSensitive, (revealed.ttl_seconds ?? 60) * 1000);
+          formElement.reset();
+          return `Secret ${name} revealed by the Agent; TTL ${revealed.ttl_seconds ?? 60}s.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
   }
 
   async function secretRotate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const name = String(form.get("name") ?? "");
-    patch({ busy: "secret-rotate", secretReveal: null });
-    try {
-      await client.rotateSecret(currentProject.id, name, secretBody(form));
-      event.currentTarget.reset();
-      await load();
-    } finally {
-      patch({ busy: "" });
-    }
+    reviewMutation(
+      { project: currentProject.name, targetType: "secret", targetID: name, operation: "rotate", diff: [`service: ${String(form.get("service_id") ?? "")}`, "second factor supplied at submission"], risk: "Replaces the Agent-managed value; existing consumers may need restart/reconciliation." },
+      async (key) => {
+        clearSensitive();
+        patch({ busy: "secret-rotate" });
+        try {
+          const result = await client.rotateSecret(currentProject.id, name, secretBody(new FormData(formElement)), key);
+          formElement.reset();
+          await load(currentProject.id);
+          return `Secret ${name} ${result.status}.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
+  }
+
+  function setupTOTP() {
+    if (!currentProject) return;
+    reviewMutation(
+      { project: currentProject.name, targetType: "project TOTP", targetID: currentProject.id, operation: "setup", diff: ["create a new Agent-local fallback secret"], risk: "The setup URI is sensitive and will be cleared after five minutes." },
+      async (key) => {
+        clearSensitive();
+        const result = await client.setupTOTP(currentProject.id, key);
+        patch({ totpSetup: result });
+        revealTimer.current = window.setTimeout(clearSensitive, result.ttl_seconds * 1000);
+        return `TOTP setup created by the Agent; TTL ${result.ttl_seconds}s.`;
+      },
+    );
   }
 
   async function incidentList(event: FormEvent<HTMLFormElement>) {
@@ -292,31 +415,53 @@ export function useConsoleState() {
     if (!currentProject) return;
     const form = new FormData(event.currentTarget);
     const incidentID = String(form.get("incident_id") ?? "");
-	 patch({ busy: "incident-resolve", incidentError: "" });
-	 try {
-	   const result = await client.resolveIncident(currentProject.id, incidentID);
-	   patch({
-	     incidentDetail: result.incident,
-	     incidents: state.incidents.map((item) => (item.incident_id === result.incident.incident_id ? result.incident : item)),
-	   });
-	 } catch (error) {
-	   patch({ incidentError: (error as Error).message });
-	 } finally {
-      patch({ busy: "" });
-    }
+    reviewMutation(
+      { project: currentProject.name, targetType: "incident", targetID: incidentID, operation: "resolve", diff: ["mark factual Agent incident resolved"], risk: "Changes incident lifecycle state but does not execute remediation." },
+      async (key) => {
+        patch({ busy: "incident-resolve", incidentError: "" });
+        try {
+          const result = await client.resolveIncident(currentProject.id, incidentID, key);
+          patch({ incidentDetail: result.incident, incidents: state.incidents.map((item) => (item.incident_id === result.incident.incident_id ? result.incident : item)) });
+          return `Incident ${incidentID} returned status ${result.incident.status}.`;
+        } finally {
+          patch({ busy: "" });
+        }
+      },
+    );
   }
 
   return {
     active,
     session,
-    orgID,
-    setActive,
-    setOrgID,
+    review: review
+      ? (() => {
+          const { submit, ...visible } = review;
+          void submit;
+          return visible;
+        })()
+      : null,
+    setActive: (view: string) => {
+      if (view !== active) clearSensitive();
+      setActive(view);
+    },
     setProjectID: (id: string) => {
-      setProjectID(id);
-      patch({ incidents: [], incidentDetail: null, incidentError: "" });
+      if (!id || id === projectID) return;
+      clearSensitive();
+      setReview(null);
+      patch({
+        status: "loading", message: "Switching project...", project: null, readiness: null,
+        nodes: [], services: [], deployments: [], sessions: [], bootstrapEvents: [], deploymentEvents: [], audit: [], support: null,
+        incidents: [], incidentDetail: null, incidentError: "", nodeDetail: null, serviceDetail: null,
+      });
+      void client
+        .switchProject(id, crypto.randomUUID())
+        .then(() => load(id))
+        .catch((error: Error & { status?: number }) => patch({ status: error.status === 401 || error.status === 403 ? "permission" : "error", message: error.message }));
     },
     setServiceDetail: (serviceDetail: ServiceRecord | null) => patch({ serviceDetail }),
+    reviewMutation,
+    closeReview,
+    submitReview,
     state: { ...state, project: currentProject },
     actions: {
       addServer,
@@ -325,6 +470,7 @@ export function useConsoleState() {
       diagnostics,
       load,
       loadBootstrapEvents,
+      retryBootstrap,
       loadDeploymentEvents,
       incidentList,
       incidentGet,
@@ -334,6 +480,7 @@ export function useConsoleState() {
       secretCreate,
       secretReveal,
       secretRotate,
+      setupTOTP,
     },
   };
 }
@@ -385,6 +532,8 @@ function emptyPatch(projects: Project[]): Partial<ConsoleState> {
     sessions: [] as BootstrapSession[],
     audit: [],
     support: null,
+    secretReveal: null,
+    totpSetup: null,
     incidents: [],
     incidentDetail: null,
     incidentError: "",

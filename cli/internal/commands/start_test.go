@@ -1971,6 +1971,140 @@ func localTestSession(t *testing.T, baseURL string) string {
 	return session.LocalSession
 }
 
+func TestLocalSettingsExposeVersionConfigurationAndBackendGaps(t *testing.T) {
+	previousVersion, previousRevision := localUIVersion, localUIRevision
+	localUIVersion, localUIRevision = "r5-014-test", "abc123"
+	t.Cleanup(func() { localUIVersion, localUIRevision = previousVersion, previousRevision })
+
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{
+		CloudURL:  "https://cloud.example.test/private/path",
+		AgentAddr: "127.0.0.1:9443",
+		TLS:       config.TLSConfig{PinnedServerCertSHA256: "abc"},
+	}, nil, "/tmp/opsi.yaml"))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/local/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var got struct {
+		Version        string              `json:"version"`
+		Revision       string              `json:"revision"`
+		CloudAuthority string              `json:"cloud_authority"`
+		AgentTLSPinned bool                `json:"agent_tls_pinned"`
+		ConfigSelected bool                `json:"config_selected"`
+		BackendGaps    []map[string]string `json:"backend_gaps"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != "r5-014-test" || got.Revision != "abc123" || got.CloudAuthority != "https://cloud.example.test" || !got.AgentTLSPinned || !got.ConfigSelected || len(got.BackendGaps) != 3 {
+		t.Fatalf("settings=%+v", got)
+	}
+}
+
+func TestLocalProjectSwitchRevalidatesSavedPAT(t *testing.T) {
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("saved-pat"); err != nil {
+		t.Fatal(err)
+	}
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/pat/verify" || r.Header.Get("Authorization") != "Bearer saved-pat" {
+			t.Fatalf("verify request path=%s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["project_id"] != "proj-2" {
+			t.Fatalf("verify body=%v err=%v", body, err)
+		}
+		_, _ = w.Write([]byte(`{"user_id":"user-1","org_id":"org-1","project_id":"proj-2","role":"owner"}`))
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) { return store, nil }))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/session/project", strings.NewReader(`{"project_id":"proj-2"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Local-Session", localTestSession(t, server.URL))
+	req.Header.Set("Idempotency-Key", "switch-project")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var got map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK || got["project_id"] != "proj-2" || got["authenticated"] != true {
+		t.Fatalf("status=%d body=%v", res.StatusCode, got)
+	}
+}
+
+type localTOTPServer struct {
+	agentv1.UnimplementedSecretServiceServer
+}
+
+func (localTOTPServer) SetupTOTP(context.Context, *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
+	return &agentv1.SetupTOTPResponse{Secret: "totp-canary", URI: "otpauth://totp/Opsi:test"}, nil
+}
+
+func TestLocalTOTPSetupUsesAgentAndNoStore(t *testing.T) {
+	addr, stop := startLocalSecretServer(t, localTOTPServer{})
+	defer stop()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: addr, CloudURL: "http://cloud.invalid"}, nil))
+	defer server.Close()
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/secrets/setup-totp", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Local-Session", localTestSession(t, server.URL))
+	req.Header.Set("Idempotency-Key", "setup-totp")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK || res.Header.Get("Cache-Control") != "no-store" || !bytes.Contains(body, []byte(`"ttl_seconds":300`)) {
+		t.Fatalf("status=%d cache=%q body=%s", res.StatusCode, res.Header.Get("Cache-Control"), body)
+	}
+}
+
+func TestBoundedLocalAPIRejectsOversizedBodiesAndResponses(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/large-response" {
+			_, _ = w.Write(bytes.Repeat([]byte("x"), localResponseBodyLimit+1))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	server := httptest.NewServer(boundedLocalAPI(next))
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/large-request", "application/json", bytes.NewReader(bytes.Repeat([]byte("x"), localRequestBodyLimit+1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusRequestEntityTooLarge || !bytes.Contains(body, []byte("REQUEST_BODY_TOO_LARGE")) || !bytes.Contains(body, []byte("request_id")) {
+		t.Fatalf("large request status=%d body=%s", res.StatusCode, body)
+	}
+
+	res, err = http.Get(server.URL + "/large-response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadGateway || !bytes.Contains(body, []byte("RESPONSE_BODY_TOO_LARGE")) {
+		t.Fatalf("large response status=%d body=%s", res.StatusCode, body)
+	}
+}
+
 func TestResolveUIDirUsesEnv(t *testing.T) {
 	t.Setenv("OPSI_UI_DIR", "/tmp/opsi-ui")
 	if got := resolveUIDir(); !strings.HasSuffix(got, "opsi-ui") {

@@ -154,6 +154,42 @@ button:disabled {
   white-space: nowrap;
 }
 
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(32, 36, 39, 0.42);
+}
+
+.modal {
+  width: min(100%, 640px);
+  max-height: min(90dvh, 760px);
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 22px;
+  background: var(--panel);
+  box-shadow: 0 24px 70px rgba(32, 36, 39, 0.24);
+}
+
+.modal h2 { margin: 0 0 14px; }
+.modal h3 { margin-bottom: 6px; }
+.modalActions, .buttonRow { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
+.reviewFacts { display: grid; gap: 7px; margin: 0; }
+.reviewFacts > div { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); padding: 7px 0; }
+.reviewFacts dt { color: var(--muted); }
+.reviewFacts dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.risk { border-left: 3px solid var(--warn); padding: 9px 11px; background: var(--warn-bg); }
+.errorBox { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border-left: 3px solid var(--bad); padding: 10px 12px; background: var(--bad-bg); color: var(--bad); }
+.errorBox span { flex-basis: 100%; }
+.success { border-left: 3px solid var(--ok); padding: 9px 11px; background: var(--ok-bg); color: var(--ok); }
+.unavailable { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px dashed var(--line-strong); border-radius: 7px; padding: 12px; background: var(--panel-soft); }
+.unavailable p { margin: 4px 0 0; color: var(--muted); }
+.secretReveal { margin-top: 12px; border: 1px solid var(--warn); border-radius: 7px; padding: 12px; background: var(--warn-bg); }
+
 .placementStack {
   display: grid;
   gap: 14px;
@@ -302,6 +338,16 @@ button:disabled {
   .runtimeEvidence {
     grid-template-columns: 1fr;
   }
+}
+
+@media (max-width: 760px) {
+  .app { display: block; }
+  .sidebar { position: static; height: auto; overflow-x: auto; display: flex; gap: 14px; padding: 10px; }
+  .sidebar > div:not(:first-child) { min-width: max-content; }
+  .brand { margin: 6px 4px; }
+  .navGroup { margin-top: 4px; }
+  .main { padding: 14px; }
+  .reviewFacts > div { display: grid; gap: 3px; }
 }
 
 .authGate {

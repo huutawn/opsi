@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Empty, Panel, StatePanel, StatusBadge } from "@/components/ui/primitives";
+import type { ConsoleController } from "@/features/console/types";
 import {
   LocalClient,
   type RepositoryCDConfig,
@@ -34,13 +35,13 @@ const emptyDraft: Draft = {
   preview: false,
 };
 
-export function RepositoryCD() {
+export function RepositoryCD({ console }: { console: ConsoleController }) {
   const client = useMemo(() => new LocalClient(), []);
   const [config, setConfig] = useState<RepositoryCDConfig | null>(null);
   const [configHash, setConfigHash] = useState("");
   const [draft, setDraft] = useState(emptyDraft);
   const [preview, setPreview] = useState<RepositoryMutationPreview | null>(null);
-  const [applyKey, setApplyKey] = useState("");
+  const [, setApplyKey] = useState(() => crypto.randomUUID());
   const [plan, setPlan] = useState<RepositoryCDPlan | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "previewing" | "applying" | "success" | "error">("loading");
   const [message, setMessage] = useState("");
@@ -87,7 +88,6 @@ export function RepositoryCD() {
       preview: service.deploy.preview.enabled,
     });
     setPreview(null);
-    setApplyKey("");
   }
 
   async function previewMutation(event: FormEvent<HTMLFormElement>) {
@@ -98,7 +98,6 @@ export function RepositoryCD() {
     try {
       const result = await client.previewRepositoryMutation(toService(draft));
       setPreview(result);
-      setApplyKey(crypto.randomUUID());
       setStatus("ready");
     } catch (error) {
       setStatus("error");
@@ -106,22 +105,28 @@ export function RepositoryCD() {
     }
   }
 
-  async function apply() {
+  function apply() {
     if (!preview) return;
-    const changed = preview.files.filter((file) => file.action !== "unchanged").map((file) => `${file.action}: ${file.path}`).join("\n");
-    if (!window.confirm(`Apply the reviewed repository changes?\n${changed || "No file changes"}`)) return;
-    setStatus("applying");
-    setMessage("");
-    try {
-      const result = await client.applyRepositoryMutation(toService(draft), preview.preview_hash, applyKey);
-      setPreview(result);
-      setConfig(result.config);
-      setConfigHash(result.config_hash);
-      setStatus("success");
-    } catch (error) {
-      setStatus("error");
-      setMessage(errorMessage(error));
-    }
+    const changed = preview.files.filter((file) => file.action !== "unchanged").map((file) => `${file.action}: ${file.path}`);
+    console.reviewMutation(
+      { project: console.state.project?.name || "local repository", targetType: "repository CD config", targetID: preview.preview_hash, operation: "apply", diff: changed.length ? changed : ["No file changes"], risk: "Writes the repository-local immutable BuildRecord/CD intent files atomically." },
+      async (key) => {
+        const applyKey = key;
+        setStatus("applying");
+        setMessage("");
+        try {
+          const result = await client.applyRepositoryMutation(toService(draft), preview.preview_hash, applyKey);
+          setPreview(result);
+          setConfig(result.config);
+          setConfigHash(result.config_hash);
+          setStatus("success");
+          setApplyKey(crypto.randomUUID());
+          return `Repository CD apply ${result.reused ? "replayed" : "succeeded"}; config hash ${result.config_hash}.`;
+        } finally {
+          setStatus((current) => (current === "applying" ? "ready" : current));
+        }
+      },
+    );
   }
 
   async function previewPlan(event: FormEvent<HTMLFormElement>) {

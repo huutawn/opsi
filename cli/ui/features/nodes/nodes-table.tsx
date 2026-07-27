@@ -4,8 +4,11 @@ import { formatTime } from "@/lib/formatting/time";
 
 export function NodesTable({ console }: { console: ConsoleController }) {
   if (!console.state.nodes.length) return <Empty text="No servers connected. Add a VPS/server so Opsi can install K3s and the Agent." />;
+  const agentUnavailable = console.session?.agent_connected !== "ok";
   return (
-    <div className="tableWrap">
+    <div>
+      {agentUnavailable ? <p className="muted" role="status">AGENT_UNAVAILABLE: drain and remove are disabled until the configured Agent reconnects.</p> : null}
+      <div className="tableWrap">
       <table>
         <thead>
           <tr>
@@ -43,14 +46,16 @@ export function NodesTable({ console }: { console: ConsoleController }) {
                 <button onClick={() => void console.actions.diagnostics(node.id)} type="button">
                   Details
                 </button>
-                <button disabled title="Agent-backed K3s drain is not wired yet" onClick={() => void console.actions.nodeAction(node.id, "drain")} type="button">
+                <button onClick={() => console.actions.nodeAction(node.id, "offline")} type="button">
+                  Mark offline
+                </button>
+                <button disabled={agentUnavailable} onClick={() => console.actions.nodeAction(node.id, "drain")} type="button">
                   Drain
                 </button>
                 <button
                   className="danger"
-                  disabled
-                  title="Agent-backed K3s remove is not wired yet"
-                  onClick={() => void console.actions.nodeAction(node.id, "remove")}
+                  disabled={agentUnavailable}
+                  onClick={() => console.actions.nodeAction(node.id, "remove")}
                   type="button"
                 >
                   Remove
@@ -60,6 +65,7 @@ export function NodesTable({ console }: { console: ConsoleController }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

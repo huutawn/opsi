@@ -1,6 +1,7 @@
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf '%040d' 0)
 LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(GIT_COMMIT)
+CLI_LDFLAGS := $(LDFLAGS) -X github.com/opsi-dev/opsi/cli/internal/commands.localUIVersion=$(VERSION) -X github.com/opsi-dev/opsi/cli/internal/commands.localUIRevision=$(GIT_COMMIT)
 AGENT_VERSION ?= $(VERSION)
 AGENT_COMMIT ?= $(GIT_COMMIT)
 AGENT_RELEASE_DIR ?= dist/agent
@@ -18,7 +19,7 @@ DEV_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/dev-contro
 STAGING_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml
 STAGING_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env.example -f deploy/staging-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build build-cli-release agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres build build-cli-release verify-cli-release agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -89,17 +90,38 @@ verify-dev-control-plane-clean-vm:
 build:
 	$(RUN) mkdir -p bin
 	cd agent && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(AGENT_LDFLAGS)" -o ../bin/opsi-agent ./cmd/opsi-agent
-	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi ./cmd/opsi
+	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(CLI_LDFLAGS)" -o ../bin/opsi ./cmd/opsi
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-cloud ./cmd/opsi-cloud
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker
 
 build-cli-release:
+	cd cli/ui && $(RUN) $(UI_NPM) ci
+	cd cli/ui && $(RUN) $(UI_NPM) run build
+	$(RUN) rm -rf dist/cli
 	$(RUN) mkdir -p dist/cli
 	@for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
 		os=$${target%/*}; arch=$${target#*/}; \
-		GOOS=$$os GOARCH=$$arch env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -trimpath -ldflags "$(LDFLAGS)" -o "dist/cli/opsi-$(VERSION)-$$os-$$arch" ./cli/cmd/opsi; \
+		bundle=$$(mktemp -d); \
+		GOOS=$$os GOARCH=$$arch env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -trimpath -ldflags "$(CLI_LDFLAGS)" -o "$$bundle/opsi" ./cli/cmd/opsi; \
+		cp -R cli/ui/out "$$bundle/opsi-ui"; \
+		tar -C "$$bundle" -czf "dist/cli/opsi-$(VERSION)-$$os-$$arch.tar.gz" opsi opsi-ui; \
+		rm -rf "$$bundle"; \
 	done
-	@cd dist/cli && sha256sum opsi-* > checksums.txt
+	@cd dist/cli && sha256sum opsi-*.tar.gz > checksums.txt
+
+verify-cli-release: build-cli-release
+	@set -eu; \
+	os=$$(uname -s | tr '[:upper:]' '[:lower:]'); arch=$$(uname -m); \
+	case "$$os/$$arch" in linux/x86_64) arch=amd64;; linux/aarch64|linux/arm64) arch=arm64;; darwin/x86_64) arch=amd64;; darwin/arm64) ;; *) echo "unsupported bundle smoke platform"; exit 1;; esac; \
+	prefix=$$(mktemp -d); port=19780; pid=; \
+	trap 'test -z "$$pid" || kill "$$pid" 2>/dev/null || :; rm -rf "$$prefix"' EXIT HUP INT TERM; \
+	tar -C "$$prefix" -xzf "dist/cli/opsi-$(VERSION)-$$os-$$arch.tar.gz"; \
+	printf '%s\n' 'cloud_url: "http://127.0.0.1:1"' 'agent_addr: "127.0.0.1:1"' >"$$prefix/config.yaml"; \
+	"$$prefix/opsi" --config "$$prefix/config.yaml" start --addr "127.0.0.1:$$port" >"$$prefix/start.log" 2>&1 & pid=$$!; \
+	for attempt in 1 2 3 4 5 6 7 8 9 10; do curl --fail --silent "http://127.0.0.1:$$port/health" >/dev/null && break; sleep 1; done; \
+	curl --fail --silent "http://127.0.0.1:$$port/health" | grep -q '"status":"ok"'; \
+	curl --fail --silent "http://127.0.0.1:$$port/" | grep -q '<title>Opsi'; \
+	test -f "$$prefix/opsi-ui/index.html"
 
 agent-release:
 	$(RUN) env AGENT_VERSION="$(AGENT_VERSION)" AGENT_COMMIT="$(AGENT_COMMIT)" OUT_DIR="$(AGENT_RELEASE_DIR)" GOCACHE="$(GOCACHE)" GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/build-agent-release.sh

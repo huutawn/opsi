@@ -1,8 +1,10 @@
 # Opsi Current Snapshot
 
-R5-013 is the active manual CLI work. The source-derived capability matrix is
-`docs/manual_cli_capability_matrix.md`; R5-012 remains implemented/live-blocked
-with its DeploymentJob defect deferred under `bugs/`.
+R5-014 is the active Local API/UI parity work. The canonical mapping is
+`docs/manual_ui_parity_matrix.md`; all 21 R5-013 supported capabilities have a
+Local route/view and the three backend gaps remain disabled. Installed bundles
+include `opsi-ui`; Agent-live acceptance is deferred to R5-017 because the
+former Agent VPS no longer exists. R5-012 remains implemented/live-blocked.
 
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.

@@ -15,6 +15,7 @@ means the documented target and boundaries are established but runtime
 capability is not implemented.
 
 | MANUAL-CLI-R5-013 | Canonical manual CLI, protected secret output, config/no-fallback behavior, and prerelease installer | CLI | PARTIAL / LOCAL_IMPLEMENTATION | `docs/manual_cli_capability_matrix.md`; focused CLI secret tests; release installer checks | Organization/member APIs and secret RPC idempotency remain factual backend gaps; R5-012 remains deferred | R5-013 | P0 |
+| LOCAL-UI-R5-014 | Local API and browser parity for all 21 supported manual capabilities, truthful backend gaps, reviewed mutation UX, credential isolation, and installed UI bundle | CLI Local backend + UI | LOCAL_IMPLEMENTATION / AGENT_LIVE_DEFERRED | `docs/manual_ui_parity_matrix.md`; Local command tests; UI source tests; Playwright fake Cloud/TLS-Agent harness; four-platform archive target | Browser execution was not completed in this environment; Agent-live acceptance is deferred to R5-017; no production-readiness claim | R5-014 | P0 |
 
 Legacy `Pxx` labels retained in evidence text identify historical implementation
 prompts only. They do not define current execution order; all new work follows

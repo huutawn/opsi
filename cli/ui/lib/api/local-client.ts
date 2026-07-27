@@ -34,6 +34,8 @@ import type {
 } from "@/lib/contracts/registry";
 
 type RequestOptions = RequestInit & { write?: boolean; idempotencyKey?: string };
+const responseLimit = 2 * 1024 * 1024;
+
 export type LocalSessionStatus = {
   authenticated: boolean;
   cloud_connected: "ok" | "failed" | "unknown";
@@ -44,6 +46,27 @@ export type LocalSessionStatus = {
   project_id?: string;
   capabilities?: string[];
 };
+
+export type LocalSettings = {
+  version: string;
+  revision: string;
+  go_version: string;
+  cloud_authority: string;
+  cloud_configured: boolean;
+  agent_configured: boolean;
+  agent_tls_pinned: boolean;
+  config_selected: boolean;
+  ui_assets: string;
+  backend_gaps: Array<{ capability: string; status: string; roadmap: string }>;
+};
+
+export class LocalAPIError extends Error {
+  status = 0;
+  code = "LOCAL_REQUEST_FAILED";
+  requestID = "";
+  nextAction = "Retry after checking Local backend connectivity.";
+  retryable = false;
+}
 
 export type RepositoryCDService = {
   key: string;
@@ -102,31 +125,57 @@ export class LocalClient {
     });
   }
 
-  logout(projectID?: string) {
+  logout(projectID?: string, idempotencyKey?: string) {
     this.localSession = "";
     return this.call<{ authenticated: false }>("/api/local/session/logout", {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify({ project_id: projectID ?? "" }),
     });
   }
 
-  rotatePAT(projectID?: string) {
+  rotatePAT(projectID?: string, idempotencyKey?: string) {
     return this.call<{ rotated: boolean; revoked_old: boolean }>("/api/local/session/token/rotate", {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify({ project_id: projectID ?? "" }),
     });
+  }
+
+  revokePAT(projectID?: string, idempotencyKey?: string) {
+    this.localSession = "";
+    return this.call<{ authenticated: false; revoked: boolean }>("/api/local/session/token/revoke", {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify({ project_id: projectID ?? "" }),
+    });
+  }
+
+  switchProject(projectID: string, idempotencyKey?: string) {
+    return this.call<LocalSessionStatus>("/api/local/session/project", {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify({ project_id: projectID }),
+    });
+  }
+
+  settings() {
+    return this.call<LocalSettings>("/api/local/settings");
   }
 
   async projects(orgID: string) {
     return this.call<{ projects: Project[] }>(`/api/local/projects?org_id=${encodeURIComponent(orgID)}`);
   }
 
-  createProject(orgID: string, body: { name: FormDataEntryValue | null; slug: FormDataEntryValue | null }) {
+  createProject(orgID: string, body: { name: FormDataEntryValue | null; slug: FormDataEntryValue | null }, idempotencyKey?: string) {
     return this.call<Project>(`/api/local/projects?org_id=${encodeURIComponent(orgID)}`, {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify(body),
     });
   }
@@ -143,15 +192,30 @@ export class LocalClient {
     return this.call<NodeDiagnostics>(`/api/local/projects/${projectID}/nodes/${nodeID}`);
   }
 
-  nodeAction(projectID: string, nodeID: string, action: "drain" | "remove") {
-    return this.call<NodeRecord>(`/api/local/projects/${projectID}/nodes/${nodeID}/${action}`, { method: "POST", write: true });
+  nodeAction(projectID: string, nodeID: string, action: "offline" | "drain" | "remove", idempotencyKey?: string) {
+    return this.call<NodeRecord>(`/api/local/projects/${projectID}/nodes/${nodeID}/${action}`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: action === "remove" ? JSON.stringify({ confirm_remove: true }) : "{}",
+    });
   }
 
-  createBootstrap(projectID: string, body: Record<string, unknown>) {
+  createBootstrap(projectID: string, body: Record<string, unknown>, idempotencyKey?: string) {
     return this.call<BootstrapSession>(`/api/local/projects/${projectID}/bootstrap-sessions`, {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify(body),
+    });
+  }
+
+  retryBootstrap(projectID: string, sessionID: string, idempotencyKey: string) {
+    return this.call<BootstrapSession>(`/api/local/projects/${projectID}/bootstrap-sessions/${sessionID}/retry`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: "{}",
     });
   }
 
@@ -193,10 +257,11 @@ export class LocalClient {
   deploymentPolicyApply(projectID: string, body: { policy_id?: string; policy: DeploymentPolicyDraft; expected_revision: number; expected_state_hash: string }, idempotencyKey: string) { return this.call<DeploymentPolicyApplyResult>(`/api/local/projects/${projectID}/deployment-policies/apply`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
   disableDeploymentPolicy(projectID: string, policyID: string, body: { expected_revision: number; expected_state_hash: string }, idempotencyKey: string) { return this.call<DeploymentPolicyApplyResult>(`/api/local/projects/${projectID}/deployment-policies/${encodeURIComponent(policyID)}/disable`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
 
-  createService(projectID: string, body: Record<string, unknown>) {
+  createService(projectID: string, body: Record<string, unknown>, idempotencyKey?: string) {
     return this.call<ServiceRecord>(`/api/local/projects/${projectID}/services`, {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify(body),
     });
   }
@@ -205,10 +270,10 @@ export class LocalClient {
     return this.call<{ installations: GitHubInstallation[] }>(`/api/local/projects/${projectID}/github/installations`);
   }
 
-  startGitHubInstallationClaim(projectID: string, installationID: number) {
+  startGitHubInstallationClaim(projectID: string, installationID: number, idempotencyKey?: string) {
     return this.call<{ authorization_url: string; status: string; expires_at: string }>(
       `/api/local/projects/${projectID}/github/installations/${installationID}/claim/start`,
-      { method: "POST", write: true, body: "{}" },
+      { method: "POST", write: true, idempotencyKey, body: "{}" },
     );
   }
 
@@ -216,17 +281,18 @@ export class LocalClient {
     return this.call<{ repositories: GitHubRepository[] }>(`/api/local/projects/${projectID}/github/repositories`);
   }
 
-  claimGitHubRepository(projectID: string, repositoryID: number) {
+  claimGitHubRepository(projectID: string, repositoryID: number, idempotencyKey?: string) {
     return this.call<{ repository_id: number; project_id: string; status: string }>(
       `/api/local/projects/${projectID}/github/repositories/${repositoryID}/claim`,
-      { method: "POST", write: true, body: "{}" },
+      { method: "POST", write: true, idempotencyKey, body: "{}" },
     );
   }
 
-  releaseGitHubRepository(projectID: string, repositoryID: number) {
+  releaseGitHubRepository(projectID: string, repositoryID: number, idempotencyKey?: string) {
     return this.call<{ released: boolean }>(`/api/local/projects/${projectID}/github/repositories/${repositoryID}/claim`, {
       method: "DELETE",
       write: true,
+      idempotencyKey,
     });
   }
 
@@ -234,18 +300,20 @@ export class LocalClient {
     return this.call<{ bindings: GitHubBinding[] }>(`/api/local/projects/${projectID}/github/bindings`);
   }
 
-  createGitHubBinding(projectID: string, body: { service_id: string; repository_id: number; service_key: string; config_path: string }) {
+  createGitHubBinding(projectID: string, body: { service_id: string; repository_id: number; service_key: string; config_path: string }, idempotencyKey?: string) {
     return this.call<GitHubBinding>(`/api/local/projects/${projectID}/github/bindings`, {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify(body),
     });
   }
 
-  removeGitHubBinding(projectID: string, bindingID: string) {
+  removeGitHubBinding(projectID: string, bindingID: string, idempotencyKey?: string) {
     return this.call<{ removed: boolean }>(`/api/local/projects/${projectID}/github/bindings/${encodeURIComponent(bindingID)}`, {
       method: "DELETE",
       write: true,
+      idempotencyKey,
     });
   }
 
@@ -304,7 +372,7 @@ export class LocalClient {
       method: "POST",
       write: true,
       idempotencyKey,
-      body: JSON.stringify({ requested_by: "cli-ui" }),
+      body: "{}",
     });
   }
 
@@ -344,6 +412,10 @@ export class LocalClient {
     return this.call<DeploymentJob>(`/api/local/projects/${projectID}/exposures`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
   }
 
+  exposures(projectID: string) {
+    return this.call<{ exposures: unknown[] }>(`/api/local/projects/${projectID}/exposures`);
+  }
+
   audit(projectID: string) {
     return this.call<{ events: AuditEvent[] }>(`/api/local/projects/${projectID}/audit`);
   }
@@ -373,26 +445,36 @@ export class LocalClient {
     return this.call<TelemetryQueryResponse>(`/api/local/projects/${projectID}/logs${suffix}`);
   }
 
-  createSecret(projectID: string, body: Record<string, unknown>) {
+  setupTOTP(projectID: string, idempotencyKey?: string) {
+    return this.call<{ status: string; project_id: string; secret: string; uri: string; ttl_seconds: number }>(
+      `/api/local/projects/${projectID}/secrets/setup-totp`,
+      { method: "POST", write: true, idempotencyKey, body: "{}" },
+    );
+  }
+
+  createSecret(projectID: string, body: Record<string, unknown>, idempotencyKey?: string) {
     return this.call<SecretResult>(`/api/local/projects/${projectID}/secrets`, {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify(body),
     });
   }
 
-  revealSecret(projectID: string, name: string, body: Record<string, unknown>) {
+  revealSecret(projectID: string, name: string, body: Record<string, unknown>, idempotencyKey?: string) {
     return this.call<SecretResult>(`/api/local/projects/${projectID}/secrets/${encodeURIComponent(name)}/reveal`, {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify({ ...body, reveal: true }),
     });
   }
 
-  rotateSecret(projectID: string, name: string, body: Record<string, unknown>) {
+  rotateSecret(projectID: string, name: string, body: Record<string, unknown>, idempotencyKey?: string) {
     return this.call<SecretResult>(`/api/local/projects/${projectID}/secrets/${encodeURIComponent(name)}/rotate`, {
       method: "POST",
       write: true,
+      idempotencyKey,
       body: JSON.stringify(body),
     });
   }
@@ -408,15 +490,17 @@ export class LocalClient {
 	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}`);
   }
 
-  resolveIncident(projectID: string, incidentID: string) {
+  resolveIncident(projectID: string, incidentID: string, idempotencyKey?: string) {
 	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/resolve`, {
 	  method: "POST",
 	  write: true,
+	  idempotencyKey,
 	  body: JSON.stringify({}),
 	});
   }
 
   private async call<T>(path: string, init: RequestOptions = {}) {
+    if (!path.startsWith("/api/local/")) throw new Error("LocalClient only accepts relative /api/local routes");
     const headers = new Headers(init.headers);
     headers.set("content-type", "application/json");
     headers.set("X-Request-ID", crypto.randomUUID());
@@ -428,13 +512,26 @@ export class LocalClient {
     const requestInit = { ...init };
     delete requestInit.write;
     delete requestInit.idempotencyKey;
-    const res = await fetch(path, { ...requestInit, headers });
-    const text = await res.text();
-    const data = text ? JSON.parse(text) : {};
+    const timeout = AbortSignal.timeout(30_000);
+    const signal = requestInit.signal ? AbortSignal.any([requestInit.signal, timeout]) : timeout;
+    const res = await fetch(path, { ...requestInit, headers, signal });
+    const text = await readBoundedText(res);
+    let data: Record<string, unknown> = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      throw Object.assign(new LocalAPIError("Local backend returned invalid JSON"), { status: res.status });
+    }
     if (!res.ok) {
-      const payload = data.error ?? data;
-      const error = new Error(payload.message ?? payload.error ?? payload.error_code ?? "request failed");
-      Object.assign(error, { status: res.status, data });
+      const payload = (data.error ?? data) as Record<string, unknown>;
+      const error = new LocalAPIError(String(payload.message ?? "request failed"));
+      Object.assign(error, {
+        status: res.status,
+        code: String(payload.code ?? "LOCAL_REQUEST_FAILED"),
+        requestID: String(payload.request_id ?? res.headers.get("X-Request-ID") ?? ""),
+        nextAction: String(payload.next_action ?? "Retry after checking Local backend connectivity."),
+        retryable: Boolean(payload.retryable),
+      });
       throw error;
     }
     return data as T;
@@ -446,4 +543,30 @@ export class LocalClient {
     this.localSession = session.local_session ?? "";
     return this.localSession;
   }
+}
+
+async function readBoundedText(response: Response) {
+  const declared = Number(response.headers.get("content-length") || 0);
+  if (declared > responseLimit) throw new LocalAPIError("Local backend response exceeded 2 MiB");
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > responseLimit) {
+      await reader.cancel();
+      throw new LocalAPIError("Local backend response exceeded 2 MiB");
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
 }

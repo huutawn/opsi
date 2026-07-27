@@ -10,21 +10,17 @@ import { RepositoryCD } from "@/features/github/repository-cd";
 type GitHubState = {
   status: "idle" | "loading" | "ready" | "error";
   message: string;
-  notice: string;
   installations: GitHubInstallation[];
   repositories: GitHubRepository[];
   bindings: GitHubBinding[];
-  busy: string;
 };
 
 const initialState: GitHubState = {
   status: "idle",
   message: "",
-  notice: "",
   installations: [],
   repositories: [],
   bindings: [],
-  busy: "",
 };
 
 export function GitHubView({ console }: { console: ConsoleController }) {
@@ -67,52 +63,40 @@ export function GitHubView({ console }: { console: ConsoleController }) {
   const projectID = project.id;
   const projectName = project.name;
 
-  async function mutate(key: string, operation: () => Promise<unknown>, notice: string) {
-    setState((current) => ({ ...current, busy: key, message: "", notice: "" }));
-    try {
-      await operation();
-      setState((current) => ({ ...current, notice }));
-      await load();
-    } catch (error) {
-      setState((current) => ({ ...current, message: errorMessage(error) }));
-    } finally {
-      setState((current) => ({ ...current, busy: "" }));
-    }
-  }
-
   async function connect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const installationID = Number(form.get("installation_id"));
-    setState((current) => ({ ...current, busy: "connect", message: "", notice: "Opening GitHub authorization." }));
-    try {
-      const started = await client.startGitHubInstallationClaim(projectID, installationID);
-      window.location.assign(started.authorization_url);
-    } catch (error) {
-      setState((current) => ({ ...current, busy: "", notice: "", message: errorMessage(error) }));
-    }
+    console.reviewMutation(
+      { project: projectName, targetType: "GitHub installation", targetID: String(installationID), operation: "claim", diff: [`installation: ${installationID}`, "Cloud verifies the GitHub identity and installation"], risk: "Starts an external GitHub authorization redirect; no credential enters browser state." },
+      async (key) => {
+        const started = await client.startGitHubInstallationClaim(projectID, installationID, key);
+        window.location.assign(started.authorization_url);
+        return "GitHub authorization started by the Local backend.";
+      },
+    );
   }
 
   async function createBinding(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    await mutate(
-      "binding-create",
-      () =>
-        client.createGitHubBinding(projectID, {
-          service_id: String(form.get("service_id") ?? ""),
-          repository_id: Number(form.get("repository_id")),
-          service_key: String(form.get("service_key") ?? ""),
-          config_path: String(form.get("config_path") ?? ".opsi/opsi-cd.yaml"),
-        }),
-      "Service binding created. Multiple service keys can share the same numeric repository.",
+    const serviceID = String(form.get("service_id") ?? "");
+    const repositoryID = Number(form.get("repository_id"));
+    const serviceKey = String(form.get("service_key") ?? "");
+    const configPath = String(form.get("config_path") ?? ".opsi/opsi-cd.yaml");
+    console.reviewMutation(
+      { project: projectName, targetType: "service binding", targetID: serviceKey, operation: "create", diff: [`repository: ${repositoryID}`, `service: ${serviceID}`, `config: ${configPath}`], risk: "Associates immutable CD intent with the selected repository." },
+      async (key) => {
+        await client.createGitHubBinding(projectID, { service_id: serviceID, repository_id: repositoryID, service_key: serviceKey, config_path: configPath }, key);
+        await load();
+        return "Service binding created by Cloud.";
+      },
     );
   }
 
   return (
     <section className="grid">
       {state.message ? <StatePanel title="GitHub action failed" text={state.message} retry={() => void load()} /> : null}
-      {state.notice ? <div className="notice">{state.notice}</div> : null}
 
       <Panel title="GitHub App connection">
         <p className="muted">Project: {projectName} ({projectID}). Authorization returns to the local CLI backend; credentials never enter browser storage.</p>
@@ -121,8 +105,8 @@ export function GitHubView({ console }: { console: ConsoleController }) {
             Installation ID
             <input className="field" min="1" name="installation_id" required type="number" />
           </label>
-          <button className="primary" disabled={state.busy === "connect"} type="submit">
-            {state.busy === "connect" ? "Waiting for GitHub" : "Authorize and claim"}
+          <button className="primary" type="submit">
+            Authorize and claim
           </button>
         </form>
         <InstallationTable installations={state.installations} />
@@ -144,17 +128,21 @@ export function GitHubView({ console }: { console: ConsoleController }) {
                     <td className="actions">
                       {repository.claim_status === "active" ? (
                         <button
-                          disabled={state.busy === `release-${repository.repository_id}`}
                           onClick={() => {
-                            const consequence = `Release repository ownership from project ${projectName} (${projectID}).\nRepository: ${repository.full_name} (${repository.repository_id}).\nConsequence: release is rejected while any active service binding remains.`;
-                            if (window.confirm(consequence)) void mutate(`release-${repository.repository_id}`, () => client.releaseGitHubRepository(projectID, repository.repository_id), "Repository ownership released.");
+                            console.reviewMutation(
+                              { project: projectName, targetType: "repository", targetID: String(repository.repository_id), operation: "release ownership", diff: [`repository: ${repository.full_name}`, "active bindings must already be absent"], risk: "Destructive: this project will no longer own the repository.", confirmation: String(repository.repository_id) },
+                              async (key) => { await client.releaseGitHubRepository(projectID, repository.repository_id, key); await load(); return "Repository ownership released by Cloud."; },
+                            );
                           }}
                           type="button"
                         >Release</button>
                       ) : (
                         <button
-                          disabled={repository.status !== "active" || repository.archived || repository.disabled || repository.claim_status === "conflict" || state.busy === `claim-${repository.repository_id}`}
-                          onClick={() => void mutate(`claim-${repository.repository_id}`, () => client.claimGitHubRepository(projectID, repository.repository_id), "Repository claimed by this project.")}
+                          disabled={repository.status !== "active" || repository.archived || repository.disabled || repository.claim_status === "conflict"}
+                          onClick={() => console.reviewMutation(
+                            { project: projectName, targetType: "repository", targetID: String(repository.repository_id), operation: "claim ownership", diff: [`repository: ${repository.full_name}`, "numeric repository identity is authoritative"], risk: "Claims this repository for the selected project." },
+                            async (key) => { await client.claimGitHubRepository(projectID, repository.repository_id, key); await load(); return "Repository claimed by this project."; },
+                          )}
                           type="button"
                         >{repository.claim_status === "conflict" ? "Owned elsewhere" : "Claim"}</button>
                       )}
@@ -173,24 +161,25 @@ export function GitHubView({ console }: { console: ConsoleController }) {
           <label>Repository<select className="select" name="repository_id" required>{state.repositories.filter((repository) => repository.claim_status === "active").map((repository) => <option key={repository.repository_id} value={repository.repository_id}>{repository.full_name}</option>)}</select></label>
           <label>Service key<input className="field" name="service_key" pattern="[a-z0-9][a-z0-9-]{0,62}" placeholder="api" required /></label>
           <label>Config path<input className="field" defaultValue=".opsi/opsi-cd.yaml" name="config_path" required /></label>
-          <button className="primary" disabled={state.busy === "binding-create" || !console.state.services.length} type="submit">Create binding</button>
+          <button className="primary" disabled={!console.state.services.length} type="submit">Create binding</button>
         </form>
         <BindingTable
           bindings={state.bindings}
-          busy={state.busy}
           project={{ id: projectID }}
           repositories={state.repositories}
           services={console.state.services}
           remove={(binding) => {
             const repository = state.repositories.find((item) => item.repository_id === binding.repository_id);
             const service = console.state.services.find((item) => item.id === binding.service_id);
-            const consequence = `Remove service binding from project ${projectName} (${projectID}).\nRepository: ${repository?.full_name ?? binding.repository_id}.\nService: ${service?.name ?? binding.service_id} (${binding.service_id}).\nBinding: ${binding.id}; service key: ${binding.service_key}.\nConsequence: this service will no longer be associated with the repository.`;
-            if (window.confirm(consequence)) void mutate(`binding-${binding.id}`, () => client.removeGitHubBinding(projectID, binding.id), "Service binding removed.");
+            console.reviewMutation(
+              { project: projectName, targetType: "service binding", targetID: binding.id, operation: "remove", diff: [`repository: ${repository?.full_name ?? binding.repository_id}`, `service: ${service?.name ?? binding.service_id}`, `service key: ${binding.service_key}`], risk: "Destructive: this service will no longer be associated with the repository.", confirmation: binding.id },
+              async (key) => { await client.removeGitHubBinding(projectID, binding.id, key); await load(); return "Service binding removed by Cloud."; },
+            );
           }}
         />
       </Panel>
 
-      <RepositoryCD />
+      <RepositoryCD console={console} />
     </section>
   );
 }
@@ -200,10 +189,10 @@ function InstallationTable({ installations }: { installations: GitHubInstallatio
   return <div className="tableWrap"><table><tbody>{installations.map((installation) => <tr key={installation.installation_id}><td><b>{installation.account_login || "GitHub account"}</b><br /><span className="muted">Installation {installation.installation_id}</span></td><td><StatusBadge value={installation.suspended ? "suspended" : installation.status} /></td></tr>)}</tbody></table></div>;
 }
 
-function BindingTable({ bindings, busy, project, repositories, services, remove }: { bindings: GitHubBinding[]; busy: string; project: { id: string }; repositories: GitHubRepository[]; services: Array<{ id: string; name: string }>; remove: (binding: GitHubBinding) => void }) {
+function BindingTable({ bindings, project, repositories, services, remove }: { bindings: GitHubBinding[]; project: { id: string }; repositories: GitHubRepository[]; services: Array<{ id: string; name: string }>; remove: (binding: GitHubBinding) => void }) {
   const active = bindings.filter((binding) => binding.status !== "removed");
   if (!active.length) return <Empty text="No active service bindings. Create distinct service keys such as api and web for the same repository." />;
-  return <div className="tableWrap"><table><thead><tr><th>Service</th><th>Repository</th><th>Key / config</th><th>Action</th></tr></thead><tbody>{active.map((binding) => <tr key={binding.id}><td>{services.find((service) => service.id === binding.service_id)?.name ?? binding.service_id}</td><td>{repositories.find((repository) => repository.repository_id === binding.repository_id)?.full_name ?? binding.repository_id}</td><td><b>{binding.service_key}</b><br /><span className="muted">{binding.config_path} · {binding.id} · {project.id}</span></td><td><button disabled={busy === `binding-${binding.id}`} onClick={() => remove(binding)} type="button">Remove</button></td></tr>)}</tbody></table></div>;
+  return <div className="tableWrap"><table><thead><tr><th>Service</th><th>Repository</th><th>Key / config</th><th>Action</th></tr></thead><tbody>{active.map((binding) => <tr key={binding.id}><td>{services.find((service) => service.id === binding.service_id)?.name ?? binding.service_id}</td><td>{repositories.find((repository) => repository.repository_id === binding.repository_id)?.full_name ?? binding.repository_id}</td><td><b>{binding.service_key}</b><br /><span className="muted">{binding.config_path} · {binding.id} · {project.id}</span></td><td><button onClick={() => remove(binding)} type="button">Remove</button></td></tr>)}</tbody></table></div>;
 }
 
 function errorMessage(error: unknown) {

@@ -3,9 +3,11 @@ import type { ConsoleController } from "@/features/console/types";
 
 export function IncidentsView({ console }: { console: ConsoleController }) {
   const incident = console.state.incidentDetail;
+  const agentUnavailable = console.session?.agent_connected !== "ok";
 
   return (
     <section className="grid">
+      {agentUnavailable ? <div className="errorBox" role="status"><b>AGENT_UNAVAILABLE</b><span>Incident actions are disabled until the configured TLS Agent reconnects.</span></div> : null}
       {console.state.incidentError ? <p role="alert">{console.state.incidentError}</p> : null}
       <Panel title="Incidents">
         <form className="grid" onSubmit={console.actions.incidentList}>
@@ -14,7 +16,7 @@ export function IncidentsView({ console }: { console: ConsoleController }) {
             <option value="open">Open</option>
             <option value="resolved">Resolved</option>
           </select>
-          <button disabled={console.state.busy === "incident-list"} type="submit">
+          <button disabled={agentUnavailable || console.state.busy === "incident-list"} type="submit">
             {console.state.busy === "incident-list" ? "Loading..." : "Load incidents"}
           </button>
         </form>
@@ -37,7 +39,7 @@ export function IncidentsView({ console }: { console: ConsoleController }) {
       <Panel title="Incident detail">
         <form className="grid" onSubmit={console.actions.incidentGet}>
           <input aria-label="Incident ID" className="field" name="incident_id" required />
-          <button disabled={console.state.busy === "incident-get"} type="submit">
+          <button disabled={agentUnavailable || console.state.busy === "incident-get"} type="submit">
             {console.state.busy === "incident-get" ? "Loading..." : "Get detail"}
           </button>
         </form>
@@ -57,7 +59,7 @@ export function IncidentsView({ console }: { console: ConsoleController }) {
       <Panel title="Resolve incident">
         <form className="grid" onSubmit={console.actions.incidentResolve}>
           <input aria-label="Incident ID" className="field" name="incident_id" required />
-          <button disabled={console.state.busy === "incident-resolve"} type="submit">
+          <button disabled={agentUnavailable || console.state.busy === "incident-resolve"} type="submit">
             Resolve
           </button>
         </form>

@@ -8,7 +8,7 @@
     "npm": "11.17.0"
   },
   "scripts": {
-	"test": "node --test",
+    "test": "node --test",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -20,6 +20,7 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

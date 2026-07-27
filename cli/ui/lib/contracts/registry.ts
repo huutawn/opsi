@@ -562,6 +562,7 @@ export type ConsoleState = {
   audit: AuditEvent[];
   support: SupportSummary | null;
   secretReveal: SecretResult | null;
+  totpSetup: { secret: string; uri: string; ttl_seconds: number } | null;
   incidents: IncidentResponse[];
   incidentDetail: IncidentResponse | null;
   incidentError: string;

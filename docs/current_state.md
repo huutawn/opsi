@@ -1,16 +1,19 @@
 # Opsi Current State
 
-## R5-013 manual CLI checkpoint
+## R5-014 Local API/UI parity checkpoint
 
-The canonical manual CLI matrix is `docs/manual_cli_capability_matrix.md`.
-Networked commands fail closed without a selected config, and secret/TOTP
-responses use protected output files. R5-012 remains implemented but live
-blocked; its deferred DeploymentJob defect is recorded under `bugs/`.
+The canonical UI matrix is `docs/manual_ui_parity_matrix.md`: 21 supported
+manual capabilities are mapped to relative Local API routes and factual views;
+organization listing, members/RBAC, and secret metadata/listing remain three
+disabled `BACKEND_GAP` rows. Installed archives contain the CLI and adjacent
+static UI assets. Browser credentials remain backend-owned. Agent-live
+acceptance is deferred to R5-017 because the former Agent VPS was deleted.
+R5-012 remains implemented but live blocked.
 
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-24 |
+| Last updated | 2026-07-27 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |

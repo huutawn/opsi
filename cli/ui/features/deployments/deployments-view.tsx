@@ -42,8 +42,6 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
   const [tlsMode, setTLSMode] = useState<"disabled" | "secret_ref">("disabled");
   const [tlsReference, setTLSReference] = useState("");
   const [exposurePreview, setExposurePreview] = useState<ExposurePreview | null>(null);
-  const [confirmExposure, setConfirmExposure] = useState(false);
-  const [confirmRollback, setConfirmRollback] = useState(false);
   const selectionOverride = useRef("");
 
   const loadOptions = useCallback(async () => {
@@ -126,25 +124,20 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
     }
   }
 
-  async function applyDeployment() {
+  function applyDeployment() {
     if (!request || !preview?.eligible) return;
-    setLoading(true);
-    setError("");
-    try {
-      const key = `ui-${selectedRecord?.id}-${environmentID}-${preview.snapshot.spec_hash.slice(0, 24)}`;
-      const created = await client.deploymentApply(projectID, request, key);
-      selectionOverride.current = created.id;
-      setJob(created);
-      setSelectedJobID(created.id);
-      await refreshJob(created.id, created.reused ?? false);
-      await console.actions.load();
-      setDisconnected(false);
-    } catch (reason) {
-      setError((reason as Error).message);
-      setDisconnected(true);
-    } finally {
-      setLoading(false);
-    }
+    console.reviewMutation(
+      { project: console.state.project?.name || projectID, targetType: "deployment", targetID: selectedRecord?.id || "BuildRecord", operation: "apply", diff: [`environment: ${environmentID}`, `runtime: ${resolvedRuntimeID}`, `node: ${resolvedNodeID}`, `digest: ${preview.snapshot.authority.build_record.build.oci_digest}`], risk: "Creates a canonical Agent rollout from the reviewed immutable BuildRecord." },
+      async (key) => {
+        setLoading(true); setError("");
+        try {
+          const created = await client.deploymentApply(projectID, request, key);
+          selectionOverride.current = created.id; setJob(created); setSelectedJobID(created.id);
+          await refreshJob(created.id, created.reused ?? false); await console.actions.load(); setDisconnected(false);
+          return `Deployment ${created.id} accepted with status ${created.status}.`;
+        } finally { setLoading(false); }
+      },
+    );
   }
 
   const refreshJob = useCallback(async (jobID: string, reused?: boolean) => {
@@ -154,32 +147,20 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
     setDisconnected(false);
   }, [client, projectID]);
 
-  async function cancelDeployment() {
+  function cancelDeployment() {
     if (!job || job.status !== "queued") return;
-    setLoading(true);
-    try {
-      const current = await client.deploymentCancel(projectID, job.id, `ui-cancel-${job.id}`);
-      setJob(current);
-      await refreshJob(job.id);
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setLoading(false);
-    }
+    console.reviewMutation(
+      { project: console.state.project?.name || projectID, targetType: "deployment", targetID: job.id, operation: "cancel", diff: ["cancel before the first Agent lease"], risk: "Cancellation fails closed after execution starts." },
+      async (key) => { const current = await client.deploymentCancel(projectID, job.id, key); setJob(current); await refreshJob(job.id); return `Deployment ${job.id} returned status ${current.status}.`; },
+    );
   }
 
-  async function retryDeployment() {
+  function retryDeployment() {
     if (!job || job.status !== "failed" || job.failure_code !== "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" || job.terminal_result) return;
-    setLoading(true);
-    try {
-      const current = await client.deploymentRetry(projectID, job.id, `ui-retry-${job.id}-${job.attempt_count ?? 0}`);
-      setJob(current);
-      await refreshJob(job.id);
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setLoading(false);
-    }
+    console.reviewMutation(
+      { project: console.state.project?.name || projectID, targetType: "deployment", targetID: job.id, operation: "retry", diff: [`attempt count: ${job.attempt_count ?? 0}`, "renew the same rollout owner"], risk: "Retries the same canonical deployment; it does not create a parallel job." },
+      async (key) => { const current = await client.deploymentRetry(projectID, job.id, key); setJob(current); await refreshJob(job.id); return `Deployment ${job.id} returned status ${current.status}.`; },
+    );
   }
 
   const baseDeployments = console.state.deployments.filter((item) => item.snapshot && ["succeeded", "rolled_back"].includes(item.status));
@@ -197,35 +178,41 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
 
   async function previewExposure() {
     setLoading(true); setError("");
-    try { const request = await exposureRequest(); delete request.expected_state_hash; setExposurePreview(await client.exposurePreview(projectID, request)); setConfirmExposure(false); }
+    try { const request = await exposureRequest(); delete request.expected_state_hash; setExposurePreview(await client.exposurePreview(projectID, request)); }
     catch (reason) { setError((reason as Error).message); }
     finally { setLoading(false); }
   }
 
-  async function applyExposure() {
-    if (!exposurePreview?.eligible || !confirmExposure) return;
-    setLoading(true); setError("");
-    try { const request = await exposureRequest(); const created = await client.exposureApply(projectID, request, `ui-exposure-${request.exposure.deployment_job_id}`); selectionOverride.current = created.id; setJob(created); setSelectedJobID(created.id); await refreshJob(created.id, created.reused ?? false); await console.actions.load(); }
-    catch (reason) { setError((reason as Error).message); }
-    finally { setLoading(false); }
+  function applyExposure() {
+    if (!exposurePreview?.eligible) return;
+    console.reviewMutation(
+      { project: console.state.project?.name || projectID, targetType: "exposure", targetID: exposurePreview.desired.spec_hash, operation: "apply", diff: exposurePreview.changes, risk: "Changes external routing and can trigger automatic rollback." },
+      async (key) => {
+        setLoading(true); setError("");
+        try { const request = await exposureRequest(); const created = await client.exposureApply(projectID, request, key); selectionOverride.current = created.id; setJob(created); setSelectedJobID(created.id); await refreshJob(created.id, created.reused ?? false); await console.actions.load(); return `Exposure rollout ${created.id} accepted with status ${created.status}.`; }
+        finally { setLoading(false); }
+      },
+    );
   }
 
-  async function explicitRollback() {
-    if (!job?.rollback_eligible || !confirmRollback) return;
-    setLoading(true); setError("");
-    try { const created = await client.rollback(projectID, job.id, `ui-rollback-${job.id}-${job.rollout_state_hash ?? "current"}`); selectionOverride.current = created.id; setJob(created); setSelectedJobID(created.id); setConfirmRollback(false); await refreshJob(created.id); await console.actions.load(); }
-    catch (reason) { setError((reason as Error).message); }
-    finally { setLoading(false); }
+  function explicitRollback() {
+    if (!job?.rollback_eligible) return;
+    console.reviewMutation(
+      { project: console.state.project?.name || projectID, targetType: "deployment", targetID: job.id, operation: "rollback", diff: ["restore the exact previous Agent known-good snapshot"], risk: "Destructive runtime mutation; availability may change while readiness is rechecked.", confirmation: job.id },
+      async (key) => {
+        setLoading(true); setError("");
+        try { const created = await client.rollback(projectID, job.id, key); selectionOverride.current = created.id; setJob(created); setSelectedJobID(created.id); await refreshJob(created.id); await console.actions.load(); return `Rollback ${created.id} accepted with status ${created.status}.`; }
+        finally { setLoading(false); }
+      },
+    );
   }
 
   const previews = console.state.deployments.filter((item) => item.snapshot?.preview);
-  async function cleanupPreview(preview: DeploymentJob) {
-    setLoading(true); setError("");
-    try {
-      const result = await client.previewCleanup(projectID, preview.id, `ui-preview-cleanup-${preview.id}`, "manual");
-      setJob(result); setSelectedJobID(result.id); await console.actions.load(); setDisconnected(false);
-    } catch (reason) { setError((reason as Error).message); }
-    finally { setLoading(false); }
+  function cleanupPreview(preview: DeploymentJob) {
+    console.reviewMutation(
+      { project: console.state.project?.name || projectID, targetType: "preview deployment", targetID: preview.id, operation: "cleanup", diff: ["remove preview runtime resources"], risk: "Destructive: the preview endpoint becomes unavailable.", confirmation: preview.id },
+      async (key) => { const result = await client.previewCleanup(projectID, preview.id, key, "manual"); setJob(result); setSelectedJobID(result.id); await console.actions.load(); setDisconnected(false); return `Preview ${preview.id} returned state ${result.rollout_state || result.status}.`; },
+    );
   }
 
   useEffect(() => {
@@ -276,7 +263,7 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
           {tlsMode === "secret_ref" && <label>TLS reference<input value={tlsReference} onChange={(event) => { setTLSReference(event.target.value); setExposurePreview(null); }} /></label>}
         </div>
         <div className="buttonRow"><button disabled={!selectedBase || !hostname || loading} onClick={() => void previewExposure()} type="button">Preview deterministic diff</button></div>
-        {exposurePreview && <><div className="callout"><StatusBadge value={exposurePreview.eligible ? "ready" : "failed"} /><span>{exposurePreview.message} — {exposurePreview.changes.join(", ")}</span></div><div className="specList compact"><div><span>Exposure hash</span><b>{exposurePreview.desired.spec_hash}</b></div><div><span>State hash</span><b>{exposurePreview.state_hash}</b></div><div><span>Route</span><b>{exposurePreview.desired.hostname}{exposurePreview.desired.path}</b></div></div><label><input checked={confirmExposure} onChange={(event) => setConfirmExposure(event.target.checked)} type="checkbox" /> I confirm this may change external routing and trigger automatic rollback.</label><div className="buttonRow"><button className="primary" disabled={!exposurePreview.eligible || !confirmExposure || loading} onClick={() => void applyExposure()} type="button">Apply through Agent rollout</button></div></>}
+        {exposurePreview && <><div className="callout"><StatusBadge value={exposurePreview.eligible ? "ready" : "failed"} /><span>{exposurePreview.message} — {exposurePreview.changes.join(", ")}</span></div><div className="specList compact"><div><span>Exposure hash</span><b>{exposurePreview.desired.spec_hash}</b></div><div><span>State hash</span><b>{exposurePreview.state_hash}</b></div><div><span>Route</span><b>{exposurePreview.desired.hostname}{exposurePreview.desired.path}</b></div></div><p className="muted">Review opens with the exact project, route, diff, risk, and idempotency identity before the Local backend submits.</p><div className="buttonRow"><button className="primary" disabled={!exposurePreview.eligible || loading} onClick={() => applyExposure()} type="button">Review exposure apply</button></div></>}
       </Panel>
       <Panel title="Deployment progress">
         {selectedJobID ? <>
@@ -296,7 +283,7 @@ export function DeploymentsView({ console }: { console: ConsoleController }) {
             <button disabled={loading || job?.status !== "queued"} onClick={() => void cancelDeployment()} type="button">Cancel before mutation</button>
             <button disabled={loading || job?.status !== "failed" || job?.failure_code !== "DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED" || Boolean(job?.terminal_result)} onClick={() => void retryDeployment()} type="button">Retry same job</button>
           </div>
-          {job?.rollback_eligible && <div className="callout"><span>Explicit rollback restores the exact previous Agent known-good snapshot and can reduce availability while readiness is rechecked.</span><label><input checked={confirmRollback} onChange={(event) => setConfirmRollback(event.target.checked)} type="checkbox" /> Confirm rollback consequence</label><button disabled={!confirmRollback || loading} onClick={() => void explicitRollback()} type="button">Rollback exact known-good</button></div>}
+          {job?.rollback_eligible && <div className="callout"><span>Explicit rollback restores the exact previous Agent known-good snapshot and can reduce availability while readiness is rechecked.</span><button disabled={loading} onClick={() => explicitRollback()} type="button">Review exact rollback</button></div>}
           <EventsList events={events} />
         </> : console.state.deployments.length ? <DeploymentsTable console={console} /> : <Empty text="No DeploymentJob selected. Preview an accepted BuildRecord to begin." />}
       </Panel>

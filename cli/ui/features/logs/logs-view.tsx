@@ -14,7 +14,7 @@ export function LogsView({ console }: { console: ConsoleController }) {
   const [message, setMessage] = useState("");
 
 	useEffect(() => {
-		if (!projectID) return;
+		if (!projectID || console.session?.agent_connected !== "ok") return;
 		let cancelled = false;
 		client
 			.logs(projectID, { limit: 50 })
@@ -30,12 +30,13 @@ export function LogsView({ console }: { console: ConsoleController }) {
     return () => {
       cancelled = true;
     };
-  }, [projectID]);
+	  }, [console.session?.agent_connected, projectID]);
 
   if (!projectID) return <Empty text="Select a project first." />;
 
   return (
     <Panel title="Logs">
+      {console.session?.agent_connected !== "ok" ? <div className="errorBox" role="status"><b>AGENT_UNAVAILABLE</b><span>Reconnect the configured TLS Agent to reload logs. Already loaded redacted rows remain visible.</span></div> : null}
       {message ? <Empty text={message} /> : null}
       {!message && logs.length === 0 ? <Empty text="No recent Agent logs for this project." /> : null}
       {logs.length > 0 ? (
