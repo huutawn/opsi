@@ -38,23 +38,17 @@ test:
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
 
 verify-postgres:
-	@test -n "$$OPSI_TEST_DATABASE_URL" || { echo "OPSI_TEST_DATABASE_URL required for Postgres tests"; exit 1; }
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresBootstrapLeaseIsAtomicAcrossWorkers$$' | grep -qx 'TestPostgresBootstrapLeaseIsAtomicAcrossWorkers'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart$$' | grep -qx 'TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart$$' | grep -qx 'TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresUnresolvedRolloutRetainsServiceOwnership$$' | grep -qx 'TestPostgresUnresolvedRolloutRetainsServiceOwnership'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease$$' | grep -qx 'TestPostgresLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply$$' | grep -qx 'TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/registry -list '^TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly$$' | grep -qx 'TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./internal/adminbootstrap -list '^TestPostgresBootstrapOwnerIsIdempotentAcrossRestart$$' | grep -qx 'TestPostgresBootstrapOwnerIsIdempotentAcrossRestart'
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresImmutableDeploymentSnapshotAndEventsSurviveRestart$$' -count=1
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresUnresolvedRolloutRetainsServiceOwnership$$' -count=1
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresLegacyDeploymentIsRetiredWithoutBlockingCanonicalLease$$' -count=1
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply$$' -count=1
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly$$' -count=1
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresBootstrapLeaseIsAtomicAcrossWorkers$$' -count=1
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/registry -run '^TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart$$' -count=1
-	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) OPSI_REQUIRE_POSTGRES_TESTS=1 go test ./internal/adminbootstrap -run '^TestPostgresBootstrapOwnerIsIdempotentAcrossRestart$$' -count=1
+	@set -eu; \
+	container="opsi-r5-016-postgres-$$PPID"; \
+	dsn="$${OPSI_TEST_DATABASE_URL:-}"; cleanup() { test -z "$${started:-}" || docker rm -f "$$container" >/dev/null; }; trap cleanup EXIT INT TERM; \
+	if test -z "$$dsn"; then \
+		command -v docker >/dev/null 2>&1 || { echo "Docker is required when OPSI_TEST_DATABASE_URL is unset"; exit 1; }; \
+		docker rm -f "$$container" >/dev/null 2>&1 || :; \
+		docker run -d --rm --name "$$container" -e POSTGRES_USER=opsi -e POSTGRES_PASSWORD=opsi -e POSTGRES_DB=opsi -p 127.0.0.1::5432 postgres:16 >/dev/null; started=1; \
+		for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do docker exec "$$container" pg_isready -U opsi -d opsi >/dev/null 2>&1 && break; test "$$attempt" -eq 12 || sleep 1; done; \
+		port="$$(docker port "$$container" 5432/tcp | awk -F: '{print $$2}')"; dsn="postgres://opsi:opsi@127.0.0.1:$$port/opsi?sslmode=disable"; \
+	fi; \
+	cd cloud; OPSI_TEST_DATABASE_URL="$$dsn" OPSI_REQUIRE_POSTGRES_TESTS=1 GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test -p 1 ./internal/actiondevice ./internal/registry ./internal/adminbootstrap -run 'TestPostgres' -count=1
 
 verify-dr:
 	$(RUN) ./scripts/verify-dr.sh

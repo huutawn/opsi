@@ -2,6 +2,7 @@
 
 R5-014 is `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
 R5-015 is `R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+R5-016 is `R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 References: `docs/manual_ui_parity_matrix.md`,
 `docs/manual_cli_capability_matrix.md`, and `docs/runbooks/install_cli.md`.
 R5-012 remains `R5_012_IMPLEMENTED / LIVE_BLOCKED / BUG_DEFERRED`.
@@ -20,6 +21,11 @@ delivery is defined by
 - Active incidents support factual list/get/resolve only.
 - Bounded Agent-local `IncidentEvidence v1` is implemented for deterministic
   fake-source proof; live Agent and UI acceptance remain deferred to R5-017.
+- Safe ActionPlane v1 implements separate CLI preflight, interactive Ed25519
+  approval, and execute invocations for restart, scale, gateway reconcile, and
+  incident resolve. Agent owns factual recheck, target locking, typed execution,
+  post-check, durable result, and audit; live Agent/K3s and UI acceptance remain
+  deferred to R5-017.
 - GitHub App user authorization is implemented with fixed GitHub endpoints,
   PKCE S256, one-time state, and a prelinked numeric GitHub user ID. GitHub App
   installation authentication now loads an RSA private key from a read-only

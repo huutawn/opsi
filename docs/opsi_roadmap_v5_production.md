@@ -610,6 +610,12 @@ browser acceptance remain deferred to R5-017.
 
 ### R5-016 — Safe ActionPlane và out-of-band approval manual CLI/UI
 
+**Source checkpoint (2026-07-28):**
+`R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+Catalog source v1 chỉ gồm restart, scale, gateway reconcile và incident resolve;
+deploy/rollback tiếp tục dùng canonical Cloud delivery path. UI và live VPS/K3s
+acceptance chưa thực hiện nên gate manual đầy đủ vẫn thuộc R5-017.
+
 **CẦN VPS:** Agent VPS để chạy typed actions và negative safety tests.
 
 **Mục tiêu:** con người thực hiện safe runtime action hoàn chỉnh trước khi MCP được phép request action.
@@ -618,7 +624,7 @@ browser acceptance remain deferred to R5-017.
 
 1. Freeze ActionPlan/Preflight/ApprovalChallenge/ApprovalGrant/ActionResult v1.
 2. Origin do trusted adapter gán, không nhận từ flag/body tùy ý.
-3. Catalog hẹp: restart, scale, deploy/rollback, gateway reconcile, incident resolve.
+3. Catalog hẹp: restart, scale, gateway reconcile, incident resolve; deploy/rollback không phải ActionPlane executor.
 4. Cấm arbitrary shell/kubectl/SQL, secret reveal, DB mutation, host/K3s destructive action.
 5. Agent deterministic risk/current-state hash/preconditions/locks/expiry/nonce/replay policy.
 6. Device registration/signing; private key trong OS secure store. Approval diễn ra ở interactive CLI hoặc Local UI, không phải prompt mà automation có thể tự trả lời.

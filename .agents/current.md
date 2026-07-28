@@ -1,8 +1,9 @@
 # Opsi Current Snapshot
 
-R5-015 is the active bounded IncidentEvidence source work.
+R5-016 Safe ActionPlane source work is implemented.
 `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
 `R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
 The canonical mapping is
 `docs/manual_ui_parity_matrix.md`; all 21 R5-013 supported capabilities have a
@@ -330,8 +331,8 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 - Historical `rca_result` and `mitigation_actions_json` columns are storage-only;
   active runtime does not read, expose, or execute them.
 - Cloud has no AI provider/runtime. Agent has no LLM/provider/prompt path.
-- `IncidentEvidence v1`, Safe ActionPlane, and `opsi mcp serve` are not
-  implemented.
+- `IncidentEvidence v1` and Safe ActionPlane v1 are implemented with fake
+  runtime durability/race evidence. `opsi mcp serve` is not implemented.
 - Opsi renders its owned Deployment, ClusterIP Service, and Traefik Ingress.
   Caller-supplied manifests are not executable input. DNS and certificate
   provisioning remain outside the implemented boundary.

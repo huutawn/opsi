@@ -140,6 +140,25 @@ func TestExternalCommandTimeoutKillsAndReaps(t *testing.T) {
 	}
 }
 
+func TestSecretToolActionKeyNeverAppearsInArgumentsOrErrors(t *testing.T) {
+	privateKey := []byte("private-key-material")
+	var args []string
+	store := &OSStore{timeout: time.Second, run: func(_ context.Context, _ string, received []string, input []byte) ([]byte, []byte, error) {
+		args = append([]string(nil), received...)
+		if strings.Contains(strings.Join(received, " "), string(privateKey)) {
+			t.Fatal("private key appeared in argv")
+		}
+		if len(input) == 0 {
+			t.Fatal("private key was not sent on stdin")
+		}
+		return nil, []byte("backend secret detail"), errors.New("failed")
+	}}
+	err := store.SetActionPrivateKey("device-1", privateKey)
+	if err == nil || strings.Contains(err.Error(), string(privateKey)) || strings.Contains(err.Error(), "backend secret detail") {
+		t.Fatalf("unsafe error=%v args=%v", err, args)
+	}
+}
+
 func TestSecretToolTimeoutHelper(t *testing.T) {
 	if os.Getenv("OPSI_KEYCHAIN_TIMEOUT_HELPER") != "1" {
 		return

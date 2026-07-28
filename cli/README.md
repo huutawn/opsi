@@ -49,6 +49,17 @@ If the repository is not visible, `--installation-id` starts the P09
 installation-claim browser flow; Cloud still verifies the GitHub user and
 installation through OAuth. The CLI reads its PAT only from the OS keychain.
 
+## Human-approved actions
+
+`opsi action device register|list|revoke` manages Cloud public device identity;
+the Ed25519 private key remains in Linux Secret Service or macOS Keychain with
+no plaintext fallback. Runtime actions use three separate process invocations:
+`opsi action preflight`, `opsi action approve <challenge-id>`, and
+`opsi action execute <challenge-id>`. Approval requires an interactive TTY and
+the exact displayed phrase. Pending grants remain in the OS secure store and
+are removed after a terminal Agent result. No browser approve/execute API,
+MCP, AI approval, `--yes`, or automatic approval path is implemented.
+
 The command writes `.opsi/opsi-cd.yaml` with build/deployment intent only and
 `.github/workflows/opsi-cd.yaml` as a manual bootstrap status workflow. Neither
 file contains Cloud infrastructure identity or secrets. Existing different

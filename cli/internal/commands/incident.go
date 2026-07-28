@@ -57,9 +57,10 @@ func newIncidentCommand(configPath *string, factory func() (keychain.Store, erro
 		})
 	}}
 	resolve := &cobra.Command{Use: "resolve", Short: "Resolve incident", RunE: func(cmd *cobra.Command, _ []string) error {
-		return run(cmd, true, func(ctx context.Context, client *agentclient.Client) (any, error) {
-			return client.ResolveIncident(ctx, &agentv1.IncidentResolveRequest{ProjectID: projectID, IncidentID: incidentID})
-		})
+		if projectID == "" || incidentID == "" {
+			return errors.New("project-id and incident-id are required")
+		}
+		return errors.New("ACTION_APPROVAL_REQUIRED: use opsi action preflight and separate interactive approval")
 	}}
 	evidence := &cobra.Command{Use: "evidence", Short: "Get bounded factual incident evidence", RunE: func(cmd *cobra.Command, _ []string) error {
 		if projectID == "" || incidentID == "" {

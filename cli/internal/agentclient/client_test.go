@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/config"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -64,6 +65,17 @@ func TestStatusInsecure(t *testing.T) {
 		t.Fatalf("unexpected status: %+v", status)
 	}
 }
+
+func TestActionClientUsesTypedJSONRPCs(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0"); if err != nil { t.Fatal(err) }
+	server := grpc.NewServer(); actionv1.RegisterActionServiceServer(server, fakeActionServer{}); go func() { _ = server.Serve(listener) }(); defer server.Stop()
+	client := New(config.Config{AgentAddr: listener.Addr().String()})
+	response, err := client.ActionPreflight(context.Background(), &actionv1.PreflightRequest{SchemaVersion: actionv1.SchemaVersion, ProjectID: "p1", NodeID: "n1", ServiceID: "s1", Target: actionv1.TargetIdentity{ProjectID: "p1", NodeID: "n1", ServiceID: "s1"}, Kind: actionv1.ActionRestartWorkload, Parameters: actionv1.ActionParameters{RestartWorkload: &actionv1.RestartWorkloadParameters{}}})
+	if err != nil || response.Challenge.ID != "challenge-1" { t.Fatalf("response=%#v err=%v", response, err) }
+}
+
+type fakeActionServer struct{ actionv1.UnimplementedActionServiceServer }
+func (fakeActionServer) Preflight(context.Context, *actionv1.PreflightRequest) (*actionv1.ActionPreflight, error) { return &actionv1.ActionPreflight{Challenge: actionv1.ApprovalChallenge{ID: "challenge-1"}}, nil }
 
 func TestTransportCredentialsRejectsMissingCA(t *testing.T) {
 	_, err := transportCredentials(config.Config{

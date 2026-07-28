@@ -16,6 +16,8 @@ import (
 
 const StatusResolved = "resolved"
 
+var ErrApprovalRequired = errors.New("ACTION_APPROVAL_REQUIRED")
+
 type Store interface {
 	GetIncident(ctx context.Context, projectID, incidentID string) (*telemetry.IncidentRecord, error)
 	ListIncidents(ctx context.Context, projectID, status string, limit int) ([]telemetry.IncidentRecord, error)
@@ -147,8 +149,16 @@ func (s *Service) Resolve(ctx context.Context, req ResolveRequest) (*telemetry.I
 	if !canResolve(auth.Role) {
 		return nil, errors.New("permission denied")
 	}
-	rec, err := s.Store.ResolveIncident(ctx, auth.ProjectID, req.IncidentID, s.now())
-	_ = s.audit(ctx, auth, "incident.resolve", req.IncidentID, result(err), "")
+	return nil, ErrApprovalRequired
+}
+
+func (s *Service) ResolveApproved(ctx context.Context, req ResolveRequest) (*telemetry.IncidentRecord, error) {
+	if req.ProjectID == "" || req.IncidentID == "" || req.UserID == "" || !canResolve(secret.Role(req.Role)) {
+		return nil, errors.New("approved incident identity is invalid")
+	}
+	auth := secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role)}
+	rec, err := s.Store.ResolveIncident(ctx, req.ProjectID, req.IncidentID, s.now())
+	_ = s.audit(ctx, auth, "incident.resolve.approved", req.IncidentID, result(err), "")
 	return rec, err
 }
 

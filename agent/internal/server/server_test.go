@@ -220,10 +220,10 @@ func TestIncidentServerUsesVerifiedIdentityAndRejectsCallerEscalation(t *testing
 
 	verifier.auth = secret.AuthContext{ProjectID: "project-1", UserID: "verified-owner", Role: secret.RoleOwner}
 	response, err := service.ResolveIncident(incomingBearer("pat-owner"), &agentv1.IncidentResolveRequest{ProjectID: "project-1", IncidentID: "inc-1"})
-	if err != nil || response.Status != incident.StatusResolved || store.resolveCalls != 1 {
+	if grpcstatus.Code(err) != codes.FailedPrecondition || response != nil || store.resolveCalls != 0 {
 		t.Fatalf("response=%+v err=%v resolve_calls=%d", response, err, store.resolveCalls)
 	}
-	if audit.last.Actor != "verified-owner" || verifier.last.PAT != "pat-owner" {
+	if audit.last.Actor != "" || verifier.last.PAT != "pat-owner" {
 		t.Fatalf("audit=%+v verifier_input=%+v", audit.last, verifier.last)
 	}
 }

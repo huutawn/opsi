@@ -281,6 +281,20 @@ func TestAPIErrorIncludesBoundedRequestContext(t *testing.T) {
 	}
 }
 
+func TestActionDeviceClientDoesNotSendPrivateKeyOrActorFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		if strings.Contains(string(body), "private") || strings.Contains(string(body), "owner_principal") { t.Errorf("unsafe action device request: %s", body) }
+		response.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "action-devices") { _, _ = io.WriteString(response, `{"id":"device-1","project_id":"p1","fingerprint_sha256":"fp","status":"active"}`); return }
+		_, _ = io.WriteString(response, `{"devices":[]}`)
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "pat", "test", server.Client()); if err != nil { t.Fatal(err) }
+	device, err := client.RegisterActionDevice(context.Background(), "p1", "laptop", "k", []byte("public")); if err != nil || device.ID != "device-1" { t.Fatalf("device=%#v err=%v", device, err) }
+	if _, err := client.ListActionDevices(context.Background(), "p1"); err != nil { t.Fatal(err) }
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opsi-dev/opsi/agent/internal/actionplane"
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/cloudrunner"
 	"github.com/opsi-dev/opsi/agent/internal/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/svcatalog"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 	"github.com/opsi-dev/opsi/agent/internal/tlsconfig"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -377,6 +379,12 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	}
 	defer serviceStore.Close()
 
+	actionStore, err := actionplane.OpenSQLiteStore(cfg.SQLitePath)
+	if err != nil {
+		return err
+	}
+	defer actionStore.Close()
+
 	engineCfg, err := deploymentEngineConfig(cfg)
 	if err != nil {
 		return err
@@ -419,7 +427,27 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
 	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore), authVerifier))
-	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(telemetryStore, store, incident.KubernetesEvidenceSource{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")}), authVerifier))
+	incidentHandler := incidentService(telemetryStore, store, incident.KubernetesEvidenceSource{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")})
+	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentHandler, authVerifier))
+	productionAdapter, _ := engineCfg.Reconciler.(deploy.ProductionAdapter)
+	projection := &deploy.ActionProjection{Store: store, Adapter: productionAdapter}
+	actionRuntime := actionplane.KubernetesRuntime{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl"), Timeout: 30 * time.Second, Projection: projection, IncidentState: func(ctx context.Context, target actionv1.TargetIdentity, incidentID string) (actionv1.IncidentState, error) {
+		record, err := incidentHandler.Store.GetIncident(ctx, target.ProjectID, incidentID)
+		if err != nil {
+			return actionv1.IncidentState{}, err
+		}
+		if record == nil {
+			return actionv1.IncidentState{}, errors.New("incident not found")
+		}
+		return actionv1.IncidentState{IncidentID: incidentID, Status: record.Status}, nil
+	}, Incident: func(ctx context.Context, target actionv1.TargetIdentity, incidentID string) error {
+		_, err := incidentHandler.ResolveApproved(ctx, incident.ResolveRequest{ProjectID: target.ProjectID, IncidentID: incidentID, UserID: actionplane.ApprovedPrincipal(ctx), Role: string(secret.RoleDeveloper)})
+		return err
+	}}
+	actionService := &actionplane.Service{Store: actionStore, Runtime: actionRuntime, Devices: actionplane.HTTPDeviceResolver{BaseURL: cfg.CloudEndpoint, Token: cfg.CloudRelay.AgentToken, NodeID: cfg.NodeID}, Authenticate: func(ctx context.Context, projectID string) (actionplane.Principal, error) {
+		return actionplane.AuthenticateFromContext(ctx, authVerifier, projectID)
+	}}
+	actionv1.RegisterActionServiceServer(grpcServer, actionService)
 
 	healthServer := &http.Server{
 		Handler:           healthHandler(version, startedAt, cfg, cloudConnection.Connected),
@@ -717,6 +745,8 @@ func mapIncidentError(err error) error {
 		return status.Error(codes.ResourceExhausted, "incident evidence exceeds the size limit")
 	case errors.Is(err, incident.ErrEvidenceUnavailable):
 		return status.Error(codes.Unavailable, "incident evidence is unavailable")
+	case errors.Is(err, incident.ErrApprovalRequired):
+		return status.Error(codes.FailedPrecondition, "ACTION_APPROVAL_REQUIRED")
 	case strings.Contains(message, "invalid") || strings.Contains(message, "required"):
 		return status.Error(codes.InvalidArgument, "invalid incident request")
 	default:

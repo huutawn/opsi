@@ -99,3 +99,14 @@ Agent migrates SQLite tables `metrics`, `logs`, `incidents`, and `audit_log` alo
 fake Kubernetes/rollout projections. The body and lowercase SHA-256 hash are
 persisted in the Agent `incidents` row; Cloud stores no evidence body. Live
 Agent/VPS and UI/browser acceptance are deferred to R5-017.
+
+## Safe ActionPlane
+
+Agent hosts the authoritative ActionPlane v1 state machine in the existing
+SQLite database. It authenticates the principal, resolves an active public
+approval device from Cloud, verifies Ed25519 approval, locks the target,
+rechecks factual state, consumes the nonce, executes one typed action, and
+persists the post-check result before releasing the lock. Deploy and rollback
+remain exclusively on the canonical Cloud RolloutIntent/PollJob path. Source
+verification uses fake Kubernetes/Cloud adapters; live Agent/K3s acceptance is
+deferred to R5-017.

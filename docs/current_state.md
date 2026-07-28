@@ -4,6 +4,7 @@
 
 `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
 `R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
@@ -152,8 +153,8 @@ artifacts. At this snapshot:
 - CLI, local API, contracts, and UI expose factual incident list/get/resolve only.
 - Historical `rca_result` and `mitigation_actions_json` columns remain for
   storage compatibility but are not read, exposed, or executed.
-- `IncidentEvidence v1`, Safe ActionPlane, and `opsi mcp serve` are not
-  implemented.
+- `IncidentEvidence v1` and Safe ActionPlane v1 are implemented with fake
+  runtime/PostgreSQL/SQLite/race evidence. `opsi mcp serve` is not implemented.
 - GitHub App user authorization, installation authentication/webhook intake,
   durable installation/repository inventory, secure installation claim, and
   project/service mapping are implemented. `opsi init` now performs safe local
@@ -608,7 +609,7 @@ remains `MANUAL_GATED`.
 Production readiness remains unproven. Current gaps include direct-origin
 restriction and certificate rotation, clean control-plane VM proof, live
 mid-step bootstrap resume, the full manual K3s E2E, public incident evidence,
-Safe ActionPlane, CLI MCP, release hardening, supply-chain evidence, and
+live ActionPlane Agent/K3s/UI acceptance, CLI MCP, release hardening, supply-chain evidence, and
 measured disaster recovery. GitHub App/OIDC, accepted BuildRecord, immutable
 OCI delivery, topology/policy routing, and Agent reconciliation are implemented
 checkpoints rather than future work.
@@ -651,8 +652,9 @@ GitHub verification remains `UNPROVEN`. P10 `opsi init` repository bootstrap is
 `CODE COMPLETE` with local tests, while its live GitHub checkpoint remains
 `UNPROVEN`. Those live GitHub negatives remain operator-required, while the
 OIDC-bound trusted artifact and immutable runtime delivery checkpoints are
-implemented. The later evidence/ActionPlane/MCP phases remain ordered future
-work. The ordered source of truth is `docs/opsi_roadmap_v5_production.md`.
+implemented. IncidentEvidence and ActionPlane source work are implemented;
+their live manual acceptance plus MCP remain ordered future work. The ordered
+source of truth is `docs/opsi_roadmap_v5_production.md`.
 
 ## R5-006 repository CD checkpoint
 

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opsi-dev/opsi/cloud/internal/actiondevice"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
@@ -57,6 +58,8 @@ type Server struct {
 	installationClaimGrants map[string]installationClaimGrant
 	now                     func() time.Time
 	random                  io.Reader
+	actionDeviceMu          sync.Mutex
+	actionDevices           actiondevice.Store
 }
 
 func NewServer(cfg Config) *Server {
@@ -125,7 +128,14 @@ func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
 	s.githubAppClient = client
 }
 
+func (s *Server) SetActionDeviceStore(store actiondevice.Store) {
+	s.actionDeviceMu.Lock()
+	defer s.actionDeviceMu.Unlock()
+	s.actionDevices = store
+}
+
 func (s *Server) Handler() http.Handler {
+	s.ensureActionDeviceStore()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
@@ -148,10 +158,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/register", s.handleAgentRegister)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
+	mux.HandleFunc("/v1/agent/projects/{project_id}/action-devices/{device_id}", s.handleAgentActionDevice)
 	mux.HandleFunc("/internal/bootstrap/sessions/lease", s.handleBootstrapWorkerLeaseWithCheckpoint)
 	mux.HandleFunc("/internal/bootstrap/sessions/{session_id}/checkpoint", s.handleBootstrapWorkerCheckpoint)
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/internal/alerts", s.handleInternalAlerts)
+	mux.HandleFunc("/api/projects/{project_id}/action-devices", s.handleActionDevices)
+	mux.HandleFunc("/api/projects/{project_id}/action-devices/{device_id}/revoke", s.handleActionDeviceRevoke)
 	mux.HandleFunc("/api/", s.handleRegistryAPI)
 	mux.HandleFunc("/", http.NotFound)
 	return s.observer.Wrap(mux)

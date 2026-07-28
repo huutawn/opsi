@@ -19,6 +19,7 @@ type Options struct {
 	BrowserOpener   func(string) error
 	Listen          func(network, address string) (net.Listener, error)
 	Random          io.Reader
+	IsTerminal      func(io.Reader) bool
 }
 
 func NewRootCommand(options Options) *cobra.Command {
@@ -54,6 +55,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.AddCommand(newServiceCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newSecretCommand(&configPath, options.KeychainFactory))
 	root.AddCommand(newIncidentCommand(&configPath, options.KeychainFactory))
+	root.AddCommand(newActionCommand(&configPath, options))
 	root.AddCommand(newServerCommand(&configPath, options))
 	root.AddCommand(newLoginCommand(options.KeychainFactory))
 	root.AddCommand(newInitCommand(&configPath, options))

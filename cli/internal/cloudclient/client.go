@@ -77,6 +77,24 @@ func (c *Client) ListServices(ctx context.Context, projectID string) ([]Service,
 	return response.Services, err
 }
 
+func (c *Client) RegisterActionDevice(ctx context.Context, projectID, displayName, idempotencyKey string, publicKey []byte) (ActionDevice, error) {
+	var response ActionDevice
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "action-devices"}, map[string]any{"display_name": displayName, "public_key": publicKey, "idempotency_key": idempotencyKey}, idempotencyKey, &response)
+	return response, err
+}
+
+func (c *Client) ListActionDevices(ctx context.Context, projectID string) ([]ActionDevice, error) {
+	var response struct{ Devices []ActionDevice `json:"devices"` }
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "action-devices"}, nil, "", &response)
+	return response.Devices, err
+}
+
+func (c *Client) RevokeActionDevice(ctx context.Context, projectID, deviceID string) (ActionDevice, error) {
+	var response struct{ Device ActionDevice `json:"device"` }
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "action-devices", deviceID, "revoke"}, nil, "revoke:"+deviceID, &response)
+	return response.Device, err
+}
+
 func (c *Client) ListProjects(ctx context.Context, orgID string) ([]Project, error) {
 	var response struct {
 		Projects []Project `json:"projects"`

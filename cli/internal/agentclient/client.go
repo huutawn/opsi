@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/opsi-dev/opsi/cli/internal/config"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -123,6 +124,31 @@ func (c *Client) ListCatalog(ctx context.Context) (*agentv1.ListCatalogResponse,
 	}
 	defer conn.Close()
 	return agentv1.NewServiceManagerServiceClient(conn).ListCatalog(ctx, &agentv1.ListCatalogRequest{})
+}
+
+func (c *Client) ActionCatalog(ctx context.Context) (*actionv1.CatalogResponse, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).Catalog(ctx, &actionv1.CatalogRequest{})
+}
+
+func (c *Client) ActionPreflight(ctx context.Context, req *actionv1.PreflightRequest) (*actionv1.ActionPreflight, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).Preflight(ctx, req)
+}
+
+func (c *Client) ActionChallenge(ctx context.Context, req *actionv1.ChallengeRequest) (*actionv1.ApprovalChallenge, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).GetChallenge(ctx, req)
+}
+
+func (c *Client) ActionExecute(ctx context.Context, req *actionv1.ExecuteRequest) (*actionv1.ActionResult, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).Execute(ctx, req)
+}
+
+func (c *Client) ActionStatus(ctx context.Context, req *actionv1.StatusRequest) (*actionv1.ActionResult, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).Status(ctx, req)
 }
 
 func (c *Client) CreateManagedService(ctx context.Context, req *agentv1.CreateManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {

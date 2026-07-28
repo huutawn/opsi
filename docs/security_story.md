@@ -16,6 +16,14 @@ Cloud has no AI runtime, model/provider integration, prompt path, or RCA fallbac
 Agent has no AI analyzer or RCA-backed executor. Historical RCA/mitigation data
 is storage-only and is never execution authority.
 
+Safe ActionPlane v1 keeps approval and execution authority separate. Cloud
+stores only project-scoped public Ed25519 device identity and revoke state. CLI
+keeps the private key and pending grant in the OS secure store. Agent derives
+`manual_cli` origin and authenticated actors, verifies the device/signature,
+locks and rechecks factual state, consumes the nonce, executes one typed action,
+and persists post-check/result/audit before lock release. Cloud never receives
+an ApprovalGrant or runtime output and never executes a runtime action.
+
 Cloud implements GitHub App user authorization, installation authentication,
 typed App-wide webhook intake, repository ownership, GitHub Actions OIDC, and
 accepted BuildRecords. The generic push relay is retired. New BuildRecord
@@ -173,6 +181,6 @@ evidence payload model, column, table, queue, or API.
 Production readiness remains unproven. GitHub App/OIDC trust and immutable
 digest delivery have implementation and recorded acceptance evidence, but the
 manual full K3s scenario, R5-011.4 public endpoint, DNS/certificate lifecycle,
-public evidence API, Safe ActionPlane, CLI MCP hardening, release provenance,
+public evidence API, live Safe ActionPlane Agent/K3s/UI acceptance, CLI MCP hardening, release provenance,
 and repeated recovery/acceptance runs remain open. R5-011 is `PARTIAL` and
 R5-011.4 is `MANUAL_GATED`.

@@ -94,15 +94,18 @@ func TestListGetResolveAuthorizationIsPreserved(t *testing.T) {
 	if _, err := svc.Resolve(context.Background(), ResolveRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "viewer", Role: "Viewer"}); err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("expected viewer resolve denial, got %v", err)
 	}
-	if rec, err := svc.Resolve(context.Background(), ResolveRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "owner", Role: "Owner"}); err != nil || rec.Status != StatusResolved {
-		t.Fatalf("owner resolve failed rec=%+v err=%v", rec, err)
+	if _, err := svc.Resolve(context.Background(), ResolveRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "owner", Role: "Owner"}); err != ErrApprovalRequired || store.resolveCalls != 0 {
+		t.Fatalf("direct owner resolve bypassed ActionPlane: calls=%d err=%v", store.resolveCalls, err)
 	}
-	if len(audit.records) != 1 || audit.records[0].Action != "incident.resolve" || audit.records[0].Result != "success" {
+	if rec, err := svc.ResolveApproved(context.Background(), ResolveRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "owner", Role: "Owner"}); err != nil || rec.Status != StatusResolved {
+		t.Fatalf("approved owner resolve failed rec=%+v err=%v", rec, err)
+	}
+	if len(audit.records) != 1 || audit.records[0].Action != "incident.resolve.approved" || audit.records[0].Result != "success" {
 		t.Fatalf("resolve audit missing: %+v", audit.records)
 	}
 
 	store.rec.Status = "open"
-	if rec, err := svc.Resolve(context.Background(), ResolveRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "developer", Role: "Developer"}); err != nil || rec.Status != StatusResolved {
+	if rec, err := svc.ResolveApproved(context.Background(), ResolveRequest{ProjectID: "p1", IncidentID: "inc-1", UserID: "developer", Role: "Developer"}); err != nil || rec.Status != StatusResolved {
 		t.Fatalf("developer resolve failed rec=%+v err=%v", rec, err)
 	}
 }
@@ -116,7 +119,7 @@ func TestResolveIncidentDoesNotDependOnLegacyRCA(t *testing.T) {
 		MitigationActions: `[{"type":"rollback","status":"success"}]`,
 	}}
 	svc := Service{Store: store}
-	rec, err := svc.Resolve(context.Background(), ResolveRequest{ProjectID: "p1", IncidentID: "inc-legacy", UserID: "owner", Role: "Owner"})
+	rec, err := svc.ResolveApproved(context.Background(), ResolveRequest{ProjectID: "p1", IncidentID: "inc-legacy", UserID: "owner", Role: "Owner"})
 	if err != nil || rec == nil || rec.Status != StatusResolved {
 		t.Fatalf("resolve must ignore legacy RCA data, rec=%+v err=%v", rec, err)
 	}

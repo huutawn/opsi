@@ -35,9 +35,10 @@ Agent
 
 GitHub App identity/repository binding, GitHub Actions OIDC, accepted
 `BuildRecord`, digest deployment, `TopologyPlan`, `DeploymentPolicy`, routing,
-and factual readiness/known-good rollback are implemented. No current path
-contains an AI provider, MCP server, `IncidentEvidence v1`, `ActionPlan`,
-approval grant, Safe ActionPlane, or pull-request preview environment.
+and factual readiness/known-good rollback are implemented. `IncidentEvidence
+v1` and Safe ActionPlane v1 are implemented with fake-runtime verification. No
+current path contains an AI provider, MCP server, browser approval surface, or
+pull-request preview environment.
 
 ### 1.1 Repository domains
 
@@ -95,8 +96,10 @@ The production-oriented Browser boundary is localhost `/api/local/...` served by
 short local session to the Browser, and mediates Cloud metadata and Agent runtime
 calls. The Browser must not receive a long-lived PAT.
 
-The CLI currently has no `opsi mcp serve`, local AI integration, approval device
-signing, or ActionPlane client.
+The CLI has no `opsi mcp serve`, local AI integration, or browser approval
+surface. Its ActionPlane client keeps Ed25519 private keys and pending grants in
+the OS secure store and separates preflight, interactive approval, and execute
+across process invocations.
 
 ### 1.4 Current Agent boundary
 
@@ -249,11 +252,11 @@ Codex / Claude Code / Antigravity / compatible MCP client
        -> Agent read-only IncidentEvidence APIs
        -> Agent typed ActionPreflight APIs
 
-Human Local UI or trusted interactive CLI
+Trusted interactive CLI
   -> separate approval interaction
   -> signed ApprovalGrant
   -> Agent typed executor
-  -> post-check and audit
+  -> post-check, durable result, and audit
 ```
 
 Vendor names are examples of MCP clients. Opsi provides one vendor-neutral local
@@ -264,8 +267,9 @@ receive the evidence body.
 Trusted CD is not an AI action. `DeploymentPolicy` does not use an AI
 `ActionPlan` or `ApprovalGrant`, AI cannot approve CD, and automatic rollback is
 part of the authorized deployment transaction. AI-originated mutations still
-require deterministic Agent preflight and separate human approval. MCP may read,
-preflight, and request a challenge but exposes no execute or approve tool.
+require deterministic Agent preflight and separate human approval. MCP remains
+unimplemented; its future boundary may read, preflight, and request a challenge
+but must expose no execute or approve tool.
 
 ## 3. Trust boundaries
 
@@ -280,9 +284,9 @@ preflight, and request a challenge but exposes no execute or approve tool.
 | GitHub Actions <-> OCI registry | Scoped runner push identity | Image labels, tags, build output | Push credential is separate from GitHub OAuth and Agent pull | Push only to allowlisted repository |
 | Agent <-> OCI registry | Scoped pull identity and immutable digest | Mutable tags and registry metadata before verification | Pull credential is separate, least privilege, and never a GitHub App token | Pull allowed repository/digest only |
 | CLI <-> Cloud | Authenticated metadata and versioned envelopes | Provider callbacks, webhook metadata, user-supplied identifiers | PAT stays in OS keychain; Cloud stores hashes; no runtime secrets | Metadata/control-plane mutations only; Cloud does not execute K3s operations |
-| CLI <-> Agent | Versioned gRPC types, authenticated project/actor context | User/AI reason text and evidence references | TLS/mTLS/pinning target; no credential forwarding to AI | Current typed APIs only; future actions require deterministic preflight and valid grant |
+| CLI <-> Agent | Versioned gRPC types, authenticated project/actor context, signed challenge | User-entered typed parameters | TLS/mTLS/pinning target; private key and pending grant stay in OS secure store | ActionPlane requires deterministic preflight, interactive approval, valid grant, lock, state recheck, post-check, and durable result |
 | Cloud <-> Agent | Signed registration, heartbeat, lease, digest job, and result envelopes | Remote errors and external webhook-derived metadata | Agent credential/HMAC protected; no raw runtime evidence or registry password plaintext in Cloud | Agent performs runtime work; Cloud records sanitized result metadata |
-| Agent <-> Kubernetes/containerd | Agent-generated typed arguments and owned resource identity | Manifest/application output, logs, Kubernetes events | Secrets use stdin/API channels, never command arguments or audit text | Allowlisted, bounded execution; future action policy, locks, post-check, and audit |
+| Agent <-> Kubernetes/containerd | Agent-generated typed arguments and owned resource identity | Application output, logs, Kubernetes events | Secrets use stdin/API channels, never command arguments or audit text | Allowlisted bounded rollout and ActionPlane execution; no caller command, manifest, path, or kubectl arguments |
 
 ## 4. Security invariants
 

@@ -11,6 +11,7 @@ import (
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 )
 
 type BuildRecord = buildrecordv1.Record
@@ -47,6 +48,7 @@ type WorkloadExposureIntent = deploymentv1.ExposureIntent
 type ExposureSpec = exposurev1.ExposureSpec
 type ExposureMutationRequest = deploymentv1.ExposureMutationRequest
 type ExposurePreview = deploymentv1.ExposurePreview
+type ActionDevice = actionv1.ActionDevice
 
 type DeploymentJob struct {
 	SchemaVersion          string                      `json:"schema_version,omitempty"`

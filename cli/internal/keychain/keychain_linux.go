@@ -5,6 +5,7 @@ package keychain
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -43,6 +44,44 @@ func (s *OSStore) GetPAT() (string, error) {
 
 func (s *OSStore) DeletePAT() error {
 	return s.runOperation("delete", []string{"clear", "service", "opsi", "key", patKey}, nil)
+}
+
+func (s *OSStore) SetActionPrivateKey(id string, value []byte) error {
+	return s.setActionSecret("private:"+id, "Opsi Action private key", value)
+}
+func (s *OSStore) GetActionPrivateKey(id string) ([]byte, error) {
+	return s.getActionSecret("private:" + id)
+}
+func (s *OSStore) DeleteActionPrivateKey(id string) error {
+	return s.deleteActionSecret("private:" + id)
+}
+func (s *OSStore) SetPendingApproval(id string, value []byte) error {
+	return s.setActionSecret("pending:"+id, "Opsi Action approval", value)
+}
+func (s *OSStore) GetPendingApproval(id string) ([]byte, error) {
+	return s.getActionSecret("pending:" + id)
+}
+func (s *OSStore) DeletePendingApproval(id string) error {
+	return s.deleteActionSecret("pending:" + id)
+}
+
+func (s *OSStore) setActionSecret(key, label string, value []byte) error {
+	encoded := base64.StdEncoding.EncodeToString(value)
+	return s.runOperation("store action secret", []string{"store", "--label=" + label, "service", "opsi", "key", key}, []byte(encoded))
+}
+func (s *OSStore) getActionSecret(key string) ([]byte, error) {
+	output, err := s.runOperationOutput("lookup action secret", []string{"lookup", "service", "opsi", "key", key}, nil)
+	if err != nil {
+		return nil, err
+	}
+	value, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
+	if err != nil {
+		return nil, ErrKeychainUnavailable
+	}
+	return value, nil
+}
+func (s *OSStore) deleteActionSecret(key string) error {
+	return s.runOperation("delete action secret", []string{"clear", "service", "opsi", "key", key}, nil)
 }
 
 func (s *OSStore) runOperation(operation string, args []string, input []byte) error {
