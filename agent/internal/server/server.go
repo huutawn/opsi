@@ -447,6 +447,9 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	actionService := &actionplane.Service{Store: actionStore, Runtime: actionRuntime, Devices: actionplane.HTTPDeviceResolver{BaseURL: cfg.CloudEndpoint, Token: cfg.CloudRelay.AgentToken, NodeID: cfg.NodeID}, Authenticate: func(ctx context.Context, projectID string) (actionplane.Principal, error) {
 		return actionplane.AuthenticateFromContext(ctx, authVerifier, projectID)
 	}}
+	if err := actionService.Recover(ctx); err != nil {
+		return err
+	}
 	actionv1.RegisterActionServiceServer(grpcServer, actionService)
 
 	healthServer := &http.Server{

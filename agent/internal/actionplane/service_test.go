@@ -13,16 +13,18 @@ import (
 )
 
 type fakeRuntime struct {
-	mu      sync.Mutex
-	state   actionv1.CurrentState
-	calls   []actionv1.ActionKind
-	postErr error
+	mu         sync.Mutex
+	state      actionv1.CurrentState
+	calls      []actionv1.ActionKind
+	currentErr error
+	postErr    error
+	postCalls  int
 }
 
 func (f *fakeRuntime) CurrentState(context.Context, actionv1.TargetIdentity, actionv1.ActionKind, actionv1.ActionParameters) (actionv1.CurrentState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.state, nil
+	return f.state, f.currentErr
 }
 func (f *fakeRuntime) RestartWorkload(context.Context, actionv1.TargetIdentity) error {
 	f.mu.Lock()
@@ -52,6 +54,7 @@ func (f *fakeRuntime) ResolveIncident(context.Context, actionv1.TargetIdentity, 
 func (f *fakeRuntime) PostCheck(context.Context, actionv1.TargetIdentity, actionv1.ActionKind, actionv1.ActionParameters, actionv1.CurrentState) (actionv1.CurrentState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.postCalls++
 	if f.postErr != nil {
 		return f.state, f.postErr
 	}
@@ -188,6 +191,39 @@ func TestExecutePostCheckFailureIsTerminal(t *testing.T) {
 	}
 }
 
+func TestRecoveryFailsOnlyAfterReadableBoundedPostCheck(t *testing.T) {
+	path := t.TempDir() + "/actions.db"
+	store, err := OpenSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	plan, state, challenge := testActionFixtures(now)
+	if err := store.Create(context.Background(), plan, state, challenge); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, "grant", "u1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{state: state, postErr: errors.New("postcondition not reached")}
+	service := &Service{Store: store, Runtime: runtime, Now: func() time.Time { return now.Add(2 * time.Second) }}
+	if err := service.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load(context.Background(), plan.ProjectID, challenge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != actionv1.StatusFailed || record.Result.FailureCode != actionv1.FailurePostCheck || runtime.postCalls != 1 || len(runtime.calls) != 0 {
+		t.Fatalf("recovery result=%+v post=%d mutations=%v", record.Result, runtime.postCalls, runtime.calls)
+	}
+}
+
 type testService struct {
 	*Service
 	device     Device
@@ -211,7 +247,7 @@ func newTestService(t *testing.T, runtime *fakeRuntime, revoked bool) *testServi
 }
 
 func fixtureState() actionv1.CurrentState {
-	state := actionv1.CurrentState{SchemaVersion: actionv1.SchemaVersion, ProjectID: "p1", Target: actionv1.TargetIdentity{ProjectID: "p1", NodeID: "n1", ServiceID: "s1"}, Workload: &actionv1.WorkloadState{UID: "uid", ResourceVersion: "1", Generation: 1, ObservedGeneration: 1, DesiredReplicas: 1, ObservedReplicas: 1, ReadyReplicas: 1}}
+	state := actionv1.CurrentState{SchemaVersion: actionv1.SchemaVersion, ProjectID: "p1", Target: actionv1.TargetIdentity{ProjectID: "p1", NodeID: "n1", ServiceID: "s1", EnvironmentID: "prod", RuntimeID: "runtime-1"}, Workload: &actionv1.WorkloadState{UID: "uid", ResourceVersion: "1", Generation: 1, ObservedGeneration: 1, DesiredReplicas: 1, ObservedReplicas: 1, ReadyReplicas: 1}}
 	state.StateHash, _ = actionv1.StateHash(state)
 	return state
 }

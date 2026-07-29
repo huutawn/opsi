@@ -9,7 +9,14 @@ and lint still pass; this does not alter ActionPlane source correctness.
 
 ## Native keychain acceptance
 
-Linux Secret Service behavior is covered with an injected fake `secret-tool`
-runner, and macOS Keychain source cross-builds without putting private material
-in argv. A real unlocked macOS Keychain was not available, so live native
-Keychain acceptance remains deferred with the R5-017 manual environment work.
+Linux Secret Service is the ActionPlane secure backend covered by source tests
+with an injected fake `secret-tool` runner. Private keys and pending grants are
+sent through stdin and have no plaintext fallback.
+
+A real unlocked macOS Keychain was not available. Cross-build does not prove
+that `security add-generic-password` durably stores stdin, so R5-016 makes no
+macOS ActionPlane secure-storage claim. Darwin private-key and pending-grant
+operations now fail closed with `ErrActionStoreUnverified`; PAT operations keep
+their existing behavior. Native macOS acceptance must verify store/get/delete,
+locked-keychain errors, timeout behavior, restart persistence, cleanup retry,
+and absence of secrets in argv/output before this backend gap can be closed.

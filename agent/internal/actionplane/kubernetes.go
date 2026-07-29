@@ -6,12 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 )
+
+var ErrFactualStateUnavailable = errors.New("factual state is unavailable")
+
+var errOwnershipMismatch = errors.New("Kubernetes ownership or backend identity mismatch")
 
 type KubernetesRuntime struct {
 	Runner        deploy.CommandRunner
@@ -38,38 +44,38 @@ func (k KubernetesRuntime) CurrentState(ctx context.Context, target actionv1.Tar
 	}
 	identity, err := k.identity(ctx, target)
 	if err != nil {
-		return actionv1.CurrentState{}, err
+		return actionv1.CurrentState{}, fmt.Errorf("%w: %v", ErrFactualStateUnavailable, err)
 	}
 	deployment, err := k.get(ctx, "deployment", identity.DeploymentName, identity.Namespace, "")
 	if err != nil {
-		return actionv1.CurrentState{}, err
+		return actionv1.CurrentState{}, fmt.Errorf("%w: %v", ErrFactualStateUnavailable, err)
 	}
 	pods, err := k.get(ctx, "pods", "", identity.Namespace, selector(identity.Selector))
 	if err != nil {
-		return actionv1.CurrentState{}, err
+		return actionv1.CurrentState{}, fmt.Errorf("%w: %v", ErrFactualStateUnavailable, err)
 	}
-	metadata, _ := deployment["metadata"].(map[string]any)
-	labels, _ := metadata["labels"].(map[string]any)
-	if !owned(labels, target) {
-		return actionv1.CurrentState{}, errors.New("Kubernetes workload is not Opsi-owned")
-	}
-	spec, _ := deployment["spec"].(map[string]any)
-	status, _ := deployment["status"].(map[string]any)
-	template, _ := spec["template"].(map[string]any)
-	templateMetadata, _ := template["metadata"].(map[string]any)
-	templateAnnotations, _ := templateMetadata["annotations"].(map[string]any)
-	state := actionv1.CurrentState{SchemaVersion: actionv1.SchemaVersion, ProjectID: target.ProjectID, Target: target, Workload: &actionv1.WorkloadState{UID: stringValue(metadata["uid"]), ResourceVersion: stringValue(metadata["resourceVersion"]), Generation: int64Value(metadata["generation"]), ObservedGeneration: int64Value(status["observedGeneration"]), DesiredReplicas: int32Value(spec["replicas"]), ObservedReplicas: int32Value(status["availableReplicas"]), ReadyReplicas: readyPods(pods), RestartToken: stringValue(templateAnnotations["opsi.dev/restarted-at"])}}
-	if identity.Snapshot != nil && identity.Snapshot.Runtime.HasExternalExposure() {
-		ingressName := identity.IngressName
-		if ingressName == "" {
-			ingressName = stableIngressName(target)
+	workload, err := workloadState(deployment, pods, identity, target)
+	if err != nil {
+		if errors.Is(err, errOwnershipMismatch) {
+			return actionv1.CurrentState{}, err
 		}
-		gateway, gatewayErr := k.get(ctx, "ingress", ingressName, identity.Namespace, "")
-		if gatewayErr == nil {
-			gatewayMetadata, _ := gateway["metadata"].(map[string]any)
-			annotations, _ := gatewayMetadata["annotations"].(map[string]any)
-			gatewayLabels, _ := gatewayMetadata["labels"].(map[string]any)
-			state.Gateway = &actionv1.GatewayState{UID: stringValue(gatewayMetadata["uid"]), ResourceVersion: stringValue(gatewayMetadata["resourceVersion"]), SpecHash: stringValue(annotations["opsi.dev/spec-hash"]), BackendServiceID: identity.ServiceName, Owned: owned(gatewayLabels, target)}
+		return actionv1.CurrentState{}, fmt.Errorf("%w: %v", ErrFactualStateUnavailable, err)
+	}
+	state := actionv1.CurrentState{SchemaVersion: actionv1.SchemaVersion, ProjectID: target.ProjectID, Target: target, Workload: workload}
+	if identity.Snapshot != nil && identity.Snapshot.Runtime.HasExternalExposure() {
+		if identity.IngressName == "" {
+			return actionv1.CurrentState{}, fmt.Errorf("%w: authoritative ingress identity is missing", ErrFactualStateUnavailable)
+		}
+		gateway, gatewayErr := k.get(ctx, "ingress", identity.IngressName, identity.Namespace, "")
+		if gatewayErr != nil {
+			return actionv1.CurrentState{}, fmt.Errorf("%w: %v", ErrFactualStateUnavailable, gatewayErr)
+		}
+		state.Gateway, err = gatewayState(gateway, identity)
+		if err != nil {
+			if errors.Is(err, errOwnershipMismatch) {
+				return actionv1.CurrentState{}, err
+			}
+			return actionv1.CurrentState{}, fmt.Errorf("%w: %v", ErrFactualStateUnavailable, err)
 		}
 	}
 	state.StateHash, err = actionv1.StateHash(state)
@@ -169,10 +175,22 @@ func (k KubernetesRuntime) PostCheck(ctx context.Context, target actionv1.Target
 }
 
 func (k KubernetesRuntime) identity(ctx context.Context, target actionv1.TargetIdentity) (deploy.ActionWorkloadIdentity, error) {
-	if k.Projection != nil {
-		return k.Projection.WorkloadIdentity(ctx, target)
+	if k.Projection == nil {
+		return deploy.ActionWorkloadIdentity{}, errors.New("authoritative ActionProjection is unavailable")
 	}
-	return deploy.ActionWorkloadIdentity{Namespace: stableNamespace(target), DeploymentName: stableDeployment(target), ServiceName: stableDeployment(target), IngressName: stableIngressName(target), Selector: deploy.ActionOwnershipLabels(target)}, nil
+	identity, err := k.Projection.WorkloadIdentity(ctx, target)
+	if err != nil {
+		return deploy.ActionWorkloadIdentity{}, err
+	}
+	for _, key := range []string{"app.kubernetes.io/managed-by", "opsi.dev/project", "opsi.dev/environment", "opsi.dev/service", "opsi.dev/runtime"} {
+		if identity.Selector[key] == "" {
+			return deploy.ActionWorkloadIdentity{}, errors.New("authoritative Kubernetes selector is incomplete")
+		}
+	}
+	if identity.Namespace == "" || identity.DeploymentName == "" || identity.ServiceName == "" || identity.Snapshot == nil {
+		return deploy.ActionWorkloadIdentity{}, errors.New("authoritative Kubernetes identity is incomplete")
+	}
+	return identity, nil
 }
 
 func (k KubernetesRuntime) run(parent context.Context, input []byte, args ...string) ([]byte, error) {
@@ -204,20 +222,7 @@ func (k KubernetesRuntime) get(ctx context.Context, kind, name, namespace, selec
 	if err != nil {
 		return nil, err
 	}
-	if len(output) > deploy.MaxCommandOutputBytes {
-		return nil, errors.New("Kubernetes output exceeded bound")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(output))
-	decoder.UseNumber()
-	var value map[string]any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, errors.New("Kubernetes returned invalid JSON")
-	}
-	var extra any
-	if decoder.Decode(&extra) == nil {
-		return nil, errors.New("Kubernetes returned multiple JSON values")
-	}
-	return value, nil
+	return decodeKubernetesJSON(output)
 }
 
 func (k KubernetesRuntime) path() string {
@@ -226,34 +231,39 @@ func (k KubernetesRuntime) path() string {
 	}
 	return "kubectl"
 }
-func stableNamespace(target actionv1.TargetIdentity) string {
-	return "opsi-" + safePart(target.ProjectID) + "-" + safePart(target.EnvironmentID)
-}
-func stableDeployment(target actionv1.TargetIdentity) string {
-	return "opsi-" + safePart(target.ServiceID) + "-" + safePart(target.RuntimeID)
-}
-func stableIngressName(target actionv1.TargetIdentity) string {
-	return "opsi-ingress-" + safePart(target.ServiceID) + "-" + safePart(target.RuntimeID)
-}
-func safePart(value string) string {
-	value = strings.ToLower(value)
-	value = strings.NewReplacer("_", "-", "/", "-", " ", "-").Replace(value)
-	if len(value) > 40 {
-		value = value[:40]
-	}
-	return strings.Trim(value, "-")
-}
 func selector(values map[string]string) string {
-	return "app.kubernetes.io/managed-by=" + values["app.kubernetes.io/managed-by"] + ",opsi.dev/project=" + values["opsi.dev/project"]
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+values[key])
+	}
+	return strings.Join(parts, ",")
 }
-func owned(labels map[string]any, target actionv1.TargetIdentity) bool {
-	return stringValue(labels["app.kubernetes.io/managed-by"]) == "opsi" && stringValue(labels["opsi.dev/project"]) == safePart(target.ProjectID)
+func owned(labels map[string]any, expected map[string]string) bool {
+	for key, value := range expected {
+		if stringValue(labels[key]) != value {
+			return false
+		}
+	}
+	return true
 }
-func readyPods(pods map[string]any) int32 {
-	items, _ := pods["items"].([]any)
+func readyPods(pods map[string]any, expected map[string]string) (int32, error) {
+	items, ok := pods["items"].([]any)
+	if !ok {
+		return 0, errors.New("Kubernetes Pod list is invalid")
+	}
 	var ready int32
 	for _, item := range items {
 		raw, _ := item.(map[string]any)
+		metadata, _ := raw["metadata"].(map[string]any)
+		labels, _ := metadata["labels"].(map[string]any)
+		if !owned(labels, expected) {
+			continue
+		}
 		status, _ := raw["status"].(map[string]any)
 		statuses, _ := status["containerStatuses"].([]any)
 		for _, value := range statuses {
@@ -263,20 +273,146 @@ func readyPods(pods map[string]any) int32 {
 			}
 		}
 	}
-	return ready
+	return ready, nil
 }
 func stringValue(value any) string { result, _ := value.(string); return result }
-func int64Value(value any) int64 {
-	switch number := value.(type) {
-	case json.Number:
-		v, _ := number.Int64()
-		return v
-	case float64:
-		return int64(number)
-	case int64:
-		return number
+func requiredString(value any, field string) (string, error) {
+	result, ok := value.(string)
+	if !ok || strings.TrimSpace(result) == "" {
+		return "", fmt.Errorf("Kubernetes %s is missing or invalid", field)
 	}
-	return 0
+	return result, nil
 }
-func int32Value(value any) int32 { return int32(int64Value(value)) }
-func boolValue(value any) bool   { value, _ = value.(bool); result, _ := value.(bool); return result }
+func numberValue(value any, field string, required bool) (int64, error) {
+	if value == nil && !required {
+		return 0, nil
+	}
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, fmt.Errorf("Kubernetes %s is missing or invalid", field)
+	}
+	result, err := number.Int64()
+	if err != nil {
+		return 0, fmt.Errorf("Kubernetes %s is malformed", field)
+	}
+	return result, nil
+}
+func boolValue(value any) bool { value, _ = value.(bool); result, _ := value.(bool); return result }
+
+func decodeKubernetesJSON(output []byte) (map[string]any, error) {
+	if len(output) > deploy.MaxCommandOutputBytes {
+		return nil, errors.New("Kubernetes output exceeded bound")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.UseNumber()
+	var value map[string]any
+	if err := decoder.Decode(&value); err != nil || value == nil {
+		return nil, errors.New("Kubernetes returned invalid JSON")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("Kubernetes returned trailing data")
+	}
+	return value, nil
+}
+
+func workloadState(deployment, pods map[string]any, identity deploy.ActionWorkloadIdentity, _ actionv1.TargetIdentity) (*actionv1.WorkloadState, error) {
+	metadata, ok := deployment["metadata"].(map[string]any)
+	if !ok {
+		return nil, errors.New("Kubernetes Deployment metadata is invalid")
+	}
+	labels, _ := metadata["labels"].(map[string]any)
+	if !owned(labels, identity.Selector) {
+		return nil, errOwnershipMismatch
+	}
+	uid, err := requiredString(metadata["uid"], "Deployment metadata.uid")
+	if err != nil {
+		return nil, err
+	}
+	resourceVersion, err := requiredString(metadata["resourceVersion"], "Deployment metadata.resourceVersion")
+	if err != nil {
+		return nil, err
+	}
+	generation, err := numberValue(metadata["generation"], "Deployment metadata.generation", true)
+	if err != nil {
+		return nil, err
+	}
+	spec, ok := deployment["spec"].(map[string]any)
+	if !ok {
+		return nil, errors.New("Kubernetes Deployment spec is invalid")
+	}
+	desired, err := numberValue(spec["replicas"], "Deployment spec.replicas", true)
+	if err != nil || desired < 0 || desired > int64(actionv1.MaxReplicas) {
+		return nil, errors.New("Kubernetes Deployment replicas are invalid")
+	}
+	status, _ := deployment["status"].(map[string]any)
+	observedGeneration, err := numberValue(status["observedGeneration"], "Deployment status.observedGeneration", false)
+	if err != nil {
+		return nil, err
+	}
+	available, err := numberValue(status["availableReplicas"], "Deployment status.availableReplicas", false)
+	if err != nil || available < 0 || available > int64(actionv1.MaxReplicas) {
+		return nil, errors.New("Kubernetes Deployment availableReplicas are invalid")
+	}
+	ready, err := readyPods(pods, identity.Selector)
+	if err != nil {
+		return nil, err
+	}
+	template, _ := spec["template"].(map[string]any)
+	templateMetadata, _ := template["metadata"].(map[string]any)
+	annotations, _ := templateMetadata["annotations"].(map[string]any)
+	return &actionv1.WorkloadState{UID: uid, ResourceVersion: resourceVersion, Generation: generation, ObservedGeneration: observedGeneration, DesiredReplicas: int32(desired), ObservedReplicas: int32(available), ReadyReplicas: ready, RestartToken: stringValue(annotations["opsi.dev/restarted-at"])}, nil
+}
+
+func gatewayState(ingress map[string]any, identity deploy.ActionWorkloadIdentity) (*actionv1.GatewayState, error) {
+	metadata, ok := ingress["metadata"].(map[string]any)
+	if !ok {
+		return nil, errors.New("Kubernetes Ingress metadata is invalid")
+	}
+	labels, _ := metadata["labels"].(map[string]any)
+	if !owned(labels, identity.Selector) || !ingressBackendMatches(ingress, identity.ServiceName) {
+		return nil, errOwnershipMismatch
+	}
+	uid, err := requiredString(metadata["uid"], "Ingress metadata.uid")
+	if err != nil {
+		return nil, err
+	}
+	resourceVersion, err := requiredString(metadata["resourceVersion"], "Ingress metadata.resourceVersion")
+	if err != nil {
+		return nil, err
+	}
+	generation, err := numberValue(metadata["generation"], "Ingress metadata.generation", true)
+	if err != nil {
+		return nil, err
+	}
+	annotations, _ := metadata["annotations"].(map[string]any)
+	return &actionv1.GatewayState{UID: uid, ResourceVersion: resourceVersion, Generation: generation, SpecHash: stringValue(annotations["opsi.dev/spec-hash"]), BackendServiceID: identity.ServiceName, Owned: true}, nil
+}
+
+func ingressBackendMatches(ingress map[string]any, serviceName string) bool {
+	spec, _ := ingress["spec"].(map[string]any)
+	if backend, ok := spec["defaultBackend"].(map[string]any); ok && !backendServiceMatches(backend, serviceName) {
+		return false
+	}
+	rules, _ := spec["rules"].([]any)
+	found := false
+	for _, ruleValue := range rules {
+		rule, _ := ruleValue.(map[string]any)
+		httpValue, _ := rule["http"].(map[string]any)
+		paths, _ := httpValue["paths"].([]any)
+		for _, pathValue := range paths {
+			path, _ := pathValue.(map[string]any)
+			backend, _ := path["backend"].(map[string]any)
+			if !backendServiceMatches(backend, serviceName) {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
+}
+
+func backendServiceMatches(backend map[string]any, serviceName string) bool {
+	service, _ := backend["service"].(map[string]any)
+	return stringValue(service["name"]) == serviceName
+}

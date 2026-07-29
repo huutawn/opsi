@@ -25,18 +25,24 @@ display name, Ed25519 public key/fingerprint, active/revoked state, timestamps,
 trusted actor, and idempotency identity. It never receives a private key,
 ApprovalGrant, action body, runtime output, or runtime execution authority.
 
-CLI generates and retains the private key in Linux Secret Service or macOS
-Keychain without plaintext fallback. Preflight, approval, and execution are
-separate process invocations. Approval requires a TTY and exact phrase; execute
-retrieves the pending grant from secure storage and removes it after a terminal
-result.
+CLI generates and retains ActionPlane private keys and pending grants in Linux
+Secret Service without plaintext fallback. The Darwin CLI still cross-builds,
+but Darwin ActionPlane secret operations fail closed with an explicit unverified
+backend error until native Keychain acceptance exists; PAT behavior is unchanged.
+Preflight, approval, and execution are separate process invocations. Approval
+requires a TTY and exact phrase. Execute removes the pending grant before
+reporting cleanup success; a deletion failure returns the factual remote status
+with `ACTION_SECURE_CLEANUP_REQUIRED`, and an exact replay retries cleanup.
 
-Agent is the execution authority. It verifies project/principal/device and
-Ed25519 signature, enforces expiry/nonce/hash/risk policy, locks per target,
-rechecks factual state inside the lock, executes one internally constructed
-typed operation, performs a post-check, and persists the terminal result and
-audit before releasing the lock. Resolver failure, R4 risk, stale state,
-replay, and ownership mismatch fail closed.
+Agent is the execution authority. One SQLite transaction reserves execution,
+checks exact/conflicting replay, acquires the target lock, persists the approved
+principal/device/grant hash, and creates at most one approved event. Mutation
+starts only after a guarded transition persists nonce consumption and execution
+start time. Terminal persistence is guarded and releases the lock atomically.
+After restart, executing actions stay unresolved and locked until read-only
+factual state plus the bounded post-check proves success or failure; recovery
+never calls an executor. Resolver failure, R4 risk, stale state, replay, and full
+Kubernetes ownership/backend mismatch fail closed.
 
 Deploy, retry, and rollback remain exclusively on the canonical path:
 
@@ -52,7 +58,8 @@ approve/execute route is allowed.
 ## Evidence And Limits
 
 R5-016 uses fake Agent/Cloud/Kubernetes adapters, existing Agent SQLite,
-disposable PostgreSQL 16 for device durability, race tests, and four-platform
-CLI cross-builds. UI approval, browser testing, live Agent/K3s acceptance, and
-full manual E2E are deferred to R5-017. MCP/AI remain later work. This decision
-does not make R5-012, R5-017, MCP, AI, or production readiness complete.
+disposable PostgreSQL 16 for device durability, race tests, Linux Secret Service
+source tests, and four-platform CLI cross-builds. macOS native ActionPlane
+Keychain acceptance, UI approval, browser testing, live Agent/K3s acceptance,
+and full manual E2E are deferred to R5-017. MCP/AI remain later work. This
+decision does not make R5-012, R5-017, MCP, AI, or production readiness complete.

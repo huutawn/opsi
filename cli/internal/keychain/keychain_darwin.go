@@ -20,15 +20,17 @@ func (s *OSStore) SetPAT(value string) error { return s.set(patKey, []byte(value
 func (s *OSStore) GetPAT() (string, error)   { value, err := s.get(patKey); return string(value), err }
 func (s *OSStore) DeletePAT() error          { return s.delete(patKey) }
 func (s *OSStore) SetActionPrivateKey(id string, value []byte) error {
-	return s.set("private:"+id, value)
+	return ErrActionStoreUnverified
 }
-func (s *OSStore) GetActionPrivateKey(id string) ([]byte, error) { return s.get("private:" + id) }
-func (s *OSStore) DeleteActionPrivateKey(id string) error        { return s.delete("private:" + id) }
+func (s *OSStore) GetActionPrivateKey(id string) ([]byte, error) {
+	return nil, ErrActionStoreUnverified
+}
+func (s *OSStore) DeleteActionPrivateKey(id string) error { return ErrActionStoreUnverified }
 func (s *OSStore) SetPendingApproval(id string, value []byte) error {
-	return s.set("pending:"+id, value)
+	return ErrActionStoreUnverified
 }
-func (s *OSStore) GetPendingApproval(id string) ([]byte, error) { return s.get("pending:" + id) }
-func (s *OSStore) DeletePendingApproval(id string) error        { return s.delete("pending:" + id) }
+func (s *OSStore) GetPendingApproval(id string) ([]byte, error) { return nil, ErrActionStoreUnverified }
+func (s *OSStore) DeletePendingApproval(id string) error        { return ErrActionStoreUnverified }
 
 func (s *OSStore) set(key string, value []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)

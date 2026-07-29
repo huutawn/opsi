@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -102,10 +103,88 @@ func TestActionApproveAndExecuteUseSecureStoreWithoutGrantOutput(t *testing.T) {
 	}
 }
 
+type cleanupFailStore struct {
+	*keychain.FakeStore
+	fail bool
+}
+
+func (s *cleanupFailStore) DeletePendingApproval(id string) error {
+	if s.fail {
+		return errors.New("delete failed")
+	}
+	return s.FakeStore.DeletePendingApproval(id)
+}
+
+func TestActionExecuteReportsFactualResultWhenSecureCleanupFailsAndRetries(t *testing.T) {
+	service := &commandActionServer{}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	actionv1.RegisterActionServiceServer(server, service)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	if err := os.WriteFile(configPath, []byte("agent_addr: "+listener.Addr().String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &cleanupFailStore{FakeStore: keychain.NewFakeStore(), fail: true}
+	if err := store.SetPAT("pat"); err != nil {
+		t.Fatal(err)
+	}
+	grant := actionv1.ApprovalGrant{SchemaVersion: actionv1.SchemaVersion, ChallengeID: "challenge-1", ActionID: "action-1", ProjectID: "p1", DeviceID: "device-1"}
+	body, err := json.Marshal(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPendingApproval("challenge-1", body); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{KeychainFactory: func() (keychain.Store, error) { return store, nil }}
+
+	first := NewRootCommand(options)
+	var output bytes.Buffer
+	first.SetOut(&output)
+	first.SetErr(&output)
+	first.SetArgs([]string{"--config", configPath, "action", "execute", "challenge-1", "--project-id", "p1"})
+	if err := first.Execute(); !errors.Is(err, ErrActionSecureCleanupRequired) {
+		t.Fatalf("cleanup error=%v output=%s", err, output.String())
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(output.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt) != 4 || receipt["status"] != string(actionv1.StatusSucceeded) || receipt["action_id"] != "action-1" || receipt["challenge_id"] != "challenge-1" || receipt["secure_cleanup_required"] != true {
+		t.Fatalf("cleanup receipt=%v", receipt)
+	}
+	if strings.Contains(output.String(), "signature") || strings.Contains(output.String(), "device_id") || strings.Contains(output.String(), "project_id") {
+		t.Fatalf("cleanup receipt leaked grant fields: %s", output.String())
+	}
+
+	store.fail = false
+	second := NewRootCommand(options)
+	output.Reset()
+	second.SetOut(&output)
+	second.SetErr(&output)
+	second.SetArgs([]string{"--config", configPath, "action", "execute", "challenge-1", "--project-id", "p1"})
+	if err := second.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if service.executeRPCs != 2 || service.executorCalls != 1 {
+		t.Fatalf("rpc=%d executor=%d", service.executeRPCs, service.executorCalls)
+	}
+	if _, err := store.GetPendingApproval("challenge-1"); !errors.Is(err, keychain.ErrActionSecretNotFound) {
+		t.Fatalf("pending grant remains: %v", err)
+	}
+}
+
 type commandActionServer struct {
 	actionv1.UnimplementedActionServiceServer
 	authorization string
 	request       *actionv1.ExecuteRequest
+	executeRPCs   int
+	executorCalls int
 }
 
 func (s *commandActionServer) GetChallenge(ctx context.Context, _ *actionv1.ChallengeRequest) (*actionv1.ApprovalChallenge, error) {
@@ -117,6 +196,10 @@ func (s *commandActionServer) GetChallenge(ctx context.Context, _ *actionv1.Chal
 func (s *commandActionServer) Execute(ctx context.Context, request *actionv1.ExecuteRequest) (*actionv1.ActionResult, error) {
 	s.capture(ctx)
 	s.request = request
+	s.executeRPCs++
+	if s.executeRPCs == 1 {
+		s.executorCalls++
+	}
 	return &actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: "action-1", ChallengeID: "challenge-1", ProjectID: "p1", Status: actionv1.StatusSucceeded, FinishedAt: time.Now().UTC()}, nil
 }
 

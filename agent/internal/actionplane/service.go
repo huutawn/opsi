@@ -100,13 +100,17 @@ func (s *Service) Preflight(ctx context.Context, request *actionv1.PreflightRequ
 		return nil, err
 	}
 	plan := actionv1.ActionPlan{SchemaVersion: actionv1.SchemaVersion, ID: "action-" + actionID, ProjectID: request.ProjectID, NodeID: request.NodeID, ServiceID: request.ServiceID, Target: request.Target, Kind: request.Kind, Parameters: request.Parameters, Origin: actionv1.OriginManualCLI, RequestedBy: principal.UserID, Risk: risk, Preconditions: preconditions(request.Kind), Postconditions: postconditions(request.Kind), CurrentStateHash: state.StateHash, IssuedAt: now, ExpiresAt: now.Add(actionv1.MaxPlanTTL)}
-	if err := plan.Validate(now); err != nil { return nil, err }
+	if err := plan.Validate(now); err != nil {
+		return nil, err
+	}
 	plan.PlanHash, err = actionv1.PlanHash(plan)
 	if err != nil {
 		return nil, err
 	}
 	challenge := actionv1.ApprovalChallenge{SchemaVersion: actionv1.SchemaVersion, ID: "challenge-" + challengeID, ActionID: plan.ID, ProjectID: plan.ProjectID, PlanHash: plan.PlanHash, StateHash: state.StateHash, Nonce: nonce, Risk: risk, Target: plan.Target, Summary: actionSummary(plan), Preconditions: append([]actionv1.Condition(nil), plan.Preconditions...), ConfirmationPhrase: "APPROVE " + plan.ID, IssuedAt: now, ExpiresAt: now.Add(actionv1.MaxChallengeTTL)}
-	if err := challenge.Validate(now); err != nil { return nil, err }
+	if err := challenge.Validate(now); err != nil {
+		return nil, err
+	}
 	if err := s.Store.Create(ctx, plan, state, challenge); err != nil {
 		return nil, err
 	}
@@ -185,20 +189,23 @@ func (s *Service) Execute(ctx context.Context, request *actionv1.ExecuteRequest)
 	if len(device.PublicKey) != ed25519.PublicKeySize || !ed25519.Verify(ed25519.PublicKey(device.PublicKey), signingBytes, request.Grant.Signature) {
 		return s.rejectAndPersist(ctx, record, grantHash, actionv1.FailureSignatureInvalid, "approval signature is invalid")
 	}
-	if err := s.Store.MarkApproved(ctx, record.Plan.ProjectID, record.Challenge.ID); err != nil {
+	reservation, err := s.Store.ReserveExecution(ctx, record.Plan.ProjectID, record.Challenge.ID, grantHash, principal.UserID, device.ID)
+	if err != nil {
 		return nil, err
 	}
-	record.Status = actionv1.StatusApproved
-	if err := s.Store.TryLock(ctx, record.Plan.Target.Key(), record.Plan.ID); err != nil {
-		if errors.Is(err, ErrActionInProgress) {
-			return &actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: record.Plan.ID, ChallengeID: record.Challenge.ID, ProjectID: record.Plan.ProjectID, Status: actionv1.StatusExecuting}, nil
-		}
-		record.GrantHash = grantHash
-		result := rejection(record, actionv1.FailureTargetLocked, "action target is locked", s.clock())
-		if completeErr := s.Store.Complete(ctx, record, *result); completeErr != nil {
-			return nil, completeErr
-		}
-		return result, nil
+	switch reservation.Outcome {
+	case ReservationExactReplay:
+		return &reservation.Record.Result, nil
+	case ReservationReplayConflict:
+		return nil, ErrReplayConflict
+	case ReservationSameInProgress:
+		return inProgress(reservation.Record), nil
+	case ReservationTargetLocked:
+		return s.finish(ctx, reservation.Record, grantHash, actionv1.StatusRejected, actionv1.FailureTargetLocked, "action target is locked", principal.UserID, device.ID, actionv1.CurrentState{})
+	case ReservationAcquired:
+		record = reservation.Record
+	default:
+		return nil, errors.New("ActionPlane reservation returned an invalid outcome")
 	}
 	current, err := s.Runtime.CurrentState(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters)
 	if err != nil {
@@ -206,33 +213,74 @@ func (s *Service) Execute(ctx context.Context, request *actionv1.ExecuteRequest)
 	}
 	currentHash, err := actionv1.StateHash(current)
 	if err != nil {
-		return nil, err
+		return s.finish(ctx, record, grantHash, actionv1.StatusFailed, actionv1.FailureExecution, "state recheck could not be hashed", principal.UserID, device.ID, actionv1.CurrentState{})
 	}
 	if currentHash != record.Challenge.StateHash {
 		return s.finish(ctx, record, grantHash, actionv1.StatusRejected, actionv1.FailureStateStale, "factual state changed after approval", principal.UserID, device.ID, current)
 	}
-	record, err = s.Store.BeginExecution(ctx, record.Plan.ProjectID, record.Challenge.ID, grantHash)
+	started := s.clock()
+	record, err = s.Store.BeginExecution(ctx, record, started)
 	if err != nil {
-		if errors.Is(err, ErrNonceConsumed) {
-			latest, loadErr := s.Store.Load(ctx, record.Plan.ProjectID, record.Challenge.ID)
-			if loadErr == nil && latest.Result.ActionID != "" && latest.GrantHash == grantHash {
-				return &latest.Result, nil
-			}
-		}
 		return nil, err
 	}
 	if record.Status.Terminal() {
 		return &record.Result, nil
 	}
-	started := s.clock()
-	if err := executeTyped(withApprovedPrincipal(ctx, principal.UserID), s.Runtime, record.Plan); err != nil {
-		return s.finishAt(ctx, record, actionv1.StatusFailed, actionv1.FailureExecution, "typed action execution failed", principal.UserID, device.ID, actionv1.CurrentState{}, started)
-	}
+	executionErr := executeTyped(withApprovedPrincipal(ctx, principal.UserID), s.Runtime, record.Plan)
 	post, err := s.Runtime.PostCheck(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters, current)
 	if err != nil {
+		if errors.Is(err, ErrFactualStateUnavailable) {
+			return inProgress(record), nil
+		}
 		return s.finishAt(ctx, record, actionv1.StatusFailed, actionv1.FailurePostCheck, "action post-check failed", principal.UserID, device.ID, post, started)
 	}
+	if executionErr != nil {
+		return s.finishAt(ctx, record, actionv1.StatusSucceeded, "", "action succeeded; executor error was superseded by factual post-check", principal.UserID, device.ID, post, started)
+	}
 	return s.finishAt(ctx, record, actionv1.StatusSucceeded, "", "action succeeded", principal.UserID, device.ID, post, started)
+}
+
+func (s *Service) Recover(ctx context.Context) error {
+	if s.Store == nil || s.Runtime == nil {
+		return errors.New("ActionPlane recovery is unavailable")
+	}
+	records, err := s.Store.Recoverable(ctx)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		now := s.clock()
+		if record.Status == actionv1.StatusApproved && !record.NonceConsumed {
+			result := actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: record.Plan.ID, ChallengeID: record.Challenge.ID, ProjectID: record.Plan.ProjectID, Status: actionv1.StatusRejected, FailureCode: actionv1.FailureInterruptedPreMutation, Message: "approved reservation was interrupted before mutation", ApprovedBy: record.ApprovedBy, DeviceID: record.DeviceID, FinishedAt: now}
+			if _, err := s.Store.Complete(ctx, record, result); err != nil {
+				return err
+			}
+			continue
+		}
+		if record.Status != actionv1.StatusExecuting || !record.NonceConsumed {
+			continue
+		}
+		if _, err := s.Runtime.CurrentState(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters); errors.Is(err, ErrFactualStateUnavailable) {
+			continue
+		}
+		post, postErr := s.Runtime.PostCheck(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters, record.State)
+		if errors.Is(postErr, ErrFactualStateUnavailable) {
+			continue
+		}
+		status, failure, message := actionv1.StatusSucceeded, actionv1.FailureCode(""), "action result recovered after Agent restart"
+		if postErr != nil {
+			status, failure, message = actionv1.StatusFailed, actionv1.FailurePostCheck, "action post-check failed after Agent restart"
+		}
+		postHash := ""
+		if post.SchemaVersion != "" {
+			postHash, _ = actionv1.StateHash(post)
+		}
+		result := actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: record.Plan.ID, ChallengeID: record.Challenge.ID, ProjectID: record.Plan.ProjectID, Status: status, FailureCode: failure, Message: message, ApprovedBy: record.ApprovedBy, DeviceID: record.DeviceID, StartedAt: record.ExecutionStartedAt, FinishedAt: now, PostStateHash: postHash}
+		if _, err := s.Store.Complete(ctx, record, result); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) Status(ctx context.Context, request *actionv1.StatusRequest) (*actionv1.ActionResult, error) {
@@ -267,10 +315,11 @@ func (s *Service) finishAt(ctx context.Context, record Record, status actionv1.A
 		postHash, _ = actionv1.StateHash(post)
 	}
 	result := actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: record.Plan.ID, ChallengeID: record.Challenge.ID, ProjectID: record.Plan.ProjectID, Status: status, FailureCode: failure, Message: message, ApprovedBy: approvedBy, DeviceID: deviceID, StartedAt: started, FinishedAt: s.clock(), PostStateHash: postHash}
-	if err := s.Store.Complete(ctx, record, result); err != nil {
+	persisted, err := s.Store.Complete(ctx, record, result)
+	if err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return &persisted.Result, nil
 }
 
 func (s *Service) principal(ctx context.Context, projectID string) (Principal, error) {
@@ -314,10 +363,15 @@ func rejection(record Record, code actionv1.FailureCode, message string, now tim
 func (s *Service) rejectAndPersist(ctx context.Context, record Record, grantHash string, code actionv1.FailureCode, message string) (*actionv1.ActionResult, error) {
 	record.GrantHash = grantHash
 	result := rejection(record, code, message, s.clock())
-	if err := s.Store.Complete(ctx, record, *result); err != nil {
+	persisted, err := s.Store.Complete(ctx, record, *result)
+	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	return &persisted.Result, nil
+}
+
+func inProgress(record Record) *actionv1.ActionResult {
+	return &actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: record.Plan.ID, ChallengeID: record.Challenge.ID, ProjectID: record.Plan.ProjectID, Status: record.Status, ApprovedBy: record.ApprovedBy, DeviceID: record.DeviceID, StartedAt: record.ExecutionStartedAt}
 }
 func approvalHash(grant actionv1.ApprovalGrant) (string, error) {
 	body, err := actionv1.CanonicalJSON(grant)

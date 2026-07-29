@@ -34,7 +34,7 @@ func (p ActionProjection) WorkloadIdentity(ctx context.Context, target actionv1.
 	if err != nil {
 		return ActionWorkloadIdentity{}, err
 	}
-	if snapshot == nil || snapshot.Target.ProjectID != target.ProjectID || snapshot.Target.NodeID != target.NodeID || snapshot.Target.ServiceKey != target.ServiceID {
+	if snapshot == nil || !actionTargetMatches(snapshot.Target, target) || !actionTargetMatches(snapshot.Runtime.Target, target) {
 		return ActionWorkloadIdentity{}, errors.New("authoritative workload snapshot not found")
 	}
 	_, resources, namespace, err := renderProductionResources(snapshot.Runtime.AgentCommand())
@@ -70,6 +70,6 @@ func (p ActionProjection) ReconcileGateway(ctx context.Context, target actionv1.
 	return errors.New("authoritative gateway object is missing")
 }
 
-func ActionOwnershipLabels(target actionv1.TargetIdentity) map[string]string {
-	return map[string]string{"app.kubernetes.io/managed-by": "opsi", "opsi.dev/project": safeLabel(target.ProjectID), "opsi.dev/service": safeLabel(target.ServiceID), "opsi.dev/runtime": safeLabel(target.RuntimeID)}
+func actionTargetMatches(snapshot deploymentv1.RuntimeTarget, target actionv1.TargetIdentity) bool {
+	return snapshot.ProjectID == target.ProjectID && snapshot.NodeID == target.NodeID && snapshot.ServiceKey == target.ServiceID && snapshot.EnvironmentID == target.EnvironmentID && snapshot.RuntimeID == target.RuntimeID
 }

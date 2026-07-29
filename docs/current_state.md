@@ -9,6 +9,16 @@ R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
 
+ActionPlane execution uses one atomic SQLite reservation and guarded terminal
+transition. Restart recovery never re-executes a mutation: unresolved executions
+retain their target lock until factual state and a bounded post-check prove a
+terminal result. Workload/gateway reads require an authoritative known-good
+projection, full project/environment/service/runtime ownership, exact Ingress
+backend identity, and strict single-value bounded Kubernetes JSON. Linux Secret
+Service is source-tested for ActionPlane secrets. Darwin ActionPlane private-key
+and pending-grant operations fail closed as an unverified backend; only the CLI
+cross-build is claimed, while PAT behavior remains unchanged.
+
 The canonical UI matrix is `docs/manual_ui_parity_matrix.md`: 21 supported
 manual capabilities are mapped to relative Local API routes and factual views;
 organization listing, members/RBAC, and secret metadata/listing remain three
@@ -20,7 +30,7 @@ R5-012 remains implemented but live blocked.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-27 |
+| Last updated | 2026-07-29 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |

@@ -70,6 +70,28 @@ func TestActionTypesSurviveJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRuntimeActionsRequireFullIdentityButIncidentResolveDoesNot(t *testing.T) {
+	for _, kind := range []ActionKind{ActionRestartWorkload, ActionScaleWorkload, ActionGatewayReconcile} {
+		request := PreflightRequest{SchemaVersion: SchemaVersion, ProjectID: "p1", NodeID: "n1", ServiceID: "s1", Target: TargetIdentity{ProjectID: "p1", NodeID: "n1", ServiceID: "s1"}, Kind: kind}
+		switch kind {
+		case ActionRestartWorkload:
+			request.Parameters.RestartWorkload = &RestartWorkloadParameters{}
+		case ActionScaleWorkload:
+			request.Parameters.ScaleWorkload = &ScaleWorkloadParameters{Replicas: 1}
+		case ActionGatewayReconcile:
+			request.Parameters.GatewayReconcile = &GatewayReconcileParameters{}
+		}
+		if err := request.Validate(); err == nil {
+			t.Fatalf("%s accepted missing environment/runtime identity", kind)
+		}
+	}
+
+	incident := PreflightRequest{SchemaVersion: SchemaVersion, ProjectID: "p1", NodeID: "n1", ServiceID: "s1", Target: TargetIdentity{ProjectID: "p1", NodeID: "n1", ServiceID: "s1"}, Kind: ActionIncidentResolve, Parameters: ActionParameters{IncidentResolve: &IncidentResolveParameters{IncidentID: "inc-1"}}}
+	if err := incident.Validate(); err != nil {
+		t.Fatalf("incident resolve incorrectly requires Kubernetes runtime identity: %v", err)
+	}
+}
+
 func testPlan() ActionPlan {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	return ActionPlan{

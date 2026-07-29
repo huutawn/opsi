@@ -5,6 +5,11 @@ R5-016 Safe ActionPlane source work is implemented.
 `R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 `R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
+ActionPlane restart recovery is read/post-check only and retains unresolved
+locks; reservation/completion are guarded SQLite transitions. Kubernetes reads
+require authoritative full ownership identity. Linux Secret Service is the
+source-tested ActionPlane backend; Darwin ActionPlane secret operations fail
+closed pending native acceptance, while PAT behavior remains unchanged.
 The canonical mapping is
 `docs/manual_ui_parity_matrix.md`; all 21 R5-013 supported capabilities have a
 Local route/view and the three backend gaps remain disabled. Installed bundles

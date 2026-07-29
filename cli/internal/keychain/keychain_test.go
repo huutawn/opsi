@@ -1,6 +1,10 @@
 package keychain
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestFakeStorePAT(t *testing.T) {
 	store := NewFakeStore()
@@ -55,5 +59,21 @@ func TestFakeStoreActionSecretsAreOpaqueAndDeletable(t *testing.T) {
 	}
 	if _, err := store.GetPendingApproval("challenge-1"); err != ErrActionSecretNotFound {
 		t.Fatalf("pending grant error=%v", err)
+	}
+}
+
+func TestDarwinActionStoreIsExplicitlyUnverifiedAndFailsClosed(t *testing.T) {
+	body, err := os.ReadFile("keychain_darwin.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(body)
+	if strings.Count(source, "return ErrActionStoreUnverified") < 4 {
+		t.Fatalf("Darwin ActionStore still claims native acceptance:\n%s", source)
+	}
+	for _, forbidden := range []string{`s.set("private:"`, `s.set("pending:"`} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("Darwin ActionStore invokes unverified secret persistence: %s", forbidden)
+		}
 	}
 }

@@ -61,23 +61,24 @@ func (s ActionStatus) Terminal() bool {
 type FailureCode string
 
 const (
-	FailureInvalid           FailureCode = "ACTION_INVALID"
-	FailureApprovalRequired  FailureCode = "ACTION_APPROVAL_REQUIRED"
-	FailureR4Prohibited      FailureCode = "ACTION_R4_PROHIBITED"
-	FailureChallengeExpired  FailureCode = "ACTION_CHALLENGE_EXPIRED"
-	FailureStateStale        FailureCode = "ACTION_STATE_STALE"
-	FailureWrongProject      FailureCode = "ACTION_WRONG_PROJECT"
-	FailureWrongUser         FailureCode = "ACTION_WRONG_USER"
-	FailureWrongDevice       FailureCode = "ACTION_WRONG_DEVICE"
-	FailureDeviceRevoked     FailureCode = "ACTION_DEVICE_REVOKED"
-	FailureSignatureInvalid  FailureCode = "ACTION_SIGNATURE_INVALID"
-	FailureNonceReplay       FailureCode = "ACTION_NONCE_REPLAY"
-	FailureReplayConflict    FailureCode = "ACTION_REPLAY_CONFLICT"
-	FailureTargetLocked      FailureCode = "ACTION_TARGET_LOCKED"
-	FailureDeviceUnavailable FailureCode = "ACTION_DEVICE_RESOLVER_UNAVAILABLE"
-	FailureExecution         FailureCode = "ACTION_EXECUTION_FAILED"
-	FailurePostCheck         FailureCode = "ACTION_POST_CHECK_FAILED"
-	FailureInterrupted       FailureCode = "ACTION_EXECUTION_INTERRUPTED"
+	FailureInvalid                FailureCode = "ACTION_INVALID"
+	FailureApprovalRequired       FailureCode = "ACTION_APPROVAL_REQUIRED"
+	FailureR4Prohibited           FailureCode = "ACTION_R4_PROHIBITED"
+	FailureChallengeExpired       FailureCode = "ACTION_CHALLENGE_EXPIRED"
+	FailureStateStale             FailureCode = "ACTION_STATE_STALE"
+	FailureWrongProject           FailureCode = "ACTION_WRONG_PROJECT"
+	FailureWrongUser              FailureCode = "ACTION_WRONG_USER"
+	FailureWrongDevice            FailureCode = "ACTION_WRONG_DEVICE"
+	FailureDeviceRevoked          FailureCode = "ACTION_DEVICE_REVOKED"
+	FailureSignatureInvalid       FailureCode = "ACTION_SIGNATURE_INVALID"
+	FailureNonceReplay            FailureCode = "ACTION_NONCE_REPLAY"
+	FailureReplayConflict         FailureCode = "ACTION_REPLAY_CONFLICT"
+	FailureTargetLocked           FailureCode = "ACTION_TARGET_LOCKED"
+	FailureDeviceUnavailable      FailureCode = "ACTION_DEVICE_RESOLVER_UNAVAILABLE"
+	FailureExecution              FailureCode = "ACTION_EXECUTION_FAILED"
+	FailurePostCheck              FailureCode = "ACTION_POST_CHECK_FAILED"
+	FailureInterrupted            FailureCode = "ACTION_EXECUTION_INTERRUPTED"
+	FailureInterruptedPreMutation FailureCode = "ACTION_EXECUTION_INTERRUPTED_PRE_MUTATION"
 )
 
 type TrustedOrigin string
@@ -99,6 +100,13 @@ func (t TargetIdentity) Key() string {
 func (t TargetIdentity) Validate() error {
 	if strings.TrimSpace(t.ProjectID) == "" || strings.TrimSpace(t.NodeID) == "" || strings.TrimSpace(t.ServiceID) == "" {
 		return errors.New("project_id, node_id, and service_id are required")
+	}
+	return nil
+}
+
+func (t TargetIdentity) validateRuntime() error {
+	if strings.TrimSpace(t.EnvironmentID) == "" || strings.TrimSpace(t.RuntimeID) == "" {
+		return errors.New("environment_id and runtime_id are required for Kubernetes actions")
 	}
 	return nil
 }
@@ -188,6 +196,11 @@ func (r PreflightRequest) Validate() error {
 	if !r.Kind.Valid() || r.Parameters.Kind() != r.Kind {
 		return errors.New("action kind and typed parameters mismatch")
 	}
+	if r.Kind != ActionIncidentResolve {
+		if err := r.Target.validateRuntime(); err != nil {
+			return err
+		}
+	}
 	return r.Parameters.Validate()
 }
 
@@ -223,6 +236,11 @@ func (p ActionPlan) Validate(now time.Time) error {
 	}
 	if !p.Kind.Valid() || p.Parameters.Kind() != p.Kind {
 		return errors.New("plan kind and parameters mismatch")
+	}
+	if p.Kind != ActionIncidentResolve {
+		if err := p.Target.validateRuntime(); err != nil {
+			return err
+		}
 	}
 	if err := p.Parameters.Validate(); err != nil {
 		return err
@@ -299,6 +317,7 @@ type WorkloadState struct {
 type GatewayState struct {
 	UID              string `json:"uid,omitempty"`
 	ResourceVersion  string `json:"resource_version,omitempty"`
+	Generation       int64  `json:"generation"`
 	SpecHash         string `json:"spec_hash,omitempty"`
 	BackendServiceID string `json:"backend_service_id,omitempty"`
 	Owned            bool   `json:"owned"`

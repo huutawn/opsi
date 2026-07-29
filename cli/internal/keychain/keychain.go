@@ -8,10 +8,11 @@ import (
 const patKey = "default-pat"
 
 var (
-	ErrPATNotFound          = errors.New("PAT is not stored in the OS keychain")
-	ErrKeychainTimeout      = errors.New("OS keychain did not respond before the deadline; unlock Secret Service and try again")
-	ErrKeychainUnavailable  = errors.New("OS keychain is unavailable or locked; unlock Secret Service and try again")
-	ErrActionSecretNotFound = errors.New("ActionPlane secure item is not stored")
+	ErrPATNotFound           = errors.New("PAT is not stored in the OS keychain")
+	ErrKeychainTimeout       = errors.New("OS keychain did not respond before the deadline; unlock Secret Service and try again")
+	ErrKeychainUnavailable   = errors.New("OS keychain is unavailable or locked; unlock Secret Service and try again")
+	ErrActionSecretNotFound  = errors.New("ActionPlane secure item is not stored")
+	ErrActionStoreUnverified = errors.New("ActionPlane secure storage backend is unsupported or unverified on this platform")
 )
 
 type Store interface {

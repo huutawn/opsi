@@ -23,6 +23,8 @@ import (
 	"golang.org/x/term"
 )
 
+var ErrActionSecureCleanupRequired = errors.New("ACTION_SECURE_CLEANUP_REQUIRED")
+
 func newActionCommand(configPath *string, options Options) *cobra.Command {
 	var projectID, nodeID, serviceID, environmentID, runtimeID, kind, deviceID, displayName, incidentID string
 	var replicas int32
@@ -234,10 +236,26 @@ func newActionCommand(configPath *string, options Options) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if result.Status.Terminal() {
-			_ = secure.DeletePendingGrant(args[0])
+		if !result.Status.Terminal() {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+		if err := secure.DeletePendingGrant(args[0]); err != nil {
+			receipt := struct {
+				Status                actionv1.ActionStatus `json:"status"`
+				ActionID              string                `json:"action_id"`
+				ChallengeID           string                `json:"challenge_id"`
+				SecureCleanupRequired bool                  `json:"secure_cleanup_required"`
+			}{Status: result.Status, ActionID: result.ActionID, ChallengeID: result.ChallengeID, SecureCleanupRequired: true}
+			if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(receipt); encodeErr != nil {
+				return encodeErr
+			}
+			return ErrActionSecureCleanupRequired
+		}
+		receipt := struct {
+			actionv1.ActionResult
+			SecureCleanupRequired bool `json:"secure_cleanup_required"`
+		}{ActionResult: *result}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(receipt)
 	}}
 	status := &cobra.Command{Use: "status <action-id>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if projectID == "" {
