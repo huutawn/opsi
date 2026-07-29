@@ -3,7 +3,7 @@
 The consolidated manual backlog source fixes are implemented locally.
 `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
-`R5_015_SOURCE_FIXED / LIVE_AGENT_PENDING`.
+`R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
 ActionPlane restart recovery is one non-blocking root-context loop with an
@@ -22,6 +22,19 @@ former Agent VPS no longer exists. R5-012 still requires a live delivery retest.
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
+
+### R5-015 corrective — R5_015_AGENT_SERVICE_IDENTITY_PASS
+
+- Opsi-managed telemetry accepts only a valid exact `opsi.dev/service`
+  ServiceKey and never guesses identity from resource names or Cloud `svc-*`
+  values.
+- IncidentEvidence uses that same Agent ServiceKey for local rollout lookup and
+  exact Deployment -> ReplicaSet -> Pod ownership; only validated Pods affect
+  the application digest.
+- Empty, missing-label, mixed-digest, and incomplete-digest evidence remains
+  bounded partial coverage. `IncidentRecord.ServiceID` carrying ServiceKey is
+  explicit technical debt for a separate contract migration.
+- No VPS/live E2E, R5-017, MCP, or production-readiness claim is included.
 
 ### Corrective Prompt 07 — UNRESOLVED_ROLLOUT_OWNERSHIP_PASS
 

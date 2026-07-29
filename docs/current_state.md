@@ -4,11 +4,18 @@
 
 `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
-`R5_015_SOURCE_FIXED / LIVE_AGENT_PENDING`.
+`R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
+
+R5-015 Agent-local Kubernetes identity is the exact `opsi.dev/service`
+ServiceKey. Opsi-managed Pods without a valid canonical service label are
+excluded from telemetry, and IncidentEvidence validates Deployment -> ReplicaSet
+-> Pod ownership before using application-container digests. `IncidentRecord.ServiceID`
+still carries the Agent ServiceKey; Cloud ServiceID/ServiceKey separation is a
+future contract migration, not part of this corrective.
 
 ActionPlane execution uses one atomic SQLite reservation and guarded terminal
 transition. Restart recovery classifies unavailable versus permanent factual

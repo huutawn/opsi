@@ -90,7 +90,7 @@ type kubernetesEvent struct {
 	LastTimestamp string `json:"lastTimestamp"`
 }
 
-func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceID, nodeID, podID string) (KubernetesEvidenceResult, error) {
+func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceKey, nodeID, podID string) (KubernetesEvidenceResult, error) {
 	var podsPayload struct {
 		Items []kubernetesPod `json:"items"`
 	}
@@ -102,17 +102,33 @@ func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceID
 		return KubernetesEvidenceResult{}, errors.New("kubernetes pods response is invalid")
 	}
 	result := KubernetesEvidenceResult{}
-	selectedPods := make([]kubernetesPod, 0, len(podsPayload.Items))
+	resources := map[string][]kubernetesResource{}
+	for _, resource := range []string{"deployments", "replicasets", "services"} {
+		var payload struct {
+			Items []kubernetesResource `json:"items"`
+		}
+		data, _, runErr := s.run(ctx, "get", resource, "-A", "-o", "json")
+		if runErr != nil {
+			markKubernetesPartial(&result, "KUBERNETES_RESOURCE_QUERY_PARTIAL")
+			continue
+		}
+		if err := decodeBoundedJSON(data, &payload); err != nil {
+			return result, errors.New("kubernetes resource response is invalid")
+		}
+		resources[resource] = payload.Items
+	}
+	identities, missingServiceKey := kubernetesResourceIdentities(projectID, serviceKey, nodeID, podID, podsPayload.Items, resources)
+	if missingServiceKey {
+		markKubernetesPartial(&result, "SERVICE_KEY_LABEL_MISSING")
+	}
+	if len(identities) == 0 {
+		markKubernetesPartial(&result, "KUBERNETES_RESOURCES_NOT_FOUND")
+	}
+
 	applicationDigests := map[string]bool{}
 	digestIncomplete := false
 	for _, item := range podsPayload.Items {
-		if !ownedKubernetesResource(item.Metadata.Labels, projectID, serviceID) {
-			continue
-		}
-		if nodeID != "" && item.Spec.NodeName != nodeID {
-			continue
-		}
-		if podID != "" && item.Metadata.Name != podID {
+		if !identities[resourceIdentity(item.Metadata.Namespace, "Pod", item.Metadata.Name)] {
 			continue
 		}
 		pod := agentv1.IncidentPodEvidence{Namespace: safeEvidenceText(item.Metadata.Namespace, 256), PodID: safeEvidenceText(item.Metadata.Name, 256), NodeID: safeEvidenceText(item.Spec.NodeName, 256)}
@@ -134,7 +150,6 @@ func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceID
 			applicationDigests[pod.ObservedDigest] = true
 		}
 		result.Pods = append(result.Pods, pod)
-		selectedPods = append(selectedPods, item)
 	}
 	sort.Slice(result.Pods, func(i, j int) bool {
 		return result.Pods[i].Namespace+"\x00"+result.Pods[i].PodID < result.Pods[j].Namespace+"\x00"+result.Pods[j].PodID
@@ -149,23 +164,6 @@ func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceID
 	} else if len(applicationDigests) > 1 {
 		markKubernetesPartial(&result, "MIXED_APPLICATION_DIGESTS")
 	}
-
-	resources := map[string][]kubernetesResource{}
-	for _, resource := range []string{"deployments", "replicasets", "services"} {
-		var payload struct {
-			Items []kubernetesResource `json:"items"`
-		}
-		data, _, runErr := s.run(ctx, "get", resource, "-A", "-o", "json")
-		if runErr != nil {
-			markKubernetesPartial(&result, "KUBERNETES_RESOURCE_QUERY_PARTIAL")
-			continue
-		}
-		if err := decodeBoundedJSON(data, &payload); err != nil {
-			return result, errors.New("kubernetes resource response is invalid")
-		}
-		resources[resource] = payload.Items
-	}
-	identities := kubernetesResourceIdentities(projectID, serviceID, selectedPods, resources)
 
 	var eventsPayload struct {
 		Items []kubernetesEvent `json:"items"`
@@ -198,37 +196,51 @@ func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceID
 		return left.Namespace+"\x00"+left.ObjectKind+"\x00"+left.ObjectName+"\x00"+left.Type+"\x00"+left.Reason+"\x00"+left.Message <
 			right.Namespace+"\x00"+right.ObjectKind+"\x00"+right.ObjectName+"\x00"+right.Type+"\x00"+right.Reason+"\x00"+right.Message
 	})
+	if len(result.Pods)+len(result.Events) == 0 {
+		markKubernetesPartial(&result, "KUBERNETES_EVIDENCE_EMPTY")
+	}
 	return result, nil
 }
 
-func ownedKubernetesResource(labels map[string]string, projectID, serviceID string) bool {
-	return labels["app.kubernetes.io/managed-by"] == "opsi" && labels["opsi.dev/project"] == projectID && labels["opsi.dev/service"] == serviceID
+func ownedKubernetesResource(labels map[string]string, projectID, serviceKey string) bool {
+	return labels["app.kubernetes.io/managed-by"] == "opsi" && labels["opsi.dev/project"] == projectID && labels["opsi.dev/service"] == serviceKey
 }
 
-func kubernetesResourceIdentities(projectID, serviceID string, pods []kubernetesPod, resources map[string][]kubernetesResource) map[string]bool {
+func kubernetesResourceIdentities(projectID, serviceKey, nodeID, podID string, pods []kubernetesPod, resources map[string][]kubernetesResource) (map[string]bool, bool) {
 	identities := map[string]bool{}
+	missingServiceKey := false
 	for _, item := range resources["deployments"] {
-		if ownedKubernetesResource(item.Metadata.Labels, projectID, serviceID) {
+		missingServiceKey = missingServiceKey || missingKubernetesServiceKey(item.Metadata.Labels, projectID)
+		if ownedKubernetesResource(item.Metadata.Labels, projectID, serviceKey) {
 			identities[resourceIdentity(item.Metadata.Namespace, "Deployment", item.Metadata.Name)] = true
 		}
 	}
 	for _, item := range resources["replicasets"] {
-		if !ownedKubernetesResource(item.Metadata.Labels, projectID, serviceID) || !hasSelectedOwner(item.Metadata, "Deployment", identities) {
+		missingServiceKey = missingServiceKey || missingKubernetesServiceKey(item.Metadata.Labels, projectID)
+		if !ownedKubernetesResource(item.Metadata.Labels, projectID, serviceKey) || !hasSelectedOwner(item.Metadata, "Deployment", identities) {
 			continue
 		}
 		identities[resourceIdentity(item.Metadata.Namespace, "ReplicaSet", item.Metadata.Name)] = true
 	}
 	for _, item := range resources["services"] {
-		if ownedKubernetesResource(item.Metadata.Labels, projectID, serviceID) {
+		missingServiceKey = missingServiceKey || missingKubernetesServiceKey(item.Metadata.Labels, projectID)
+		if ownedKubernetesResource(item.Metadata.Labels, projectID, serviceKey) {
 			identities[resourceIdentity(item.Metadata.Namespace, "Service", item.Metadata.Name)] = true
 		}
 	}
 	for _, item := range pods {
-		if hasSelectedOwner(item.Metadata, "ReplicaSet", identities) {
+		missingServiceKey = missingServiceKey || missingKubernetesServiceKey(item.Metadata.Labels, projectID)
+		if ownedKubernetesResource(item.Metadata.Labels, projectID, serviceKey) &&
+			hasSelectedOwner(item.Metadata, "ReplicaSet", identities) &&
+			(nodeID == "" || item.Spec.NodeName == nodeID) && (podID == "" || item.Metadata.Name == podID) {
 			identities[resourceIdentity(item.Metadata.Namespace, "Pod", item.Metadata.Name)] = true
 		}
 	}
-	return identities
+	return identities, missingServiceKey
+}
+
+func missingKubernetesServiceKey(labels map[string]string, projectID string) bool {
+	return labels["app.kubernetes.io/managed-by"] == "opsi" && labels["opsi.dev/project"] == projectID && labels["opsi.dev/service"] == ""
 }
 
 func hasSelectedOwner(metadata kubernetesMetadata, kind string, identities map[string]bool) bool {

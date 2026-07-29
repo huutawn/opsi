@@ -10,24 +10,32 @@ import (
 )
 
 const (
-	ownedLabels = `"app.kubernetes.io/managed-by":"opsi","opsi.dev/project":"p1","opsi.dev/environment":"prod","opsi.dev/runtime":"runtime-1","opsi.dev/service":"svc"`
-	digestA     = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	digestB     = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	serviceKey     = "api"
+	resourceName   = "opsi-api-rt-example"
+	cloudServiceID = "svc-d3b30564957dd8ed"
+	replicaSetName = resourceName + "-rs"
+	ownedLabels    = `"app.kubernetes.io/managed-by":"opsi","app.kubernetes.io/name":"` + resourceName + `","opsi.dev/project":"p1","opsi.dev/environment":"prod","opsi.dev/runtime":"runtime-1","opsi.dev/service":"` + serviceKey + `"`
+	digestA        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	digestB        = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
 func TestKubernetesEvidenceUsesApplicationDigestAndOwnershipGraph(t *testing.T) {
 	podA := ownedPod("pod-a", digestA, digestB)
 	podB := ownedPod("pod-b", digestA, "")
+	orphan := strings.Replace(ownedPod("orphan", digestB, ""), `"name":"`+replicaSetName+`"`, `"name":"orphan-rs"`, 1)
+	mislabeled := strings.Replace(ownedPod("cloud-id", digestB, ""), `"opsi.dev/service":"`+serviceKey+`"`, `"opsi.dev/service":"`+cloudServiceID+`"`, 1)
 	events := `{"items":[` +
 		ownedEvent("default", "Pod", "pod-a", "pod") + `,` +
-		ownedEvent("default", "ReplicaSet", "api-rs", "rs") + `,` +
-		ownedEvent("default", "Deployment", "api", "deployment") + `,` +
-		ownedEvent("default", "Service", "api", "service") + `,` +
-		ownedEvent("other", "Deployment", "api", "wrong-namespace") + `,` +
+		ownedEvent("default", "ReplicaSet", replicaSetName, "rs") + `,` +
+		ownedEvent("default", "Deployment", resourceName, "deployment") + `,` +
+		ownedEvent("default", "Service", resourceName, "service") + `,` +
+		ownedEvent("other", "Deployment", resourceName, "wrong-namespace") + `,` +
+		ownedEvent("default", "Pod", "orphan", "orphan") + `,` +
+		ownedEvent("default", "Pod", "cloud-id", "cloud-id") + `,` +
 		ownedEvent("default", "Pod", "other-pod", "wrong-service") + `]}`
-	runner := &fakeKubernetesRunner{responses: ownedKubernetesResponses(podA+","+podB, events)}
+	runner := &fakeKubernetesRunner{responses: ownedKubernetesResponses(podA+","+orphan+","+mislabeled+","+podB, events)}
 	runner.responses["get pods -A -o json"] = kubectlResult{stdout: runner.responses["get pods -A -o json"].stdout, stderr: []byte("warning: local fake")}
-	result, err := (KubernetesEvidenceSource{Runner: runner}).Read(context.Background(), "p1", "svc", "node-1", "")
+	result, err := (KubernetesEvidenceSource{Runner: runner}).Read(context.Background(), "p1", serviceKey, "node-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +46,7 @@ func TestKubernetesEvidenceUsesApplicationDigestAndOwnershipGraph(t *testing.T) 
 		t.Fatalf("events=%+v", result.Events)
 	}
 	for _, event := range result.Events {
-		if event.Namespace != "default" || strings.Contains(event.Message, "wrong") {
+		if event.Namespace != "default" || strings.Contains(event.Message, "wrong") || event.Message == "orphan" || event.Message == "cloud-id" {
 			t.Fatalf("foreign event accepted: %+v", event)
 		}
 	}
@@ -59,7 +67,7 @@ func TestKubernetesEvidenceMixedAndIncompleteApplicationDigestsArePartial(t *tes
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: ownedKubernetesResponses(test.pods, `{"items":[]}`)}}).Read(context.Background(), "p1", "svc", "node-1", "")
+			result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: ownedKubernetesResponses(test.pods, `{"items":[]}`)}}).Read(context.Background(), "p1", serviceKey, "node-1", "")
 			if err != nil || result.ObservedDigest != "" || result.CoverageStatus != "partial" || result.ReasonCode != test.reason {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
@@ -69,7 +77,7 @@ func TestKubernetesEvidenceMixedAndIncompleteApplicationDigestsArePartial(t *tes
 
 func TestKubernetesEvidenceIsStableAcrossReorderedInput(t *testing.T) {
 	read := func(pods string) KubernetesEvidenceResult {
-		result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: ownedKubernetesResponses(pods, `{"items":[]}`)}}).Read(context.Background(), "p1", "svc", "node-1", "")
+		result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: ownedKubernetesResponses(pods, `{"items":[]}`)}}).Read(context.Background(), "p1", serviceKey, "node-1", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,10 +92,36 @@ func TestKubernetesEvidenceIsStableAcrossReorderedInput(t *testing.T) {
 	}
 }
 
+func TestKubernetesEvidenceMissingServiceKeyIsPartial(t *testing.T) {
+	responses := ownedKubernetesResponses(ownedPod("missing-label", digestA, ""), `{"items":[]}`)
+	for _, key := range []string{"get pods -A -o json", "get deployments -A -o json", "get replicasets -A -o json", "get services -A -o json"} {
+		response := responses[key]
+		response.stdout = []byte(strings.ReplaceAll(string(response.stdout), `,"opsi.dev/service":"`+serviceKey+`"`, ""))
+		responses[key] = response
+	}
+	result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: responses}}).Read(context.Background(), "p1", serviceKey, "node-1", "")
+	if err != nil || result.ObservedDigest != "" || result.CoverageStatus != "partial" || result.ReasonCode != "SERVICE_KEY_LABEL_MISSING" || len(result.Pods) != 0 {
+		t.Fatalf("missing service key was not bounded partial evidence: result=%+v err=%v", result, err)
+	}
+}
+
+func TestKubernetesEvidenceDoesNotInferServiceKeyFromCloudIDOrResourceName(t *testing.T) {
+	responses := ownedKubernetesResponses(strings.ReplaceAll(ownedPod("cloud-id", digestA, ""), `"opsi.dev/service":"`+serviceKey+`"`, `"opsi.dev/service":"`+cloudServiceID+`"`), `{"items":[]}`)
+	for _, key := range []string{"get deployments -A -o json", "get replicasets -A -o json", "get services -A -o json"} {
+		response := responses[key]
+		response.stdout = []byte(strings.ReplaceAll(string(response.stdout), `,"opsi.dev/service":"`+serviceKey+`"`, `,"opsi.dev/service":"`+cloudServiceID+`"`))
+		responses[key] = response
+	}
+	result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: responses}}).Read(context.Background(), "p1", serviceKey, "node-1", "")
+	if err != nil || result.ObservedDigest != "" || result.CoverageStatus != "partial" || result.ReasonCode != "KUBERNETES_RESOURCES_NOT_FOUND" || len(result.Pods) != 0 {
+		t.Fatalf("cloud service ID/resource name was used as Agent service key: result=%+v err=%v", result, err)
+	}
+}
+
 func TestKubernetesEvidenceResourceFailureIsPartialAndInvalidJSONFailsClosed(t *testing.T) {
 	responses := ownedKubernetesResponses(ownedPod("pod-a", digestA, ""), `{"items":[]}`)
 	responses["get replicasets -A -o json"] = kubectlResult{err: errors.New("unavailable")}
-	result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: responses}}).Read(context.Background(), "p1", "svc", "node-1", "")
+	result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: responses}}).Read(context.Background(), "p1", serviceKey, "node-1", "")
 	if err != nil || result.CoverageStatus != "partial" || result.ReasonCode != "KUBERNETES_RESOURCE_QUERY_PARTIAL" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -99,7 +133,7 @@ func TestKubernetesEvidenceResourceFailureIsPartialAndInvalidJSONFailsClosed(t *
 		t.Run(name, func(t *testing.T) {
 			invalid := ownedKubernetesResponses("", `{"items":[]}`)
 			invalid["get pods -A -o json"] = kubectlResult{stdout: data}
-			if _, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: invalid}}).Read(context.Background(), "p1", "svc", "", ""); err == nil {
+			if _, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: invalid}}).Read(context.Background(), "p1", serviceKey, "", ""); err == nil {
 				t.Fatal("invalid Kubernetes JSON accepted")
 			}
 		})
@@ -109,7 +143,7 @@ func TestKubernetesEvidenceResourceFailureIsPartialAndInvalidJSONFailsClosed(t *
 func TestKubernetesEvidenceCommandDeadlineIsBounded(t *testing.T) {
 	runner := &fakeKubernetesRunner{deadlineOnly: true}
 	started := time.Now()
-	_, err := (KubernetesEvidenceSource{Runner: runner}).Read(context.Background(), "p1", "svc", "", "")
+	_, err := (KubernetesEvidenceSource{Runner: runner}).Read(context.Background(), "p1", serviceKey, "", "")
 	if err == nil {
 		t.Fatal("deadline runner unexpectedly succeeded")
 	}
@@ -121,9 +155,9 @@ func TestKubernetesEvidenceCommandDeadlineIsBounded(t *testing.T) {
 func ownedKubernetesResponses(pods, events string) map[string]kubectlResult {
 	return map[string]kubectlResult{
 		"get pods -A -o json":        {stdout: []byte(`{"items":[` + pods + `]}`)},
-		"get deployments -A -o json": {stdout: []byte(`{"items":[{"metadata":{"name":"api","namespace":"default","labels":{` + ownedLabels + `}}}]}`)},
-		"get replicasets -A -o json": {stdout: []byte(`{"items":[{"metadata":{"name":"api-rs","namespace":"default","labels":{` + ownedLabels + `},"ownerReferences":[{"kind":"Deployment","name":"api"}]}}]}`)},
-		"get services -A -o json":    {stdout: []byte(`{"items":[{"metadata":{"name":"api","namespace":"default","labels":{` + ownedLabels + `}}}]}`)},
+		"get deployments -A -o json": {stdout: []byte(`{"items":[{"metadata":{"name":"` + resourceName + `","namespace":"default","labels":{` + ownedLabels + `}}}]}`)},
+		"get replicasets -A -o json": {stdout: []byte(`{"items":[{"metadata":{"name":"` + replicaSetName + `","namespace":"default","labels":{` + ownedLabels + `},"ownerReferences":[{"kind":"Deployment","name":"` + resourceName + `"}]}}]}`)},
+		"get services -A -o json":    {stdout: []byte(`{"items":[{"metadata":{"name":"` + resourceName + `","namespace":"default","labels":{` + ownedLabels + `}}}]}`)},
 		"get events -A -o json":      {stdout: []byte(events)},
 	}
 }
@@ -139,7 +173,7 @@ func ownedPod(name, applicationDigest, sidecarDigest string) string {
 		}
 		containers += `{"name":"sidecar","ready":true,"imageID":"sidecar@` + sidecarDigest + `"}`
 	}
-	return `{"metadata":{"name":"` + name + `","namespace":"default","labels":{` + ownedLabels + `},"ownerReferences":[{"kind":"ReplicaSet","name":"api-rs"}]},"spec":{"nodeName":"node-1"},"status":{"containerStatuses":[` + containers + `]}}`
+	return `{"metadata":{"name":"` + name + `","namespace":"default","labels":{` + ownedLabels + `},"ownerReferences":[{"kind":"ReplicaSet","name":"` + replicaSetName + `"}]},"spec":{"nodeName":"node-1"},"status":{"containerStatuses":[` + containers + `]}}`
 }
 
 func ownedEvent(namespace, kind, name, message string) string {

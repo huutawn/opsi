@@ -27,10 +27,10 @@ func TestIncidentEvidenceConstants(t *testing.T) {
 
 func TestIncidentEvidenceIsCanonicalAcrossReorderedSources(t *testing.T) {
 	created := time.Unix(1000, 0).UTC()
-	record := telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: "svc", NodeID: "node", PodID: "pod", Status: "open", CreatedAt: created}
+	record := telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: serviceKey, NodeID: "node", PodID: "pod", Status: "open", CreatedAt: created}
 	records := []telemetry.SyncRecord{
-		{Log: &telemetry.LogRecord{ProjectID: "p1", ServiceID: "svc", PodID: "pod", Fingerprint: "fp-b", Level: "error", Message: "second", ObservedAt: created.Add(time.Second)}},
-		{Log: &telemetry.LogRecord{ProjectID: "p1", ServiceID: "svc", PodID: "pod", Fingerprint: "fp-a", Level: "warn", Message: "first", ObservedAt: created}},
+		{Log: &telemetry.LogRecord{ProjectID: "p1", ServiceID: serviceKey, PodID: "pod", Fingerprint: "fp-b", Level: "error", Message: "second", ObservedAt: created.Add(time.Second)}},
+		{Log: &telemetry.LogRecord{ProjectID: "p1", ServiceID: serviceKey, PodID: "pod", Fingerprint: "fp-a", Level: "warn", Message: "first", ObservedAt: created}},
 	}
 	audits := []telemetry.EvidenceAuditRecord{{ID: "audit-b", Action: "deploy", ResourceID: "svc", CreatedAt: created.Add(time.Second)}, {ID: "audit-a", Action: "incident", ResourceID: "inc-1", CreatedAt: created}}
 	rollout := &fakeRolloutEvidence{projection: &deploy.EvidenceProjection{RolloutID: "rollout-1", State: "failed", FailureCode: "RUNTIME_READINESS_FAILED", DesiredDigest: "sha256:" + strings.Repeat("a", 64), PreviousDigest: "sha256:" + strings.Repeat("b", 64), TotalEvents: 2, Events: []deploy.EvidenceEvent{{Version: 2, State: "failed", StateHash: strings.Repeat("d", 64), CreatedAt: created.Add(time.Second)}, {Version: 1, State: "waiting", StateHash: strings.Repeat("c", 64), CreatedAt: created}}}}
@@ -52,6 +52,9 @@ func TestIncidentEvidenceIsCanonicalAcrossReorderedSources(t *testing.T) {
 	}
 	if first.Deployment.DesiredDigest == "" || first.Deployment.ObservedDigest == "" || len(first.Rollout.EventCorrelation) != 2 || len(first.AuditReferences) != 2 {
 		t.Fatalf("factual rollout/audit evidence missing: %+v", first)
+	}
+	if len(rollout.serviceKeys) != 2 || rollout.serviceKeys[0] != serviceKey || rollout.serviceKeys[1] != serviceKey || rollout.serviceKeys[0] == cloudServiceID {
+		t.Fatalf("Agent-local rollout lookup did not use ServiceKey: %+v", rollout.serviceKeys)
 	}
 }
 
@@ -283,9 +286,13 @@ func (f *fakeEvidenceSource) EvidenceAuditRecords(context.Context, string, strin
 	return append([]telemetry.EvidenceAuditRecord(nil), f.audits...), len(f.audits), nil
 }
 
-type fakeRolloutEvidence struct{ projection *deploy.EvidenceProjection }
+type fakeRolloutEvidence struct {
+	projection  *deploy.EvidenceProjection
+	serviceKeys []string
+}
 
-func (f *fakeRolloutEvidence) ReadIncidentEvidence(context.Context, string, string, time.Time, time.Time) (*deploy.EvidenceProjection, error) {
+func (f *fakeRolloutEvidence) ReadIncidentEvidence(_ context.Context, _, serviceKey string, _, _ time.Time) (*deploy.EvidenceProjection, error) {
+	f.serviceKeys = append(f.serviceKeys, serviceKey)
 	return f.projection, nil
 }
 
