@@ -1,145 +1,112 @@
-# Opsi
+<div align="center">
+  <h1>Opsi</h1>
+  <p><strong>Open-source, self-hosted deployment and operations platform for shipping immutable workloads to your own infrastructure.</strong></p>
+</div>
 
-R5-014 is `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
-R5-015 is `R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-R5-016 is `R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-References: `docs/manual_ui_parity_matrix.md`,
-`docs/manual_cli_capability_matrix.md`, and `docs/runbooks/install_cli.md`.
-R5-012 remains `R5_012_IMPLEMENTED / LIVE_BLOCKED / BUG_DEFERRED`.
+Opsi combines a hosted or self-hosted control plane with an agent running on
+your infrastructure. The CLI and local web interface keep credentials on the
+operator machine while deployments remain policy-driven and auditable.
 
-Opsi is a local-first operations control-plane prototype. Current implementation
-truth lives in `docs/current_state.md`; target requirements live in
-`docs/opsi_srs.md`; capability evidence lives in `docs/status_matrix.md`; the
-single canonical active roadmap is `docs/opsi_roadmap_v5_production.md`. Trusted artifact
-delivery is defined by
-`docs/architecture_decisions/ADR-004-trusted-artifact-cd.md`.
+## Table of contents
 
-## Current boundary
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Interfaces](#interfaces)
+- [Features](#features)
+- [Status](#status)
+- [Documentation](#documentation)
+- [License](#license)
 
-- Cloud has no AI runtime or AI provider integration.
-- Agent has no AI analyzer, fallback RCA, or RCA-backed execution.
-- Active incidents support factual list/get/resolve only.
-- Bounded Agent-local `IncidentEvidence v1` is implemented for deterministic
-  fake-source proof; live Agent and UI acceptance remain deferred to R5-017.
-- Safe ActionPlane v1 implements separate CLI preflight, interactive Ed25519
-  approval, and execute invocations for restart, scale, gateway reconcile, and
-  incident resolve. Agent owns factual recheck, target locking, typed execution,
-  post-check, durable result, and audit; live Agent/K3s and UI acceptance remain
-  deferred to R5-017.
-- GitHub App user authorization is implemented with fixed GitHub endpoints,
-  PKCE S256, one-time state, and a prelinked numeric GitHub user ID. GitHub App
-  installation authentication now loads an RSA private key from a read-only
-  file, signs RS256 App JWTs, and caches installation tokens in memory. The
-  separate `/v1/webhooks/github-app` endpoint verifies the App-wide secret and
-  atomically persists typed installation/repository events and delivery IDs in
-  PostgreSQL. Numeric repository IDs are claimed by one Opsi project and may
-  bind multiple service keys within that project. `opsi init` now matches a
-  safe local GitHub origin against Cloud metadata, claims the numeric repository
-  ID, creates the P09 service binding, and atomically writes a secret-free
-  `.opsi/opsi-cd.yaml` plus a manual bootstrap-only workflow. GitHub Actions
-  OIDC admission, accepted `BuildRecord` storage, immutable digest deployment,
-  `TopologyPlan`, `DeploymentPolicy`, routing, and Opsi-owned K3s reconciliation
-  are implemented. PR-preview acceptance remains future R5-012 work.
-- Opsi renders its owned Deployment, ClusterIP Service, and Traefik exposure
-  resources. DNS, certificate provisioning, and public endpoint acceptance are
-  not complete.
-- P01 code is complete. Its clean control-plane VPS checkpoint is
-  `DEFERRED / UNPROVEN` because no clean Ubuntu VPS was available.
-- Bootstrap sessions persist a durable per-step checkpoint. New workers build
-  `first-server-v2`; unfinished `first-server-v1` checkpoints fail closed and
-  require a new bootstrap session. Verified K3s/Agent installation and Agent
-  registration replay are idempotent for at-least-once step execution.
-- Production readiness and complete real VPS/GitHub evidence remain unproven.
-- The Local browser uses relative `/api/local/...` requests only. Cloud PAT and
-  Agent TLS credentials remain in the CLI backend; installed prerelease archives
-  include the binary and adjacent static UI assets. Agent-live R5-014 acceptance
-  is deferred to R5-017 because the former Agent VPS no longer exists.
-- GitHub user access tokens are used only during login or installation-claim
-  callbacks and are not persisted or returned to the CLI. Installation claims
-  compare the numeric GitHub `/user` identity with the prelinked Opsi identity,
-  then require the requested installation to appear in `/user/installations`.
-  Organization visibility proves token access for this MVP, not GitHub
-  organization-owner status. Pending OAuth state and local grants remain in
-  memory and are lost when Cloud restarts. Installation tokens remain in
-  memory, while webhook delivery deduplication is durable in PostgreSQL and the
-  P08 in-memory replay layer remains enabled. The remaining GitHub App live
-  negatives are tracked as operator-required evidence in the status matrix.
+## Quick start
 
-The roadmap target is user-owned AI through a future local CLI MCP bridge. AI
-will read redacted evidence and propose typed actions; deterministic Agent policy
-and a separate human approval channel remain authoritative. MCP will not expose
-execute or approve tools.
+Install the latest published CLI prerelease for Linux or macOS (amd64 or
+arm64). The installer verifies the release archive with SHA-256 and installs
+the CLI plus local web UI to `~/.local/bin` by default.
 
-The production delivery path is separate from that AI boundary:
+```sh
+curl -fsSL https://raw.githubusercontent.com/huutawn/opsi/main/scripts/install-cli.sh \
+  | OPSI_VERSION=r5-014-3bdc586 sh
+```
+
+Create a CLI configuration. The default Cloud endpoint is the deployed
+`https://opsidev.site`; replace `agent_addr` after connecting an Opsi Agent.
+
+```sh
+mkdir -p "$HOME/.config/opsi"
+printf '%s\n' \
+  'agent_addr: 127.0.0.1:9443' \
+  'cloud_url: https://opsidev.site' \
+  > "$HOME/.config/opsi/config.yaml"
+
+opsi --config "$HOME/.config/opsi/config.yaml" start
+```
+
+Open `http://127.0.0.1:9780`. Cloud operations require a PAT stored in the OS
+keychain with `opsi login --pat-file PATH`. See the
+[CLI installation runbook](docs/runbooks/install_cli.md) for release, PATH,
+configuration, and self-hosting details.
+
+## How it works
 
 ```text
 GitHub Actions OIDC
--> accepted BuildRecord
--> immutable OCI digest
--> TopologyPlan + DeploymentPolicy + routing
--> durable DeploymentJob + canonical RolloutIntent
--> Agent PollJob
--> ReconcileRollout -> ProductionAdapter
--> Opsi-owned K3s resources
--> factual readiness/known-good rollback
+        |
+        v
+Opsi Cloud: identity, policy, topology, deployment jobs
+        |
+        v
+Opsi Agent: reconcile immutable OCI images on K3s
+        |
+        v
+Readiness evidence, audit history, and known-good rollback
 ```
 
-Git commit SHA remains provenance and source identity, not the runtime artifact.
-The Agent Git clone/build and arbitrary manifest execution paths are retired;
-there is one executable delivery path from accepted BuildRecord to immutable
-runtime state. New BuildRecord deployments never create active
-`immutable_image` jobs; historical rows are read/restore compatibility only.
+The Cloud control plane decides what may run and assigns durable work. The
+Agent owns infrastructure reconciliation and reports factual results. Browser
+requests go through the local CLI backend, so Cloud PATs and Agent TLS
+credentials are not exposed to browser code.
 
-## Build and test
+## Interfaces
 
-Supported toolchain:
+| Interface | Purpose |
+|---|---|
+| CLI | Configure projects, servers, policies, deployments, incidents, and approved actions. |
+| Local Web UI | Browser console served by `opsi start` through credential-safe local APIs. |
+| Cloud API | Identity, GitHub integration, topology, policy, build records, and deployment coordination. |
+| Agent | Reconciles workloads on user-owned infrastructure and reports runtime evidence. |
 
-- Go `1.26.4` with `GOTOOLCHAIN=local`;
-- Node `24.16.0`;
-- npm `11.17.0`;
-- UI dependencies restored from `cli/ui/package-lock.json`.
+## Features
 
-Required clean-checkout commands:
+- Self-hosted control plane and agents for user-owned infrastructure.
+- GitHub App integration and GitHub Actions OIDC admission.
+- Immutable OCI digest deployments with topology and deployment policies.
+- Opsi-owned K3s reconciliation, readiness checks, and known-good rollback.
+- Local CLI and web console with OS-keychain-backed Cloud credentials.
+- Incident evidence, audit history, and explicit human-approved operational actions.
 
-```bash
-make verify
-make test
-make build
-make clean
-make package-source
-```
+## Status
 
-`make verify` checks toolchain, source hygiene, Go vet/tests for each module, and
-the UI restore/build/lint path. No optional command wrapper is required.
+Opsi is under active development and is not yet production-ready. The current
+source includes the canonical immutable deployment path and broad local/source
+test coverage, while some live Agent, browser, DNS/TLS, disaster-recovery, and
+production acceptance gates remain open.
 
-Module test commands:
+- Deployed development Cloud: `https://opsidev.site`
+- Current implementation truth: [docs/current_state.md](docs/current_state.md)
+- Capability evidence: [docs/status_matrix.md](docs/status_matrix.md)
+- Production roadmap: [docs/opsi_roadmap_v5_production.md](docs/opsi_roadmap_v5_production.md)
 
-```bash
-cd contracts/go && GOTOOLCHAIN=local go test ./...
-cd agent && GOTOOLCHAIN=local go test ./...
-cd cli && GOTOOLCHAIN=local go test ./cmd/... ./internal/...
-cd cloud && GOTOOLCHAIN=local go test ./...
-```
+## Documentation
 
-## Clean VPS/K3s proof
+- [Architecture](docs/architecture.md)
+- [System requirements](docs/opsi_srs.md)
+- [CLI installation](docs/runbooks/install_cli.md)
+- [Development control plane](docs/runbooks/dev_control_plane.md)
+- [Security model](docs/security_story.md)
+- [Architecture decisions](docs/architecture_decisions/)
 
-```bash
-make verify-e2e-k3s-preflight
-make verify-e2e-k3s
-```
+## License
 
-The active incident segment checks list, detail, resolve, and resolve audit only.
-This is an operator-run local workflow requiring `OPSI_E2E_SSH_KEY_PATH` and an
-exact `OPSI_E2E_VPS_HOST_KEY_SHA256`; no GitHub-hosted K3s workflow exists. The
-command path exists, but no committed real-infrastructure pass artifact
-currently proves the complete scenario. See
-`docs/runbooks/clean_vps_k3s_e2e.md`.
-
-## Roadmap order
-
-The implemented checkpoint includes GitHub App identity/repository binding,
-GitHub Actions OIDC, accepted BuildRecords, topology/policy routing, immutable
-DeploymentJobs, Agent polling, and factual K3s readiness/rollback. R5-011 stays
-`PARTIAL`; its live R5-011.4 endpoint gate is `MANUAL_GATED`. R5-012, MCP, AI,
-DNS, TLS, and public endpoint acceptance are not done. Production readiness
-must not be inferred.
+Opsi is licensed under the [Apache License 2.0](LICENSE). Unless explicitly
+stated otherwise, contributions submitted to this repository are licensed
+under the same terms.
