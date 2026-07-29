@@ -68,6 +68,11 @@ func EncodeIncidentEvidence(evidence *agentv1.IncidentEvidence) ([]byte, error) 
 	if evidence == nil || evidence.SchemaVersion != IncidentEvidenceSchemaVersion {
 		return nil, ErrEvidenceCorrupt
 	}
+	evidence.ContentSHA256 = ""
+	canonicalizeEvidence(evidence)
+	if err := fitIncidentEvidence(evidence); err != nil {
+		return nil, err
+	}
 	payload := *evidence
 	payload.ContentSHA256 = ""
 	canonical, err := json.Marshal(payload)
@@ -87,6 +92,147 @@ func EncodeIncidentEvidence(evidence *agentv1.IncidentEvidence) ([]byte, error) 
 		return nil, errors.New("incident evidence contains sensitive content")
 	}
 	return body, nil
+}
+
+func fitIncidentEvidence(evidence *agentv1.IncidentEvidence) error {
+	if evidenceFits(evidence) {
+		return nil
+	}
+	for _, limit := range []int{256, 128, 64, 0} {
+		if changed := truncateLogExcerpts(evidence, limit); changed > 0 {
+			ensureEvidenceTruncation(evidence, "log_excerpts", changed)
+			markEvidenceCoverage(evidence, "telemetry")
+		}
+		if changed := truncateKubernetesMessages(evidence, limit); changed > 0 {
+			ensureEvidenceTruncation(evidence, "kubernetes_event_messages", changed)
+			markEvidenceCoverage(evidence, "kubernetes")
+		}
+		canonicalizeEvidence(evidence)
+		if evidenceFits(evidence) {
+			return nil
+		}
+	}
+	for len(evidence.Timeline) > 0 {
+		removed := evidence.Timeline[len(evidence.Timeline)-1]
+		evidence.Timeline = evidence.Timeline[:len(evidence.Timeline)-1]
+		addEvidenceOmission(evidence, "timeline", 1)
+		markEvidenceCoverage(evidence, removed.Source)
+		if evidenceFits(evidence) {
+			return nil
+		}
+	}
+	for len(evidence.KubernetesEvents) > 0 {
+		evidence.KubernetesEvents = evidence.KubernetesEvents[:len(evidence.KubernetesEvents)-1]
+		addEvidenceOmission(evidence, "kubernetes", 1)
+		markEvidenceCoverage(evidence, "kubernetes")
+		if evidenceFits(evidence) {
+			return nil
+		}
+	}
+	for len(evidence.AuditReferences) > 0 {
+		evidence.AuditReferences = evidence.AuditReferences[:len(evidence.AuditReferences)-1]
+		addEvidenceOmission(evidence, "audit", 1)
+		markEvidenceCoverage(evidence, "audit")
+		if evidenceFits(evidence) {
+			return nil
+		}
+	}
+	for len(evidence.Pods) > 0 {
+		evidence.Pods = evidence.Pods[:len(evidence.Pods)-1]
+		addEvidenceOmission(evidence, "pods", 1)
+		markEvidenceCoverage(evidence, "kubernetes")
+		markEvidenceCoverage(evidence, "telemetry")
+		if evidenceFits(evidence) {
+			return nil
+		}
+	}
+	for len(evidence.Rollout.EventCorrelation) > 0 {
+		evidence.Rollout.EventCorrelation = evidence.Rollout.EventCorrelation[:len(evidence.Rollout.EventCorrelation)-1]
+		addEvidenceOmission(evidence, "rollout", 1)
+		markEvidenceCoverage(evidence, "rollout")
+		if evidenceFits(evidence) {
+			return nil
+		}
+	}
+	return ErrEvidenceTooLarge
+}
+
+func evidenceFits(evidence *agentv1.IncidentEvidence) bool {
+	probe := *evidence
+	probe.ContentSHA256 = strings.Repeat("0", 64)
+	body, err := json.Marshal(&probe)
+	return err == nil && len(body) <= MaxIncidentEvidenceBytes
+}
+
+func truncateLogExcerpts(evidence *agentv1.IncidentEvidence, limit int) int32 {
+	var changed int32
+	for index := range evidence.LogFingerprints {
+		value := ""
+		if limit > 0 {
+			value = truncateUTF8(evidence.LogFingerprints[index].Excerpt, limit)
+		}
+		if value != evidence.LogFingerprints[index].Excerpt {
+			evidence.LogFingerprints[index].Excerpt = value
+			changed++
+		}
+	}
+	return changed
+}
+
+func truncateKubernetesMessages(evidence *agentv1.IncidentEvidence, limit int) int32 {
+	var changed int32
+	for index := range evidence.KubernetesEvents {
+		value := ""
+		if limit > 0 {
+			value = truncateUTF8(evidence.KubernetesEvents[index].Message, limit)
+		}
+		if value != evidence.KubernetesEvents[index].Message {
+			evidence.KubernetesEvents[index].Message = value
+			changed++
+		}
+	}
+	for index := range evidence.Timeline {
+		if evidence.Timeline[index].Source != "kubernetes" {
+			continue
+		}
+		value := ""
+		if limit > 0 {
+			value = truncateUTF8(evidence.Timeline[index].Detail, limit)
+		}
+		if value != evidence.Timeline[index].Detail {
+			evidence.Timeline[index].Detail = value
+			changed++
+		}
+	}
+	return changed
+}
+
+func ensureEvidenceTruncation(evidence *agentv1.IncidentEvidence, section string, count int32) {
+	for _, truncation := range evidence.Truncations {
+		if truncation.Section == section {
+			return
+		}
+	}
+	evidence.Truncations = append(evidence.Truncations, agentv1.IncidentTruncation{Section: section, OmittedItems: count, UTF8Safe: true})
+}
+
+func addEvidenceOmission(evidence *agentv1.IncidentEvidence, section string, count int32) {
+	for index := range evidence.Truncations {
+		if evidence.Truncations[index].Section == section {
+			evidence.Truncations[index].OmittedItems += count
+			return
+		}
+	}
+	evidence.Truncations = append(evidence.Truncations, agentv1.IncidentTruncation{Section: section, OmittedItems: count, UTF8Safe: true})
+}
+
+func markEvidenceCoverage(evidence *agentv1.IncidentEvidence, source string) {
+	for index := range evidence.Coverage {
+		if evidence.Coverage[index].Source == source {
+			evidence.Coverage[index].Status = "truncated"
+			evidence.Coverage[index].Truncated = true
+		}
+	}
 }
 
 func VerifyIncidentEvidence(body []byte, storedHash string) (*agentv1.IncidentEvidence, error) {
@@ -146,6 +292,7 @@ func containsEvidenceSecret(value string) bool {
 }
 
 func canonicalizeEvidence(evidence *agentv1.IncidentEvidence) {
+	sort.Strings(evidence.Rollout.EventCorrelation)
 	sort.Slice(evidence.Timeline, func(i, j int) bool {
 		left, right := evidence.Timeline[i], evidence.Timeline[j]
 		if left.ObservedAtUnix != right.ObservedAtUnix {

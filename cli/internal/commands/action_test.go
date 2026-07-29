@@ -9,11 +9,14 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/opsi-dev/opsi/cli/internal/actionapproval"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
@@ -105,7 +108,8 @@ func TestActionApproveAndExecuteUseSecureStoreWithoutGrantOutput(t *testing.T) {
 
 type cleanupFailStore struct {
 	*keychain.FakeStore
-	fail bool
+	fail        bool
+	failPrivate bool
 }
 
 func (s *cleanupFailStore) DeletePendingApproval(id string) error {
@@ -113,6 +117,87 @@ func (s *cleanupFailStore) DeletePendingApproval(id string) error {
 		return errors.New("delete failed")
 	}
 	return s.FakeStore.DeletePendingApproval(id)
+}
+
+func (s *cleanupFailStore) DeleteActionPrivateKey(id string) error {
+	if s.failPrivate {
+		return errors.New("backend path secret-marker")
+	}
+	return s.FakeStore.DeleteActionPrivateKey(id)
+}
+
+func TestActionDeviceRevokeReportsLocalCleanupAndRetries(t *testing.T) {
+	var remoteCalls int
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteCalls++
+		if r.URL.Path != "/api/projects/p1/action-devices/device-1/revoke" || r.Header.Get("Authorization") != "Bearer pat-canary" {
+			t.Fatalf("request path=%s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"device":{"id":"device-1","status":"revoked"}}`)
+	}))
+	defer cloud.Close()
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	if err := os.WriteFile(configPath, []byte("agent_addr: 127.0.0.1:9443\ncloud_url: "+cloud.URL+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &cleanupFailStore{FakeStore: keychain.NewFakeStore(), failPrivate: true}
+	if err := store.SetPAT("pat-canary"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionPrivateKey("device-1", []byte("private-key-canary")); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{KeychainFactory: func() (keychain.Store, error) { return store, nil }}
+	run := func() (string, string, error) {
+		command := NewRootCommand(options)
+		var stdout, stderr bytes.Buffer
+		command.SetOut(&stdout)
+		command.SetErr(&stderr)
+		command.SetArgs([]string{"--config", configPath, "action", "device", "revoke", "device-1", "--project-id", "p1"})
+		err := command.Execute()
+		return stdout.String(), stderr.String(), err
+	}
+	stdout, stderr, err := run()
+	if !errors.Is(err, ErrActionSecureCleanupRequired) {
+		t.Fatalf("error=%v stdout=%s stderr=%s", err, stdout, stderr)
+	}
+	var receipt map[string]any
+	if json.Unmarshal([]byte(stdout), &receipt) != nil || len(receipt) != 3 || receipt["device_id"] != "device-1" || receipt["status"] != "revoked" || receipt["local_cleanup_required"] != true {
+		t.Fatalf("receipt=%v stdout=%s", receipt, stdout)
+	}
+	for _, canary := range []string{"private-key-canary", "backend path", "secret-marker"} {
+		if strings.Contains(stdout+stderr, canary) {
+			t.Fatalf("cleanup leaked %q: stdout=%s stderr=%s", canary, stdout, stderr)
+		}
+	}
+	if _, err := store.GetActionPrivateKey("device-1"); err != nil {
+		t.Fatalf("failed cleanup removed key: %v", err)
+	}
+	store.failPrivate = false
+	stdout, stderr, err = run()
+	if err != nil || strings.Contains(stdout, "local_cleanup_required") || stderr != "" || remoteCalls != 2 {
+		t.Fatalf("retry error=%v calls=%d stdout=%s stderr=%s", err, remoteCalls, stdout, stderr)
+	}
+	if _, err := store.GetActionPrivateKey("device-1"); !errors.Is(err, keychain.ErrActionSecretNotFound) {
+		t.Fatalf("retry did not remove key: %v", err)
+	}
+}
+
+func TestApprovalTargetDisplayIsLabeledBoundedAndControlFree(t *testing.T) {
+	target := actionv1.TargetIdentity{ProjectID: "p1\x00hidden", EnvironmentID: "prod\nnext", RuntimeID: strings.Repeat("r", 200), NodeID: "node\t1", ServiceID: "svc\r1"}
+	output := formatApprovalTarget(target)
+	if strings.IndexFunc(output, unicode.IsControl) >= 0 {
+		t.Fatalf("control character in target output: %q", output)
+	}
+	for _, field := range []string{"project=", "environment=", "runtime=", "node=", "service="} {
+		if !strings.Contains(output, field) {
+			t.Fatalf("missing %s in %q", field, output)
+		}
+	}
+	if strings.Contains(output, "\x00") || len([]rune(strings.Split(output, "runtime=")[1])) > 180 {
+		t.Fatalf("target output is unsafe or unbounded: %q", output)
+	}
 }
 
 func TestActionExecuteReportsFactualResultWhenSecureCleanupFailsAndRetries(t *testing.T) {

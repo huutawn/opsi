@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+var agentServiceKeyLabelPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
 
 type CommandRunner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -104,15 +107,21 @@ func (c KubernetesCollector) listPods(ctx context.Context) (map[string]podMeta, 
 	}
 	items := map[string]podMeta{}
 	for _, item := range payload.Items {
-		projectID := firstLabel(item.Metadata.Labels, "opsi.dev/project-id", "opsi.project_id", "project_id")
+		if item.Metadata.Labels["app.kubernetes.io/managed-by"] != "opsi" {
+			continue
+		}
+		serviceKey := item.Metadata.Labels["opsi.dev/service"]
+		if !agentServiceKeyLabelPattern.MatchString(serviceKey) {
+			continue
+		}
+		projectID := item.Metadata.Labels["opsi.dev/project"]
 		if projectID == "" {
 			projectID = c.ProjectID
 		}
-		serviceID := firstLabel(item.Metadata.Labels, "opsi.dev/service-id", "opsi.service_id", "service_id", "app.kubernetes.io/name", "app")
 		meta := podMeta{
 			ProjectID: projectID,
 			NodeID:    firstNonEmpty(item.Spec.NodeName, c.NodeID),
-			ServiceID: serviceID,
+			ServiceID: serviceKey,
 			PodID:     item.Metadata.Name,
 			Namespace: item.Metadata.Namespace,
 		}

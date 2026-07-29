@@ -29,6 +29,20 @@ type Principal struct {
 	Role      string
 }
 
+const (
+	RecoveryStoreFailed    = "ACTION_RECOVERY_STORE_FAILED"
+	RecoveryCompleteFailed = "ACTION_RECOVERY_COMPLETE_FAILED"
+	RecoveryTimeout        = "ACTION_RECOVERY_TIMEOUT"
+)
+
+type RecoveryError struct {
+	Category string
+	err      error
+}
+
+func (e RecoveryError) Error() string { return e.Category }
+func (e RecoveryError) Unwrap() error { return e.err }
+
 func AuthenticateFromContext(ctx context.Context, verifier secret.AuthVerifier, projectID string) (Principal, error) {
 	if verifier == nil {
 		return Principal{}, ErrAuthentication
@@ -57,6 +71,7 @@ type Service struct {
 	Now             func() time.Time
 	recoveryTimeout time.Duration
 	recoveryMu      sync.Mutex
+	ReportRecovery  func(string)
 }
 
 func (s *Service) Catalog(context.Context, *actionv1.CatalogRequest) (*actionv1.CatalogResponse, error) {
@@ -254,25 +269,60 @@ func (s *Service) Recover(ctx context.Context) error {
 	}
 	records, err := s.Store.Recoverable(ctx)
 	if err != nil {
-		return err
+		category := RecoveryStoreFailed
+		if errors.Is(err, context.DeadlineExceeded) {
+			category = RecoveryTimeout
+		}
+		return RecoveryError{Category: category, err: err}
 	}
-	for _, record := range records {
+	var firstErr error
+	for index, record := range records {
+		recordCtx := ctx
+		cancel := func() {}
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			budget := remaining / time.Duration(len(records)-index)
+			if budget <= 0 {
+				budget = time.Millisecond
+			}
+			recordCtx, cancel = context.WithTimeout(ctx, budget)
+		}
 		now := s.clock()
 		if record.Status == actionv1.StatusApproved && !record.NonceConsumed {
 			result := actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: record.Plan.ID, ChallengeID: record.Challenge.ID, ProjectID: record.Plan.ProjectID, Status: actionv1.StatusRejected, FailureCode: actionv1.FailureInterruptedPreMutation, Message: "approved reservation was interrupted before mutation", ApprovedBy: record.ApprovedBy, DeviceID: record.DeviceID, FinishedAt: now}
-			if _, err := s.Store.Complete(ctx, record, result); err != nil {
-				return err
+			if _, err := s.Store.Complete(recordCtx, record, result); err != nil {
+				if firstErr == nil {
+					firstErr = RecoveryError{Category: RecoveryCompleteFailed, err: err}
+				}
 			}
+			cancel()
 			continue
 		}
 		if record.Status != actionv1.StatusExecuting || !record.NonceConsumed {
+			cancel()
 			continue
 		}
-		if _, err := s.Runtime.CurrentState(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters); err != nil {
+		if _, err := s.Runtime.CurrentState(recordCtx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				s.reportRecovery(RecoveryTimeout)
+			}
+			if !errors.Is(err, ErrFactualStateUnavailable) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				result := actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: record.Plan.ID, ChallengeID: record.Challenge.ID, ProjectID: record.Plan.ProjectID, Status: actionv1.StatusFailed, FailureCode: actionv1.FailureExecution, Message: "factual state recheck failed during recovery", ApprovedBy: record.ApprovedBy, DeviceID: record.DeviceID, FinishedAt: now}
+				if _, completeErr := s.Store.Complete(recordCtx, record, result); completeErr != nil {
+					if firstErr == nil {
+						firstErr = RecoveryError{Category: RecoveryCompleteFailed, err: completeErr}
+					}
+				}
+			}
+			cancel()
 			continue
 		}
-		post, postErr := s.Runtime.PostCheck(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters, record.State)
+		post, postErr := s.Runtime.PostCheck(recordCtx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters, record.State)
 		if errors.Is(postErr, ErrFactualStateUnavailable) || errors.Is(postErr, context.Canceled) || errors.Is(postErr, context.DeadlineExceeded) {
+			if errors.Is(postErr, context.DeadlineExceeded) && ctx.Err() == nil {
+				s.reportRecovery(RecoveryTimeout)
+			}
+			cancel()
 			continue
 		}
 		status, failure, message := actionv1.StatusSucceeded, actionv1.FailureCode(""), "action result recovered after Agent restart"
@@ -284,11 +334,14 @@ func (s *Service) Recover(ctx context.Context) error {
 			postHash, _ = actionv1.StateHash(post)
 		}
 		result := actionv1.ActionResult{SchemaVersion: actionv1.SchemaVersion, ActionID: record.Plan.ID, ChallengeID: record.Challenge.ID, ProjectID: record.Plan.ProjectID, Status: status, FailureCode: failure, Message: message, ApprovedBy: record.ApprovedBy, DeviceID: record.DeviceID, StartedAt: record.ExecutionStartedAt, FinishedAt: now, PostStateHash: postHash}
-		if _, err := s.Store.Complete(ctx, record, result); err != nil {
-			return err
+		if _, err := s.Store.Complete(recordCtx, record, result); err != nil {
+			if firstErr == nil {
+				firstErr = RecoveryError{Category: RecoveryCompleteFailed, err: err}
+			}
 		}
+		cancel()
 	}
-	return nil
+	return firstErr
 }
 
 func (s *Service) RecoverLoop(ctx context.Context, interval time.Duration) error {
@@ -307,7 +360,14 @@ func (s *Service) RecoverLoop(ctx context.Context, interval time.Duration) error
 			timeout = 30 * time.Second
 		}
 		passCtx, cancel := context.WithTimeout(ctx, timeout)
-		_ = s.Recover(passCtx)
+		if err := s.Recover(passCtx); err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+			var recoveryErr RecoveryError
+			if errors.As(err, &recoveryErr) {
+				s.reportRecovery(recoveryErr.Category)
+			} else {
+				s.reportRecovery(RecoveryStoreFailed)
+			}
+		}
 		cancel()
 		timer := time.NewTimer(interval)
 		select {
@@ -317,6 +377,14 @@ func (s *Service) RecoverLoop(ctx context.Context, interval time.Duration) error
 		case <-timer.C:
 		}
 	}
+}
+
+func (s *Service) reportRecovery(category string) {
+	if s.ReportRecovery == nil || category == "" {
+		return
+	}
+	defer func() { _ = recover() }()
+	s.ReportRecovery(category)
 }
 
 func (s *Service) Status(ctx context.Context, request *actionv1.StatusRequest) (*actionv1.ActionResult, error) {

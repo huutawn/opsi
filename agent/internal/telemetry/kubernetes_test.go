@@ -15,12 +15,21 @@ func (f fakeRunner) Run(_ context.Context, _ string, args ...string) ([]byte, er
 	return []byte(f[strings.Join(args, " ")]), nil
 }
 
+const (
+	testServiceKey     = "api"
+	testResourceName   = "opsi-api-rt-example"
+	testCloudServiceID = "svc-d3b30564957dd8ed"
+)
+
 func TestKubernetesCollectorMapsPodMetricsAndLogs(t *testing.T) {
 	now := time.Date(2026, 6, 20, 1, 2, 3, 0, time.UTC)
 	runner := fakeRunner{
-		"get pods -A -o json":                   `{"items":[{"metadata":{"name":"api-123","namespace":"default","labels":{"opsi.dev/project-id":"proj","opsi.dev/service-id":"svc-api"}},"spec":{"nodeName":"node-a"},"status":{"containerStatuses":[{"ready":true,"restartCount":2}]}}]}`,
-		"top pods -A --containers --no-headers": "default api-123 app 25m 64Mi\n",
-		"logs -n default api-123 --all-containers=true --tail 10 --since 1m0s --timestamps": "2026-06-20T01:02:03Z ERROR failed to connect\n",
+		"get pods -A -o json": `{"items":[` +
+			`{"metadata":{"name":"` + testResourceName + `-pod","namespace":"default","labels":{"app.kubernetes.io/managed-by":"opsi","app.kubernetes.io/name":"` + testResourceName + `","opsi.dev/project":"proj","opsi.dev/service":"` + testServiceKey + `"}},"spec":{"nodeName":"node-a"},"status":{"containerStatuses":[{"ready":true,"restartCount":2}]}},` +
+			`{"metadata":{"name":"guessed-resource","namespace":"default","labels":{"app.kubernetes.io/managed-by":"opsi","app.kubernetes.io/name":"` + testResourceName + `","opsi.dev/project":"proj"}}},` +
+			`{"metadata":{"name":"guessed-cloud-id","namespace":"default","labels":{"app.kubernetes.io/managed-by":"opsi","app.kubernetes.io/name":"` + testCloudServiceID + `","opsi.dev/project":"proj"}}}]}`,
+		"top pods -A --containers --no-headers": "default " + testResourceName + "-pod app 25m 64Mi\ndefault guessed-resource app 99m 99Mi\ndefault guessed-cloud-id app 99m 99Mi\n",
+		"logs -n default " + testResourceName + "-pod --all-containers=true --tail 10 --since 1m0s --timestamps": "2026-06-20T01:02:03Z ERROR failed to connect\n",
 	}
 	collector := KubernetesCollector{Runner: runner, LogTailLines: 10, LogSince: time.Minute, Now: func() time.Time { return now }}
 	metrics, logs, err := collector.Collect(context.Background())
@@ -30,7 +39,7 @@ func TestKubernetesCollectorMapsPodMetricsAndLogs(t *testing.T) {
 	if len(metrics) != 4 {
 		t.Fatalf("expected cpu+memory+ready+restart metrics, got %+v", metrics)
 	}
-	if metrics[0].ProjectID != "proj" || metrics[0].ServiceID != "svc-api" || metrics[0].PodID != "api-123" || metrics[0].Value != 0.025 {
+	if metrics[0].ProjectID != "proj" || metrics[0].ServiceID != testServiceKey || metrics[0].PodID != testResourceName+"-pod" || metrics[0].Value != 0.025 {
 		t.Fatalf("unexpected cpu metric: %+v", metrics[0])
 	}
 	if metrics[1].Value != 64*1024*1024 {
@@ -42,8 +51,22 @@ func TestKubernetesCollectorMapsPodMetricsAndLogs(t *testing.T) {
 	if metrics[3].Name != "pod.restart_count" || metrics[3].Value != 2 {
 		t.Fatalf("unexpected restart metric: %+v", metrics[3])
 	}
-	if len(logs) != 1 || logs[0].Level != "error" || logs[0].Message != "ERROR failed to connect" || !logs[0].Unread {
+	if len(logs) != 1 || logs[0].ServiceID != testServiceKey || logs[0].ServiceID == testCloudServiceID || logs[0].ServiceID == testResourceName || logs[0].Level != "error" || logs[0].Message != "ERROR failed to connect" || !logs[0].Unread {
 		t.Fatalf("unexpected logs: %+v", logs)
+	}
+}
+
+func TestKubernetesCollectorRejectsMissingMalformedAndGuessedServiceKeys(t *testing.T) {
+	runner := fakeRunner{
+		"get pods -A -o json": `{"items":[` +
+			`{"metadata":{"name":"missing","namespace":"default","labels":{"app.kubernetes.io/managed-by":"opsi","app.kubernetes.io/name":"` + testResourceName + `","opsi.dev/project":"proj"}}},` +
+			`{"metadata":{"name":"malformed","namespace":"default","labels":{"app.kubernetes.io/managed-by":"opsi","app.kubernetes.io/name":"` + testCloudServiceID + `","opsi.dev/project":"proj","opsi.dev/service":"-bad"}}},` +
+			`{"metadata":{"name":"unmanaged","namespace":"default","labels":{"opsi.dev/project":"proj","opsi.dev/service":"` + testServiceKey + `"}}}]}`,
+		"top pods -A --containers --no-headers": "default missing app 25m 64Mi\ndefault malformed app 25m 64Mi\ndefault unmanaged app 25m 64Mi\n",
+	}
+	metrics, logs, err := (KubernetesCollector{Runner: runner, ProjectID: "proj"}).Collect(context.Background())
+	if err != nil || len(metrics) != 0 || len(logs) != 0 {
+		t.Fatalf("guessed service identities reached telemetry: metrics=%+v logs=%+v err=%v", metrics, logs, err)
 	}
 }
 

@@ -446,7 +446,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	}}
 	actionService := &actionplane.Service{Store: actionStore, Runtime: actionRuntime, Devices: actionplane.HTTPDeviceResolver{BaseURL: cfg.CloudEndpoint, Token: cfg.CloudRelay.AgentToken, NodeID: cfg.NodeID}, Authenticate: func(ctx context.Context, projectID string) (actionplane.Principal, error) {
 		return actionplane.AuthenticateFromContext(ctx, authVerifier, projectID)
-	}}
+	}, ReportRecovery: func(category string) { logger.Warn("agent ActionPlane recovery issue", "category", category) }}
 	actionv1.RegisterActionServiceServer(grpcServer, actionService)
 	go func() {
 		logger.Info("agent ActionPlane recovery loop started")

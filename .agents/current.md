@@ -1,13 +1,14 @@
 # Opsi Current Snapshot
 
-R5-016B ActionPlane recovery liveness is implemented locally.
+The consolidated manual backlog source fixes are implemented locally.
 `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
-`R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_016_RECOVERY_LIVENESS_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
+`R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
+`R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
 ActionPlane restart recovery is one non-blocking root-context loop with an
-immediate pass, five-second default retry, and 30-second pass budget. It is
-read/post-check only and retains unresolved locks until factual completion;
+immediate pass, five-second default retry, 30-second pass budget, and bounded
+per-record opportunity. It is read/post-check only and retains unresolved locks until factual completion;
 reservation/completion are guarded SQLite transitions. Kubernetes reads
 require authoritative full ownership identity. Linux Secret Service is the
 source-tested ActionPlane backend; Darwin ActionPlane secret operations fail
@@ -16,11 +17,26 @@ The canonical mapping is
 `docs/manual_ui_parity_matrix.md`; all 21 R5-013 supported capabilities have a
 Local route/view and the three backend gaps remain disabled. Installed bundles
 include `opsi-ui`; Agent-live acceptance is deferred to R5-017 because the
-former Agent VPS no longer exists. R5-012 remains implemented/live-blocked.
+former Agent VPS no longer exists. R5-012 still requires a live delivery retest.
 
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
+
+### R5-015 corrective — R5_015_AGENT_SERVICE_IDENTITY_PASS
+
+- Opsi-managed telemetry accepts only a valid exact `opsi.dev/service`
+  ServiceKey and never guesses identity from resource names or Cloud `svc-*`
+  values.
+- IncidentEvidence uses that same Agent ServiceKey for local rollout lookup and
+  exact Deployment -> ReplicaSet -> Pod ownership; only validated Pods affect
+  the application digest.
+- Missing exact target Pods and zero owned Pods remain bounded partial coverage
+  even when matching Deployment or Service events exist. Missing-label,
+  mixed-digest, and incomplete-digest evidence is also bounded partial coverage.
+  `IncidentRecord.ServiceID` carrying ServiceKey is explicit technical debt for
+  a separate contract migration.
+- No VPS/live E2E, R5-017, MCP, or production-readiness claim is included.
 
 ### Corrective Prompt 07 — UNRESOLVED_ROLLOUT_OWNERSHIP_PASS
 
