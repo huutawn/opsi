@@ -610,16 +610,20 @@ browser acceptance remain deferred to R5-017.
 
 ### R5-016 — Safe ActionPlane và out-of-band approval manual CLI/UI
 
-**Source checkpoint corrected (2026-07-29):**
-`R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+**Recovery liveness checkpoint corrected (2026-07-29):**
+`R5_016_RECOVERY_LIVENESS_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 Catalog source v1 chỉ gồm restart, scale, gateway reconcile và incident resolve;
 deploy/rollback tiếp tục dùng canonical Cloud delivery path. UI và live VPS/K3s
 acceptance chưa thực hiện nên gate manual đầy đủ vẫn thuộc R5-017.
 Execution reservation/replay/target lock là một SQLite transaction; terminal
-write được guard và release lock trong cùng transaction. Agent restart không tự
+write được guard và release lock trong cùng transaction. Agent phục vụ health/RPC
+trước recovery; đúng một root-context background loop chạy pass đầu ngay lập tức,
+retry mặc định mỗi 5 giây và giới hạn mỗi pass 30 giây. Agent restart không tự
 gán `ACTION_EXECUTION_INTERRUPTED`: recovery chỉ đọc factual state và chạy
-bounded post-check, không gọi executor. Kubernetes identity phải đến từ known-good
-projection và khớp project/environment/service/runtime cùng exact Ingress backend.
+bounded post-check, không gọi executor; unavailable giữ nguyên action và lock để
+pass sau tự hoàn tất khi factual source phục hồi. Kubernetes identity phải đến
+từ known-good projection và khớp project/environment/service/runtime cùng exact
+Ingress backend.
 Linux Secret Service được source-test; Darwin ActionPlane secure storage là
 backend gap fail-closed cho tới native acceptance ở R5-017.
 

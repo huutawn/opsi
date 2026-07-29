@@ -4,16 +4,20 @@
 
 `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
 `R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_016_RECOVERY_LIVENESS_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
 
 ActionPlane execution uses one atomic SQLite reservation and guarded terminal
-transition. Restart recovery never re-executes a mutation: unresolved executions
-retain their target lock until factual state and a bounded post-check prove a
-terminal result. Workload/gateway reads require an authoritative known-good
-projection, full project/environment/service/runtime ownership, exact Ingress
+transition. Restart recovery is one root-context background loop, so health and
+RPC startup do not wait for recovery. It runs immediately, retries at a bounded
+five-second default interval, and gives each non-overlapping pass at most 30
+seconds. Recovery never re-executes a mutation: unavailable factual reads keep
+the execution and target lock unresolved until a later pass obtains factual
+state and a bounded post-check proves a terminal result. Workload/gateway reads
+require an authoritative known-good projection, full
+project/environment/service/runtime ownership, exact Ingress
 backend identity, and strict single-value bounded Kubernetes JSON. Linux Secret
 Service is source-tested for ActionPlane secrets. Darwin ActionPlane private-key
 and pending-grant operations fail closed as an unverified backend; only the CLI

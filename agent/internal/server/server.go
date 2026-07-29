@@ -447,10 +447,13 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	actionService := &actionplane.Service{Store: actionStore, Runtime: actionRuntime, Devices: actionplane.HTTPDeviceResolver{BaseURL: cfg.CloudEndpoint, Token: cfg.CloudRelay.AgentToken, NodeID: cfg.NodeID}, Authenticate: func(ctx context.Context, projectID string) (actionplane.Principal, error) {
 		return actionplane.AuthenticateFromContext(ctx, authVerifier, projectID)
 	}}
-	if err := actionService.Recover(ctx); err != nil {
-		return err
-	}
 	actionv1.RegisterActionServiceServer(grpcServer, actionService)
+	go func() {
+		logger.Info("agent ActionPlane recovery loop started")
+		if err := actionService.RecoverLoop(ctx, 5*time.Second); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Warn("agent ActionPlane recovery loop stopped", "error", err)
+		}
+	}()
 
 	healthServer := &http.Server{
 		Handler:           healthHandler(version, startedAt, cfg, cloudConnection.Connected),

@@ -13,18 +13,25 @@ import (
 )
 
 type fakeRuntime struct {
-	mu         sync.Mutex
-	state      actionv1.CurrentState
-	calls      []actionv1.ActionKind
-	currentErr error
-	postErr    error
-	postCalls  int
+	mu           sync.Mutex
+	state        actionv1.CurrentState
+	calls        []actionv1.ActionKind
+	currentErr   error
+	currentFn    func(context.Context) (actionv1.CurrentState, error)
+	currentCalls int
+	postErr      error
+	postCalls    int
 }
 
-func (f *fakeRuntime) CurrentState(context.Context, actionv1.TargetIdentity, actionv1.ActionKind, actionv1.ActionParameters) (actionv1.CurrentState, error) {
+func (f *fakeRuntime) CurrentState(ctx context.Context, _ actionv1.TargetIdentity, _ actionv1.ActionKind, _ actionv1.ActionParameters) (actionv1.CurrentState, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.state, f.currentErr
+	f.currentCalls++
+	state, err, currentFn := f.state, f.currentErr, f.currentFn
+	f.mu.Unlock()
+	if currentFn != nil {
+		return currentFn(ctx)
+	}
+	return state, err
 }
 func (f *fakeRuntime) RestartWorkload(context.Context, actionv1.TargetIdentity) error {
 	f.mu.Lock()
@@ -191,6 +198,30 @@ func TestExecutePostCheckFailureIsTerminal(t *testing.T) {
 	}
 }
 
+func TestExecuteKeepsPreMutationFactualUnavailableReserved(t *testing.T) {
+	runtime := &fakeRuntime{state: fixtureState()}
+	service := newTestService(t, runtime, false)
+	preflight, err := service.Preflight(context.Background(), fixtureRequest(actionv1.ActionRestartWorkload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := signGrant(t, preflight.Challenge, service)
+	runtime.mu.Lock()
+	runtime.currentErr = ErrFactualStateUnavailable
+	runtime.mu.Unlock()
+	result, err := service.Execute(context.Background(), &actionv1.ExecuteRequest{ProjectID: preflight.Plan.ProjectID, ChallengeID: preflight.Challenge.ID, Grant: grant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := service.Store.Load(context.Background(), preflight.Plan.ProjectID, preflight.Challenge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != actionv1.StatusApproved || record.Status != actionv1.StatusApproved || record.Result.ActionID != "" || lockCount(t, service.Store.(*SQLiteStore), preflight.Plan.ID) != 1 || len(runtime.calls) != 0 {
+		t.Fatalf("pre-mutation unavailable result=%+v record=%+v locks=%d executor_calls=%d", result, record, lockCount(t, service.Store.(*SQLiteStore), preflight.Plan.ID), len(runtime.calls))
+	}
+}
+
 func TestRecoveryFailsOnlyAfterReadableBoundedPostCheck(t *testing.T) {
 	path := t.TempDir() + "/actions.db"
 	store, err := OpenSQLiteStore(path)
@@ -222,6 +253,292 @@ func TestRecoveryFailsOnlyAfterReadableBoundedPostCheck(t *testing.T) {
 	if record.Status != actionv1.StatusFailed || record.Result.FailureCode != actionv1.FailurePostCheck || runtime.postCalls != 1 || len(runtime.calls) != 0 {
 		t.Fatalf("recovery result=%+v post=%d mutations=%v", record.Result, runtime.postCalls, runtime.calls)
 	}
+}
+
+func TestRecoveryKeepsFactualUnavailableActionUnresolved(t *testing.T) {
+	store, err := OpenSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	plan, state, challenge := testActionFixtures(now)
+	if err := store.Create(context.Background(), plan, state, challenge); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, "grant", "u1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{state: state, currentErr: ErrFactualStateUnavailable}
+	service := &Service{Store: store, Runtime: runtime, Now: func() time.Time { return now.Add(2 * time.Second) }}
+	if err := service.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load(context.Background(), plan.ProjectID, challenge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != actionv1.StatusExecuting || record.Result.ActionID != "" || len(runtime.calls) != 0 {
+		t.Fatalf("unavailable action was terminalized: record=%+v calls=%v", record, runtime.calls)
+	}
+	if got := lockCount(t, store, plan.ID); got != 1 {
+		t.Fatalf("unavailable action lock count=%d", got)
+	}
+	t.Logf("status=%s terminal_result=%t locks=1 executor_calls=%d", record.Status, record.Result.ActionID != "", len(runtime.calls))
+}
+
+func TestIncidentRecoveryUnavailableRetainsLock(t *testing.T) {
+	store, err := OpenSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	plan, state, challenge := testActionFixtures(now)
+	state.Workload = nil
+	state.Incident = &actionv1.IncidentState{IncidentID: "incident-1", Status: "open"}
+	state.StateHash, _ = actionv1.StateHash(state)
+	plan.Kind = actionv1.ActionIncidentResolve
+	plan.Parameters = actionv1.ActionParameters{IncidentResolve: &actionv1.IncidentResolveParameters{IncidentID: state.Incident.IncidentID}}
+	plan.CurrentStateHash = state.StateHash
+	plan.PlanHash, _ = actionv1.PlanHash(plan)
+	challenge.PlanHash, challenge.StateHash = plan.PlanHash, state.StateHash
+	if err := store.Create(context.Background(), plan, state, challenge); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, "grant", "u1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	executorCalls := 0
+	runtime := KubernetesRuntime{
+		IncidentState: func(context.Context, actionv1.TargetIdentity, string) (actionv1.IncidentState, error) {
+			return actionv1.IncidentState{}, errors.New("incident store unavailable")
+		},
+		Incident: func(context.Context, actionv1.TargetIdentity, string) error {
+			executorCalls++
+			return nil
+		},
+	}
+	if err := (&Service{Store: store, Runtime: runtime}).Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load(context.Background(), plan.ProjectID, challenge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != actionv1.StatusExecuting || record.Result.ActionID != "" || lockCount(t, store, plan.ID) != 1 || executorCalls != 0 {
+		t.Fatalf("record=%+v locks=%d executor_calls=%d", record, lockCount(t, store, plan.ID), executorCalls)
+	}
+	t.Logf("incident_status=%s terminal_result=false locks=1 executor_calls=0", record.Status)
+}
+
+func TestRecoveryLoopRetriesUnavailableWithoutExecutor(t *testing.T) {
+	store, err := OpenSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	plan, state, challenge := testActionFixtures(now)
+	if err := store.Create(context.Background(), plan, state, challenge); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, "grant", "u1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{state: state, currentErr: ErrFactualStateUnavailable}
+	service := &Service{Store: store, Runtime: runtime, Now: func() time.Time { return now.Add(2 * time.Second) }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() { done <- service.RecoverLoop(ctx, 5*time.Millisecond) }()
+	unavailableDeadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(unavailableDeadline) {
+		runtime.mu.Lock()
+		currentCalls := runtime.currentCalls
+		runtime.mu.Unlock()
+		if currentCalls >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	runtime.mu.Lock()
+	unavailableCalls := runtime.currentCalls
+	runtime.mu.Unlock()
+	if unavailableCalls < 2 {
+		t.Fatalf("recovery did not retry unavailable state: calls=%d", unavailableCalls)
+	}
+	record, err := store.Load(context.Background(), plan.ProjectID, challenge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != actionv1.StatusExecuting || record.Result.ActionID != "" || lockCount(t, store, plan.ID) != 1 {
+		t.Fatalf("unavailable recovery changed state: %+v locks=%d", record, lockCount(t, store, plan.ID))
+	}
+	runtime.mu.Lock()
+	runtime.currentErr = nil
+	runtime.mu.Unlock()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		record, err = store.Load(context.Background(), plan.ProjectID, challenge.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.Status == actionv1.StatusSucceeded {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("recovery loop error=%v", err)
+	}
+	if record.Status != actionv1.StatusSucceeded || lockCount(t, store, plan.ID) != 0 || len(runtime.calls) != 0 {
+		t.Fatalf("recovery did not finish factual action: %+v locks=%d executor_calls=%d", record, lockCount(t, store, plan.ID), len(runtime.calls))
+	}
+	runtime.mu.Lock()
+	currentCalls, postCalls := runtime.currentCalls, runtime.postCalls
+	runtime.mu.Unlock()
+	t.Logf("elapsed=%s current_state_calls=%d post_checks=%d executor_calls=0 locks=0", time.Since(started), currentCalls, postCalls)
+}
+
+func TestRecoveryLoopStopsOnCancellation(t *testing.T) {
+	store, err := OpenSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runtime := &fakeRuntime{state: fixtureState(), currentErr: ErrFactualStateUnavailable}
+	service := &Service{Store: store, Runtime: runtime}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.RecoverLoop(ctx, time.Millisecond) }()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("recovery loop error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery loop did not stop")
+	}
+}
+
+func TestRecoveryPassTimeoutRetriesWithoutBusyLoop(t *testing.T) {
+	store, err := OpenSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	plan, state, challenge := testActionFixtures(now)
+	if err := store.Create(context.Background(), plan, state, challenge); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, "grant", "u1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{currentFn: func(ctx context.Context) (actionv1.CurrentState, error) {
+		<-ctx.Done()
+		return actionv1.CurrentState{}, ctx.Err()
+	}}
+	service := &Service{Store: store, Runtime: runtime, recoveryTimeout: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.RecoverLoop(ctx, 15*time.Millisecond) }()
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		runtime.mu.Lock()
+		calls := runtime.currentCalls
+		runtime.mu.Unlock()
+		if calls >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("recovery loop error=%v", err)
+	}
+	runtime.mu.Lock()
+	currentCalls := runtime.currentCalls
+	runtime.mu.Unlock()
+	record, err := store.Load(context.Background(), plan.ProjectID, challenge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentCalls < 2 || currentCalls > 4 || record.Status != actionv1.StatusExecuting || lockCount(t, store, plan.ID) != 1 {
+		t.Fatalf("passes=%d record=%+v locks=%d", currentCalls, record, lockCount(t, store, plan.ID))
+	}
+	t.Logf("timed_out_passes=%d status=%s locks=1", currentCalls, record.Status)
+}
+
+func TestConcurrentRecoveryAndReplayPersistOneTerminalEvent(t *testing.T) {
+	runtime := &fakeRuntime{state: fixtureState()}
+	service := newTestService(t, runtime, false)
+	preflight, err := service.Preflight(context.Background(), fixtureRequest(actionv1.ActionRestartWorkload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := signGrant(t, preflight.Challenge, service)
+	grantHash, err := approvalHash(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := service.Store.ReserveExecution(context.Background(), preflight.Plan.ProjectID, preflight.Challenge.ID, grantHash, "u1", service.device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Store.BeginExecution(context.Background(), reservation.Record, preflight.Plan.IssuedAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var recoveryErr, replayErr error
+	var replay *actionv1.ActionResult
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		recoveryErr = service.Recover(context.Background())
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		replay, replayErr = service.Execute(context.Background(), &actionv1.ExecuteRequest{ProjectID: preflight.Plan.ProjectID, ChallengeID: preflight.Challenge.ID, Grant: grant})
+	}()
+	close(start)
+	wg.Wait()
+	if recoveryErr != nil || replayErr != nil || replay == nil {
+		t.Fatalf("recovery_err=%v replay=%+v replay_err=%v", recoveryErr, replay, replayErr)
+	}
+	terminal, err := service.Execute(context.Background(), &actionv1.ExecuteRequest{ProjectID: preflight.Plan.ProjectID, ChallengeID: preflight.Challenge.ID, Grant: grant})
+	if err != nil || terminal.Status != actionv1.StatusSucceeded {
+		t.Fatalf("terminal replay=%+v err=%v", terminal, err)
+	}
+	store := service.Store.(*SQLiteStore)
+	assertEventCounts(t, store, preflight.Plan.ID, map[actionv1.ActionStatus]int{actionv1.StatusSucceeded: 1, actionv1.StatusFailed: 0})
+	if len(runtime.calls) != 0 || runtime.postCalls != 1 || lockCount(t, store, preflight.Plan.ID) != 0 {
+		t.Fatalf("executor=%d post=%d locks=%d", len(runtime.calls), runtime.postCalls, lockCount(t, store, preflight.Plan.ID))
+	}
+	t.Logf("terminal_status=%s terminal_events=1 post_checks=1 executor_calls=0 locks=0", terminal.Status)
 }
 
 type testService struct {

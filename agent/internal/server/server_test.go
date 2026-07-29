@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,12 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opsi-dev/opsi/agent/internal/actionplane"
 	"github.com/opsi-dev/opsi/agent/internal/cloudrunner"
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/incident"
 	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -145,6 +148,52 @@ func TestRunServesHealthAndStatus(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not stop")
+	}
+}
+
+func TestRunServesBeforeRecoveryOfManyUnavailableActions(t *testing.T) {
+	for _, count := range []int{1, 4} {
+		t.Run(fmt.Sprintf("actions-%d", count), func(t *testing.T) {
+			cfg := config.Default()
+			cfg.ListenAddr = freeAddr(t)
+			cfg.HealthAddr = freeAddr(t)
+			cfg.NodeID = "test-node"
+			cfg.SQLitePath = t.TempDir() + "/agent.sqlite"
+			cfg.Deployment.DryRun = true
+			seedUnavailableIncidentActions(t, cfg.SQLitePath, count)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errCh := make(chan error, 1)
+			started := time.Now()
+			go func() { errCh <- Run(ctx, cfg, "test-version", slog.Default()) }()
+			waitForHealth(t, "http://"+cfg.HealthAddr+"/health")
+			if elapsed := time.Since(started); elapsed >= time.Second {
+				t.Fatalf("startup waited for recovery: count=%d elapsed=%s", count, elapsed)
+			} else {
+				t.Logf("recoverable_actions=%d health_rpc_startup=%s", count, elapsed)
+			}
+			dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Second)
+			conn, err := grpc.DialContext(dialCtx, cfg.ListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+			dialCancel()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = agentv1.NewStatusServiceClient(conn).Status(context.Background(), &agentv1.StatusRequest{})
+			_ = conn.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("server did not stop")
+			}
+		})
 	}
 }
 
@@ -335,4 +384,32 @@ func waitForHealth(t *testing.T, url string) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("health endpoint did not become ready: %s", url)
+}
+
+func seedUnavailableIncidentActions(t *testing.T, path string, count int) {
+	t.Helper()
+	store, err := actionplane.OpenSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	for i := 0; i < count; i++ {
+		target := actionv1.TargetIdentity{ProjectID: "p1", NodeID: fmt.Sprintf("node-%d", i), ServiceID: "svc", EnvironmentID: "prod", RuntimeID: fmt.Sprintf("runtime-%d", i)}
+		state := actionv1.CurrentState{SchemaVersion: actionv1.SchemaVersion, ProjectID: "p1", Target: target, Incident: &actionv1.IncidentState{IncidentID: fmt.Sprintf("missing-%d", i), Status: "open"}}
+		state.StateHash, _ = actionv1.StateHash(state)
+		plan := actionv1.ActionPlan{SchemaVersion: actionv1.SchemaVersion, ID: fmt.Sprintf("action-%d", i), ProjectID: "p1", NodeID: target.NodeID, ServiceID: target.ServiceID, Target: target, Kind: actionv1.ActionIncidentResolve, Parameters: actionv1.ActionParameters{IncidentResolve: &actionv1.IncidentResolveParameters{IncidentID: state.Incident.IncidentID}}, Origin: actionv1.OriginManualCLI, RequestedBy: "u1", Risk: actionv1.RiskR2, CurrentStateHash: state.StateHash, IssuedAt: now, ExpiresAt: now.Add(actionv1.MaxPlanTTL)}
+		plan.PlanHash, _ = actionv1.PlanHash(plan)
+		challenge := actionv1.ApprovalChallenge{SchemaVersion: actionv1.SchemaVersion, ID: fmt.Sprintf("challenge-%d", i), ActionID: plan.ID, ProjectID: plan.ProjectID, PlanHash: plan.PlanHash, StateHash: state.StateHash, Nonce: fmt.Sprintf("nonce-%d", i), IssuedAt: now, ExpiresAt: now.Add(actionv1.MaxChallengeTTL)}
+		if err := store.Create(context.Background(), plan, state, challenge); err != nil {
+			t.Fatal(err)
+		}
+		reservation, err := store.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, fmt.Sprintf("grant-%d", i), "u1", "device-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

@@ -1,12 +1,14 @@
 # Opsi Current Snapshot
 
-R5-016 Safe ActionPlane source work is implemented.
+R5-016B ActionPlane recovery liveness is implemented locally.
 `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
 `R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_016_ACTION_PLANE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_016_RECOVERY_LIVENESS_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
-ActionPlane restart recovery is read/post-check only and retains unresolved
-locks; reservation/completion are guarded SQLite transitions. Kubernetes reads
+ActionPlane restart recovery is one non-blocking root-context loop with an
+immediate pass, five-second default retry, and 30-second pass budget. It is
+read/post-check only and retains unresolved locks until factual completion;
+reservation/completion are guarded SQLite transitions. Kubernetes reads
 require authoritative full ownership identity. Linux Secret Service is the
 source-tested ActionPlane backend; Darwin ActionPlane secret operations fail
 closed pending native acceptance, while PAT behavior remains unchanged.

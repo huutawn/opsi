@@ -32,11 +32,11 @@ type KubernetesRuntime struct {
 func (k KubernetesRuntime) CurrentState(ctx context.Context, target actionv1.TargetIdentity, kind actionv1.ActionKind, parameters actionv1.ActionParameters) (actionv1.CurrentState, error) {
 	if kind == actionv1.ActionIncidentResolve {
 		if k.IncidentState == nil || parameters.IncidentResolve == nil {
-			return actionv1.CurrentState{}, errors.New("incident factual-state adapter is unavailable")
+			return actionv1.CurrentState{}, fmt.Errorf("%w: incident factual-state adapter is unavailable", ErrFactualStateUnavailable)
 		}
 		incident, err := k.IncidentState(ctx, target, parameters.IncidentResolve.IncidentID)
 		if err != nil {
-			return actionv1.CurrentState{}, err
+			return actionv1.CurrentState{}, fmt.Errorf("%w: %w", ErrFactualStateUnavailable, err)
 		}
 		state := actionv1.CurrentState{SchemaVersion: actionv1.SchemaVersion, ProjectID: target.ProjectID, Target: target, Incident: &incident}
 		state.StateHash, err = actionv1.StateHash(state)

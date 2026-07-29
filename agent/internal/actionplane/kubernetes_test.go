@@ -3,6 +3,7 @@ package actionplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,18 @@ func TestKubernetesRuntimeFailsClosedWithoutAuthoritativeProjection(t *testing.T
 	if _, err := runtime.CurrentState(context.Background(), fixtureState().Target, actionv1.ActionRestartWorkload, actionv1.ActionParameters{RestartWorkload: &actionv1.RestartWorkloadParameters{}}); err == nil {
 		t.Fatal("nil ActionProjection used guessed Kubernetes identity")
 	}
+}
+
+func TestKubernetesIncidentStateUnavailableIsFactualUnavailable(t *testing.T) {
+	sentinel := errors.New("incident store temporarily unavailable")
+	runtime := KubernetesRuntime{IncidentState: func(context.Context, actionv1.TargetIdentity, string) (actionv1.IncidentState, error) {
+		return actionv1.IncidentState{}, sentinel
+	}}
+	_, err := runtime.CurrentState(context.Background(), fixtureState().Target, actionv1.ActionIncidentResolve, actionv1.ActionParameters{IncidentResolve: &actionv1.IncidentResolveParameters{IncidentID: "incident-1"}})
+	if !errors.Is(err, ErrFactualStateUnavailable) || !errors.Is(err, sentinel) {
+		t.Fatalf("incident unavailable error=%v", err)
+	}
+	t.Logf("classified=%v source_error_preserved=%v", errors.Is(err, ErrFactualStateUnavailable), errors.Is(err, sentinel))
 }
 
 func TestKubernetesJSONIsSingleStrictBoundedValue(t *testing.T) {

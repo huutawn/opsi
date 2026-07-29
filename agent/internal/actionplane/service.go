@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/secret"
@@ -49,11 +50,13 @@ func AuthenticateFromContext(ctx context.Context, verifier secret.AuthVerifier, 
 
 type Service struct {
 	actionv1.UnimplementedActionServiceServer
-	Store        ActionStore
-	Runtime      Runtime
-	Devices      DeviceResolver
-	Authenticate func(context.Context, string) (Principal, error)
-	Now          func() time.Time
+	Store           ActionStore
+	Runtime         Runtime
+	Devices         DeviceResolver
+	Authenticate    func(context.Context, string) (Principal, error)
+	Now             func() time.Time
+	recoveryTimeout time.Duration
+	recoveryMu      sync.Mutex
 }
 
 func (s *Service) Catalog(context.Context, *actionv1.CatalogRequest) (*actionv1.CatalogResponse, error) {
@@ -209,6 +212,9 @@ func (s *Service) Execute(ctx context.Context, request *actionv1.ExecuteRequest)
 	}
 	current, err := s.Runtime.CurrentState(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters)
 	if err != nil {
+		if errors.Is(err, ErrFactualStateUnavailable) {
+			return inProgress(record), nil
+		}
 		return s.finish(ctx, record, grantHash, actionv1.StatusFailed, actionv1.FailureExecution, "state recheck failed", principal.UserID, device.ID, actionv1.CurrentState{})
 	}
 	currentHash, err := actionv1.StateHash(current)
@@ -241,6 +247,8 @@ func (s *Service) Execute(ctx context.Context, request *actionv1.ExecuteRequest)
 }
 
 func (s *Service) Recover(ctx context.Context) error {
+	s.recoveryMu.Lock()
+	defer s.recoveryMu.Unlock()
 	if s.Store == nil || s.Runtime == nil {
 		return errors.New("ActionPlane recovery is unavailable")
 	}
@@ -260,11 +268,11 @@ func (s *Service) Recover(ctx context.Context) error {
 		if record.Status != actionv1.StatusExecuting || !record.NonceConsumed {
 			continue
 		}
-		if _, err := s.Runtime.CurrentState(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters); errors.Is(err, ErrFactualStateUnavailable) {
+		if _, err := s.Runtime.CurrentState(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters); err != nil {
 			continue
 		}
 		post, postErr := s.Runtime.PostCheck(ctx, record.Plan.Target, record.Plan.Kind, record.Plan.Parameters, record.State)
-		if errors.Is(postErr, ErrFactualStateUnavailable) {
+		if errors.Is(postErr, ErrFactualStateUnavailable) || errors.Is(postErr, context.Canceled) || errors.Is(postErr, context.DeadlineExceeded) {
 			continue
 		}
 		status, failure, message := actionv1.StatusSucceeded, actionv1.FailureCode(""), "action result recovered after Agent restart"
@@ -281,6 +289,34 @@ func (s *Service) Recover(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) RecoverLoop(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		timeout := s.recoveryTimeout
+		if timeout <= 0 || timeout > 30*time.Second {
+			timeout = 30 * time.Second
+		}
+		passCtx, cancel := context.WithTimeout(ctx, timeout)
+		_ = s.Recover(passCtx)
+		cancel()
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (s *Service) Status(ctx context.Context, request *actionv1.StatusRequest) (*actionv1.ActionResult, error) {
