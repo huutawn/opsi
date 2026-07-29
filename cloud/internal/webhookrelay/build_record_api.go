@@ -79,14 +79,12 @@ func (s *Server) handleBuildRecordSubmission(w http.ResponseWriter, r *http.Requ
 	if reused {
 		status = http.StatusOK
 	}
-	var delivery *registry.DeploymentJob
-	deliveryPending := false
-	if err == nil {
-		job, _, deliveryErr := s.ensureAutomaticDelivery(r.Context(), record)
-		if deliveryErr != nil { deliveryPending = true }
-		delivery = job
+	delivery, _, err := s.ensureAutomaticDelivery(r.Context(), record)
+	if err != nil {
+		writeAutomaticDeliveryFailure(w, r, err)
+		return
 	}
-	writeJSON(w, status, map[string]any{"record": record, "reused": reused, "delivery": delivery, "delivery_pending": deliveryPending})
+	writeJSON(w, status, map[string]any{"record": record, "reused": reused, "delivery": delivery, "delivery_pending": false})
 }
 
 func (s *Server) authorizeBuildIdentity(ctx context.Context, identity githuboidc.VerifiedIdentity, submission buildrecordv1.Submission) (githuboidc.VerifiedIdentity, buildrecordv1.Submission, error) {
@@ -218,11 +216,11 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 	}
 	starter, ok := s.Registry.(immutableDeploymentStarter)
 	if !ok {
-		return nil, false, registry.APIError{Status: 503, Code: "DEPLOYMENT_UNAVAILABLE", Message: "immutable deployment store is unavailable"}
+		return nil, false, automaticDeliveryError(registry.APIError{Status: 503, Code: "DEPLOYMENT_UNAVAILABLE", Message: "immutable deployment store is unavailable"})
 	}
 	job, reused, err := starter.StartImmutableDeployment(snapshot, "github-actions", keyPrefix+":"+record.ID, "automatic-"+record.ID)
 	if err != nil {
-		return nil, reused, err
+		return nil, reused, automaticDeliveryError(err)
 	}
 	job.Reused = reused
 	if !reused {
@@ -233,6 +231,29 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 		s.Registry.Audit(job.OrgID, record.ProjectID, "github-actions", action, "deployment_job", job.ID, "success", map[string]any{"build_record_id": record.ID, "reused": false, "oci_digest": record.Build.OCIDigest})
 	}
 	return &job, reused, nil
+}
+
+func automaticDeliveryError(err error) error {
+	var apiErr registry.APIError
+	if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 {
+		return registry.APIError{Status: apiErr.Status, Code: apiErr.Code, Message: "automatic delivery authority rejected the request"}
+	}
+	return registry.APIError{Status: http.StatusServiceUnavailable, Code: "AUTOMATIC_DELIVERY_PENDING", Message: "BuildRecord was accepted but automatic delivery is pending"}
+}
+
+func writeAutomaticDeliveryFailure(w http.ResponseWriter, r *http.Request, err error) {
+	var apiErr registry.APIError
+	if errors.As(err, &apiErr) {
+		apiErr.RequestID = r.Header.Get("X-Request-ID")
+		writeRegistryError(w, apiErr)
+		return
+	}
+	var policyErr deploymentpolicy.Error
+	if errors.As(err, &policyErr) {
+		writeRegistryError(w, registry.APIError{Status: policyErr.Status, Code: policyErr.Code, Message: "automatic delivery authority rejected the request", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	writeRegistryError(w, registry.APIError{Status: http.StatusInternalServerError, Code: "AUTOMATIC_DELIVERY_FAILED", Message: "automatic delivery failed", RequestID: r.Header.Get("X-Request-ID")})
 }
 
 func quantityAtLeast(limit, required string, cpu bool) bool {

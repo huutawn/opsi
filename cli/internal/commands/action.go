@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/opsi-dev/opsi/cli/internal/actionapproval"
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
@@ -126,8 +127,15 @@ func newActionCommand(configPath *string, options Options) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		_ = (actionapproval.Store{Backend: store}).DeletePrivateKey(args[0])
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"device_id": device.ID, "status": device.Status})
+		receipt := map[string]any{"device_id": device.ID, "status": device.Status}
+		if err := (actionapproval.Store{Backend: store}).DeletePrivateKey(args[0]); err != nil {
+			receipt["local_cleanup_required"] = true
+			if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(receipt); encodeErr != nil {
+				return encodeErr
+			}
+			return ErrActionSecureCleanupRequired
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(receipt)
 	}}
 	device.AddCommand(register, list, revoke)
 
@@ -172,7 +180,9 @@ func newActionCommand(configPath *string, options Options) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "action=%s target=%s risk=%s state_hash=%s expires=%s\nsummary=%s\n", challenge.ActionID, challenge.Target.Key(), challenge.Risk, challenge.StateHash, challenge.ExpiresAt.UTC().Format(time.RFC3339), challenge.Summary)
+		fmt.Fprintf(cmd.OutOrStdout(), "action=%s risk=%s state_hash=%s expires=%s\n", challenge.ActionID, challenge.Risk, challenge.StateHash, challenge.ExpiresAt.UTC().Format(time.RFC3339))
+		fmt.Fprintln(cmd.OutOrStdout(), formatApprovalTarget(challenge.Target))
+		fmt.Fprintf(cmd.OutOrStdout(), "summary=%s\n", challenge.Summary)
 		for _, condition := range challenge.Preconditions {
 			fmt.Fprintf(cmd.OutOrStdout(), "precondition=%s: %s\n", condition.Code, condition.Summary)
 		}
@@ -285,6 +295,24 @@ func newActionCommand(configPath *string, options Options) *cobra.Command {
 	preflight.Flags().StringVar(&incidentID, "incident-id", "", "incident id")
 	action.AddCommand(device, catalog, preflight, approve, execute, status)
 	return action
+}
+
+func formatApprovalTarget(target actionv1.TargetIdentity) string {
+	return fmt.Sprintf("target: project=%s environment=%s runtime=%s node=%s service=%s", humanApprovalField(target.ProjectID), humanApprovalField(target.EnvironmentID), humanApprovalField(target.RuntimeID), humanApprovalField(target.NodeID), humanApprovalField(target.ServiceID))
+}
+
+func humanApprovalField(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+	runes := []rune(value)
+	if len(runes) > 128 {
+		runes = runes[:128]
+	}
+	return string(runes)
 }
 
 func newActionAgent(cmd *cobra.Command, configPath string, factory func() (keychain.Store, error)) (*agentclient.Client, string, error) {

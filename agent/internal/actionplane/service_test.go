@@ -490,6 +490,176 @@ func TestRecoveryPassTimeoutRetriesWithoutBusyLoop(t *testing.T) {
 	t.Logf("timed_out_passes=%d status=%s locks=1", currentCalls, record.Status)
 }
 
+func TestRecoveryTerminalizesNonUnavailableCurrentStateError(t *testing.T) {
+	store, err := OpenSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	plan, state, challenge := testActionFixtures(now)
+	if err := store.Create(context.Background(), plan, state, challenge); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, "grant", "u1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{state: state, currentErr: errors.New("ownership mismatch")}
+	service := &Service{Store: store, Runtime: runtime, Now: func() time.Time { return now.Add(2 * time.Second) }}
+	if err := service.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load(context.Background(), plan.ProjectID, challenge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != actionv1.StatusFailed || record.Result.FailureCode != actionv1.FailureExecution || lockCount(t, store, plan.ID) != 0 || len(runtime.calls) != 0 {
+		t.Fatalf("record=%+v locks=%d executor_calls=%d", record, lockCount(t, store, plan.ID), len(runtime.calls))
+	}
+}
+
+func TestRecoveryPassGivesLaterRecordOpportunityAfterEarlierDeadline(t *testing.T) {
+	store, err := OpenSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	firstPlan, firstState, firstChallenge := testActionFixtures(now)
+	secondPlan, secondState, secondChallenge := testActionFixtures(now)
+	secondPlan.ID, secondPlan.ServiceID, secondPlan.Target.ServiceID = "action-second", "s2", "s2"
+	secondState.Target.ServiceID = "s2"
+	secondState.StateHash, _ = actionv1.StateHash(secondState)
+	secondPlan.CurrentStateHash = secondState.StateHash
+	secondPlan.PlanHash, _ = actionv1.PlanHash(secondPlan)
+	secondChallenge.ID, secondChallenge.ActionID, secondChallenge.PlanHash, secondChallenge.StateHash = "challenge-second", secondPlan.ID, secondPlan.PlanHash, secondState.StateHash
+	if err := store.Create(context.Background(), firstPlan, firstState, firstChallenge); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(context.Background(), secondPlan, secondState, secondChallenge); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		plan      actionv1.ActionPlan
+		challenge actionv1.ApprovalChallenge
+	}{
+		{firstPlan, firstChallenge}, {secondPlan, secondChallenge},
+	} {
+		reservation, err := store.ReserveExecution(context.Background(), item.plan.ProjectID, item.challenge.ID, "grant-"+item.plan.ID, "u1", "device-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime := &starvingRecoveryRuntime{state: secondState, firstService: firstPlan.ServiceID}
+	service := &Service{Store: store, Runtime: runtime, Now: func() time.Time { return now.Add(2 * time.Second) }}
+	passCtx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	if err := service.Recover(passCtx); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := store.Load(context.Background(), firstPlan.ProjectID, firstChallenge.ID)
+	second, _ := store.Load(context.Background(), secondPlan.ProjectID, secondChallenge.ID)
+	if first.Status != actionv1.StatusExecuting || second.Status != actionv1.StatusSucceeded || lockCount(t, store, firstPlan.ID) != 1 || lockCount(t, store, secondPlan.ID) != 0 || runtime.executorCalls != 0 {
+		t.Fatalf("first=%+v second=%+v locks=%d/%d executor_calls=%d", first, second, lockCount(t, store, firstPlan.ID), lockCount(t, store, secondPlan.ID), runtime.executorCalls)
+	}
+}
+
+func TestRecoveryLoopReportsTransientCompleteFailureAndContinues(t *testing.T) {
+	base, err := OpenSQLiteStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	plan, state, challenge := testActionFixtures(now)
+	if err := base.Create(context.Background(), plan, state, challenge); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := base.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, "grant", "u1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	store := &completeFailActionStore{ActionStore: base, failures: 1}
+	runtime := &fakeRuntime{state: state}
+	var categories []string
+	service := &Service{Store: store, Runtime: runtime, ReportRecovery: func(category string) { categories = append(categories, category) }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.RecoverLoop(ctx, time.Millisecond) }()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		record, _ := base.Load(context.Background(), plan.ProjectID, challenge.ID)
+		if record.Status == actionv1.StatusSucceeded {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("loop error=%v", err)
+	}
+	record, _ := base.Load(context.Background(), plan.ProjectID, challenge.ID)
+	if record.Status != actionv1.StatusSucceeded || len(categories) == 0 || categories[0] != RecoveryCompleteFailed || len(runtime.calls) != 0 {
+		t.Fatalf("record=%+v categories=%v executor_calls=%d", record, categories, len(runtime.calls))
+	}
+}
+
+type starvingRecoveryRuntime struct {
+	state         actionv1.CurrentState
+	firstService  string
+	executorCalls int
+}
+
+func (r *starvingRecoveryRuntime) CurrentState(ctx context.Context, target actionv1.TargetIdentity, _ actionv1.ActionKind, _ actionv1.ActionParameters) (actionv1.CurrentState, error) {
+	if target.ServiceID == r.firstService {
+		<-ctx.Done()
+		return actionv1.CurrentState{}, ctx.Err()
+	}
+	return r.state, nil
+}
+func (r *starvingRecoveryRuntime) RestartWorkload(context.Context, actionv1.TargetIdentity) error {
+	r.executorCalls++
+	return nil
+}
+func (r *starvingRecoveryRuntime) ScaleWorkload(context.Context, actionv1.TargetIdentity, int32) error {
+	r.executorCalls++
+	return nil
+}
+func (r *starvingRecoveryRuntime) GatewayReconcile(context.Context, actionv1.TargetIdentity) error {
+	r.executorCalls++
+	return nil
+}
+func (r *starvingRecoveryRuntime) ResolveIncident(context.Context, actionv1.TargetIdentity, string) error {
+	r.executorCalls++
+	return nil
+}
+func (r *starvingRecoveryRuntime) PostCheck(context.Context, actionv1.TargetIdentity, actionv1.ActionKind, actionv1.ActionParameters, actionv1.CurrentState) (actionv1.CurrentState, error) {
+	return r.state, nil
+}
+
+type completeFailActionStore struct {
+	ActionStore
+	failures int
+}
+
+func (s *completeFailActionStore) Complete(ctx context.Context, record Record, result actionv1.ActionResult) (Record, error) {
+	if s.failures > 0 {
+		s.failures--
+		return record, errors.New("transient complete failure")
+	}
+	return s.ActionStore.Complete(ctx, record, result)
+}
+
 func TestConcurrentRecoveryAndReplayPersistOneTerminalEvent(t *testing.T) {
 	runtime := &fakeRuntime{state: fixtureState()}
 	service := newTestService(t, runtime, false)

@@ -21,9 +21,8 @@ their existing behavior. Native macOS acceptance must verify store/get/delete,
 locked-keychain errors, timeout behavior, restart persistence, cleanup retry,
 and absence of secrets in argv/output before this backend gap can be closed.
 
-## CLI hygiene backlog
+## Remaining deferred scope
 
-R5-016B does not modify CLI behavior. The secure-store deletion error and NUL
-separator display issues are tracked factually in
-`bugs/BUG-R5-016-CLI-HYGIENE-002.md` for the consolidated manual bug-fix phase
-before R5-017 final acceptance.
+The UI dependency advisories and native macOS ActionPlane secure-storage
+acceptance remain deferred to R5-017. CLI hygiene is tracked separately and is
+fixed in `bugs/BUG-R5-016-CLI-HYGIENE-002.md`.

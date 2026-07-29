@@ -9,14 +9,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
+	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
 type buildRecordOIDCFixture struct{ identity githuboidc.VerifiedIdentity }
@@ -31,6 +38,46 @@ func (f buildRecordOIDCFixture) Verify(_ context.Context, token string) (githubo
 type fixedRateLimiter struct{ allow bool }
 
 func (l fixedRateLimiter) Allow(string, int, time.Duration) bool { return l.allow }
+
+type replayRejectingBuildRecordOIDC struct {
+	identity githuboidc.VerifiedIdentity
+	mu       sync.Mutex
+	seen     map[string]bool
+}
+
+func (f *replayRejectingBuildRecordOIDC) Verify(_ context.Context, token string) (githuboidc.VerifiedIdentity, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.seen[token] {
+		return githuboidc.VerifiedIdentity{}, errors.New("replayed")
+	}
+	f.seen[token] = true
+	return f.identity, nil
+}
+
+type flakyAutomaticDeliveryRegistry struct {
+	registry.API
+	starter      immutableDeploymentStarter
+	repositories []registry.GitHubRepository
+	failures     atomic.Int32
+}
+
+type automaticDeliveryFacts struct{ facts topology.Facts }
+
+func (f automaticDeliveryFacts) PlacementFacts(context.Context, string) (topology.Facts, error) {
+	return f.facts, nil
+}
+
+func (r *flakyAutomaticDeliveryRegistry) ListGitHubRepositories(string) ([]registry.GitHubRepository, error) {
+	return r.repositories, nil
+}
+
+func (r *flakyAutomaticDeliveryRegistry) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, requestedBy, key, requestID string) (registry.DeploymentJob, bool, error) {
+	if r.failures.Add(-1) >= 0 {
+		return registry.DeploymentJob{}, false, errors.New("temporary store failure secret-marker")
+	}
+	return r.starter.StartImmutableDeployment(snapshot, requestedBy, key, requestID)
+}
 
 type blockingBuildRecordOIDC struct {
 	identity githuboidc.VerifiedIdentity
@@ -177,6 +224,121 @@ func TestBuildRecordSubmissionOIDCStrictReplayAndConflict(t *testing.T) {
 	assertBuildRecordAPIError(t, cookieResponse, http.StatusBadRequest, "OIDC_REQUEST_INVALID")
 }
 
+func TestBuildRecordSubmissionReportsPendingAutomaticDeliveryAndReplaysExactly(t *testing.T) {
+	server, store, projectID, identity := automaticDeliveryServer(t, 1)
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	body := mustBuildRecordBody(t, identity)
+
+	first := postBuildRecord(t, httpServer.URL, body, "oidc-token-1")
+	assertBuildRecordAPIError(t, first, http.StatusServiceUnavailable, "AUTOMATIC_DELIVERY_PENDING")
+	if jobs, err := store.ListDeployments(projectID); err != nil || len(jobs) != 0 {
+		t.Fatalf("jobs=%+v err=%v", jobs, err)
+	}
+	if _, err := server.BuildRecords.Get(context.Background(), projectID, "br-auto"); err != nil {
+		t.Fatalf("accepted BuildRecord was rolled back: %v", err)
+	}
+	replayedOIDC := postBuildRecord(t, httpServer.URL, body, "oidc-token-1")
+	assertBuildRecordAPIError(t, replayedOIDC, http.StatusUnauthorized, "OIDC_AUTH_INVALID")
+
+	second := postBuildRecord(t, httpServer.URL, body, "oidc-token-2")
+	if second.StatusCode != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s", second.StatusCode, readResponse(second))
+	}
+	var retried struct {
+		Record   buildrecordv1.Record    `json:"record"`
+		Reused   bool                    `json:"reused"`
+		Delivery *registry.DeploymentJob `json:"delivery"`
+	}
+	decodeResponse(t, second, &retried)
+	if !retried.Reused || retried.Record.ID != "br-auto" || retried.Delivery == nil {
+		t.Fatalf("retry=%+v", retried)
+	}
+
+	third := postBuildRecord(t, httpServer.URL, body, "oidc-token-3")
+	var replayed struct {
+		Delivery *registry.DeploymentJob `json:"delivery"`
+	}
+	decodeResponse(t, third, &replayed)
+	if third.StatusCode != http.StatusOK || replayed.Delivery == nil || replayed.Delivery.ID != retried.Delivery.ID || !replayed.Delivery.Reused {
+		t.Fatalf("replay status=%d delivery=%+v", third.StatusCode, replayed.Delivery)
+	}
+	jobs, err := store.ListDeployments(projectID)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != retried.Delivery.ID {
+		t.Fatalf("jobs=%+v err=%v", jobs, err)
+	}
+	audits, err := store.ListAudit(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := 0
+	for _, audit := range audits {
+		if audit.Action == "MAIN_DEPLOYMENT_CREATED" && audit.ResourceID == retried.Delivery.ID {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("creation audits=%d audits=%+v", created, audits)
+	}
+}
+
+func TestBuildRecordSubmissionConcurrentAutomaticReplayCreatesOneJobAndAudit(t *testing.T) {
+	server, store, projectID, identity := automaticDeliveryServer(t, 0)
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	body := mustBuildRecordBody(t, identity)
+	type concurrentResponse struct {
+		response *http.Response
+		err      error
+	}
+	responses := make(chan concurrentResponse, 2)
+	var group sync.WaitGroup
+	for _, token := range []string{"oidc-concurrent-1", "oidc-concurrent-2"} {
+		group.Add(1)
+		go func(token string) {
+			defer group.Done()
+			request, err := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/build-records", bytes.NewReader(body))
+			if err != nil {
+				responses <- concurrentResponse{err: err}
+				return
+			}
+			request.Header.Set("Authorization", "Bearer "+token)
+			request.Header.Set("Content-Type", "application/json")
+			response, err := http.DefaultClient.Do(request)
+			responses <- concurrentResponse{response: response, err: err}
+		}(token)
+	}
+	group.Wait()
+	close(responses)
+	for item := range responses {
+		if item.err != nil {
+			t.Fatal(item.err)
+		}
+		response := item.response
+		if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusOK {
+			t.Fatalf("concurrent status=%d body=%s", response.StatusCode, readResponse(response))
+		}
+		_ = readResponse(response)
+	}
+	jobs, err := store.ListDeployments(projectID)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("jobs=%+v err=%v", jobs, err)
+	}
+	audits, err := store.ListAudit(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := 0
+	for _, audit := range audits {
+		if audit.Action == "MAIN_DEPLOYMENT_CREATED" {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("creation audits=%d audits=%+v", created, audits)
+	}
+}
+
 func TestBuildRecordSubmissionRejectsClaimMismatchAndDoesNotReflectToken(t *testing.T) {
 	identity := testBuildRecordIdentity()
 	server := NewServer(Config{})
@@ -231,11 +393,70 @@ type testBuildBindingResolver struct{ binding buildrecord.Binding }
 func (r testBuildBindingResolver) ResolveBuildBinding(context.Context, uint64, string) (buildrecord.Binding, error) {
 	return r.binding, nil
 }
+
+func automaticDeliveryServer(t *testing.T, failures int32) (*Server, *registry.Service, string, githuboidc.VerifiedIdentity) {
+	t.Helper()
+	now := time.Now().UTC()
+	identity := testBuildRecordIdentity()
+	identity.Subject = "repo:huutawn/opsi:ref:refs/heads/main"
+	identity.Ref = "refs/heads/main"
+	identity.WorkflowRef = "huutawn/opsi/.github/workflows/opsi-cd.yaml@refs/heads/main"
+	server := NewServer(Config{})
+	store := server.Registry.(*registry.Service)
+	project, err := store.CreateProject("org-1", "Automatic", "automatic", "owner", "project-auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := store.UpsertNode(project.ID, "node-1", "server", registry.NodeHealthy, "203.0.113.10", "", "node-auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.RegisterAgent(project.ID, node.ID, "sha256:test", "credential", "v1", "agent-auto", map[string]any{"deploy": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordAgentHeartbeat(project.ID, node.ID, registry.AgentHeartbeat{Version: "v1", NodeReady: true, K3SStatus: "ready", Capabilities: map[string]any{"deploy": true}}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := store.CreateService(project.ID, registry.ServiceDraft{Name: "api", RepoURL: "https://github.com/huutawn/opsi", ContainerPort: 8080, ResourceLimits: map[string]string{"cpu": "500m", "memory": "512Mi"}}, "service-auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := testBuildBindingResolver{binding: buildrecord.Binding{ProjectID: project.ID, BindingID: "binding-auto", ServiceID: service.ID, ServiceKey: service.Name, RepositoryID: identity.RepositoryID, RepositoryOwnerID: identity.RepositoryOwnerID}}
+	server.BuildRecords = buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: binding, Policies: []githuboidc.WorkloadPolicy{{RepositoryID: identity.RepositoryID, ServiceKey: service.Name, WorkflowRefs: []string{identity.WorkflowRef}, Refs: []string{identity.Ref}, Events: []string{identity.EventName}, OCIRepositories: []string{"ghcr.io/huutawn/opsi/api"}}}, NewID: func() (string, error) { return "br-auto", nil }}
+	facts, err := store.PlacementFacts(context.Background(), project.ID)
+	if err != nil || len(facts.Environments) != 1 || len(facts.Runtimes) != 1 {
+		t.Fatalf("facts=%+v err=%v", facts, err)
+	}
+	fresh := now
+	facts.Services = []topology.ServiceFact{{ID: service.ID, ProjectID: project.ID, Key: service.Name}}
+	facts.Nodes = []topology.NodeFact{{ID: node.ID, ProjectID: project.ID, RuntimeID: service.RuntimeID, Status: "healthy", CPUCores: 2, MemoryMB: 2048, LastSeenAt: &fresh}}
+	facts.Agents = []topology.AgentFact{{ID: agent.ID, ProjectID: project.ID, RuntimeID: service.RuntimeID, NodeID: node.ID, Status: "active", Capabilities: map[string]any{"deploy": true}, LastSeenAt: &fresh}}
+	server.Topology = topology.Service{Store: topology.NewMemoryStore(), Facts: automaticDeliveryFacts{facts}, Now: func() time.Time { return now }}
+	assignment := topologyv1.Assignment{ServiceKey: service.Name, EnvironmentID: facts.Environments[0].ID, RuntimeID: facts.Runtimes[0].ID, Replicas: 1, CPURequestMillicores: 100, MemoryRequestBytes: 64 << 20, Exposure: topologyv1.ExposureIntent{Mode: "none"}}
+	topologyDraft := topologyv1.Draft{SchemaVersion: topologyv1.SchemaVersion, ProjectID: project.ID, Assignments: []topologyv1.Assignment{assignment}}
+	if validation, err := server.Topology.Validate(context.Background(), project.ID, topologyDraft, false); err != nil || !validation.Valid {
+		t.Fatalf("topology validation=%+v err=%v", validation, err)
+	}
+	if _, err := server.Topology.Apply(context.Background(), project.ID, "owner", "topology-auto", topologyv1.ApplyRequest{Draft: topologyDraft}, false); err != nil {
+		t.Fatal(err)
+	}
+	server.Policies = deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: server.BuildRecords.Store, Bindings: binding, Topology: server.Topology, Now: func() time.Time { return now }}
+	draft := deploymentpolicyv1.Draft{SchemaVersion: deploymentpolicyv1.SchemaVersion, ProjectID: project.ID, RepositoryID: identity.RepositoryID, ServiceKeys: []string{service.Name}, WorkflowRefs: []string{identity.WorkflowRef}, AllowedEvents: []string{"push"}, AllowedGitRefs: []string{identity.Ref}, EnvironmentID: assignment.EnvironmentID, AllowedRuntimeIDs: []string{assignment.RuntimeID}, AllowedOCIRepositories: []string{"ghcr.io/huutawn/opsi/api"}, AllowedPlatforms: []string{"linux/amd64"}, AllowedConfigHashes: []string{strings.Repeat("b", 64)}, AllowedBuildPlanHashes: []string{strings.Repeat("d", 64)}, AutomaticMain: true, AllowUnknownCapacity: true, Enabled: true}
+	if _, err := server.Policies.Apply(context.Background(), project.ID, "owner", "policy-auto", deploymentpolicyv1.ApplyRequest{Draft: draft}); err != nil {
+		t.Fatal(err)
+	}
+	flaky := &flakyAutomaticDeliveryRegistry{API: store, starter: store, repositories: []registry.GitHubRepository{{RepositoryID: int64(identity.RepositoryID), OwnerID: int64(identity.RepositoryOwnerID), DefaultBranch: "main"}}}
+	flaky.failures.Store(failures)
+	server.Registry = flaky
+	server.OIDC = &replayRejectingBuildRecordOIDC{identity: identity, seen: map[string]bool{}}
+	return server, store, project.ID, identity
+}
 func testBuildRecordIdentity() githuboidc.VerifiedIdentity {
 	return githuboidc.VerifiedIdentity{Issuer: githuboidc.GitHubIssuer, Subject: "repo:huutawn/opsi:ref:refs/heads/developer", Repository: "huutawn/opsi", RepositoryID: 7, RepositoryOwner: "huutawn", RepositoryOwnerID: 8, Ref: "refs/heads/developer", SHA: strings.Repeat("a", 40), EventName: "push", Workflow: "opsi-cd", WorkflowRef: "huutawn/opsi/.github/workflows/opsi-cd.yaml@refs/heads/developer", RunID: 99, RunAttempt: 1}
 }
 func testBuildRecordSubmission(i githuboidc.VerifiedIdentity) buildrecordv1.Submission {
-	return buildrecordv1.Submission{SchemaVersion: buildrecordv1.SchemaVersion, ServiceKey: "api", RepositoryID: i.RepositoryID, RepositoryOwnerID: i.RepositoryOwnerID, Ref: i.Ref, SHA: i.SHA, EventName: i.EventName, WorkflowRef: i.WorkflowRef, RunID: i.RunID, RunAttempt: i.RunAttempt, ConfigHash: strings.Repeat("b", 64), Platform: "linux/amd64", OCIRepository: "ghcr.io/huutawn/opsi/api", OCIDigest: "sha256:" + strings.Repeat("c", 64), Status: "succeeded"}
+	return buildrecordv1.Submission{SchemaVersion: buildrecordv1.SchemaVersion, ServiceKey: "api", RepositoryID: i.RepositoryID, RepositoryOwnerID: i.RepositoryOwnerID, Ref: i.Ref, SHA: i.SHA, EventName: i.EventName, WorkflowRef: i.WorkflowRef, RunID: i.RunID, RunAttempt: i.RunAttempt, ConfigHash: strings.Repeat("b", 64), PlanHash: strings.Repeat("d", 64), Platform: "linux/amd64", OCIRepository: "ghcr.io/huutawn/opsi/api", OCIDigest: "sha256:" + strings.Repeat("c", 64), Status: "succeeded"}
 }
 func mustBuildRecordBody(t *testing.T, identity githuboidc.VerifiedIdentity) []byte {
 	t.Helper()

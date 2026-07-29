@@ -173,7 +173,8 @@ func (b IncidentContextBuilder) readKubernetes(ctx context.Context, record telem
 		evidence.Coverage = append(evidence.Coverage, agentv1.IncidentSourceCoverage{Source: "kubernetes", Status: "unavailable", ReasonCode: "KUBERNETES_QUERY_FAILED", ItemCount: int32(len(result.Pods) + len(result.Events))})
 		return
 	}
-	evidence.Coverage = append(evidence.Coverage, agentv1.IncidentSourceCoverage{Source: "kubernetes", Status: "available", ItemCount: int32(len(result.Pods) + len(result.Events))})
+	status := firstNonEmptyEvidence(result.CoverageStatus, "available")
+	evidence.Coverage = append(evidence.Coverage, agentv1.IncidentSourceCoverage{Source: "kubernetes", Status: status, ReasonCode: result.ReasonCode, ItemCount: int32(len(result.Pods) + len(result.Events)), Truncated: status == "partial"})
 }
 
 func (b IncidentContextBuilder) readAudit(ctx context.Context, record telemetry.IncidentRecord, since, until time.Time, evidence *agentv1.IncidentEvidence) {

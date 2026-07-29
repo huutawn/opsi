@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type actionsRoundTripper func(*http.Request) (*http.Response, error)
@@ -130,6 +132,74 @@ func TestSubmitBuildRecordReturnsOnlyTypedCloudErrorCode(t *testing.T) {
 	_, err := submitBuildRecordFromGitHubActions(context.Background(), input, client)
 	if err == nil || !strings.Contains(err.Error(), "BUILD_WORKLOAD_FORBIDDEN") || strings.Contains(err.Error(), "secret-marker") {
 		t.Fatalf("error=%v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("permanent authority error was retried: calls=%d", calls)
+	}
+}
+
+func TestSubmitBuildRecordRetriesPendingDeliveryWithFreshOIDCToken(t *testing.T) {
+	input := validActionsBuildRecordInput()
+	tokens := []string{actionsTestOIDCToken(t, input, ""), actionsTestOIDCToken(t, input, input.WorkflowRef)}
+	var calls, tokenRequests int
+	client := &http.Client{Transport: actionsRoundTripper(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if request.Method == http.MethodGet {
+			token := tokens[tokenRequests]
+			tokenRequests++
+			return actionsResponse(http.StatusOK, `{"value":"`+token+`"}`), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer "+tokens[tokenRequests-1] {
+			t.Fatalf("POST reused stale token: %q", request.Header.Get("Authorization"))
+		}
+		if tokenRequests == 1 {
+			return actionsResponse(http.StatusServiceUnavailable, `{"error_code":"AUTOMATIC_DELIVERY_PENDING","message":"secret-marker"}`), nil
+		}
+		return actionsResponse(http.StatusOK, `{"record":{"id":"br-live-1"},"reused":true}`), nil
+	})}
+	result, err := submitBuildRecordFromGitHubActions(context.Background(), input, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 4 || tokenRequests != 2 || result.ID != "br-live-1" || !result.Reused {
+		t.Fatalf("calls=%d token_requests=%d result=%+v", calls, tokenRequests, result)
+	}
+}
+
+func TestSubmitBuildRecordPendingRetryStopsOnCancellation(t *testing.T) {
+	input := validActionsBuildRecordInput()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var posts int
+	client := &http.Client{Transport: actionsRoundTripper(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			return actionsResponse(http.StatusOK, `{"value":"`+actionsTestOIDCToken(t, input, "")+`"}`), nil
+		}
+		posts++
+		cancel()
+		return actionsResponse(http.StatusServiceUnavailable, `{"error_code":"AUTOMATIC_DELIVERY_PENDING"}`), nil
+	})}
+	started := time.Now()
+	_, err := submitBuildRecordFromGitHubActions(ctx, input, client)
+	if !errors.Is(err, context.Canceled) || posts != 1 || time.Since(started) > time.Second {
+		t.Fatalf("cancellation err=%v posts=%d elapsed=%s", err, posts, time.Since(started))
+	}
+}
+
+func TestSubmitBuildRecordPendingDeliveryIsBoundedToThreeAttempts(t *testing.T) {
+	input := validActionsBuildRecordInput()
+	var calls, posts int
+	client := &http.Client{Transport: actionsRoundTripper(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if request.Method == http.MethodGet {
+			return actionsResponse(http.StatusOK, `{"value":"`+actionsTestOIDCToken(t, input, "")+`"}`), nil
+		}
+		posts++
+		return actionsResponse(http.StatusServiceUnavailable, `{"error_code":"AUTOMATIC_DELIVERY_PENDING"}`), nil
+	})}
+	_, err := submitBuildRecordFromGitHubActions(context.Background(), input, client)
+	if err == nil || posts != actionsBuildRecordAttempts || calls != actionsBuildRecordAttempts*2 {
+		t.Fatalf("bounded retry err=%v posts=%d calls=%d", err, posts, calls)
 	}
 }
 

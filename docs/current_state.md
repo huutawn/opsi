@@ -3,17 +3,21 @@
 ## R5-014 Local API/UI parity checkpoint
 
 `R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
-`R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_016_RECOVERY_LIVENESS_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
+`R5_015_SOURCE_FIXED / LIVE_AGENT_PENDING`.
+`R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
 
 ActionPlane execution uses one atomic SQLite reservation and guarded terminal
-transition. Restart recovery is one root-context background loop, so health and
+transition. Restart recovery classifies unavailable versus permanent factual
+errors and reports bounded categories. It is one root-context background loop,
+so health and
 RPC startup do not wait for recovery. It runs immediately, retries at a bounded
 five-second default interval, and gives each non-overlapping pass at most 30
-seconds. Recovery never re-executes a mutation: unavailable factual reads keep
+seconds with bounded per-record opportunity. Recovery never re-executes a
+mutation: unavailable factual reads keep
 the execution and target lock unresolved until a later pass obtains factual
 state and a bounded post-check proves a terminal result. Workload/gateway reads
 require an authoritative known-good projection, full
@@ -29,7 +33,7 @@ organization listing, members/RBAC, and secret metadata/listing remain three
 disabled `BACKEND_GAP` rows. Installed archives contain the CLI and adjacent
 static UI assets. Browser credentials remain backend-owned. Agent-live
 acceptance is deferred to R5-017 because the former Agent VPS was deleted.
-R5-012 remains implemented but live blocked.
+R5-012 source handling is fixed, but its live delivery retest remains pending.
 
 | Metadata | Value |
 |---|---|

@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	actionsBuildRecordPath       = "/v1/build-records"
-	actionsRequestTimeout        = 30 * time.Second
-	actionsResponseLimit   int64 = 64 << 10
+	actionsBuildRecordPath           = "/v1/build-records"
+	actionsRequestTimeout            = 30 * time.Second
+	actionsResponseLimit       int64 = 64 << 10
+	actionsBuildRecordAttempts       = 3
 )
 
 var (
@@ -60,6 +61,15 @@ type actionsBuildRecordInput struct {
 type actionsBuildRecordResult struct {
 	ID     string `json:"id"`
 	Reused bool   `json:"reused"`
+}
+
+type actionsBuildRecordError struct {
+	status int
+	code   string
+}
+
+func (e actionsBuildRecordError) Error() string {
+	return fmt.Sprintf("BuildRecord submission failed with HTTP %d (%s)", e.status, e.code)
 }
 
 func newInternalCommand(options Options) *cobra.Command {
@@ -125,19 +135,38 @@ func submitBuildRecordFromGitHubActions(ctx context.Context, input actionsBuildR
 	if client == nil {
 		client = actionsHTTPClient(nil)
 	}
-	oidcToken, err := requestActionsOIDCToken(ctx, client, tokenURL, input.RequestToken)
-	if err != nil {
-		return actionsBuildRecordResult{}, err
+	ctx, cancel := context.WithTimeout(ctx, actionsRequestTimeout)
+	defer cancel()
+	for attempt := 0; attempt < actionsBuildRecordAttempts; attempt++ {
+		oidcToken, err := requestActionsOIDCToken(ctx, client, tokenURL, input.RequestToken)
+		if err != nil {
+			return actionsBuildRecordResult{}, err
+		}
+		boundInput, err := bindSelectedActionsClaims(input, oidcToken, audience)
+		if err != nil {
+			return actionsBuildRecordResult{}, err
+		}
+		submission, err := actionsBuildRecordSubmission(boundInput)
+		if err != nil {
+			return actionsBuildRecordResult{}, err
+		}
+		result, err := postActionsBuildRecord(ctx, client, endpoint, oidcToken, submission)
+		if err == nil {
+			return result, nil
+		}
+		var cloudErr actionsBuildRecordError
+		if !errors.As(err, &cloudErr) || cloudErr.status != http.StatusServiceUnavailable || cloudErr.code != "AUTOMATIC_DELIVERY_PENDING" || attempt == actionsBuildRecordAttempts-1 {
+			return actionsBuildRecordResult{}, err
+		}
+		timer := time.NewTimer(time.Duration(1<<attempt) * 250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return actionsBuildRecordResult{}, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	input, err = bindSelectedActionsClaims(input, oidcToken, audience)
-	if err != nil {
-		return actionsBuildRecordResult{}, err
-	}
-	submission, err := actionsBuildRecordSubmission(input)
-	if err != nil {
-		return actionsBuildRecordResult{}, err
-	}
-	return postActionsBuildRecord(ctx, client, endpoint, oidcToken, submission)
+	return actionsBuildRecordResult{}, errors.New("BuildRecord submission failed")
 }
 
 func bindSelectedActionsClaims(input actionsBuildRecordInput, token, audience string) (actionsBuildRecordInput, error) {
@@ -326,7 +355,7 @@ func postActionsBuildRecord(ctx context.Context, client *http.Client, endpoint *
 			Code string `json:"error_code"`
 		}
 		if decodeActionsJSON(response.Body, &failure) == nil && actionsAPICode.MatchString(failure.Code) {
-			return actionsBuildRecordResult{}, fmt.Errorf("BuildRecord submission failed with HTTP %d (%s)", response.StatusCode, failure.Code)
+			return actionsBuildRecordResult{}, actionsBuildRecordError{status: response.StatusCode, code: failure.Code}
 		}
 		return actionsBuildRecordResult{}, fmt.Errorf("BuildRecord submission failed with HTTP %d", response.StatusCode)
 	}

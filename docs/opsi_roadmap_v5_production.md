@@ -494,6 +494,11 @@ performed; R5-011 remains `PARTIAL` and R5-011.4 remains `MANUAL_GATED`.
 
 ### R5-012 — Main CD và PR preview manual acceptance
 
+Source correction checkpoint: `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
+Accepted BuildRecords no longer return false success when eligible automatic
+DeploymentJob creation fails; the GitHub Actions helper performs bounded retry
+with a fresh replay-protected OIDC token. No live GitHub/Agent retest was run.
+
 **CẦN VPS:** VPS Agent staging; cần test repository GitHub thật.
 
 **Mục tiêu:** hoàn thành trusted CD main branch và preview PR, vẫn có manual visibility/control qua CLI/UI.
@@ -519,8 +524,8 @@ performed; R5-011 remains `PARTIAL` and R5-011.4 remains `MANUAL_GATED`.
 
 Current implementation checkpoint: the source-derived matrix is
 `docs/manual_cli_capability_matrix.md`; factual gaps are recorded in
-`bugs/BUG-R5-013-CLI-GAPS-001.md`. R5-012 remains
-`R5_012_IMPLEMENTED / LIVE_BLOCKED / BUG_DEFERRED`.
+`bugs/BUG-R5-013-CLI-GAPS-001.md`. R5-012 source handling is
+`R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 
 **Mục tiêu:** CLI là canonical manual interface đầy đủ, không chỉ tập hợp các lệnh rời rạc.
 
@@ -586,6 +591,11 @@ R5-017 because the former Agent VPS no longer exists.
 
 ### R5-015 — IncidentEvidence source completion (live Agent/UI deferred)
 
+Factuality correction checkpoint: `R5_015_SOURCE_FIXED / LIVE_AGENT_PENDING`.
+Application-container digests, exact Opsi-owned Kubernetes resource events, and
+deterministic final 256 KiB evidence fitting are source-tested. No live Agent
+acceptance was run.
+
 **CẦN VPS:** deferred; this source-completion checkpoint uses deterministic
 fake TLS Agent/Kubernetes sources and local disposable SQLite only.
 
@@ -610,8 +620,8 @@ browser acceptance remain deferred to R5-017.
 
 ### R5-016 — Safe ActionPlane và out-of-band approval manual CLI/UI
 
-**Recovery liveness checkpoint corrected (2026-07-29):**
-`R5_016_RECOVERY_LIVENESS_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+**Recovery operability and CLI hygiene checkpoint corrected (2026-07-29):**
+`R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 Catalog source v1 chỉ gồm restart, scale, gateway reconcile và incident resolve;
 deploy/rollback tiếp tục dùng canonical Cloud delivery path. UI và live VPS/K3s
 acceptance chưa thực hiện nên gate manual đầy đủ vẫn thuộc R5-017.
@@ -623,7 +633,10 @@ gán `ACTION_EXECUTION_INTERRUPTED`: recovery chỉ đọc factual state và ch�
 bounded post-check, không gọi executor; unavailable giữ nguyên action và lock để
 pass sau tự hoàn tất khi factual source phục hồi. Kubernetes identity phải đến
 từ known-good projection và khớp project/environment/service/runtime cùng exact
-Ingress backend.
+Ingress backend. Permanent factual errors terminalize through guarded Complete;
+per-record pass budgets prevent starvation, and loop errors surface only bounded
+categories. Device revoke reports required local cleanup, and approval target
+text is labeled, bounded, and control-free.
 Linux Secret Service được source-test; Darwin ActionPlane secure storage là
 backend gap fail-closed cho tới native acceptance ở R5-017.
 
