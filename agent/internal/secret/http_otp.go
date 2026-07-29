@@ -19,7 +19,7 @@ func (c HTTPOTPClient) RequestOTP(ctx context.Context, auth AuthContext, purpose
 	var resp struct {
 		RequestID string `json:"request_id"`
 	}
-	err := c.post(ctx, "/v1/otp/request", map[string]string{"project_id": auth.ProjectID, "user_id": auth.UserID, "purpose": purpose, "service_id": ref.ServiceID, "secret_name": ref.Name}, &resp)
+	err := c.post(ctx, "/v1/otp/request", auth.PAT, map[string]string{"project_id": auth.ProjectID, "user_id": auth.UserID, "purpose": purpose, "service_id": ref.ServiceID, "secret_name": ref.Name}, &resp)
 	if err != nil {
 		return "", err
 	}
@@ -30,10 +30,10 @@ func (c HTTPOTPClient) RequestOTP(ctx context.Context, auth AuthContext, purpose
 }
 
 func (c HTTPOTPClient) VerifyOTP(ctx context.Context, auth AuthContext, requestID, purpose, code string) error {
-	return c.post(ctx, "/v1/otp/verify", map[string]string{"request_id": requestID, "project_id": auth.ProjectID, "user_id": auth.UserID, "purpose": purpose, "code": code}, nil)
+	return c.post(ctx, "/v1/otp/verify", auth.PAT, map[string]string{"request_id": requestID, "project_id": auth.ProjectID, "user_id": auth.UserID, "purpose": purpose, "code": code}, nil)
 }
 
-func (c HTTPOTPClient) post(ctx context.Context, path string, payload any, out any) error {
+func (c HTTPOTPClient) post(ctx context.Context, path, pat string, payload any, out any) error {
 	endpoint := strings.TrimRight(c.Endpoint, "/")
 	if endpoint == "" {
 		return fmt.Errorf("cloud otp endpoint is required")
@@ -47,6 +47,9 @@ func (c HTTPOTPClient) post(ctx context.Context, path string, payload any, out a
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
+	if pat != "" {
+		req.Header.Set("authorization", "Bearer "+pat)
+	}
 	client := c.Client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}

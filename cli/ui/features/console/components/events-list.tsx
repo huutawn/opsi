@@ -8,7 +8,7 @@ export function EventsList({ events }: { events: TimelineEvent[] }) {
         <div className="event" key={event.id}>
           <div>{event.progress_percent}%</div>
           <div>
-            <b>{event.step}</b>
+            <b>{event.step}{event.attempt ? ` (attempt ${event.attempt})` : ""}</b>
             <br />
             <span className="muted">{event.message_redacted}</span>
             <div className="bar">

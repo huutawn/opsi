@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -41,29 +42,49 @@ func TestValidateRejectsMissingClientCA(t *testing.T) {
 	}
 }
 
-func TestDefaultUsesContainerdBuilder(t *testing.T) {
+func TestDefaultUsesImmutableDeploymentRuntime(t *testing.T) {
 	cfg := Default()
-	if cfg.Deployment.BuilderMode != "containerd" || cfg.Deployment.ContainerdNS != "k8s.io" || cfg.Deployment.NerdctlPath != "nerdctl" {
+	if cfg.Deployment.RolloutTimeout != "10m" || cfg.Deployment.PollInterval != "5s" || cfg.Deployment.Namespace != "default" {
 		t.Fatalf("unexpected builder defaults: %+v", cfg.Deployment)
 	}
-	if cfg.Deployment.TerminationGracePeriodSeconds != 30 || cfg.Deployment.ResourceRequests["cpu"] != "100m" || cfg.Deployment.ResourceLimits["memory"] != "512Mi" {
-		t.Fatalf("unexpected deployment safety defaults: %+v", cfg.Deployment)
+}
+
+func TestLoadRejectsRemovedIngressEnabledConfig(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "agent.yaml")
+			data := []byte("cloud_relay:\n  agent_token: do-not-leak\ndeployment:\n  ingress_enabled: " + value + "\n")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("expected removed config key to be rejected")
+			}
+			if !strings.Contains(err.Error(), "deployment.ingress_enabled has been removed") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if strings.Contains(err.Error(), "do-not-leak") || strings.Contains(err.Error(), "agent_token") {
+				t.Fatalf("error leaked config data: %v", err)
+			}
+		})
 	}
 }
 
-func TestValidateRejectsUnknownBuilderMode(t *testing.T) {
-	cfg := Default()
-	cfg.Deployment.BuilderMode = "bad"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected builder mode validation error")
-	}
-}
-
-func TestValidateRejectsNegativeTerminationGrace(t *testing.T) {
-	cfg := Default()
-	cfg.Deployment.TerminationGracePeriodSeconds = -1
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected termination grace validation error")
+func TestLoadRejectsLegacyDeploymentConfig(t *testing.T) {
+	for _, key := range []string{"repo_url", "dockerfile", "manifest_path", "builder_mode", "build_root"} {
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agent.yaml")
+			if err := os.WriteFile(path, []byte("deployment:\n  "+key+": retired\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "has been removed") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,124 @@ func (s *Server) handleRegistryAPI(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func (s *Server) handleGitHubInstallationsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "github_installation", projectID, "owner", "admin", "developer", "viewer", "support") {
+		return
+	}
+	installations, err := s.Registry.ListGitHubInstallations(projectID)
+	writeRegistryResult(w, r, map[string]any{"installations": installations}, err, http.StatusOK)
+}
+
+func (s *Server) handleGitHubRepositoriesAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "github_repository", projectID, "owner", "admin", "developer", "viewer", "support") {
+		return
+	}
+	repositories, err := s.Registry.ListGitHubRepositories(projectID)
+	writeRegistryResult(w, r, map[string]any{"repositories": repositories}, err, http.StatusOK)
+}
+
+func (s *Server) handleGitHubRepositoryClaimAPI(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "github_repository", r.PathValue("repository_id"), "owner", "admin") {
+		return
+	}
+	repositoryID, err := strconv.ParseInt(r.PathValue("repository_id"), 10, 64)
+	if err != nil || repositoryID <= 0 {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "GITHUB_REPOSITORY_ID_INVALID", Message: "repository_id must be a positive integer", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		claim, err := s.Registry.ClaimGitHubRepository(projectID, repositoryID, principal.UserID)
+		writeRegistryResult(w, r, claim, err, http.StatusOK)
+	case http.MethodDelete:
+		if err := s.Registry.ReleaseGitHubRepository(projectID, repositoryID, principal.UserID); err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"released": true})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleGitHubBindingsAPI(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if !s.requireRole(w, r, principal, projectID, "github_service_binding", projectID, "owner", "admin", "developer", "viewer", "support") {
+			return
+		}
+		bindings, err := s.Registry.ListGitHubServiceBindings(projectID)
+		writeRegistryResult(w, r, map[string]any{"bindings": bindings}, err, http.StatusOK)
+	case http.MethodPost:
+		if !s.requireRole(w, r, principal, projectID, "github_service_binding", projectID, "owner", "admin") {
+			return
+		}
+		var draft registry.GitHubServiceBindingDraft
+		if !decodeJSON(w, r, &draft) {
+			return
+		}
+		draft.CreatedBy = principal.UserID
+		binding, err := s.Registry.CreateGitHubServiceBinding(projectID, draft)
+		writeRegistryResult(w, r, binding, err, http.StatusCreated)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleGitHubBindingAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "github_service_binding", r.PathValue("binding_id"), "owner", "admin") {
+		return
+	}
+	if err := s.Registry.RemoveGitHubServiceBinding(projectID, r.PathValue("binding_id"), principal.UserID); err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"removed": true})
+}
+
+func (s *Server) authorizeGitHubProject(w http.ResponseWriter, r *http.Request, projectID string) (auth.VerifyResult, bool) {
+	if s.Auth == nil {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "AUTH_UNAVAILABLE", Message: "PAT authentication is not configured", RequestID: r.Header.Get("X-Request-ID")})
+		return auth.VerifyResult{}, false
+	}
+	token := bearerToken(r)
+	if token == "" {
+		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "AUTH_REQUIRED", Message: "Authorization bearer token is required", RequestID: r.Header.Get("X-Request-ID")})
+		return auth.VerifyResult{}, false
+	}
+	principal, err := s.Auth.VerifyPAT(r.Context(), auth.VerifyRequest{Token: token, ProjectID: projectID})
+	if err != nil {
+		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "AUTH_INVALID", Message: "Authorization bearer token is invalid", RequestID: r.Header.Get("X-Request-ID")})
+		return auth.VerifyResult{}, false
+	}
+	return principal, true
+}
+
 func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID string, principal auth.VerifyResult) {
 	switch r.Method {
 	case http.MethodGet:
@@ -41,26 +160,26 @@ func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID
 		if !requireWriteHeaders(w, r) {
 			return
 		}
+		if s.Auth != nil && principal.UserID == "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusForbidden, Code: "PERMISSION_DENIED", Message: "authenticated principal user ID is required", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
 		if !s.requireRole(w, r, principal, "", "project", orgID, "owner", "admin") {
 			return
 		}
 		var req struct {
-			Name      string `json:"name"`
-			Slug      string `json:"slug"`
-			CreatedBy string `json:"created_by"`
+			Name string `json:"name"`
+			Slug string `json:"slug"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if req.CreatedBy == "" {
-			req.CreatedBy = principal.UserID
-		}
-		project, err := s.Registry.CreateProject(orgID, req.Name, req.Slug, req.CreatedBy, r.Header.Get("Idempotency-Key"))
+		project, err := s.Registry.CreateProject(orgID, req.Name, req.Slug, principal.UserID, r.Header.Get("Idempotency-Key"))
 		if err != nil {
 			writeRegistryFailure(w, r, err)
 			return
 		}
-		s.Registry.Audit(orgID, project.ID, principal.UserID, "PROJECT_CREATED", "project", project.ID, "success", nil)
+		s.auditOnce(orgID, project.ID, principal.UserID, "PROJECT_CREATED", "project", project.ID, "success", nil)
 		writeJSON(w, http.StatusCreated, project)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -69,6 +188,18 @@ func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID
 
 func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts []string, principal auth.VerifyResult) {
 	projectID := parts[1]
+	if s.handleExposureAPI(w, r, projectID, parts, principal) {
+		return
+	}
+	if s.handleDeploymentAPI(w, r, projectID, parts, principal) {
+		return
+	}
+	if s.handlePlacementAPI(w, r, projectID, parts, principal) {
+		return
+	}
+	if s.handleBuildRecordRead(w, r, projectID, parts, principal) {
+		return
+	}
 	if len(parts) == 3 && parts[2] == "readiness" && r.Method == http.MethodGet {
 		value, err := s.Registry.ProjectReadiness(projectID)
 		writeRegistryResult(w, r, value, err, http.StatusOK)
@@ -77,7 +208,10 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 	if len(parts) == 3 && parts[2] == "nodes" {
 		if r.Method == http.MethodGet {
 			value, err := s.Registry.ListNodes(projectID)
-			writeRegistryResult(w, r, value, err, http.StatusOK)
+			if value == nil {
+				value = []registry.Node{}
+			}
+			writeRegistryResult(w, r, map[string]any{"nodes": value}, err, http.StatusOK)
 			return
 		}
 		if r.Method == http.MethodPost {
@@ -128,15 +262,11 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			return
 		}
 		var req struct {
-			RequestedBy string `json:"requested_by"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if req.RequestedBy == "" {
-			req.RequestedBy = principal.UserID
-		}
-		value, err := s.Registry.RollbackDeployment(projectID, parts[3], req.RequestedBy, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"))
+		value, err := s.Registry.RollbackDeployment(projectID, parts[3], principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"))
 		if err == nil {
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "DEPLOYMENT_ROLLBACK_STARTED", "deployment_job", value.ID, "success", map[string]any{"source_deployment_id": parts[3], "service_id": value.ServiceID})
 		}
@@ -158,36 +288,63 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		writeRegistryResult(w, r, value, err, http.StatusOK)
 		return
 	}
-	if len(parts) == 5 && parts[2] == "nodes" && (parts[4] == "drain" || parts[4] == "remove") && r.Method == http.MethodPost {
+	if len(parts) == 5 && parts[2] == "nodes" && parts[4] == "offline" && r.Method == http.MethodPost {
 		if !requireWriteHeaders(w, r) {
 			return
 		}
 		if !s.requireRole(w, r, principal, projectID, "node", parts[3], "owner", "admin") {
 			return
 		}
-		nodes, err := s.Registry.ListNodes(projectID)
-		if err != nil {
-			writeRegistryFailure(w, r, err)
+		var req struct {
+			ConfirmTargetReset bool `json:"confirm_target_reset"`
+		}
+		if !decodeJSON(w, r, &req) {
 			return
 		}
-		node, ok := nodeByID(nodes, parts[3])
-		if !ok {
-			writeRegistryFailure(w, r, registry.ErrNotFound)
+		if !req.ConfirmTargetReset {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "TARGET_RESET_CONFIRMATION_REQUIRED", Message: "confirm_target_reset=true is required", RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
-		action := "NODE_DRAIN_REQUEST_BLOCKED"
-		if parts[4] == "remove" {
-			action = "NODE_REMOVE_REQUEST_BLOCKED"
-			if node.Role == "server" && r.URL.Query().Get("force") != "true" && healthyServerCount(nodes) <= 1 {
-				err := registry.APIError{Status: http.StatusConflict, Code: "ONLY_SERVER_NODE", Message: "removing the only healthy server would block the runtime", NextAction: "add_or_promote_server_first", RequestID: r.Header.Get("X-Request-ID")}
-				s.Registry.Audit(node.OrgID, projectID, principal.UserID, action, "node", node.ID, "failure", map[string]any{"error_code": err.Code})
-				writeRegistryError(w, err)
+		value, err := s.Registry.MarkNodeOffline(projectID, parts[3])
+		if err == nil {
+			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "NODE_MARKED_OFFLINE", "node", value.ID, "success", map[string]any{"reason": "operator_confirmed_target_reset"})
+		}
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 5 && parts[2] == "nodes" && (parts[4] == "drain" || parts[4] == "remove") && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if s.Auth != nil && principal.UserID == "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusForbidden, Code: "PERMISSION_DENIED", Message: "authenticated principal user ID is required", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		if !s.requireRole(w, r, principal, projectID, "node", parts[3], "owner", "admin") {
+			return
+		}
+		var req struct {
+			ConfirmRemove bool `json:"confirm_remove"`
+		}
+		if r.ContentLength != 0 {
+			if !decodeJSON(w, r, &req) {
 				return
 			}
 		}
-		apiErr := registry.APIError{Status: http.StatusNotImplemented, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node drain/remove must execute through Agent/K3s; Cloud registry cannot mark runtime lifecycle complete", NextAction: "wire_agent_node_lifecycle_endpoint", RequestID: r.Header.Get("X-Request-ID")}
-		s.Registry.Audit(node.OrgID, projectID, principal.UserID, action, "node", node.ID, "failure", map[string]any{"error_code": apiErr.Code})
-		writeRegistryError(w, apiErr)
+		job, err := s.Registry.RequestNodeLifecycle(projectID, parts[3], parts[4], principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), req.ConfirmRemove, r.URL.Query().Get("force") == "true")
+		if err == nil {
+			s.auditOnce(job.OrgID, projectID, principal.UserID, "NODE_LIFECYCLE_REQUESTED", "node_lifecycle_job", job.ID, "success", map[string]any{"action": job.Action, "target_node_id": job.TargetNodeID, "status": job.Status})
+		} else if nodes, listErr := s.Registry.ListNodes(projectID); listErr == nil {
+			if node, ok := nodeByID(nodes, parts[3]); ok {
+				code := "NODE_LIFECYCLE_REQUEST_FAILED"
+				var apiErr registry.APIError
+				if errors.As(err, &apiErr) {
+					code = apiErr.Code
+				}
+				s.Registry.Audit(node.OrgID, projectID, principal.UserID, "NODE_LIFECYCLE_REQUEST_REJECTED", "node", node.ID, "failure", map[string]any{"action": parts[4], "error_code": code})
+			}
+		}
+		writeRegistryResult(w, r, job, err, http.StatusAccepted)
 		return
 	}
 	if len(parts) == 3 && parts[2] == "agents" && r.Method == http.MethodPost {
@@ -202,6 +359,10 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			PublicKeyFingerprint string         `json:"public_key_fingerprint"`
 			Version              string         `json:"version"`
 			Capabilities         map[string]any `json:"capabilities"`
+			AgentEndpoint        string         `json:"agent_endpoint"`
+			AgentPort            int            `json:"agent_port"`
+			AgentTLSServerName   string         `json:"agent_tls_server_name"`
+			AgentCertSHA256      string         `json:"agent_cert_sha256"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
@@ -217,7 +378,9 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			writeRegistryFailure(w, r, err)
 			return
 		}
-		value, err := s.Registry.RegisterAgent(projectID, req.NodeID, req.PublicKeyFingerprint, hash, req.Version, r.Header.Get("Idempotency-Key"), req.Capabilities)
+		value, err := s.Registry.RegisterAgent(projectID, req.NodeID, req.PublicKeyFingerprint, hash, req.Version, r.Header.Get("Idempotency-Key"), req.Capabilities, registry.AgentEndpoint{
+			Address: req.AgentEndpoint, Port: req.AgentPort, TLSServerName: req.AgentTLSServerName, CertSHA256: req.AgentCertSHA256,
+		})
 		if err == nil {
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "AGENT_REGISTERED", "agent", value.ID, "success", map[string]any{"node_id": value.NodeID})
 		}
@@ -298,6 +461,7 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "INVALID_BOOTSTRAP_CREDENTIAL", Message: err.Error(), RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
+		defer clearBootstrapCredential(&credential)
 		value, err := s.Registry.CreateBootstrapSession(projectID, req.Role, req.PublicHost, req.SSHUsername, credential.AuthMethod, principal.UserID, r.Header.Get("Idempotency-Key"), req.SSHPort)
 		if err == nil {
 			s.observer.Inc("bootstrap_sessions_total")
@@ -316,6 +480,51 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 	if len(parts) == 3 && parts[2] == "bootstrap-sessions" && r.Method == http.MethodGet {
 		value, err := s.Registry.ListBootstrapSessions(projectID)
 		writeRegistryResult(w, r, map[string]any{"sessions": value}, err, http.StatusOK)
+		return
+	}
+	if len(parts) == 5 && parts[2] == "bootstrap-sessions" && parts[4] == "retry" && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) {
+			return
+		}
+		if principal.Role != "owner" && principal.Role != "admin" {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RBAC_DENIED", "bootstrap_session", parts[3], "denied", map[string]any{"role": principal.Role, "error_code": "BOOTSTRAP_RETRY_FORBIDDEN"})
+			s.observer.Inc("rbac_denied_total")
+			writeRegistryError(w, registry.APIError{Status: http.StatusForbidden, Code: "BOOTSTRAP_RETRY_FORBIDDEN", Message: "only Owner or Admin can retry a bootstrap session", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		current, err := s.Registry.GetBootstrapSession(projectID, parts[3])
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		if current.Status != registry.BootstrapDeadLetter {
+			result, retryErr := s.Registry.ManualRetryBootstrapSession(projectID, parts[3], r.Header.Get("Idempotency-Key"), s.clock())
+			if retryErr == nil && !result.Applied {
+				writeJSON(w, http.StatusAccepted, result.Session)
+				return
+			}
+			if retryErr != nil {
+				writeRegistryFailure(w, r, retryErr)
+				return
+			}
+			writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_NOT_DEAD_LETTER", Message: "bootstrap session is not dead-lettered", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		credential, ok := s.credentials.GetForBootstrapLease(parts[3])
+		clearBootstrapCredential(&credential)
+		if !ok {
+			writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_RETRY_CREDENTIAL_UNAVAILABLE", Message: "bootstrap credential is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
+		result, err := s.Registry.ManualRetryBootstrapSession(projectID, parts[3], r.Header.Get("Idempotency-Key"), s.clock())
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		if result.Applied {
+			s.Registry.Audit(result.Session.OrgID, projectID, principal.UserID, "BOOTSTRAP_MANUAL_RETRY_REQUESTED", "bootstrap_session", result.Session.ID, "success", map[string]any{"previous_attempt_count": current.AttemptCount, "attempt_count": 0, "manual_retry_generation": r.Header.Get("Idempotency-Key")})
+		}
+		writeJSON(w, http.StatusAccepted, result.Session)
 		return
 	}
 	if len(parts) == 4 && parts[2] == "bootstrap-sessions" && r.Method == http.MethodGet {
@@ -344,35 +553,6 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "SERVICE_CREATED", "service", value.ID, "success", map[string]any{"type": value.Type})
 		}
 		writeRegistryResult(w, r, value, err, http.StatusCreated)
-		return
-	}
-	if len(parts) == 5 && parts[2] == "services" && parts[4] == "deployments" && r.Method == http.MethodPost {
-		if !requireWriteHeaders(w, r) {
-			return
-		}
-		if !s.requireRole(w, r, principal, projectID, "deployment_job", parts[3], "owner", "admin", "developer") {
-			return
-		}
-		if !s.limits.Allow("deploy:"+projectID, 60, time.Minute) {
-			s.observer.Inc("rate_limited_total")
-			writeRegistryError(w, registry.APIError{Status: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "deployment rate limit exceeded", RequestID: r.Header.Get("X-Request-ID")})
-			return
-		}
-		var req struct {
-			RequestedBy string `json:"requested_by"`
-		}
-		if !decodeJSON(w, r, &req) {
-			return
-		}
-		if req.RequestedBy == "" {
-			req.RequestedBy = principal.UserID
-		}
-		value, err := s.Registry.StartDeployment(projectID, parts[3], req.RequestedBy, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"))
-		if err == nil {
-			s.observer.Inc("deployment_jobs_total")
-			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "DEPLOYMENT_STARTED", "deployment_job", value.ID, "success", map[string]any{"service_id": value.ServiceID})
-		}
-		writeRegistryResult(w, r, value, err, http.StatusAccepted)
 		return
 	}
 	http.NotFound(w, r)
@@ -443,6 +623,17 @@ func healthyServerCount(nodes []registry.Node) int {
 	return count
 }
 
+func (s *Server) auditOnce(orgID, projectID, actorUserID, action, resourceType, resourceID, result string, metadata map[string]any) {
+	if events, err := s.Registry.ListAudit(projectID); err == nil {
+		for _, event := range events {
+			if event.Action == action && event.ResourceType == resourceType && event.ResourceID == resourceID {
+				return
+			}
+		}
+	}
+	s.Registry.Audit(orgID, projectID, actorUserID, action, resourceType, resourceID, result, metadata)
+}
+
 func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, principal auth.VerifyResult, projectID, resourceType, resourceID string, allowed ...string) bool {
 	for _, role := range allowed {
 		if principal.Role == role {
@@ -486,6 +677,10 @@ func bootstrapCredential(method, username, privateKey, password, k3sToken string
 	}
 }
 
+func clearBootstrapCredential(credential *BootstrapCredential) {
+	zeroBootstrapCredential(credential)
+}
+
 func bearerToken(r *http.Request) string {
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
@@ -518,6 +713,10 @@ func writeRegistryFailure(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	if errors.Is(err, registry.ErrNotFound) {
 		writeRegistryError(w, registry.APIError{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "Resource was not found.", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	if errors.Is(err, registry.ErrGitHubEventConflict) {
+		writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "GITHUB_EVENT_CONFLICT", Message: "GitHub numeric identity conflicts with stored inventory", RequestID: r.Header.Get("X-Request-ID")})
 		return
 	}
 	writeRegistryError(w, registry.APIError{Status: http.StatusInternalServerError, Code: "INTERNAL", Message: "Internal server error.", RequestID: r.Header.Get("X-Request-ID")})

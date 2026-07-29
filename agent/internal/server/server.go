@@ -10,15 +10,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opsi-dev/opsi/agent/internal/actionplane"
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/cloudrunner"
 	"github.com/opsi-dev/opsi/agent/internal/config"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/incident"
+	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/svcatalog"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
 	"github.com/opsi-dev/opsi/agent/internal/tlsconfig"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -27,31 +30,34 @@ import (
 )
 
 type StatusService struct {
-	version   string
-	startedAt time.Time
-	cfg       config.Config
+	version        string
+	startedAt      time.Time
+	cfg            config.Config
+	cloudConnected func() bool
+	healthProbe    cloudrunner.HealthProbe
 }
 
-func NewStatusService(version string, startedAt time.Time, cfg config.Config) *StatusService {
-	return &StatusService{version: version, startedAt: startedAt, cfg: cfg}
+func NewStatusService(version string, startedAt time.Time, cfg config.Config, cloudConnected func() bool, healthProbe ...cloudrunner.HealthProbe) *StatusService {
+	if cloudConnected == nil {
+		cloudConnected = func() bool { return false }
+	}
+	var probe cloudrunner.HealthProbe
+	if len(healthProbe) > 0 {
+		probe = healthProbe[0]
+	}
+	return &StatusService{version: version, startedAt: startedAt, cfg: cfg, cloudConnected: cloudConnected, healthProbe: probe}
 }
 
-func (s *StatusService) Status(context.Context, *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
+func (s *StatusService) Status(ctx context.Context, _ *agentv1.StatusRequest) (*agentv1.StatusResponse, error) {
+	health := cloudrunner.ProbeRuntime(ctx, s.healthProbe)
 	return &agentv1.StatusResponse{
 		Version:        s.version,
 		UptimeSeconds:  int64(time.Since(s.startedAt).Seconds()),
 		NodeID:         s.cfg.NodeID,
-		Health:         "ok",
-		CloudConnected: false,
+		Health:         statusHealth(health),
+		CloudConnected: s.cloudConnected(),
 		StartedAtUnix:  s.startedAt.Unix(),
 	}, nil
-}
-
-type DeploymentService struct {
-	cfg          config.Config
-	engine       *deploy.Engine
-	auth         secret.AuthVerifier
-	serviceStore *svcatalog.Store
 }
 
 type TelemetryService struct {
@@ -62,10 +68,12 @@ type TelemetryService struct {
 type SecretService struct {
 	cfg     config.Config
 	service *secret.Service
+	auth    secret.AuthVerifier
 }
 
 type IncidentService struct {
 	service *incident.Service
+	auth    secret.AuthVerifier
 }
 
 type ServiceManagerService struct {
@@ -78,12 +86,12 @@ func NewTelemetryService(store telemetry.Store, auth secret.AuthVerifier) *Telem
 	return &TelemetryService{store: store, auth: auth}
 }
 
-func NewSecretService(cfg config.Config, service *secret.Service) *SecretService {
-	return &SecretService{cfg: cfg, service: service}
+func NewSecretService(cfg config.Config, service *secret.Service, auth secret.AuthVerifier) *SecretService {
+	return &SecretService{cfg: cfg, service: service, auth: auth}
 }
 
-func NewIncidentService(service *incident.Service) *IncidentService {
-	return &IncidentService{service: service}
+func NewIncidentService(service *incident.Service, auth secret.AuthVerifier) *IncidentService {
+	return &IncidentService{service: service, auth: auth}
 }
 
 func NewServiceManagerService(store *svcatalog.Store, manager svcatalog.Manager, auth secret.AuthVerifier) *ServiceManagerService {
@@ -178,35 +186,65 @@ func (s *ServiceManagerService) DeleteManagedService(ctx context.Context, req *a
 	return &agentv1.DeleteManagedServiceResponse{ProjectID: req.ProjectID, ID: req.ID, Deleted: true}, nil
 }
 
-func (s *IncidentService) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Analyze(ctx, incident.AnalyzeRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+func (s *IncidentService) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer)
+	if err != nil {
+		return nil, err
+	}
+	records, err := s.service.List(ctx, incident.ListRequest{ProjectID: auth.ProjectID, Status: req.Status, Limit: int(req.Limit), UserID: auth.UserID, Role: string(auth.Role), PAT: auth.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
-	return incidentResponse(rec, rca), nil
+	out := &agentv1.IncidentListResponse{}
+	for i := range records {
+		rec := records[i]
+		out.Incidents = append(out.Incidents, *incidentResponse(&rec))
+	}
+	return out, nil
 }
 
-func (s *IncidentService) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Approve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, ActionID: req.ActionID, ActionHash: req.ActionHash, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+func (s *IncidentService) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := s.service.Get(ctx, incident.IncidentRequest{ProjectID: auth.ProjectID, IncidentID: req.IncidentID, UserID: auth.UserID, Role: string(auth.Role), PAT: auth.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
-	return incidentResponse(rec, rca), nil
+	return incidentResponse(rec), nil
 }
 
-func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	rec, rca, err := s.service.Resolve(ctx, incident.ActionRequest{ProjectID: req.ProjectID, IncidentID: req.IncidentID, UserID: req.UserID, Role: req.Role, PAT: req.PAT})
+func (s *IncidentService) GetIncidentEvidence(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer)
+	if err != nil {
+		return nil, err
+	}
+	evidence, err := s.service.GetEvidence(ctx, incident.IncidentRequest{ProjectID: auth.ProjectID, IncidentID: req.IncidentID, UserID: auth.UserID, Role: string(auth.Role), PAT: auth.PAT})
 	if err != nil {
 		return nil, mapIncidentError(err)
 	}
-	return incidentResponse(rec, rca), nil
+	return evidence, nil
+}
+
+func (s *IncidentService) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := s.service.Resolve(ctx, incident.ResolveRequest{ProjectID: auth.ProjectID, IncidentID: req.IncidentID, UserID: auth.UserID, Role: string(auth.Role), PAT: auth.PAT})
+	if err != nil {
+		return nil, mapIncidentError(err)
+	}
+	return incidentResponse(rec), nil
 }
 
 func (s *SecretService) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
-	secretValue, uri, err := s.service.SetupTOTP(ctx, secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: firstNonEmpty(req.PAT, bearerToken(ctx))})
+	auth, err := verifyRequestAuth(ctx, s.auth, req.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	secretValue, uri, err := s.service.SetupTOTP(ctx, auth)
 	if err != nil {
 		return nil, mapSecretError(err)
 	}
@@ -214,8 +252,11 @@ func (s *SecretService) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPReq
 }
 
 func (s *SecretService) CreateSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	value, err := s.service.Create(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg))
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	value, err := s.service.Create(ctx, auth, refFromSecretRequest(req, s.cfg))
 	if err != nil {
 		return nil, mapSecretError(err)
 	}
@@ -223,8 +264,11 @@ func (s *SecretService) CreateSecret(ctx context.Context, req *agentv1.SecretReq
 }
 
 func (s *SecretService) RevealSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	value, err := s.service.Reveal(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner)
+	if err != nil {
+		return nil, err
+	}
+	value, err := s.service.Reveal(ctx, auth, refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
 	if err != nil {
 		return nil, mapSecretError(err)
 	}
@@ -232,8 +276,11 @@ func (s *SecretService) RevealSecret(ctx context.Context, req *agentv1.SecretReq
 }
 
 func (s *SecretService) RotateSecret(ctx context.Context, req *agentv1.SecretRequest) (*agentv1.SecretResponse, error) {
-	req.PAT = firstNonEmpty(req.PAT, bearerToken(ctx))
-	value, err := s.service.Rotate(ctx, authFromSecretRequest(req), refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
+	auth, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner)
+	if err != nil {
+		return nil, err
+	}
+	value, err := s.service.Rotate(ctx, auth, refFromSecretRequest(req, s.cfg), req.OTPRequestID, req.OTPCode, req.TOTPCode)
 	if err != nil {
 		return nil, mapSecretError(err)
 	}
@@ -281,90 +328,38 @@ func (s *TelemetryService) Sync(req *agentv1.SyncRequest, stream agentv1.Telemet
 	return nil
 }
 
-func NewDeploymentService(cfg config.Config, engine *deploy.Engine, auth secret.AuthVerifier, serviceStore *svcatalog.Store) *DeploymentService {
-	return &DeploymentService{cfg: cfg, engine: engine, auth: auth, serviceStore: serviceStore}
-}
-
-func (s *DeploymentService) Deploy(req *agentv1.DeployRequest, stream agentv1.DeploymentService_DeployServer) error {
-	resolved, err := deploy.RequestFromContract(req, s.cfg.Deployment)
-	if err != nil {
-		return status.Error(codes.InvalidArgument, err.Error())
+func (s *TelemetryService) QueryTelemetry(ctx context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error) {
+	if req.ProjectID == "" {
+		return nil, status.Error(codes.InvalidArgument, "project_id is required")
+	}
+	if req.Limit < 0 || req.Limit > 200 {
+		return nil, status.Error(codes.InvalidArgument, "limit must be between 0 and 200")
+	}
+	if req.Cursor != "" {
+		cursor, err := time.Parse(time.RFC3339Nano, req.Cursor)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, "cursor is invalid")
+		}
+		req.SinceUnix = cursor.Unix()
+	}
+	if !req.IncludeLogs && !req.IncludeSummary && !req.IncludeServices {
+		return nil, status.Error(codes.InvalidArgument, "at least one telemetry view must be requested")
 	}
 	if s.auth != nil {
-		if _, err := authorize(stream.Context(), s.auth, resolved.ProjectID, secret.RoleOwner, secret.RoleDeveloper); err != nil {
-			return err
+		if _, err := authorize(ctx, s.auth, req.ProjectID, secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer); err != nil {
+			return nil, err
 		}
 	}
-	resolved, err = s.validateDependencies(stream.Context(), resolved)
+	resp, err := telemetry.BuildQueryResponse(ctx, s.store, req, time.Now().UTC())
 	if err != nil {
-		return err
+		return nil, status.Error(codes.Internal, err.Error())
 	}
-	_, err = s.engine.Deploy(stream.Context(), resolved, func(event *deploy.ProgressEvent) error {
-		out := &agentv1.ProgressEvent{
-			OperationID: event.OperationID,
-			ProjectID:   event.ProjectID,
-			ServiceID:   event.ServiceID,
-			ServiceName: event.ServiceName,
-			Phase:       event.Phase,
-			Message:     event.Message,
-			Percent:     event.Percent,
-		}
-		if event.Err != nil {
-			out.Error = &agentv1.ServiceError{Code: agentv1.ErrorCodeInternal, Message: event.Err.Error()}
-		}
-		return stream.Send(out)
-	})
-	if err != nil {
-		return status.Error(codes.Internal, err.Error())
-	}
-	return nil
-}
-
-func (s *DeploymentService) validateDependencies(ctx context.Context, req deploy.Request) (deploy.Request, error) {
-	if len(req.DependsOn) == 0 {
-		return req, nil
-	}
-	if s.serviceStore == nil {
-		return req, status.Error(codes.FailedPrecondition, "service catalog store is not configured")
-	}
-	defaultOwner := map[string]string{}
-	unprefixedOwner := map[string]string{}
-	for i, dep := range req.DependsOn {
-		service, err := s.serviceStore.GetManagedService(ctx, req.ProjectID, dep.Name)
-		if err != nil {
-			return req, status.Error(codes.Internal, err.Error())
-		}
-		if service == nil {
-			return req, status.Errorf(codes.FailedPrecondition, "dependency service %q is not registered", dep.Name)
-		}
-		keys, ok := svcatalog.EnvKeysForType(service.Type)
-		if !ok {
-			return req, status.Errorf(codes.FailedPrecondition, "dependency service %q has unknown type %q", dep.Name, service.Type)
-		}
-		req.DependsOn[i].EnvKeys = keys
-		for _, key := range keys {
-			if dep.ExposeAsDefault {
-				if owner := defaultOwner[key]; owner != "" {
-					return req, status.Errorf(codes.FailedPrecondition, "dependency default env collision on %s between %s and %s; only one dependency may expose_as_default", key, owner, dep.Name)
-				}
-				defaultOwner[key] = dep.Name
-			}
-			if dep.EnvPrefix == "" && !dep.ExposeAsDefault {
-				if owner := unprefixedOwner[key]; owner != "" {
-					return req, status.Errorf(codes.FailedPrecondition, "dependency env collision on %s between %s and %s; set env_prefix or expose_as_default on exactly one dependency", key, owner, dep.Name)
-				}
-				unprefixedOwner[key] = dep.Name
-			}
-		}
-		if err := s.serviceStore.UpsertBinding(ctx, svcatalog.ServiceBinding{ProjectID: req.ProjectID, AppServiceID: req.ServiceID, DependencyServiceID: service.ID, Namespace: req.Namespace}); err != nil {
-			return req, status.Error(codes.Internal, err.Error())
-		}
-	}
-	return req, nil
+	return resp, nil
 }
 
 func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Logger) error {
 	startedAt := time.Now().UTC()
+	cloudConnection := &cloudrunner.ConnectionState{}
 
 	store, err := deploy.OpenSQLiteStore(cfg.SQLitePath)
 	if err != nil {
@@ -384,11 +379,21 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	}
 	defer serviceStore.Close()
 
+	actionStore, err := actionplane.OpenSQLiteStore(cfg.SQLitePath)
+	if err != nil {
+		return err
+	}
+	defer actionStore.Close()
+
 	engineCfg, err := deploymentEngineConfig(cfg)
 	if err != nil {
 		return err
 	}
 	engine := deploy.NewEngine(store, engineCfg)
+	healthProbe := cloudrunner.KubernetesHealthProbe{
+		KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl"),
+		Runner:      cloudrunner.ExecHealthCommandRunner{},
+	}
 
 	grpcListener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -413,17 +418,45 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		logger.Warn("gRPC TLS is not configured; use only for local development")
 	}
 
+	if cfg.Auth.Enabled {
+		grpcOptions = append(grpcOptions, grpc.UnaryInterceptor(statusAuthInterceptor(authVerifier(cfg), firstNonEmpty(cfg.CloudRelay.ProjectID, cfg.Deployment.ProjectID))))
+	}
 	grpcServer := grpc.NewServer(grpcOptions...)
-	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg))
+	agentv1.RegisterStatusServiceServer(grpcServer, NewStatusService(version, startedAt, cfg, cloudConnection.Connected, healthProbe))
 	authVerifier := authVerifier(cfg)
-	agentv1.RegisterDeploymentServiceServer(grpcServer, NewDeploymentService(cfg, engine, authVerifier, serviceStore))
 	agentv1.RegisterServiceManagerServiceServer(grpcServer, NewServiceManagerService(serviceStore, serviceManager(cfg, serviceStore), authVerifier))
 	agentv1.RegisterTelemetryServiceServer(grpcServer, NewTelemetryService(telemetryStore, authVerifier))
-	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore, authVerifier)))
-	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentService(cfg, telemetryStore, authVerifier)))
+	agentv1.RegisterSecretServiceServer(grpcServer, NewSecretService(cfg, secretService(cfg, telemetryStore), authVerifier))
+	incidentHandler := incidentService(telemetryStore, store, incident.KubernetesEvidenceSource{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")})
+	agentv1.RegisterIncidentServiceServer(grpcServer, NewIncidentService(incidentHandler, authVerifier))
+	productionAdapter, _ := engineCfg.Reconciler.(deploy.ProductionAdapter)
+	projection := &deploy.ActionProjection{Store: store, Adapter: productionAdapter}
+	actionRuntime := actionplane.KubernetesRuntime{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl"), Timeout: 30 * time.Second, Projection: projection, IncidentState: func(ctx context.Context, target actionv1.TargetIdentity, incidentID string) (actionv1.IncidentState, error) {
+		record, err := incidentHandler.Store.GetIncident(ctx, target.ProjectID, incidentID)
+		if err != nil {
+			return actionv1.IncidentState{}, err
+		}
+		if record == nil {
+			return actionv1.IncidentState{}, errors.New("incident not found")
+		}
+		return actionv1.IncidentState{IncidentID: incidentID, Status: record.Status}, nil
+	}, Incident: func(ctx context.Context, target actionv1.TargetIdentity, incidentID string) error {
+		_, err := incidentHandler.ResolveApproved(ctx, incident.ResolveRequest{ProjectID: target.ProjectID, IncidentID: incidentID, UserID: actionplane.ApprovedPrincipal(ctx), Role: string(secret.RoleDeveloper)})
+		return err
+	}}
+	actionService := &actionplane.Service{Store: actionStore, Runtime: actionRuntime, Devices: actionplane.HTTPDeviceResolver{BaseURL: cfg.CloudEndpoint, Token: cfg.CloudRelay.AgentToken, NodeID: cfg.NodeID}, Authenticate: func(ctx context.Context, projectID string) (actionplane.Principal, error) {
+		return actionplane.AuthenticateFromContext(ctx, authVerifier, projectID)
+	}}
+	actionv1.RegisterActionServiceServer(grpcServer, actionService)
+	go func() {
+		logger.Info("agent ActionPlane recovery loop started")
+		if err := actionService.RecoverLoop(ctx, 5*time.Second); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Warn("agent ActionPlane recovery loop stopped", "error", err)
+		}
+	}()
 
 	healthServer := &http.Server{
-		Handler:           healthHandler(version, startedAt, cfg),
+		Handler:           healthHandler(version, startedAt, cfg, cloudConnection.Connected),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -514,8 +547,6 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		}
 	}
 	if cfg.CloudRelay.Enabled {
-		deploymentCfg := cfg.Deployment
-		deploymentCfg.ProjectID = firstNonEmpty(deploymentCfg.ProjectID, cfg.CloudRelay.ProjectID)
 		pollInterval := parseDurationOr(cfg.CloudRelay.PollInterval, 2*time.Second)
 		longPollWait := parseDurationOr(cfg.CloudRelay.LongPollWait, 30*time.Second)
 		heartbeatInterval := parseDurationOr(cfg.CloudRelay.HeartbeatInterval, 30*time.Second)
@@ -528,11 +559,13 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			},
 			NodeID:            cfg.NodeID,
 			Version:           version,
-			DeploymentConfig:  deploymentCfg,
 			Engine:            engine,
+			NodeLifecycle:     nodelifecycle.Service{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			PollInterval:      pollInterval,
 			LongPollWait:      longPollWait,
 			HeartbeatInterval: heartbeatInterval,
+			HealthProbe:       healthProbe,
+			ConnectionState:   cloudConnection,
 			Logger:            logger,
 		}
 		go func() {
@@ -568,7 +601,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 	return healthServer.Shutdown(shutdownCtx)
 }
 
-func secretService(cfg config.Config, audit secret.AuditSink, auth secret.AuthVerifier) *secret.Service {
+func secretService(cfg config.Config, audit secret.AuditSink) *secret.Service {
 	timeout := 10 * time.Second
 	if cfg.Secret.CloudOTPTimeout != "" {
 		if parsed, err := time.ParseDuration(cfg.Secret.CloudOTPTimeout); err == nil {
@@ -583,7 +616,6 @@ func secretService(cfg config.Config, audit secret.AuditSink, auth secret.AuthVe
 	return &secret.Service{
 		Store:            store,
 		TOTPStore:        store,
-		Auth:             auth,
 		Audit:            audit,
 		OTP:              secret.HTTPOTPClient{Endpoint: cfg.CloudEndpoint},
 		Encryption:       secret.StaticEncryptionVerifier(cfg.Secret.EncryptionAtRestConfirmed),
@@ -606,10 +638,25 @@ func authVerifier(cfg config.Config) secret.AuthVerifier {
 	return &secret.HTTPAuthVerifier{Endpoint: cfg.CloudEndpoint, CacheTTL: ttl}
 }
 
+func statusAuthInterceptor(verifier secret.AuthVerifier, projectID string) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if info.FullMethod != "/opsi.agent.v1.StatusService/Status" {
+			return handler(ctx, req)
+		}
+		if verifier == nil || projectID == "" {
+			return nil, status.Error(codes.Unauthenticated, "Agent status authentication is unavailable")
+		}
+		if _, err := verifier.VerifyAuth(ctx, secret.AuthContext{ProjectID: projectID, PAT: bearerToken(ctx)}); err != nil {
+			return nil, status.Error(codes.Unauthenticated, "Agent status authentication failed")
+		}
+		return handler(ctx, req)
+	}
+}
+
 func authorize(ctx context.Context, verifier secret.AuthVerifier, projectID string, allowed ...secret.Role) (secret.AuthContext, error) {
-	verified, err := verifier.VerifyAuth(ctx, secret.AuthContext{ProjectID: projectID, PAT: bearerToken(ctx)})
+	verified, err := verifyRequestAuth(ctx, verifier, projectID)
 	if err != nil {
-		return secret.AuthContext{}, status.Error(codes.Unauthenticated, err.Error())
+		return secret.AuthContext{}, err
 	}
 	if err := secret.RequireRole(verified, allowed...); err != nil {
 		return secret.AuthContext{}, status.Error(codes.PermissionDenied, err.Error())
@@ -617,8 +664,25 @@ func authorize(ctx context.Context, verifier secret.AuthVerifier, projectID stri
 	return verified, nil
 }
 
-func authFromSecretRequest(req *agentv1.SecretRequest) secret.AuthContext {
-	return secret.AuthContext{ProjectID: req.ProjectID, UserID: req.UserID, Role: secret.Role(req.Role), PAT: req.PAT}
+func verifyRequestAuth(ctx context.Context, verifier secret.AuthVerifier, projectID string) (secret.AuthContext, error) {
+	if projectID == "" {
+		return secret.AuthContext{}, status.Error(codes.InvalidArgument, "project_id is required")
+	}
+	if verifier == nil {
+		return secret.AuthContext{}, status.Error(codes.Unauthenticated, "Agent authentication is unavailable")
+	}
+	pat := bearerToken(ctx)
+	if pat == "" {
+		return secret.AuthContext{}, status.Error(codes.Unauthenticated, "Authorization Bearer token is required")
+	}
+	verified, err := verifier.VerifyAuth(ctx, secret.AuthContext{ProjectID: projectID, PAT: pat})
+	if err != nil {
+		return secret.AuthContext{}, status.Error(codes.Unauthenticated, "Agent authentication failed")
+	}
+	if verified.ProjectID != projectID {
+		return secret.AuthContext{}, status.Error(codes.PermissionDenied, "project access denied")
+	}
+	return verified, nil
 }
 
 func bearerToken(ctx context.Context) string {
@@ -631,12 +695,6 @@ func bearerToken(ctx context.Context) string {
 		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
 			return parts[1]
 		}
-		if token := strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")); token != "" && token != value {
-			return token
-		}
-	}
-	if values := md.Get("x-opsi-pat"); len(values) > 0 {
-		return values[0]
 	}
 	return ""
 }
@@ -682,57 +740,68 @@ func mapIncidentError(err error) error {
 	message := err.Error()
 	switch {
 	case strings.Contains(message, "PAT") || strings.Contains(message, "cloud auth"):
-		return status.Error(codes.Unauthenticated, message)
+		return status.Error(codes.Unauthenticated, "Agent authentication failed")
 	case message == "permission denied":
-		return status.Error(codes.PermissionDenied, message)
+		return status.Error(codes.PermissionDenied, "incident access denied")
 	case strings.Contains(message, "not found"):
-		return status.Error(codes.NotFound, message)
+		return status.Error(codes.NotFound, "incident not found")
+	case errors.Is(err, incident.ErrEvidenceCorrupt):
+		return status.Error(codes.FailedPrecondition, "stored incident evidence is invalid")
+	case errors.Is(err, incident.ErrEvidenceTooLarge):
+		return status.Error(codes.ResourceExhausted, "incident evidence exceeds the size limit")
+	case errors.Is(err, incident.ErrEvidenceUnavailable):
+		return status.Error(codes.Unavailable, "incident evidence is unavailable")
+	case errors.Is(err, incident.ErrApprovalRequired):
+		return status.Error(codes.FailedPrecondition, "ACTION_APPROVAL_REQUIRED")
 	case strings.Contains(message, "invalid") || strings.Contains(message, "required"):
-		return status.Error(codes.InvalidArgument, message)
+		return status.Error(codes.InvalidArgument, "invalid incident request")
 	default:
-		return status.Error(codes.Internal, message)
+		return status.Error(codes.Internal, "incident operation failed")
 	}
 }
 
-func incidentResponse(rec *telemetry.IncidentRecord, r incident.RCA) *agentv1.IncidentResponse {
+func incidentResponse(rec *telemetry.IncidentRecord) *agentv1.IncidentResponse {
 	resp := &agentv1.IncidentResponse{
-		IncidentID:            rec.ID,
-		ProjectID:             rec.ProjectID,
-		ServiceID:             rec.ServiceID,
-		Status:                rec.Status,
-		RootCause:             r.RootCause,
-		Confidence:            r.Confidence,
-		ContributingFactors:   r.ContributingFactors,
-		MitigationActionsJSON: rec.MitigationActions,
-		MTTRSeconds:           rec.MTTRSeconds,
+		IncidentID:  rec.ID,
+		ProjectID:   rec.ProjectID,
+		NodeID:      rec.NodeID,
+		ServiceID:   rec.ServiceID,
+		PodID:       rec.PodID,
+		Status:      rec.Status,
+		Severity:    rec.Severity,
+		AnomalyType: rec.AnomalyType,
+		MTTRSeconds: rec.MTTRSeconds,
+	}
+	if !rec.CreatedAt.IsZero() {
+		resp.CreatedAtUnix = rec.CreatedAt.Unix()
 	}
 	if !rec.ResolvedAt.IsZero() {
 		resp.ResolvedAtUnix = rec.ResolvedAt.Unix()
 	}
-	for _, action := range r.RecommendedActions {
-		resp.RecommendedActions = append(resp.RecommendedActions, agentv1.RecommendedAction{ID: action.ID, Type: action.Type, Description: action.Description, RollbackSafe: action.RollbackSafe, Params: action.Params, ActionHash: action.ActionHash})
-	}
-	if r.Metadata.Provider != "" {
-		resp.RCAMetadata = &agentv1.RCAMetadata{Provider: r.Metadata.Provider, ConfiguredProvider: r.Metadata.ConfiguredProvider, Model: r.Metadata.Model, FallbackUsed: r.Metadata.FallbackUsed, InputContextHash: r.Metadata.InputContextHash, CreatedAt: r.Metadata.CreatedAt}
-	}
 	return resp
 }
 
-func incidentService(cfg config.Config, store telemetry.Store, auth secret.AuthVerifier) *incident.Service {
+func incidentService(store telemetry.Store, rollouts *deploy.SQLiteStore, kubernetes incident.KubernetesEvidenceSource) *incident.Service {
 	return &incident.Service{
-		Store:       store,
-		Audit:       store.(secret.AuditSink),
-		Auth:        auth,
-		Cloud:       incident.HTTPAnalyzerClient{Endpoint: cfg.CloudEndpoint},
-		KubectlPath: cfg.Telemetry.KubectlPath,
-		Namespace:   firstNonEmpty(cfg.Deployment.Namespace, cfg.Secret.Namespace),
-		DryRun:      cfg.Deployment.DryRun || cfg.Deployment.BuilderMode == "dry_run",
+		Store:           store,
+		Audit:           store.(secret.AuditSink),
+		EvidenceBuilder: incident.IncidentContextBuilder{Store: store, Rollouts: rollouts, Kubernetes: kubernetes},
 	}
+}
+
+func statusHealth(health cloudrunner.RuntimeHealth) string {
+	if health.NodeReady && health.K3SStatus == cloudrunner.K3SStatusReady {
+		return "ok"
+	}
+	if health.K3SStatus == cloudrunner.K3SStatusUnavailable {
+		return "unavailable"
+	}
+	return "degraded"
 }
 
 func serviceManager(cfg config.Config, store *svcatalog.Store) svcatalog.Manager {
 	var applier svcatalog.ManifestApplier = svcatalog.KubectlApplier{KubectlPath: firstNonEmpty(cfg.Secret.KubectlPath, cfg.Telemetry.KubectlPath)}
-	if cfg.Deployment.DryRun || cfg.Deployment.BuilderMode == "dry_run" {
+	if cfg.Deployment.DryRun {
 		applier = svcatalog.DryRunApplier{}
 	}
 	return svcatalog.Manager{Store: store, Applier: applier}
@@ -814,28 +883,25 @@ func deploymentEngineConfig(cfg config.Config) (deploy.EngineConfig, error) {
 		pollInterval = parsed
 	}
 	engineCfg := deploy.EngineConfig{
-		Git:            deploy.ExecGitClient{},
-		Builder:        deploy.ContainerdBuilder{NerdctlPath: cfg.Deployment.NerdctlPath, Namespace: cfg.Deployment.ContainerdNS},
-		K3s:            deploy.KubectlAdapter{},
-		BuildRoot:      cfg.Deployment.BuildRoot,
+		Reconciler: deploy.ProductionAdapter{
+			Runner:              deploy.ExecCommandRunner{},
+			RoutingProbe:        deploy.BoundedHTTPProbe{Scheme: "http", Address: "127.0.0.1", Port: 80, Timeout: 5 * time.Second, MaxBody: 16 * 1024},
+			RequireLocalRouting: true,
+			KubectlPath:         firstNonEmpty(cfg.Telemetry.KubectlPath, "kubectl"),
+			Timeout:             rolloutTimeout,
+			PollInterval:        pollInterval,
+		},
 		RolloutTimeout: rolloutTimeout,
 		PollInterval:   pollInterval,
-	}
-	switch cfg.Deployment.BuilderMode {
-	case "docker":
-		engineCfg.Builder = deploy.ExecBuilder{}
-	case "dry_run":
-		engineCfg.Builder = deploy.DryRunBuilder{}
-	}
-	if cfg.Deployment.DryRun {
-		engineCfg.Git = deploy.DryRunGitClient{}
-		engineCfg.Builder = deploy.DryRunBuilder{}
-		engineCfg.K3s = deploy.DryRunK3sAdapter{}
 	}
 	return engineCfg, nil
 }
 
-func healthHandler(version string, startedAt time.Time, cfg config.Config) http.Handler {
+func healthHandler(version string, startedAt time.Time, cfg config.Config, cloudConnected ...func() bool) http.Handler {
+	connected := func() bool { return false }
+	if len(cloudConnected) > 0 && cloudConnected[0] != nil {
+		connected = cloudConnected[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -844,7 +910,7 @@ func healthHandler(version string, startedAt time.Time, cfg config.Config) http.
 			"version":         version,
 			"node_id":         cfg.NodeID,
 			"uptime_seconds":  int64(time.Since(startedAt).Seconds()),
-			"cloud_connected": false,
+			"cloud_connected": connected(),
 		})
 	})
 	return mux

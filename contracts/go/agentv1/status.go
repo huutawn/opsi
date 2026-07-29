@@ -12,7 +12,6 @@ import (
 
 const (
 	StatusServiceName         = "opsi.agent.v1.StatusService"
-	DeploymentServiceName     = "opsi.agent.v1.DeploymentService"
 	TelemetryServiceName      = "opsi.agent.v1.TelemetryService"
 	SecretServiceName         = "opsi.agent.v1.SecretService"
 	IncidentServiceName       = "opsi.agent.v1.IncidentService"
@@ -20,73 +19,15 @@ const (
 	JSONCodecName             = "json"
 )
 
-type ErrorCode string
-
-const (
-	ErrorCodeUnspecified      ErrorCode = "UNSPECIFIED"
-	ErrorCodeAuthFailed       ErrorCode = "AUTH_FAILED"
-	ErrorCodeUnavailable      ErrorCode = "UNAVAILABLE"
-	ErrorCodeInvalidInput     ErrorCode = "INVALID_INPUT"
-	ErrorCodeTimeout          ErrorCode = "TIMEOUT"
-	ErrorCodePermissionDenied ErrorCode = "PERMISSION_DENIED"
-	ErrorCodeInternal         ErrorCode = "INTERNAL"
-)
-
 type StatusRequest struct{}
 
 type StatusResponse struct {
-	Version        string         `json:"version"`
-	UptimeSeconds  int64          `json:"uptime_seconds"`
-	NodeID         string         `json:"node_id"`
-	Health         string         `json:"health"`
-	CloudConnected bool           `json:"cloud_connected"`
-	StartedAtUnix  int64          `json:"started_at_unix"`
-	Errors         []ServiceError `json:"errors,omitempty"`
-}
-
-type ServiceError struct {
-	Code    ErrorCode `json:"code"`
-	Message string    `json:"message"`
-}
-
-type ProgressEvent struct {
-	OperationID string        `json:"operation_id"`
-	Phase       string        `json:"phase"`
-	Message     string        `json:"message"`
-	Percent     int32         `json:"percent"`
-	Error       *ServiceError `json:"error,omitempty"`
-	ProjectID   string        `json:"project_id,omitempty"`
-	ServiceID   string        `json:"service_id,omitempty"`
-	ServiceName string        `json:"service_name,omitempty"`
-}
-
-type DeployRequest struct {
-	ProjectID                     string              `json:"project_id"`
-	ServiceID                     string              `json:"service_id"`
-	ServiceName                   string              `json:"service_name"`
-	ServiceType                   string              `json:"service_type"`
-	RepoURL                       string              `json:"repo_url"`
-	Branch                        string              `json:"branch"`
-	GitSHA                        string              `json:"git_sha"`
-	Namespace                     string              `json:"namespace"`
-	BuildContext                  string              `json:"build_context"`
-	Dockerfile                    string              `json:"dockerfile"`
-	ManifestPath                  string              `json:"manifest_path"`
-	Registry                      string              `json:"registry"`
-	ImageTag                      string              `json:"image_tag"`
-	TriggeredBy                   string              `json:"triggered_by"`
-	WatchPaths                    []string            `json:"watch_paths,omitempty"`
-	TerminationGracePeriodSeconds int32               `json:"termination_grace_period_seconds,omitempty"`
-	ResourceRequestsJSON          string              `json:"resource_requests_json,omitempty"`
-	ResourceLimitsJSON            string              `json:"resource_limits_json,omitempty"`
-	IngressEnabled                bool                `json:"ingress_enabled,omitempty"`
-	DependsOn                     []ServiceDependency `json:"depends_on,omitempty"`
-}
-
-type ServiceDependency struct {
-	Name            string `json:"name"`
-	EnvPrefix       string `json:"env_prefix,omitempty"`
-	ExposeAsDefault bool   `json:"expose_as_default,omitempty"`
+	Version        string `json:"version"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	NodeID         string `json:"node_id"`
+	Health         string `json:"health"`
+	CloudConnected bool   `json:"cloud_connected"`
+	StartedAtUnix  int64  `json:"started_at_unix"`
 }
 
 type ListCatalogRequest struct{}
@@ -181,11 +122,61 @@ type SyncChunk struct {
 	Done           bool   `json:"done"`
 }
 
+type TelemetryQueryRequest struct {
+	ProjectID       string `json:"project_id"`
+	ServiceID       string `json:"service_id,omitempty"`
+	SinceUnix       int64  `json:"since_unix,omitempty"`
+	Cursor          string `json:"cursor,omitempty"`
+	Limit           int32  `json:"limit,omitempty"`
+	IncludeLogs     bool   `json:"include_logs,omitempty"`
+	IncludeSummary  bool   `json:"include_summary,omitempty"`
+	IncludeServices bool   `json:"include_services,omitempty"`
+}
+
+type TelemetryQueryResponse struct {
+	ProjectID     string                   `json:"project_id"`
+	Source        string                   `json:"source"`
+	PayloadPolicy string                   `json:"payload_policy"`
+	Summary       *TelemetryRuntimeSummary `json:"summary,omitempty"`
+	Services      []TelemetryServiceStatus `json:"services,omitempty"`
+	Logs          []TelemetryLogEntry      `json:"logs,omitempty"`
+	NextCursor    string                   `json:"next_cursor,omitempty"`
+}
+
+type TelemetryRuntimeSummary struct {
+	SinceUnix    int64  `json:"since_unix"`
+	EndUnix      int64  `json:"end_unix"`
+	MetricCount  int32  `json:"metric_count"`
+	LogCount     int32  `json:"log_count"`
+	ErrorCount   int32  `json:"error_count"`
+	ServiceCount int32  `json:"service_count"`
+	Health       string `json:"health"`
+}
+
+type TelemetryServiceStatus struct {
+	ServiceID        string  `json:"service_id"`
+	Health           string  `json:"health"`
+	PodCount         int32   `json:"pod_count"`
+	ReadyPods        int32   `json:"ready_pods"`
+	CPUCores         float64 `json:"cpu_cores,omitempty"`
+	MemoryBytes      float64 `json:"memory_bytes,omitempty"`
+	RestartCount     int32   `json:"restart_count,omitempty"`
+	RecentErrorCount int32   `json:"recent_error_count,omitempty"`
+	LastSeenUnix     int64   `json:"last_seen_unix,omitempty"`
+}
+
+type TelemetryLogEntry struct {
+	ServiceID    string `json:"service_id,omitempty"`
+	PodID        string `json:"pod_id,omitempty"`
+	Namespace    string `json:"namespace,omitempty"`
+	Level        string `json:"level"`
+	Message      string `json:"message"`
+	Fingerprint  string `json:"fingerprint"`
+	ObservedUnix int64  `json:"observed_unix"`
+}
+
 type SetupTOTPRequest struct {
 	ProjectID string `json:"project_id"`
-	UserID    string `json:"user_id"`
-	Role      string `json:"role"`
-	PAT       string `json:"pat"`
 }
 
 type SetupTOTPResponse struct {
@@ -198,9 +189,6 @@ type SecretRequest struct {
 	ServiceID    string `json:"service_id"`
 	Name         string `json:"name"`
 	Namespace    string `json:"namespace"`
-	UserID       string `json:"user_id"`
-	Role         string `json:"role"`
-	PAT          string `json:"pat"`
 	OTPCode      string `json:"otp_code"`
 	TOTPCode     string `json:"totp_code"`
 	OTPRequestID string `json:"otp_request_id"`
@@ -215,55 +203,148 @@ type SecretResponse struct {
 	Password  string `json:"password,omitempty"`
 }
 
-type IncidentAnalyzeRequest struct {
-	ProjectID  string `json:"project_id"`
-	IncidentID string `json:"incident_id"`
-	UserID     string `json:"user_id"`
-	Role       string `json:"role"`
-	PAT        string `json:"pat"`
+type IncidentListRequest struct {
+	ProjectID string `json:"project_id"`
+	Status    string `json:"status"`
+	Limit     int32  `json:"limit"`
 }
 
-type IncidentActionRequest struct {
+type IncidentGetRequest struct {
 	ProjectID  string `json:"project_id"`
 	IncidentID string `json:"incident_id"`
-	ActionID   string `json:"action_id"`
-	ActionHash string `json:"action_hash,omitempty"`
-	UserID     string `json:"user_id"`
-	Role       string `json:"role"`
-	PAT        string `json:"pat"`
+}
+
+type IncidentResolveRequest struct {
+	ProjectID  string `json:"project_id"`
+	IncidentID string `json:"incident_id"`
+}
+
+type IncidentListResponse struct {
+	Incidents []IncidentResponse `json:"incidents"`
 }
 
 type IncidentResponse struct {
-	IncidentID            string              `json:"incident_id"`
-	ProjectID             string              `json:"project_id"`
-	ServiceID             string              `json:"service_id,omitempty"`
-	Status                string              `json:"status"`
-	RootCause             string              `json:"root_cause,omitempty"`
-	Confidence            float64             `json:"confidence,omitempty"`
-	ContributingFactors   []string            `json:"contributing_factors,omitempty"`
-	RecommendedActions    []RecommendedAction `json:"recommended_actions,omitempty"`
-	MitigationActionsJSON string              `json:"mitigation_actions_json,omitempty"`
-	ResolvedAtUnix        int64               `json:"resolved_at_unix,omitempty"`
-	MTTRSeconds           int64               `json:"mttr_seconds,omitempty"`
-	RCAMetadata           *RCAMetadata        `json:"rca_metadata,omitempty"`
+	IncidentID     string `json:"incident_id"`
+	ProjectID      string `json:"project_id"`
+	ServiceID      string `json:"service_id,omitempty"`
+	Status         string `json:"status"`
+	NodeID         string `json:"node_id,omitempty"`
+	PodID          string `json:"pod_id,omitempty"`
+	AnomalyType    string `json:"anomaly_type,omitempty"`
+	Severity       string `json:"severity,omitempty"`
+	CreatedAtUnix  int64  `json:"created_at_unix,omitempty"`
+	ResolvedAtUnix int64  `json:"resolved_at_unix,omitempty"`
+	MTTRSeconds    int64  `json:"mttr_seconds,omitempty"`
 }
 
-type RecommendedAction struct {
-	ID           string            `json:"id"`
-	Type         string            `json:"type"`
-	Description  string            `json:"description"`
-	RollbackSafe bool              `json:"rollback_safe,omitempty"`
-	Params       map[string]string `json:"params,omitempty"`
-	ActionHash   string            `json:"action_hash,omitempty"`
+type IncidentEvidence struct {
+	SchemaVersion     string                     `json:"schema_version"`
+	Identity          IncidentEvidenceIdentity   `json:"identity"`
+	GeneratedAtUnix   int64                      `json:"generated_at_unix"`
+	ObservationWindow IncidentEvidenceWindow     `json:"observation_window"`
+	Deployment        IncidentDeploymentEvidence `json:"deployment"`
+	Rollout           IncidentRolloutEvidence    `json:"rollout"`
+	Timeline          []IncidentTimelineEntry    `json:"timeline,omitempty"`
+	Pods              []IncidentPodEvidence      `json:"pods,omitempty"`
+	KubernetesEvents  []IncidentKubernetesEvent  `json:"kubernetes_events,omitempty"`
+	LogFingerprints   []IncidentLogFingerprint   `json:"log_fingerprints,omitempty"`
+	AuditReferences   []IncidentAuditReference   `json:"audit_references,omitempty"`
+	Coverage          []IncidentSourceCoverage   `json:"coverage"`
+	Truncations       []IncidentTruncation       `json:"truncations,omitempty"`
+	ContentSHA256     string                     `json:"content_sha256"`
 }
 
-type RCAMetadata struct {
-	Provider           string `json:"provider"`
-	ConfiguredProvider string `json:"configured_provider,omitempty"`
-	Model              string `json:"model"`
-	FallbackUsed       bool   `json:"fallback_used"`
-	InputContextHash   string `json:"input_context_hash"`
-	CreatedAt          string `json:"created_at"`
+type IncidentEvidenceIdentity struct {
+	IncidentID  string `json:"incident_id"`
+	ProjectID   string `json:"project_id"`
+	ServiceID   string `json:"service_id,omitempty"`
+	NodeID      string `json:"node_id,omitempty"`
+	PodID       string `json:"pod_id,omitempty"`
+	AnomalyType string `json:"anomaly_type,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Status      string `json:"status"`
+}
+
+type IncidentEvidenceWindow struct {
+	StartUnix int64 `json:"start_unix"`
+	EndUnix   int64 `json:"end_unix"`
+}
+
+type IncidentDeploymentEvidence struct {
+	DesiredDigest  string `json:"desired_digest,omitempty"`
+	PreviousDigest string `json:"previous_digest,omitempty"`
+	ObservedDigest string `json:"observed_digest,omitempty"`
+	RestoredDigest string `json:"restored_digest,omitempty"`
+}
+
+type IncidentRolloutEvidence struct {
+	RolloutID        string   `json:"rollout_id,omitempty"`
+	State            string   `json:"state,omitempty"`
+	FailureCode      string   `json:"failure_code,omitempty"`
+	ReadinessHash    string   `json:"readiness_hash,omitempty"`
+	EventCorrelation []string `json:"event_correlation,omitempty"`
+}
+
+type IncidentTimelineEntry struct {
+	ObservedAtUnix   int64  `json:"observed_at_unix"`
+	Source           string `json:"source"`
+	Kind             string `json:"kind"`
+	Detail           string `json:"detail,omitempty"`
+	UntrustedContent bool   `json:"untrusted_content"`
+}
+
+type IncidentPodEvidence struct {
+	Namespace       string `json:"namespace,omitempty"`
+	PodID           string `json:"pod_id"`
+	NodeID          string `json:"node_id,omitempty"`
+	ReadyContainers int32  `json:"ready_containers"`
+	TotalContainers int32  `json:"total_containers"`
+	RestartCount    int32  `json:"restart_count"`
+	ObservedDigest  string `json:"observed_digest,omitempty"`
+}
+
+type IncidentKubernetesEvent struct {
+	ObservedAtUnix   int64  `json:"observed_at_unix"`
+	Namespace        string `json:"namespace,omitempty"`
+	ObjectKind       string `json:"object_kind,omitempty"`
+	ObjectName       string `json:"object_name,omitempty"`
+	Type             string `json:"type,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	Message          string `json:"message,omitempty"`
+	UntrustedContent bool   `json:"untrusted_content"`
+}
+
+type IncidentLogFingerprint struct {
+	Fingerprint       string `json:"fingerprint"`
+	Level             string `json:"level,omitempty"`
+	Count             int32  `json:"count"`
+	FirstObservedUnix int64  `json:"first_observed_unix"`
+	LastObservedUnix  int64  `json:"last_observed_unix"`
+	Excerpt           string `json:"excerpt,omitempty"`
+	UntrustedContent  bool   `json:"untrusted_content"`
+}
+
+type IncidentAuditReference struct {
+	AuditID       string `json:"audit_id"`
+	Action        string `json:"action"`
+	ResourceType  string `json:"resource_type"`
+	ResourceID    string `json:"resource_id"`
+	Result        string `json:"result"`
+	CreatedAtUnix int64  `json:"created_at_unix"`
+}
+
+type IncidentSourceCoverage struct {
+	Source     string `json:"source"`
+	Status     string `json:"status"`
+	ReasonCode string `json:"reason_code,omitempty"`
+	ItemCount  int32  `json:"item_count"`
+	Truncated  bool   `json:"truncated"`
+}
+
+type IncidentTruncation struct {
+	Section      string `json:"section"`
+	OmittedItems int32  `json:"omitted_items"`
+	UTF8Safe     bool   `json:"utf8_safe"`
 }
 
 type JSONCodec struct{}
@@ -342,100 +423,6 @@ var StatusService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "contracts/agent/v1/status.proto",
-}
-
-type DeploymentServiceServer interface {
-	Deploy(*DeployRequest, DeploymentService_DeployServer) error
-}
-
-type UnimplementedDeploymentServiceServer struct{}
-
-func (UnimplementedDeploymentServiceServer) Deploy(*DeployRequest, DeploymentService_DeployServer) error {
-	return status.Error(codes.Unimplemented, "method Deploy not implemented")
-}
-
-type DeploymentService_DeployServer interface {
-	Send(*ProgressEvent) error
-	grpc.ServerStream
-}
-
-func RegisterDeploymentServiceServer(server grpc.ServiceRegistrar, service DeploymentServiceServer) {
-	server.RegisterService(&DeploymentService_ServiceDesc, service)
-}
-
-type DeploymentServiceClient interface {
-	Deploy(ctx context.Context, in *DeployRequest, opts ...grpc.CallOption) (DeploymentService_DeployClient, error)
-}
-
-type deploymentServiceClient struct {
-	cc grpc.ClientConnInterface
-}
-
-func NewDeploymentServiceClient(cc grpc.ClientConnInterface) DeploymentServiceClient {
-	return &deploymentServiceClient{cc: cc}
-}
-
-func (c *deploymentServiceClient) Deploy(ctx context.Context, in *DeployRequest, opts ...grpc.CallOption) (DeploymentService_DeployClient, error) {
-	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
-	stream, err := c.cc.NewStream(ctx, &DeploymentService_ServiceDesc.Streams[0], "/"+DeploymentServiceName+"/Deploy", opts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &deploymentServiceDeployClient{stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-type DeploymentService_DeployClient interface {
-	Recv() (*ProgressEvent, error)
-	grpc.ClientStream
-}
-
-type deploymentServiceDeployClient struct {
-	grpc.ClientStream
-}
-
-func (x *deploymentServiceDeployClient) Recv() (*ProgressEvent, error) {
-	m := new(ProgressEvent)
-	if err := x.ClientStream.RecvMsg(m); err != nil {
-		return nil, err
-	}
-	return m, nil
-}
-
-func deploymentDeployHandler(service any, stream grpc.ServerStream) error {
-	in := new(DeployRequest)
-	if err := stream.RecvMsg(in); err != nil {
-		return err
-	}
-	return service.(DeploymentServiceServer).Deploy(in, &deploymentServiceDeployServer{stream})
-}
-
-type deploymentServiceDeployServer struct {
-	grpc.ServerStream
-}
-
-func (x *deploymentServiceDeployServer) Send(m *ProgressEvent) error {
-	return x.ServerStream.SendMsg(m)
-}
-
-var DeploymentService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: DeploymentServiceName,
-	HandlerType: (*DeploymentServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
-	Streams: []grpc.StreamDesc{
-		{
-			StreamName:    "Deploy",
-			Handler:       deploymentDeployHandler,
-			ServerStreams: true,
-		},
-	},
 	Metadata: "contracts/agent/v1/status.proto",
 }
 
@@ -615,12 +602,17 @@ var ServiceManagerService_ServiceDesc = grpc.ServiceDesc{
 
 type TelemetryServiceServer interface {
 	Sync(*SyncRequest, TelemetryService_SyncServer) error
+	QueryTelemetry(context.Context, *TelemetryQueryRequest) (*TelemetryQueryResponse, error)
 }
 
 type UnimplementedTelemetryServiceServer struct{}
 
 func (UnimplementedTelemetryServiceServer) Sync(*SyncRequest, TelemetryService_SyncServer) error {
 	return status.Error(codes.Unimplemented, "method Sync not implemented")
+}
+
+func (UnimplementedTelemetryServiceServer) QueryTelemetry(context.Context, *TelemetryQueryRequest) (*TelemetryQueryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryTelemetry not implemented")
 }
 
 type TelemetryService_SyncServer interface {
@@ -634,6 +626,7 @@ func RegisterTelemetryServiceServer(server grpc.ServiceRegistrar, service Teleme
 
 type TelemetryServiceClient interface {
 	Sync(ctx context.Context, in *SyncRequest, opts ...grpc.CallOption) (TelemetryService_SyncClient, error)
+	QueryTelemetry(ctx context.Context, in *TelemetryQueryRequest, opts ...grpc.CallOption) (*TelemetryQueryResponse, error)
 }
 
 type telemetryServiceClient struct {
@@ -658,6 +651,13 @@ func (c *telemetryServiceClient) Sync(ctx context.Context, in *SyncRequest, opts
 		return nil, err
 	}
 	return x, nil
+}
+
+func (c *telemetryServiceClient) QueryTelemetry(ctx context.Context, in *TelemetryQueryRequest, opts ...grpc.CallOption) (*TelemetryQueryResponse, error) {
+	out := new(TelemetryQueryResponse)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+TelemetryServiceName+"/QueryTelemetry", in, out, opts...)
+	return out, err
 }
 
 type TelemetryService_SyncClient interface {
@@ -685,6 +685,21 @@ func telemetrySyncHandler(service any, stream grpc.ServerStream) error {
 	return service.(TelemetryServiceServer).Sync(in, &telemetryServiceSyncServer{stream})
 }
 
+func telemetryQueryHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(TelemetryQueryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(TelemetryServiceServer).QueryTelemetry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + TelemetryServiceName + "/QueryTelemetry"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(TelemetryServiceServer).QueryTelemetry(ctx, req.(*TelemetryQueryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 type telemetryServiceSyncServer struct {
 	grpc.ServerStream
 }
@@ -696,7 +711,9 @@ func (x *telemetryServiceSyncServer) Send(m *SyncChunk) error {
 var TelemetryService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: TelemetryServiceName,
 	HandlerType: (*TelemetryServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{MethodName: "QueryTelemetry", Handler: telemetryQueryHandler},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Sync",
@@ -865,22 +882,27 @@ var SecretService_ServiceDesc = grpc.ServiceDesc{
 }
 
 type IncidentServiceServer interface {
-	AnalyzeIncident(context.Context, *IncidentAnalyzeRequest) (*IncidentResponse, error)
-	ApproveIncidentAction(context.Context, *IncidentActionRequest) (*IncidentResponse, error)
-	ResolveIncident(context.Context, *IncidentActionRequest) (*IncidentResponse, error)
+	ListIncidents(context.Context, *IncidentListRequest) (*IncidentListResponse, error)
+	GetIncident(context.Context, *IncidentGetRequest) (*IncidentResponse, error)
+	GetIncidentEvidence(context.Context, *IncidentGetRequest) (*IncidentEvidence, error)
+	ResolveIncident(context.Context, *IncidentResolveRequest) (*IncidentResponse, error)
 }
 
 type UnimplementedIncidentServiceServer struct{}
 
-func (UnimplementedIncidentServiceServer) AnalyzeIncident(context.Context, *IncidentAnalyzeRequest) (*IncidentResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method AnalyzeIncident not implemented")
+func (UnimplementedIncidentServiceServer) ListIncidents(context.Context, *IncidentListRequest) (*IncidentListResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListIncidents not implemented")
 }
 
-func (UnimplementedIncidentServiceServer) ApproveIncidentAction(context.Context, *IncidentActionRequest) (*IncidentResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ApproveIncidentAction not implemented")
+func (UnimplementedIncidentServiceServer) GetIncident(context.Context, *IncidentGetRequest) (*IncidentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetIncident not implemented")
 }
 
-func (UnimplementedIncidentServiceServer) ResolveIncident(context.Context, *IncidentActionRequest) (*IncidentResponse, error) {
+func (UnimplementedIncidentServiceServer) GetIncidentEvidence(context.Context, *IncidentGetRequest) (*IncidentEvidence, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetIncidentEvidence not implemented")
+}
+
+func (UnimplementedIncidentServiceServer) ResolveIncident(context.Context, *IncidentResolveRequest) (*IncidentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveIncident not implemented")
 }
 
@@ -889,9 +911,10 @@ func RegisterIncidentServiceServer(server grpc.ServiceRegistrar, service Inciden
 }
 
 type IncidentServiceClient interface {
-	AnalyzeIncident(ctx context.Context, in *IncidentAnalyzeRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
-	ApproveIncidentAction(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
-	ResolveIncident(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
+	ListIncidents(ctx context.Context, in *IncidentListRequest, opts ...grpc.CallOption) (*IncidentListResponse, error)
+	GetIncident(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
+	GetIncidentEvidence(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentEvidence, error)
+	ResolveIncident(ctx context.Context, in *IncidentResolveRequest, opts ...grpc.CallOption) (*IncidentResponse, error)
 }
 
 type incidentServiceClient struct{ cc grpc.ClientConnInterface }
@@ -900,59 +923,81 @@ func NewIncidentServiceClient(cc grpc.ClientConnInterface) IncidentServiceClient
 	return &incidentServiceClient{cc: cc}
 }
 
-func (c *incidentServiceClient) AnalyzeIncident(ctx context.Context, in *IncidentAnalyzeRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
-	out := new(IncidentResponse)
+func (c *incidentServiceClient) ListIncidents(ctx context.Context, in *IncidentListRequest, opts ...grpc.CallOption) (*IncidentListResponse, error) {
+	out := new(IncidentListResponse)
 	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
-	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/AnalyzeIncident", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/ListIncidents", in, out, opts...)
 	return out, err
 }
 
-func (c *incidentServiceClient) ApproveIncidentAction(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
+func (c *incidentServiceClient) GetIncident(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
 	out := new(IncidentResponse)
 	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
-	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/ApproveIncidentAction", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/GetIncident", in, out, opts...)
 	return out, err
 }
 
-func (c *incidentServiceClient) ResolveIncident(ctx context.Context, in *IncidentActionRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
+func (c *incidentServiceClient) GetIncidentEvidence(ctx context.Context, in *IncidentGetRequest, opts ...grpc.CallOption) (*IncidentEvidence, error) {
+	out := new(IncidentEvidence)
+	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
+	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/GetIncidentEvidence", in, out, opts...)
+	return out, err
+}
+
+func (c *incidentServiceClient) ResolveIncident(ctx context.Context, in *IncidentResolveRequest, opts ...grpc.CallOption) (*IncidentResponse, error) {
 	out := new(IncidentResponse)
 	opts = append([]grpc.CallOption{grpc.ForceCodec(JSONCodec{})}, opts...)
 	err := c.cc.Invoke(ctx, "/"+IncidentServiceName+"/ResolveIncident", in, out, opts...)
 	return out, err
 }
 
-func analyzeIncidentHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-	in := new(IncidentAnalyzeRequest)
+func listIncidentsHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentListRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return service.(IncidentServiceServer).AnalyzeIncident(ctx, in)
+		return service.(IncidentServiceServer).ListIncidents(ctx, in)
 	}
-	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/AnalyzeIncident"}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/ListIncidents"}
 	handler := func(ctx context.Context, req any) (any, error) {
-		return service.(IncidentServiceServer).AnalyzeIncident(ctx, req.(*IncidentAnalyzeRequest))
+		return service.(IncidentServiceServer).ListIncidents(ctx, req.(*IncidentListRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func approveIncidentActionHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-	in := new(IncidentActionRequest)
+func getIncidentHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentGetRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return service.(IncidentServiceServer).ApproveIncidentAction(ctx, in)
+		return service.(IncidentServiceServer).GetIncident(ctx, in)
 	}
-	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/ApproveIncidentAction"}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/GetIncident"}
 	handler := func(ctx context.Context, req any) (any, error) {
-		return service.(IncidentServiceServer).ApproveIncidentAction(ctx, req.(*IncidentActionRequest))
+		return service.(IncidentServiceServer).GetIncident(ctx, req.(*IncidentGetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func getIncidentEvidenceHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(IncidentGetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return service.(IncidentServiceServer).GetIncidentEvidence(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/GetIncidentEvidence"}
+	handler := func(ctx context.Context, req any) (any, error) {
+		return service.(IncidentServiceServer).GetIncidentEvidence(ctx, req.(*IncidentGetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func resolveIncidentHandler(service any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-	in := new(IncidentActionRequest)
+	in := new(IncidentResolveRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -961,7 +1006,7 @@ func resolveIncidentHandler(service any, ctx context.Context, dec func(any) erro
 	}
 	info := &grpc.UnaryServerInfo{Server: service, FullMethod: "/" + IncidentServiceName + "/ResolveIncident"}
 	handler := func(ctx context.Context, req any) (any, error) {
-		return service.(IncidentServiceServer).ResolveIncident(ctx, req.(*IncidentActionRequest))
+		return service.(IncidentServiceServer).ResolveIncident(ctx, req.(*IncidentResolveRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -970,8 +1015,9 @@ var IncidentService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: IncidentServiceName,
 	HandlerType: (*IncidentServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
-		{MethodName: "AnalyzeIncident", Handler: analyzeIncidentHandler},
-		{MethodName: "ApproveIncidentAction", Handler: approveIncidentActionHandler},
+		{MethodName: "ListIncidents", Handler: listIncidentsHandler},
+		{MethodName: "GetIncident", Handler: getIncidentHandler},
+		{MethodName: "GetIncidentEvidence", Handler: getIncidentEvidenceHandler},
 		{MethodName: "ResolveIncident", Handler: resolveIncidentHandler},
 	},
 	Streams:  []grpc.StreamDesc{},

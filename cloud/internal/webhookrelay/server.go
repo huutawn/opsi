@@ -6,38 +6,106 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/opsi-dev/opsi/cloud/internal/actiondevice"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
+	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 type Server struct {
-	Queue         *Queue
-	Config        Config
-	OTP           *otp.Service
-	Auth          *auth.Service
-	Registry      registry.API
-	credentials   CredentialVault
-	registrations RegistrationVault
-	limits        RateLimiter
-	observer      *Observer
-	alerts        *AlertManager
+	Config       Config
+	OTP          *otp.Service
+	Auth         *auth.Service
+	HTTPClient   *http.Client
+	Registry     registry.API
+	BuildRecords buildrecord.Service
+	Topology     topology.Service
+	Policies     deploymentpolicy.Service
+	OIDC         interface {
+		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
+	}
+	oidcInitError           error
+	credentials             CredentialVault
+	registrations           RegistrationVault
+	limits                  RateLimiter
+	observer                *Observer
+	alerts                  *AlertManager
+	healthCheck             func(context.Context) error
+	githubAppClient         *GitHubAppClient
+	githubAppEventSink      GitHubAppEventSink
+	githubReplay            *githubReplayStore
+	buildRecordSlots        chan struct{}
+	authMu                  sync.Mutex
+	oauthStates             map[string]oauthState
+	authGrants              map[string]authGrant
+	installationClaimGrants map[string]installationClaimGrant
+	now                     func() time.Time
+	random                  io.Reader
+	actionDeviceMu          sync.Mutex
+	actionDevices           actiondevice.Store
 }
 
 func NewServer(cfg Config) *Server {
 	service := otp.NewService()
 	service.DevEcho = cfg.OTP.DevEcho
-	return &Server{Queue: NewQueue(), Config: cfg, OTP: service, Registry: registry.NewService(), credentials: NewCredentialStore(), registrations: NewRegistrationTokenStore(), limits: newRateLimiter(), observer: NewObserver(), alerts: NewAlertManager(cfg.Alerts)}
+	oidcConfig := cfg.GitHubOIDC
+	if oidcConfig.Issuer == "" {
+		oidcConfig = githuboidc.DefaultConfig()
+	}
+	verifier, verifierErr := githuboidc.New(oidcConfig)
+	registryService := registry.NewService()
+	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
+	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
+	server := &Server{
+		Config:                  cfg,
+		OTP:                     service,
+		HTTPClient:              newGitHubHTTPClient(),
+		Registry:                registryService,
+		BuildRecords:            buildRecordService,
+		Topology:                topologyService,
+		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
+		OIDC:                    verifier,
+		oidcInitError:           verifierErr,
+		credentials:             NewCredentialStore(),
+		registrations:           NewRegistrationTokenStore(),
+		limits:                  newRateLimiter(),
+		observer:                NewObserver(),
+		alerts:                  NewAlertManager(cfg.Alerts),
+		buildRecordSlots:        make(chan struct{}, buildRecordMaxConcurrency),
+		oauthStates:             map[string]oauthState{},
+		authGrants:              map[string]authGrant{},
+		installationClaimGrants: map[string]installationClaimGrant{},
+		random:                  rand.Reader,
+	}
+	server.BuildRecords.AuditSink = func(event buildrecord.AuditEvent) {
+		registryService.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
+	}
+	server.githubReplay = newGitHubReplayStore(githubReplayMaxEntries, githubReplayTTL, server.clock)
+	return server
+}
+
+func (s *Server) clock() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (s *Server) SetSecurityStores(credentials CredentialVault, registrations RegistrationVault, limits RateLimiter) {
@@ -52,170 +120,144 @@ func (s *Server) SetSecurityStores(credentials CredentialVault, registrations Re
 	}
 }
 
+func (s *Server) SetHealthCheck(check func(context.Context) error) {
+	s.healthCheck = check
+}
+
+func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
+	s.githubAppClient = client
+}
+
+func (s *Server) SetActionDeviceStore(store actiondevice.Store) {
+	s.actionDeviceMu.Lock()
+	defer s.actionDeviceMu.Unlock()
+	s.actionDevices = store
+}
+
 func (s *Server) Handler() http.Handler {
+	s.ensureActionDeviceStore()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
-	mux.HandleFunc("/v1/webhooks/github", s.handleGitHubWebhook)
+	mux.HandleFunc("/v1/webhooks/github-app", s.handleGitHubAppWebhook)
+	mux.HandleFunc("/v1/build-records", s.handleBuildRecordSubmission)
 	mux.HandleFunc("/v1/auth/pat/verify", s.handlePATVerify)
-	mux.HandleFunc("/v1/ai/incidents/analyze", s.handleAnalyzeIncident)
+	mux.HandleFunc("/v1/auth/browser/start", s.handleBrowserAuthStart)
+	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)
+	mux.HandleFunc("/v1/auth/browser/redeem", s.handleBrowserAuthRedeem)
+	mux.HandleFunc("/v1/projects/{project_id}/github/installations/{installation_id}/claim/start", s.handleInstallationClaimStart)
+	mux.HandleFunc("/v1/github/installations/claim/redeem", s.handleInstallationClaimRedeem)
+	mux.HandleFunc("/v1/projects/{project_id}/github/installations", s.handleGitHubInstallationsAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/github/repositories", s.handleGitHubRepositoriesAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/github/repositories/{repository_id}/claim", s.handleGitHubRepositoryClaimAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/github/bindings", s.handleGitHubBindingsAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/github/bindings/{binding_id}", s.handleGitHubBindingAPI)
+	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
+	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/register", s.handleAgentRegister)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
+	mux.HandleFunc("/v1/agent/projects/{project_id}/action-devices/{device_id}", s.handleAgentActionDevice)
+	mux.HandleFunc("/internal/bootstrap/sessions/lease", s.handleBootstrapWorkerLeaseWithCheckpoint)
+	mux.HandleFunc("/internal/bootstrap/sessions/{session_id}/checkpoint", s.handleBootstrapWorkerCheckpoint)
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/internal/alerts", s.handleInternalAlerts)
+	mux.HandleFunc("/api/projects/{project_id}/action-devices", s.handleActionDevices)
+	mux.HandleFunc("/api/projects/{project_id}/action-devices/{device_id}/revoke", s.handleActionDeviceRevoke)
 	mux.HandleFunc("/api/", s.handleRegistryAPI)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if !s.Config.EnableDebugUI {
-			http.NotFound(w, r)
-			return
-		}
-		s.handleUI(w, r)
-	})
+	mux.HandleFunc("/", http.NotFound)
 	return s.observer.Wrap(mux)
 }
 
-func (s *Server) handleAnalyzeIncident(w http.ResponseWriter, r *http.Request) {
+type capturedHTTPResponse struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (r *capturedHTTPResponse) Header() http.Header {
+	if r.header == nil {
+		r.header = make(http.Header)
+	}
+	return r.header
+}
+
+func (r *capturedHTTPResponse) WriteHeader(status int) { r.status = status }
+
+func (r *capturedHTTPResponse) Write(data []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.body.Write(data)
+}
+
+func (s *Server) handleBootstrapWorkerLeaseWithCheckpoint(w http.ResponseWriter, r *http.Request) {
+	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(requestBody))
+	var leaseRequest struct {
+		WorkerID string `json:"worker_id"`
+	}
+	_ = json.Unmarshal(requestBody, &leaseRequest)
+	captured := &capturedHTTPResponse{}
+	s.handleBootstrapWorker(captured, r)
+	if captured.status != http.StatusOK {
+		for key, values := range captured.Header() {
+			w.Header()[key] = append([]string(nil), values...)
+		}
+		w.WriteHeader(captured.status)
+		_, _ = w.Write(captured.body.Bytes())
+		return
+	}
+	var response map[string]any
+	if err := json.Unmarshal(captured.body.Bytes(), &response); err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	bundle, ok := response["bundle"].(map[string]any)
+	if !ok {
+		writeRegistryFailure(w, r, fmt.Errorf("bootstrap lease response is missing bundle"))
+		return
+	}
+	sessionID, _ := bundle["session_id"].(string)
+	projectID, _ := bundle["project_id"].(string)
+	leaseToken, _ := response["lease_token"].(string)
+	session, err := s.Registry.GetBootstrapSessionForLease(projectID, sessionID, strings.TrimSpace(leaseRequest.WorkerID), leaseToken, s.clock())
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	bundle["checkpoint"] = session.Checkpoint
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleBootstrapWorkerCheckpoint(w http.ResponseWriter, r *http.Request) {
+	if s.Config.BootstrapWorkerToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Bootstrap-Worker-Token")), []byte(s.Config.BootstrapWorkerToken)) != 1 {
+		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "BOOTSTRAP_WORKER_AUTH_REQUIRED", Message: "bootstrap worker token is required", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	var req struct {
-		SchemaVersion string `json:"schema_version"`
-		IncidentID    string `json:"incident_id"`
-		ProjectID     string `json:"project_id"`
-		ServiceID     string `json:"service_id"`
-		AnomalyType   string `json:"anomaly_type"`
+	var request struct {
+		ProjectID string `json:"project_id"`
+		registry.BootstrapCheckpoint
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid incident context")
+	if !decodeJSON(w, r, &request) {
 		return
 	}
-	if forbiddenAIPayload(body) {
-		writeError(w, http.StatusBadRequest, "incident context contains forbidden raw or secret-like fields")
+	workerID, leaseToken := bootstrapLeaseHeaders(r)
+	session, err := s.Registry.UpdateBootstrapCheckpointForLease(request.ProjectID, r.PathValue("session_id"), workerID, leaseToken, request.BootstrapCheckpoint, s.clock())
+	if err != nil {
+		writeRegistryFailure(w, r, err)
 		return
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid incident context")
-		return
-	}
-	if req.SchemaVersion != "opsi.incident_context.v1" || req.IncidentID == "" || req.ProjectID == "" {
-		writeError(w, http.StatusBadRequest, "invalid incident context")
-		return
-	}
-	rca, err := s.analyzeIncident(r.Context(), req.IncidentID, req.ServiceID, firstNonEmpty(req.AnomalyType, "unknown anomaly"), body)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, rca)
-}
-
-func (s *Server) analyzeIncident(ctx context.Context, incidentID, serviceID, anomalyType string, body []byte) (map[string]any, error) {
-	cfg := s.Config.AI
-	provider := firstNonEmpty(cfg.Provider, "fixture")
-	inputHash := "sha256:" + sha256Hex(body)
-	if provider == "gemini" {
-		rootCause, model, err := callGemini(ctx, cfg, body)
-		if err == nil {
-			return rcaResponse(incidentID, serviceID, rootCause, "gemini", provider, false, model, inputHash), nil
-		}
-		if !cfg.FallbackFixture {
-			return nil, fmt.Errorf("gemini RCA failed")
-		}
-		return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, true, "fixture", inputHash), nil
-	}
-	return rcaResponse(incidentID, serviceID, "Cloud fixture RCA: "+anomalyType, "fixture", provider, false, "fixture", inputHash), nil
-}
-
-func rcaResponse(incidentID, serviceID, rootCause, provider, configuredProvider string, fallback bool, model, inputHash string) map[string]any {
-	return map[string]any{
-		"schema_version": "opsi.rca.v1",
-		"incident_id":    incidentID,
-		"root_cause":     rootCause,
-		"confidence":     0.64,
-		"contributing_factors": []string{
-			"sanitized metric context",
-			"service-level anomaly",
-		},
-		"recommended_actions": []map[string]any{
-			{"id": "scale-replicas", "type": "scale_replicas", "description": "Scale service replicas", "rollback_safe": true, "params": map[string]string{"service_id": serviceID, "replicas": "2"}},
-			{"id": "rate-limit-ingress", "type": "rate_limit_ingress", "description": "Apply ingress rate limit", "rollback_safe": true, "params": map[string]string{"service_id": serviceID, "rps": "10"}},
-		},
-		"metadata": map[string]any{"provider": provider, "configured_provider": configuredProvider, "fallback_used": fallback, "model": model, "input_context_hash": inputHash, "created_at": time.Now().UTC().Format(time.RFC3339)},
-	}
-}
-
-func sha256Hex(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-func callGemini(ctx context.Context, cfg AIConfig, incidentContext []byte) (string, string, error) {
-	key := os.Getenv(firstNonEmpty(cfg.APIKeyEnv, "GEMINI_API_KEY"))
-	if key == "" {
-		return "", "", fmt.Errorf("missing Gemini API key")
-	}
-	model := firstNonEmpty(cfg.Model, "gemini-2.0-flash")
-	endpoint := strings.TrimRight(firstNonEmpty(cfg.Endpoint, "https://generativelanguage.googleapis.com"), "/")
-	u, err := url.Parse(endpoint + "/v1beta/models/" + url.PathEscape(model) + ":generateContent")
-	if err != nil {
-		return "", "", err
-	}
-	q := u.Query()
-	q.Set("key", key)
-	u.RawQuery = q.Encode()
-	payload := map[string]any{"contents": []map[string]any{{"parts": []map[string]string{{"text": "Analyze this sanitized Opsi incident context. Return one concise root cause sentence only.\n" + string(incidentContext)}}}}}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return "", "", err
-	}
-	timeout := time.Duration(cfg.Timeout)
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(data))
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("gemini status %d", resp.StatusCode)
-	}
-	var out struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return "", "", err
-	}
-	if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 || strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text) == "" {
-		return "", "", fmt.Errorf("gemini returned empty RCA")
-	}
-	return strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text), model, nil
-}
-
-func forbiddenAIPayload(body []byte) bool {
-	lower := strings.ToLower(string(body))
-	for _, token := range []string{"raw_log", "raw_logs", "password", "secret", "token", "api_key", "kubeconfig", "private_key"} {
-		if strings.Contains(lower, `"`+token+`"`) || strings.Contains(lower, token+":") {
-			return true
-		}
-	}
-	return false
+	writeJSON(w, http.StatusOK, session.Checkpoint)
 }
 
 func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
@@ -228,14 +270,13 @@ func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Token     string `json:"token"`
 		ProjectID string `json:"project_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid pat verify request")
 		return
 	}
-	result, err := s.Auth.VerifyPAT(r.Context(), auth.VerifyRequest{Token: req.Token, ProjectID: req.ProjectID})
+	result, err := s.Auth.VerifyPAT(r.Context(), auth.VerifyRequest{Token: bearerFromRequest(r), ProjectID: req.ProjectID})
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
@@ -243,57 +284,76 @@ func (s *Server) handlePATVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "queued_webhooks": s.Queue.Len()})
-}
-
-func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handlePATRotate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
+	if s.Auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth service is not configured")
+		return
+	}
+	var req struct {
+		ProjectID string `json:"project_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	issued, old, err := s.Auth.RotatePAT(r.Context(), bearerFromRequest(r), req.ProjectID, 90*24*time.Hour)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.auditAuth("", "", req.ProjectID, "token_rotated", "failure", map[string]any{"reason": err.Error()})
+		writeError(w, http.StatusUnauthorized, "PAT rotation failed")
 		return
 	}
-	var push githubPush
-	if err := json.Unmarshal(body, &push); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid github payload")
+	s.auditAuth(old.OrgID, old.UserID, old.ProjectID, "token_rotated", "success", map[string]any{"old_token_id": old.TokenID, "new_expires_at": issued.ExpiresAt})
+	writeJSON(w, http.StatusOK, map[string]any{"token": issued.Token, "session": issued.Session})
+}
+
+func (s *Server) handlePATRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	branch := branchFromRef(push.Ref)
-	route, ok := s.matchRoute(push.Repository.CloneURL, push.Repository.FullName, branch)
-	if !ok {
-		writeError(w, http.StatusNotFound, "no relay route for repo/branch")
+	if s.Auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth service is not configured")
 		return
 	}
-	now := time.Now().UTC()
-	ttl := time.Duration(s.Config.TTL)
-	if ttl <= 0 || ttl > 24*time.Hour {
-		ttl = 24 * time.Hour
+	var req struct {
+		ProjectID string `json:"project_id"`
 	}
-	env := Envelope{
-		ID:          newID(),
-		ProjectID:   route.ProjectID,
-		ServiceID:   route.ServiceID,
-		ServiceName: route.ServiceName,
-		ServiceType: route.ServiceType,
-		RepoURL:     firstNonEmpty(route.RepoURL, push.Repository.CloneURL),
-		Ref:         push.Ref,
-		After:       push.After,
-		Branch:      branch,
-		TriggeredBy: push.Pusher.Name,
-		Body:        string(body),
-		Signature:   firstNonEmpty(r.Header.Get("X-Hub-Signature-256"), r.Header.Get("X-Hub-Signature")),
-		ReceivedAt:  now,
-		ExpiresAt:   now.Add(ttl),
-	}
-	if err := s.Queue.Enqueue(env); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	result, err := s.Auth.RevokePAT(r.Context(), bearerFromRequest(r), req.ProjectID)
+	if err != nil {
+		s.auditAuth("", "", req.ProjectID, "token_revoked", "failure", map[string]any{"reason": err.Error()})
+		writeError(w, http.StatusUnauthorized, "PAT revocation failed")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"id": env.ID, "expires_at": env.ExpiresAt})
+	s.auditAuth(result.OrgID, result.UserID, result.ProjectID, "token_revoked", "success", map[string]any{"token_id": result.TokenID})
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "session": result})
+}
+
+func (s *Server) auditAuth(orgID, userID, projectID, action, result string, metadata map[string]any) {
+	if s.Registry != nil && orgID != "" {
+		s.Registry.Audit(orgID, projectID, userID, action, "auth", firstNonEmpty(projectID, userID, "auth"), result, metadata)
+	}
+}
+
+func bearerFromRequest(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if s.healthCheck != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.healthCheck(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +363,14 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	}
 	if strings.Contains(r.URL.Path, "/deployments/") && strings.HasSuffix(r.URL.Path, "/result") {
 		s.handleAgentDeploymentResult(w, r)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/deployments/") && strings.HasSuffix(r.URL.Path, "/progress") {
+		s.handleAgentDeploymentProgress(w, r)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/node-lifecycle/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentNodeLifecycleResult(w, r)
 		return
 	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
@@ -315,15 +383,36 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	s.recoverAutomaticDeliveries(r.Context(), projectID)
+	s.enqueueExpiredPreviewCleanup(projectID, agent.ID)
 	lease, ok, err := s.Registry.LeaseDeployment(projectID, nodeID)
 	if err != nil {
 		writeRegistryFailure(w, r, err)
 		return
 	}
 	if ok {
+		if lease.Command != nil && lease.Deployment.AttemptCount == 1 {
+			if err := s.validateLeasedDeploymentAuthority(r.Context(), lease.Deployment); err != nil {
+				_, _ = s.Registry.CompleteDeployment(projectID, nodeID, lease.Deployment.ID, r.Header.Get("X-Request-ID"), registry.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: "failed", LeaseToken: lease.LeaseToken, SpecHash: lease.Deployment.SpecHash, ApplicationImage: lease.Command.Image.Reference, FailureCode: "DEPLOYMENT_AUTHORITY_REVOKED", FailureMessageRedacted: "deployment authority changed before first Agent lease"})
+				writeRegistryFailure(w, r, err)
+				return
+			}
+		}
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
-		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "service": lease.Service, "action": lease.Action, "lease_token": lease.LeaseToken})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
+		return
+	}
+	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		job := lifecycle.Job
+		s.Registry.Audit(job.OrgID, projectID, agent.ID, "NODE_LIFECYCLE_ACCEPTED", "node_lifecycle_job", job.ID, "success", map[string]any{"action": job.Action, "target_node_id": job.TargetNodeID, "status": job.Status, "attempt_count": job.AttemptCount})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "node_lifecycle", "id": job.ID, "action": job.Action, "project_id": job.ProjectID, "target_node_id": job.TargetNodeID, "target_node_name": job.TargetNodeName, "confirm_remove": job.ConfirmRemove, "lease_token": lifecycle.LeaseToken})
 		return
 	}
 	wait := 30 * time.Second
@@ -338,16 +427,100 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	if wait > 30*time.Second {
 		wait = 30 * time.Second
 	}
-	env, err := s.Queue.Next(r.Context(), projectID, wait)
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-timer.C:
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) recoverAutomaticDeliveries(ctx context.Context, projectID string) {
+	result, err := s.BuildRecords.List(ctx, projectID, buildrecord.ListFilter{Status: "succeeded", Limit: 100})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if env == nil {
-		w.WriteHeader(http.StatusNoContent)
+	for _, record := range result.Records {
+		_, _, _ = s.ensureAutomaticDelivery(ctx, record)
+	}
+}
+
+func (s *Server) enqueueExpiredPreviewCleanup(projectID, actor string) {
+	store, ok := s.Registry.(previewCleanupStore)
+	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, env)
+	jobs, err := s.Registry.ListDeployments(projectID)
+	if err != nil {
+		return
+	}
+	now := s.clock()
+	for _, job := range jobs {
+		if job.Snapshot == nil || job.Snapshot.Preview == nil || !now.After(job.Snapshot.Preview.ExpiresAt) || job.Action == deploymentv1.RolloutOperationCleanup {
+			continue
+		}
+		_, _, _ = store.StartPreviewCleanup(projectID, actor, "ttl:"+job.ID, "ttl-expiry", deploymentv1.PreviewCleanupRequest{DeploymentID: job.ID, Reason: "ttl_expired"})
+	}
+}
+
+type immutableDeploymentProgressStore interface {
+	ProgressImmutableDeployment(string, string, string, string, deploymentv1.Progress) (registry.DeploymentJob, error)
+}
+
+func (s *Server) handleAgentDeploymentProgress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+		return
+	}
+	deploymentID := deploymentIDFromAgentPath(r.URL.Path)
+	store, ok := s.Registry.(immutableDeploymentProgressStore)
+	if deploymentID == "" || !ok {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "DEPLOYMENT_PROGRESS_UNAVAILABLE", Message: "deployment progress store is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	var progress deploymentv1.Progress
+	if !decodeJSON(w, r, &progress) {
+		return
+	}
+	if progress.SchemaVersion != deploymentv1.EventSchemaVersion {
+		writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "DEPLOYMENT_PROGRESS_INVALID", Message: "deployment progress schema is invalid", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	job, err := store.ProgressImmutableDeployment(projectID, nodeID, deploymentID, r.Header.Get("X-Request-ID"), progress)
+	writeRegistryResult(w, r, job, err, http.StatusOK)
+}
+
+func (s *Server) validateLeasedDeploymentAuthority(ctx context.Context, job registry.DeploymentJob) error {
+	if job.Snapshot == nil {
+		return nil
+	}
+	snapshot := job.Snapshot
+	record, err := s.BuildRecords.Get(ctx, job.ProjectID, snapshot.Authority.BuildRecord.ID)
+	if err != nil || record.Build.Status != "succeeded" || record.Build.OCIRepository != snapshot.Image.Repository || record.Build.OCIDigest != snapshot.Image.Digest || record.ActiveBindingID != snapshot.Authority.BuildRecord.ActiveBindingID {
+		return registry.APIError{Status: 409, Code: "DEPLOYMENT_BUILD_AUTHORITY_REVOKED", Message: "BuildRecord or active service binding changed before Agent lease"}
+	}
+	decision, err := s.Policies.Route(ctx, job.ProjectID, deploymentpolicyv1.RoutingRequest{BuildRecordID: record.ID, EnvironmentID: snapshot.Authority.EnvironmentID})
+	if err != nil || !decision.Eligible || decision.DecisionHash != snapshot.Authority.RoutingDecisionHash || decision.RuntimeID != job.RuntimeID || decision.NodeID != job.NodeID || decision.AgentID != job.AgentID {
+		return registry.APIError{Status: 409, Code: "DEPLOYMENT_ROUTING_AUTHORITY_REVOKED", Message: "routing decision changed before Agent lease"}
+	}
+	plan, err := s.Topology.Get(ctx, job.ProjectID)
+	if err != nil || plan.ID != snapshot.Authority.TopologyPlanID || plan.Revision != snapshot.Authority.TopologyRevision || plan.PlanHash != snapshot.Authority.TopologyHash {
+		return registry.APIError{Status: 409, Code: "DEPLOYMENT_TOPOLOGY_AUTHORITY_REVOKED", Message: "TopologyPlan changed before Agent lease"}
+	}
+	policy, err := s.Policies.Get(ctx, job.ProjectID, snapshot.Authority.DeploymentPolicyID)
+	if err != nil || !policy.Draft.Enabled || policy.Revision != snapshot.Authority.DeploymentPolicyRevision || policy.PolicyHash != snapshot.Authority.DeploymentPolicyHash {
+		return registry.APIError{Status: 409, Code: "DEPLOYMENT_POLICY_AUTHORITY_REVOKED", Message: "DeploymentPolicy changed before Agent lease"}
+	}
+	return nil
 }
 
 func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Request) {
@@ -376,15 +549,63 @@ func (s *Server) handleAgentDeploymentResult(w http.ResponseWriter, r *http.Requ
 		if job.Status == registry.DeploymentFailed {
 			s.observer.Inc("deployment_failures_total")
 		}
-		outcome := "failed"
-		if job.Status == registry.DeploymentSucceeded || job.Status == registry.DeploymentRolledBack {
-			outcome = "success"
-		}
-		s.Registry.Audit(job.OrgID, projectID, "agent", "DEPLOYMENT_AGENT_RESULT_RECORDED", "deployment_job", job.ID, outcome, map[string]any{"status": job.Status, "failure_code": job.FailureCode})
 	} else {
-		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_RESULT_REJECTED", "deployment_job", deploymentID, "denied", map[string]any{"error": err.Error()})
+		code := "DEPLOYMENT_RESULT_REJECTED"
+		var apiError registry.APIError
+		if errors.As(err, &apiError) && apiError.Code != "" {
+			code = apiError.Code
+		}
+		s.Registry.Audit(agent.OrgID, projectID, "agent", "DEPLOYMENT_AGENT_RESULT_REJECTED", "deployment_job", deploymentID, "denied", map[string]any{"error_code": code, "deployment_id": deploymentID})
 	}
 	writeRegistryResult(w, r, job, err, http.StatusOK)
+}
+
+func (s *Server) handleAgentNodeLifecycleResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
+		return
+	}
+	jobID := nodeLifecycleIDFromAgentPath(r.URL.Path)
+	if jobID == "" {
+		writeError(w, http.StatusBadRequest, "node lifecycle job id is required")
+		return
+	}
+	var result registry.NodeLifecycleResult
+	if !decodeJSON(w, r, &result) {
+		return
+	}
+	job, err := s.Registry.CompleteNodeLifecycle(projectID, nodeID, jobID, r.Header.Get("X-Request-ID"), result)
+	if err == nil {
+		outcome := "failure"
+		action := "NODE_LIFECYCLE_FAILED"
+		if job.Status == registry.NodeLifecycleCompleted {
+			outcome = "success"
+			action = "NODE_LIFECYCLE_COMPLETED"
+		}
+		if job.Status == registry.NodeLifecycleUnsupported {
+			action = "NODE_LIFECYCLE_UNSUPPORTED"
+		}
+		s.Registry.Audit(job.OrgID, projectID, agent.ID, action, "node_lifecycle_job", job.ID, outcome, map[string]any{"status": job.Status, "action": job.Action, "target_node_id": job.TargetNodeID, "verified": job.Verified, "failure_code": job.FailureCode})
+	} else {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "NODE_LIFECYCLE_RESULT_REJECTED", "node_lifecycle_job", jobID, "denied", map[string]any{"error": err.Error()})
+	}
+	writeRegistryResult(w, r, job, err, http.StatusOK)
+}
+
+func nodeLifecycleIDFromAgentPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "node-lifecycle" {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -468,10 +689,50 @@ func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	var req otp.Request
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	var body struct {
+		ProjectID string `json:"project_id"`
+		UserID    string `json:"user_id,omitempty"`
+		Purpose   string `json:"purpose"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid otp request")
 		return
+	}
+	body.ProjectID = strings.TrimSpace(body.ProjectID)
+	body.UserID = strings.TrimSpace(body.UserID)
+	body.Purpose = strings.TrimSpace(body.Purpose)
+	if body.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+	if body.Purpose == "" {
+		writeError(w, http.StatusBadRequest, "purpose is required")
+		return
+	}
+	if s.Auth == nil && body.UserID == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	req := otp.Request{
+		ProjectID: body.ProjectID,
+		UserID:    body.UserID,
+		Purpose:   body.Purpose,
+	}
+	principal, ok := s.authorizeProject(w, r, req.ProjectID)
+	if !ok {
+		return
+	}
+	if s.Auth != nil {
+		if req.UserID != "" && req.UserID != principal.UserID {
+			writeError(w, http.StatusForbidden, "otp user does not match authenticated user")
+			return
+		}
+		req.UserID = principal.UserID
+		req.Email = principal.Email
+		if req.Email == "" {
+			writeError(w, http.StatusUnprocessableEntity, "authenticated user has no email address")
+			return
+		}
 	}
 	resp, err := s.OTP.RequestOTP(r.Context(), req)
 	if err != nil {
@@ -505,6 +766,17 @@ func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid otp verify request")
 		return
 	}
+	principal, ok := s.authorizeProject(w, r, req.ProjectID)
+	if !ok {
+		return
+	}
+	if s.Auth != nil {
+		if req.UserID != "" && req.UserID != principal.UserID {
+			writeError(w, http.StatusForbidden, "otp user does not match authenticated user")
+			return
+		}
+		req.UserID = principal.UserID
+	}
 	err := s.OTP.VerifyOTP(r.Context(), req.RequestID, req.ProjectID, req.UserID, req.Purpose, req.Code)
 	if err != nil {
 		statusCode := http.StatusUnauthorized
@@ -515,37 +787,6 @@ func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
-}
-
-func (s *Server) matchRoute(repoURL, fullName, branch string) (Route, bool) {
-	for _, route := range s.Config.Routes {
-		if route.Branch != "" && route.Branch != branch {
-			continue
-		}
-		if route.RepoURL != "" && route.RepoURL == repoURL {
-			return route, true
-		}
-		if route.RepoFullName != "" && route.RepoFullName == fullName {
-			return route, true
-		}
-	}
-	return Route{}, false
-}
-
-type githubPush struct {
-	Ref        string `json:"ref"`
-	After      string `json:"after"`
-	Repository struct {
-		CloneURL string `json:"clone_url"`
-		FullName string `json:"full_name"`
-	} `json:"repository"`
-	Pusher struct {
-		Name string `json:"name"`
-	} `json:"pusher"`
-}
-
-func branchFromRef(ref string) string {
-	return strings.TrimPrefix(ref, "refs/heads/")
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

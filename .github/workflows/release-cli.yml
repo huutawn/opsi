@@ -1,0 +1,53 @@
+name: release-cli
+
+on:
+  push:
+    tags:
+      - 'r5-014-*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      # actions/setup-go v5.0.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version: '1.26.4'
+      # actions/setup-node v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.16.0'
+          cache: npm
+          cache-dependency-path: cli/ui/package-lock.json
+      - name: Build prerelease CLI artifacts
+        env:
+          VERSION: ${{ github.ref_name }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -eu
+          cd cli/ui
+          npm ci
+          npm run build
+          cd ../..
+          mkdir -p release-cli
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS=${target%/*}
+            GOARCH=${target#*/}
+            bundle=$(mktemp -d)
+            GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags "-X main.version=${VERSION} -X main.revision=${REVISION} -X github.com/opsi-dev/opsi/cli/internal/commands.localUIVersion=${VERSION} -X github.com/opsi-dev/opsi/cli/internal/commands.localUIRevision=${REVISION}" -o "$bundle/opsi" ./cli/cmd/opsi
+            cp -R cli/ui/out "$bundle/opsi-ui"
+            tar -C "$bundle" -czf "release-cli/opsi-${VERSION}-${GOOS}-${GOARCH}.tar.gz" opsi opsi-ui
+            rm -rf "$bundle"
+          done
+          (cd release-cli && sha256sum opsi-*.tar.gz > checksums.txt)
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" release-cli/* --prerelease --title "${{ github.ref_name }}" --notes "Local API/UI manual parity prerelease; Agent-live acceptance deferred to R5-017; revision ${{ github.sha }}"

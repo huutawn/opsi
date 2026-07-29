@@ -1,78 +1,462 @@
 # Opsi Current Snapshot
 
-Detailed snapshot: `docs/current_state.md`. Architecture: `docs/architecture.md`.
+R5-016B ActionPlane recovery liveness is implemented locally.
+`R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
+`R5_015_INCIDENT_EVIDENCE_SOURCE_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_016_RECOVERY_LIVENESS_PASS / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
+ActionPlane restart recovery is one non-blocking root-context loop with an
+immediate pass, five-second default retry, and 30-second pass budget. It is
+read/post-check only and retains unresolved locks until factual completion;
+reservation/completion are guarded SQLite transitions. Kubernetes reads
+require authoritative full ownership identity. Linux Secret Service is the
+source-tested ActionPlane backend; Darwin ActionPlane secret operations fail
+closed pending native acceptance, while PAT behavior remains unchanged.
+The canonical mapping is
+`docs/manual_ui_parity_matrix.md`; all 21 R5-013 supported capabilities have a
+Local route/view and the three backend gaps remain disabled. Installed bundles
+include `opsi-ui`; Agent-live acceptance is deferred to R5-017 because the
+former Agent VPS no longer exists. R5-012 remains implemented/live-blocked.
 
-## Repo Shape
+Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
+Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
+Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 
-- Go workspace with modules: `agent/`, `cli/`, `cloud/`, `contracts/go/`.
-- Canonical SRS is `docs/opsi_srs.md` (SRS v4 active production-ready contract); legacy SRS v3.2 is archived under `docs/archive/`.
-- Public contracts live under `contracts/`; current Go binding is hand-written JSON gRPC, not generated protobuf.
-- Runtime code exists for Phase 1-5 minimum slices; Cloud now serves a static production workflow UI for project/node/service/deploy/topology/audit flows.
+### Corrective Prompt 07 — UNRESOLVED_ROLLOUT_OWNERSHIP_PASS
 
-## Implemented Runtime
+- A canonical rollout owns its service until Cloud commits a factual Agent
+  `TerminalResult` or safely cancels it before the first lease.
+- Lease expiry requeues and renews the same owner. Max-attempt exhaustion keeps
+  `DEPLOYMENT_LEASE_ATTEMPTS_EXHAUSTED` retryable without deleting the lock or
+  manufacturing terminal truth.
+- In-memory and PostgreSQL acquisition reject another deployment despite an
+  expired/missing lock row, while retry renews the same deployment ID and
+  bounded attempt window idempotently.
+- Cancellation requires zero attempts and prepared/queued history. Disposable
+  PostgreSQL 16 tests cover restart, expired/missing rows, retry/create races,
+  rollback safety, and factual terminal release without a migration.
+- No SSH, live E2E, VPS, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
 
-  - Agent:
-  - gRPC services: Status, Deployment, ServiceManager, Telemetry, Secret, Incident.
-  - HTTP `/health`, TLS 1.3 config, optional client cert verification.
-  - SQLite WAL stores for service/deployment/managed service/telemetry/audit state.
-  - Deployment supports project/service scoped deploy, safe relative source path containment for build context/Dockerfile/manifest/watch paths, containerd-first builder, Docker fallback, dry-run, progress stream, rollout watch/rollback with post-rollback verification, redacted failure/status messages, and `depends_on` service binding injection.
-  - Service binding supports alias/prefix/default env policy for multiple same-type dependencies, deterministic binding checksum annotations, and typed rollout-failure classification before auto rollback.
-  - Service catalog supports PostgreSQL/Redis managed runtime plus external service registration; managed PostgreSQL/Redis manifests include probes/resources/security-context basics, and external service registration stores TCP probe status as healthy/unhealthy.
-  - Telemetry supports Kubernetes/cAdvisor/kubectl/runtime collectors, retention, zstd sync chunks, and project-scoped sync.
-  - Secret vault supports Kubernetes Secret storage via stdin-applied Secret manifests (no secret values in kubectl argv), Cloud PAT verify cache, OTP/TOTP reveal gate, rotation restart, and audit.
-  - Incident path supports evidence-backed sanitized RCA context from local telemetry metric/log fingerprint windows, typed mitigation allowlist, stale-action hash guard, post-action verification, resolution, MTTR, and audit.
-  - Cloud relay client can poll deployment leases, heartbeat, submit redacted deployment results, and sign Agent requests with HMAC headers for production Cloud guards.
-  - CloudRunner can poll Cloud deployment jobs with `DeploymentIntent` v1, execute git-source deploys through the Agent deployment engine using intent-scoped source/runtime/resource/binding fields, reject image-source jobs clearly for P0, report `intent_hash`, retry result reporting, and run with the Agent daemon when `cloud_relay.enabled=true`.
+### Corrective Prompt 06 — ROLLOUT_FAILURE_PHASE_TRUTHFUL_PASS
 
-- CLI:
-  - Cobra commands: `status`, `deploy`, `sync`, `service`, `secret`, `incident`, `login`, `start`.
-  - Agent gRPC client supports TLS, client cert, and server cert pinning.
-  - PAT storage uses OS keychain; tests use fake store.
-  - `opsi start` serves `/health`, supports `--dev-ui http://localhost:3000`, serves `cli/ui/out` when built, and returns an honest 503 when no UI build exists.
-  - CLI UI is split by route/layout/feature/hook/API/contracts and browser code now calls `/api/local/...` for project/readiness/node/service/deploy/topology/audit/support workflows. `opsi start` proxies Cloud registry calls through the CLI backend using the OS-keychain PAT, exposes `/api/local/session` with a short local session token, requires `X-Local-Session` plus `Idempotency-Key` on mutations, exposes `/api/local/status` for Agent status, exposes `/api/local/projects/{project_id}/telemetry/summary` from Agent telemetry sync metadata without returning raw payloads, and never returns the PAT to the browser.
-  - CLI local deploy submit validates image-source services before Cloud job creation when the service is known locally via the registry read model.
+- Terminal rollout results carry bounded `pre_mutation` or `post_mutation`
+  failure phase; failure-code inequality is not mutation evidence.
+- Runner rejects `failed` WAL records with `TerminalAt=nil`, performs one
+  bounded same-lease resume, and calls `CompleteDeployment` only for factual
+  terminal results (`rolled_back`, `rollback_failed`, terminal failed, success).
+- Cloud in-memory and PostgreSQL paths reject forged pre-mutation results after
+  mutation progress, keep the service lock until a factual terminal result,
+  and persist/replay the phase through existing terminal-result JSON.
+- `NO_KNOWN_GOOD` remains post-mutation/no-snapshot only. No database migration,
+  rollout state, dependency, route, worker, or legacy delivery path was added.
+- No SSH, live E2E, VPS, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
 
-- Cloud:
-- Local/dev runtime for webhook relay, OTP, PAT verify, fixture AI RCA, and Gemini RCA adapter with explicit fallback metadata.
-  - Control-plane registry API exposes org project create/list, project readiness, nodes, bootstrap sessions/events, services, deployment job creation, and deployment rollback request creation with write idempotency/request headers, RBAC, audit, bootstrap expiry cleanup, and machine-readable readiness errors.
-  - Registry read models expose project-scoped services, deployments with plan/manifest/rollback metadata, bootstrap sessions, deployment events, and audit events for UI refresh/reconnect without mock topology data.
-  - Registry security gate enforces owner/admin-only node/bootstrap/agent lifecycle actions, developer deploy/service actions, RBAC denial audit, bootstrap credential TTL/read-once storage, worker-only credential take, one-time agent registration token exchange, bcrypt-hashed agent bearer credentials, revoked/rotated agent poll blocking, redacted bootstrap events/audit metadata, bootstrap/deployment/agent-registration rate limits, and agent register/rotate/revoke records.
-  - Node/K3s/Agent lifecycle supports first-server vs worker bootstrap gating, active-host/idempotency protection, agent heartbeat/inventory readiness reconciliation, and node diagnostics. Drain/remove endpoints now block honestly unless/until Agent-backed K3s execution is wired; only-server removal precondition is still enforced before the blocked response.
-  - Deployment release flow enforces server-side service deploy prerequisites, concrete Git revision/build-context/dockerfile/manifest validation, early image-source rejection, deploy-capable Agent readiness, deterministic deployment/manifest/intent hashes, service-specific runtime/resource/binding intent fields, previous revision refs, versioned `DeploymentIntent` job envelopes, redacted deployment events, audit, idempotency, Agent job lease/result contract with lease tokens, expiry retry, dead-letter state, terminal lock release, and expiring service-level deployment locks.
-  - Production Cloud config requires Postgres, a strong bootstrap worker token, a strong bootstrap secret key, and Agent HMAC request signatures; with Postgres it uses AES-GCM encrypted bootstrap credential/registration storage, DB-backed rate limits, and DB triggers that make `cloud_audit_events` append-only.
-  - Postgres migration and runtime registry repository include org/project/environment/runtime/node/agent/bootstrap/service/deployment/audit/idempotency control-plane schema when `database_url` is configured; dev default uses in-memory store.
-  - OTP supports hashed code, TTL, one-time verify, rate limit, optional Postgres, SMTP/outbox, and dev echo.
-  - PAT verify uses bcrypt hash + project membership role when Postgres is configured.
-  - Static Cloud UI at `/` uses real registry APIs for project list/detail readiness, add-server bootstrap with reconnect-safe timeline, node diagnostics/actions, service drafts/detail, deploy queueing with redacted event timeline, topology from real nodes/services/deployments, and redacted audit.
-  - Cloud exposes request-ID echoing, Prometheus-style process/domain metrics at `/metrics`, project support summaries at `/api/projects/:projectID/support`, webhook/outbox alert routing, and deployable Prometheus/Alertmanager/Grafana provisioning artifacts. Support summaries include Grafana-style dashboard panels, SLO signals, configured alerts, active alerts, production gates, break-glass policy, runbooks, redacted support context, and recent deployment request IDs. CLI UI maps Metrics/Support to that real support dashboard. Cloud inline UI is now debug-only behind `enable_debug_ui=true`.
-- Cloud AI config is explicit (`fixture|gemini`), Gemini RCA calls use sanitized incident context only, fixture fallback is explicit, AI payloads reject raw-log/secret-like keys before analysis, and Agent RCA validation requires visible provider/model/fallback/input-context-hash metadata before storing or returning analysis.
-  - Root README documents clean-checkout verification, Go `GOTOOLCHAIN=local`, module test commands, optional `rtk` wrapper fallback, and offline cache expectations. Root Makefile exposes `verify`, `test`, `build`, `clean`, and `package-source`; builds binaries into `bin/`, injects a shared build SHA into `opsi version`, `opsi-agent --version`, and `opsi-cloud --version`, and creates a `release/` artifact layout with checksums and demo docs.
-  - Runtime security hardening includes Agent production/non-loopback config fail-fast, Cloud production OTP/dev-echo and HTTPS public URL guards, Agent request HMAC compatibility, omitted OTP `code` outside dev echo, secret reveal second-factor negative tests, AI raw-log/secret-like payload rejection tests, Incident action hash/post-action verification, and a proto-vs-handwritten-Go service/RPC drift test.
+### Corrective Prompt 05 — PRE_MUTATION_FAILURE_REPORTING_PASS
 
-## Known Gaps
+- Pre-WAL failures after a canonical rollout lease now report deterministic
+  `failed` results from the leased `RolloutIntent`, not an empty WAL record.
+- Typed rollout codes are preserved; generic preflight uses
+  `ROLLOUT_PREFLIGHT_FAILED`. No readiness/resources are fabricated, and the
+  factual previous known-good/current digest is retained when present.
+- In-memory and PostgreSQL completion accept the strict pre-mutation shape,
+  release the service lock, persist one immutable terminal result, accept exact
+  replay after restart/lost response, and never turn the cause into lease
+  attempts exhausted. `NO_KNOWN_GOOD` remains post-mutation/no-snapshot only.
+- The manual E2E incident selector requires matching `service_id` plus
+  `created_at_unix` no older than the timestamp immediately before broken B.
+- No SSH, live E2E, VPS, DNS, TLS, Cloudflare, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
 
-- OAuth login/PAT issuance UI not implemented.
-- Cloud webhook relay is in-memory; registry deployment job leases/results are durable with Postgres, but webhook/event relay queue is not wired to durable storage yet.
-- Cloud AI provider schema is still minimal; Gemini output is currently consumed as root-cause text while recommended actions remain typed fixture actions.
-- CLI UI WebSocket/SSE bridge, Agent-vault secret reveal/rotation endpoints, and incident registry endpoint are not implemented; unavailable actions are disabled instead of fake-success.
-- Standalone SSH bootstrap worker/K3s installer binary is not implemented; Cloud exposes the secure take/finish contract and lifecycle state machine.
-- Agent-backed K3s drain/remove execution is not implemented; Cloud blocks node lifecycle requests instead of marking metadata-only success.
-- K3s encryption-at-rest is config-gated, not auto-detected.
-- Service catalog lacks DB-native rotation, service logs, backup/restore workflows for managed services, and full managed-service readiness reconciliation.
-- HA server topology and heartbeat timeout reconciler remain future work.
-- Plan 06 support dashboard and external observability provisioning exist; HA server topology, heartbeat timeout reconciler, and provider-specific Slack/PagerDuty adapters remain future work.
-- Local Web UI still needs Agent-owned local endpoints for secret reveal/rotation, incidents/RCA actions, logs, detailed telemetry views, and runtime audit merge; missing Agent-owned local endpoints return typed disabled errors instead of fake success.
-- Source hygiene gate passes after `make clean`; generated binaries/UI outputs/DB files are no longer required for verification.
+### R5-011-S4 — SINGLE_ROLLOUT_EXECUTION_PATH_PASS
 
-## Commands
+- The discovered blocker was active BuildRecord `immutable_image` jobs beside
+  rollout reconciliation. New BuildRecord deployments now create only durable
+  `rollout` jobs with a canonical `RolloutIntent`.
+- Agent commands without an intent fail with `LEGACY_DEPLOYMENT_RETIRED` before
+  Kubernetes mutation. `Engine.Deploy` and `ProductionAdapter.Deploy` are no
+  longer executable delivery entry points; PollJob enters `ReconcileRollout`.
+- Queued historical rows are terminalized without blocking the next canonical
+  lease. No-external workloads render no Ingress, while image redeployments
+  preserve existing authoritative exposure.
+- The local harness requires healthy A -> broken B -> restored A and validates
+  exact digests, known-good/readiness/resource evidence, terminal states, and
+  final K3s imageID readiness. Its self-test uses a local ssh-keyscan stub and
+  JSON fixtures without network access.
+- No SSH, VPS, DNS, TLS, release, public endpoint, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
 
-Run from module dirs, not repo root:
+### R5-011-S3 — MANUAL_ACCEPTANCE_TRUTH_REPAIR
 
-```bash
-rtk go test ./...      # agent/
-rtk go test ./...      # cli/
-rtk go test ./...      # cloud/
-rtk go test ./...      # contracts/go/
-```
+- Correction only: the manual K3s acceptance is PEM-only, pins one exact SSH
+  host fingerprint, submits accepted healthy/bad BuildRecords through the
+  canonical project deployment route, and rejects PEM material in evidence.
+- The false GitHub-hosted K3s workflow, dated readiness snapshot, and obsolete
+  future-work duplicate are deleted. Active documents now record one delivery
+  path from GitHub Actions OIDC through accepted BuildRecord, immutable digest,
+  topology/policy routing, durable job, Agent PollJob, ProductionAdapter/
+  ReconcileRollout, Opsi-owned K3s resources, and factual readiness/rollback.
+- No SSH, VPS, DNS, TLS, release, public endpoint, R5-012, MCP, or AI action was
+  performed. R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`.
 
-Last checked for P1 hardening: agent 80 passed, cloud 26 passed, cli 21 passed, contracts/go 1 passed.
+### R5-011-S2 — SINGLE_IMMUTABLE_DELIVERY_PATH_PASS
+
+- Direct Git/build/manifest Agent deployment, CLI direct deploy, Local/Cloud
+  service-scoped deployment creation, generic GitHub push relay, and Cloud
+  inline debug UI/configuration are retired. Only the BuildRecord -> immutable
+  digest -> DeploymentJob/RolloutIntent -> PollJob -> ProductionAdapter/
+  ReconcileRollout -> K3s readiness/rollback path remains executable.
+- Historical deployment columns and relay tables remain for restore/read
+  compatibility only; legacy queued jobs are terminalized or skipped
+  deterministically and cannot reach an Agent.
+- Health command output is bounded to 256 KiB per probe with a five-second
+  timeout and fail-closed overflow/truncation behavior.
+- Local/PostgreSQL tests, race tests, source hygiene, build, and E2E self-test
+  were run. No VPS, DNS, TLS, public endpoint, or full K3s E2E acceptance was
+  performed; the full E2E remains `MANUAL_GATED`.
+- R5-011 remains `PARTIAL`; R5-011.4 remains `MANUAL_GATED`. No R5-012 or MCP/AI
+  work was performed.
+
+## Active Task
+
+### R5-011.1 — Local external exposure contract and renderer
+
+- Starting revision is `9caf01bbbff868546d4065195dd70004c2002ef9` on
+  `developer`. R5-010 remains `DONE / LIVE_ACCEPTANCE_PASS` at its recorded live
+  evidence and is reused without changing the running workload.
+- `ExposureSpec v1` owns bounded project/environment/runtime/service/job
+  identity, canonical hostname and Prefix path, exact service port, bounded TLS
+  mode/opaque reference, optional display metadata, and deterministic spec hash.
+- The existing R5-010 namespace/name/label helpers, exact ClusterIP Service
+  renderer result, and `CommandRunner`/kubectl boundary remain authoritative.
+  The sole gateway resource is `networking.k8s.io/v1` Ingress with fixed
+  `ingressClassName: traefik` and field manager `opsi-r5-011-exposure`.
+- Read-only preflight distinguishes create, unchanged, and deterministic owned
+  diff, and fails closed for foreign names, backend mismatch, cross-workload
+  identity, TLS reference failures, and Opsi/foreign hostname-path conflicts.
+- R5-011.1 is `DONE / LOCAL_CONTRACT_RENDERER_PASS` after the recorded local
+  contract/Agent test, vet, race, deterministic, source-hygiene, diff, and
+  secret-marker checks. R5-011 is not DONE.
+- No SSH/VPS/K3s mutation, Ingress apply, external endpoint, Agent release,
+  Cloud/Worker deploy, readiness reconciliation, rollback/WAL, Cloud API,
+  CLI/UI, DNS/Cloudflare/certificate, MCP, or AI work was performed.
+
+### R5-011.2 — Agent-local durable reconciliation and exact rollback
+
+- Starting revision is `7587d5892fee53844ca50f0ad8f91db3b3d67d81` on
+  `developer`; the pre-existing UI test change remains outside this task.
+- `ExposureSpec.SpecHash` is now functional-only (display metadata excluded),
+  with compatibility decoding for the metadata-inclusive R5-011.1 hash.
+  Kubernetes absence uses fixed `--ignore-not-found` plus bounded empty output;
+  ingress inventory has timeout, byte/item bounds, strict decode, sorting, and
+  fail-closed overflow handling.
+- The existing Agent `deploy.Engine`, `ProductionAdapter`, and SQLite store
+  now implement versioned rollout intent/WAL/events, one active target lock,
+  CAS UID/resourceVersion ownership, factual app-digest/Service-endpoint/
+  Ingress/local-routing readiness, immutable known-good snapshots, bounded
+  restart reconciliation, and exact automatic rollback. No second renderer or
+  deployment engine was added.
+- `R5-011.2` verdict is `DONE / LOCAL_RECONCILIATION_ROLLBACK_PASS` after the
+  disposable pinned K3s A -> broken immutable B -> exact A verifier, including
+  Agent/store restart while B was waiting and one-resource-count proof.
+- R5-011.3 still owns Cloud PostgreSQL lifecycle/state plus Agent/CLI/Local
+  API/UI wiring. R5-011.4 still owns live public endpoint proof. No VPS,
+  Cloudflare, DNS, certificate, MCP, AI, or release action was performed.
+
+### R5-011.3 — Durable Cloud rollout/exposure lifecycle and Local UI
+
+- The existing R5-010 `DeploymentJob`, lease, event, and Agent command path now
+  carries immutable `RolloutIntent` authority, including exact digest,
+  WorkloadSpec/ExposureSpec hashes, topology/policy/routing authority, and
+  expected known-good references. Agent SQLite remains runtime truth.
+- Append-only PostgreSQL migration `MigrateR5011Rollout` extends the existing
+  deployment tables with rollout intent/state, exposure, digest, known-good,
+  readiness, and sanitized terminal result fields. Existing R5-010 rows are
+  preserved. In-memory and PostgreSQL services enforce project scope,
+  idempotency, target locking, allowlisted monotonic transitions, terminal
+  immutability, stale lease rejection, and sanitized bounded metadata.
+- Canonical Cloud routes are exposure preview/diff/apply/list/detail plus the
+  existing deployment events/status/rollback routes. Manual CLI commands are
+  `opsi exposure create|diff|apply|status|history` and
+  `opsi deploy rollback|status|list|events`; mutations require explicit
+  confirmation and idempotency keys. Browser calls only Local API paths.
+- Local acceptance passed success, automatic B -> A rollback, explicit
+  rollback, no-known-good, rollback-failed, target/route/ownership/identity
+  conflicts, stale/out-of-order/terminal/idempotency/concurrency/security
+  negatives, PostgreSQL/backend/Agent restart fixtures, and CLI/Local API/UI
+  factual state parity. UI source-state tests, lint, build, and a disposable
+  headless Chrome interaction fixture (preview -> apply -> succeeded -> explicit
+  rollback -> rolled_back) pass. Playwright is not installed, so the browser
+  evidence uses Chrome DevTools Protocol instead.
+- Verdict: `DONE / LOCAL_CONTROL_PLANE_UI_PASS` for R5-011.3 only. R5-011
+  remains partial; R5-011.4 still owns live Agent/VPS, public endpoint, and
+  certificate/DNS acceptance. No VPS, staging deployment, MCP, AI, or R5-012
+  action was performed.
+
+### R5-011-S1 — Agent trust boundary and truthful runtime health
+
+- Starting revision was `95227edb6ed3def2c3c5dde209465d9746610ecc` on
+  `developer`, with `HEAD == origin/developer` and a clean worktree at entry.
+- Agent PAT verification now uses `Authorization: Bearer`, a project-only JSON
+  body, digest-keyed identity caching, exact project matching, complete verified
+  identity, and expiry-boundary fail-closed behavior. Secret and incident Agent
+  RPC authority is derived only from verified Bearer metadata; CLI, Local API,
+  and Local UI no longer accept caller-selected user/role/PAT authority.
+- Heartbeats and gRPC status use a bounded direct-argv kubectl probe for API
+  readiness and Kubernetes node Ready conditions. Runtime failures report
+  `not_ready`/`unavailable`, disable deploy capability, and make status
+  `degraded`/`unavailable`; Cloud connectivity remains separate.
+- UI source tests run through Node's built-in test runner and `make verify`
+  includes `ui-test`. Local/code verification passed with Go `1.26.4`, Node
+  `24.16.0`, and npm `11.17.0`; the exact revision has not been deployed or
+  exercised against a VPS/live public endpoint.
+- Checkpoint: `R5-011-S1 — TRUST_BOUNDARY_AND_HEALTH_TRUTH_PASS`. R5-011 remains
+  `PARTIAL`; R5-011.4 remains `MANUAL_GATED`, and no Cloud, MCP, AI, or staging
+  changes were made.
+
+### R5-009 — Manual placement, DeploymentPolicy, and routing preflight
+
+- R5-009 local acceptance passed on 2026-07-19 with disposable PostgreSQL,
+  loopback Cloud, real CLI, Local API, built Local UI, and headless Chrome.
+- `TopologyPlan v1` and `DeploymentPolicy v1` use immutable PostgreSQL
+  revisions, mutable heads, authenticated audit, bounded exact fields, scoped
+  unknown-capacity override, expected revision/state hash, and idempotency.
+- Positive route selected exactly one fresh healthy runtime/node/deploy Agent for
+  both `api` and `worker`; stale, unknown, oversubscribed, foreign, zero-Agent,
+  ambiguous-Agent, wrong-identity, and disabled-policy cases failed closed.
+- CLI and Local API/UI returned identical plan/policy hashes. Browser wizard
+  preview/apply rendered revision and audit results. PostgreSQL restart and
+  concurrent one-winner apply passed.
+- No SSH, Agent VPS, reboot/reset/bootstrap, workload, `DeploymentJob`, Agent
+  mutation, MCP, AI, or R5-010 work was performed.
+
+### R5-008 — Live GitHub runner, GHCR, and BuildRecord proof
+
+- R5-007 hardening and live R5-008 acceptance passed on 2026-07-19.
+- Opsi code-bearing revision: `b1435f0029e0ad65c019ff692bfa80e1f2aa1476`.
+- Final fixture revision: `c0ae78e0c1b5df93ae0f67a4de860849cbf71c97`.
+- Canonical generated workflow source pin: `f782c84f60c1d657b11e7a74a2bd55f6c2ae31e1`.
+- Baseline run `29676422752` attempt `2` selected `api` and `worker`; changed run
+  `29676722594` selected only `api`. Public GHCR digests and Cloud BuildRecords
+  matched for both runs.
+- Cloud staging runs `4/4` healthy on immutable image
+  `ghcr.io/huutawn/opsi-cloud@sha256:c3c63a1724a8b17876c200251293156773b172b782257811c8d3d848eac61bf6`.
+- Temporary negative workflows/policy were removed after exact live 401/403/400/
+  409/replay/rate-limit/failed-build/PR checks. No Agent VPS was used during
+  R5-008; R5-009 is recorded separately above.
+
+### R5-007 — GitHub Actions OIDC verifier and BuildRecord v1
+
+- R5-006 remains `DONE / FUNCTIONAL_ACCEPTANCE_PASS`. Its focused R5-007 entry
+  review repaired Local repository apply so a bounded safe `Idempotency-Key`
+  replays only the same canonical request, conflicting reuse fails typed, and
+  apply requires the exact filesystem-bound `preview_hash` returned by preview.
+- R5-007 is `DONE / LOCAL_FUNCTIONAL_ACCEPTANCE_PASS / LIVE_EVIDENCE_DEFERRED`.
+  Cloud pins GitHub issuer/JWKS, verifies signed bounded claims, authorizes the
+  active repository/service binding and exact workload policy, and stores
+  append-only `opsi.build_record/v1` rows idempotently in PostgreSQL.
+- CLI and Local API/UI expose project-scoped PAT-authenticated BuildRecord
+  list/detail only. The browser receives no PAT/OIDC token and has no submit or
+  deploy action.
+- R5-005 remains `OPERATOR_REQUIRED / FUNCTIONAL_ACCEPTANCE_PASS / LIVE_LIFECYCLE_EVIDENCE_DEFERRED`.
+- R5-005 and R5-006 business scope outside the focused repair is frozen.
+- The two missing live webhook deliveries (`installation_repositories: removed` and
+  `repository`) and the live wrong-user check using a second GitHub account remain
+  deferred; no evidence is fabricated and R5-005 is not marked `DONE`.
+
+### R5-004D acceptance status
+
+- `GET /api/projects/{project_id}/nodes` now has one canonical response
+  contract: `{"nodes":[...]}`. The CLI rejects malformed or unexpected node
+  response schemas without reflecting response bodies or credentials.
+- The Cloud-only image update was deployed to staging with an immutable digest;
+  the Bootstrap Worker and Agent images were intentionally retained because
+  their source did not change.
+- R5-004 remains `PARTIAL`. Fedora Secret Service canary store/get/delete and
+  the bounded Linux keychain path passed. The final CLI resolved the existing
+  `R5-004` project through an idempotent `bootstrap-owner` repeat
+  (`reused: true`, no PAT issued), then passed atomic Cloud TLS resolution,
+  direct pinned TLS/PAT status, real pin/name/auth negatives, and Local UI
+  shared-state proof.
+- The old Agent node was decommissioned and only Opsi/K3s-managed paths were
+  reset under the trusted ED25519 host key. Recovery session
+  `boot-7b843526dff6842b` completed as node `node-c69fe70180d359d7`, but the
+  single poller first observed checkpoint `4/register_agent`; it never
+  restarted the Worker during `install_k3s`. No second reset, recovery session,
+  Worker fault, or target reboot was attempted.
+
+- R5-004 live clean-VPS bootstrap ran on 2026-07-17 at revision
+  `d3df6b8d2b3a029ea3f589dfb840ff296e7bdbd5`. The final CLI created one
+  durable session and node through Cloud/Worker strict SSH; pinned K3s
+  `v1.36.2+k3s1` and Agent `0.0.0-staging.a0d5315` installed, registered,
+  reached healthy heartbeat, and survived a controlled target reboot.
+- The first live attempt correctly dead-lettered before mutation because Go SSH
+  selected an unpinned ECDSA key while only the operator-confirmed ED25519 key
+  was trusted. Worker now constrains host-key negotiation to algorithms present
+  for that host in `known_hosts`; the same session/idempotency/node completed
+  after the supported credential re-submit and manual retry path.
+- The first R5-003 public-port start was rolled back because Caddy sorted the
+  general HTTP redirect before the loopback health response. Raw evidence showed
+  `/health` return 308 to `https://127.0.0.1/health`, after which `wget` followed
+  to unused container port 443. Caddy remained running with restart count zero.
+- The staging HTTP listener now uses `route` to preserve health-before-redirect
+  order. The validator rejects the former unordered form, and a focused
+  loopback smoke covers health, redirect isolation, Origin CA TLS, protected
+  paths, hardening, and log markers without stopping the dev profile.
+- R5-002 added a separate production-like staging control-plane profile with
+  origin TLS, fail-closed production configuration, isolated service exposure,
+  individual read-only secret mounts, offline validation, and a Cloudflare Full
+  (strict) operator runbook.
+- The staging validator cross-checks the URL-decoded PostgreSQL DSN username,
+  password, and database against the Compose PostgreSQL identity and secret.
+  Production Worker HTTP is fail-closed unless the staging-only internal
+  endpoint is explicitly opted into and the profile validates its isolated
+  backend boundary.
+- The development profile remains an independent local HTTP package and its
+  Make targets cannot start the staging Compose project.
+- The historical archive leak came from the former canonical `package-source`
+  recipe archiving working-directory `.` with incomplete exclusions.
+- Source-package and release containment is implemented through the Git-aware
+  candidate set, shared path/content validation, focused negative tests, and
+  pre-publication archive validation.
+- Incident status remains `OPERATOR_REQUIRED`: external credential rotation or
+  revocation, post-rotation verification, distributed-artifact review, and the
+  repository-owner Git history decision have not been performed by this task.
+- Operator procedure: `docs/runbooks/credential-incident.md`.
+- Staging and Full (strict) procedure:
+  `docs/runbooks/staging-control-plane.md`.
+
+## M0 State
+
+- Phase 1 V3-001 through V3-007 removed Cloud AI runtime, Agent analyzer/fallback
+  RCA, RCA-backed execution, analyze/approve contracts and user surfaces,
+  Nginx-specific incident mitigation, fake ingress config, and tracked runtime
+  credential/config artifacts.
+- Active incident behavior is factual list/get/resolve with authorization,
+  deterministic bounded sanitized context, MTTR, and resolve audit.
+- Historical `rca_result` and `mitigation_actions_json` columns are storage-only;
+  active runtime does not read, expose, or execute them.
+- Cloud has no AI provider/runtime. Agent has no LLM/provider/prompt path.
+- `IncidentEvidence v1` and Safe ActionPlane v1 are implemented with fake
+  runtime durability/race evidence. `opsi mcp serve` is not implemented.
+- Opsi renders its owned Deployment, ClusterIP Service, and Traefik Ingress.
+  Caller-supplied manifests are not executable input. DNS and certificate
+  provisioning remain outside the implemented boundary.
+- The control-plane staging package terminates origin TLS at Caddy. This is
+  deployment infrastructure for Cloud and is not an Agent-managed application
+  gateway capability.
+- Clean VPS/K3s automation checks incident list/get/resolve and resolve audit,
+  but no committed real-infrastructure pass artifact exists. Production
+  readiness remains unproven.
+
+## Implemented Boundaries
+
+- Browser core workflows use the CLI local backend and short local sessions;
+  usable PATs remain in OS keychain.
+- Cloud owns identity/project/membership, registration, bootstrap/deployment job
+  envelopes, OTP, audit/control-plane metadata, and Postgres durability where
+  configured. It does not own runtime execution or raw runtime evidence.
+- `opsi-cloud admin bootstrap-owner` transactionally creates or reuses the
+  normalized first user, organization, canonical project, Owner memberships,
+  OAuth identity and/or initial PAT hash in PostgreSQL. A durable singleton
+  marker makes exact restart-safe repeats idempotent and conflicting tuples fail
+  closed. Raw initial PAT material is written only to an operator-selected
+  mode-0600 file and is never printed or audited.
+- Opsi has one supported development control-plane deployment path: Docker
+  Compose starts PostgreSQL, Opsi Cloud, one Bootstrap Worker, and Caddy. The
+  package uses named database and Cloud-data volumes, startup health ordering,
+  uniform restart policies, bounded Docker logs, placeholder-only examples,
+  and gitignored runtime configuration and initial PAT files.
+- A separate `deploy/staging-control-plane` package is code/config validated. It
+  uses production Cloud/Worker flags, HTTPS public identity, PostgreSQL,
+  authenticated worker calls, non-root Cloud/Worker/proxy containers, read-only
+  filesystems, bounded logs, named volumes, an internal backend network, and
+  file-backed runtime secrets. PostgreSQL, Worker, and Cloud publish no host
+  ports; Caddy alone publishes 80/443 and denies internal/metrics paths.
+- The fixed Caddy configuration passed isolated Origin CA validation and the
+  public staging origin passed Cloudflare Full (strict), TLS, route, restart,
+  and persistence evidence in R5-003. Direct-origin firewall restriction and
+  certificate rotation remain `OPERATOR_REQUIRED`.
+- Agent owns deployment, service runtime, secrets, telemetry, factual incidents,
+  local audit, and K3s/containerd execution.
+- Bootstrap Worker is a long-running, single-concurrency daemon. It polls Cloud,
+  atomically leases the oldest eligible bootstrap session, increments a bounded
+  attempt count, renews the lease with authenticated heartbeats, and binds
+  progress and finish calls to the worker identity and one-time lease token.
+- Worker configuration no longer accepts a fixed `session_id`. Durable lease
+  recovery persists retry backoff and moves exhausted or permanent failures to
+  `dead_letter`. Credential handoff is non-destructive across retry attempts;
+  registration tokens rotate per attempt. Owner/Admin manual retry is
+  idempotent and requires an available credential.
+
+## Next Ordered Work
+
+R5-004 is `PARTIAL / FUNCTIONAL_ACCEPTANCE_PASS / RESILIENCE_EVIDENCE_DEFERRED`.
+Gate B is accepted and recovery node `node-c69fe70180d359d7` remains the current
+Agent VPS; do not reset or rebuild it again. The live Worker restart during
+`install_k3s` is a mandatory R5-017 gate on a disposable VPS or fresh reset
+with a deterministic staging-only E2E barrier or fault mechanism, never a
+production fault hook. R5-018/MCP remains blocked unless that deferred gate
+passes. R5-005 is `OPERATOR_REQUIRED`, not `DONE`. Projectless browser login and
+callback, keychain PAT verification, installation/repository claims, two
+service bindings, `opsi init` dry-run/apply/idempotency, and CLI/Local API parity
+pass live. Repository inventory exposes durable `available`/`active`/`conflict`
+ownership state without leaking another project's ID. Local API GitHub
+mutations use the keychain PAT and one-time local session/idempotency headers,
+while the browser receives no PAT or OAuth token. Full CLI/Cloud tests and vet,
+UI lint/build, and disposable PostgreSQL GitHub inventory/durable-dedupe tests
+pass at revision `12df6c9`.
+
+The R5-005 fixture now exists and the operator supplied installation/repository
+numeric identity. The App must keep Metadata read-only and manually subscribe
+only to `repository`. GitHub sends `installation` and
+`installation_repositories` as default lifecycle events for every App; they do
+not need to appear in the App API `events` array, and `installation_target` is
+not a substitute. The focused sanitized verifier and tests encode this boundary;
+live selected-repository remove/add must prove lifecycle delivery. The live
+`added` delivery is accepted and durable replay returns `duplicate=true` after
+Cloud restart. GitHub's App delivery API still contains no matching `removed`
+delivery and no `repository` delivery, despite the reported remove/save/add/save
+operation. Those two sanitized deliveries, plus a live wrong-user check using a
+second GitHub account, remain the acceptance blockers; evidence must not be
+fabricated from mocks.
+
+The R5-005 live browser checkpoint exposed stale-keychain and project-first
+login UX defects. Browser login now starts from GitHub identity without asking
+for a project ID. Cloud resolves the only active project membership and rejects
+ambiguous multi-project identity explicitly. Local session startup verifies a
+keychain PAT through Cloud, returns only safe org/project identity metadata, and
+never stores browser auth state. Failed GitHub callbacks return one-time typed
+errors to the Local UI instead of leaving the operator on a public JSON error
+page. Focused Cloud/CLI tests and UI lint/build cover the recovery path.
+
+The first live projectless login then proved the GitHub account itself was not
+prelinked. The canonical `bootstrap-owner` command now has an explicit
+`--link-existing-owner` recovery mode that reads the durable bootstrap marker,
+restores its Owner memberships if required, conflict-checks the numeric OAuth
+identity, and links it transactionally without requiring the original
+email/org/project tuple or issuing a PAT. It remains a local admin operation;
+there is no browser, public API, or parallel deployment path.
+
+The next live callback successfully redeemed and returned `auth=ok`, but Local
+session verification still reported the newly stored PAT as invalid. The cause
+was a transport contract mismatch: CLI correctly sent the credential in the
+Bearer header while Cloud `/v1/auth/pat/verify` read only a JSON-body token.
+Cloud now uses the same fail-closed Bearer parser as rotate/revoke, the control
+plane E2E verifier no longer sends PAT material in a JSON body or process
+argument, and a focused endpoint test rejects body-only tokens. Signed-out UI
+is now one centered auth gate; the duplicate topbar login and ineffective retry
+paths are removed.
+
+## Verification
+
+R5-002 regression checks are focused Cloud tests,
+`make dev-control-plane-validate-source`,
+`make staging-control-plane-validate-source`, `make source-hygiene`, and
+`git diff --check`. R5-003 additionally passed operator-run live TLS,
+Cloudflare, restart, persistence, route, and redacted evidence checks. R5-004
+additionally passed protected-input tests, Bootstrap Worker/Cloud race tests,
+full Agent tests, UI build/lint, live bootstrap, Local API/UI parity, Worker
+restart after completion, and target reboot recovery. Direct-origin firewall
+restriction and live mid-step Worker resume remain separate unresolved gates.

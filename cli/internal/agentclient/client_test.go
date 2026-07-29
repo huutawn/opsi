@@ -2,19 +2,52 @@ package agentclient
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
+	"encoding/json"
+	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/config"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestNormalizeFingerprint(t *testing.T) {
 	got := normalizeFingerprint("AA:BB:CC")
 	if got != "aabbcc" {
 		t.Fatalf("unexpected fingerprint %q", got)
+	}
+}
+
+func TestWithPATUsesAuthorizationMetadataOnly(t *testing.T) {
+	const pat = "pat-metadata-canary"
+	ctx := WithPAT(context.Background(), pat)
+	md, ok := metadata.FromOutgoingContext(ctx)
+	if !ok || len(md.Get("authorization")) != 1 || md.Get("authorization")[0] != "Bearer "+pat {
+		t.Fatalf("metadata = %#v", md)
+	}
+	if len(md.Get("x-opsi-pat")) != 0 {
+		t.Fatalf("legacy metadata = %#v", md.Get("x-opsi-pat"))
+	}
+	data, err := json.Marshal(agentv1.SecretRequest{ProjectID: "project-1", ServiceID: "service-1", Name: "db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), pat) || strings.Contains(string(data), `"pat"`) || strings.Contains(string(data), `"user_id"`) || strings.Contains(string(data), `"role"`) {
+		t.Fatalf("serialized request contains caller authority: %s", data)
 	}
 }
 
@@ -33,6 +66,17 @@ func TestStatusInsecure(t *testing.T) {
 	}
 }
 
+func TestActionClientUsesTypedJSONRPCs(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0"); if err != nil { t.Fatal(err) }
+	server := grpc.NewServer(); actionv1.RegisterActionServiceServer(server, fakeActionServer{}); go func() { _ = server.Serve(listener) }(); defer server.Stop()
+	client := New(config.Config{AgentAddr: listener.Addr().String()})
+	response, err := client.ActionPreflight(context.Background(), &actionv1.PreflightRequest{SchemaVersion: actionv1.SchemaVersion, ProjectID: "p1", NodeID: "n1", ServiceID: "s1", Target: actionv1.TargetIdentity{ProjectID: "p1", NodeID: "n1", ServiceID: "s1"}, Kind: actionv1.ActionRestartWorkload, Parameters: actionv1.ActionParameters{RestartWorkload: &actionv1.RestartWorkloadParameters{}}})
+	if err != nil || response.Challenge.ID != "challenge-1" { t.Fatalf("response=%#v err=%v", response, err) }
+}
+
+type fakeActionServer struct{ actionv1.UnimplementedActionServiceServer }
+func (fakeActionServer) Preflight(context.Context, *actionv1.PreflightRequest) (*actionv1.ActionPreflight, error) { return &actionv1.ActionPreflight{Challenge: actionv1.ApprovalChallenge{ID: "challenge-1"}}, nil }
+
 func TestTransportCredentialsRejectsMissingCA(t *testing.T) {
 	_, err := transportCredentials(config.Config{
 		AgentAddr: "127.0.0.1:9443",
@@ -42,6 +86,48 @@ func TestTransportCredentialsRejectsMissingCA(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestVerifyRemoteTLSRejectsWrongPinAndServerName(t *testing.T) {
+	addr, pin, stop := startPinnedTLSServer(t)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	valid := config.Config{AgentAddr: addr, TLS: config.TLSConfig{PinnedServerCertSHA256: pin, ServerName: "127.0.0.1"}}
+	if err := verifyRemoteTLS(ctx, valid); err != nil {
+		t.Fatalf("verify valid TLS: %v", err)
+	}
+
+	wrongPin := valid
+	wrongPin.TLS.PinnedServerCertSHA256 = strings.Repeat("a", 64)
+	if err := verifyRemoteTLS(ctx, wrongPin); err == nil || !strings.Contains(err.Error(), "certificate pin mismatch") {
+		t.Fatalf("wrong-pin error: %v", err)
+	}
+
+	wrongName := valid
+	wrongName.TLS.ServerName = "wrong-agent-name.invalid"
+	if err := verifyRemoteTLS(ctx, wrongName); err == nil || !strings.Contains(err.Error(), "certificate name mismatch") {
+		t.Fatalf("wrong-server-name error: %v", err)
+	}
+}
+
+func TestGetIncidentEvidenceUsesPinnedTLSAndBearerMetadata(t *testing.T) {
+	addr, pin, service, stop := startPinnedIncidentEvidenceServer(t)
+	defer stop()
+	ctx, cancel := context.WithTimeout(WithPAT(context.Background(), "evidence-pat-canary"), 5*time.Second)
+	defer cancel()
+	response, err := New(config.Config{AgentAddr: addr, CloudURL: "http://unused.invalid", TLS: config.TLSConfig{PinnedServerCertSHA256: pin, ServerName: "127.0.0.1"}}).GetIncidentEvidence(ctx, &agentv1.IncidentGetRequest{ProjectID: "p1", IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Identity.IncidentID != "inc-1" || service.authorization != "Bearer evidence-pat-canary" || service.request.ProjectID != "p1" || service.request.IncidentID != "inc-1" {
+		t.Fatalf("response=%+v auth=%q request=%+v", response, service.authorization, service.request)
+	}
+	serialized, _ := json.Marshal(service.request)
+	if strings.Contains(string(serialized), "evidence-pat-canary") {
+		t.Fatalf("PAT leaked into request: %s", serialized)
 	}
 }
 
@@ -61,4 +147,84 @@ func startStatusServer(t *testing.T) (string, func()) {
 	agentv1.RegisterStatusServiceServer(server, fakeStatusServer{})
 	go func() { _ = server.Serve(listener) }()
 	return listener.Addr().String(), server.Stop
+}
+
+func startPinnedTLSServer(t *testing.T) (string, string, func()) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "agent.test"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Minute),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		BasicConstraintsValid: true,
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := tls.Certificate{Certificate: [][]byte{certificateDER}, PrivateKey: privateKey}
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				_ = connection.(*tls.Conn).Handshake()
+				_ = connection.Close()
+			}()
+		}
+	}()
+	fingerprint := sha256.Sum256(certificateDER)
+	return listener.Addr().String(), hex.EncodeToString(fingerprint[:]), func() { _ = listener.Close() }
+}
+
+type pinnedIncidentEvidenceServer struct {
+	agentv1.UnimplementedIncidentServiceServer
+	authorization string
+	request       agentv1.IncidentGetRequest
+}
+
+func (s *pinnedIncidentEvidenceServer) GetIncidentEvidence(ctx context.Context, request *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	if values := md.Get("authorization"); len(values) > 0 {
+		s.authorization = values[0]
+	}
+	s.request = *request
+	return &agentv1.IncidentEvidence{SchemaVersion: "opsi.incident_evidence.v1", Identity: agentv1.IncidentEvidenceIdentity{IncidentID: request.IncidentID, ProjectID: request.ProjectID}}, nil
+}
+
+func startPinnedIncidentEvidenceServer(t *testing.T) (string, string, *pinnedIncidentEvidenceServer, func()) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "agent.test"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Minute), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, BasicConstraintsValid: true}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := tls.Certificate{Certificate: [][]byte{certificateDER}, PrivateKey: privateKey}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13})))
+	service := &pinnedIncidentEvidenceServer{}
+	agentv1.RegisterIncidentServiceServer(server, service)
+	go func() { _ = server.Serve(listener) }()
+	fingerprint := sha256.Sum256(certificateDER)
+	return listener.Addr().String(), hex.EncodeToString(fingerprint[:]), service, server.Stop
 }

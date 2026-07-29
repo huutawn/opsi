@@ -55,17 +55,17 @@ func TestOTPRequestSendsCodeWithoutEchoByDefault(t *testing.T) {
 	sender := &fakeSender{}
 	svc := NewService()
 	svc.Sender = sender
-	resp, err := svc.RequestOTP(context.Background(), Request{ProjectID: "proj", UserID: "user@example.com", Purpose: "secret.reveal"})
+	resp, err := svc.RequestOTP(context.Background(), Request{ProjectID: "proj", UserID: "user-id", Email: "user@example.com", Purpose: "secret.reveal"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.Code != "" {
 		t.Fatal("expected code to stay out of API response")
 	}
-	if sender.code == "" || sender.req.UserID != "user@example.com" {
+	if sender.code == "" || sender.req.UserID != "user-id" || sender.req.Email != "user@example.com" {
 		t.Fatalf("sender not called: %+v", sender)
 	}
-	if err := svc.VerifyOTP(context.Background(), resp.RequestID, "proj", "user@example.com", "secret.reveal", sender.code); err != nil {
+	if err := svc.VerifyOTP(context.Background(), resp.RequestID, "proj", "user-id", "secret.reveal", sender.code); err != nil {
 		t.Fatal(err)
 	}
 }

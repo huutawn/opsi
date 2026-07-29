@@ -18,48 +18,6 @@ export function AddServiceForm({ console }: { console: ConsoleController }) {
           <input className="field" name="name" required />
         </label>
         <label>
-          Source
-          <select className="select" name="source_type">
-            <option value="git">Git</option>
-            <option value="image">Image</option>
-            <option value="external">External</option>
-          </select>
-        </label>
-        <label>
-          Image
-          <input className="field" name="image" />
-        </label>
-        <label className="span2">
-          Repo URL
-          <input className="field" name="repo_url" />
-        </label>
-        <label>
-          Branch
-          <input className="field" name="branch" placeholder="main" />
-        </label>
-        <label>
-          Git SHA
-          <input className="field" name="git_sha" required />
-        </label>
-        <label>
-          Build method
-          <select className="select" name="build_method">
-            <option value="dockerfile">Dockerfile</option>
-          </select>
-        </label>
-        <label>
-          Build context
-          <input className="field" name="build_context" defaultValue="." />
-        </label>
-        <label>
-          Dockerfile
-          <input className="field" name="dockerfile" defaultValue="Dockerfile" />
-        </label>
-        <label>
-          Manifest path
-          <input className="field" name="manifest_path" defaultValue="k8s/deployment.yaml" />
-        </label>
-        <label>
           Container port
           <input className="field" min="1" name="container_port" type="number" />
         </label>
@@ -71,7 +29,7 @@ export function AddServiceForm({ console }: { console: ConsoleController }) {
           Replicas
           <input className="field" min="1" name="replicas" type="number" defaultValue={1} />
         </label>
-        <p className="muted span2">Deploy requires readiness, a healthy deploy-capable Agent, and a concrete Git SHA.</p>
+        <p className="muted span2">This creates only service catalog identity. Immutable BuildRecords provide the image digest used for deployment; Git/source-build inputs do not belong here.</p>
         <button className="primary span2" disabled={console.state.busy === "service"}>
           {console.state.busy === "service" ? "Saving" : "Save draft"}
         </button>

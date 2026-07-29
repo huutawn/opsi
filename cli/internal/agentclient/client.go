@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/opsi-dev/opsi/cli/internal/config"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -44,33 +45,6 @@ func (c *Client) Status(ctx context.Context) (*agentv1.StatusResponse, error) {
 	return agentv1.NewStatusServiceClient(conn).Status(ctx, &agentv1.StatusRequest{})
 }
 
-func (c *Client) Deploy(ctx context.Context, req *agentv1.DeployRequest, onEvent func(*agentv1.ProgressEvent) error) error {
-	conn, err := c.dial(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	stream, err := agentv1.NewDeploymentServiceClient(conn).Deploy(ctx, req)
-	if err != nil {
-		return err
-	}
-	for {
-		event, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if onEvent != nil {
-			if err := onEvent(event); err != nil {
-				return err
-			}
-		}
-	}
-}
-
 func (c *Client) Sync(ctx context.Context, req *agentv1.SyncRequest, onChunk func(*agentv1.SyncChunk) error) error {
 	conn, err := c.dial(ctx)
 	if err != nil {
@@ -96,6 +70,15 @@ func (c *Client) Sync(ctx context.Context, req *agentv1.SyncRequest, onChunk fun
 			}
 		}
 	}
+}
+
+func (c *Client) QueryTelemetry(ctx context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewTelemetryServiceClient(conn).QueryTelemetry(ctx, req)
 }
 
 func (c *Client) SetupTOTP(ctx context.Context, req *agentv1.SetupTOTPRequest) (*agentv1.SetupTOTPResponse, error) {
@@ -143,6 +126,31 @@ func (c *Client) ListCatalog(ctx context.Context) (*agentv1.ListCatalogResponse,
 	return agentv1.NewServiceManagerServiceClient(conn).ListCatalog(ctx, &agentv1.ListCatalogRequest{})
 }
 
+func (c *Client) ActionCatalog(ctx context.Context) (*actionv1.CatalogResponse, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).Catalog(ctx, &actionv1.CatalogRequest{})
+}
+
+func (c *Client) ActionPreflight(ctx context.Context, req *actionv1.PreflightRequest) (*actionv1.ActionPreflight, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).Preflight(ctx, req)
+}
+
+func (c *Client) ActionChallenge(ctx context.Context, req *actionv1.ChallengeRequest) (*actionv1.ApprovalChallenge, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).GetChallenge(ctx, req)
+}
+
+func (c *Client) ActionExecute(ctx context.Context, req *actionv1.ExecuteRequest) (*actionv1.ActionResult, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).Execute(ctx, req)
+}
+
+func (c *Client) ActionStatus(ctx context.Context, req *actionv1.StatusRequest) (*actionv1.ActionResult, error) {
+	conn, err := c.dial(ctx); if err != nil { return nil, err }; defer conn.Close()
+	return actionv1.NewActionServiceClient(conn).Status(ctx, req)
+}
+
 func (c *Client) CreateManagedService(ctx context.Context, req *agentv1.CreateManagedServiceRequest) (*agentv1.ManagedServiceResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
@@ -179,25 +187,34 @@ func (c *Client) DeleteManagedService(ctx context.Context, req *agentv1.DeleteMa
 	return agentv1.NewServiceManagerServiceClient(conn).DeleteManagedService(ctx, req)
 }
 
-func (c *Client) AnalyzeIncident(ctx context.Context, req *agentv1.IncidentAnalyzeRequest) (*agentv1.IncidentResponse, error) {
+func (c *Client) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	return agentv1.NewIncidentServiceClient(conn).AnalyzeIncident(ctx, req)
+	return agentv1.NewIncidentServiceClient(conn).ListIncidents(ctx, req)
 }
 
-func (c *Client) ApproveIncidentAction(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+func (c *Client) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	return agentv1.NewIncidentServiceClient(conn).ApproveIncidentAction(ctx, req)
+	return agentv1.NewIncidentServiceClient(conn).GetIncident(ctx, req)
 }
 
-func (c *Client) ResolveIncident(ctx context.Context, req *agentv1.IncidentActionRequest) (*agentv1.IncidentResponse, error) {
+func (c *Client) GetIncidentEvidence(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return agentv1.NewIncidentServiceClient(conn).GetIncidentEvidence(ctx, req)
+}
+
+func (c *Client) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
 		return nil, err
@@ -211,6 +228,11 @@ func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !isLoopback(c.cfg.AgentAddr) {
+		if err := verifyRemoteTLS(ctx, c.cfg); err != nil {
+			return nil, err
+		}
+	}
 	conn, err := grpc.DialContext(ctx, c.cfg.AgentAddr, grpc.WithTransportCredentials(creds), grpc.WithBlock())
 	if err != nil {
 		return nil, fmt.Errorf("connect agent: %w", err)
@@ -220,9 +242,32 @@ func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, error) {
 
 func transportCredentials(cfg config.Config) (credentials.TransportCredentials, error) {
 	if !cfg.TLS.Enabled() {
+		if !isLoopback(cfg.AgentAddr) {
+			return nil, errors.New("non-loopback Agent connections require TLS certificate pinning")
+		}
 		return insecure.NewCredentials(), nil
 	}
 
+	tlsCfg, err := tlsConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return credentials.NewTLS(tlsCfg), nil
+}
+
+func verifyRemoteTLS(ctx context.Context, cfg config.Config) error {
+	tlsCfg, err := tlsConfig(cfg)
+	if err != nil {
+		return err
+	}
+	connection, err := (&tls.Dialer{NetDialer: &net.Dialer{}, Config: tlsCfg}).DialContext(ctx, "tcp", cfg.AgentAddr)
+	if err != nil {
+		return fmt.Errorf("verify Agent TLS: %w", err)
+	}
+	return connection.Close()
+}
+
+func tlsConfig(cfg config.Config) (*tls.Config, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
 	serverName := cfg.TLS.ServerName
 	if serverName == "" {
@@ -253,6 +298,9 @@ func transportCredentials(cfg config.Config) (credentials.TransportCredentials, 
 
 	if cfg.TLS.PinnedServerCertSHA256 != "" {
 		expected := normalizeFingerprint(cfg.TLS.PinnedServerCertSHA256)
+		if len(expected) != sha256.Size*2 {
+			return nil, errors.New("server certificate pin must be a SHA-256 fingerprint")
+		}
 		tlsCfg.InsecureSkipVerify = cfg.TLS.CACertPath == ""
 		tlsCfg.VerifyConnection = func(state tls.ConnectionState) error {
 			if len(state.PeerCertificates) == 0 {
@@ -263,11 +311,26 @@ func transportCredentials(cfg config.Config) (credentials.TransportCredentials, 
 			if actual != expected {
 				return fmt.Errorf("server certificate pin mismatch")
 			}
+			if err := state.PeerCertificates[0].VerifyHostname(serverName); err != nil {
+				return fmt.Errorf("server certificate name mismatch")
+			}
 			return nil
 		}
 	}
 
-	return credentials.NewTLS(tlsCfg), nil
+	return tlsCfg, nil
+}
+
+func isLoopback(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func loadCertPool(path string) (*x509.CertPool, error) {

@@ -8,10 +8,6 @@ service StatusService {
   rpc Status(StatusRequest) returns (StatusResponse);
 }
 
-service DeploymentService {
-  rpc Deploy(DeployRequest) returns (stream ProgressEvent);
-}
-
 service ServiceManagerService {
   rpc ListCatalog(ListCatalogRequest) returns (ListCatalogResponse);
   rpc CreateManagedService(CreateManagedServiceRequest) returns (ManagedServiceResponse);
@@ -22,6 +18,7 @@ service ServiceManagerService {
 
 service TelemetryService {
   rpc Sync(SyncRequest) returns (stream SyncChunk);
+  rpc QueryTelemetry(TelemetryQueryRequest) returns (TelemetryQueryResponse);
 }
 
 service SecretService {
@@ -32,66 +29,24 @@ service SecretService {
 }
 
 service IncidentService {
-  rpc AnalyzeIncident(IncidentAnalyzeRequest) returns (IncidentResponse);
-  rpc ApproveIncidentAction(IncidentActionRequest) returns (IncidentResponse);
-  rpc ResolveIncident(IncidentActionRequest) returns (IncidentResponse);
+  rpc ListIncidents(IncidentListRequest) returns (IncidentListResponse);
+  rpc GetIncident(IncidentGetRequest) returns (IncidentResponse);
+  rpc GetIncidentEvidence(IncidentGetRequest) returns (IncidentEvidence);
+  rpc ResolveIncident(IncidentResolveRequest) returns (IncidentResponse);
 }
 
 message StatusRequest {}
 
 message StatusResponse {
+	reserved 7;
+	reserved "errors";
+
   string version = 1;
   int64 uptime_seconds = 2;
   string node_id = 3;
   string health = 4;
   bool cloud_connected = 5;
   int64 started_at_unix = 6;
-  repeated ServiceError errors = 7;
-}
-
-message ServiceError {
-  ErrorCode code = 1;
-  string message = 2;
-}
-
-message ProgressEvent {
-  string operation_id = 1;
-  string phase = 2;
-  string message = 3;
-  int32 percent = 4;
-  ServiceError error = 5;
-  string project_id = 6;
-  string service_id = 7;
-  string service_name = 8;
-}
-
-message DeployRequest {
-  string project_id = 1;
-  string service_id = 2;
-  string service_name = 3;
-  string service_type = 4;
-  string repo_url = 5;
-  string branch = 6;
-  string git_sha = 7;
-  string namespace = 8;
-  string build_context = 9;
-  string dockerfile = 10;
-  string manifest_path = 11;
-  string registry = 12;
-  string image_tag = 13;
-  string triggered_by = 14;
-  repeated string watch_paths = 15;
-  int32 termination_grace_period_seconds = 16;
-  string resource_requests_json = 17;
-  string resource_limits_json = 18;
-  bool ingress_enabled = 19;
-  repeated ServiceDependency depends_on = 20;
-}
-
-message ServiceDependency {
-  string name = 1;
-  string env_prefix = 2;
-  bool expose_as_default = 3;
 }
 
 message ListCatalogRequest {}
@@ -186,11 +141,64 @@ message SyncChunk {
   bool done = 8;
 }
 
-message SetupTOTPRequest {
+message TelemetryQueryRequest {
   string project_id = 1;
-  string user_id = 2;
-  string role = 3;
-  string pat = 4;
+  string service_id = 2;
+  int64 since_unix = 3;
+  string cursor = 4;
+  int32 limit = 5;
+  bool include_logs = 6;
+  bool include_summary = 7;
+  bool include_services = 8;
+}
+
+message TelemetryQueryResponse {
+  string project_id = 1;
+  string source = 2;
+  string payload_policy = 3;
+  TelemetryRuntimeSummary summary = 4;
+  repeated TelemetryServiceStatus services = 5;
+  repeated TelemetryLogEntry logs = 6;
+  string next_cursor = 7;
+}
+
+message TelemetryRuntimeSummary {
+  int64 since_unix = 1;
+  int64 end_unix = 2;
+  int32 metric_count = 3;
+  int32 log_count = 4;
+  int32 error_count = 5;
+  int32 service_count = 6;
+  string health = 7;
+}
+
+message TelemetryServiceStatus {
+  string service_id = 1;
+  string health = 2;
+  int32 pod_count = 3;
+  int32 ready_pods = 4;
+  double cpu_cores = 5;
+  double memory_bytes = 6;
+  int32 restart_count = 7;
+  int32 recent_error_count = 8;
+  int64 last_seen_unix = 9;
+}
+
+message TelemetryLogEntry {
+  string service_id = 1;
+  string pod_id = 2;
+  string namespace = 3;
+  string level = 4;
+  string message = 5;
+  string fingerprint = 6;
+  int64 observed_unix = 7;
+}
+
+message SetupTOTPRequest {
+  reserved 2, 3, 4;
+  reserved "user_id", "role", "pat";
+
+  string project_id = 1;
 }
 
 message SetupTOTPResponse {
@@ -199,13 +207,13 @@ message SetupTOTPResponse {
 }
 
 message SecretRequest {
+  reserved 5, 6, 7;
+  reserved "user_id", "role", "pat";
+
   string project_id = 1;
   string service_id = 2;
   string name = 3;
   string namespace = 4;
-  string user_id = 5;
-  string role = 6;
-  string pat = 7;
   string otp_code = 8;
   string totp_code = 9;
   string otp_request_id = 10;
@@ -220,22 +228,33 @@ message SecretResponse {
   string password = 6;
 }
 
-message IncidentAnalyzeRequest {
+message IncidentListRequest {
+  reserved 4, 5, 6;
+  reserved "user_id", "role", "pat";
+
   string project_id = 1;
-  string incident_id = 2;
-  string user_id = 3;
-  string role = 4;
-  string pat = 5;
+  string status = 2;
+  int32 limit = 3;
 }
 
-message IncidentActionRequest {
+message IncidentGetRequest {
+  reserved 3, 4, 5;
+  reserved "user_id", "role", "pat";
+
   string project_id = 1;
   string incident_id = 2;
-  string action_id = 3;
-  string action_hash = 4;
-  string user_id = 5;
-  string role = 6;
-  string pat = 7;
+}
+
+message IncidentResolveRequest {
+  reserved 3, 4, 5;
+  reserved "user_id", "role", "pat";
+
+  string project_id = 1;
+  string incident_id = 2;
+}
+
+message IncidentListResponse {
+  repeated IncidentResponse incidents = 1;
 }
 
 message IncidentResponse {
@@ -243,40 +262,121 @@ message IncidentResponse {
   string project_id = 2;
   string service_id = 3;
   string status = 4;
-  string root_cause = 5;
-  double confidence = 6;
-  repeated string contributing_factors = 7;
-  repeated RecommendedAction recommended_actions = 8;
-  string mitigation_actions_json = 9;
+  string node_id = 5;
+  string pod_id = 6;
+  string anomaly_type = 7;
+  string severity = 8;
+  int64 created_at_unix = 9;
   int64 resolved_at_unix = 10;
   int64 mttr_seconds = 11;
-  RCAMetadata rca_metadata = 12;
 }
 
-message RecommendedAction {
-  string id = 1;
-  string type = 2;
-  string description = 3;
-  bool rollback_safe = 4;
-  map<string, string> params = 5;
-  string action_hash = 6;
+message IncidentEvidence {
+  string schema_version = 1;
+  IncidentEvidenceIdentity identity = 2;
+  int64 generated_at_unix = 3;
+  IncidentEvidenceWindow observation_window = 4;
+  IncidentDeploymentEvidence deployment = 5;
+  IncidentRolloutEvidence rollout = 6;
+  repeated IncidentTimelineEntry timeline = 7;
+  repeated IncidentPodEvidence pods = 8;
+  repeated IncidentKubernetesEvent kubernetes_events = 9;
+  repeated IncidentLogFingerprint log_fingerprints = 10;
+  repeated IncidentAuditReference audit_references = 11;
+  repeated IncidentSourceCoverage coverage = 12;
+  repeated IncidentTruncation truncations = 13;
+  string content_sha256 = 14;
 }
 
-message RCAMetadata {
-  string provider = 1;
-  string configured_provider = 2;
-  string model = 3;
-  bool fallback_used = 4;
-  string input_context_hash = 5;
-  string created_at = 6;
+message IncidentEvidenceIdentity {
+  string incident_id = 1;
+  string project_id = 2;
+  string service_id = 3;
+  string node_id = 4;
+  string pod_id = 5;
+  string anomaly_type = 6;
+  string severity = 7;
+  string status = 8;
 }
 
-enum ErrorCode {
-  ERROR_CODE_UNSPECIFIED = 0;
-  ERROR_CODE_AUTH_FAILED = 1;
-  ERROR_CODE_UNAVAILABLE = 2;
-  ERROR_CODE_INVALID_INPUT = 3;
-  ERROR_CODE_TIMEOUT = 4;
-  ERROR_CODE_PERMISSION_DENIED = 5;
-  ERROR_CODE_INTERNAL = 6;
+message IncidentEvidenceWindow {
+  int64 start_unix = 1;
+  int64 end_unix = 2;
+}
+
+message IncidentDeploymentEvidence {
+  string desired_digest = 1;
+  string previous_digest = 2;
+  string observed_digest = 3;
+  string restored_digest = 4;
+}
+
+message IncidentRolloutEvidence {
+  string rollout_id = 1;
+  string state = 2;
+  string failure_code = 3;
+  string readiness_hash = 4;
+  repeated string event_correlation = 5;
+}
+
+message IncidentTimelineEntry {
+  int64 observed_at_unix = 1;
+  string source = 2;
+  string kind = 3;
+  string detail = 4;
+  bool untrusted_content = 5;
+}
+
+message IncidentPodEvidence {
+  string namespace = 1;
+  string pod_id = 2;
+  string node_id = 3;
+  int32 ready_containers = 4;
+  int32 total_containers = 5;
+  int32 restart_count = 6;
+  string observed_digest = 7;
+}
+
+message IncidentKubernetesEvent {
+  int64 observed_at_unix = 1;
+  string namespace = 2;
+  string object_kind = 3;
+  string object_name = 4;
+  string type = 5;
+  string reason = 6;
+  string message = 7;
+  bool untrusted_content = 8;
+}
+
+message IncidentLogFingerprint {
+  string fingerprint = 1;
+  string level = 2;
+  int32 count = 3;
+  int64 first_observed_unix = 4;
+  int64 last_observed_unix = 5;
+  string excerpt = 6;
+  bool untrusted_content = 7;
+}
+
+message IncidentAuditReference {
+  string audit_id = 1;
+  string action = 2;
+  string resource_type = 3;
+  string resource_id = 4;
+  string result = 5;
+  int64 created_at_unix = 6;
+}
+
+message IncidentSourceCoverage {
+  string source = 1;
+  string status = 2;
+  string reason_code = 3;
+  int32 item_count = 4;
+  bool truncated = 5;
+}
+
+message IncidentTruncation {
+  string section = 1;
+  int32 omitted_items = 2;
+  bool utf8_safe = 3;
 }

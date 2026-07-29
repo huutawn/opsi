@@ -26,8 +26,11 @@ function SessionsTable({ console }: { console: ConsoleController }) {
             <th>Status</th>
             <th>Host</th>
             <th>Role</th>
+            <th>Progress</th>
+            <th>Failure</th>
             <th>Created</th>
             <th>Events</th>
+            <th>Retry</th>
           </tr>
         </thead>
         <tbody>
@@ -39,11 +42,23 @@ function SessionsTable({ console }: { console: ConsoleController }) {
               </td>
               <td>{item.public_host || "-"}</td>
               <td>{item.role}</td>
+              <td>
+                {item.checkpoint
+                  ? `${item.checkpoint.next_step_index}/4${item.checkpoint.last_completed_step ? ` · ${item.checkpoint.last_completed_step}` : ""}`
+                  : `${item.attempt_count ?? 0}/${item.max_attempts ?? 0} attempts`}
+              </td>
+              <td>{item.last_failure_message_redacted || item.last_failure_code || "-"}</td>
               <td>{formatTime(item.created_at)}</td>
               <td>
                 <button onClick={() => void console.actions.loadBootstrapEvents(item.id)} type="button">
                   Reconnect
                 </button>
+              </td>
+              <td>
+                <button disabled={!['failed', 'dead_letter'].includes(item.status)} onClick={() => console.actions.retryBootstrap(item.id)} type="button">
+                  Retry
+                </button>
+                {!['failed', 'dead_letter'].includes(item.status) ? <span className="muted"> Not retryable</span> : null}
               </td>
             </tr>
           ))}

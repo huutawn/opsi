@@ -67,6 +67,7 @@ func TestSyncCommandPersistsAndUsesState(t *testing.T) {
 }
 
 type commandTelemetryServer struct {
+	agentv1.UnimplementedTelemetryServiceServer
 	lastReceivedUnix int64
 }
 

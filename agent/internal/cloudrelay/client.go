@@ -13,7 +13,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 type Client struct {
@@ -24,129 +24,74 @@ type Client struct {
 	HTTPClient   *http.Client
 }
 
-type WebhookEnvelope struct {
-	ProjectID   string   `json:"project_id"`
-	ServiceID   string   `json:"service_id"`
-	ServiceName string   `json:"service_name"`
-	ServiceType string   `json:"service_type"`
-	RepoURL     string   `json:"repo_url"`
-	Ref         string   `json:"ref"`
-	After       string   `json:"after"`
-	Branch      string   `json:"branch"`
-	TriggeredBy string   `json:"triggered_by"`
-	Body        string   `json:"body"`
-	Signature   string   `json:"signature"`
-	Modified    []string `json:"modified"`
+type DeploymentLease struct {
+	Kind       string                     `json:"kind"`
+	Action     string                     `json:"action"`
+	LeaseToken string                     `json:"lease_token,omitempty"`
+	Deployment DeploymentJobEnvelope      `json:"deployment"`
+	Command    *deploymentv1.AgentCommand `json:"command,omitempty"`
 }
 
-type DeploymentLease struct {
-	Kind       string                `json:"kind"`
-	Action     string                `json:"action"`
-	LeaseToken string                `json:"lease_token,omitempty"`
-	Deployment DeploymentJobEnvelope `json:"deployment"`
-	Service    ServiceEnvelope       `json:"service"`
+type JobLease struct {
+	Kind          string              `json:"kind"`
+	Deployment    *DeploymentLease    `json:"deployment_lease,omitempty"`
+	NodeLifecycle *NodeLifecycleLease `json:"node_lifecycle_lease,omitempty"`
 }
 
 type DeploymentJobEnvelope struct {
-	ID                  string            `json:"id"`
-	DeploymentPlanHash  string            `json:"deployment_plan_hash"`
-	ManifestHash        string            `json:"manifest_hash"`
-	IntentHash          string            `json:"intent_hash"`
-	DeploymentIntent    *DeploymentIntent `json:"deployment_intent,omitempty"`
-	PreviousRevisionRef string            `json:"previous_revision_ref"`
+	ID                  string `json:"id"`
+	DeploymentPlanHash  string `json:"deployment_plan_hash"`
+	ManifestHash        string `json:"manifest_hash"`
+	IntentHash          string `json:"intent_hash"`
+	PreviousRevisionRef string `json:"previous_revision_ref"`
+	// Kept wire-inert so historical result formatting can compile without
+	// accepting legacy deployment intent data from Cloud.
+	DeploymentIntent *deploymentIntentEnvelope `json:"-"`
 }
 
-type DeploymentIntent struct {
-	IntentVersion string                    `json:"intent_version"`
-	ProjectID     string                    `json:"project_id"`
-	ServiceID     string                    `json:"service_id"`
-	DeploymentID  string                    `json:"deployment_id"`
-	RequestedBy   string                    `json:"requested_by,omitempty"`
-	Source        DeploymentIntentSource    `json:"source"`
-	Image         DeploymentIntentImage     `json:"image,omitempty"`
-	Runtime       DeploymentIntentRuntime   `json:"runtime"`
-	Health        DeploymentIntentHealth    `json:"health"`
-	Resources     map[string]any            `json:"resources,omitempty"`
-	Bindings      []DeploymentIntentBinding `json:"bindings,omitempty"`
-	Rollout       DeploymentIntentRollout   `json:"rollout"`
-	Review        DeploymentIntentReview    `json:"review"`
-}
-
-type DeploymentIntentSource struct {
-	Type         string   `json:"type"`
-	RepoURL      string   `json:"repo_url,omitempty"`
-	Branch       string   `json:"branch,omitempty"`
-	GitSHA       string   `json:"git_sha,omitempty"`
-	BuildContext string   `json:"build_context,omitempty"`
-	Dockerfile   string   `json:"dockerfile,omitempty"`
-	ManifestPath string   `json:"manifest_path,omitempty"`
-	WatchPaths   []string `json:"watch_paths,omitempty"`
-}
-
-type DeploymentIntentRuntime struct {
-	ContainerPort int            `json:"container_port,omitempty"`
-	Env           map[string]any `json:"env,omitempty"`
-	Replicas      int            `json:"replicas,omitempty"`
-}
-
-type DeploymentIntentHealth struct {
-	Path                string `json:"path,omitempty"`
-	InitialDelaySeconds int    `json:"initial_delay_seconds,omitempty"`
-	TimeoutSeconds      int    `json:"timeout_seconds,omitempty"`
-	FailureThreshold    int    `json:"failure_threshold,omitempty"`
-}
-
-type DeploymentIntentBinding struct {
-	ServiceID       string   `json:"service_id"`
-	Alias           string   `json:"alias,omitempty"`
-	EnvPrefix       string   `json:"env_prefix,omitempty"`
-	ExposeAsDefault bool     `json:"expose_as_default,omitempty"`
-	EnvKeys         []string `json:"env_keys,omitempty"`
-}
-
-type DeploymentIntentImage struct {
-	Repository string `json:"repository,omitempty"`
-	Tag        string `json:"tag,omitempty"`
-	PullPolicy string `json:"pull_policy,omitempty"`
-}
-
-type DeploymentIntentRollout struct {
-	TimeoutSeconds int  `json:"timeout_seconds"`
-	AutoRollback   bool `json:"auto_rollback"`
-}
-
-type DeploymentIntentReview struct {
-	ManifestHash string `json:"manifest_hash,omitempty"`
-	IntentHash   string `json:"intent_hash,omitempty"`
-}
-
-type ServiceEnvelope struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	SourceType   string   `json:"source_type"`
-	RepoURL      string   `json:"repo_url"`
-	Image        string   `json:"image"`
-	Branch       string   `json:"branch"`
-	GitSHA       string   `json:"git_sha"`
-	BuildContext string   `json:"build_context"`
-	Dockerfile   string   `json:"dockerfile"`
-	ManifestPath string   `json:"manifest_path"`
-	WatchPaths   []string `json:"watch_paths"`
-	Namespace    string   `json:"namespace"`
-	HealthPath   string   `json:"health_path"`
-	Replicas     int      `json:"replicas"`
+type deploymentIntentEnvelope struct {
+	Review struct {
+		IntentHash string
+	} `json:"review"`
 }
 
 type DeploymentResult struct {
+	SchemaVersion          string                    `json:"schema_version,omitempty"`
+	Status                 string                    `json:"status"`
+	LeaseToken             string                    `json:"lease_token,omitempty"`
+	FinalRevisionRef       string                    `json:"final_revision_ref,omitempty"`
+	IntentHash             string                    `json:"intent_hash,omitempty"`
+	FailureCode            string                    `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                    `json:"failure_message_redacted,omitempty"`
+	RollbackEligible       bool                      `json:"rollback_eligible"`
+	RollbackBlockedReason  string                    `json:"rollback_blocked_reason,omitempty"`
+	SpecHash               string                    `json:"spec_hash,omitempty"`
+	ApplicationImage       string                    `json:"application_image,omitempty"`
+	ApplicationImageID     string                    `json:"application_image_id,omitempty"`
+	Namespace              string                    `json:"namespace,omitempty"`
+	DeploymentName         string                    `json:"deployment_name,omitempty"`
+	ServiceName            string                    `json:"service_name,omitempty"`
+	AvailableReplicas      int32                     `json:"available_replicas,omitempty"`
+	RolloutResult          *deploymentv1.AgentResult `json:"rollout_result,omitempty"`
+}
+
+type NodeLifecycleLease struct {
+	Kind          string `json:"kind"`
+	ID            string `json:"id"`
+	Action        string `json:"action"`
+	ProjectID     string `json:"project_id"`
+	TargetNodeID  string `json:"target_node_id"`
+	TargetName    string `json:"target_node_name"`
+	ConfirmRemove bool   `json:"confirm_remove"`
+	LeaseToken    string `json:"lease_token,omitempty"`
+}
+
+type NodeLifecycleResult struct {
 	Status                 string `json:"status"`
 	LeaseToken             string `json:"lease_token,omitempty"`
-	FinalRevisionRef       string `json:"final_revision_ref,omitempty"`
-	IntentHash             string `json:"intent_hash,omitempty"`
 	FailureCode            string `json:"failure_code,omitempty"`
 	FailureMessageRedacted string `json:"failure_message_redacted,omitempty"`
-	RollbackEligible       bool   `json:"rollback_eligible"`
-	RollbackBlockedReason  string `json:"rollback_blocked_reason,omitempty"`
+	Verified               bool   `json:"verified"`
 }
 
 type Heartbeat struct {
@@ -156,50 +101,33 @@ type Heartbeat struct {
 	NodeReady    bool           `json:"node_ready"`
 }
 
-func (c Client) PollWebhook(ctx context.Context, agentID string, wait time.Duration) (*deploy.WebhookEvent, error) {
-	body, status, err := c.pollNext(ctx, agentID, wait)
+func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) (*JobLease, error) {
+	body, status, err := c.pollNext(ctx, nodeID, wait)
 	if err != nil || status == http.StatusNoContent {
 		return nil, err
 	}
 	var kind struct {
 		Kind string `json:"kind"`
 	}
-	if err := json.Unmarshal(body, &kind); err == nil && kind.Kind == "deployment" {
+	if err := json.Unmarshal(body, &kind); err != nil {
+		return nil, err
+	}
+	switch kind.Kind {
+	case "deployment":
+		var lease DeploymentLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, Deployment: &lease}, nil
+	case "node_lifecycle":
+		var lease NodeLifecycleLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, NodeLifecycle: &lease}, nil
+	default:
 		return nil, nil
 	}
-	var envelope WebhookEnvelope
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, err
-	}
-	return &deploy.WebhookEvent{
-		ProjectID:   envelope.ProjectID,
-		ServiceID:   envelope.ServiceID,
-		ServiceName: envelope.ServiceName,
-		ServiceType: envelope.ServiceType,
-		RepoURL:     envelope.RepoURL,
-		Ref:         envelope.Ref,
-		After:       envelope.After,
-		Branch:      envelope.Branch,
-		TriggeredBy: envelope.TriggeredBy,
-		Body:        []byte(envelope.Body),
-		Signature:   envelope.Signature,
-		Modified:    envelope.Modified,
-	}, nil
-}
-
-func (c Client) PollDeployment(ctx context.Context, nodeID string, wait time.Duration) (*DeploymentLease, error) {
-	body, status, err := c.pollNext(ctx, nodeID, wait)
-	if err != nil || status == http.StatusNoContent {
-		return nil, err
-	}
-	var lease DeploymentLease
-	if err := json.Unmarshal(body, &lease); err != nil {
-		return nil, err
-	}
-	if lease.Kind != "deployment" {
-		return nil, nil
-	}
-	return &lease, nil
 }
 
 func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID string, result DeploymentResult) error {
@@ -237,6 +165,82 @@ func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("complete deployment: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c Client) ProgressDeployment(ctx context.Context, nodeID, deploymentID string, progress deploymentv1.Progress) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/deployments/" + url.PathEscape(deploymentID) + "/progress"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(progress)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("deployment progress: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c Client) CompleteNodeLifecycle(ctx context.Context, nodeID, jobID string, result NodeLifecycleResult) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/node-lifecycle/" + url.PathEscape(jobID) + "/result"
+	query := endpoint.Query()
+	if c.ProjectID != "" {
+		query.Set("project_id", c.ProjectID)
+	}
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete node lifecycle: status %d", resp.StatusCode)
 	}
 	return nil
 }

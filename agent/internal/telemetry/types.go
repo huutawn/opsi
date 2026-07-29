@@ -51,24 +51,59 @@ type UptimeCheckRecord struct {
 }
 
 type IncidentRecord struct {
-	ID                string    `json:"id"`
-	ProjectID         string    `json:"project_id"`
-	NodeID            string    `json:"node_id,omitempty"`
-	ServiceID         string    `json:"service_id,omitempty"`
-	PodID             string    `json:"pod_id,omitempty"`
-	AffectedServices  string    `json:"affected_services,omitempty"`
-	AffectedNodes     string    `json:"affected_nodes,omitempty"`
-	AffectedPods      string    `json:"affected_pods,omitempty"`
-	AnomalyType       string    `json:"anomaly_type"`
-	Severity          string    `json:"severity"`
-	Status            string    `json:"status"`
-	ContextJSON       string    `json:"context_json"`
-	RCAResult         string    `json:"rca_result,omitempty"`
-	MitigationActions string    `json:"mitigation_actions_json,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	ResolvedAt        time.Time `json:"resolved_at,omitempty"`
-	MTTRSeconds       int64     `json:"mttr_seconds,omitempty"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                  string    `json:"id"`
+	ProjectID           string    `json:"project_id"`
+	NodeID              string    `json:"node_id,omitempty"`
+	ServiceID           string    `json:"service_id,omitempty"`
+	PodID               string    `json:"pod_id,omitempty"`
+	AffectedServices    string    `json:"affected_services,omitempty"`
+	AffectedNodes       string    `json:"affected_nodes,omitempty"`
+	AffectedPods        string    `json:"affected_pods,omitempty"`
+	AnomalyType         string    `json:"anomaly_type"`
+	Severity            string    `json:"severity"`
+	Status              string    `json:"status"`
+	ContextJSON         string    `json:"context_json"`
+	RCAResult           string    `json:"rca_result,omitempty"`
+	MitigationActions   string    `json:"mitigation_actions_json,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	ResolvedAt          time.Time `json:"resolved_at,omitempty"`
+	MTTRSeconds         int64     `json:"mttr_seconds,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
+	EvidenceJSON        string    `json:"-"`
+	EvidenceSHA256      string    `json:"-"`
+	EvidenceGeneratedAt time.Time `json:"-"`
+}
+
+type EvidenceAuditRecord struct {
+	ID           string
+	Action       string
+	ResourceType string
+	ResourceID   string
+	Result       string
+	CreatedAt    time.Time
+}
+
+type IncidentEvidenceTelemetry struct {
+	LogGroups      []EvidenceLogGroup
+	Pods           []EvidencePodRecord
+	TotalLogGroups int
+	TotalPods      int
+}
+
+type EvidenceLogGroup struct {
+	Fingerprint string
+	Level       string
+	Count       int32
+	FirstAt     time.Time
+	LastAt      time.Time
+	Excerpt     string
+}
+
+type EvidencePodRecord struct {
+	PodID        string
+	NodeID       string
+	Ready        bool
+	RestartCount int32
 }
 
 type SyncRecord struct {

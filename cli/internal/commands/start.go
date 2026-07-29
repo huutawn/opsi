@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -13,9 +14,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
@@ -23,6 +26,19 @@ import (
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
+)
+
+var (
+	localUIVersion  = "dev"
+	localUIRevision = "unknown"
+)
+
+const (
+	localRequestBodyLimit         = 1 << 20
+	localResponseBodyLimit        = 2 << 20
+	incidentEvidenceResponseLimit = 256 << 10
 )
 
 func newStartCommand(configPath *string, factory func() (keychain.Store, error)) *cobra.Command {
@@ -40,8 +56,11 @@ func newStartCommand(configPath *string, factory func() (keychain.Store, error))
 }
 
 func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer, factory func() (keychain.Store, error)) error {
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadSelected(configPath)
 	if err != nil {
+		return err
+	}
+	if err := requireSelectedAgentAddress(configPath); err != nil {
 		return err
 	}
 	listener, err := net.Listen("tcp", addr)
@@ -51,7 +70,7 @@ func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer
 	defer listener.Close()
 
 	server := &http.Server{
-		Handler:           newStartMux(resolveUIDir(), devUI, cfg, factory),
+		Handler:           newStartMux(resolveUIDir(), devUI, cfg, factory, configPath),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -75,19 +94,115 @@ func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer
 	}
 }
 
-func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error)) *http.ServeMux {
+type agentConfigReloadError struct{}
+
+func (agentConfigReloadError) Error() string { return "Agent configuration reload failed" }
+
+type agentConfigResolver struct {
+	startup    config.Config
+	configPath string
+}
+
+func newAgentConfigResolver(startup config.Config, configPath string) agentConfigResolver {
+	return agentConfigResolver{startup: startup, configPath: configPath}
+}
+
+func (r agentConfigResolver) snapshot() (config.Config, error) {
+	if r.configPath == "" {
+		return r.startup, nil
+	}
+	loaded, err := config.Load(r.configPath)
+	if err != nil {
+		return config.Config{}, agentConfigReloadError{}
+	}
+	snapshot := r.startup
+	snapshot.AgentAddr = loaded.AgentAddr
+	snapshot.TLS = loaded.TLS
+	return snapshot, nil
+}
+
+func resolveAgentSnapshot(startup config.Config, resolver ...agentConfigResolver) (config.Config, error) {
+	if len(resolver) == 0 {
+		return startup, nil
+	}
+	return resolver[0].snapshot()
+}
+
+func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error), configPaths ...string) *http.ServeMux {
+	configPath := ""
+	if len(configPaths) > 0 {
+		configPath = configPaths[0]
+	}
+	agentResolver := newAgentConfigResolver(cfg, configPath)
 	localSession := newLocalSessionToken()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	authFlow := &localAuthFlow{states: map[string]time.Time{}, installationClaims: map[string]time.Time{}}
+	routes := http.NewServeMux()
+	routes.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"opsi-cli"}`))
 	})
-	mux.HandleFunc("/api/local/session/login", func(w http.ResponseWriter, r *http.Request) {
-		writeLocalError(w, r, http.StatusNotImplemented, "LOGIN_NOT_IMPLEMENTED", "Browser login is not implemented; run opsi login to store a PAT in the OS keychain")
+	routes.HandleFunc("/api/local/session/login", func(w http.ResponseWriter, r *http.Request) {
+		startLocalBrowserLogin(w, r, cfg, authFlow)
 	})
-	mux.HandleFunc("/api/local/session", func(w http.ResponseWriter, r *http.Request) {
+	routes.HandleFunc("/api/local/session/login/start", func(w http.ResponseWriter, r *http.Request) {
+		startLocalBrowserLogin(w, r, cfg, authFlow)
+	})
+	routes.HandleFunc("/api/local/session/callback", func(w http.ResponseWriter, r *http.Request) {
+		completeLocalBrowserLogin(w, r, cfg, factory, authFlow)
+	})
+	routes.HandleFunc("/api/local/github/installations/claim/callback", func(w http.ResponseWriter, r *http.Request) {
+		completeLocalInstallationClaim(w, r, cfg, factory, authFlow)
+	})
+	routes.HandleFunc("/api/local/session/logout", func(w http.ResponseWriter, r *http.Request) {
+		if !requireLocalSession(w, r, localSession) {
+			return
+		}
+		logoutLocalSession(w, r, cfg, factory)
+		authFlow.clearSession()
+	})
+	routes.HandleFunc("/api/local/session/token/rotate", func(w http.ResponseWriter, r *http.Request) {
+		if !requireLocalSession(w, r, localSession) {
+			return
+		}
+		rotateLocalPAT(w, r, cfg, factory)
+	})
+	routes.HandleFunc("/api/local/session/token/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if !requireLocalSession(w, r, localSession) {
+			return
+		}
+		logoutLocalSession(w, r, cfg, factory)
+		authFlow.clearSession()
+	})
+	routes.HandleFunc("/api/local/session/project", func(w http.ResponseWriter, r *http.Request) {
+		if !requireLocalSession(w, r, localSession) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+			return
+		}
+		var body struct {
+			ProjectID string `json:"project_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.ProjectID) == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+			return
+		}
+		authenticated, tokenState, cloudState, identity := localPATStatus(r.Context(), cfg, factory, strings.TrimSpace(body.ProjectID))
+		if !authenticated {
+			writeLocalError(w, r, http.StatusUnauthorized, "PROJECT_SWITCH_REJECTED", "Cloud rejected the selected project")
+			return
+		}
+		authFlow.setSession(identity)
+		writeLocalJSON(w, http.StatusOK, map[string]any{
+			"authenticated": true, "token_status": tokenState, "cloud_connected": cloudState,
+			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
+			"org_id":          identity.OrgID, "project_id": identity.ProjectID, "role": identity.Role,
+		})
+	})
+	routes.HandleFunc("/api/local/session", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			writeLocalError(w, r, http.StatusNotImplemented, "LOGIN_NOT_IMPLEMENTED", "Browser login is not implemented; run opsi login to store a PAT in the OS keychain")
+			startLocalBrowserLogin(w, r, cfg, authFlow)
 			return
 		}
 		if r.Method != http.MethodGet {
@@ -95,18 +210,55 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			return
 		}
 		w.Header().Set("content-type", "application/json")
+		projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		if projectID == "" {
+			projectID = authFlow.session().ProjectID
+		}
+		authenticated, tokenState, cloudState, identity := false, "missing", "unknown", localSessionIdentity{}
+		if optionalPAT(factory) != "" {
+			tokenState = "unverified"
+		}
+		if projectID != "" || r.URL.Query().Get("verify") == "1" {
+			authenticated, tokenState, cloudState, identity = localPATStatus(r.Context(), cfg, factory, projectID)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"authenticated":   optionalPAT(factory) != "",
-			"cloud_connected": true,
-			"agent_connected": true,
+			"authenticated":   authenticated,
+			"cloud_connected": cloudState,
+			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
+			"token_status":    tokenState,
+			"org_id":          identity.OrgID,
+			"project_id":      identity.ProjectID,
 			"local_session":   localSession,
-			"capabilities":    []string{"projects", "nodes", "services", "deployments", "audit", "support"},
+			"capabilities":    []string{"projects", "nodes", "services", "deployments", "github_app", "build_records", "topology", "deployment_policy", "routing_preflight", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
 	})
-	mux.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {
+	routes.HandleFunc("/api/local/settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+			return
+		}
+		writeLocalJSON(w, http.StatusOK, map[string]any{
+			"version": localUIVersion, "revision": localUIRevision, "go_version": runtime.Version(),
+			"cloud_authority": configuredAuthority(cfg.CloudURL), "cloud_configured": strings.TrimSpace(cfg.CloudURL) != "",
+			"agent_configured": strings.TrimSpace(cfg.AgentAddr) != "", "agent_tls_pinned": strings.TrimSpace(cfg.TLS.PinnedServerCertSHA256) != "",
+			"config_selected": configPath != "", "ui_assets": filepath.Base(uiDir),
+			"backend_gaps": []map[string]string{
+				{"capability": "organization listing", "status": "BACKEND_GAP", "roadmap": "R5-017+"},
+				{"capability": "members/RBAC", "status": "BACKEND_GAP", "roadmap": "R5-017+"},
+				{"capability": "secret metadata/listing", "status": "BACKEND_GAP", "roadmap": "R5-017+"},
+			},
+		})
+	})
+	routes.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 800*time.Millisecond)
 		defer cancel()
-		status, err := agentclient.New(cfg).Status(ctx)
+		ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
+		agentCfg, err := agentResolver.snapshot()
+		if err != nil {
+			writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONFIG_RELOAD_FAILED", "Agent configuration is unavailable")
+			return
+		}
+		status, err := agentclient.New(agentCfg).Status(ctx)
 		w.Header().Set("content-type", "application/json")
 		if err != nil {
 			writeLocalError(w, r, http.StatusBadGateway, "AGENT_UNAVAILABLE", "Agent status is unavailable")
@@ -114,125 +266,980 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 		}
 		_ = json.NewEncoder(w).Encode(status)
 	})
-	mux.HandleFunc("/api/local/", func(w http.ResponseWriter, r *http.Request) {
-		proxyLocalRegistry(w, r, cfg, factory, localSession)
+	registerRepositoryCDRoutes(routes, localSession)
+	routes.HandleFunc("/api/local/", func(w http.ResponseWriter, r *http.Request) {
+		if (r.URL.Path == "/api/local/projects" || r.URL.Path == "/api/local/projects/") && strings.TrimSpace(r.URL.Query().Get("org_id")) == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "ORG_ID_REQUIRED", "org_id must come from the authenticated session")
+			return
+		}
+		if handleLocalAgentRoutes(w, r, cfg, factory, localSession, agentResolver) {
+			return
+		}
+		proxyLocalRegistry(w, r, cfg, factory, localSession, authFlow)
 	})
+
+	mux := http.NewServeMux()
+	mux.Handle("/health", routes)
+	mux.Handle("/api/local/", boundedLocalAPI(routes))
 	mux.Handle("/", newUIHandler(uiDir, devUI))
 	return mux
 }
 
-func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), localSession string) {
-	if isMutation(r.Method) {
-		if r.Header.Get("X-Local-Session") != localSession {
-			writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_SESSION_REQUIRED", "mutating local requests require X-Local-Session")
-			return
-		}
-		if r.Header.Get("Idempotency-Key") == "" {
-			writeLocalError(w, r, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "mutating local requests require Idempotency-Key")
-			return
-		}
+func configuredAuthority(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
 	}
-	if localTelemetrySummary(w, r, cfg, factory) {
-		return
-	}
-	cloud, err := url.Parse(cfg.CloudURL)
-	if err != nil || cloud.Scheme == "" || cloud.Host == "" {
-		writeLocalError(w, r, http.StatusBadGateway, "INVALID_CLOUD_URL", "local cloud_url is invalid")
-		return
-	}
-	path, rawQuery, err := localToCloudPath(r.URL)
-	if err != nil {
-		if isLocalCapability(path) {
-			writeLocalError(w, r, http.StatusNotImplemented, path, err.Error())
-			return
-		}
-		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", err.Error())
-		return
-	}
-	target := *cloud
-	target.Path = path
-	target.RawQuery = rawQuery
+	return u.Scheme + "://" + u.Host
+}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	if projectID, serviceID, ok := localDeploymentIDs(r.URL.Path, r.Method); ok {
-		sourceType, found, err := fetchCloudServiceSourceType(ctx, *cloud, projectID, serviceID, r.Header, factory)
-		if err != nil {
-			writeLocalError(w, r, http.StatusBadGateway, "LOCAL_DEPLOY_VALIDATION_FAILED", "could not validate service deployment source")
-			return
-		}
-		if found && sourceType == "image" {
-			writeLocalError(w, r, http.StatusBadRequest, "IMAGE_DEPLOY_NOT_SUPPORTED", "Image-source deploy is not supported by the current Agent runner. Use Git source or enable the image deploy capability.")
-			return
-		}
+type localResponseBuffer struct {
+	header   http.Header
+	status   int
+	body     bytes.Buffer
+	overflow bool
+}
+
+func (b *localResponseBuffer) Header() http.Header { return b.header }
+
+func (b *localResponseBuffer) WriteHeader(status int) {
+	if b.status == 0 {
+		b.status = status
 	}
-	req, err := http.NewRequestWithContext(ctx, r.Method, target.String(), r.Body)
-	if err != nil {
-		writeLocalError(w, r, http.StatusBadGateway, "LOCAL_PROXY_REQUEST_FAILED", "could not create Cloud request")
+}
+
+func (b *localResponseBuffer) Write(data []byte) (int, error) {
+	if b.status == 0 {
+		b.status = http.StatusOK
+	}
+	if b.body.Len()+len(data) > localResponseBodyLimit {
+		b.overflow = true
+		return len(data), nil
+	}
+	return b.body.Write(data)
+}
+
+func boundedLocalAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Header.Get("X-Request-ID")) == "" {
+			r.Header.Set("X-Request-ID", newLocalSessionToken())
+		}
+		if r.Body != nil {
+			body, err := io.ReadAll(io.LimitReader(r.Body, localRequestBodyLimit+1))
+			_ = r.Body.Close()
+			if err != nil || len(body) > localRequestBodyLimit {
+				writeLocalAPIError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_BODY_TOO_LARGE", "local request body exceeds 1 MiB", "Reduce the request and review it again.")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+		defer cancel()
+		r = r.WithContext(ctx)
+		buffer := &localResponseBuffer{header: make(http.Header)}
+		next.ServeHTTP(buffer, r)
+		if buffer.overflow {
+			writeLocalAPIError(w, r, http.StatusBadGateway, "RESPONSE_BODY_TOO_LARGE", "downstream response exceeds 2 MiB", "Narrow the request and retry.")
+			return
+		}
+		status := buffer.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if status >= 400 {
+			writeNormalizedLocalError(w, r, status, buffer.body.Bytes())
+			return
+		}
+		for key, values := range buffer.header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.Header().Del("Content-Length")
+		w.WriteHeader(status)
+		_, _ = w.Write(buffer.body.Bytes())
+	})
+}
+
+func writeNormalizedLocalError(w http.ResponseWriter, r *http.Request, status int, body []byte) {
+	var payload struct {
+		Error struct {
+			Code       string `json:"code"`
+			Message    string `json:"message"`
+			NextAction string `json:"next_action"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &payload)
+	code := strings.TrimSpace(payload.Error.Code)
+	if code == "" {
+		code = "DOWNSTREAM_REQUEST_FAILED"
+	}
+	message := strings.TrimSpace(redactLocalTelemetryText(payload.Error.Message))
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	nextAction := strings.TrimSpace(payload.Error.NextAction)
+	if nextAction == "" {
+		nextAction = localNextAction(status)
+	}
+	writeLocalAPIError(w, r, status, code, message, nextAction)
+}
+
+func localNextAction(status int) string {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "Sign in again or ask a project owner to grant access."
+	case http.StatusConflict, http.StatusPreconditionFailed:
+		return "Refresh factual state, create a new review, and retry."
+	case http.StatusNotFound:
+		return "Refresh inventory and select an existing target."
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return "Correct the input and create a new review."
+	default:
+		return "Retry after checking Local backend, Cloud, and Agent connectivity."
+	}
+}
+
+func writeLocalAPIError(w http.ResponseWriter, r *http.Request, status int, code, message, nextAction string) {
+	requestID := r.Header.Get("X-Request-ID")
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("X-Request-ID", requestID)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": code, "message": message, "request_id": requestID,
+		"next_action": nextAction, "retryable": status >= 500 || status == http.StatusConflict || status == http.StatusPreconditionFailed,
+	}})
+}
+
+type localAuthFlow struct {
+	mu                 sync.Mutex
+	states             map[string]time.Time
+	installationClaims map[string]time.Time
+	currentSession     localSessionIdentity
+}
+
+type localSessionIdentity struct {
+	UserID    string `json:"user_id,omitempty"`
+	OrgID     string `json:"org_id,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	Role      string `json:"role,omitempty"`
+}
+
+func (f *localAuthFlow) session() localSessionIdentity {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.currentSession
+}
+
+func (f *localAuthFlow) setSession(session localSessionIdentity) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.currentSession = session
+}
+
+func (f *localAuthFlow) clearSession() {
+	f.setSession(localSessionIdentity{})
+}
+
+func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.Config, flow *localAuthFlow) {
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
 		return
 	}
-	copyProxyHeaders(req.Header, r.Header)
-	req.Header.Del("Authorization")
-	if pat := optionalPAT(factory); pat != "" {
-		req.Header.Set("Authorization", "Bearer "+pat)
+	var body struct {
+		ProjectID string `json:"project_id"`
 	}
-
-	resp, err := http.DefaultClient.Do(req)
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+	body.ProjectID = strings.TrimSpace(body.ProjectID)
+	state := newLocalSessionToken()
+	callback := "http://" + r.Host + "/api/local/session/callback"
+	payload, _ := json.Marshal(map[string]any{"local_callback": callback, "local_state": state, "project_id": body.ProjectID})
+	resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/browser/start", "", payload)
 	if err != nil {
-		writeLocalError(w, r, http.StatusBadGateway, "CLOUD_UNAVAILABLE", "Cloud registry is unavailable")
+		writeLocalError(w, r, http.StatusBadGateway, "AUTH_START_FAILED", "Cloud auth start is unavailable")
 		return
 	}
 	defer resp.Body.Close()
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeLocalError(w, r, resp.StatusCode, "AUTH_UNAVAILABLE", "Cloud auth flow is unavailable")
+		return
 	}
-	if requestID := r.Header.Get("X-Request-ID"); requestID != "" {
-		w.Header().Set("X-Request-ID", requestID)
-	}
-	w.WriteHeader(resp.StatusCode)
+	flow.mu.Lock()
+	flow.states[state] = time.Now().UTC().Add(5 * time.Minute)
+	flow.mu.Unlock()
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func localTelemetrySummary(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
-	projectID, ok := telemetrySummaryProjectID(r.URL.Path)
+func requireLocalSession(w http.ResponseWriter, r *http.Request, localSession string) bool {
+	if r.Header.Get("X-Local-Session") != localSession {
+		writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_SESSION_REQUIRED", "mutating local requests require X-Local-Session")
+		return false
+	}
+	if !requireLocalIdempotencyKey(w, r) {
+		return false
+	}
+	return true
+}
+
+func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), flow *localAuthFlow) {
+	if r.Method != http.MethodGet {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return
+	}
+	code, state := r.URL.Query().Get("code"), r.URL.Query().Get("state")
+	flow.mu.Lock()
+	expiresAt, ok := flow.states[state]
+	if ok {
+		delete(flow.states, state)
+	}
+	flow.mu.Unlock()
+	if !ok || time.Now().UTC().After(expiresAt) {
+		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_CALLBACK_INVALID", "auth callback expired or invalid")
+		return
+	}
+	if authError := browserAuthErrorCode(r.URL.Query().Get("error")); authError != "" {
+		http.Redirect(w, r, "/?auth_error="+url.QueryEscape(authError), http.StatusFound)
+		return
+	}
+	if code == "" {
+		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_CALLBACK_INVALID", "auth callback expired or invalid")
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"code": code})
+	resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/browser/redeem", "", payload)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "AUTH_REDEEM_FAILED", "Cloud auth redeem is unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_REDEEM_FAILED", "Cloud auth grant was rejected")
+		return
+	}
+	var out struct {
+		Token   string               `json:"token"`
+		Session localSessionIdentity `json:"session"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.Token == "" || out.Session.ProjectID == "" || out.Session.OrgID == "" {
+		writeLocalError(w, r, http.StatusBadGateway, "AUTH_REDEEM_FAILED", "Cloud auth response was invalid")
+		return
+	}
+	store, err := storeFromFactory(factory)
+	if err != nil || store.SetPAT(out.Token) != nil {
+		writeLocalError(w, r, http.StatusInternalServerError, "LOCAL_CREDENTIAL_STORE_FAILED", "could not store credential in OS keychain")
+		return
+	}
+	flow.setSession(out.Session)
+	http.Redirect(w, r, "/?auth=ok", http.StatusFound)
+}
+
+func browserAuthErrorCode(code string) string {
+	switch code {
+	case "AUTH_SESSION_EXPIRED", "GITHUB_AUTH_DENIED", "GITHUB_AUTH_FAILED", "GITHUB_ACCOUNT_UNLINKED", "OPSI_MEMBERSHIP_REQUIRED", "PROJECT_SELECTION_REQUIRED", "AUTH_UNAVAILABLE":
+		return code
+	default:
+		return ""
+	}
+}
+
+func rotateLocalPAT(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) {
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return
+	}
+	store, err := storeFromFactory(factory)
+	if err != nil {
+		writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_CREDENTIAL_MISSING", "local credential is unavailable")
+		return
+	}
+	oldPAT, err := store.GetPAT()
+	if err != nil || oldPAT == "" {
+		writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_CREDENTIAL_MISSING", "local credential is unavailable")
+		return
+	}
+	var body struct {
+		ProjectID string `json:"project_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+	payload, _ := json.Marshal(map[string]string{"project_id": body.ProjectID})
+	resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/pat/rotate", oldPAT, payload)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "PAT_ROTATE_FAILED", "Cloud PAT rotation is unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeLocalError(w, r, http.StatusUnauthorized, "PAT_ROTATE_FAILED", "Cloud PAT rotation failed")
+		return
+	}
+	var out struct {
+		Token   string         `json:"token"`
+		Session map[string]any `json:"session"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.Token == "" {
+		writeLocalError(w, r, http.StatusBadGateway, "PAT_ROTATE_FAILED", "Cloud PAT rotation response was invalid")
+		return
+	}
+	if err := store.SetPAT(out.Token); err != nil {
+		writeLocalError(w, r, http.StatusInternalServerError, "LOCAL_CREDENTIAL_STORE_FAILED", "old credential was preserved because keychain update failed")
+		return
+	}
+	revokedOld := revokeCloudPAT(r.Context(), cfg.CloudURL, oldPAT, body.ProjectID) == nil
+	writeLocalJSON(w, http.StatusOK, map[string]any{"rotated": true, "revoked_old": revokedOld, "session": out.Session})
+}
+
+func logoutLocalSession(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) {
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return
+	}
+	store, err := storeFromFactory(factory)
+	if err == nil {
+		if pat, getErr := store.GetPAT(); getErr == nil && pat != "" {
+			var body struct {
+				ProjectID string `json:"project_id"`
+			}
+			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+			_ = revokeCloudPAT(r.Context(), cfg.CloudURL, pat, body.ProjectID)
+		}
+		_ = store.DeletePAT()
+	}
+	writeLocalJSON(w, http.StatusOK, map[string]any{"authenticated": false, "revoked": true})
+}
+
+func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) string {
+	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	defer cancel()
+	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		return "failed"
+	}
+	if _, err := agentclient.New(agentCfg).Status(ctx); err != nil {
+		return "failed"
+	}
+	return "ok"
+}
+
+func localPATStatus(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), projectID string) (bool, string, string, localSessionIdentity) {
+	pat := optionalPAT(factory)
+	if pat == "" {
+		return false, "missing", "unknown", localSessionIdentity{}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	status, identity, err := verifyCloudPAT(ctx, cfg.CloudURL, pat, projectID)
+	if err != nil {
+		return false, "unverified", "failed", localSessionIdentity{}
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return false, "invalid", "ok", localSessionIdentity{}
+	}
+	if status >= 200 && status < 300 {
+		return true, "valid", "ok", identity
+	}
+	return false, "unverified", "failed", localSessionIdentity{}
+}
+
+func verifyCloudPAT(ctx context.Context, cloudURL, pat, projectID string) (int, localSessionIdentity, error) {
+	payload, _ := json.Marshal(map[string]string{"project_id": projectID})
+	resp, err := postCloudJSON(ctx, cloudURL, "/v1/auth/pat/verify", pat, payload)
+	if err != nil {
+		return 0, localSessionIdentity{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		return resp.StatusCode, localSessionIdentity{}, nil
+	}
+	var session localSessionIdentity
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&session); err != nil {
+		return resp.StatusCode, localSessionIdentity{}, err
+	}
+	wrongProject := projectID != "" && session.ProjectID != projectID
+	if session.UserID == "" || session.OrgID == "" || session.ProjectID == "" || wrongProject || session.Role == "" {
+		return resp.StatusCode, localSessionIdentity{}, fmt.Errorf("invalid PAT verification response")
+	}
+	return resp.StatusCode, session, nil
+}
+
+func postCloudJSON(ctx context.Context, cloudURL, path, pat string, payload []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cloudURL, "/")+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if pat != "" {
+		req.Header.Set("Authorization", "Bearer "+pat)
+	}
+	return http.DefaultClient.Do(req)
+}
+
+func revokeCloudPAT(ctx context.Context, cloudURL, pat, projectID string) error {
+	payload, _ := json.Marshal(map[string]string{"project_id": projectID})
+	resp, err := postCloudJSON(ctx, cloudURL, "/v1/auth/pat/revoke", pat, payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("revoke status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func storeFromFactory(factory func() (keychain.Store, error)) (keychain.Store, error) {
+	if factory == nil {
+		return nil, fmt.Errorf("keychain is not configured")
+	}
+	return factory()
+}
+
+func handleLocalAgentRoutes(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), localSession string, resolver agentConfigResolver) bool {
+	if retiredLocalServiceDeployment(r.URL.Path, r.Method) {
+		return false
+	}
+	if isMutation(r.Method) && !isPlacementPreview(r.URL.Path) {
+		if r.Header.Get("X-Local-Session") != localSession {
+			writeLocalError(w, r, http.StatusUnauthorized, "LOCAL_SESSION_REQUIRED", "mutating local requests require X-Local-Session")
+			return true
+		}
+		if !requireLocalIdempotencyKey(w, r) {
+			return true
+		}
+	}
+	return localTelemetry(w, r, cfg, factory, resolver) ||
+		localSecretOperation(w, r, cfg, factory, resolver) ||
+		localIncidentOperation(w, r, cfg, factory, resolver)
+}
+
+func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "secrets" {
+		return false
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	if err != nil || projectID == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+		return true
+	}
+	if rejectCallerAuthorityQuery(w, r) {
+		return true
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusNotImplemented, "SECRETS_OPERATION_UNSUPPORTED", "this secret operation is not supported by the local Agent API")
+		return true
+	}
+	if len(parts) == 6 && parts[5] == "setup-totp" {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			writeLocalError(w, r, http.StatusBadRequest, "INVALID_TOTP_REQUEST", "invalid TOTP setup request")
+			return true
+		}
+		if len(raw) != 0 {
+			writeLocalError(w, r, http.StatusBadRequest, "TOTP_INPUT_UNSUPPORTED", "TOTP setup accepts no caller-controlled fields")
+			return true
+		}
+		callLocalTOTPAgent(w, r, cfg, factory, projectID, resolver...)
+		return true
+	}
+	if len(parts) == 5 {
+		req, ok := readLocalSecretRequest(w, r, projectID, "")
+		if !ok {
+			return true
+		}
+		callLocalSecretAgent(w, r, cfg, factory, "created", req.SecretRequest, false, resolver...)
+		return true
+	}
+	if len(parts) != 7 {
+		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local secret route is not implemented")
+		return true
+	}
+	name, err := url.PathUnescape(parts[5])
+	if err != nil || name == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "SECRET_NAME_REQUIRED", "secret name is required")
+		return true
+	}
+	req, ok := readLocalSecretRequest(w, r, projectID, name)
+	if !ok {
+		return true
+	}
+	switch parts[6] {
+	case "reveal":
+		if !req.explicitReveal {
+			writeLocalError(w, r, http.StatusBadRequest, "SECRET_REVEAL_INTENT_REQUIRED", "secret reveal requires explicit reveal intent")
+			return true
+		}
+		if !req.hasSecondFactor() {
+			writeLocalError(w, r, http.StatusBadRequest, "SECRET_SECOND_FACTOR_REQUIRED", "secret reveal requires OTP or TOTP")
+			return true
+		}
+		callLocalSecretAgent(w, r, cfg, factory, "revealed", req.SecretRequest, true, resolver...)
+	case "rotate":
+		if !req.hasSecondFactor() {
+			writeLocalError(w, r, http.StatusBadRequest, "SECRET_SECOND_FACTOR_REQUIRED", "secret rotation requires OTP or TOTP")
+			return true
+		}
+		callLocalSecretAgent(w, r, cfg, factory, "rotated", req.SecretRequest, false, resolver...)
+	default:
+		writeLocalError(w, r, http.StatusNotImplemented, "SECRETS_OPERATION_UNSUPPORTED", "this secret operation is not supported by the local Agent API")
+	}
+	return true
+}
+
+func callLocalTOTPAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), projectID string, resolver ...agentConfigResolver) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentSecretError(w, r, err)
+		return
+	}
+	resp, err := agentclient.New(agentCfg).SetupTOTP(ctx, &agentv1.SetupTOTPRequest{ProjectID: projectID})
+	if err != nil {
+		writeLocalAgentSecretError(w, r, err)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "created", "source": "agent", "project_id": projectID,
+		"secret": resp.Secret, "uri": resp.URI, "ttl_seconds": 300,
+	})
+}
+
+type localSecretRequest struct {
+	*agentv1.SecretRequest
+	explicitReveal bool
+}
+
+func (req localSecretRequest) hasSecondFactor() bool {
+	return req.TOTPCode != "" || (req.OTPRequestID != "" && req.OTPCode != "")
+}
+
+func readLocalSecretRequest(w http.ResponseWriter, r *http.Request, projectID, pathName string) (localSecretRequest, bool) {
+	var raw map[string]json.RawMessage
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err := dec.Decode(&raw); err != nil {
+		writeLocalError(w, r, http.StatusBadRequest, "INVALID_SECRET_REQUEST", "invalid secret request")
+		return localSecretRequest{}, false
+	}
+	allowed := map[string]bool{
+		"service_id": true, "name": true, "namespace": true,
+		"otp_code": true, "otp_request_id": true, "totp_code": true, "reveal": true, "explicit_intent": true,
+	}
+	for key := range raw {
+		lower := strings.ToLower(key)
+		if isCallerAuthorityField(lower) {
+			writeLocalError(w, r, http.StatusBadRequest, "CALLER_AUTHORITY_FORBIDDEN", "authentication and identity fields are managed by the local backend")
+			return localSecretRequest{}, false
+		}
+		if !allowed[lower] {
+			writeLocalError(w, r, http.StatusBadRequest, "SECRET_INPUT_UNSUPPORTED", "secret request contains an unsupported field")
+			return localSecretRequest{}, false
+		}
+	}
+	name := pathName
+	if name == "" {
+		name = jsonString(raw, "name")
+	}
+	req := &agentv1.SecretRequest{
+		ProjectID:    projectID,
+		ServiceID:    jsonString(raw, "service_id"),
+		Name:         name,
+		Namespace:    jsonString(raw, "namespace"),
+		OTPCode:      jsonString(raw, "otp_code"),
+		OTPRequestID: jsonString(raw, "otp_request_id"),
+		TOTPCode:     jsonString(raw, "totp_code"),
+	}
+	if req.ServiceID == "" || req.Name == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "SECRET_REQUIRED_FIELDS_MISSING", "service_id and name are required")
+		return localSecretRequest{}, false
+	}
+	return localSecretRequest{SecretRequest: req, explicitReveal: jsonBool(raw, "reveal") || strings.EqualFold(jsonString(raw, "explicit_intent"), "reveal")}, true
+}
+
+func jsonString(raw map[string]json.RawMessage, key string) string {
+	data, ok := raw[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func jsonBool(raw map[string]json.RawMessage, key string) bool {
+	data, ok := raw[key]
 	if !ok {
 		return false
+	}
+	var value bool
+	return json.Unmarshal(data, &value) == nil && value
+}
+
+func callLocalSecretAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), statusText string, req *agentv1.SecretRequest, includePassword bool, resolver ...agentConfigResolver) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentSecretError(w, r, err)
+		return
+	}
+	client := agentclient.New(agentCfg)
+	var resp *agentv1.SecretResponse
+	switch statusText {
+	case "created":
+		resp, err = client.CreateSecret(ctx, req)
+	case "revealed":
+		resp, err = client.RevealSecret(ctx, req)
+	case "rotated":
+		resp, err = client.RotateSecret(ctx, req)
+	}
+	if err != nil {
+		writeLocalAgentSecretError(w, r, err)
+		return
+	}
+	out := map[string]any{
+		"status":     statusText,
+		"source":     "agent",
+		"project_id": resp.ProjectID,
+		"service_id": resp.ServiceID,
+		"name":       resp.Name,
+		"namespace":  resp.Namespace,
+		"username":   resp.Username,
+	}
+	if includePassword {
+		out["password"] = resp.Password
+		out["ttl_seconds"] = 60
+		out["reveal_expires_at"] = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func writeLocalAgentSecretError(w http.ResponseWriter, r *http.Request, err error) {
+	statusCode := http.StatusBadGateway
+	code := "AGENT_SECRET_OPERATION_FAILED"
+	if _, ok := err.(agentConfigReloadError); ok {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONFIG_RELOAD_FAILED", "Agent configuration is unavailable")
+		return
+	}
+	switch grpcstatus.Code(err) {
+	case codes.InvalidArgument:
+		statusCode, code = http.StatusBadRequest, "INVALID_SECRET_REQUEST"
+	case codes.Unauthenticated:
+		statusCode, code = http.StatusUnauthorized, "AGENT_AUTH_REQUIRED"
+	case codes.PermissionDenied:
+		statusCode, code = http.StatusForbidden, "SECRET_ACCESS_DENIED"
+	case codes.FailedPrecondition:
+		statusCode, code = http.StatusPreconditionFailed, "SECRET_PRECONDITION_FAILED"
+	case codes.Unimplemented:
+		statusCode, code = http.StatusNotImplemented, "AGENT_SECRET_UNSUPPORTED"
+	case codes.DeadlineExceeded:
+		statusCode, code = http.StatusGatewayTimeout, "AGENT_SECRET_TIMEOUT"
+	case codes.Unavailable:
+		statusCode, code = http.StatusBadGateway, "AGENT_UNAVAILABLE"
+	}
+	writeLocalError(w, r, statusCode, code, "Agent secret operation failed")
+}
+
+func localIncidentOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "incidents" {
+		return false
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	if err != nil || projectID == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+		return true
+	}
+	if rejectCallerAuthorityQuery(w, r) {
+		return true
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method == http.MethodGet {
+		req, ok := readLocalIncidentQuery(w, r, projectID)
+		if !ok {
+			return true
+		}
+		if len(parts) == 5 {
+			callLocalIncidentListAgent(w, r, cfg, factory, req, resolver...)
+			return true
+		}
+		if len(parts) == 6 {
+			incidentID, err := url.PathUnescape(parts[5])
+			if err != nil || incidentID == "" {
+				writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ID_REQUIRED", "incident_id is required")
+				return true
+			}
+			callLocalIncidentGetAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID}, resolver...)
+			return true
+		}
+		if len(parts) == 7 && parts[6] == "evidence" {
+			incidentID, err := url.PathUnescape(parts[5])
+			if err != nil || incidentID == "" {
+				writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ID_REQUIRED", "incident_id is required")
+				return true
+			}
+			callLocalIncidentEvidenceAgent(w, r, cfg, factory, &agentv1.IncidentGetRequest{ProjectID: projectID, IncidentID: incidentID}, resolver...)
+			return true
+		}
+		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local incident route is not implemented")
+		return true
+	}
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return true
+	}
+	if len(parts) != 7 || parts[6] != "resolve" {
+		writeLocalError(w, r, http.StatusNotFound, "LOCAL_ROUTE_NOT_FOUND", "local incident route is not implemented")
+		return true
+	}
+	incidentID, err := url.PathUnescape(parts[5])
+	if err != nil || incidentID == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_ID_REQUIRED", "incident_id is required")
+		return true
+	}
+	req, ok := readLocalIncidentRequest(w, r, projectID, incidentID)
+	if !ok {
+		return true
+	}
+	callLocalIncidentResolveAgent(w, r, cfg, factory, req, resolver...)
+	return true
+}
+
+func readLocalIncidentQuery(w http.ResponseWriter, r *http.Request, projectID string) (*agentv1.IncidentListRequest, bool) {
+	query := r.URL.Query()
+	limit, _ := strconv.ParseInt(query.Get("limit"), 10, 32)
+	return &agentv1.IncidentListRequest{ProjectID: projectID, Status: strings.TrimSpace(query.Get("status")), Limit: int32(limit)}, true
+}
+
+func readLocalIncidentRequest(w http.ResponseWriter, r *http.Request, projectID, incidentID string) (*agentv1.IncidentResolveRequest, bool) {
+	var raw map[string]json.RawMessage
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err := dec.Decode(&raw); err != nil {
+		writeLocalError(w, r, http.StatusBadRequest, "INVALID_INCIDENT_REQUEST", "invalid incident request")
+		return nil, false
+	}
+	for key := range raw {
+		lower := strings.ToLower(key)
+		if isCallerAuthorityField(lower) {
+			writeLocalError(w, r, http.StatusBadRequest, "CALLER_AUTHORITY_FORBIDDEN", "authentication and identity fields are managed by the local backend")
+			return nil, false
+		}
+		if lower != "" {
+			writeLocalError(w, r, http.StatusBadRequest, "INCIDENT_INPUT_UNSUPPORTED", "incident request contains an unsupported field")
+			return nil, false
+		}
+	}
+	return &agentv1.IncidentResolveRequest{ProjectID: projectID, IncidentID: incidentID}, true
+}
+
+func isCallerAuthorityField(field string) bool {
+	return field == "pat" || field == "user_id" || field == "role"
+}
+
+func rejectCallerAuthorityQuery(w http.ResponseWriter, r *http.Request) bool {
+	for field := range r.URL.Query() {
+		if isCallerAuthorityField(strings.ToLower(field)) {
+			writeLocalError(w, r, http.StatusBadRequest, "CALLER_AUTHORITY_FORBIDDEN", "authentication and identity fields are managed by the local backend")
+			return true
+		}
+	}
+	return false
+}
+
+func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentListRequest, resolver ...agentConfigResolver) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	resp, err := agentclient.New(agentCfg).ListIncidents(ctx, req)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incidents": resp.Incidents})
+}
+
+func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest, resolver ...agentConfigResolver) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	resp, err := agentclient.New(agentCfg).GetIncident(ctx, req)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incident": resp})
+}
+
+func callLocalIncidentEvidenceAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest, resolver ...agentConfigResolver) {
+	ctx, cancel := context.WithTimeout(r.Context(), incidentEvidenceOperationTimeout)
+	defer cancel()
+	pat, err := resolvePAT("", factory)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	ctx = agentclient.WithPAT(ctx, pat)
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	response, err := agentclient.New(agentCfg).GetIncidentEvidence(ctx, req)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	body, err := json.Marshal(response)
+	if err != nil || len(body) > incidentEvidenceResponseLimit {
+		writeLocalError(w, r, http.StatusBadGateway, "INCIDENT_EVIDENCE_INVALID", "Agent incident evidence response is invalid")
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(append(body, '\n'))
+}
+
+func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentResolveRequest, resolver ...agentConfigResolver) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if pat := optionalPAT(factory); pat != "" {
+		ctx = agentclient.WithPAT(ctx, pat)
+	}
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	resp, err := agentclient.New(agentCfg).ResolveIncident(ctx, req)
+	if err != nil {
+		writeLocalAgentIncidentError(w, r, err)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":         "resolved",
+		"source":         "agent",
+		"payload_policy": "incident records contain factual Agent runtime state only",
+		"incident":       resp,
+	})
+}
+
+func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err error) {
+	statusCode := http.StatusBadGateway
+	code := "AGENT_INCIDENT_OPERATION_FAILED"
+	if _, ok := err.(agentConfigReloadError); ok {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONFIG_RELOAD_FAILED", "Agent configuration is unavailable")
+		return
+	}
+	switch grpcstatus.Code(err) {
+	case codes.InvalidArgument:
+		statusCode, code = http.StatusBadRequest, "INVALID_INCIDENT_REQUEST"
+	case codes.Unauthenticated:
+		statusCode, code = http.StatusUnauthorized, "AGENT_AUTH_REQUIRED"
+	case codes.PermissionDenied:
+		statusCode, code = http.StatusForbidden, "INCIDENT_ACCESS_DENIED"
+	case codes.FailedPrecondition:
+		statusCode, code = http.StatusPreconditionFailed, "INCIDENT_PRECONDITION_FAILED"
+	case codes.ResourceExhausted:
+		statusCode, code = http.StatusBadGateway, "INCIDENT_EVIDENCE_TOO_LARGE"
+	case codes.NotFound:
+		statusCode, code = http.StatusNotFound, "INCIDENT_NOT_FOUND"
+	case codes.Unimplemented:
+		statusCode, code = http.StatusNotImplemented, "AGENT_INCIDENT_UNSUPPORTED"
+	case codes.DeadlineExceeded:
+		statusCode, code = http.StatusGatewayTimeout, "AGENT_INCIDENT_TIMEOUT"
+	case codes.Unavailable:
+		statusCode, code = http.StatusBadGateway, "AGENT_UNAVAILABLE"
+	}
+	writeLocalError(w, r, statusCode, code, "Agent incident operation failed")
+}
+
+func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
+	req, view, ok := localTelemetryRequest(w, r)
+	if !ok {
+		return false
+	}
+	if req == nil {
+		return true
 	}
 	if r.Method != http.MethodGet {
 		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
 		return true
 	}
-	query := r.URL.Query()
-	sinceUnix, _ := strconv.ParseInt(query.Get("since_unix"), 10, 64)
-	maxChunkBytes, _ := strconv.ParseInt(query.Get("max_chunk_bytes"), 10, 32)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if pat := optionalPAT(factory); pat != "" {
 		ctx = agentclient.WithPAT(ctx, pat)
 	}
-	summary := telemetrySummary{ProjectID: projectID, SinceUnix: sinceUnix, Source: "agent", PayloadPolicy: "raw telemetry payload remains local and is not returned to the browser"}
-	err := agentclient.New(cfg).Sync(ctx, &agentv1.SyncRequest{ProjectID: projectID, LastReceivedUnix: sinceUnix, MaxChunkBytes: int32(maxChunkBytes)}, func(chunk *agentv1.SyncChunk) error {
-		summary.ChunkCount++
-		summary.RecordCount += int(chunk.RecordCount)
-		if summary.StartUnix == 0 || chunk.StartUnix < summary.StartUnix {
-			summary.StartUnix = chunk.StartUnix
-		}
-		if chunk.EndUnix > summary.EndUnix {
-			summary.EndUnix = chunk.EndUnix
-		}
-		if chunk.Done {
-			summary.Done = true
-		}
-		return nil
-	})
-	w.Header().Set("content-type", "application/json")
+	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
 	if err != nil {
-		writeLocalError(w, r, http.StatusBadGateway, "AGENT_TELEMETRY_UNAVAILABLE", "Agent telemetry summary is unavailable")
+		writeLocalAgentTelemetryError(w, r, err)
 		return true
 	}
-	_ = json.NewEncoder(w).Encode(summary)
+	resp, err := agentclient.New(agentCfg).QueryTelemetry(ctx, req)
+	w.Header().Set("content-type", "application/json")
+	if err != nil {
+		writeLocalAgentTelemetryError(w, r, err)
+		return true
+	}
+	sanitizeTelemetryResponse(resp)
+	if view == "summary" && resp.Summary != nil {
+		_ = json.NewEncoder(w).Encode(telemetrySummary{
+			ProjectID:     resp.ProjectID,
+			SinceUnix:     resp.Summary.SinceUnix,
+			RecordCount:   int(resp.Summary.MetricCount + resp.Summary.LogCount),
+			StartUnix:     resp.Summary.SinceUnix,
+			EndUnix:       resp.Summary.EndUnix,
+			Done:          true,
+			Source:        "agent",
+			PayloadPolicy: resp.PayloadPolicy,
+			Health:        resp.Summary.Health,
+			MetricCount:   int(resp.Summary.MetricCount),
+			LogCount:      int(resp.Summary.LogCount),
+			ErrorCount:    int(resp.Summary.ErrorCount),
+			ServiceCount:  int(resp.Summary.ServiceCount),
+		})
+		return true
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 	return true
 }
 
@@ -246,129 +1253,114 @@ type telemetrySummary struct {
 	Done          bool   `json:"done"`
 	Source        string `json:"source"`
 	PayloadPolicy string `json:"payload_policy"`
+	Health        string `json:"health,omitempty"`
+	MetricCount   int    `json:"metric_count,omitempty"`
+	LogCount      int    `json:"log_count,omitempty"`
+	ErrorCount    int    `json:"error_count,omitempty"`
+	ServiceCount  int    `json:"service_count,omitempty"`
 }
 
-func telemetrySummaryProjectID(path string) (string, bool) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 6 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "telemetry" || parts[5] != "summary" {
-		return "", false
+func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.TelemetryQueryRequest, string, bool) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" {
+		return nil, "", false
 	}
 	projectID, err := url.PathUnescape(parts[3])
-	return projectID, err == nil && projectID != ""
-}
-
-func localDeploymentIDs(path, method string) (string, string, bool) {
-	if method != http.MethodPost {
-		return "", "", false
+	if err != nil || projectID == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+		return nil, "", true
 	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 7 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "services" || parts[6] != "deployments" {
-		return "", "", false
-	}
-	return parts[3], parts[5], true
-}
-
-func fetchCloudServiceSourceType(ctx context.Context, cloud url.URL, projectID, serviceID string, headers http.Header, factory func() (keychain.Store, error)) (string, bool, error) {
-	cloud.Path = "/api/projects/" + url.PathEscape(projectID) + "/services"
-	cloud.RawQuery = ""
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cloud.String(), nil)
-	if err != nil {
-		return "", false, err
-	}
-	copyProxyHeaders(req.Header, headers)
-	req.Header.Del("Authorization")
-	if pat := optionalPAT(factory); pat != "" {
-		req.Header.Set("Authorization", "Bearer "+pat)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", false, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("service list status %d", resp.StatusCode)
-	}
-	var payload struct {
-		Services []struct {
-			ID         string `json:"id"`
-			SourceType string `json:"source_type"`
-		} `json:"services"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", false, err
-	}
-	for _, service := range payload.Services {
-		if service.ID == serviceID {
-			return service.SourceType, true, nil
+	query := r.URL.Query()
+	sinceUnix, _ := strconv.ParseInt(query.Get("since_unix"), 10, 64)
+	limit, _ := strconv.ParseInt(query.Get("limit"), 10, 32)
+	req := &agentv1.TelemetryQueryRequest{ProjectID: projectID, SinceUnix: sinceUnix, Cursor: query.Get("cursor"), Limit: int32(limit)}
+	switch {
+	case len(parts) == 6 && parts[4] == "telemetry" && parts[5] == "summary":
+		req.IncludeSummary = true
+		req.IncludeServices = true
+		return req, "summary", true
+	case len(parts) == 7 && parts[4] == "telemetry" && parts[5] == "services":
+		serviceID, err := url.PathUnescape(parts[6])
+		if err != nil || serviceID == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "SERVICE_ID_REQUIRED", "service_id is required")
+			return nil, "", true
 		}
+		req.ServiceID = serviceID
+		req.IncludeSummary = true
+		req.IncludeServices = true
+		return req, "service", true
+	case len(parts) == 5 && parts[4] == "logs":
+		req.ServiceID = query.Get("service_id")
+		req.IncludeLogs = true
+		return req, "logs", true
+	case len(parts) == 6 && parts[4] == "logs" && parts[5] == "query":
+		req.ServiceID = query.Get("service_id")
+		req.IncludeLogs = true
+		return req, "logs", true
 	}
-	return "", false, nil
+	if parts[4] == "telemetry" || parts[4] == "logs" {
+		writeLocalError(w, r, http.StatusNotImplemented, "TELEMETRY_OPERATION_UNSUPPORTED", "this telemetry/logs operation is not supported by the local Agent API")
+		return nil, "", true
+	}
+	return nil, "", false
 }
 
-func localToCloudPath(u *url.URL) (string, string, error) {
-	path := strings.TrimPrefix(u.Path, "/api/local")
-	if path == "/projects" || path == "/projects/" {
-		q := u.Query()
-		orgID := q.Get("org_id")
-		if orgID == "" {
-			orgID = "org-1"
-		}
-		q.Del("org_id")
-		return "/api/orgs/" + url.PathEscape(orgID) + "/projects", q.Encode(), nil
+func writeLocalAgentTelemetryError(w http.ResponseWriter, r *http.Request, err error) {
+	statusCode := http.StatusBadGateway
+	code := "AGENT_TELEMETRY_UNAVAILABLE"
+	if _, ok := err.(agentConfigReloadError); ok {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONFIG_RELOAD_FAILED", "Agent configuration is unavailable")
+		return
 	}
-	if strings.HasPrefix(path, "/projects/") && strings.HasSuffix(path, "/nodes/bootstrap") {
-		return "/api" + strings.TrimSuffix(path, "/nodes/bootstrap") + "/bootstrap-sessions", u.RawQuery, nil
+	switch grpcstatus.Code(err) {
+	case codes.InvalidArgument:
+		statusCode, code = http.StatusBadRequest, "INVALID_TELEMETRY_REQUEST"
+	case codes.Unauthenticated:
+		statusCode, code = http.StatusUnauthorized, "AGENT_AUTH_REQUIRED"
+	case codes.PermissionDenied:
+		statusCode, code = http.StatusForbidden, "TELEMETRY_ACCESS_DENIED"
+	case codes.Unimplemented:
+		statusCode, code = http.StatusNotImplemented, "AGENT_TELEMETRY_UNSUPPORTED"
+	case codes.DeadlineExceeded:
+		statusCode, code = http.StatusGatewayTimeout, "AGENT_TELEMETRY_TIMEOUT"
+	case codes.Unavailable:
+		statusCode, code = http.StatusBadGateway, "AGENT_UNAVAILABLE"
 	}
-	if disabledCode, ok := disabledLocalCapability(path); ok {
-		return disabledCode, "", fmt.Errorf("local endpoint %s is not wired to the Agent yet", u.Path)
-	}
-	if strings.HasPrefix(path, "/projects/") {
-		return "/api" + path, u.RawQuery, nil
-	}
-	return "", "", fmt.Errorf("local route %s is not implemented", u.Path)
+	writeLocalError(w, r, statusCode, code, "Agent telemetry operation failed")
 }
 
-func disabledLocalCapability(path string) (string, bool) {
-	for _, marker := range []struct {
-		fragment string
-		code     string
-	}{
-		{"/secrets", "SECRETS_LOCAL_API_NOT_IMPLEMENTED"},
-		{"/incidents", "INCIDENTS_LOCAL_API_NOT_IMPLEMENTED"},
-		{"/telemetry", "TELEMETRY_LOCAL_API_NOT_IMPLEMENTED"},
-		{"/logs", "LOGS_LOCAL_API_NOT_IMPLEMENTED"},
-	} {
-		if strings.Contains(path, marker.fragment) {
-			return marker.code, true
-		}
+func sanitizeTelemetryResponse(resp *agentv1.TelemetryQueryResponse) {
+	if resp == nil {
+		return
 	}
-	return "", false
-}
-
-func isLocalCapability(code string) bool {
-	return strings.HasSuffix(code, "_LOCAL_API_NOT_IMPLEMENTED")
-}
-
-func isMutation(method string) bool {
-	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
-}
-
-func copyProxyHeaders(dst, src http.Header) {
-	for _, key := range []string{"Content-Type", "X-Request-ID", "Idempotency-Key"} {
-		if value := src.Get(key); value != "" {
-			dst.Set(key, value)
-		}
+	resp.PayloadPolicy = localTelemetryPayloadPolicy(resp.PayloadPolicy)
+	for i := range resp.Logs {
+		resp.Logs[i].Message = redactLocalTelemetryText(resp.Logs[i].Message)
 	}
 }
 
-func writeLocalError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
-	requestID := r.Header.Get("X-Request-ID")
-	w.Header().Set("content-type", "application/json")
-	if requestID != "" {
-		w.Header().Set("X-Request-ID", requestID)
+func localTelemetryPayloadPolicy(value string) string {
+	if value != "" {
+		return value
 	}
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": message, "retryable": status >= 500, "request_id": requestID}})
+	return "raw logs and raw metric streams remain Agent-local; browser responses are redacted summaries/windows"
+}
+
+var localTelemetryRedactors = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	{regexp.MustCompile(`(?i)(authorization:\s*bearer\s+)[^\s,;]+`), `${1}[REDACTED]`},
+	{regexp.MustCompile(`(?i)(password|passwd|pwd|token|pat|api[_-]?key|secret|authorization|bearer)\s*[:=]\s*("[^"]+"|'[^']+'|[^\s,;]+)`), `$1=[REDACTED]`},
+	{regexp.MustCompile(`-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----`), `[REDACTED_PRIVATE_KEY]`},
+}
+
+func redactLocalTelemetryText(value string) string {
+	out := value
+	for _, redactor := range localTelemetryRedactors {
+		out = redactor.re.ReplaceAllString(out, redactor.repl)
+	}
+	return strings.ReplaceAll(out, "kubeconfig", "[REDACTED]")
 }
 
 func newLocalSessionToken() string {
@@ -401,14 +1393,17 @@ func resolveUIDir() string {
 	if dir := os.Getenv("OPSI_UI_DIR"); dir != "" {
 		return dir
 	}
-	candidates := []string{"ui/out", "cli/ui/out"}
-	if _, file, _, ok := runtime.Caller(0); ok {
-		candidates = append(candidates, filepath.Join(filepath.Dir(file), "..", "..", "ui", "out"))
+	candidates := []string{}
+	if executable, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(executable), "opsi-ui"))
 	}
 	for _, dir := range candidates {
 		if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
 			return dir
 		}
 	}
-	return candidates[0]
+	if len(candidates) != 0 {
+		return candidates[0]
+	}
+	return "opsi-ui"
 }

@@ -1,0 +1,13 @@
+**
+!.dockerignore
+!cloud/
+!cloud/Dockerfile
+!cloud/go.mod
+!cloud/go.sum
+!cloud/cmd/
+!cloud/cmd/**
+!cloud/internal/
+!cloud/internal/**
+!contracts/
+!contracts/go/
+!contracts/go/**

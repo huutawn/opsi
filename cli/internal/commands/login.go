@@ -9,14 +9,19 @@ import (
 )
 
 func newLoginCommand(factory func() (keychain.Store, error)) *cobra.Command {
-	var pat string
+	var patFile string
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Store a Cloud PAT in the OS keychain",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			pat = strings.TrimSpace(pat)
+			value, err := readProtectedSecret(patFile, "PAT")
+			if err != nil {
+				return err
+			}
+			defer clearBytes(value)
+			pat := strings.TrimSpace(string(value))
 			if pat == "" {
-				return fmt.Errorf("--pat is required in Phase 1; OAuth login is added in a later phase")
+				return fmt.Errorf("PAT file is empty")
 			}
 			store, err := factory()
 			if err != nil {
@@ -29,6 +34,6 @@ func newLoginCommand(factory func() (keychain.Store, error)) *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&pat, "pat", "", "personal access token returned by Cloud")
+	cmd.Flags().StringVar(&patFile, "pat-file", "", "protected PAT file; use /dev/stdin for piped input")
 	return cmd
 }

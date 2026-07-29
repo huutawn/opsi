@@ -10,6 +10,7 @@ func TestLoadConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cli.yaml")
 	data := []byte(`agent_addr: 127.0.0.1:9443
+cloud_url: https://cloud.example.test
 tls:
   ca_cert_path: ./ca.crt
   client_cert_path: ./client.crt
@@ -25,7 +26,7 @@ tls:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AgentAddr != "127.0.0.1:9443" || !cfg.TLS.Enabled() {
+	if cfg.AgentAddr != "127.0.0.1:9443" || cfg.CloudURL != "https://cloud.example.test" || !cfg.TLS.Enabled() {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }
@@ -35,5 +36,18 @@ func TestValidateRejectsPartialClientCert(t *testing.T) {
 	cfg.TLS.ClientCertPath = "client.crt"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRequiresSelectedConfigAndCloudURL(t *testing.T) {
+	if _, err := Load(""); err == nil {
+		t.Fatal("missing selected config was accepted")
+	}
+	path := filepath.Join(t.TempDir(), "cli.yaml")
+	if err := os.WriteFile(path, []byte("agent_addr: 127.0.0.1:9443\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSelected(path); err == nil {
+		t.Fatal("selected config silently defaulted cloud_url")
 	}
 }

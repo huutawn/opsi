@@ -5,49 +5,108 @@ Agent is the execution brain that runs on the user's VPS. It provides config loa
 ## Build
 
 ```bash
-rtk go build ./cmd/opsi-agent
+go build ./cmd/opsi-agent
 ```
 
 ## Test
 
 ```bash
-rtk go test ./...
-rtk go test -cover ./...
+go test ./...
+go test -cover ./...
 ```
 
 ## Run locally
 
 ```bash
-rtk go run ./cmd/opsi-agent --config config.example.yaml
+go run ./cmd/opsi-agent --config config.example.yaml
+go run ./cmd/opsi-agent --config config.example.yaml --check
+go run ./cmd/opsi-agent --version
 ```
 
 Generate local development certificates first if TLS paths are enabled:
 
 ```bash
-rtk ../scripts/dev-certs.sh ./certs
+ ../scripts/dev-certs.sh ./certs
 ```
 
-For local deployment smoke tests without containerd/K3s, keep `deployment.dry_run: true` in `config.example.yaml`. Production single-node K3s deployments use `git`, `nerdctl --namespace k8s.io build`, `kubectl apply`, `kubectl set image`, and `kubectl rollout status/undo`. Docker remains available with `deployment.builder_mode: docker` for compatibility or registry-oriented flows.
+`deployment.dry_run` controls only managed-service catalog application. It does
+not bypass immutable `ProductionAdapter` deployment. Production deployments
+consume only the immutable `AgentCommand` delivered by Cloud and reconcile
+Opsi-owned K3s resources by digest.
+
+## Linux release artifact
+
+From the repository root:
+
+```bash
+make agent-release
+make verify-agent-release
+```
+
+`make agent-release` writes a direct Linux amd64 executable plus deterministic
+metadata to:
+
+```text
+dist/agent/opsi-agent-linux-amd64
+dist/agent/checksums.txt
+dist/agent/release.json
+```
+
+The release artifact is built with explicit version and full commit metadata.
+It has not been published or hosted over HTTPS, and Bootstrap Worker has not
+been tested against this artifact on a VPS.
 
 ## Systemd Runtime
 
-Production Agent is intended to run as a native systemd service, not as a Docker container. A unit template is available at `packaging/systemd/opsi-agent.service`. Expected layout:
+Production Agent is intended to run as a native systemd service, not as a Docker container. `packaging/systemd/opsi-agent.service` is the canonical unit and a Bootstrap Worker parity test prevents its embedded install asset from diverging. The checksum-addressed layout is:
 
 ```text
-/opt/opsi/agent/releases/<version>/opsi-agent
-/opt/opsi/agent/current -> /opt/opsi/agent/releases/<version>
+/opt/opsi/agent/releases/<agent-sha256>/opsi-agent
+/opt/opsi/agent/current -> releases/<agent-sha256>
+/opt/opsi/agent/previous -> releases/<previous-sha256>  # optional
 /etc/opsi/agent.yaml
 /var/lib/opsi/
 ```
 
-Rollback is a symlink switch back to a previous release followed by `systemctl restart opsi-agent`.
+`install_agent` only verifies and stages a release. `register_agent` atomically
+updates `previous` and `current`, installs the unit/config atomically, restarts
+the service, checks the local health endpoint, and restores the previous release
+if the new one is unhealthy. This behavior has unit/contract coverage but has
+not been proven on a clean target VPS; that evidence belongs to P06.
 
-## Phase 2 Deployment
+## Immutable Deployment
 
-Agent exposes `opsi.agent.v1.DeploymentService.Deploy` over gRPC. The engine resolves missing CLI request fields from `deployment:` config, requires `project_id` + `service_id` + `service_name`, upserts service metadata in SQLite table `services`, records deployments in SQLite table `deployments` using WAL mode, builds under `/tmp/opsi-builds/{project_id}/{deploy_id}/`, and removes the build directory after success or failure.
+The public Agent API has no direct deployment RPC. Cloud resolves the accepted
+BuildRecord, topology, policy, routing, and durable job into an immutable
+`AgentCommand` carrying a canonical `RolloutIntent`; the Agent polls that
+command, pulls its digest, reconciles Opsi-owned K3s resources, reports
+readiness, and participates in rollback reconciliation. Commands without a
+RolloutIntent fail closed before Kubernetes mutation. Historical SQLite
+deployment columns remain readable for restore compatibility but are not
+executable input paths.
 
-Progress phases are `queued`, `cloning`, `building`, `applying`, `watching`, `success`, `rollback`, and `failed`. Progress events include project/service scope. Only deploy-time rollout failures before readiness passes are rollback-safe; those call `kubectl rollout undo deployment/{service_name}` and store `rollback_safe` plus `rollback_reason`.
+The poll transport may retain the historical `/webhooks/next` route name, but
+it carries only canonical deployment or node lifecycle jobs. It is not a
+generic webhook relay, and the Agent has no Git/source or arbitrary-manifest
+deployment path.
 
-## Phase 3 Telemetry
+## Phase 3 Telemetry and Incident Evidence
 
 Agent migrates SQLite tables `metrics`, `logs`, `incidents`, and `audit_log` alongside Phase 2 `services`/`deployments`, with WAL mode enabled. When `telemetry.enabled` is true, the runtime collector writes node/process fallback metrics every `telemetry.interval` and applies raw retention for metrics/logs. `opsi.agent.v1.TelemetryService.Sync` returns project-scoped zstd chunks with delta-encoded metric/log payloads.
+
+`IncidentService.GetIncidentEvidence` builds one bounded
+`opsi.incident_evidence.v1` record from Agent-local SQLite facts plus injectable
+fake Kubernetes/rollout projections. The body and lowercase SHA-256 hash are
+persisted in the Agent `incidents` row; Cloud stores no evidence body. Live
+Agent/VPS and UI/browser acceptance are deferred to R5-017.
+
+## Safe ActionPlane
+
+Agent hosts the authoritative ActionPlane v1 state machine in the existing
+SQLite database. It authenticates the principal, resolves an active public
+approval device from Cloud, verifies Ed25519 approval, locks the target,
+rechecks factual state, consumes the nonce, executes one typed action, and
+persists the post-check result before releasing the lock. Deploy and rollback
+remain exclusively on the canonical Cloud RolloutIntent/PollJob path. Source
+verification uses fake Kubernetes/Cloud adapters; live Agent/K3s acceptance is
+deferred to R5-017.

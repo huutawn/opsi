@@ -16,15 +16,55 @@ cloud/opsi-cloud
 opsi-agent
 opsi-cli
 opsi-cloud
-certs/
-*.db
-*.sqlite
-*.sqlite3
-*.sqlite-*
+!cloud/cmd/opsi-cloud/
+!cloud/cmd/opsi-cloud/*.go
 *.tsbuildinfo
 .AGENTS
 .AGENTS/*
+
+# Local runtime configuration
+**/config.local.yaml
+**/config.local.yml
+**/config.local.json
+**/config.local.toml
+
+# Environment and credential files
+.env
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+/deploy/dev-control-plane/.env
+/deploy/dev-control-plane/config/cloud.json
+/deploy/dev-control-plane/config/bootstrap-worker.json
+/deploy/dev-control-plane/secrets/*
+/deploy/staging-control-plane/.env
+/deploy/staging-control-plane/config/cloud.json
+/deploy/staging-control-plane/config/bootstrap-worker.json
+/deploy/staging-control-plane/secrets/*
+!**/*.example.json
+
+# Runtime certificates, keys and keystores
+**/certs/
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/id_rsa
+**/id_ed25519
+**/kubeconfig
+**/kubeconfig.*
+
+# Runtime output
+**/*-outbox.log
+**/*.log
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-*
+**/*.db
 # Test and Coverage
+__pycache__/
+*.py[cod]
 *.test
 *.out
 *.coverprofile
@@ -50,26 +90,15 @@ cli/ui/node_modules/
 AGENTS.md
 headroom_memory.db
 .agents/*
-.agents/rules_enforced.md
+!.agents/rules.md
+!.agents/rules_enforced.md
 !.agents/current.md
 !.agents/production_ready_rules.md
 .agents_archive
-docs/*
-docs/repair/
-docs/repair/*.md
-docs/opsi_srs.md
-docs/current_state.md
-!docs/status_matrix.md
-!docs/demo_runbook.md
-!docs/security_story.md
-!docs/future_work.md
-!docs/archive/
-docs/archive/*
-docs/archive/README.md
-docs/archive/opsi_srs_v3_2_legacy.md
-docs/production_ready/
-docs/production_ready/*.md
-docs/architecture_decisions/
-docs/architecture_decisions/*
-docs/architecture_decisions/ADR-002-srs-v4-current-direction.md
+# Runtime evidence stays opt-in; canonical docs, roadmaps, ADRs, and runbooks
+# must remain trackable without adding per-file exceptions.
+/docs/evidence/*
+!docs/evidence/v3-013-clean-vm.md
 .agents_active
+k
+docs/OPSI_ROADMAP_V5_MANUAL_FIRST.md

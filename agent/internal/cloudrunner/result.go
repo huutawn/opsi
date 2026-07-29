@@ -2,62 +2,115 @@ package cloudrunner
 
 import (
 	"errors"
-	"strings"
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
-func ResultFromRecord(record deploy.Record, err error, lease cloudrelay.DeploymentLease) cloudrelay.DeploymentResult {
-	result := cloudrelay.DeploymentResult{
-		Status:                "failed",
-		LeaseToken:            lease.LeaseToken,
-		FinalRevisionRef:      firstNonEmpty(record.ImageTag, lease.Deployment.ManifestHash),
-		IntentHash:            firstNonEmpty(lease.Deployment.IntentHash, intentHashFromLease(lease)),
-		RollbackEligible:      lease.Deployment.PreviousRevisionRef != "",
-		RollbackBlockedReason: "",
+func progressFromRollout(record deploymentv1.RolloutRecord, leaseToken string, percent int32, message string) deploymentv1.Progress {
+	progress := deploymentv1.Progress{SchemaVersion: deploymentv1.EventSchemaVersion, LeaseToken: leaseToken, State: record.State, MessageRedacted: deploy.RedactSensitive(message), ProgressPercent: percent, RolloutID: record.Intent.RolloutID, IntentHash: record.Intent.IntentHash, StateHash: record.StateHash, WorkloadSpecHash: record.Intent.Desired.WorkloadSpecHash, ExposureSpecHash: record.Intent.Desired.ExposureSpecHash, DesiredDigest: record.Intent.Desired.Image.Digest, PreviousDigest: record.Intent.PreviousDigest, Resources: append([]deploymentv1.ResourceIdentity(nil), record.Resources...), Attempt: record.Intent.Attempt}
+	if record.Error != nil {
+		progress.FailureCode = record.Error.Code
 	}
-	switch record.Status {
-	case deploy.StatusSuccess:
-		result.Status = "succeeded"
-	case deploy.StatusRolledBack:
-		result.Status = "rolled_back"
-		result.RollbackEligible = false
-	case deploy.StatusFailedAfterRollback:
-		result.FailureCode = "ROLLBACK_FAILED"
-	case deploy.StatusFailed:
-		result.FailureCode = "DEPLOY_FAILED"
+	if record.Evidence != nil {
+		progress.ReadinessEvidenceHash, _ = record.Evidence.Hash()
 	}
-	if !result.RollbackEligible && result.RollbackBlockedReason == "" {
-		result.RollbackBlockedReason = "no previous successful revision"
+	if record.State == deploymentv1.RolloutStateSucceeded {
+		progress.CurrentDigest = record.Intent.Desired.Image.Digest
+	} else if record.State == deploymentv1.RolloutStateRolledBack {
+		progress.CurrentDigest = record.Intent.PreviousDigest
 	}
-	if err != nil {
-		result.FailureMessageRedacted = deploy.RedactSensitive(err.Error())
-		if result.FailureCode == "" {
-			result.FailureCode = failureCode(err)
+	return progress
+}
+
+func resultFromRollout(intent deploymentv1.RolloutIntent, record deploymentv1.RolloutRecord, reconcileErr error, lease cloudrelay.DeploymentLease) (cloudrelay.DeploymentResult, bool) {
+	preMutation := record.Intent.RolloutID == ""
+	if preMutation {
+		failure := rolloutFailure(reconcileErr, deploymentv1.RolloutCodePreflightFailed)
+		if failure.FailurePhase != deploymentv1.FailurePhasePreMutation {
+			return cloudrelay.DeploymentResult{}, false
 		}
-	} else if record.Error != "" {
-		result.FailureMessageRedacted = deploy.RedactSensitive(record.Error)
+		record = preMutationFailureRecord(intent, reconcileErr)
 	}
-	return result
-}
-
-func intentHashFromLease(lease cloudrelay.DeploymentLease) string {
-	if lease.Deployment.DeploymentIntent == nil {
-		return ""
+	if !preMutation && !deploymentv1.IsFactualTerminalRollout(record) {
+		return cloudrelay.DeploymentResult{}, false
 	}
-	return lease.Deployment.DeploymentIntent.Review.IntentHash
-}
-
-func failureCode(err error) string {
-	switch {
-	case errors.Is(err, errImageSourceUnsupported):
-		return "IMAGE_SOURCE_UNSUPPORTED"
-	case err == nil:
-		return ""
-	case strings.Contains(err.Error(), "required"):
-		return "DEPLOYMENT_REQUEST_INVALID"
+	result := cloudrelay.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, LeaseToken: lease.LeaseToken, Status: record.State, IntentHash: record.Intent.IntentHash}
+	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: record.State, RolloutID: record.Intent.RolloutID, RolloutState: record.State, IntentHash: record.Intent.IntentHash, StateHash: record.StateHash, SpecHash: record.Intent.Desired.WorkloadSpecHash, WorkloadSpecHash: record.Intent.Desired.WorkloadSpecHash, ExposureSpecHash: record.Intent.Desired.ExposureSpecHash, DesiredDigest: record.Intent.Desired.Image.Digest, PreviousDigest: record.Intent.PreviousDigest, Resources: append([]deploymentv1.ResourceIdentity(nil), record.Resources...), Attempt: record.Intent.Attempt}
+	if record.Evidence != nil {
+		agentResult.ReadinessEvidenceHash, _ = record.Evidence.Hash()
+	}
+	if record.Error != nil {
+		failure := deploymentv1.NewRolloutError(record.Error.Code, deploy.RedactSensitive(record.Error.Message), record.Error.Retryable)
+		agentResult.FailureCode = failure.Code
+		agentResult.FailureMessageRedacted = failure.Message
+	} else if reconcileErr != nil {
+		failure := rolloutFailure(reconcileErr, deploymentv1.RolloutCodeRuntimeFailed)
+		agentResult.FailureCode = failure.Code
+		agentResult.FailureMessageRedacted = failure.Message
+	}
+	if agentResult.FailureCode != "" {
+		agentResult.FailurePhase = deploymentv1.FailurePhasePostMutation
+		if preMutation || record.State == deploymentv1.RolloutStateFailed && agentResult.FailureCode == deploymentv1.RolloutCodeCancelledBeforeMutation {
+			agentResult.FailurePhase = deploymentv1.FailurePhasePreMutation
+		}
+	}
+	switch record.State {
+	case deploymentv1.RolloutStateSucceeded:
+		result.Status = deploymentv1.StateSucceeded
+		agentResult.CurrentDigest = record.Intent.Desired.Image.Digest
+		snapshot := deploymentv1.KnownGoodSnapshot{SchemaVersion: deploymentv1.KnownGoodSchemaVersion, ID: record.Intent.RolloutID, Target: record.Intent.Target, Runtime: record.Intent.Desired, Resources: record.Resources, EvidenceHash: agentResult.ReadinessEvidenceHash}
+		if record.Evidence != nil {
+			snapshot.VerifiedAt = record.Evidence.ObservedAt
+		}
+		if canonical, err := snapshot.Canonicalize(); err == nil {
+			agentResult.KnownGoodID = canonical.ID
+			agentResult.KnownGoodHash = canonical.SnapshotHash
+		}
+	case deploymentv1.RolloutStateRolledBack:
+		result.Status = deploymentv1.RolloutStateRolledBack
+		agentResult.CurrentDigest = record.Intent.PreviousDigest
+		agentResult.KnownGoodID = record.Intent.PreviousKnownGoodID
+		agentResult.KnownGoodHash = record.Intent.PreviousKnownGoodHash
+	case deploymentv1.RolloutStateRollbackFailed:
+		result.Status = deploymentv1.RolloutStateRollbackFailed
+	case deploymentv1.RolloutStateFailed:
+		result.Status = deploymentv1.StateFailed
+		if agentResult.FailurePhase == deploymentv1.FailurePhasePreMutation {
+			agentResult.CurrentDigest = record.Intent.PreviousDigest
+			agentResult.KnownGoodID = record.Intent.PreviousKnownGoodID
+			agentResult.KnownGoodHash = record.Intent.PreviousKnownGoodHash
+			agentResult.ReadinessEvidenceHash = ""
+			agentResult.Resources = nil
+		}
 	default:
-		return "DEPLOY_FAILED"
+		result.Status = deploymentv1.StateFailed
 	}
+	result.FailureCode = agentResult.FailureCode
+	result.FailureMessageRedacted = agentResult.FailureMessageRedacted
+	result.RolloutResult = agentResult
+	return result, true
+}
+
+func preMutationFailureRecord(intent deploymentv1.RolloutIntent, err error) deploymentv1.RolloutRecord {
+	failure := rolloutFailure(err, deploymentv1.RolloutCodePreflightFailed)
+	terminalAt := intent.CreatedAt
+	record := deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateFailed, Version: 1, Error: failure, CreatedAt: intent.CreatedAt, UpdatedAt: intent.CreatedAt, TerminalAt: &terminalAt}
+	record.StateHash, _ = record.CalculateStateHash()
+	return record
+}
+
+func rolloutFailure(err error, fallbackCode string) *deploymentv1.RolloutError {
+	var typed *deploymentv1.RolloutError
+	if errors.As(err, &typed) && typed.Code != "" {
+		failure := deploymentv1.NewRolloutError(typed.Code, deploy.RedactSensitive(typed.Message), typed.Retryable)
+		failure.FailurePhase = typed.FailurePhase
+		return failure
+	}
+	message := "rollout reconciliation failed"
+	if err != nil {
+		message = err.Error()
+	}
+	return deploymentv1.NewRolloutError(fallbackCode, deploy.RedactSensitive(message), false)
 }

@@ -2,95 +2,127 @@ package webhookrelay
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/otp"
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
-func TestGitHubWebhookQueuesEnvelopeAndLongPollReturnsIt(t *testing.T) {
-	server := NewServer(Config{TTL: Duration(time.Hour)})
-	hash, err := auth.HashPAT("agent-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	project, err := server.Registry.CreateProject("org-1", "Demo", "demo", "user-1", "proj")
-	if err != nil {
-		t.Fatal(err)
-	}
-	node, err := server.Registry.UpsertNode(project.ID, "vps", "server", "healthy", "203.0.113.10", "", "node")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := server.Registry.RegisterAgent(project.ID, node.ID, "sha256:abc", hash, "v1", "agent", nil); err != nil {
-		t.Fatal(err)
-	}
-	server.Config.Routes = []Route{{
-		ProjectID:    project.ID,
-		ServiceID:    "svc-api",
-		ServiceName:  "api",
-		ServiceType:  "backend",
-		RepoFullName: "example/api",
-		Branch:       "main",
-	}}
+type capturedAudit struct {
+	actor    string
+	action   string
+	metadata map[string]any
+}
 
-	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"clone_url":"https://github.com/example/api.git","full_name":"example/api"},"pusher":{"name":"alice"}}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/github", bytes.NewReader(body))
-	req.Header.Set("X-Hub-Signature-256", "sha256=test")
-	w := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+type deploymentResultRegistry struct {
+	registry.API
+	completeErr error
+	audits      []capturedAudit
+}
+
+func (r *deploymentResultRegistry) VerifyAgent(projectID, nodeID, token string) (registry.Agent, error) {
+	return registry.Agent{ID: "agent-1", OrgID: "org-1", ProjectID: projectID, NodeID: nodeID}, nil
+}
+
+func (r *deploymentResultRegistry) CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result registry.DeploymentResult) (registry.DeploymentJob, error) {
+	return registry.DeploymentJob{ID: deploymentID, OrgID: "org-1", ProjectID: projectID, NodeID: nodeID, Status: registry.DeploymentSucceeded}, r.completeErr
+}
+
+func (r *deploymentResultRegistry) Audit(_, _ string, actorUserID, action, _, _ string, _ string, metadata map[string]any) {
+	r.audits = append(r.audits, capturedAudit{actor: actorUserID, action: action, metadata: metadata})
+}
+
+func TestAgentDeploymentResultAuditOwnership(t *testing.T) {
+	request := func(store *deploymentResultRegistry) *httptest.ResponseRecorder {
+		server := NewServer(Config{})
+		server.Registry = store
+		req := httptest.NewRequest(http.MethodPost, "/v1/agents/node-1/deployments/dep-1/result?project_id=proj-1", strings.NewReader(`{"lease_token":"lease-secret","failure_message_redacted":"terminal-secret"}`))
+		req.Header.Set("Authorization", "Bearer agent-token")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/agents/"+node.ID+"/webhooks/next?project_id="+project.ID+"&wait=0s", nil)
-	req.Header.Set("Authorization", "Bearer agent-secret")
-	w = httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("unexpected poll status: %d body=%s", w.Code, w.Body.String())
+	success := &deploymentResultRegistry{}
+	if rec := request(success); rec.Code != http.StatusOK || len(success.audits) != 0 {
+		t.Fatalf("success status=%d audits=%+v body=%s", rec.Code, success.audits, rec.Body.String())
 	}
-	var env Envelope
-	if err := json.NewDecoder(w.Body).Decode(&env); err != nil {
-		t.Fatal(err)
+
+	rejected := &deploymentResultRegistry{completeErr: registry.APIError{Status: http.StatusConflict, Code: "DEPLOYMENT_STALE_LEASE", Message: "lease-secret terminal-secret"}}
+	if rec := request(rejected); rec.Code != http.StatusConflict || len(rejected.audits) != 1 {
+		t.Fatalf("rejection status=%d audits=%+v body=%s", rec.Code, rejected.audits, rec.Body.String())
 	}
-	if env.ProjectID != project.ID || env.ServiceID != "svc-api" || env.Branch != "main" || env.Signature != "sha256=test" || env.TriggeredBy != "alice" {
-		t.Fatalf("unexpected envelope: %+v", env)
+	audit := rejected.audits[0]
+	encoded, _ := json.Marshal(audit.metadata)
+	if audit.actor != "agent" || audit.action != "DEPLOYMENT_AGENT_RESULT_REJECTED" || audit.metadata["error_code"] != "DEPLOYMENT_STALE_LEASE" || strings.Contains(string(encoded), "lease-secret") || strings.Contains(string(encoded), "terminal-secret") {
+		t.Fatalf("rejection audit=%+v", audit)
 	}
 }
 
-func TestGitHubWebhookRejectsUnknownRoute(t *testing.T) {
-	server := NewServer(Config{TTL: Duration(time.Hour)})
-	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/github", bytes.NewReader([]byte(`{"ref":"refs/heads/main","repository":{"full_name":"example/api"}}`)))
+func TestHealthFailsClosedWhenDependencyCheckFails(t *testing.T) {
+	server := NewServer(Config{})
+	server.SetHealthCheck(func(context.Context) error { return errors.New("database unavailable") })
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "database unavailable") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPATVerifyUsesBearerAuthorizationAndDoesNotAcceptBodyToken(t *testing.T) {
+	hash, err := auth.HashPAT("pat-live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Config{})
+	server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{{UserID: "user-1", OrgID: "org-1", ProjectID: "proj-1", Role: "Owner", Hash: hash, ExpiresAt: time.Now().Add(time.Hour)}}}}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/pat/verify", strings.NewReader(`{"project_id":"proj-1"}`))
+	req.Header.Set("Authorization", "Bearer pat-live")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"project_id":"proj-1"`) {
+		t.Fatalf("bearer verification status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/auth/pat/verify", strings.NewReader(`{"token":"pat-live","project_id":"proj-1"}`))
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("body token was accepted: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRetiredGenericGitHubWebhookReturnsNotFound(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/github", bytes.NewReader([]byte(`{}`)))
 	w := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
+	NewServer(Config{}).Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
-		t.Fatalf("unexpected status: %d", w.Code)
-	}
-}
-
-func TestQueuePurgesExpiredEnvelopes(t *testing.T) {
-	queue := NewQueue()
-	now := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
-	queue.now = func() time.Time { return now }
-	if err := queue.Enqueue(Envelope{ProjectID: "proj", ServiceID: "svc", ExpiresAt: now.Add(-time.Second)}); err != nil {
-		t.Fatal(err)
-	}
-	if got := queue.Len(); got != 0 {
-		t.Fatalf("expected expired item purged, got %d", got)
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
 func TestOTPRequestOmitsCodeWithoutDevEcho(t *testing.T) {
 	server := NewServer(Config{})
-	req := httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"ProjectID":"proj","UserID":"user","Purpose":"secret_reveal"}`)))
+	sender := &captureOTPSender{}
+	server.OTP.Sender = sender
+	req := httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"project_id":"proj","user_id":"user","purpose":"secret_reveal"}`)))
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.req.ProjectID != "proj" || sender.req.UserID != "user" || sender.req.Purpose != "secret_reveal" {
+		t.Fatalf("snake-case OTP request was not decoded correctly: %+v", sender.req)
 	}
 	var body map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
@@ -98,5 +130,174 @@ func TestOTPRequestOmitsCodeWithoutDevEcho(t *testing.T) {
 	}
 	if _, ok := body["code"]; ok {
 		t.Fatalf("code leaked in non-dev response: %v", body)
+	}
+}
+
+func TestOTPRequestValidation(t *testing.T) {
+	hash, err := auth.HashPAT("owner-pat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticatedServer := NewServer(Config{})
+	authenticatedServer.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{{
+		ID: "pat-1", UserID: "user-1", Email: "owner@example.test", OrgID: "org-1", ProjectID: "proj-1", Role: "Owner", Hash: hash,
+	}}}}
+
+	tests := []struct {
+		name       string
+		server     *Server
+		body       string
+		wantDetail string
+	}{
+		{
+			name:       "missing project before PAT authorization",
+			server:     authenticatedServer,
+			body:       `{"purpose":"secret.reveal"}`,
+			wantDetail: "project_id is required",
+		},
+		{
+			name:       "missing purpose",
+			server:     authenticatedServer,
+			body:       `{"project_id":"proj-1"}`,
+			wantDetail: "purpose is required",
+		},
+		{
+			name:       "missing user without auth",
+			server:     NewServer(Config{}),
+			body:       `{"project_id":"proj-1","purpose":"secret.reveal"}`,
+			wantDetail: "user_id is required",
+		},
+		{
+			name:       "malformed JSON",
+			server:     authenticatedServer,
+			body:       `{"project_id":`,
+			wantDetail: "invalid otp request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/otp/request", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer owner-pat")
+			w := httptest.NewRecorder()
+			tt.server.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tt.wantDetail) {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "pat invalid") || strings.Contains(w.Body.String(), "owner-pat") {
+				t.Fatalf("validation response leaked auth details: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+func TestOTPRequiresPATAndUsesAuthenticatedEmail(t *testing.T) {
+	hash, err := auth.HashPAT("owner-pat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &captureOTPSender{}
+	server := NewServer(Config{})
+	server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{{
+		ID: "pat-1", UserID: "user-1", Email: "owner@example.test", OrgID: "org-1", ProjectID: "proj-1", Role: "Owner", Hash: hash,
+	}}}}
+	server.OTP.Sender = sender
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"project_id":"proj-1","purpose":"secret.reveal"}`)))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated OTP request status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "owner-pat") {
+		t.Fatalf("unauthenticated response leaked PAT: %s", w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"project_id":"proj-1","user_id":"other-user","purpose":"secret.reveal"}`)))
+	req.Header.Set("Authorization", "Bearer owner-pat")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-user OTP request status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "owner-pat") {
+		t.Fatalf("forbidden response leaked PAT: %s", w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/otp/request", bytes.NewReader([]byte(`{"project_id":" proj-1 ","purpose":" secret.reveal ","email":"attacker@example.test"}`)))
+	req.Header.Set("Authorization", "Bearer owner-pat")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("authenticated OTP request status=%d body=%s", w.Code, w.Body.String())
+	}
+	if sender.req.ProjectID != "proj-1" || sender.req.UserID != "user-1" || sender.req.Email != "owner@example.test" || sender.req.Purpose != "secret.reveal" || sender.code == "" {
+		t.Fatalf("OTP identity was not derived from PAT: %+v", sender.req)
+	}
+	if strings.Contains(w.Body.String(), "owner-pat") || strings.Contains(w.Body.String(), sender.code) {
+		t.Fatalf("OTP response leaked PAT or OTP code: %s", w.Body.String())
+	}
+	var requested struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&requested); err != nil {
+		t.Fatal(err)
+	}
+
+	verifyBody := []byte(`{"request_id":"` + requested.RequestID + `","project_id":"proj-1","purpose":"secret.reveal","code":"` + sender.code + `"}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/otp/verify", bytes.NewReader(verifyBody))
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated OTP verify status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "owner-pat") || strings.Contains(w.Body.String(), sender.code) {
+		t.Fatalf("OTP verify error leaked PAT or OTP code: %s", w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/otp/verify", bytes.NewReader(verifyBody))
+	req.Header.Set("Authorization", "Bearer owner-pat")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authenticated OTP verify status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "owner-pat") || strings.Contains(w.Body.String(), sender.code) {
+		t.Fatalf("OTP verify response leaked PAT or OTP code: %s", w.Body.String())
+	}
+}
+
+type captureOTPSender struct {
+	req  otp.Request
+	code string
+}
+
+func (s *captureOTPSender) SendOTP(_ context.Context, req otp.Request, code string, _ time.Time) error {
+	s.req = req
+	s.code = code
+	return nil
+}
+
+func TestAIRoutesRemoved(t *testing.T) {
+	handler := NewServer(Config{}).Handler()
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/v1/ai/incidents/analyze"},
+		{method: http.MethodGet, path: "/v1/ai/incidents/analyze"},
+		{method: http.MethodGet, path: "/v1/ai/unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status=%d, want %d", rec.Code, http.StatusNotFound)
+			}
+		})
 	}
 }

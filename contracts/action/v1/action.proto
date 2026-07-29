@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package opsi.action.v1;
+
+option go_package = "github.com/opsi-dev/opsi/contracts/go/actionv1";
+
+// The Go contract is hand-written because Opsi uses its strict JSON gRPC codec.
+// This schema freezes the RPC and typed action catalog for non-Go consumers.
+service ActionService {
+  rpc Catalog(CatalogRequest) returns (CatalogResponse);
+  rpc Preflight(PreflightRequest) returns (ActionPreflight);
+  rpc GetChallenge(ChallengeRequest) returns (ApprovalChallenge);
+  rpc Execute(ExecuteRequest) returns (ActionResult);
+  rpc Status(StatusRequest) returns (ActionResult);
+}
+
+message CatalogRequest {}
+message CatalogResponse { string schema_version = 1; repeated CatalogAction actions = 2; }
+message CatalogAction { string kind = 1; string risk = 2; string summary = 3; }
+message TargetIdentity { string project_id = 1; string node_id = 2; string service_id = 3; string environment_id = 4; string runtime_id = 5; }
+message RestartWorkloadParameters {}
+message ScaleWorkloadParameters { int32 replicas = 1; }
+message GatewayReconcileParameters {}
+message IncidentResolveParameters { string incident_id = 1; }
+message ActionParameters {
+  oneof value {
+    RestartWorkloadParameters restart_workload = 1;
+    ScaleWorkloadParameters scale_workload = 2;
+    GatewayReconcileParameters gateway_reconcile = 3;
+    IncidentResolveParameters incident_resolve = 4;
+  }
+}
+message Condition { string code = 1; string summary = 2; }
+message PreflightRequest { string schema_version = 1; string project_id = 2; string node_id = 3; string service_id = 4; TargetIdentity target = 5; string kind = 6; ActionParameters parameters = 7; }
+message ActionPlan { string schema_version = 1; string id = 2; string project_id = 3; string node_id = 4; string service_id = 5; TargetIdentity target = 6; string kind = 7; ActionParameters parameters = 8; string origin = 9; string requested_by = 10; string risk = 11; repeated Condition preconditions = 12; repeated Condition postconditions = 13; string current_state_hash = 14; string plan_hash = 15; int64 issued_at_unix_nano = 16; int64 expires_at_unix_nano = 17; }
+message ApprovalChallenge { string schema_version = 1; string id = 2; string action_id = 3; string project_id = 4; string plan_hash = 5; string state_hash = 6; string nonce = 7; string risk = 8; TargetIdentity target = 9; string summary = 10; repeated Condition preconditions = 11; string confirmation_phrase = 12; int64 issued_at_unix_nano = 13; int64 expires_at_unix_nano = 14; }
+message ApprovalGrant { string schema_version = 1; string challenge_id = 2; string action_id = 3; string project_id = 4; string device_id = 5; string plan_hash = 6; string state_hash = 7; string nonce = 8; int64 issued_at_unix_nano = 9; int64 expires_at_unix_nano = 10; bytes signature = 11; }
+message WorkloadState { string uid = 1; string resource_version = 2; int64 generation = 3; int64 observed_generation = 4; int32 desired_replicas = 5; int32 observed_replicas = 6; int32 ready_replicas = 7; string restart_token = 8; }
+message GatewayState { string uid = 1; string resource_version = 2; string spec_hash = 3; string backend_service_id = 4; bool owned = 5; }
+message IncidentState { string incident_id = 1; string status = 2; }
+message CurrentState { string schema_version = 1; string project_id = 2; TargetIdentity target = 3; WorkloadState workload = 4; GatewayState gateway = 5; IncidentState incident = 6; string state_hash = 7; }
+message ActionPreflight { string schema_version = 1; ActionPlan plan = 2; CurrentState current_state = 3; ApprovalChallenge challenge = 4; string summary = 5; }
+message ChallengeRequest { string project_id = 1; string challenge_id = 2; }
+message ExecuteRequest { string project_id = 1; string challenge_id = 2; ApprovalGrant grant = 3; }
+message StatusRequest { string project_id = 1; string action_id = 2; }
+message ActionResult { string schema_version = 1; string action_id = 2; string challenge_id = 3; string project_id = 4; string status = 5; string failure_code = 6; string message = 7; string approved_by = 8; string device_id = 9; int64 started_at_unix_nano = 10; int64 finished_at_unix_nano = 11; string post_state_hash = 12; }
+message ActionEvent { string schema_version = 1; string id = 2; string action_id = 3; string project_id = 4; string status = 5; string failure_code = 6; string actor = 7; int64 created_at_unix_nano = 8; }
+message ActionDevice { string schema_version = 1; string id = 2; string project_id = 3; string owner_principal = 4; string display_name = 5; bytes public_key = 6; string fingerprint_sha256 = 7; string status = 8; string trusted_actor = 9; string idempotency_key = 10; int64 created_at_unix_nano = 11; int64 revoked_at_unix_nano = 12; }

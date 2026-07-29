@@ -55,11 +55,137 @@ export type ServiceRecord = {
   namespace?: string;
 };
 
-export type DeploymentJob = {
-  id: string;
-  service_id: string;
+export type GitHubInstallation = {
+  installation_id: number;
+  account_login?: string;
   status: string;
-  deployment_plan_hash?: string;
+  suspended?: boolean;
+};
+
+export type GitHubRepository = {
+  repository_id: number;
+  installation_id: number;
+  owner_login?: string;
+  name?: string;
+  full_name: string;
+  archived?: boolean;
+  disabled?: boolean;
+  default_branch?: string;
+  status: string;
+  claim_status: "available" | "active" | "conflict" | string;
+  claimed_project_id?: string;
+};
+
+export type GitHubBinding = {
+  id: string;
+  project_id: string;
+  service_id: string;
+  repository_id: number;
+  installation_id: number;
+  service_key: string;
+  config_path: string;
+  status: string;
+};
+
+export type BuildRecord = {
+  schema_version: "opsi.build_record/v1";
+  id: string;
+  project_id: string;
+  repository_id: number;
+  repository_owner_id: number;
+  active_binding_id: string;
+  service_id: string;
+  service_key: string;
+  created_at: string;
+  workload: {
+    issuer: string;
+    subject: string;
+    repository_id: number;
+    repository_owner_id: number;
+    ref: string;
+    sha: string;
+    event_name: string;
+    workflow: string;
+    workflow_ref: string;
+    job_workflow_ref?: string;
+    run_id: number;
+    run_attempt: number;
+  };
+  build: {
+    config_hash: string;
+    plan_hash?: string;
+    platform: string;
+    oci_repository: string;
+    oci_digest: string;
+    provenance_digest?: string;
+    status: string;
+  };
+};
+
+export type BuildRecordList = { records: BuildRecord[]; next_cursor?: string };
+
+export type TopologyAssignment = {
+  service_key: string;
+  environment_id: string;
+  runtime_id: string;
+  replicas: number;
+  cpu_request_millicores: number;
+  memory_request_bytes: number;
+  exposure: { mode: "none" | "internal" | "public" };
+  rationale?: { summary?: string };
+};
+
+export type TopologyDraft = { schema_version: "opsi.topology_plan/v1"; project_id: string; assignments: TopologyAssignment[] };
+export type TopologyPlan = TopologyDraft & { id: string; revision: number; state_hash: string; plan_hash: string; created_by: string; applied_by: string; created_at: string; applied_at: string };
+export type TopologyPreview = { draft: TopologyDraft; plan_hash: string; state_hash: string };
+export type TopologyCapacity = {
+  runtime_id: string; node_id?: string; agent_id?: string; source: string; heartbeat_age_seconds?: number; heartbeat_fresh: boolean;
+  cpu_capacity_millicores?: number; memory_capacity_bytes?: number; reserved_cpu_millicores: number; reserved_memory_bytes: number;
+  assigned_cpu_millicores: number; assigned_memory_bytes: number; requested_cpu_millicores: number; requested_memory_bytes: number;
+  available_cpu_millicores?: number; available_memory_bytes?: number; unknown_capacity: boolean; unknown_capacity_policy_override: boolean; oversubscribed: boolean;
+};
+export type TopologyValidation = { schema_version: string; project_id: string; plan_hash: string; valid: boolean; runtimes: Array<{ runtime_id: string; eligible: boolean; capacity: TopologyCapacity; issues: Array<{ code: string; message: string }> }>; issues: Array<{ code: string; message: string; service_key?: string; runtime_id?: string }>; validated_at: string };
+export type TopologyDiff = { project_id: string; current_revision: number; current_hash?: string; proposed_hash: string; changes: Array<{ service_key: string; change: string; before?: TopologyAssignment; after?: TopologyAssignment }> };
+export type PlacementFacts = {
+  project_id: string;
+  environments: Array<{ id: string; project_id: string; name: string; type: string; status: string }>;
+  runtimes: Array<{ id: string; project_id: string; environment_id: string; name: string; type: string; status: string }>;
+  nodes: Array<{ id: string; project_id: string; runtime_id: string; status: string; cpu_cores?: number; memory_mb?: number; last_seen_at?: string }>;
+  agents: Array<{ id: string; project_id: string; runtime_id: string; node_id: string; status: string; capabilities: Record<string, unknown>; last_seen_at?: string }>;
+  services: Array<{ id: string; project_id: string; key: string }>;
+};
+
+export type DeploymentPolicyDraft = {
+  schema_version: "opsi.deployment_policy/v1"; project_id: string; repository_id: number; service_keys: string[]; workflow_refs: string[]; job_workflow_refs?: string[];
+  allowed_events: string[]; allowed_git_refs: string[]; environment_id: string; allowed_runtime_ids: string[]; allowed_oci_repositories: string[]; allowed_oci_prefixes?: string[];
+  allowed_platforms: string[]; allowed_config_hashes: string[]; allowed_build_plan_hashes: string[]; allow_unknown_capacity: boolean; enabled: boolean;
+  automatic_main?: boolean;
+  preview?: { enabled: boolean; hostname_suffix?: string; ttl_seconds?: number; max_replicas?: number; cpu?: string; memory?: string };
+};
+
+export type PreviewSpec = { namespace: string; hostname: string; repository_id: number; repository_owner_id: number; pr_number: number; head_sha: string; service_key: string; cpu: string; memory: string; max_replicas: number; created_at: string; expires_at: string };
+export type DeploymentPolicy = { schema_version: string; id: string; revision: number; state_hash: string; policy_hash: string; policy: DeploymentPolicyDraft; created_by: string; applied_by: string; created_at: string; applied_at: string };
+export type DeploymentPolicyPreview = { policy: DeploymentPolicyDraft; policy_hash: string; state_hash: string };
+export type DeploymentPolicyApplyResult = { policy: DeploymentPolicy; reused: boolean };
+
+export type DeploymentJob = {
+	 schema_version?: string;
+	 mode?: string;
+	 id: string;
+	 project_id?: string;
+	 environment_id?: string;
+	 runtime_id?: string;
+	 service_id: string;
+	 status: string;
+	 spec_hash?: string;
+	 attempt_count?: number;
+	 max_attempts?: number;
+	 retry_after?: string;
+	 reused?: boolean;
+	 started_at?: string;
+	 finished_at?: string;
+	 updated_at?: string;
+	 deployment_plan_hash?: string;
   manifest_hash?: string;
   intent_hash?: string;
   deployment_intent?: unknown;
@@ -69,17 +195,123 @@ export type DeploymentJob = {
   agent_id?: string;
   node_id?: string;
   failure_code?: string;
-  failure_message_redacted?: string;
+	 failure_message_redacted?: string;
+	 terminal_result?: {
+		schema_version: string;
+		status: string;
+		spec_hash: string;
+		application_image: string;
+		application_image_id: string;
+		namespace: string;
+		deployment_name: string;
+		service_name: string;
+		available_replicas: number;
+		failure_code?: string;
+		failure_message_redacted?: string;
+		rollout_id?: string;
+		rollout_state?: string;
+		intent_hash?: string;
+		state_hash?: string;
+		workload_spec_hash?: string;
+		exposure_spec_hash?: string;
+		desired_digest?: string;
+		current_digest?: string;
+		previous_digest?: string;
+		known_good_id?: string;
+		known_good_hash?: string;
+		readiness_evidence_hash?: string;
+	 };
+	 base_deployment_id?: string;
+	 rollout_state?: string;
+	 rollout_state_hash?: string;
+	 desired_digest?: string;
+	 current_digest?: string;
+	 previous_digest?: string;
+	 known_good_id?: string;
+	 known_good_hash?: string;
+	 readiness_evidence_hash?: string;
+	 exposure_spec?: ExposureSpec;
   requested_by?: string;
-  created_at: string;
+	 created_at: string;
+	 snapshot?: {
+		project_id: string;
+		image: { repository: string; digest: string; reference: string };
+		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; deployment_policy_id: string; deployment_policy_revision: number; runtime_id: string; node_id: string; agent_id: string };
+		workload: WorkloadSpec;
+		spec_hash: string;
+		preview?: PreviewSpec;
+	};
+};
+
+export type ExposureSpec = {
+	schema_version: "opsi.exposure_spec/v1";
+	project_id: string;
+	environment_id: string;
+	runtime_id: string;
+	service_key: string;
+	deployment_job_id: string;
+	hostname: string;
+	path: string;
+	service_port: number;
+	tls: { mode: "disabled" | "secret_ref"; secret_ref?: string };
+	metadata?: { display_name?: string; rationale?: string };
+	spec_hash: string;
+};
+
+export type ExposureMutationRequest = {
+	schema_version: "opsi.exposure_mutation/v1";
+	base_deployment_job_id: string;
+	expected_state_hash?: string;
+	exposure: ExposureSpec;
+};
+
+export type ExposurePreview = {
+	schema_version: string;
+	base_deployment_job_id: string;
+	current?: ExposureSpec;
+	desired: ExposureSpec;
+	changes: string[];
+	state_hash: string;
+	eligible: boolean;
+	decision_code: string;
+	message: string;
+	resolved_at: string;
+};
+
+export type WorkloadSpec = {
+	schema_version: "opsi.workload_spec/v1";
+	service_key: string;
+	replicas: number;
+	application_container_name: "app";
+	container_port: number;
+	readiness_probe?: { path: string; port: number; initial_delay_seconds: number; period_seconds: number; timeout_seconds: number; failure_threshold: number };
+	liveness_probe?: { path: string; port: number; initial_delay_seconds: number; period_seconds: number; timeout_seconds: number; failure_threshold: number };
+	resources: { requests: { cpu: string; memory: string }; limits: { cpu: string; memory: string } };
+	termination_grace_period_seconds: number;
+	environment?: Array<{ name: string; value: string }>;
+	secret_references?: Array<{ env_name: string; secret_id: string }>;
+	exposure: { mode: "none" | "internal" };
+};
+
+export type DeploymentPreview = {
+	schema_version: string;
+	snapshot: NonNullable<DeploymentJob["snapshot"]>;
+	current?: DeploymentJob["snapshot"];
+	changes: string[];
+	eligible: boolean;
+	decision_code: string;
+	message: string;
+	resolved_at: string;
 };
 
 export type TimelineEvent = {
+  schema_version?: string;
   id: string;
   deployment_id?: string;
   step: string;
   message_redacted: string;
   progress_percent: number;
+  attempt?: number;
   request_id?: string;
   created_at: string;
 };
@@ -94,6 +326,91 @@ export type TelemetrySummary = {
   done: boolean;
   source: "agent";
   payload_policy: string;
+  health?: string;
+  metric_count?: number;
+  log_count?: number;
+  error_count?: number;
+  service_count?: number;
+};
+
+export type TelemetryLogEntry = {
+  service_id?: string;
+  pod_id?: string;
+  namespace?: string;
+  level: string;
+  message: string;
+  fingerprint: string;
+  observed_unix: number;
+};
+
+export type TelemetryServiceStatus = {
+  service_id: string;
+  health: string;
+  pod_count: number;
+  ready_pods: number;
+  cpu_cores?: number;
+  memory_bytes?: number;
+  restart_count?: number;
+  recent_error_count?: number;
+  last_seen_unix?: number;
+};
+
+export type TelemetryQueryResponse = {
+  project_id: string;
+  source: "agent";
+  payload_policy: string;
+  summary?: {
+    since_unix: number;
+    end_unix: number;
+    metric_count: number;
+    log_count: number;
+    error_count: number;
+    service_count: number;
+    health: string;
+  };
+  services?: TelemetryServiceStatus[];
+  logs?: TelemetryLogEntry[];
+  next_cursor?: string;
+};
+
+export type SecretResult = {
+  status: string;
+  source: "agent";
+  project_id: string;
+  service_id: string;
+  name: string;
+  namespace?: string;
+  username?: string;
+  password?: string;
+  ttl_seconds?: number;
+  reveal_expires_at?: string;
+};
+
+export type IncidentResponse = {
+  incident_id: string;
+  project_id: string;
+  node_id?: string;
+  service_id?: string;
+  pod_id?: string;
+  status: string;
+  severity?: string;
+  anomaly_type?: string;
+  created_at_unix?: number;
+  resolved_at_unix?: number;
+  mttr_seconds?: number;
+};
+
+export type IncidentResult = {
+  status?: string;
+  source: "agent";
+  payload_policy: string;
+  incident: IncidentResponse;
+};
+
+export type IncidentListResult = {
+  source: "agent";
+  payload_policy: string;
+  incidents: IncidentResponse[];
 };
 
 export type BootstrapSession = {
@@ -101,6 +418,15 @@ export type BootstrapSession = {
   status: string;
   public_host?: string;
   role: string;
+  attempt_count?: number;
+  max_attempts?: number;
+  last_failure_code?: string;
+  last_failure_message_redacted?: string;
+  checkpoint?: {
+    plan_version: string;
+    next_step_index: number;
+    last_completed_step?: string;
+  };
   created_at: string;
 };
 
@@ -235,6 +561,11 @@ export type ConsoleState = {
   deploymentEvents: TimelineEvent[];
   audit: AuditEvent[];
   support: SupportSummary | null;
+  secretReveal: SecretResult | null;
+  totpSetup: { secret: string; uri: string; ttl_seconds: number } | null;
+  incidents: IncidentResponse[];
+  incidentDetail: IncidentResponse | null;
+  incidentError: string;
   nodeDetail: NodeDiagnostics | null;
   serviceDetail: ServiceRecord | null;
   busy: string;

@@ -12,6 +12,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			email TEXT UNIQUE NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT`,
 		`CREATE TABLE IF NOT EXISTS organizations (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -116,6 +117,10 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			UNIQUE (runtime_id, name)
 		)`,
 		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS k3s_status TEXT`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_endpoint TEXT`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_port INTEGER`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_tls_server_name TEXT`,
+		`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_cert_sha256 TEXT`,
 		`CREATE INDEX IF NOT EXISTS nodes_project_status_idx ON nodes(project_id, status)`,
 		`CREATE TABLE IF NOT EXISTS agents (
 			id TEXT PRIMARY KEY,
@@ -162,6 +167,19 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			UNIQUE (project_id, idempotency_key)
 		)`,
 		`CREATE INDEX IF NOT EXISTS bootstrap_sessions_project_status_idx ON bootstrap_sessions(project_id, status, created_at)`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS lease_owner TEXT`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS lease_token_hash TEXT`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS leased_at TIMESTAMPTZ`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS lease_heartbeat_at TIMESTAMPTZ`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS last_failure_code TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS last_failure_message_redacted TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE bootstrap_sessions ADD COLUMN IF NOT EXISTS dead_lettered_at TIMESTAMPTZ`,
+		`CREATE INDEX IF NOT EXISTS bootstrap_sessions_retry_queue_idx ON bootstrap_sessions(status, next_attempt_at, created_at, id) WHERE status IN ('created','pending','retry_wait')`,
+		`CREATE INDEX IF NOT EXISTS bootstrap_sessions_lease_expiry_idx ON bootstrap_sessions(status, lease_expires_at) WHERE lease_expires_at IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_events (
 			id TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -296,6 +314,34 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE deployment_jobs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3`,
 		`CREATE INDEX IF NOT EXISTS deployment_jobs_project_status_idx ON deployment_jobs(project_id, status, created_at)`,
 		`CREATE INDEX IF NOT EXISTS deployment_jobs_lease_expiry_idx ON deployment_jobs(project_id, status, lease_expires_at)`,
+		`CREATE TABLE IF NOT EXISTS node_lifecycle_jobs (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			runtime_id TEXT NOT NULL REFERENCES runtimes(id) ON DELETE CASCADE,
+			action TEXT NOT NULL,
+			status TEXT NOT NULL,
+			target_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			target_node_name TEXT NOT NULL,
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			agent_id TEXT REFERENCES agents(id),
+			requested_by TEXT REFERENCES users(id),
+			idempotency_key TEXT,
+			confirm_remove BOOLEAN NOT NULL DEFAULT false,
+			lease_token TEXT,
+			lease_expires_at TIMESTAMPTZ,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			max_attempts INTEGER NOT NULL DEFAULT 3,
+			failure_code TEXT,
+			failure_message_redacted TEXT,
+			verified BOOLEAN NOT NULL DEFAULT false,
+			finished_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			UNIQUE (project_id, target_node_id, action, idempotency_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS node_lifecycle_jobs_project_status_idx ON node_lifecycle_jobs(project_id, status, created_at)`,
+		`CREATE INDEX IF NOT EXISTS node_lifecycle_jobs_lease_expiry_idx ON node_lifecycle_jobs(project_id, status, lease_expires_at)`,
 		`CREATE TABLE IF NOT EXISTS service_deployment_locks (
 			service_id TEXT PRIMARY KEY REFERENCES control_services(id) ON DELETE CASCADE,
 			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -319,6 +365,46 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		`CREATE INDEX IF NOT EXISTS deployment_events_deployment_created_idx ON deployment_events(deployment_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS relay_jobs (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			runtime_id TEXT,
+			agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+			target_service_id TEXT,
+			target_service_name TEXT,
+			target_service_type TEXT,
+			type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			body_hash TEXT NOT NULL,
+			redacted_body JSONB NOT NULL DEFAULT '{}'::jsonb,
+			idempotency_key TEXT NOT NULL,
+			lease_owner_agent_id TEXT,
+			lease_expires_at TIMESTAMPTZ,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			max_attempts INTEGER NOT NULL DEFAULT 3,
+			next_retry_at TIMESTAMPTZ,
+			last_error_redacted TEXT,
+			created_by TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			expires_at TIMESTAMPTZ NOT NULL,
+			UNIQUE (project_id, idempotency_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS relay_jobs_project_status_idx ON relay_jobs(project_id, status, created_at)`,
+		`CREATE INDEX IF NOT EXISTS relay_jobs_retry_idx ON relay_jobs(project_id, status, next_retry_at)`,
+		`CREATE TABLE IF NOT EXISTS relay_events (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			job_id TEXT NOT NULL REFERENCES relay_jobs(id) ON DELETE CASCADE,
+			sequence BIGSERIAL,
+			type TEXT NOT NULL,
+			message_redacted TEXT NOT NULL,
+			metadata_redacted JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS relay_events_job_sequence_idx ON relay_events(job_id, sequence)`,
 		`CREATE TABLE IF NOT EXISTS cloud_audit_events (
 			id TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -360,7 +446,31 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			revoked BOOLEAN NOT NULL DEFAULT false,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		`ALTER TABLE personal_access_tokens ADD COLUMN IF NOT EXISTS purpose TEXT`,
 		`CREATE INDEX IF NOT EXISTS personal_access_tokens_user_id_idx ON personal_access_tokens(user_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS personal_access_tokens_user_purpose_idx ON personal_access_tokens(user_id, purpose) WHERE purpose IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS oauth_identities (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			provider TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			UNIQUE (provider, subject),
+			UNIQUE (user_id, provider)
+		)`,
+		`CREATE INDEX IF NOT EXISTS oauth_identities_user_idx ON oauth_identities(user_id)`,
+		`CREATE TABLE IF NOT EXISTS cloud_admin_bootstrap_state (
+			key TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id),
+			organization_id TEXT NOT NULL REFERENCES organizations(id),
+			project_id TEXT NOT NULL REFERENCES projects(id),
+			normalized_email TEXT NOT NULL,
+			org_slug TEXT NOT NULL,
+			project_slug TEXT NOT NULL,
+			completed_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS otp_requests (
 			id TEXT PRIMARY KEY,
 			project_id TEXT NOT NULL,
@@ -373,11 +483,103 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		`CREATE INDEX IF NOT EXISTS otp_requests_user_created_idx ON otp_requests(user_id, created_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS control_services_id_project_uidx ON control_services(id, project_id)`,
+		`CREATE TABLE IF NOT EXISTS github_installations (
+			installation_id BIGINT PRIMARY KEY CHECK (installation_id > 0),
+			account_id BIGINT NOT NULL CHECK (account_id > 0),
+			account_login TEXT NOT NULL,
+			account_type TEXT NOT NULL,
+			status TEXT NOT NULL CHECK (status IN ('active','suspended','deleted')),
+			suspended BOOLEAN NOT NULL DEFAULT false,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			CHECK ((status = 'suspended') = suspended)
+		)`,
+		`CREATE TABLE IF NOT EXISTS github_repositories (
+			repository_id BIGINT PRIMARY KEY CHECK (repository_id > 0),
+			installation_id BIGINT NOT NULL CHECK (installation_id > 0) REFERENCES github_installations(installation_id),
+			owner_id BIGINT NOT NULL CHECK (owner_id > 0),
+			owner_login TEXT NOT NULL,
+			name TEXT NOT NULL,
+			full_name TEXT NOT NULL,
+			private BOOLEAN NOT NULL,
+			archived BOOLEAN NOT NULL,
+			disabled BOOLEAN NOT NULL,
+			default_branch TEXT NOT NULL,
+			status TEXT NOT NULL CHECK (status IN ('active','removed','deleted')),
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			UNIQUE (repository_id, installation_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS github_repositories_installation_idx ON github_repositories(installation_id, repository_id)`,
+		`CREATE TABLE IF NOT EXISTS github_installation_project_links (
+			installation_id BIGINT NOT NULL CHECK (installation_id > 0) REFERENCES github_installations(installation_id),
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			claimed_by TEXT NOT NULL REFERENCES users(id),
+			status TEXT NOT NULL CHECK (status IN ('active','revoked')),
+			claimed_at TIMESTAMPTZ NOT NULL,
+			revoked_at TIMESTAMPTZ,
+			PRIMARY KEY (installation_id, project_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS github_installation_project_links_project_idx ON github_installation_project_links(project_id, installation_id) WHERE status = 'active'`,
+		`CREATE TABLE IF NOT EXISTS github_repository_claims (
+			repository_id BIGINT PRIMARY KEY CHECK (repository_id > 0),
+			installation_id BIGINT NOT NULL CHECK (installation_id > 0),
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			claimed_by TEXT NOT NULL REFERENCES users(id),
+			status TEXT NOT NULL CHECK (status IN ('active','revoked')),
+			claimed_at TIMESTAMPTZ NOT NULL,
+			released_at TIMESTAMPTZ,
+			UNIQUE (repository_id, installation_id, project_id),
+			FOREIGN KEY (repository_id, installation_id) REFERENCES github_repositories(repository_id, installation_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS github_repository_claims_active_repository_uidx ON github_repository_claims(repository_id) WHERE status = 'active'`,
+		`CREATE INDEX IF NOT EXISTS github_repository_claims_project_idx ON github_repository_claims(project_id, repository_id)`,
+		`CREATE TABLE IF NOT EXISTS github_service_bindings (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			service_id TEXT NOT NULL,
+			repository_id BIGINT NOT NULL CHECK (repository_id > 0),
+			installation_id BIGINT NOT NULL CHECK (installation_id > 0),
+			service_key TEXT NOT NULL,
+			config_path TEXT NOT NULL CHECK (config_path <> '' AND config_path !~ '^/'),
+			status TEXT NOT NULL CHECK (status IN ('active','revoked')),
+			created_by TEXT NOT NULL REFERENCES users(id),
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			removed_at TIMESTAMPTZ,
+			FOREIGN KEY (service_id, project_id) REFERENCES control_services(id, project_id) ON DELETE CASCADE,
+			FOREIGN KEY (repository_id, installation_id) REFERENCES github_repositories(repository_id, installation_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS github_service_bindings_active_service_uidx ON github_service_bindings(service_id) WHERE status = 'active'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS github_service_bindings_active_repository_key_uidx ON github_service_bindings(repository_id, service_key) WHERE status = 'active'`,
+		`CREATE INDEX IF NOT EXISTS github_service_bindings_project_idx ON github_service_bindings(project_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
+			delivery_id TEXT PRIMARY KEY CHECK (delivery_id <> ''),
+			event TEXT NOT NULL,
+			action TEXT NOT NULL,
+			installation_id BIGINT CHECK (installation_id > 0),
+			repository_id BIGINT CHECK (repository_id > 0),
+			received_at TIMESTAMPTZ NOT NULL,
+			processed_at TIMESTAMPTZ NOT NULL
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return err
 		}
 	}
-	return nil
+	if err := MigrateBootstrapCheckpoint(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateBuildRecords(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateR5009TopologyPolicy(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateR5010Deployment(ctx, db); err != nil {
+		return err
+	}
+	return MigrateR5011Rollout(ctx, db)
 }

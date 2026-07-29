@@ -2,17 +2,109 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/opsi-dev/opsi/agent/internal/actionplane"
+	"github.com/opsi-dev/opsi/agent/internal/cloudrunner"
 	"github.com/opsi-dev/opsi/agent/internal/config"
+	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	"github.com/opsi-dev/opsi/agent/internal/incident"
+	"github.com/opsi-dev/opsi/agent/internal/secret"
+	"github.com/opsi-dev/opsi/agent/internal/telemetry"
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	grpcstatus "google.golang.org/grpc/status"
 )
+
+func TestIncidentServiceDescriptorContainsOnlyActiveIncidentRPCs(t *testing.T) {
+	want := map[string]bool{"ListIncidents": true, "GetIncident": true, "GetIncidentEvidence": true, "ResolveIncident": true}
+	if len(agentv1.IncidentService_ServiceDesc.Methods) != len(want) {
+		t.Fatalf("unexpected incident RPC count: %+v", agentv1.IncidentService_ServiceDesc.Methods)
+	}
+	for _, method := range agentv1.IncidentService_ServiceDesc.Methods {
+		if !want[method.MethodName] {
+			t.Fatalf("unexpected incident RPC %q", method.MethodName)
+		}
+		delete(want, method.MethodName)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing active incident RPCs: %v", want)
+	}
+}
+
+func TestGetIncidentIgnoresLegacyRCAAndMitigationData(t *testing.T) {
+	store, err := telemetry.OpenSQLiteStore(t.TempDir() + "/telemetry.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	resolved := time.Unix(70, 0).UTC()
+	if err := store.InsertIncident(context.Background(), telemetry.IncidentRecord{
+		ID:                "inc-legacy",
+		ProjectID:         "p1",
+		ServiceID:         "svc-1",
+		Status:            "resolved",
+		RCAResult:         `{"legacy":"ignored"}`,
+		MitigationActions: `[{"type":"rollback","status":"success"}]`,
+		CreatedAt:         time.Unix(10, 0).UTC(),
+		ResolvedAt:        resolved,
+		MTTRSeconds:       60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewIncidentService(incidentService(store, nil, incident.KubernetesEvidenceSource{}), &fixedAuthVerifier{auth: secret.AuthContext{ProjectID: "p1", UserID: "viewer", Role: secret.RoleViewer}})
+	resp, err := service.GetIncident(incomingBearer("pat-viewer"), &agentv1.IncidentGetRequest{
+		ProjectID:  "p1",
+		IncidentID: "inc-legacy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IncidentID != "inc-legacy" || resp.ProjectID != "p1" || resp.ServiceID != "svc-1" || resp.Status != "resolved" || resp.MTTRSeconds != 60 || resp.ResolvedAtUnix != resolved.Unix() {
+		t.Fatalf("factual incident fields changed: %+v", resp)
+	}
+}
+
+func TestGetIncidentEvidenceUsesVerifiedProjectAndReadRoles(t *testing.T) {
+	store, err := telemetry.OpenSQLiteStore(t.TempDir() + "/telemetry.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.InsertIncident(context.Background(), telemetry.IncidentRecord{ID: "inc-1", ProjectID: "p1", ServiceID: "svc", Status: "open", CreatedAt: time.Unix(10, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	verifier := &fixedAuthVerifier{}
+	service := NewIncidentService(&incident.Service{Store: store, EvidenceBuilder: incident.IncidentContextBuilder{Store: store, Now: func() time.Time { return time.Unix(20, 0).UTC() }}}, verifier)
+	for _, role := range []secret.Role{secret.RoleOwner, secret.RoleDeveloper, secret.RoleViewer} {
+		verifier.auth = secret.AuthContext{ProjectID: "p1", UserID: strings.ToLower(string(role)), Role: role}
+		response, err := service.GetIncidentEvidence(incomingBearer("pat-canary"), &agentv1.IncidentGetRequest{ProjectID: "p1", IncidentID: "inc-1"})
+		if err != nil || response.SchemaVersion != incident.IncidentEvidenceSchemaVersion || response.Identity.ProjectID != "p1" {
+			t.Fatalf("role=%s response=%+v err=%v", role, response, err)
+		}
+	}
+	if _, err := service.GetIncidentEvidence(context.Background(), &agentv1.IncidentGetRequest{ProjectID: "p1", IncidentID: "inc-1"}); grpcstatus.Code(err) != codes.Unauthenticated {
+		t.Fatalf("missing Bearer err=%v", err)
+	}
+	verifier.auth = secret.AuthContext{ProjectID: "p1", UserID: "viewer", Role: secret.RoleViewer}
+	if _, err := service.GetIncidentEvidence(incomingBearer("pat-canary"), &agentv1.IncidentGetRequest{ProjectID: "p2", IncidentID: "inc-1"}); grpcstatus.Code(err) != codes.PermissionDenied {
+		t.Fatalf("cross-project err=%v", err)
+	}
+}
 
 func TestRunServesHealthAndStatus(t *testing.T) {
 	cfg := config.Default()
@@ -21,6 +113,7 @@ func TestRunServesHealthAndStatus(t *testing.T) {
 	cfg.NodeID = "test-node"
 	cfg.SQLitePath = t.TempDir() + "/agent.sqlite"
 	cfg.Deployment.DryRun = true
+	cfg.Telemetry.KubectlPath = t.TempDir() + "/missing-kubectl"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -43,7 +136,7 @@ func TestRunServesHealthAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.NodeID != "test-node" || resp.Health != "ok" || resp.Version != "test-version" {
+	if resp.NodeID != "test-node" || resp.Health != "unavailable" || resp.Version != "test-version" {
 		t.Fatalf("unexpected status: %+v", resp)
 	}
 
@@ -56,6 +149,212 @@ func TestRunServesHealthAndStatus(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not stop")
 	}
+}
+
+func TestRunServesBeforeRecoveryOfManyUnavailableActions(t *testing.T) {
+	for _, count := range []int{1, 4} {
+		t.Run(fmt.Sprintf("actions-%d", count), func(t *testing.T) {
+			cfg := config.Default()
+			cfg.ListenAddr = freeAddr(t)
+			cfg.HealthAddr = freeAddr(t)
+			cfg.NodeID = "test-node"
+			cfg.SQLitePath = t.TempDir() + "/agent.sqlite"
+			cfg.Deployment.DryRun = true
+			seedUnavailableIncidentActions(t, cfg.SQLitePath, count)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errCh := make(chan error, 1)
+			started := time.Now()
+			go func() { errCh <- Run(ctx, cfg, "test-version", slog.Default()) }()
+			waitForHealth(t, "http://"+cfg.HealthAddr+"/health")
+			if elapsed := time.Since(started); elapsed >= time.Second {
+				t.Fatalf("startup waited for recovery: count=%d elapsed=%s", count, elapsed)
+			} else {
+				t.Logf("recoverable_actions=%d health_rpc_startup=%s", count, elapsed)
+			}
+			dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Second)
+			conn, err := grpc.DialContext(dialCtx, cfg.ListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+			dialCancel()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = agentv1.NewStatusServiceClient(conn).Status(context.Background(), &agentv1.StatusRequest{})
+			_ = conn.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("server did not stop")
+			}
+		})
+	}
+}
+
+func TestDeploymentEngineConfigRequiresTrustedLocalRoutingProbe(t *testing.T) {
+	engineCfg, err := deploymentEngineConfig(config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, ok := engineCfg.Reconciler.(deploy.ProductionAdapter)
+	if !ok || !adapter.RequireLocalRouting || adapter.RoutingProbe == nil {
+		t.Fatalf("production reconciler must require a routing probe: %#v", engineCfg.Reconciler)
+	}
+	probe, ok := adapter.RoutingProbe.(deploy.BoundedHTTPProbe)
+	if !ok || probe.Scheme != "http" || probe.Address != "127.0.0.1" || probe.Port != 80 || probe.Timeout != 5*time.Second || probe.MaxBody != 16*1024 {
+		t.Fatalf("unexpected trusted routing probe: %#v", adapter.RoutingProbe)
+	}
+}
+
+func TestStatusAndHealthExposeCloudConnectionState(t *testing.T) {
+	connected := true
+	cfg := config.Default()
+	cfg.NodeID = "node-1"
+	status := NewStatusService("v1", time.Unix(10, 0), cfg, func() bool { return connected }, staticServerHealthProbe{health: cloudrunner.RuntimeHealth{NodeReady: true, K3SStatus: cloudrunner.K3SStatusReady}})
+	response, err := status.Status(context.Background(), &agentv1.StatusRequest{})
+	if err != nil || !response.CloudConnected {
+		t.Fatalf("status=%+v err=%v", response, err)
+	}
+	httpResponse := httptest.NewRecorder()
+	healthHandler("v1", time.Unix(10, 0), cfg, func() bool { return connected }).ServeHTTP(httpResponse, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var body map[string]any
+	if err := json.Unmarshal(httpResponse.Body.Bytes(), &body); err != nil || body["cloud_connected"] != true {
+		t.Fatalf("health body=%s err=%v", httpResponse.Body.String(), err)
+	}
+	connected = false
+	response, _ = status.Status(context.Background(), &agentv1.StatusRequest{})
+	if response.CloudConnected {
+		t.Fatal("status did not reflect disconnected Cloud state")
+	}
+}
+
+func TestStatusReflectsRuntimeProbe(t *testing.T) {
+	cfg := config.Default()
+	tests := []struct {
+		name   string
+		probe  cloudrunner.HealthProbe
+		health string
+	}{
+		{name: "ready", probe: staticServerHealthProbe{health: cloudrunner.RuntimeHealth{NodeReady: true, K3SStatus: cloudrunner.K3SStatusReady}}, health: "ok"},
+		{name: "not ready", probe: staticServerHealthProbe{health: cloudrunner.RuntimeHealth{K3SStatus: cloudrunner.K3SStatusNotReady}}, health: "degraded"},
+		{name: "unavailable", probe: staticServerHealthProbe{err: errors.New("unavailable")}, health: "unavailable"},
+		{name: "missing", health: "unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response, err := NewStatusService("v1", time.Now(), cfg, func() bool { return true }, tt.probe).Status(context.Background(), &agentv1.StatusRequest{})
+			if err != nil || response.Health != tt.health || !response.CloudConnected {
+				t.Fatalf("response=%+v err=%v", response, err)
+			}
+		})
+	}
+}
+
+func TestIncidentServerUsesVerifiedIdentityAndRejectsCallerEscalation(t *testing.T) {
+	store := &recordingIncidentStore{record: telemetry.IncidentRecord{ID: "inc-1", ProjectID: "project-1", Status: "open"}}
+	audit := &recordingAuditSink{}
+	verifier := &fixedAuthVerifier{auth: secret.AuthContext{ProjectID: "project-1", UserID: "verified-viewer", Role: secret.RoleViewer}}
+	service := NewIncidentService(&incident.Service{Store: store, Audit: audit}, verifier)
+
+	_, err := service.ResolveIncident(incomingBearer("pat-viewer"), &agentv1.IncidentResolveRequest{ProjectID: "project-1", IncidentID: "inc-1"})
+	if grpcstatus.Code(err) != codes.PermissionDenied || store.resolveCalls != 0 {
+		t.Fatalf("viewer escalation err=%v resolve_calls=%d", err, store.resolveCalls)
+	}
+
+	verifier.auth = secret.AuthContext{ProjectID: "project-1", UserID: "verified-owner", Role: secret.RoleOwner}
+	response, err := service.ResolveIncident(incomingBearer("pat-owner"), &agentv1.IncidentResolveRequest{ProjectID: "project-1", IncidentID: "inc-1"})
+	if grpcstatus.Code(err) != codes.FailedPrecondition || response != nil || store.resolveCalls != 0 {
+		t.Fatalf("response=%+v err=%v resolve_calls=%d", response, err, store.resolveCalls)
+	}
+	if audit.last.Actor != "" || verifier.last.PAT != "pat-owner" {
+		t.Fatalf("audit=%+v verifier_input=%+v", audit.last, verifier.last)
+	}
+}
+
+func TestSecretAndIncidentRPCsRequireAuthorizationBearer(t *testing.T) {
+	verifier := &fixedAuthVerifier{auth: secret.AuthContext{ProjectID: "project-1", UserID: "owner", Role: secret.RoleOwner}}
+	secretService := NewSecretService(config.Default(), &secret.Service{}, verifier)
+	incidentService := NewIncidentService(&incident.Service{Store: &recordingIncidentStore{}}, verifier)
+
+	if _, err := secretService.SetupTOTP(context.Background(), &agentv1.SetupTOTPRequest{ProjectID: "project-1"}); grpcstatus.Code(err) != codes.Unauthenticated {
+		t.Fatalf("missing secret Bearer err=%v", err)
+	}
+	legacy := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-opsi-pat", "legacy-pat"))
+	if _, err := incidentService.ListIncidents(legacy, &agentv1.IncidentListRequest{ProjectID: "project-1"}); grpcstatus.Code(err) != codes.Unauthenticated {
+		t.Fatalf("legacy metadata err=%v", err)
+	}
+	invalid := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Basic caller"))
+	if _, err := incidentService.ListIncidents(invalid, &agentv1.IncidentListRequest{ProjectID: "project-1"}); grpcstatus.Code(err) != codes.Unauthenticated {
+		t.Fatalf("invalid authorization err=%v", err)
+	}
+}
+
+type fixedAuthVerifier struct {
+	auth secret.AuthContext
+	err  error
+	last secret.AuthContext
+}
+
+func (v *fixedAuthVerifier) VerifyAuth(_ context.Context, auth secret.AuthContext) (secret.AuthContext, error) {
+	v.last = auth
+	if v.err != nil {
+		return secret.AuthContext{}, v.err
+	}
+	verified := v.auth
+	verified.PAT = auth.PAT
+	return verified, nil
+}
+
+type staticServerHealthProbe struct {
+	health cloudrunner.RuntimeHealth
+	err    error
+}
+
+func (p staticServerHealthProbe) Probe(context.Context) (cloudrunner.RuntimeHealth, error) {
+	return p.health, p.err
+}
+
+type recordingIncidentStore struct {
+	record       telemetry.IncidentRecord
+	resolveCalls int
+}
+
+func (s *recordingIncidentStore) GetIncident(context.Context, string, string) (*telemetry.IncidentRecord, error) {
+	copy := s.record
+	return &copy, nil
+}
+
+func (s *recordingIncidentStore) ListIncidents(context.Context, string, string, int) ([]telemetry.IncidentRecord, error) {
+	return []telemetry.IncidentRecord{s.record}, nil
+}
+
+func (s *recordingIncidentStore) ResolveIncident(_ context.Context, projectID, incidentID string, resolved time.Time) (*telemetry.IncidentRecord, error) {
+	s.resolveCalls++
+	s.record.ProjectID = projectID
+	s.record.ID = incidentID
+	s.record.Status = incident.StatusResolved
+	s.record.ResolvedAt = resolved
+	copy := s.record
+	return &copy, nil
+}
+
+type recordingAuditSink struct {
+	last secret.AuditRecord
+}
+
+func (s *recordingAuditSink) InsertAudit(_ context.Context, record secret.AuditRecord) error {
+	s.last = record
+	return nil
+}
+
+func incomingBearer(token string) context.Context {
+	return metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 }
 
 func freeAddr(t *testing.T) string {
@@ -85,4 +384,32 @@ func waitForHealth(t *testing.T, url string) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("health endpoint did not become ready: %s", url)
+}
+
+func seedUnavailableIncidentActions(t *testing.T, path string, count int) {
+	t.Helper()
+	store, err := actionplane.OpenSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	for i := 0; i < count; i++ {
+		target := actionv1.TargetIdentity{ProjectID: "p1", NodeID: fmt.Sprintf("node-%d", i), ServiceID: "svc", EnvironmentID: "prod", RuntimeID: fmt.Sprintf("runtime-%d", i)}
+		state := actionv1.CurrentState{SchemaVersion: actionv1.SchemaVersion, ProjectID: "p1", Target: target, Incident: &actionv1.IncidentState{IncidentID: fmt.Sprintf("missing-%d", i), Status: "open"}}
+		state.StateHash, _ = actionv1.StateHash(state)
+		plan := actionv1.ActionPlan{SchemaVersion: actionv1.SchemaVersion, ID: fmt.Sprintf("action-%d", i), ProjectID: "p1", NodeID: target.NodeID, ServiceID: target.ServiceID, Target: target, Kind: actionv1.ActionIncidentResolve, Parameters: actionv1.ActionParameters{IncidentResolve: &actionv1.IncidentResolveParameters{IncidentID: state.Incident.IncidentID}}, Origin: actionv1.OriginManualCLI, RequestedBy: "u1", Risk: actionv1.RiskR2, CurrentStateHash: state.StateHash, IssuedAt: now, ExpiresAt: now.Add(actionv1.MaxPlanTTL)}
+		plan.PlanHash, _ = actionv1.PlanHash(plan)
+		challenge := actionv1.ApprovalChallenge{SchemaVersion: actionv1.SchemaVersion, ID: fmt.Sprintf("challenge-%d", i), ActionID: plan.ID, ProjectID: plan.ProjectID, PlanHash: plan.PlanHash, StateHash: state.StateHash, Nonce: fmt.Sprintf("nonce-%d", i), IssuedAt: now, ExpiresAt: now.Add(actionv1.MaxChallengeTTL)}
+		if err := store.Create(context.Background(), plan, state, challenge); err != nil {
+			t.Fatal(err)
+		}
+		reservation, err := store.ReserveExecution(context.Background(), plan.ProjectID, challenge.ID, fmt.Sprintf("grant-%d", i), "u1", "device-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.BeginExecution(context.Background(), reservation.Record, now.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
