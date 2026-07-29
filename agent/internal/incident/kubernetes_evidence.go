@@ -121,16 +121,15 @@ func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceKe
 	if missingServiceKey {
 		markKubernetesPartial(&result, "SERVICE_KEY_LABEL_MISSING")
 	}
-	if len(identities) == 0 {
-		markKubernetesPartial(&result, "KUBERNETES_RESOURCES_NOT_FOUND")
-	}
 
 	applicationDigests := map[string]bool{}
 	digestIncomplete := false
+	selectedPodCount := 0
 	for _, item := range podsPayload.Items {
 		if !identities[resourceIdentity(item.Metadata.Namespace, "Pod", item.Metadata.Name)] {
 			continue
 		}
+		selectedPodCount++
 		pod := agentv1.IncidentPodEvidence{Namespace: safeEvidenceText(item.Metadata.Namespace, 256), PodID: safeEvidenceText(item.Metadata.Name, 256), NodeID: safeEvidenceText(item.Spec.NodeName, 256)}
 		applicationFound := false
 		for _, container := range item.Status.ContainerStatuses {
@@ -154,6 +153,13 @@ func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceKe
 	sort.Slice(result.Pods, func(i, j int) bool {
 		return result.Pods[i].Namespace+"\x00"+result.Pods[i].PodID < result.Pods[j].Namespace+"\x00"+result.Pods[j].PodID
 	})
+	if selectedPodCount == 0 {
+		if podID != "" {
+			markKubernetesPartial(&result, "KUBERNETES_TARGET_POD_NOT_FOUND")
+		} else {
+			markKubernetesPartial(&result, "KUBERNETES_PODS_NOT_FOUND")
+		}
+	}
 
 	if !digestIncomplete && len(applicationDigests) == 1 {
 		for digest := range applicationDigests {
@@ -196,9 +202,6 @@ func (s KubernetesEvidenceSource) Read(ctx context.Context, projectID, serviceKe
 		return left.Namespace+"\x00"+left.ObjectKind+"\x00"+left.ObjectName+"\x00"+left.Type+"\x00"+left.Reason+"\x00"+left.Message <
 			right.Namespace+"\x00"+right.ObjectKind+"\x00"+right.ObjectName+"\x00"+right.Type+"\x00"+right.Reason+"\x00"+right.Message
 	})
-	if len(result.Pods)+len(result.Events) == 0 {
-		markKubernetesPartial(&result, "KUBERNETES_EVIDENCE_EMPTY")
-	}
 	return result, nil
 }
 

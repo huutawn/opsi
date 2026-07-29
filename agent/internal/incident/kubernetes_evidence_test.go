@@ -113,8 +113,31 @@ func TestKubernetesEvidenceDoesNotInferServiceKeyFromCloudIDOrResourceName(t *te
 		responses[key] = response
 	}
 	result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: responses}}).Read(context.Background(), "p1", serviceKey, "node-1", "")
-	if err != nil || result.ObservedDigest != "" || result.CoverageStatus != "partial" || result.ReasonCode != "KUBERNETES_RESOURCES_NOT_FOUND" || len(result.Pods) != 0 {
+	if err != nil || result.ObservedDigest != "" || result.CoverageStatus != "partial" || result.ReasonCode != "KUBERNETES_PODS_NOT_FOUND" || len(result.Pods) != 0 {
 		t.Fatalf("cloud service ID/resource name was used as Agent service key: result=%+v err=%v", result, err)
+	}
+}
+
+func TestKubernetesEvidenceMissingOwnedPodsRemainsPartialWithResourceEvents(t *testing.T) {
+	events := `{"items":[` +
+		ownedEvent("default", "Deployment", resourceName, "deployment") + `,` +
+		ownedEvent("default", "Service", resourceName, "service") + `]}`
+	tests := []struct {
+		name   string
+		pods   string
+		podID  string
+		reason string
+	}{
+		{name: "stale target pod", pods: ownedPod("current-pod", digestA, ""), podID: "stale-pod", reason: "KUBERNETES_TARGET_POD_NOT_FOUND"},
+		{name: "no owned pods", reason: "KUBERNETES_PODS_NOT_FOUND"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := (KubernetesEvidenceSource{Runner: &fakeKubernetesRunner{responses: ownedKubernetesResponses(test.pods, events)}}).Read(context.Background(), "p1", serviceKey, "node-1", test.podID)
+			if err != nil || result.CoverageStatus != "partial" || result.ReasonCode != test.reason || result.ObservedDigest != "" || len(result.Pods) != 0 || len(result.Events) != 2 {
+				t.Fatalf("missing owned pod was hidden by resource events: result=%+v err=%v", result, err)
+			}
+		})
 	}
 }
 

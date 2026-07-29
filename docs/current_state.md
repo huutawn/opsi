@@ -13,7 +13,9 @@ performed.
 R5-015 Agent-local Kubernetes identity is the exact `opsi.dev/service`
 ServiceKey. Opsi-managed Pods without a valid canonical service label are
 excluded from telemetry, and IncidentEvidence validates Deployment -> ReplicaSet
--> Pod ownership before using application-container digests. `IncidentRecord.ServiceID`
+-> Pod ownership before using application-container digests. Missing exact target
+Pods and zero owned Pods remain bounded partial coverage even when matching
+Deployment or Service events exist. `IncidentRecord.ServiceID`
 still carries the Agent ServiceKey; Cloud ServiceID/ServiceKey separation is a
 future contract migration, not part of this corrective.
 

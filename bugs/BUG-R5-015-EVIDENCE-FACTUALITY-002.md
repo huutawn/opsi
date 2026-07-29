@@ -14,6 +14,11 @@ digests remain per-Pod only with bounded partial reasons, Kubernetes events use
 the same Opsi ownership graph, and final evidence fitting keeps encoded bodies
 within 256 KiB before hashing.
 
+Pod coverage is based only on the exact Pods selected after that ownership
+graph. A stale target Pod reports `KUBERNETES_TARGET_POD_NOT_FOUND`; zero owned
+Pods reports `KUBERNETES_PODS_NOT_FOUND`. Deployment or Service events remain
+useful evidence but cannot turn either missing-Pod state into available coverage.
+
 Identity boundary: Agent-local telemetry and rollout/evidence lookup use the
 canonical `opsi.dev/service` ServiceKey (`api`). `IncidentRecord.ServiceID`
 currently carries that Agent ServiceKey. Separating Cloud ServiceID from

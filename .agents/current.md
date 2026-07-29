@@ -31,9 +31,11 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 - IncidentEvidence uses that same Agent ServiceKey for local rollout lookup and
   exact Deployment -> ReplicaSet -> Pod ownership; only validated Pods affect
   the application digest.
-- Empty, missing-label, mixed-digest, and incomplete-digest evidence remains
-  bounded partial coverage. `IncidentRecord.ServiceID` carrying ServiceKey is
-  explicit technical debt for a separate contract migration.
+- Missing exact target Pods and zero owned Pods remain bounded partial coverage
+  even when matching Deployment or Service events exist. Missing-label,
+  mixed-digest, and incomplete-digest evidence is also bounded partial coverage.
+  `IncidentRecord.ServiceID` carrying ServiceKey is explicit technical debt for
+  a separate contract migration.
 - No VPS/live E2E, R5-017, MCP, or production-readiness claim is included.
 
 ### Corrective Prompt 07 — UNRESOLVED_ROLLOUT_OWNERSHIP_PASS
