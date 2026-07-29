@@ -1,6 +1,8 @@
 import type { FormEvent } from "react";
 import type { LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
+import type { ConsoleRoute } from "@/features/console/navigation";
+import type { FoundationState } from "@/lib/presentation/project";
 
 export type MutationReview = {
   project: string;
@@ -21,15 +23,17 @@ export type MutationRequest = Omit<MutationReview, "idempotencyKey" | "status" |
 
 export type ConsoleController = {
   active: string;
+  route: ConsoleRoute;
   session: LocalSessionStatus | null;
   review: MutationReview | null;
+  navigate: (route: Partial<ConsoleRoute>) => void;
   setActive: (view: string) => void;
   setProjectID: (id: string) => void;
   setServiceDetail: (service: ServiceRecord | null) => void;
   reviewMutation: (request: MutationRequest, submit: (idempotencyKey: string) => Promise<string>) => void;
   closeReview: () => void;
   submitReview: () => Promise<void>;
-  state: ConsoleState;
+  state: ConsoleState & FoundationState;
   actions: {
     addServer: (event: FormEvent<HTMLFormElement>) => Promise<void>;
     createProject: (event: FormEvent<HTMLFormElement>) => Promise<void>;
