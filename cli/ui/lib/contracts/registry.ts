@@ -413,6 +413,23 @@ export type IncidentListResult = {
   incidents: IncidentResponse[];
 };
 
+export type IncidentEvidence = {
+  schema_version: string;
+  identity: IncidentResponse;
+  generated_at_unix: number;
+  observation_window: { start_unix: number; end_unix: number };
+  deployment: { desired_digest?: string; previous_digest?: string; observed_digest?: string; restored_digest?: string };
+  rollout: { rollout_id?: string; state?: string; failure_code?: string; readiness_hash?: string; event_correlation?: string[] };
+  timeline?: Array<{ observed_at_unix: number; source: string; kind: string; detail?: string; untrusted_content: boolean }>;
+  pods?: Array<{ namespace?: string; pod_id: string; node_id?: string; ready_containers: number; total_containers: number; restart_count: number; observed_digest?: string }>;
+  kubernetes_events?: Array<{ observed_at_unix: number; namespace?: string; object_kind?: string; object_name?: string; type?: string; reason?: string; message?: string; untrusted_content: boolean }>;
+  log_fingerprints?: Array<{ fingerprint: string; level?: string; count: number; first_observed_unix: number; last_observed_unix: number; excerpt?: string; untrusted_content: boolean }>;
+  audit_references?: Array<{ audit_id: string; action: string; resource_type: string; resource_id: string; result: string; created_at_unix: number }>;
+  coverage: Array<{ source: string; status: string; reason_code?: string; item_count: number; truncated: boolean }>;
+  truncations?: Array<{ section: string; omitted_items: number; utf8_safe: boolean }>;
+  content_sha256: string;
+};
+
 export type BootstrapSession = {
   id: string;
   status: string;
@@ -564,8 +581,6 @@ export type ConsoleState = {
   secretReveal: SecretResult | null;
   totpSetup: { secret: string; uri: string; ttl_seconds: number } | null;
   incidents: IncidentResponse[];
-  incidentDetail: IncidentResponse | null;
-  incidentError: string;
   nodeDetail: NodeDiagnostics | null;
   serviceDetail: ServiceRecord | null;
   busy: string;

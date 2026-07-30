@@ -664,6 +664,8 @@ backend gap fail-closed cho tới native acceptance ở R5-017.
 
 ### R5-017 — Full manual E2E chạy hai lần — MCP BLOCKING GATE
 
+**Trạng thái frontend:** FE-01 đến FE-04 source redesign và browser fixture acceptance đã pass. Security/Settings, Delivery loading, observability factuality, và CLI-only ActionPlane handoff đã được ổn định. Các advisory PostCSS/Sharp vẫn `UPSTREAM_BLOCKED`; PostCSS còn build-time risk và không có claim dependency closure. Không có live Agent/VPS acceptance trong FE-04, nên R5-017 vẫn pending và roadmap tổng thể chưa complete.
+
 **CẦN VPS:** tối thiểu một Agent VPS. Để tuyên bố hỗ trợ multi-VPS production path, cần **hai Agent VPS** trong cùng project nhưng hai single-node runtimes độc lập.
 
 **Mục tiêu:** chứng minh sản phẩm đầy đủ không cần MCP/AI.

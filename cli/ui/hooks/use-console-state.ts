@@ -2,25 +2,19 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
-import type { MutationRequest, MutationReview } from "@/features/console/types";
-import type {
-  BootstrapSession,
-  ConsoleState,
-  DeploymentJob,
-  NodeDiagnostics,
-  NodeRecord,
-  Project,
-  ServiceRecord,
-  TimelineEvent,
-} from "@/lib/contracts/registry";
+import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
+import { normalizeRoute, parseRoute, routeForLegacy, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
+import { emptyFoundation, type FoundationState } from "@/lib/presentation/project";
+import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
+import { clearProjectPatch, loadFoundation, loadProject, reconnect, secretBody, workspacePatch } from "@/hooks/console-state-support";
 
 export function useConsoleState() {
   const [session, setSession] = useState<LocalSessionStatus | null>(null);
-  const [active, setActive] = useState("Projects");
-  const [projectID, setProjectID] = useState("");
+  const [route, setRoute] = useState<ConsoleRoute>({ projectID: "", view: "projects", tab: "" });
+  const [projectID, setSelectedProjectID] = useState("");
   const [review, setReview] = useState<(MutationReview & { submit: (key: string) => Promise<string> }) | null>(null);
   const revealTimer = useRef<number | null>(null);
-  const [state, setState] = useState<ConsoleState>({
+  const [state, setState] = useState<ConsoleState & FoundationState>({
     status: "loading",
     message: "",
     projects: [],
@@ -37,17 +31,16 @@ export function useConsoleState() {
     secretReveal: null,
     totpSetup: null,
     incidents: [],
-    incidentDetail: null,
-    incidentError: "",
     nodeDetail: null,
     serviceDetail: null,
     busy: "",
+    foundation: emptyFoundation,
   });
 
   const client = useMemo(() => new LocalClient(), []);
-  const currentProject = state.projects.find((item) => item.id === projectID) ?? state.projects[0] ?? null;
+  const currentProject = state.projects.find((item) => item.id === projectID) ?? null;
 
-  function patch(value: Partial<ConsoleState>) {
+  function patch(value: Partial<ConsoleState & FoundationState>) {
     setState((prev) => ({ ...prev, ...value }));
   }
 
@@ -81,7 +74,7 @@ export function useConsoleState() {
     setReview((current) => (current?.status === "submitting" ? current : null));
   }
 
-  async function load(selectedProjectID = "") {
+  async function load(selectedProjectID = projectID) {
     patch(state.status === "ready" ? { message: "" } : { status: "loading", message: "" });
     try {
       const sessionStatus = await client.session(selectedProjectID || undefined);
@@ -104,18 +97,26 @@ export function useConsoleState() {
       }
       const effectiveOrgID = sessionStatus.org_id ?? "";
       if (!effectiveOrgID) throw new Error("Authenticated session did not include an organization ID");
-      const effectiveProjectID = selectedProjectID || projectID || sessionStatus.project_id || "";
       const list = await client.projects(effectiveOrgID);
       const projects = list.projects ?? [];
-      const selected = projects.find((item) => item.id === effectiveProjectID) ?? projects[0] ?? null;
+      if (!selectedProjectID) {
+        patch(workspacePatch(projects));
+        return;
+      }
+      const selected = projects.find((item) => item.id === selectedProjectID) ?? null;
       if (!selected) {
-        patch(emptyPatch(projects));
+        setSelectedProjectID("");
+        const next = normalizeRoute({ view: "projects" });
+        setRoute(next);
+        window.history.replaceState({}, "", routeHref(next));
+        patch({ ...workspacePatch(projects), message: "The selected project is unavailable. Choose another project." });
         return;
       }
 
       const [readiness, nodes, services, deployments, sessions, audit, support] = await loadProject(client, selected.id);
+      const foundation = await loadFoundation(client, selected.id, services.services ?? [], sessionStatus.agent_connected);
       const streamPatch = await reconnect(client, selected.id, sessions.sessions ?? [], deployments.deployments ?? []);
-      setProjectID(selected.id);
+      setSelectedProjectID(selected.id);
       patch({
         status: "ready",
         projects,
@@ -127,6 +128,8 @@ export function useConsoleState() {
         sessions: sessions.sessions ?? [],
         audit: audit.events ?? [],
         support,
+        incidents: foundation.incidents,
+        foundation,
         ...streamPatch,
       });
     } catch (error) {
@@ -140,9 +143,34 @@ export function useConsoleState() {
   }
 
   useEffect(() => {
-    queueMicrotask(() => void load());
+    const initial = parseRoute(window.location.search);
+    // URL state is the external source of truth for refresh/deep-link restoration.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRoute(initial);
+    setSelectedProjectID(initial.projectID);
+    queueMicrotask(() => void load(initial.projectID));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    function restoreRoute() {
+      const next = parseRoute(window.location.search);
+      clearSensitive();
+      setReview(null);
+      setRoute(next);
+      if (next.projectID === projectID) return;
+      setSelectedProjectID(next.projectID);
+      if (!next.projectID) {
+        patch(workspacePatch(state.projects));
+        return;
+      }
+      patch(clearProjectPatch("Restoring project…"));
+      void client.switchProject(next.projectID, crypto.randomUUID()).then(() => load(next.projectID)).catch(loadError);
+    }
+    window.addEventListener("popstate", restoreRoute);
+    return () => window.removeEventListener("popstate", restoreRoute);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectID, state.projects]);
 
   useEffect(
     () => () => {
@@ -150,6 +178,51 @@ export function useConsoleState() {
     },
     [],
   );
+
+  function updateRoute(next: ConsoleRoute, replace = false) {
+    setRoute(next);
+    window.history[replace ? "replaceState" : "pushState"]({}, "", routeHref(next));
+  }
+
+  function navigate(request: Partial<ConsoleRoute>) {
+    const next = normalizeRoute({ ...route, ...request, projectID: request.projectID ?? route.projectID });
+    if (next.projectID !== projectID) {
+      setReview(null);
+      if (!next.projectID) {
+        clearSensitive();
+        setReview(null);
+        setSelectedProjectID("");
+        updateRoute(next);
+        patch(workspacePatch(state.projects));
+      } else {
+        void selectProject(next.projectID, next);
+      }
+      return;
+    }
+    if (next.view !== route.view || next.tab !== route.tab) {
+      clearSensitive();
+      patch({ serviceDetail: next.view === "services" ? state.serviceDetail : null });
+    }
+    updateRoute(next);
+  }
+
+  async function selectProject(id: string, destination = normalizeRoute({ projectID: id, view: "overview" })) {
+    if (!id) return;
+    clearSensitive();
+    setSelectedProjectID(id);
+    updateRoute(destination);
+    patch(clearProjectPatch("Switching project…"));
+    try {
+      await client.switchProject(id, crypto.randomUUID());
+      await load(id);
+    } catch (error) {
+      loadError(error as Error & { status?: number });
+    }
+  }
+
+  function loadError(error: Error & { status?: number }) {
+    patch({ status: error.status === 401 || error.status === 403 ? "permission" : "error", message: error.message });
+  }
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -165,7 +238,7 @@ export function useConsoleState() {
         try {
           const created = await client.createProject(orgID, { name, slug }, key);
           formElement.reset();
-          await load(created.id);
+          await selectProject(created.id);
           return `Project ${created.id} created by the Local backend.`;
         } finally {
           patch({ busy: "" });
@@ -183,13 +256,13 @@ export function useConsoleState() {
     const host = String(form.get("public_host") ?? "");
     const role = String(form.get("role") ?? "");
     reviewMutation(
-      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, `auth: ${authMethod}`, `ssh port: ${String(form.get("ssh_port") || 22)}`], risk: "Starts the canonical bootstrap worker flow. Credentials are submitted once and stay out of browser storage." },
+      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, `auth: ${authMethod}`, `ssh port: ${String(form.get("ssh_port") || "not reported")}`], risk: "Starts the canonical bootstrap worker flow. Credentials are submitted once and stay out of browser storage." },
       async (key) => {
         const submitted = new FormData(formElement);
         const submittedAuth = String(submitted.get("auth_method"));
         const body: Record<string, unknown> = {
           role: submitted.get("role"), public_host: submitted.get("public_host"),
-          ssh_port: Number(submitted.get("ssh_port") || 22), ssh_username: submitted.get("ssh_username"), auth_method: submittedAuth,
+          ssh_port: Number(submitted.get("ssh_port")), ssh_username: submitted.get("ssh_username"), auth_method: submittedAuth,
         };
         body[submittedAuth === "private_key" ? "ssh_private_key" : "ssh_password"] = String(submitted.get("secret") ?? "");
         patch({ busy: "server" });
@@ -234,7 +307,7 @@ export function useConsoleState() {
   async function diagnostics(nodeID: string) {
     if (!currentProject) return;
     patch({ nodeDetail: await client.node(currentProject.id, nodeID) });
-    setActive("Servers / Nodes");
+    navigate({ view: "infrastructure", tab: "nodes", node: nodeID });
   }
 
   function nodeAction(nodeID: string, action: "offline" | "drain" | "remove") {
@@ -302,7 +375,7 @@ export function useConsoleState() {
     const form = new FormData(formElement);
     const name = String(form.get("name") ?? "");
     reviewMutation(
-      { project: currentProject.name, targetType: "secret", targetID: name, operation: "create", diff: [`service: ${String(form.get("service_id") ?? "")}`, `namespace: ${String(form.get("namespace") || "default")}`], risk: "Writes a secret through the authenticated Agent. Values are never returned." },
+      { project: currentProject.name, targetType: "secret", targetID: name, operation: "create", diff: [`service: ${String(form.get("service_id") ?? "")}`, `namespace: ${String(form.get("namespace") ?? "")}`], risk: "Writes a secret through the authenticated Agent. Values are never returned." },
       async (key) => {
         clearSensitive();
         patch({ busy: "secret-create" });
@@ -333,6 +406,7 @@ export function useConsoleState() {
           const revealed = await client.revealSecret(currentProject.id, name, secretBody(new FormData(formElement)), key);
           patch({ secretReveal: revealed });
           revealTimer.current = window.setTimeout(clearSensitive, (revealed.ttl_seconds ?? 60) * 1000);
+          setReview(null);
           formElement.reset();
           return `Secret ${name} revealed by the Agent; TTL ${revealed.ttl_seconds ?? 60}s.`;
         } finally {
@@ -374,64 +448,15 @@ export function useConsoleState() {
         const result = await client.setupTOTP(currentProject.id, key);
         patch({ totpSetup: result });
         revealTimer.current = window.setTimeout(clearSensitive, result.ttl_seconds * 1000);
+        setReview(null);
         return `TOTP setup created by the Agent; TTL ${result.ttl_seconds}s.`;
       },
     );
   }
 
-  async function incidentList(event: FormEvent<HTMLFormElement>) {
-	 event.preventDefault();
-	 if (!currentProject) return;
-	 const form = new FormData(event.currentTarget);
-	 patch({ busy: "incident-list", incidentDetail: null, incidentError: "" });
-	 try {
-	   const result = await client.incidents(currentProject.id, String(form.get("status") ?? ""));
-	   patch({ incidents: result.incidents ?? [] });
-	 } catch (error) {
-	   patch({ incidentError: (error as Error).message });
-	 } finally {
-	   patch({ busy: "" });
-	 }
-  }
-
-  async function incidentGet(event: FormEvent<HTMLFormElement>) {
-	 event.preventDefault();
-	 if (!currentProject) return;
-	 const form = new FormData(event.currentTarget);
-	 const incidentID = String(form.get("incident_id") ?? "");
-	 patch({ busy: "incident-get", incidentDetail: null, incidentError: "" });
-	 try {
-	   const result = await client.incident(currentProject.id, incidentID);
-	   patch({ incidentDetail: result.incident });
-	 } catch (error) {
-	   patch({ incidentError: (error as Error).message });
-	 } finally {
-	   patch({ busy: "" });
-    }
-  }
-
-  async function incidentResolve(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
-    const incidentID = String(form.get("incident_id") ?? "");
-    reviewMutation(
-      { project: currentProject.name, targetType: "incident", targetID: incidentID, operation: "resolve", diff: ["mark factual Agent incident resolved"], risk: "Changes incident lifecycle state but does not execute remediation." },
-      async (key) => {
-        patch({ busy: "incident-resolve", incidentError: "" });
-        try {
-          const result = await client.resolveIncident(currentProject.id, incidentID, key);
-          patch({ incidentDetail: result.incident, incidents: state.incidents.map((item) => (item.incident_id === result.incident.incident_id ? result.incident : item)) });
-          return `Incident ${incidentID} returned status ${result.incident.status}.`;
-        } finally {
-          patch({ busy: "" });
-        }
-      },
-    );
-  }
-
   return {
-    active,
+    active: routeLabel(route),
+    route,
     session,
     review: review
       ? (() => {
@@ -440,23 +465,11 @@ export function useConsoleState() {
           return visible;
         })()
       : null,
-    setActive: (view: string) => {
-      if (view !== active) clearSensitive();
-      setActive(view);
-    },
+    navigate,
+    setActive: (view: string) => navigate(routeForLegacy(view, projectID)),
     setProjectID: (id: string) => {
-      if (!id || id === projectID) return;
-      clearSensitive();
       setReview(null);
-      patch({
-        status: "loading", message: "Switching project...", project: null, readiness: null,
-        nodes: [], services: [], deployments: [], sessions: [], bootstrapEvents: [], deploymentEvents: [], audit: [], support: null,
-        incidents: [], incidentDetail: null, incidentError: "", nodeDetail: null, serviceDetail: null,
-      });
-      void client
-        .switchProject(id, crypto.randomUUID())
-        .then(() => load(id))
-        .catch((error: Error & { status?: number }) => patch({ status: error.status === 401 || error.status === 403 ? "permission" : "error", message: error.message }));
+      void selectProject(id);
     },
     setServiceDetail: (serviceDetail: ServiceRecord | null) => patch({ serviceDetail }),
     reviewMutation,
@@ -472,9 +485,7 @@ export function useConsoleState() {
       loadBootstrapEvents,
       retryBootstrap,
       loadDeploymentEvents,
-      incidentList,
-      incidentGet,
-      incidentResolve,
+      hideSensitive: clearSensitive,
       nodeAction,
       rollback,
       secretCreate,
@@ -482,63 +493,5 @@ export function useConsoleState() {
       secretRotate,
       setupTOTP,
     },
-  };
-}
-
-function secretBody(form: FormData) {
-  return {
-    service_id: form.get("service_id"),
-    name: form.get("name"),
-    namespace: form.get("namespace"),
-    otp_request_id: form.get("otp_request_id"),
-    otp_code: form.get("otp_code"),
-    totp_code: form.get("totp_code"),
-  };
-}
-
-async function loadProject(client: LocalClient, projectID: string) {
-  return Promise.all([
-    client.readiness(projectID),
-    client.nodes(projectID),
-    client.services(projectID),
-    client.deployments(projectID),
-    client.bootstrapSessions(projectID),
-    client.audit(projectID),
-    client.support(projectID),
-  ]);
-}
-
-async function reconnect(
-  client: LocalClient,
-  projectID: string,
-  sessions: BootstrapSession[],
-  deployments: DeploymentJob[],
-): Promise<Pick<ConsoleState, "bootstrapEvents" | "deploymentEvents">> {
-  const activeSession = sessions.find((item) => ["created", "preflight", "installing", "waiting_agent"].includes(item.status)) ?? sessions[0];
-  const bootstrapEvents = activeSession ? await client.bootstrapEvents(projectID, activeSession.id) : [];
-  const deploymentEvents = deployments[0] ? (await client.deploymentEvents(projectID, deployments[0].id)).events ?? [] : [];
-  return { bootstrapEvents, deploymentEvents };
-}
-
-function emptyPatch(projects: Project[]): Partial<ConsoleState> {
-  return {
-    status: "empty",
-    projects,
-    project: null,
-    readiness: null,
-    nodes: [] as NodeRecord[],
-    services: [] as ServiceRecord[],
-    deployments: [] as DeploymentJob[],
-    sessions: [] as BootstrapSession[],
-    audit: [],
-    support: null,
-    secretReveal: null,
-    totpSetup: null,
-    incidents: [],
-    incidentDetail: null,
-    incidentError: "",
-    bootstrapEvents: [] as TimelineEvent[],
-    deploymentEvents: [] as TimelineEvent[],
-    nodeDetail: null as NodeDiagnostics | null,
-  };
+  } as ConsoleController;
 }

@@ -15,6 +15,7 @@ import type {
   SecretResult,
   IncidentResult,
   IncidentListResult,
+  IncidentEvidence,
   SupportSummary,
   TelemetryQueryResponse,
   TelemetrySummary,
@@ -30,6 +31,8 @@ import type {
   DeploymentPolicyPreview,
   DeploymentPolicyApplyResult,
   DeploymentPreview,
+  ExposureMutationRequest,
+  ExposurePreview,
   WorkloadSpec,
 } from "@/lib/contracts/registry";
 
@@ -400,20 +403,20 @@ export class LocalClient {
     return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments/${encodeURIComponent(deploymentID)}/cleanup`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify({ deployment_id: deploymentID, reason }) });
   }
 
-  exposurePreview(projectID: string, body: import("../contracts/registry").ExposureMutationRequest) {
-    return this.call<import("../contracts/registry").ExposurePreview>(`/api/local/projects/${projectID}/exposures/preview`, { method: "POST", body: JSON.stringify(body) });
+  exposurePreview(projectID: string, body: ExposureMutationRequest) {
+    return this.call<ExposurePreview>(`/api/local/projects/${projectID}/exposures/preview`, { method: "POST", body: JSON.stringify(body) });
   }
 
-  exposureDiff(projectID: string, body: import("../contracts/registry").ExposureMutationRequest) {
-    return this.call<import("../contracts/registry").ExposurePreview>(`/api/local/projects/${projectID}/exposures/diff`, { method: "POST", body: JSON.stringify(body) });
+  exposureDiff(projectID: string, body: ExposureMutationRequest) {
+    return this.call<ExposurePreview>(`/api/local/projects/${projectID}/exposures/diff`, { method: "POST", body: JSON.stringify(body) });
   }
 
-  exposureApply(projectID: string, body: import("../contracts/registry").ExposureMutationRequest, idempotencyKey: string) {
+  exposureApply(projectID: string, body: ExposureMutationRequest, idempotencyKey: string) {
     return this.call<DeploymentJob>(`/api/local/projects/${projectID}/exposures`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
   }
 
   exposures(projectID: string) {
-    return this.call<{ exposures: unknown[] }>(`/api/local/projects/${projectID}/exposures`);
+    return this.call<{ exposures: DeploymentJob[] }>(`/api/local/projects/${projectID}/exposures`);
   }
 
   audit(projectID: string) {
@@ -490,13 +493,8 @@ export class LocalClient {
 	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}`);
   }
 
-  resolveIncident(projectID: string, incidentID: string, idempotencyKey?: string) {
-	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/resolve`, {
-	  method: "POST",
-	  write: true,
-	  idempotencyKey,
-	  body: JSON.stringify({}),
-	});
+  incidentEvidence(projectID: string, incidentID: string) {
+	return this.call<IncidentEvidence>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/evidence`);
   }
 
   private async call<T>(path: string, init: RequestOptions = {}) {
