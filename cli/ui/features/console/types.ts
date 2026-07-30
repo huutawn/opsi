@@ -46,6 +46,7 @@ export type ConsoleController = {
     incidentList: (event: FormEvent<HTMLFormElement>) => Promise<void>;
     incidentGet: (event: FormEvent<HTMLFormElement>) => Promise<void>;
     incidentResolve: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+    hideSensitive: () => void;
     nodeAction: (nodeID: string, action: "offline" | "drain" | "remove") => void;
     rollback: (deploymentID: string) => void;
     secretCreate: (event: FormEvent<HTMLFormElement>) => Promise<void>;

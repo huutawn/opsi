@@ -841,3 +841,21 @@ make verify
 
 Go module tests run from `agent/`, `cli/`, `cloud/`, and `contracts/go/`, not
 from the workspace root.
+
+## FE-04 frontend source stabilization
+
+FE-01 through FE-04 frontend source redesign is complete. FE-04 replaces the
+standalone Secrets and Audit implementations with one canonical Security view,
+redesigns workspace Settings around session/connections/install/PAT facts, and
+fixes the Delivery loading and observability factuality regressions. Protected
+secret/TOTP results are removed on hide, Escape, TTL expiry, navigation,
+project switch, authentication invalidation, and PAT revoke/logout. Incident
+resolution remains a CLI handoff through factual `opsi action` commands; no
+browser approval material exists.
+
+Mock Local API browser acceptance passes at 1440x900, 1024x768, and 390x844.
+No live Agent/VPS acceptance occurred. R5-017 remains pending. The remaining
+PostCSS and Sharp advisories are upstream-blocked and are not present in the
+static browser export; PostCSS remains build-time reachable, so dependency
+remediation, supply-chain closure, release readiness, and production readiness
+are not claimed.

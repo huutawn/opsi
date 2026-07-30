@@ -45,6 +45,12 @@ test("open incident and unavailable sources cannot aggregate to healthy", () => 
   assert.equal(serviceRows({ services: [service], telemetry: [], telemetrySource: "unavailable", deployments: [], placement: null, topology: null })[0].health, "unavailable");
 });
 
+test("service rows do not attach telemetry by display name", () => {
+  const row = serviceRows({ services: [service], telemetry: [{ service_id: service.name, health: "healthy", pod_count: 2, ready_pods: 2 }], telemetrySource: "available", deployments: [], placement: null, topology: null })[0];
+  assert.equal(row.telemetry, undefined);
+  assert.equal(row.health, "unknown");
+});
+
 test("failed latest build outranks an older successful deployment", () => {
   const result = summary({ builds: [{ id: "build-2", project_id: project.id, service_id: service.id, service_key: "api", repository_id: 1, repository_owner_id: 1, active_binding_id: "binding-1", created_at: "2026-07-29T02:00:00Z", schema_version: "opsi.build_record/v1", workload: { issuer: "github", subject: "repo", repository_id: 1, repository_owner_id: 1, ref: "refs/heads/main", sha: "abcdef", event_name: "push", workflow: "build", workflow_ref: "build.yml", run_id: 1, run_attempt: 1 }, build: { config_hash: "config", platform: "linux/amd64", oci_repository: "example/api", oci_digest: "sha256:abc", status: "failed" } }] });
   assert.equal(result.overall, "failed");

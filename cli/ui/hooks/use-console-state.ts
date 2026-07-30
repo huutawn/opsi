@@ -375,7 +375,7 @@ export function useConsoleState() {
     const form = new FormData(formElement);
     const name = String(form.get("name") ?? "");
     reviewMutation(
-      { project: currentProject.name, targetType: "secret", targetID: name, operation: "create", diff: [`service: ${String(form.get("service_id") ?? "")}`, `namespace: ${String(form.get("namespace") || "default")}`], risk: "Writes a secret through the authenticated Agent. Values are never returned." },
+      { project: currentProject.name, targetType: "secret", targetID: name, operation: "create", diff: [`service: ${String(form.get("service_id") ?? "")}`, `namespace: ${String(form.get("namespace") ?? "")}`], risk: "Writes a secret through the authenticated Agent. Values are never returned." },
       async (key) => {
         clearSensitive();
         patch({ busy: "secret-create" });
@@ -406,6 +406,7 @@ export function useConsoleState() {
           const revealed = await client.revealSecret(currentProject.id, name, secretBody(new FormData(formElement)), key);
           patch({ secretReveal: revealed });
           revealTimer.current = window.setTimeout(clearSensitive, (revealed.ttl_seconds ?? 60) * 1000);
+          setReview(null);
           formElement.reset();
           return `Secret ${name} revealed by the Agent; TTL ${revealed.ttl_seconds ?? 60}s.`;
         } finally {
@@ -447,6 +448,7 @@ export function useConsoleState() {
         const result = await client.setupTOTP(currentProject.id, key);
         patch({ totpSetup: result });
         revealTimer.current = window.setTimeout(clearSensitive, result.ttl_seconds * 1000);
+        setReview(null);
         return `TOTP setup created by the Agent; TTL ${result.ttl_seconds}s.`;
       },
     );
@@ -483,6 +485,7 @@ export function useConsoleState() {
       loadBootstrapEvents,
       retryBootstrap,
       loadDeploymentEvents,
+      hideSensitive: clearSensitive,
       nodeAction,
       rollback,
       secretCreate,

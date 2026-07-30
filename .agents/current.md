@@ -476,3 +476,16 @@ additionally passed protected-input tests, Bootstrap Worker/Cloud race tests,
 full Agent tests, UI build/lint, live bootstrap, Local API/UI parity, Worker
 restart after completion, and target reboot recovery. Direct-origin firewall
 restriction and live mid-step Worker resume remain separate unresolved gates.
+
+## FE-04 continuation
+
+FE-01 through FE-04 frontend source redesign and mock Local API browser
+acceptance pass. Security and Settings now use their canonical implementations;
+the old Secrets and Audit views are deleted. Delivery loading and observability
+factuality regressions are fixed, protected values are bounded to the explicit
+dialog lifecycle, and ActionPlane approval/execution remains CLI-only.
+
+Dependency status is `OPEN / UPSTREAM_BLOCKED /
+NOT_SHIPPED_TO_BROWSER_RUNTIME / BUILD_TIME_RISK_REMAINS`. No live Agent/VPS
+acceptance occurred, R5-017 remains pending, and no release or production
+readiness claim is made.

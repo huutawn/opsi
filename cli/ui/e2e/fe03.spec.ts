@@ -32,7 +32,7 @@ test("Observability preserves factual semantics, text rendering, evidence, and U
   await page.getByRole("button", { name: /inc-1/ }).click();
   await expect(page.getByText("Partial evidence")).toBeVisible();
   await expect(page.getByText("Continue in CLI")).toBeVisible();
-  await expect(page.getByText("content-hash-1")).toBeVisible();
+  await expect(page.getByText("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBeVisible();
 });
 
 test("Corrupt incident evidence fails closed", async ({ page }) => {
@@ -100,7 +100,7 @@ async function respond(route: Route) {
   else if (/\/telemetry\/services\//.test(path)) body = { project_id: "proj-1", source: "agent", payload_policy: "redacted", services: data.telemetry.filter((item) => path.endsWith(item.service_id)) };
   else if (path.endsWith("/logs")) body = { project_id: "proj-1", source: "agent", payload_policy: "redacted", logs: data.logs };
   else if (path.endsWith("/incidents")) body = { source: "agent", payload_policy: "redacted", incidents: data.incidents };
-  else if (path.endsWith("/incidents/inc-1/evidence")) body = data.evidence;
+  else if (path.endsWith("/incidents/inc-1/evidence")) body = { ...data.evidence, content_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
   else if (path.endsWith("/incidents/inc-1")) body = { source: "agent", payload_policy: "redacted", incident: data.incidents[0] };
   await route.fulfill({ body: JSON.stringify(body), contentType: "application/json", status: 200 });
 }

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("settings view renders version, configuration, and truthful backend gaps", async () => {
+test("settings is a factual local workspace destination with reviewed PAT lifecycle", async () => {
   const source = await readFile(new URL("./settings-view.tsx", import.meta.url), "utf8");
-  for (const marker of ["Version and configuration", "backend_gaps", "PAT rotation", "PAT revoke", "gap.status"]) {
+  for (const marker of ["Session", "Connections", "Version and installation", "Access token lifecycle", "Capability limits", "PAT rotation", "revoke and sign out", "confirmation: \"REVOKE\"", "hideSensitive", "backend_gaps"]) {
     assert.match(source, new RegExp(marker));
   }
-  assert.doesNotMatch(source, /placeholder|SupportView|localStorage|sessionStorage/i);
+  assert.doesNotMatch(source, /disabled.*gap\.status|SupportView|localStorage|sessionStorage|raw PAT|certificate material/i);
 });

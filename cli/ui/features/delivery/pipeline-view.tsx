@@ -6,6 +6,9 @@ import { derivePipeline, type PipelineStage } from "@/lib/presentation/delivery/
 
 export function PipelineView({ console, data, selectedService }: DeliveryViewProps) {
   if (!selectedService) return <Empty title="No delivery service" text="Add an application service, then bind it to a repository before Delivery can show a causal pipeline." />;
+  if (!data.hasLoaded && (data.sourceState === "loading" || data.buildState === "loading" || data.deploymentState === "loading")) {
+    return <Empty title="Loading delivery pipeline" text="Source, BuildRecord, and deployment facts are still loading. No empty-state conclusion is available yet." />;
+  }
   const pipeline = derivePipeline({
     projectID: console.state.project?.id ?? "",
     service: selectedService,

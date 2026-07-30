@@ -2,10 +2,18 @@
 
 ## UI dependency audit
 
-`npm ci` reports four existing high-severity dependency advisories in the Local
-UI dependency tree. R5-016 does not modify `cli/ui/**`, `package.json`, or
-`package-lock.json`, so dependency remediation is deferred. UI tests, build,
-and lint still pass; this does not alter ActionPlane source correctness.
+FE-04 keeps the compatible latest stable `next@16.2.12` and documents the
+remaining upstream findings as
+`OPEN / UPSTREAM_BLOCKED / NOT_SHIPPED_TO_BROWSER_RUNTIME /
+BUILD_TIME_RISK_REMAINS`. Production audit output contains
+`GHSA-6g55-p6wh-862q` and `GHSA-r28c-9q8g-f849` through
+`next@16.2.12 -> postcss@8.4.31`, plus `GHSA-f88m-g3jw-g9cj` through the
+optional `next@16.2.12 -> sharp@0.34.5` path. The full audit also contains the
+dev-only brace-expansion advisories `GHSA-3jxr-9vmj-r5cp` and
+`GHSA-mh99-v99m-4gvg`. Static export inspection shows no PostCSS or Sharp in
+browser artifacts; PostCSS remains build-time reachable. This is not dependency
+remediation or supply-chain closure. The macOS Keychain deferred claim below
+is unchanged.
 
 ## Native keychain acceptance
 

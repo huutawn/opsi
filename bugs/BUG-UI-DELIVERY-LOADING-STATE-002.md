@@ -8,8 +8,14 @@ During the initial request, the pipeline can therefore render `Source not config
 
 ## Scope
 
-This is a factual FE-02 defect record only. Delivery source behavior is not changed in FE-03.
+This is a factual FE-02 defect record. Delivery source behavior was not changed in FE-03.
 
-## Follow-up
+## FE-04 baseline reproduction
 
-Fix the source-state mapping in FE-04 stabilization and cover the initial loading transition with a regression test.
+The FE-04 regression requires `PipelineView` to recognize `sourceState === "loading"`. It fails at the starting revision because the view maps every non-`unavailable` source state to `ready` and can render empty conclusions before the Local API request settles.
+
+## Status
+
+`FIXED / FE-04`
+
+`DeliveryData.hasLoaded` keeps the loading state distinct, preserves the previous factual result during refresh, and prevents empty conclusions before the Local request settles. The focused source regression and Playwright loading scenario pass.

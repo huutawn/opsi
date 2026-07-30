@@ -58,3 +58,9 @@ test("router keeps Delivery URL drill-down state when changing tabs", async () =
   assert.match(router, /routeHref\(\{ \.\.\.route, tab: tab\.id \}\)/);
   assert.match(router, /aria-current=/);
 });
+
+test("pipeline loading remains distinct from empty or ready conclusions", async () => {
+  const pipeline = await readFile(files.pipeline, "utf8");
+  assert.match(pipeline, /sourceState === "loading"/);
+  assert.match(pipeline, /Loading delivery pipeline/);
+});

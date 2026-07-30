@@ -110,12 +110,47 @@ export function safeLogMessage(message: string) {
   return /(?:authorization:\s*bearer|password\s*=|token\s*=|private[_ -]?key|secret\s*=)/i.test(message) ? "[message hidden: backend redaction contract violation]" : message;
 }
 
-function isIncidentEvidence(value: unknown): value is IncidentEvidence {
-  if (!value || typeof value !== "object") return false;
-  const evidence = value as Partial<IncidentEvidence>;
-  return evidence.schema_version === "opsi.incident_evidence/v1"
-    && typeof evidence.content_sha256 === "string" && evidence.content_sha256.length > 0
-    && typeof evidence.observation_window?.start_unix === "number" && typeof evidence.observation_window.end_unix === "number"
-    && Boolean(evidence.deployment && evidence.rollout)
-    && Array.isArray(evidence.coverage);
+const MAX_EVIDENCE_COVERAGE = 32;
+const MAX_EVIDENCE_TIMELINE = 256;
+const MAX_EVIDENCE_PODS = 256;
+const MAX_EVIDENCE_ITEMS = 256;
+
+export function isIncidentEvidence(value: unknown): value is IncidentEvidence {
+  if (!isRecord(value) || value.schema_version !== "opsi.incident_evidence/v1" || typeof value.content_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.content_sha256)) return false;
+  if (!isIncidentIdentity(value.identity) || !timestamp(value.generated_at_unix) || !isRecord(value.observation_window) || !timestamp(value.observation_window.start_unix) || !timestamp(value.observation_window.end_unix) || value.observation_window.start_unix > value.observation_window.end_unix) return false;
+  if (!isRecord(value.deployment) || !isRecord(value.rollout) || !boundedObject(value.deployment) || !boundedObject(value.rollout)) return false;
+  if (!boundedArray(value.coverage, MAX_EVIDENCE_COVERAGE, isCoverage)) return false;
+  if (!optionalArray(value.timeline, MAX_EVIDENCE_TIMELINE, (item) => isRecord(item) && timestamp(item.observed_at_unix) && text(item.source) && text(item.kind) && optionalText(item.detail) && typeof item.untrusted_content === "boolean")) return false;
+  if (!optionalArray(value.pods, MAX_EVIDENCE_PODS, (item) => isRecord(item) && text(item.pod_id) && optionalText(item.namespace) && optionalText(item.node_id) && count(item.ready_containers) && count(item.total_containers) && item.ready_containers <= item.total_containers && count(item.restart_count) && optionalText(item.observed_digest))) return false;
+  if (!optionalArray(value.kubernetes_events, MAX_EVIDENCE_ITEMS, (item) => isRecord(item) && timestamp(item.observed_at_unix) && optionalText(item.namespace) && optionalText(item.object_kind) && optionalText(item.object_name) && optionalText(item.type) && optionalText(item.reason) && optionalText(item.message) && typeof item.untrusted_content === "boolean")) return false;
+  if (!optionalArray(value.log_fingerprints, MAX_EVIDENCE_ITEMS, (item) => isRecord(item) && text(item.fingerprint) && optionalText(item.level) && count(item.count) && timestamp(item.first_observed_unix) && timestamp(item.last_observed_unix) && item.first_observed_unix <= item.last_observed_unix && optionalText(item.excerpt) && typeof item.untrusted_content === "boolean")) return false;
+  if (!optionalArray(value.audit_references, MAX_EVIDENCE_ITEMS, (item) => isRecord(item) && text(item.audit_id) && text(item.action) && text(item.resource_type) && text(item.resource_id) && text(item.result) && timestamp(item.created_at_unix))) return false;
+  if (!optionalArray(value.truncations, 32, (item) => isRecord(item) && text(item.section) && count(item.omitted_items) && typeof item.utf8_safe === "boolean")) return false;
+  return true;
 }
+
+function isIncidentIdentity(value: unknown) {
+  return isRecord(value) && text(value.incident_id) && text(value.project_id) && text(value.status) && optionalText(value.service_id) && optionalText(value.node_id) && optionalText(value.pod_id) && (value.created_at_unix === undefined || timestamp(value.created_at_unix));
+}
+
+function isCoverage(value: unknown) {
+  return isRecord(value) && text(value.source) && text(value.status) && optionalText(value.reason_code) && count(value.item_count) && typeof value.truncated === "boolean";
+}
+
+function optionalArray(value: unknown, maximum: number, validate: (item: unknown) => boolean) {
+  return value === undefined || boundedArray(value, maximum, validate);
+}
+
+function boundedArray(value: unknown, maximum: number, validate: (item: unknown) => boolean) {
+  return Array.isArray(value) && value.length <= maximum && value.every(validate);
+}
+
+function boundedObject(value: Record<string, unknown>) {
+  return Object.keys(value).length <= 16 && Object.values(value).every((item) => item === undefined || typeof item === "string" && item.length <= 512 || Array.isArray(item) && item.length <= 32 && item.every(text));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
+function text(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.length <= 512; }
+function optionalText(value: unknown) { return value === undefined || typeof value === "string" && value.length <= 2048; }
+function count(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0; }
+function timestamp(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) > 0; }

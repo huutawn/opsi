@@ -1,8 +1,7 @@
-import { AuditView } from "@/features/audit/audit-view";
 import { DeliveryView } from "@/features/delivery/delivery-view";
 import { InfrastructureView } from "@/features/infrastructure/infrastructure-view";
 import { ObservabilityView } from "@/features/observability/observability-view";
-import { SecretsView } from "@/features/secrets/secrets-view";
+import { SecurityView } from "@/features/security/security-view";
 import { SettingsView } from "@/features/settings/settings-view";
 import { groupedTabs, routeHref, type ConsoleRoute } from "@/features/console/navigation";
 import { OverviewView } from "@/features/overview/overview-view";
@@ -16,7 +15,7 @@ const tabViewMap: Record<string, Record<string, (props: { console: ConsoleContro
   delivery: { pipeline: DeliveryView, builds: DeliveryView, deployments: DeliveryView, exposure: DeliveryView, source: DeliveryView },
   infrastructure: { topology: InfrastructureView, runtimes: InfrastructureView, nodes: InfrastructureView, bootstrap: InfrastructureView },
   observability: { health: ObservabilityView, metrics: ObservabilityView, logs: ObservabilityView, incidents: ObservabilityView },
-  security: { secrets: SecretsView, audit: AuditView },
+  security: { secrets: SecurityView, audit: SecurityView },
 };
 
 export function routeView(route: ConsoleRoute, console: ConsoleController) {

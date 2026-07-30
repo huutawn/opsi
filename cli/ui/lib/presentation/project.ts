@@ -227,7 +227,7 @@ export function serviceRows(input: {
   topology: TopologyPlan | null;
 }) {
   return input.services.map((service) => {
-    const telemetry = input.telemetry.find((item) => item.service_id === service.id || item.service_id === service.name);
+    const telemetry = input.telemetry.find((item) => item.service_id === service.id);
     const deployment = latest(input.deployments.filter((item) => item.service_id === service.id), (item) => item.updated_at ?? item.created_at);
     const key = input.placement?.services.find((item) => item.id === service.id)?.key ?? service.name;
     const assignment = input.topology?.assignments.find((item) => item.service_key === key);

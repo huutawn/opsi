@@ -37,6 +37,7 @@ export type DeliveryData = {
   buildError: string;
   deploymentError: string;
   exposureError: string;
+  hasLoaded: boolean;
   loadBuilds: (filters?: { serviceKey?: string; repositoryID?: string; sha?: string; status?: string; cursor?: string }) => Promise<void>;
   refreshDeployments: () => Promise<void>;
   mergeDeployment: (job: DeploymentJob) => void;
@@ -102,6 +103,7 @@ export function useDeliveryData(projectID: string, services: ServiceRecord[], in
         policies: policies.status === "fulfilled" ? policies.value.policies ?? [] : current.policies,
         placement: placement.status === "fulfilled" ? placement.value : current.placement,
         topology: topology.status === "fulfilled" ? topology.value : current.topology,
+        hasLoaded: true,
         sourceState: sourceReady ? "ready" : "unavailable",
         buildState: builds.status === "fulfilled" ? "ready" : "unavailable",
         deploymentState: deployments.status === "fulfilled" ? "ready" : "unavailable",
@@ -143,6 +145,7 @@ function emptyState(services: ServiceRecord[], deployments: DeploymentJob[]) {
     buildError: "",
     deploymentError: "",
     exposureError: "",
+    hasLoaded: false,
   };
 }
 
