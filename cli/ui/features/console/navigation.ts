@@ -9,10 +9,11 @@ export const projectDestinations = [
 
 export const groupedTabs = {
   delivery: [
-    { id: "source", label: "Source" },
-    { id: "builds", label: "Build Records" },
+    { id: "pipeline", label: "Pipeline" },
+    { id: "builds", label: "Builds" },
     { id: "deployments", label: "Deployments" },
     { id: "exposure", label: "Exposure" },
+    { id: "source", label: "Source" },
   ],
   infrastructure: [
     { id: "runtime", label: "Runtime" },
@@ -35,7 +36,19 @@ export const groupedTabs = {
 
 export type ProjectView = (typeof projectDestinations)[number]["id"];
 export type ConsoleView = ProjectView | "projects" | "settings";
-export type ConsoleRoute = { projectID: string; view: ConsoleView; tab: string };
+export type ConsoleRoute = {
+  projectID: string;
+  view: ConsoleView;
+  tab: string;
+  service?: string;
+  build?: string;
+  deployment?: string;
+  status?: string;
+  kind?: string;
+  repository?: string;
+  sha?: string;
+  cursor?: string;
+};
 
 const projectViews = new Set<ConsoleView>(projectDestinations.map((item) => item.id));
 
@@ -54,7 +67,8 @@ export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {
   if (view === "projects") return { projectID: "", view, tab: "" };
   const tabs = view in groupedTabs ? groupedTabs[view as keyof typeof groupedTabs] : [];
   const tab = tabs.some((item) => item.id === route.tab) ? route.tab ?? "" : defaultTab(view);
-  return { projectID, view, tab };
+  const deliveryState = view === "delivery" ? compactDeliveryState(route) : {};
+  return { projectID, view, tab, ...deliveryState };
 }
 
 export function parseRoute(search: string): ConsoleRoute {
@@ -65,6 +79,14 @@ export function parseRoute(search: string): ConsoleRoute {
     projectID: params.get("project") ?? "",
     view: valid ? requested ?? undefined : undefined,
     tab: params.get("tab") ?? "",
+    service: params.get("service") ?? "",
+    build: params.get("build") ?? "",
+    deployment: params.get("deployment") ?? "",
+    status: params.get("status") ?? "",
+    kind: params.get("kind") ?? "",
+    repository: params.get("repository") ?? "",
+    sha: params.get("sha") ?? "",
+    cursor: params.get("cursor") ?? "",
   });
 }
 
@@ -74,7 +96,18 @@ export function routeHref(route: Partial<ConsoleRoute>) {
   if (normalized.projectID) params.set("project", normalized.projectID);
   params.set("view", normalized.view);
   if (normalized.tab) params.set("tab", normalized.tab);
+  for (const key of ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor"] as const) {
+    if (normalized[key]) params.set(key, normalized[key]);
+  }
   return `/?${params}`;
+}
+
+function compactDeliveryState(route: Partial<ConsoleRoute>) {
+  const state: Partial<ConsoleRoute> = {};
+  for (const key of ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor"] as const) {
+    if (route[key]) state[key] = route[key];
+  }
+  return state;
 }
 
 export function routeLabel(route: ConsoleRoute) {

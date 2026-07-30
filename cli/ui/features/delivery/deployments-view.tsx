@@ -1,0 +1,15 @@
+"use client";
+
+import { useEffect } from "react";
+import { Empty } from "@/components/ui/primitives";
+import { DeploymentCreate } from "@/features/delivery/deployment-create";
+import { DeploymentDetail } from "@/features/delivery/deployment-detail";
+import { DeliveryStatus, ServiceFilter, displayTime, short, type DeliveryViewProps } from "@/features/delivery/shared";
+
+export function DeploymentsView({ console, data, selectedService }: DeliveryViewProps) {
+  const filtered = data.deployments.filter((job) => (!selectedService || job.service_id === selectedService.id) && (!console.route.status || (job.rollout_state || job.status) === console.route.status) && (!console.route.kind || (console.route.kind === "preview") === Boolean(job.snapshot?.preview)));
+  const selected = filtered.find((job) => job.id === console.route.deployment) ?? filtered[0];
+  useEffect(() => { if (!console.route.deployment && selected) console.navigate({ deployment: selected.id }); }, [console, selected]);
+
+  return <div className="deliveryPage"><div className="deliveryToolbar"><ServiceFilter console={console} services={data.services} selected={selectedService} /><label>Rollout State<select value={console.route.status ?? ""} onChange={(event) => console.navigate({ status: event.target.value, deployment: "" })}><option value="">Any</option>{["prepared", "leased", "applying", "waiting", "succeeded", "failed", "rolling_back", "rolled_back", "rollback_failed", "cancelled"].map((state) => <option key={state} value={state}>{state.replaceAll("_", " ")}</option>)}</select></label><label>Release Type<select value={console.route.kind ?? ""} onChange={(event) => console.navigate({ kind: event.target.value, deployment: "" })}><option value="">Production & Preview</option><option value="production">Production</option><option value="preview">Preview</option></select></label><DeploymentCreate console={console} data={data} selectedService={selectedService} /></div><div className="masterDetail"><section className="masterList" aria-label="Deployments"><div className="sectionHeading"><div><p className="eyebrow">Rollout History</p><h2>Deployments</h2></div><span>{filtered.length} shown</span></div>{filtered.length ? <ul>{filtered.map((job) => <li key={job.id}><button aria-pressed={selected?.id === job.id} onClick={() => console.navigate({ deployment: job.id, service: job.service_id })} type="button"><span><strong>{data.services.find((service) => service.id === job.service_id)?.name ?? job.service_id}</strong><small>{job.environment_id || "Environment not reported"} · {job.snapshot?.preview ? "Preview" : "Production"}</small></span><span><DeliveryStatus status={job.rollout_state || job.status} /><small>{displayTime(job.finished_at || job.created_at)}</small></span><code title={job.desired_digest}>{short(job.desired_digest || job.snapshot?.image.digest, 18)}</code></button></li>)}</ul> : <Empty title="No deployments observed" text="No factual DeploymentJob matches the exact service, state, and release-type filters." />}</section><DeploymentDetail console={console} data={data} selected={selected} /></div></div>;
+}

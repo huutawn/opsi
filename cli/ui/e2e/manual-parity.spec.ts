@@ -39,8 +39,9 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByText("agent-node", { exact: true })).toBeVisible();
 
   await page.getByRole("link", { name: "Delivery", exact: true }).click();
+  await expect(page.getByText("Current Release", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Source", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "GitHub App connection" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Repository Ownership & Service Bindings" })).toBeVisible();
   await expect(page.getByText("opsi-test/api", { exact: true }).first()).toBeVisible();
 
   await page.getByRole("link", { name: "Infrastructure", exact: true }).click();
@@ -48,13 +49,15 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByRole("heading", { name: "Manual placement wizard" })).toBeVisible();
 
   await page.getByRole("link", { name: "Delivery", exact: true }).click();
-  await page.getByRole("link", { name: "Build Records", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Trusted build records" })).toBeVisible();
+  await page.getByRole("link", { name: "Builds", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Build Records" })).toBeVisible();
   await expect(page.getByText("build-1", { exact: true })).toBeVisible();
 
   await page.getByRole("link", { name: "Deployments", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Immutable deployment" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Exposure rollout" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Deployments" })).toBeVisible();
+
+  await page.getByRole("link", { name: "Exposure", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Exposure" })).toBeVisible();
 
   await page.getByRole("link", { name: "Security", exact: true }).click();
   await page.getByRole("link", { name: "Secrets", exact: true }).click();

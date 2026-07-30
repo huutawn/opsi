@@ -1,8 +1,6 @@
-import { AuditView } from "@/features/console/operations-views";
+import { AuditView } from "@/features/audit/audit-view";
 import { NodesView } from "@/features/console/nodes-view";
-import { BuildRecordsView } from "@/features/build-records/build-records-view";
-import { DeploymentsView as DeliveryDeploymentsView } from "@/features/deployments/deployments-view";
-import { GitHubView } from "@/features/github/github-view";
+import { DeliveryView } from "@/features/delivery/delivery-view";
 import { IncidentsView } from "@/features/incidents/incidents-view";
 import { LogsView } from "@/features/logs/logs-view";
 import { MetricsView } from "@/features/metrics/metrics-view";
@@ -20,7 +18,7 @@ import type { ConsoleController } from "@/features/console/types";
 export const coreViewMap = { overview: OverviewView, services: ServicesView } as const;
 
 const tabViewMap: Record<string, Record<string, (props: { console: ConsoleController }) => React.ReactNode>> = {
-  delivery: { source: GitHubView, builds: BuildRecordsView, deployments: DeliveryDeploymentsView, exposure: DeliveryDeploymentsView },
+  delivery: { pipeline: DeliveryView, builds: DeliveryView, deployments: DeliveryView, exposure: DeliveryView, source: DeliveryView },
   infrastructure: { runtime: RuntimeView, nodes: NodesView, bootstrap: NodesView, topology: InfrastructureTopologyView },
   observability: { health: MetricsView, metrics: MetricsView, logs: LogsView, incidents: IncidentsView, support: SupportView },
   security: { secrets: SecretsView, audit: AuditView },
@@ -34,7 +32,7 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
   const View = tabViewMap[route.view]?.[route.tab] ?? tabViewMap[route.view]?.[groupedTabs[route.view as keyof typeof groupedTabs]?.[0]?.id ?? ""];
   if (!View) return null;
   const tabs = groupedTabs[route.view as keyof typeof groupedTabs];
-  return <section className="groupedPage"><div className="groupedHeader"><div><p className="eyebrow">Project workspace</p><h1>{groupedTitle(route.view)}</h1><p>{groupedDescription(route.view)}</p></div></div><nav aria-label={`${groupedTitle(route.view)} sections`} className="tabs">{tabs.map((tab) => <a aria-current={route.tab === tab.id ? "page" : undefined} className={route.tab === tab.id ? "active" : ""} href={routeHref({ projectID: route.projectID, view: route.view, tab: tab.id })} key={tab.id} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); console.navigate({ projectID: route.projectID, view: route.view, tab: tab.id }); }}>{tab.label}</a>)}</nav><View console={console} /></section>;
+  return <section className="groupedPage"><div className="groupedHeader"><div><p className="eyebrow">Project workspace</p><h1>{groupedTitle(route.view)}</h1><p>{groupedDescription(route.view)}</p></div></div><nav aria-label={`${groupedTitle(route.view)} sections`} className="tabs">{tabs.map((tab) => <a aria-current={route.tab === tab.id ? "page" : undefined} className={route.tab === tab.id ? "active" : ""} href={routeHref({ ...route, tab: tab.id })} key={tab.id} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); console.navigate({ tab: tab.id }); }}>{tab.label}</a>)}</nav><View console={console} /></section>;
 }
 
 function groupedTitle(view: string) { return view[0].toUpperCase() + view.slice(1); }

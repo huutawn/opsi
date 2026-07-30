@@ -166,28 +166,33 @@ export function RepositoryCD({ console }: { console: ConsoleController }) {
         ) : <Empty text="No valid v2 config is present yet. Preview a first service to create it." />}
       </Panel>
 
-      <Panel title="Add or update one service">
+      <Panel title="Repository service configuration">
+        <details className="sourceAction">
+          <summary>Add or Update One Service</summary>
         <form className="form" onSubmit={(event) => void previewMutation(event)}>
           <label>Service key<input className="field" required value={draft.key} onChange={(event) => setDraft({ ...draft, key: event.target.value })} /></label>
           <label>Build context<input className="field" required value={draft.context} onChange={(event) => setDraft({ ...draft, context: event.target.value })} /></label>
           <label>Dockerfile<input className="field" required value={draft.dockerfile} onChange={(event) => setDraft({ ...draft, dockerfile: event.target.value })} /></label>
           <label>Platform<input className="field" required value={draft.platform} onChange={(event) => setDraft({ ...draft, platform: event.target.value })} /></label>
-          <label>Watch paths<input className="field" placeholder="services/api, schemas" value={draft.watchPaths} onChange={(event) => setDraft({ ...draft, watchPaths: event.target.value })} /></label>
-          <label>Shared paths<input className="field" placeholder="shared" value={draft.sharedPaths} onChange={(event) => setDraft({ ...draft, sharedPaths: event.target.value })} /></label>
-          <label>Dependencies<input className="field" placeholder="api" value={draft.dependencies} onChange={(event) => setDraft({ ...draft, dependencies: event.target.value })} /></label>
+          <label>Watch paths<input className="field" placeholder="services/api, schemas…" value={draft.watchPaths} onChange={(event) => setDraft({ ...draft, watchPaths: event.target.value })} /></label>
+          <label>Shared paths<input className="field" placeholder="shared…" value={draft.sharedPaths} onChange={(event) => setDraft({ ...draft, sharedPaths: event.target.value })} /></label>
+          <label>Dependencies<input className="field" placeholder="api…" value={draft.dependencies} onChange={(event) => setDraft({ ...draft, dependencies: event.target.value })} /></label>
           <label>Production branch<input className="field" required value={draft.branch} onChange={(event) => setDraft({ ...draft, branch: event.target.value })} /></label>
           <label><input type="checkbox" checked={draft.preview} onChange={(event) => setDraft({ ...draft, preview: event.target.checked })} /> Enable pull-request preview intent</label>
           <button className="primary" disabled={status === "previewing" || status === "applying"} type="submit">{status === "previewing" ? "Validating" : "Preview config and workflow"}</button>
         </form>
         {preview ? <div className="grid">
           <p><b>Config hash:</b> {preview.config_hash} {preview.migrated_v1 ? "· v1 migration preview" : ""}</p>
-          <pre>{preview.config_diff || "Config unchanged"}</pre>
-          <pre>{preview.workflow_diff || "Workflow unchanged"}</pre>
+          <details><summary>Config Diff</summary><pre aria-label="Repository config diff">{preview.config_diff || "Config unchanged"}</pre></details>
+          <details><summary>Workflow Diff</summary><pre aria-label="GitHub workflow diff">{preview.workflow_diff || "Workflow unchanged"}</pre></details>
           <button className="primary" disabled={status === "applying"} onClick={() => void apply()} type="button">{status === "applying" ? "Applying" : status === "error" ? "Retry apply" : "Apply reviewed changes"}</button>
         </div> : null}
+        </details>
       </Panel>
 
       <Panel title="Affected-service preview">
+        <details className="sourceAction">
+          <summary>Preview Affected Services</summary>
         <form className="form" onSubmit={(event) => void previewPlan(event)}>
           <label>Event<select className="select" name="event" defaultValue="push"><option value="push">Push</option><option value="pull_request">Pull request</option><option value="merge">Merge</option><option value="initial">Initial build</option></select></label>
           <label>Base commit<input className="field" name="base" placeholder="40-character commit ID" /></label>
@@ -199,6 +204,7 @@ export function RepositoryCD({ console }: { console: ConsoleController }) {
           <p><b>Affected:</b> {plan.affected_service_keys.join(", ") || "none"}<br /><b>Config hash:</b> {plan.config_hash}<br /><b>Plan hash:</b> {plan.plan_hash}</p>
           {plan.services.map((service) => <div key={service.key}><b>{service.key}</b>{service.reasons.map((reason) => <p className="muted" key={`${reason.code}-${reason.path ?? reason.dependency ?? "global"}`}>{reason.code}: {reason.explanation}</p>)}</div>)}
         </div> : null}
+        </details>
       </Panel>
     </section>
   );
