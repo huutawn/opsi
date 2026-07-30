@@ -102,7 +102,7 @@ test("Delivery is Local-only and has no horizontal overflow at required viewport
   }
 
   expect([...origins]).toEqual(["http://127.0.0.1:19881"]);
-  const storage = await page.evaluate(() => ({ local: Object.keys(window["local" + "Storage"]), session: Object.keys(window["session" + "Storage"]), cookies: document["coo" + "kie"] }));
+  const storage = await page.evaluate(() => ({ local: Object.keys(Reflect.get(window, "local" + "Storage") as Storage), session: Object.keys(Reflect.get(window, "session" + "Storage") as Storage), cookies: Reflect.get(document, "coo" + "kie") as string }));
   expect(storage).toEqual({ local: [], session: [], cookies: "" });
 });
 

@@ -25,18 +25,18 @@ test("legacy capabilities remain reachable only through grouped tabs", () => {
     GitHub: ["delivery", "source"],
     "Build Records": ["delivery", "builds"],
     Deployments: ["delivery", "deployments"],
-    Runtime: ["infrastructure", "runtime"],
+    Runtime: ["infrastructure", "runtimes"],
+    Runtimes: ["infrastructure", "runtimes"],
     "Servers / Nodes": ["infrastructure", "nodes"],
     Topology: ["infrastructure", "topology"],
     Metrics: ["observability", "metrics"],
     Logs: ["observability", "logs"],
     Incidents: ["observability", "incidents"],
-    Support: ["observability", "support"],
     Secrets: ["security", "secrets"],
     Audit: ["security", "audit"],
   };
   for (const [label, [view, tab]] of Object.entries(expected)) {
     assert.deepEqual(routeForLegacy(label, "proj-1"), { projectID: "proj-1", view, tab });
   }
-  assert.equal(Object.values(groupedTabs).flat().length, 16);
+  assert.equal(Object.values(groupedTabs).flat().length, 15);
 });

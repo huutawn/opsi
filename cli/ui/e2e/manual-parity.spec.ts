@@ -34,7 +34,7 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByRole("heading", { name: "Runtime inventory" })).toBeVisible();
   await expect(page.getByRole("row", { name: /Primary runtime-1/ })).toBeVisible();
 
-  await page.getByRole("link", { name: "Nodes / Servers", exact: true }).click();
+  await page.getByRole("link", { name: "Nodes", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Node list" })).toBeVisible();
   await expect(page.getByText("agent-node", { exact: true })).toBeVisible();
 
@@ -83,10 +83,10 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByText("organization listing", { exact: true })).toBeVisible();
 
   const storage = await page.evaluate(async () => ({
-    local: Object.keys(window["local" + "Storage"]),
-    session: Object.keys(window["session" + "Storage"]),
-    databases: await window["indexed" + "DB"].databases(),
-    cookies: document["coo" + "kie"],
+    local: Object.keys(Reflect.get(window, "local" + "Storage") as Storage),
+    session: Object.keys(Reflect.get(window, "session" + "Storage") as Storage),
+    databases: await (Reflect.get(window, "indexed" + "DB") as IDBFactory).databases(),
+    cookies: Reflect.get(document, "coo" + "kie") as string,
   }));
   expect(storage).toEqual({ local: [], session: [], databases: [], cookies: "" });
   expect([...browserAuthorities]).toEqual([localOrigin]);

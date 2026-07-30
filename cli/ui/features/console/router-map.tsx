@@ -1,14 +1,9 @@
 import { AuditView } from "@/features/audit/audit-view";
-import { NodesView } from "@/features/console/nodes-view";
 import { DeliveryView } from "@/features/delivery/delivery-view";
-import { IncidentsView } from "@/features/incidents/incidents-view";
-import { LogsView } from "@/features/logs/logs-view";
-import { MetricsView } from "@/features/metrics/metrics-view";
-import { RuntimeView } from "@/features/runtime/runtime-view";
+import { InfrastructureView } from "@/features/infrastructure/infrastructure-view";
+import { ObservabilityView } from "@/features/observability/observability-view";
 import { SecretsView } from "@/features/secrets/secrets-view";
 import { SettingsView } from "@/features/settings/settings-view";
-import { SupportView } from "@/features/support/support-view";
-import { TopologyView as InfrastructureTopologyView } from "@/features/topology/topology-view";
 import { groupedTabs, routeHref, type ConsoleRoute } from "@/features/console/navigation";
 import { OverviewView } from "@/features/overview/overview-view";
 import { ProjectsView } from "@/features/projects/projects-view";
@@ -19,8 +14,8 @@ export const coreViewMap = { overview: OverviewView, services: ServicesView } as
 
 const tabViewMap: Record<string, Record<string, (props: { console: ConsoleController }) => React.ReactNode>> = {
   delivery: { pipeline: DeliveryView, builds: DeliveryView, deployments: DeliveryView, exposure: DeliveryView, source: DeliveryView },
-  infrastructure: { runtime: RuntimeView, nodes: NodesView, bootstrap: NodesView, topology: InfrastructureTopologyView },
-  observability: { health: MetricsView, metrics: MetricsView, logs: LogsView, incidents: IncidentsView, support: SupportView },
+  infrastructure: { topology: InfrastructureView, runtimes: InfrastructureView, nodes: InfrastructureView, bootstrap: InfrastructureView },
+  observability: { health: ObservabilityView, metrics: ObservabilityView, logs: ObservabilityView, incidents: ObservabilityView },
   security: { secrets: SecretsView, audit: AuditView },
 };
 

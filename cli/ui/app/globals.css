@@ -383,6 +383,92 @@ summary { cursor: pointer; }
 .repositoryCD pre, .sourceSection pre { max-width: 100%; max-height: 320px; overflow: auto; padding: 12px; border: 1px solid var(--line); background: #292a27; color: #f4f3ef; font-size: 11px; line-height: 1.5; white-space: pre; }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
+
+/* FE-03 infrastructure and observability surfaces stay dense without turning every field into a card. */
+.destinationToolbar, .observabilityHero, .sectionHeading, .detailHeading, .logMeta, .dialogActions { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.destinationToolbar { margin-bottom: 22px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.destinationToolbar p, .observabilityHero p:not(.eyebrow), .sectionHeading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.sourceTag, .logMeta { color: var(--muted); font-size: 11px; }
+.topologyCanvas { position: relative; min-height: 240px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-muted); }
+.topologyEdges { position: absolute; inset: 0; overflow: visible; }
+.topologyEdges line { stroke: var(--line-strong); stroke-width: 1.5; marker-end: url(#topology-arrow); }
+.topologyEdges marker path { fill: var(--line-strong); }
+.topologyNode { position: absolute; display: grid; width: 176px; min-height: 64px; gap: 3px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); text-align: left; }
+.topologyNode[aria-pressed="true"] { border-color: var(--ink); box-shadow: 0 0 0 2px rgb(32 33 31 / 12%); }
+.topologyNode span, .topologyNode small { color: var(--muted); font-size: 10px; }
+.topologyNode span { font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.topologyNode strong { overflow-wrap: anywhere; }
+.topologyTree { display: none; }
+.infrastructureSplit, .observabilityColumns, .bootstrapLayout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); gap: 22px; margin-top: 22px; }
+.relationshipList, .compactList { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.relationshipList li { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.relationshipList small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
+.inspector, .nextAction, .evidenceDisclosure, .truthCallout, .notice { padding: 14px; border-left: 3px solid var(--line-strong); background: var(--surface-muted); }
+.inspector h3, .inspector h4 { margin-top: 0; }
+.masterDetail { min-width: 0; }
+.infrastructureMaster, .incidentMaster { margin-top: 8px; }
+.masterList ul, .bootstrapInventory ul { margin: 0; padding: 0; list-style: none; }
+.masterList li, .bootstrapInventory li { border-bottom: 1px solid var(--line); }
+.masterList li > button, .bootstrapInventory li > button { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 12px 9px; border: 0; border-radius: 0; background: transparent; text-align: left; }
+.masterList li > button:hover, .masterList li > button[aria-pressed="true"], .bootstrapInventory li > button:hover, .bootstrapInventory li > button[aria-pressed="true"] { background: var(--surface-muted); }
+.masterList li > button > span, .bootstrapInventory li > button > span { display: grid; min-width: 0; gap: 3px; }
+.masterList small, .bootstrapInventory small, .compactList small { color: var(--muted); overflow-wrap: anywhere; }
+.detailPanel { min-width: 0; }
+.detailPanel h2, .detailPanel h3 { text-wrap: balance; }
+.compactList li { display: grid; gap: 4px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.compactList li > button { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 9px; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; }
+.compactList li > button small { grid-column: 2; }
+.evidenceGrid { margin: 0; }
+.evidenceGrid dd { overflow-wrap: anywhere; }
+.bootstrapDetail { min-width: 0; }
+.bootstrapLayout { grid-template-columns: minmax(300px, .8fr) minmax(0, 1.2fr); }
+.placementDialog { position: fixed; inset: 50% auto auto 50%; z-index: 40; width: min(860px, calc(100vw - 28px)); max-height: min(90dvh, 820px); margin: 0; transform: translate(-50%, -50%); overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line-strong); border-radius: 11px; padding: 24px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.placementDialog::backdrop { background: rgb(32 33 31 / 42%); }
+.phaseRail { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 22px 0; padding: 0; overflow: hidden; border: 1px solid var(--line); background: var(--line); list-style: none; }
+.phaseRail li { padding: 9px; background: var(--surface-muted); color: var(--muted); font-size: 10px; font-weight: 800; text-align: center; text-transform: uppercase; }
+.phaseRail li.active { background: var(--ink); color: var(--surface); }
+.placementForm { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.placementForm .panel { grid-column: 1 / -1; }
+.placementForm .span2 { grid-column: 1 / -1; }
+.infrastructurePage, .observabilityPage, .observabilityStack, .evidenceStack { display: grid; min-width: 0; gap: 22px; }
+.observabilityHero { min-width: 0; align-items: center; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.observabilityHero > div { min-width: 0; max-width: 100%; }
+.observabilityHero p:not(.eyebrow) { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.heroStatus { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.coverageGrid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); background: var(--line); }
+.coverageItem { display: grid; min-width: 0; gap: 6px; padding: 12px; background: var(--surface); }
+.coverageItem span { color: var(--muted); font-size: 11px; }
+.healthMatrix { overflow-x: auto; }
+.healthHeader, .healthRow { display: grid; grid-template-columns: minmax(140px, 1.4fr) repeat(5, minmax(90px, .8fr)); gap: 10px; align-items: center; min-width: 720px; padding: 10px; }
+.healthHeader { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.healthRow { width: 100%; border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left; }
+.healthRow:hover { background: var(--surface-muted); }
+.observabilityColumns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.evidenceDisclosure { border-left-color: var(--blue); }
+.evidenceDisclosure > summary { font-weight: 800; }
+.evidenceDisclosure > .observabilityColumns { margin-top: 14px; }
+.comparisonChart { display: grid; gap: 10px; margin-top: 10px; }
+.comparisonRow { display: grid; grid-template-columns: minmax(110px, .65fr) minmax(120px, 1.5fr) minmax(160px, .8fr); gap: 10px; align-items: center; }
+.comparisonTrack { height: 9px; overflow: hidden; border-radius: 2px; background: var(--surface-muted); }
+.comparisonTrack i { display: block; height: 100%; background: var(--blue); }
+.comparisonRow b { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.chartSummary { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.logFilters { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(150px, .6fr) minmax(220px, 1.4fr); gap: 12px; }
+.logFilters label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.logMeta { justify-content: flex-start; flex-wrap: wrap; }
+.logList { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.logList > li { display: grid; grid-template-columns: 170px auto minmax(120px, .3fr) minmax(0, 1.5fr); gap: 10px; align-items: start; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.logList time, .logList p { overflow-wrap: anywhere; }
+.logList p { margin: 0; white-space: pre-wrap; }
+.logList details { grid-column: 4; }
+.logList details > summary { color: var(--muted); font-size: 11px; }
+.evidenceBanner { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--line); background: var(--surface-muted); }
+.evidenceBanner code { margin-left: auto; overflow-wrap: anywhere; color: var(--muted); font-size: 10px; }
+.cliHandoff { display: grid; gap: 5px; min-width: min(100%, 300px); padding: 10px; border: 1px solid var(--line); background: var(--surface-muted); }
+.cliHandoff code { overflow-wrap: anywhere; font-size: 11px; }
+.evidenceCode { max-height: 240px; overflow: auto; white-space: pre-wrap; }
+@media (max-width: 1100px) { .topologyCanvas { display: none; } .topologyTree { display: grid; gap: 12px; } .topologyTree section { padding: 12px; border: 1px solid var(--line); background: var(--surface); } .topologyTree h3 { margin: 0 0 8px; } .topologyTree p { margin: 5px 0; color: var(--muted); overflow-wrap: anywhere; font-size: 12px; } .coverageGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .coverageItem:last-child { grid-column: 1 / -1; } .infrastructureSplit, .observabilityColumns, .bootstrapLayout { grid-template-columns: 1fr; } .placementForm, .logFilters { grid-template-columns: 1fr; } .placementForm .span2 { grid-column: auto; } .comparisonRow { grid-template-columns: minmax(90px, .6fr) minmax(100px, 1fr); } .comparisonRow b { grid-column: 1 / -1; } .logList > li { grid-template-columns: 1fr auto; } .logList p, .logList details { grid-column: 1 / -1; } }
+@media (max-width: 640px) { .destinationToolbar, .observabilityHero { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; } .observabilityHero > div { width: 100%; } .phaseRail { grid-template-columns: repeat(2, minmax(0, 1fr)); } .coverageGrid { grid-template-columns: 1fr; } .coverageItem:last-child { grid-column: auto; } .healthHeader { display: none; } .healthRow { min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; } .healthRow strong { grid-column: 1 / -1; } .healthRow span { min-width: 0; overflow: visible; white-space: normal; } .healthRow span:not(.status)::before { display: block; margin-bottom: 3px; color: var(--muted); content: attr(data-label); font-size: 9px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; } .healthRow .status { justify-self: start; } .placementDialog { padding: 18px 14px; } .evidenceBanner code { width: 100%; margin-left: 0; } }
 @media (max-width: 1100px) { .main { padding-inline: 24px; } .statusStrip { grid-template-columns: repeat(3, 1fr); } .statusLead { grid-column: 1 / -1; border-left: 0 !important; border-bottom: 3px solid var(--muted); } .statusLead.healthy { border-bottom-color: var(--ok); } .statusLead.degraded { border-bottom-color: var(--warn); } .statusLead.failed { border-bottom-color: var(--bad); } .statusStrip > div:nth-child(2) { border-left: 0; } .overviewGrid, .overviewGrid.lower { grid-template-columns: 1fr; } }
 @media (max-width: 960px) { .app { display: block; } .sidebar { position: fixed; inset: 0 auto 0 0; transform: translateX(-105%); transition: transform 160ms ease; box-shadow: var(--shadow); } .sidebar.open { transform: translateX(0); } .sidebarBackdrop { position: fixed; inset: 0; z-index: 9; display: block; border: 0; border-radius: 0; background: rgb(32 33 31 / 35%); opacity: 0; pointer-events: none; transition: opacity 160ms ease; } .sidebarBackdrop.open { opacity: 1; pointer-events: auto; } .mobileOnly { display: inline-grid; } .main { padding-inline: 20px; } .cols, .grafanaGrid, .form, .filterBar, .specList, .specList.compact, .steps, .placementGrid, .reviewGrid, .runtimeEvidence, .releaseSummary, .deliverySplit, .sourceInventory { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, minmax(110px, 1fr)); } .hero, .projectFilters, .serviceFilters { grid-template-columns: 1fr; } .wizardRail { grid-template-columns: repeat(3, minmax(0, 1fr)); } .placementGrid .wide, .span2 { grid-column: auto; } .stageRail { grid-template-columns: 1fr; gap: 0; } .stageRail::before { top: 25px; bottom: 25px; left: 34px; width: 1px; height: auto; } .stageRail button { min-height: 0; grid-template-columns: 50px minmax(0, 1fr) auto; grid-template-rows: auto; padding: 8px 8px; } .masterDetail { grid-template-columns: 1fr; } .masterList { border-right: 0; border-bottom: 1px solid var(--line); } .setupRail { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 640px) { .main { padding-inline: 14px; } .topbar { min-height: 60px; gap: 8px; } .breadcrumb { font-size: 11px; } .workspaceCrumb, .viewCrumb, .crumbDivider { display: none; } .environmentCrumb::before { content: "· "; } .projectCrumb { flex: 1 1 auto; } .environmentCrumb { flex: 0 1 auto; } .topbarActions .sourceWarning { display: none; } .page, .groupedPage { padding-top: 24px; } .pageHeader, .groupedHeader { display: grid; gap: 16px; margin-bottom: 22px; } .pageHeader h1, .groupedHeader h1 { font-size: 29px; } .pageAction { justify-self: start; } .tabs { margin-bottom: 20px; flex-wrap: wrap; overflow-x: visible; } .statusStrip { grid-template-columns: repeat(2, 1fr); } .statusStrip > div { border-left: 0; border-top: 1px solid var(--line); } .statusStrip > div:nth-child(odd) { border-right: 1px solid var(--line); } .statusLead { grid-column: 1 / -1; border-top: 0 !important; border-right: 0 !important; } .projectListHeader { display: none; } .projectRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 14px; padding: 16px 10px; } .projectRow > span:not(.projectIdentity) { display: flex; justify-content: space-between; gap: 9px; white-space: normal; } .projectRow [data-label]::before { display: inline; color: var(--muted); content: attr(data-label); font-size: 10px; font-weight: 700; text-transform: uppercase; } .projectRow > span:nth-child(2), .projectRow > span:nth-child(3) { grid-column: 2; } .projectRow > span:nth-child(4), .projectRow > span:nth-child(5), .projectRow > span:nth-child(6) { grid-column: 1 / -1; } .serviceRow { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 15px 8px; } .serviceRow > span:nth-child(2), .serviceRow > span:nth-child(3), .serviceRow > span:nth-child(4) { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 8px; white-space: normal; } .serviceRow > span:nth-child(2)::before, .serviceRow > span:nth-child(3)::before, .serviceRow > span:nth-child(4)::before { color: var(--muted); content: attr(data-label); font-size: 10px; font-weight: 700; text-transform: uppercase; } .detailFacts { grid-template-columns: 1fr; } .metrics { grid-template-columns: 1fr; } .nativeDialog, .deliveryDialog { padding: 18px 14px; } th, td { white-space: normal; } .topoRow { min-width: 720px; } .wizardRail { grid-template-columns: repeat(2, minmax(0, 1fr)); } .authGate { padding: 16px; } .authGateCard { padding: 28px 20px; } .deliveryToolbar { align-items: stretch; } .deliveryToolbar > *, .deliveryToolbar > label { width: 100%; } .stageRail button { grid-template-columns: 50px minmax(0, 1fr); } .stageRail button > .status { grid-column: 2; } .releaseSummary dl, .evidenceGrid, .deploymentForm { grid-template-columns: 1fr; } .masterDetail { border-inline: 0; } .masterList, .detailPanel { padding-inline: 10px; } .setupRail { grid-template-columns: repeat(2, minmax(0, 1fr)); } .bindingRow { grid-template-columns: minmax(0, 1fr) auto; } .bindingRow > span:nth-child(3) { grid-column: 1 / -1; } .dialogHeading { display: grid; } }

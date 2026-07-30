@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
-import type { MutationRequest, MutationReview } from "@/features/console/types";
+import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
 import { normalizeRoute, parseRoute, routeForLegacy, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
 import { emptyFoundation, type FoundationState } from "@/lib/presentation/project";
 import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
@@ -31,8 +31,6 @@ export function useConsoleState() {
     secretReveal: null,
     totpSetup: null,
     incidents: [],
-    incidentDetail: null,
-    incidentError: "",
     nodeDetail: null,
     serviceDetail: null,
     busy: "",
@@ -258,13 +256,13 @@ export function useConsoleState() {
     const host = String(form.get("public_host") ?? "");
     const role = String(form.get("role") ?? "");
     reviewMutation(
-      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, `auth: ${authMethod}`, `ssh port: ${String(form.get("ssh_port") || 22)}`], risk: "Starts the canonical bootstrap worker flow. Credentials are submitted once and stay out of browser storage." },
+      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, `auth: ${authMethod}`, `ssh port: ${String(form.get("ssh_port") || "not reported")}`], risk: "Starts the canonical bootstrap worker flow. Credentials are submitted once and stay out of browser storage." },
       async (key) => {
         const submitted = new FormData(formElement);
         const submittedAuth = String(submitted.get("auth_method"));
         const body: Record<string, unknown> = {
           role: submitted.get("role"), public_host: submitted.get("public_host"),
-          ssh_port: Number(submitted.get("ssh_port") || 22), ssh_username: submitted.get("ssh_username"), auth_method: submittedAuth,
+          ssh_port: Number(submitted.get("ssh_port")), ssh_username: submitted.get("ssh_username"), auth_method: submittedAuth,
         };
         body[submittedAuth === "private_key" ? "ssh_private_key" : "ssh_password"] = String(submitted.get("secret") ?? "");
         patch({ busy: "server" });
@@ -309,7 +307,7 @@ export function useConsoleState() {
   async function diagnostics(nodeID: string) {
     if (!currentProject) return;
     patch({ nodeDetail: await client.node(currentProject.id, nodeID) });
-    navigate(routeForLegacy("Servers / Nodes", currentProject.id));
+    navigate({ view: "infrastructure", tab: "nodes", node: nodeID });
   }
 
   function nodeAction(nodeID: string, action: "offline" | "drain" | "remove") {
@@ -454,57 +452,6 @@ export function useConsoleState() {
     );
   }
 
-  async function incidentList(event: FormEvent<HTMLFormElement>) {
-	 event.preventDefault();
-	 if (!currentProject) return;
-	 const form = new FormData(event.currentTarget);
-	 patch({ busy: "incident-list", incidentDetail: null, incidentError: "" });
-	 try {
-	   const result = await client.incidents(currentProject.id, String(form.get("status") ?? ""));
-	   patch({ incidents: result.incidents ?? [] });
-	 } catch (error) {
-	   patch({ incidentError: (error as Error).message });
-	 } finally {
-	   patch({ busy: "" });
-	 }
-  }
-
-  async function incidentGet(event: FormEvent<HTMLFormElement>) {
-	 event.preventDefault();
-	 if (!currentProject) return;
-	 const form = new FormData(event.currentTarget);
-	 const incidentID = String(form.get("incident_id") ?? "");
-	 patch({ busy: "incident-get", incidentDetail: null, incidentError: "" });
-	 try {
-	   const result = await client.incident(currentProject.id, incidentID);
-	   patch({ incidentDetail: result.incident });
-	 } catch (error) {
-	   patch({ incidentError: (error as Error).message });
-	 } finally {
-	   patch({ busy: "" });
-    }
-  }
-
-  async function incidentResolve(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!currentProject) return;
-    const form = new FormData(event.currentTarget);
-    const incidentID = String(form.get("incident_id") ?? "");
-    reviewMutation(
-      { project: currentProject.name, targetType: "incident", targetID: incidentID, operation: "resolve", diff: ["mark factual Agent incident resolved"], risk: "Changes incident lifecycle state but does not execute remediation." },
-      async (key) => {
-        patch({ busy: "incident-resolve", incidentError: "" });
-        try {
-          const result = await client.resolveIncident(currentProject.id, incidentID, key);
-          patch({ incidentDetail: result.incident, incidents: state.incidents.map((item) => (item.incident_id === result.incident.incident_id ? result.incident : item)) });
-          return `Incident ${incidentID} returned status ${result.incident.status}.`;
-        } finally {
-          patch({ busy: "" });
-        }
-      },
-    );
-  }
-
   return {
     active: routeLabel(route),
     route,
@@ -536,9 +483,6 @@ export function useConsoleState() {
       loadBootstrapEvents,
       retryBootstrap,
       loadDeploymentEvents,
-      incidentList,
-      incidentGet,
-      incidentResolve,
       nodeAction,
       rollback,
       secretCreate,
@@ -546,5 +490,5 @@ export function useConsoleState() {
       secretRotate,
       setupTOTP,
     },
-  };
+  } as ConsoleController;
 }

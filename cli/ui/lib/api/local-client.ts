@@ -15,6 +15,7 @@ import type {
   SecretResult,
   IncidentResult,
   IncidentListResult,
+  IncidentEvidence,
   SupportSummary,
   TelemetryQueryResponse,
   TelemetrySummary,
@@ -492,13 +493,8 @@ export class LocalClient {
 	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}`);
   }
 
-  resolveIncident(projectID: string, incidentID: string, idempotencyKey?: string) {
-	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/resolve`, {
-	  method: "POST",
-	  write: true,
-	  idempotencyKey,
-	  body: JSON.stringify({}),
-	});
+  incidentEvidence(projectID: string, incidentID: string) {
+	return this.call<IncidentEvidence>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/evidence`);
   }
 
   private async call<T>(path: string, init: RequestOptions = {}) {

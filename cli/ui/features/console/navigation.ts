@@ -16,17 +16,16 @@ export const groupedTabs = {
     { id: "source", label: "Source" },
   ],
   infrastructure: [
-    { id: "runtime", label: "Runtime" },
-    { id: "nodes", label: "Nodes / Servers" },
-    { id: "bootstrap", label: "Bootstrap" },
     { id: "topology", label: "Topology" },
+    { id: "runtimes", label: "Runtimes" },
+    { id: "nodes", label: "Nodes" },
+    { id: "bootstrap", label: "Bootstrap" },
   ],
   observability: [
     { id: "health", label: "Health" },
     { id: "metrics", label: "Metrics" },
     { id: "logs", label: "Logs" },
     { id: "incidents", label: "Incidents" },
-    { id: "support", label: "Support" },
   ],
   security: [
     { id: "secrets", label: "Secrets" },
@@ -48,6 +47,14 @@ export type ConsoleRoute = {
   repository?: string;
   sha?: string;
   cursor?: string;
+  runtime?: string;
+  node?: string;
+  session?: string;
+  topology?: string;
+  incident?: string;
+  level?: string;
+  query?: string;
+  window?: string;
 };
 
 const projectViews = new Set<ConsoleView>(projectDestinations.map((item) => item.id));
@@ -67,8 +74,7 @@ export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {
   if (view === "projects") return { projectID: "", view, tab: "" };
   const tabs = view in groupedTabs ? groupedTabs[view as keyof typeof groupedTabs] : [];
   const tab = tabs.some((item) => item.id === route.tab) ? route.tab ?? "" : defaultTab(view);
-  const deliveryState = view === "delivery" ? compactDeliveryState(route) : {};
-  return { projectID, view, tab, ...deliveryState };
+  return { projectID, view, tab, ...compactViewState(view, route) };
 }
 
 export function parseRoute(search: string): ConsoleRoute {
@@ -87,6 +93,14 @@ export function parseRoute(search: string): ConsoleRoute {
     repository: params.get("repository") ?? "",
     sha: params.get("sha") ?? "",
     cursor: params.get("cursor") ?? "",
+    runtime: params.get("runtime") ?? "",
+    node: params.get("node") ?? "",
+    session: params.get("session") ?? "",
+    topology: params.get("topology") ?? "",
+    incident: params.get("incident") ?? "",
+    level: params.get("level") ?? "",
+    query: params.get("query") ?? "",
+    window: params.get("window") ?? "",
   });
 }
 
@@ -96,15 +110,22 @@ export function routeHref(route: Partial<ConsoleRoute>) {
   if (normalized.projectID) params.set("project", normalized.projectID);
   params.set("view", normalized.view);
   if (normalized.tab) params.set("tab", normalized.tab);
-  for (const key of ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor"] as const) {
+  for (const key of ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor", "runtime", "node", "session", "topology", "incident", "level", "query", "window"] as const) {
     if (normalized[key]) params.set(key, normalized[key]);
   }
   return `/?${params}`;
 }
 
-function compactDeliveryState(route: Partial<ConsoleRoute>) {
+function compactViewState(view: ConsoleView, route: Partial<ConsoleRoute>) {
   const state: Partial<ConsoleRoute> = {};
-  for (const key of ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor"] as const) {
+  const keys = view === "delivery"
+    ? ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor"] as const
+    : view === "infrastructure"
+      ? ["runtime", "node", "session", "service", "topology"] as const
+      : view === "observability"
+        ? ["service", "incident", "status", "level", "query", "cursor", "window"] as const
+        : [] as const;
+  for (const key of keys) {
     if (route[key]) state[key] = route[key];
   }
   return state;
@@ -126,15 +147,16 @@ export function routeForLegacy(label: string, projectID: string): ConsoleRoute {
     "Build Records": { view: "delivery", tab: "builds" },
     Deployments: { view: "delivery", tab: "deployments" },
     Exposure: { view: "delivery", tab: "exposure" },
-    Runtime: { view: "infrastructure", tab: "runtime" },
+    Runtime: { view: "infrastructure", tab: "runtimes" },
+    Runtimes: { view: "infrastructure", tab: "runtimes" },
     "Servers / Nodes": { view: "infrastructure", tab: "nodes" },
+    Nodes: { view: "infrastructure", tab: "nodes" },
     Bootstrap: { view: "infrastructure", tab: "bootstrap" },
     Topology: { view: "infrastructure", tab: "topology" },
     Health: { view: "observability", tab: "health" },
     Metrics: { view: "observability", tab: "metrics" },
     Logs: { view: "observability", tab: "logs" },
     Incidents: { view: "observability", tab: "incidents" },
-    Support: { view: "observability", tab: "support" },
     Secrets: { view: "security", tab: "secrets" },
     Audit: { view: "security", tab: "audit" },
     Settings: { view: "settings" },
