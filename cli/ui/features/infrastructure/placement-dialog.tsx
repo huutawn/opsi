@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Empty, Surface, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { LocalClient } from "@/lib/api/local-client";
@@ -12,6 +12,7 @@ type Preview = { topology: TopologyPreview; validation: TopologyValidation; diff
 const client = new LocalClient();
 
 export function PlacementDialog({ console, data, onClose, onApplied }: { console: ConsoleController; data: PlacementData; onClose: () => void; onApplied: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
   const project = console.state.project;
   const projectID = project?.id ?? "";
   const [phase, setPhase] = useState<"target" | "capacity" | "validate" | "review">("target");
@@ -30,6 +31,11 @@ export function PlacementDialog({ console, data, onClose, onApplied }: { console
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState("");
   const [allowUnknown, setAllowUnknown] = useState(false);
+  useEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => { if (element?.open) element.close(); };
+  }, []);
 
   const environments = data.facts.environments;
   const runtimes = data.facts.runtimes.filter((item) => item.environment_id === environmentID);
@@ -94,8 +100,8 @@ export function PlacementDialog({ console, data, onClose, onApplied }: { console
     finally { setBusy(false); }
   }
 
-  return <dialog className="placementDialog" open aria-labelledby="placement-title">
-    <div className="dialogHeading"><div><p className="eyebrow">Infrastructure action</p><h2 id="placement-title">Plan placement</h2><p>Review exact target, capacity, validation, and immutable revisions before apply.</p></div><button aria-label="Close placement dialog" className="iconButton" onClick={onClose} type="button">×</button></div>
+  return <dialog className="placementDialog" onCancel={(event) => { event.preventDefault(); onClose(); }} ref={dialog} aria-labelledby="placement-title">
+    <div className="dialogHeading"><div><p className="eyebrow">Infrastructure action</p><h2 id="placement-title">Plan placement</h2><p>Review exact target, capacity, validation, and immutable revisions before apply.</p></div><button aria-label="Close placement dialog" autoFocus className="iconButton" onClick={onClose} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button></div>
     <ol className="phaseRail" aria-label="Placement phases">{["Target", "Capacity", "Validate", "Review & apply"].map((item, index) => <li className={phase === ["target", "capacity", "validate", "review"][index] ? "active" : ""} key={item}>{index + 1}. {item}</li>)}</ol>
     {phase === "target" ? <div className="form placementForm">
       <label>Repository<select aria-label="Repository" className="select" value={repositoryID} onChange={(event) => { setRepositoryID(event.target.value); setServiceKey(""); setBuildID(""); }}><option value="">Choose exact repository…</option>{repositories.map((item) => <option key={item.repository_id} value={item.repository_id}>{item.full_name}</option>)}</select></label>

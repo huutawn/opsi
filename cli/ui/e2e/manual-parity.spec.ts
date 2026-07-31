@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 const localOrigin = "http://127.0.0.1:19881";
 const controlURL = "http://127.0.0.1:19882/__control";
@@ -6,6 +7,8 @@ const controlURL = "http://127.0.0.1:19882/__control";
 test.beforeEach(async () => {
   await fetch(`${controlURL}?mode=&agent=up`);
 });
+test.beforeEach(async ({ page }) => watchConsoleErrors(page));
+test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("manual Local UI parity stays behind the Local backend", async ({ page }) => {
   const browserAuthorities = new Set<string>();
@@ -30,7 +33,10 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await page.getByRole("button", { name: "Confirm and submit" }).click();
   await expect(page.getByText(/Project proj-2 created by the Local backend/)).toBeVisible();
   await page.getByRole("button", { name: "Close" }).click();
-  await expect(page.getByText("Created Project", { exact: true }).first()).toBeVisible();
+  const createdProject = page.locator(".projectRow").filter({ hasText: "Created Project" });
+  await expect(createdProject).toBeVisible();
+  await createdProject.click();
+  await expect(page.getByRole("heading", { name: "Created Project" })).toBeVisible();
 
   await page.getByRole("link", { name: "Infrastructure", exact: true }).click();
   await page.getByRole("tab", { name: "Runtimes", exact: true }).click();

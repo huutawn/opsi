@@ -13,17 +13,37 @@ export function AppShell() {
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
+  const navigation = useRef<HTMLElement>(null);
+  const main = useRef<HTMLElement>(null);
   function closeNavigation() {
     setNavigationOpen(false);
     window.requestAnimationFrame(() => menuButton.current?.focus());
   }
   useEffect(() => {
     if (!navigationOpen) return;
+    const background = main.current;
+    const skipLink = document.querySelector<HTMLElement>(".skipLink");
+    if (background) background.inert = true;
+    if (skipLink) skipLink.inert = true;
+    const drawer = navigation.current;
+    const focusable = () => focusableElements(drawer);
+    window.requestAnimationFrame(() => drawer?.querySelector<HTMLElement>('[aria-label="Close navigation"]')?.focus());
     function keydown(event: KeyboardEvent) {
-      if (event.key === "Escape") closeNavigation();
+      if (event.key === "Escape") { event.preventDefault(); closeNavigation(); return; }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }
     document.addEventListener("keydown", keydown);
-    return () => document.removeEventListener("keydown", keydown);
+    return () => {
+      document.removeEventListener("keydown", keydown);
+      if (background) background.inert = false;
+      if (skipLink) skipLink.inert = false;
+    };
   }, [navigationOpen]);
 
   if (!console.session && console.state.status === "loading") return <AuthGate checking message="Checking the local credential and Cloud session." />;
@@ -34,8 +54,8 @@ export function AppShell() {
   const environment = console.state.foundation.placement?.environments.find((item) => item.status === "active")?.name ?? "Environment not reported";
   return <div className={`app ${collapsed ? "sidebarCollapsed" : ""}`}>
     <a className="skipLink" href="#main">Skip to content</a>
-    <Sidebar collapsed={collapsed} environment={environment} onBrowse={() => console.navigate({ projectID: "", view: "projects", tab: "" })} onClose={closeNavigation} onCollapse={() => setCollapsed((value) => !value)} onNavigate={console.navigate} onSelectProject={console.setProjectID} open={navigationOpen} orgID={console.session.org_id ?? ""} project={console.state.project} projects={console.state.projects} route={console.route} />
-    <main className="main" id="main" tabIndex={-1}>
+    <Sidebar collapsed={collapsed} drawerRef={navigation} environment={environment} onBrowse={() => console.navigate({ projectID: "", view: "projects", tab: "" })} onClose={closeNavigation} onCollapse={() => setCollapsed((value) => !value)} onNavigate={console.navigate} onSelectProject={console.setProjectID} open={navigationOpen} orgID={console.session.org_id ?? ""} project={console.state.project} projects={console.state.projects} route={console.route} />
+    <main className="main" id="main" ref={main} tabIndex={-1}>
       <ContextHeader environment={environment} lastUpdated={latestUpdate(console)} menuButtonRef={menuButton} onMenu={() => setNavigationOpen(true)} onRefresh={() => void console.actions.load()} project={console.state.project} route={console.route} serviceScope={console.state.services.find((item) => item.id === console.route.service)?.name} session={console.session} />
       <ConsoleRouter console={console} />
     </main>
@@ -44,47 +64,54 @@ export function AppShell() {
 }
 
 function MutationDialog({ console }: { console: ConsoleController }) {
-  const dialog = useRef<HTMLDivElement>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const credential = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
   const [confirmation, setConfirmation] = useState({ key: "", value: "" });
+  const [hasCredential, setHasCredential] = useState(false);
   const review = console.review;
   useEffect(() => {
     if (!review) return;
-    returnFocus.current = document.activeElement as HTMLElement | null;
-    const currentReview = review;
+    returnFocus.current = document.querySelector<HTMLElement>(`[data-review-trigger="${review.operation}"]`)
+      ?? document.activeElement as HTMLElement | null;
     const element = dialog.current;
-    const focusable = () => Array.from(element?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled)") ?? []);
-    focusable()[0]?.focus();
-    function keydown(event: KeyboardEvent) {
-      if (event.key === "Escape" && currentReview.status !== "submitting") console.closeReview();
-      if (event.key !== "Tab") return;
-      const items = focusable();
-      if (!items.length) return;
-      const [first] = items;
-      const last = items[items.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-    }
-    document.addEventListener("keydown", keydown);
-    return () => { document.removeEventListener("keydown", keydown); returnFocus.current?.focus(); };
+    element?.showModal();
+    const keydown = (event: KeyboardEvent) => trapTabKey(event, element);
+    element?.addEventListener("keydown", keydown);
+    window.requestAnimationFrame(() => (credential.current ?? focusableElements(element)[0])?.focus());
+    return () => {
+      element?.removeEventListener("keydown", keydown);
+      if (element?.open) element.close();
+      returnFocus.current?.focus();
+    };
     // One reviewed attempt keeps one idempotency key across retries.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [review?.idempotencyKey]);
   if (!review) return null;
   const confirmationValue = confirmation.key === review.idempotencyKey ? confirmation.value : "";
-  const confirmed = !review.confirmation || confirmationValue === review.confirmation;
-  return <div className="modalBackdrop"><div aria-describedby="mutationRisk" aria-labelledby="mutationTitle" aria-modal="true" className="modal" ref={dialog} role="dialog">
+  const confirmed = (!review.confirmation || confirmationValue === review.confirmation) && (!review.credential || hasCredential);
+  function submit() {
+    const value = review?.credential ? credential.current?.value ?? "" : undefined;
+    if (credential.current) credential.current.value = "";
+    setHasCredential(false);
+    void console.submitReview(value);
+  }
+  const credentialField = review.credential && review.status !== "submitting" && review.status !== "succeeded" ? <label>{review.credential.label}{review.credential.label.includes("private key")
+    ? <textarea autoComplete="off" className="textarea" onInput={(event) => setHasCredential(Boolean(event.currentTarget.value))} ref={credential as React.RefObject<HTMLTextAreaElement>} aria-label={review.credential.inputLabel} />
+    : <input autoComplete="new-password" className="field" onInput={(event) => setHasCredential(Boolean(event.currentTarget.value))} ref={credential as React.RefObject<HTMLInputElement>} type="password" aria-label={review.credential.inputLabel} />}</label> : null;
+  return <dialog aria-describedby="mutationRisk" aria-labelledby="mutationTitle" className="modal" onCancel={(event) => { event.preventDefault(); if (review.status !== "submitting") console.closeReview(); }} ref={dialog}>
     <p className="eyebrow">Review and confirm</p><h2 id="mutationTitle">{review.operation} {review.targetType}</h2>
     <dl className="reviewFacts"><div><dt>Project</dt><dd>{review.project}</dd></div><div><dt>Target</dt><dd>{review.targetType} / {review.targetID}</dd></div><div><dt>Required permission</dt><dd>Existing Local API authorization</dd></div></dl>
     <h3>Before / after</h3><ul>{review.diff.map((item) => <li key={item}>{item}</li>)}</ul>
     <p className="risk" id="mutationRisk"><b>Risk:</b> {review.risk}</p>
     <details className="technicalDetails"><summary>Technical details</summary><span>Idempotency key</span><code>{review.idempotencyKey}</code></details>
     {review.confirmation ? <label>Type <code>{review.confirmation}</code> to confirm<input autoComplete="off" className="field" onChange={(event) => setConfirmation({ key: review.idempotencyKey, value: event.target.value })} value={confirmationValue} /></label> : null}
+    {credentialField}
     {review.status === "submitting" ? <p aria-live="polite" role="status">Submitting to the Local backend…</p> : null}
     {review.status === "succeeded" ? <p aria-live="polite" className="success" role="status">{review.evidence}</p> : null}
     {review.status === "failed" ? <div className="errorBox" role="alert"><b>{review.error}</b><span>{review.nextAction}</span></div> : null}
-    <div className="modalActions"><button disabled={review.status === "submitting"} onClick={console.closeReview} type="button">{review.status === "succeeded" ? "Close" : "Cancel"}</button>{review.status !== "succeeded" ? <button className="primary" disabled={!confirmed || review.status === "submitting"} onClick={() => void console.submitReview()} type="button">{review.status === "failed" ? "Retry same attempt" : review.status === "submitting" ? "Submitting…" : "Confirm and submit"}</button> : null}</div>
-  </div></div>;
+    <div className="modalActions"><button disabled={review.status === "submitting"} onClick={console.closeReview} type="button">{review.status === "succeeded" ? "Close" : "Cancel"}</button>{review.status !== "succeeded" ? <button className="primary" disabled={!confirmed || review.status === "submitting"} onClick={submit} type="button">{review.status === "failed" ? "Retry same attempt" : review.status === "submitting" ? "Submitting…" : "Confirm and submit"}</button> : null}</div>
+  </dialog>;
 }
 
 function AuthGate({ message, checking = false }: { message: string; checking?: boolean }) {
@@ -111,4 +138,19 @@ function latestUpdate(console: ConsoleController) {
 }
 function authErrorMessage(code: string) {
   return ({ GITHUB_ACCOUNT_UNLINKED: "This GitHub account is not linked to an Opsi user.", OPSI_MEMBERSHIP_REQUIRED: "This account has no active Opsi project membership.", PROJECT_SELECTION_REQUIRED: "This account needs an explicit project selection.", GITHUB_AUTH_DENIED: "GitHub authorization was cancelled.", AUTH_SESSION_EXPIRED: "The sign-in request expired.", AUTH_UNAVAILABLE: "Opsi sign-in is temporarily unavailable.", GITHUB_AUTH_FAILED: "GitHub sign-in failed." } as Record<string, string>)[code] ?? "";
+}
+
+function focusableElements(root: HTMLElement | null | undefined) {
+  return Array.from(root?.querySelectorAll<HTMLElement>('a[href], button:not(:disabled), summary, input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])
+    .filter((element) => element.getClientRects().length > 0);
+}
+
+function trapTabKey(event: KeyboardEvent, root: HTMLElement | null) {
+  if (event.key !== "Tab") return;
+  const items = focusableElements(root);
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 }

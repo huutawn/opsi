@@ -1,6 +1,8 @@
 import { expect, test, type Route } from "@playwright/test";
+import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
-test.beforeEach(async ({ page }) => { await page.route("**/api/local/**", respond); });
+test.beforeEach(async ({ page }) => { watchConsoleErrors(page); await page.route("**/api/local/**", respond); });
+test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Infrastructure uses canonical edges, truthful capacity, and URL state", async ({ page }) => {
   await page.goto("/?project=proj-1&view=infrastructure");
@@ -26,6 +28,10 @@ test("Observability preserves factual semantics, text rendering, evidence, and U
   await page.getByRole("tab", { name: "Logs", exact: true }).click();
   await expect(page.getByText("<script>alert('x')</script> token=should-hide", { exact: true })).toHaveCount(0);
   await expect(page.getByText(/redaction contract violation/i)).toBeVisible();
+  const resume = page.getByRole("button", { name: "Resume periodic refresh" });
+  await resume.click();
+  await expect(page.getByRole("button", { name: "Pause periodic refresh" })).toHaveAttribute("aria-pressed", "false");
+  await page.getByRole("button", { name: "Pause periodic refresh" }).click();
   await page.getByLabel("Search loaded page").fill("timeout");
   await expect(page).toHaveURL(/query=timeout/);
   await page.getByRole("tab", { name: "Incidents", exact: true }).click();

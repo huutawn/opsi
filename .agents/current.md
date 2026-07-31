@@ -489,3 +489,24 @@ Dependency status is `OPEN / UPSTREAM_BLOCKED /
 NOT_SHIPPED_TO_BROWSER_RUNTIME / BUILD_TIME_RISK_REMAINS`. No live Agent/VPS
 acceptance occurred, R5-017 remains pending, and no release or production
 readiness claim is made.
+
+## 2026-07-31 UI corrective pass
+
+The canonical frontend now serializes project-switch mutations and rejects
+obsolete load/error/refresh results. Projects use bounded read-only factual
+summaries without switching the Local session. Bootstrap credentials are
+requested only at final confirmation, cleared from DOM/state before the request
+waits, and required again after failure. Native modal/drawer behavior, APG tabs,
+40px targets, complete activity outcomes, and URL-restorable service detail are
+covered by browser regressions. Audit time filtering and paused-by-default
+periodic Logs refresh close the remaining Prompt 01 acceptance gaps without a
+new API or parallel UI path.
+
+Frontend evidence: 31 unit/source tests pass; lint and build pass; all 24
+Playwright Chromium scenarios pass with application console/page errors gated;
+`make ui-test`, `make ui-lint`, and
+`make ui-build` pass. `make verify` stops before repository verification because
+the environment reports `go1.26.5-X:nodwarf5` and the Makefile requires
+`go1.26.4`. Live Agent/VPS and screen-reader acceptance remain unproven,
+R5-017 remains pending, and organization listing, members/RBAC, and secret
+metadata/listing remain the three backend gaps.

@@ -2,7 +2,8 @@
 
 ## R5-014 Local API/UI parity checkpoint
 
-`R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
+`R5_014_UI_REWORK_SOURCE_PRESENT / CORRECTIVE_FRONTEND_GATES_PASS /
+REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
@@ -47,7 +48,7 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-29 |
+| Last updated | 2026-07-31 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
@@ -842,9 +843,9 @@ make verify
 Go module tests run from `agent/`, `cli/`, `cloud/`, and `contracts/go/`, not
 from the workspace root.
 
-## FE-04 frontend source stabilization
+## FE-04 frontend source stabilization and corrective pass
 
-FE-01 through FE-04 frontend source redesign is complete. FE-04 replaces the
+FE-01 through FE-04 frontend source redesign exists in the canonical UI. FE-04 replaces the
 standalone Secrets and Audit implementations with one canonical Security view,
 redesigns workspace Settings around session/connections/install/PAT facts, and
 fixes the Delivery loading and observability factuality regressions. Protected
@@ -853,8 +854,25 @@ project switch, authentication invalidation, and PAT revoke/logout. Incident
 resolution remains a CLI handoff through factual `opsi action` commands; no
 browser approval material exists.
 
-Mock Local API browser acceptance passes at 1440x900, 1024x768, and 390x844.
-No live Agent/VPS acceptance occurred. R5-017 remains pending. The remaining
+The 2026-07-31 corrective pass adds latest-wins serialized project switching,
+bounded factual project summaries, staged bootstrap credential handling,
+native modal/drawer focus behavior, APG-associated tabs, 40px primary targets,
+all factual activity outcomes with text/table fallback, and restorable service
+detail. Audit loaded-history filters now include time bounds; Logs periodic
+refresh is real, bounded, and paused by default.
+
+`npm test` passes 31 tests, `npm run lint` passes, `npm run build` passes, and
+`npx playwright test` passes 24 Chromium scenarios at 1440x900, 1024x768,
+390x844, and 320x800 with application console/page errors gated. `make ui-test`,
+`make ui-lint`, and `make ui-build` pass.
+`make verify` stops at the repository toolchain check because the environment
+reports `go1.26.5-X:nodwarf5` while the Makefile requires `go1.26.4`; the wider
+repository verification is therefore unproven, not a product-test failure.
+
+No live Agent/VPS or screen-reader acceptance occurred. R5-017 remains pending,
+and this evidence does not establish full WCAG conformance. Organization
+listing, members/RBAC, and secret metadata/listing remain the three backend
+gaps. The remaining
 PostCSS and Sharp advisories are upstream-blocked and are not present in the
 static browser export; PostCSS remains build-time reachable, so dependency
 remediation, supply-chain closure, release readiness, and production readiness

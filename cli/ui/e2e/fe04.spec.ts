@@ -1,6 +1,10 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 type Scenario = "default" | "ttl" | "agent-down" | "cloud-down" | "signed-out" | "audit-empty" | "audit-unavailable" | "unknown" | "unresolved" | "malformed" | "delivery-loading";
+
+test.beforeEach(async ({ page }) => watchConsoleErrors(page));
+test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Security operations use explicit targets and protected results clear at every boundary", async ({ page }) => {
   const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -133,6 +137,9 @@ test("TTL cleanup, Agent availability, audit explorer, and unavailable history s
   await expect(page.getByRole("button", { name: /deploy/ })).toBeVisible();
   await page.getByRole("combobox", { name: "Result" }).selectOption("denied");
   await expect(page.getByRole("button", { name: /deploy\.failed.*denied/i })).toBeVisible();
+  await page.getByLabel("From date").fill("2026-07-31");
+  await expect(page.getByText("No loaded audit events match these filters.", { exact: true })).toBeVisible();
+  await page.getByLabel("From date").fill("2026-07-30");
   await expect(page.getByText("req-audit-2", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("nested redacted", { exact: true })).toHaveCount(0);
   await page.screenshot({ fullPage: true, path: "../../.tmp/ui-fe04/audit-1440x900.png" });

@@ -130,6 +130,8 @@ function compactViewState(view: ConsoleView, route: Partial<ConsoleRoute>) {
       ? ["runtime", "node", "session", "service", "topology"] as const
       : view === "observability"
         ? ["service", "incident", "status", "level", "query", "cursor", "window"] as const
+        : view === "services"
+          ? ["service"] as const
         : [] as const;
   for (const key of keys) {
     if (route[key]) state[key] = route[key];

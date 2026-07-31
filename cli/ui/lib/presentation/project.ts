@@ -218,6 +218,15 @@ export function deriveProjectSummary(input: {
   };
 }
 
+export type ProjectSummary = ReturnType<typeof deriveProjectSummary>;
+export type ProjectSummaryEntry = {
+  status: "loading" | "ready" | "error";
+  environment?: string;
+  runtimeStatus?: PresentationStatus;
+  summary?: ProjectSummary;
+  error?: string;
+};
+
 export function serviceRows(input: {
   services: ServiceRecord[];
   telemetry: TelemetryServiceStatus[];

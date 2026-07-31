@@ -6,7 +6,7 @@ import { SettingsView } from "@/features/settings/settings-view";
 import { groupedTabs, routeHref, type ConsoleRoute } from "@/features/console/navigation";
 import { OverviewView } from "@/features/overview/overview-view";
 import { ProjectsView, WorkspaceHomeView } from "@/features/projects/projects-view";
-import { Tabs } from "@/components/navigation/tabs";
+import { Tabs, tabPanelProps } from "@/components/navigation/tabs";
 import { ServicesView } from "@/features/services/services-view";
 import type { ConsoleController } from "@/features/console/types";
 
@@ -28,7 +28,8 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
   const View = tabViewMap[route.view]?.[route.tab] ?? tabViewMap[route.view]?.[groupedTabs[route.view as keyof typeof groupedTabs]?.[0]?.id ?? ""];
   if (!View) return null;
   const tabs = groupedTabs[route.view as keyof typeof groupedTabs];
-  return <section className="groupedPage"><div className="groupedHeader"><div><p className="eyebrow">Project workspace</p><h1>{groupedTitle(route.view)}</h1><p>{groupedDescription(route.view)}</p></div></div><Tabs label={`${groupedTitle(route.view)} sections`} items={tabs.map((tab) => ({ ...tab, href: routeHref({ ...route, tab: tab.id }) }))} selected={route.tab} onSelect={(event, tab) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); console.navigate({ tab }); }} /><View console={console} /></section>;
+  const label = `${groupedTitle(route.view)} sections`;
+  return <section className="groupedPage"><div className="groupedHeader"><div><p className="eyebrow">Project workspace</p><h1>{groupedTitle(route.view)}</h1><p>{groupedDescription(route.view)}</p></div></div><Tabs label={label} items={tabs.map((tab) => ({ ...tab, href: routeHref({ ...route, tab: tab.id }) }))} selected={route.tab} onSelect={(event, tab) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); console.navigate({ tab }); }} /><div {...tabPanelProps(label, route.tab)}><View console={console} /></div></section>;
 }
 
 function groupedTitle(view: string) { return view[0].toUpperCase() + view.slice(1); }

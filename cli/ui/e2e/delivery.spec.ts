@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 type Scenario = "unconfigured" | "monorepo" | "no-build" | "build-ready" | "waiting" | "verified" | "failed" | "rolled-back" | "preview" | "exposure" | "unavailable";
 
@@ -7,6 +8,8 @@ const screenshotDir = "../../.tmp/ui-fe02";
 const digest = (character: string) => `sha256:${character.repeat(64)}`;
 
 test.beforeAll(async () => { await mkdir(screenshotDir, { recursive: true }); });
+test.beforeEach(async ({ page }) => watchConsoleErrors(page));
+test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Delivery restores canonical URL state and renders truthful pipeline stages", async ({ page }) => {
   let scenario: Scenario = "unconfigured";

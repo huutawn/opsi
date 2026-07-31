@@ -1,9 +1,11 @@
 import { projectDestinations, routeHref, type ConsoleRoute } from "@/features/console/navigation";
 import type { Project } from "@/lib/contracts/registry";
 import { ProjectSwitcher } from "@/components/navigation/project-switcher";
+import type { RefObject } from "react";
 
-export function Sidebar({ collapsed, environment, onBrowse, onClose, onCollapse, onNavigate, onSelectProject, open, orgID, project, projects, route }: {
+export function Sidebar({ collapsed, drawerRef, environment, onBrowse, onClose, onCollapse, onNavigate, onSelectProject, open, orgID, project, projects, route }: {
   collapsed: boolean;
+  drawerRef: RefObject<HTMLElement | null>;
   environment: string;
   onBrowse: () => void;
   onClose: () => void;
@@ -24,8 +26,8 @@ export function Sidebar({ collapsed, environment, onBrowse, onClose, onCollapse,
   }
   const projectID = project?.id ?? "";
   return <>
-    <button aria-label="Close navigation" className={`sidebarBackdrop ${open ? "open" : ""}`} onClick={onClose} tabIndex={open ? 0 : -1} type="button" />
-    <aside aria-label="Primary navigation" className={`sidebar ${open ? "open" : ""} ${collapsed ? "collapsed" : ""}`}>
+    <button aria-label="Close navigation" className={`sidebarBackdrop ${open ? "open" : ""}`} onClick={onClose} tabIndex={-1} type="button" />
+    <aside aria-label="Primary navigation" aria-modal={open ? "true" : undefined} className={`sidebar ${open ? "open" : ""} ${collapsed ? "collapsed" : ""}`} ref={drawerRef} role={open ? "dialog" : undefined}>
       <div className="brandRow"><a aria-label="Opsi home" className="brand" href={routeHref({ view: "home" })} onClick={(event) => navigate(event, { view: "home", projectID: "" })}><span aria-hidden="true">O</span><b>Opsi</b></a><button aria-label="Close navigation" className="iconButton mobileOnly" onClick={onClose} type="button"><Icon kind="close" /></button></div>
       <ProjectSwitcher environment={environment} onBrowse={onBrowse} onSelect={onSelectProject} orgID={orgID} project={project} projects={projects} />
       <nav aria-label={project ? "Project" : "Workspace"} className="navSection">

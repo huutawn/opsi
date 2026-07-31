@@ -3,6 +3,7 @@ import type { LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
 import type { ConsoleRoute } from "@/features/console/navigation";
 import type { FoundationState } from "@/lib/presentation/project";
+import type { ProjectSummaryEntry } from "@/lib/presentation/project";
 
 export type MutationReview = {
   project: string;
@@ -12,6 +13,7 @@ export type MutationReview = {
   diff: string[];
   risk: string;
   confirmation?: string;
+  credential?: { label: string; inputLabel: string };
   idempotencyKey: string;
   status: "reviewing" | "submitting" | "succeeded" | "failed";
   evidence?: string;
@@ -29,9 +31,10 @@ export type ConsoleController = {
   navigate: (route: Partial<ConsoleRoute>) => void;
   setProjectID: (id: string) => void;
   setServiceDetail: (service: ServiceRecord | null) => void;
-  reviewMutation: (request: MutationRequest, submit: (idempotencyKey: string) => Promise<string>) => void;
+  projectSummaries: Record<string, ProjectSummaryEntry>;
+  reviewMutation: (request: MutationRequest, submit: (idempotencyKey: string, credential?: string) => Promise<string>) => void;
   closeReview: () => void;
-  submitReview: () => Promise<void>;
+  submitReview: (credential?: string) => Promise<void>;
   state: ConsoleState & FoundationState;
   actions: {
     addServer: (event: FormEvent<HTMLFormElement>) => Promise<void>;

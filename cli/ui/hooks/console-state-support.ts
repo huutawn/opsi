@@ -10,6 +10,7 @@ import type {
   TimelineEvent,
 } from "@/lib/contracts/registry";
 import { emptyFoundation, type FoundationData, type FoundationState } from "@/lib/presentation/project";
+import { deriveProjectSummary, normalizeStatus, type ProjectSummaryEntry } from "@/lib/presentation/project";
 
 export function secretBody(form: FormData) {
   return {
@@ -66,6 +67,29 @@ export async function loadFoundation(client: LocalClient, projectID: string, ser
       telemetry: telemetrySource,
       incidents: incidentSource,
     },
+  };
+}
+
+export async function loadProjectSummary(client: LocalClient, project: Project, agentStatus: string): Promise<ProjectSummaryEntry> {
+  const [readiness, services, deployments] = await Promise.all([
+    client.readiness(project.id),
+    client.services(project.id),
+    client.deployments(project.id),
+  ]);
+  const records = services.services ?? [];
+  const foundation = await loadFoundation(client, project.id, records, agentStatus);
+  const nodeStatuses = foundation.placement?.nodes.map((node) => normalizeStatus(node.status)) ?? [];
+  const runtimeStatus = foundation.sources.runtime !== "available"
+    ? "unavailable"
+    : nodeStatuses.includes("failed") ? "failed"
+      : nodeStatuses.includes("degraded") ? "degraded"
+        : nodeStatuses.includes("unavailable") ? "unavailable"
+          : nodeStatuses.length && nodeStatuses.every((status) => status === "healthy") ? "healthy" : "unknown";
+  return {
+    status: "ready",
+    environment: foundation.placement?.environments.find((item) => item.status === "active")?.name,
+    runtimeStatus,
+    summary: deriveProjectSummary({ project, readiness, services: records, deployments: deployments.deployments ?? [], foundation }),
   };
 }
 
