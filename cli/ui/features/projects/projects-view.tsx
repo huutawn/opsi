@@ -83,3 +83,14 @@ export function ProjectsView({ console }: { console: ConsoleController }) {
     </section>
   );
 }
+
+export function WorkspaceHomeView({ console }: { console: ConsoleController }) {
+  const degraded = console.session?.cloud_connected !== "ok";
+  return <section className="page workspaceHome">
+    <PageHeader eyebrow="Workspace" title="Home" description="Choose a project or review the Local workspace connection before making changes." action={<button className="primary" onClick={() => console.navigate({ view: "projects" })} type="button">Browse projects</button>} />
+    <div className="workspaceSummary">
+      <section aria-labelledby="workspace-projects"><p className="eyebrow">Projects</p><h2 id="workspace-projects">{console.state.projects.length} available</h2><p>Project navigation appears only after a project is selected.</p></section>
+      <section aria-labelledby="workspace-cloud"><p className="eyebrow">Cloud source</p><h2 id="workspace-cloud">{degraded ? "Unavailable" : "Connected"}</h2><p>{degraded ? "Previously loaded factual data remains visible where available." : "Project history is available through the Local API."}</p></section>
+    </div>
+  </section>;
+}

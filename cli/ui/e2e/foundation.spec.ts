@@ -5,26 +5,37 @@ type Scenario = "healthy" | "degraded" | "unavailable" | "empty" | "long" | "fai
 test("workspace, grouped navigation, restoration, and back-forward behavior", async ({ page }) => {
   await mockLocalAPI(page, "healthy");
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Home" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Overview" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Browse projects" }).click();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Checkout Platform/ })).toBeVisible();
   await expect(page.locator(".projectRow .status").first()).toHaveText("Unknown");
   await page.getByRole("link", { name: /Checkout Platform/ }).click();
   await expect(page.getByRole("link", { name: "Overview" })).toBeVisible();
   for (const destination of ["Overview", "Services", "Delivery", "Infrastructure", "Observability", "Security"]) await expect(page.getByRole("link", { name: destination, exact: true })).toBeVisible();
   await expect(page.locator(".navSection a")).toHaveCount(6);
+  await page.getByRole("button", { name: "Collapse sidebar" }).click();
+  await expect(page.getByRole("button", { name: "Expand sidebar" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("Switch project")).toBeVisible();
+  await page.getByRole("button", { name: "Expand sidebar" }).click();
 
   await page.getByRole("link", { name: "Observability", exact: true }).click();
-  await page.getByRole("link", { name: "Logs", exact: true }).click();
+  await page.getByRole("tab", { name: "Health", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("tab", { name: "Metrics", exact: true })).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page).toHaveURL(/view=observability&tab=metrics/);
+  await page.getByRole("tab", { name: "Logs", exact: true }).click();
   await expect(page).toHaveURL(/view=observability&tab=logs/);
   await page.reload();
-  await expect(page.getByRole("link", { name: "Logs", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.getByRole("link", { name: "Security", exact: true }).click();
   await expect(page).toHaveURL(/view=security&tab=secrets/);
   await page.goBack();
-  await expect(page.getByRole("link", { name: "Logs", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.goForward();
-  await expect(page.getByRole("link", { name: "Secrets", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Secrets", exact: true })).toHaveAttribute("aria-selected", "true");
 });
 
 test("truthful project summaries cover required factual fixtures", async ({ page }) => {
@@ -45,7 +56,7 @@ test("truthful project summaries cover required factual fixtures", async ({ page
     }
     if (next === "unavailable") {
       await expect(page.getByText("Agent unavailable", { exact: true })).toBeVisible();
-      await expect(page.getByText("Unavailable", { exact: true }).first()).toBeVisible();
+      await expect(page.locator(".statusStrip > div").nth(3).getByText("Unavailable", { exact: true })).toBeVisible();
       await expect(page.getByText("Incident source missing", { exact: true })).toBeVisible();
       await page.getByRole("link", { name: "Services", exact: true }).click();
       await expect(page.locator(".serviceRow .status").first()).toHaveText("Unavailable");
@@ -79,10 +90,16 @@ test("switching projects clears scoped service detail", async ({ page }) => {
 
 test("required viewports have no horizontal overflow and produce review screenshots", async ({ page }) => {
   await mockLocalAPI(page, "degraded");
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 390, height: 844 }]) {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 390, height: 844 }, { width: 320, height: 800 }]) {
     await page.setViewportSize(viewport);
     await page.goto("/?project=proj-1&view=overview");
     await expect(page.locator(".statusLead strong")).toHaveText("Degraded");
+    if (viewport.width <= 390) {
+      const menu = page.getByRole("button", { name: "Open navigation" });
+      await menu.click();
+      await page.keyboard.press("Escape");
+      await expect(menu).toBeFocused();
+    }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ fullPage: true, path: `../../.tmp/ui-fe01/overview-${viewport.width}x${viewport.height}.png` });
   }

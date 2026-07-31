@@ -13,7 +13,7 @@ test("Delivery restores canonical URL state and renders truthful pipeline stages
   await mockDeliveryAPI(page, () => scenario);
 
   await page.goto("/?project=proj-1&view=delivery");
-  await expect(page.getByRole("link", { name: "Pipeline", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Pipeline", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("Source not configured", { exact: true })).toBeVisible();
 
   scenario = "no-build";
@@ -26,16 +26,16 @@ test("Delivery restores canonical URL state and renders truthful pipeline stages
   await expect(page.getByText("Immutable artifact ready", { exact: true })).toBeVisible();
   await expect(page.getByText("Artifact ready — no deployment observed", { exact: true })).toBeVisible();
 
-  await page.getByRole("link", { name: "Builds", exact: true }).click();
+  await page.getByRole("tab", { name: "Builds", exact: true }).click();
   await page.getByRole("button", { name: /web.*main/i }).click();
   await expect(page).toHaveURL(/tab=builds.*service=svc-web.*build=build-web-1/);
   await page.reload();
   await expect(page.getByRole("button", { name: /web.*main/i })).toHaveAttribute("aria-pressed", "true");
-  await page.getByRole("link", { name: "Deployments", exact: true }).click();
+  await page.getByRole("tab", { name: "Deployments", exact: true }).click();
   await page.goBack();
-  await expect(page.getByRole("link", { name: "Builds", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Builds", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.goForward();
-  await expect(page.getByRole("link", { name: "Deployments", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Deployments", exact: true })).toHaveAttribute("aria-selected", "true");
 
   scenario = "waiting";
   await page.goto("/?project=proj-1&view=delivery&tab=pipeline&service=svc-web");

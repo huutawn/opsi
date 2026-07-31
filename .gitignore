@@ -22,6 +22,8 @@ opsi-cloud
 .AGENTS
 .AGENTS/*
 
+docs/ui
+
 # Local runtime configuration
 **/config.local.yaml
 **/config.local.yml

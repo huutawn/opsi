@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
-import { normalizeRoute, parseRoute, routeForLegacy, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
+import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
 import { emptyFoundation, type FoundationState } from "@/lib/presentation/project";
 import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
 import { clearProjectPatch, loadFoundation, loadProject, reconnect, secretBody, workspacePatch } from "@/hooks/console-state-support";
@@ -466,7 +466,6 @@ export function useConsoleState() {
         })()
       : null,
     navigate,
-    setActive: (view: string) => navigate(routeForLegacy(view, projectID)),
     setProjectID: (id: string) => {
       setReview(null);
       void selectProject(id);
