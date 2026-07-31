@@ -1,7 +1,9 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
+import { MAX_PROJECT_SUMMARY_REQUESTS } from "../hooks/console-state-support";
+import { PROJECT_SUMMARY_TTL_MS } from "../lib/presentation/project";
+import { collectedErrors, expectHTTPFailure, expectNoConsoleErrors, resetConsoleErrors, watchConsoleErrors } from "./console-errors";
 
-type Scenario = "healthy" | "degraded" | "unavailable" | "empty" | "long" | "failed-build";
+type Scenario = "healthy" | "degraded" | "refreshed" | "unavailable" | "empty" | "long" | "failed-build";
 
 test.beforeEach(async ({ page }) => watchConsoleErrors(page));
 test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
@@ -136,6 +138,7 @@ for (const staleResult of ["success", "error"] as const) {
       await respond(route, "healthy");
     });
     await page.goto("/?view=projects");
+    if (staleResult === "error") expectHTTPFailure(page, { path: "/api/local/session/project", status: 500, method: "POST" });
     await page.getByRole("link", { name: /Checkout Platform/ }).click();
     await expect.poll(() => switches).toEqual(["proj-1"]);
     await page.getByLabel("Switch project").click();
@@ -172,6 +175,7 @@ for (const staleRefresh of ["success", "error"] as const) {
       await respond(route, "healthy");
     });
     await page.goto("/?project=proj-1&view=overview");
+    if (staleRefresh === "error") expectHTTPFailure(page, { path: "/api/local/projects/proj-1/deployments", status: 500, method: "GET" });
     await expect(page.getByRole("heading", { name: "Checkout Platform" })).toBeVisible();
     await page.getByRole("button", { name: "Refresh project overview" }).click();
     await expect.poll(() => refreshWaiting).toBe(true);
@@ -205,6 +209,7 @@ test("project summaries are factual, bounded, searchable, filterable, and partia
     }
     await respond(route, "healthy");
   });
+  expectHTTPFailure(page, { path: "/api/local/projects/proj-3/readiness", status: 503, method: "GET" });
   await page.goto("/?view=projects");
   const checkout = page.locator(".projectRow").filter({ hasText: "Checkout Platform" });
   const payments = page.locator(".projectRow").filter({ hasText: "Payments" });
@@ -229,6 +234,216 @@ test("project summaries are factual, bounded, searchable, filterable, and partia
   await page.keyboard.press("Enter");
   await expect(payments).toBeVisible();
   await expect(checkout).toHaveCount(0);
+});
+
+test("workspace project summaries reuse fresh cache and revalidate without discarding facts", async ({ page }) => {
+  await page.addInitScript(() => {
+    const clock = Date.now.bind(Date);
+    let offset = 0;
+    Object.assign(window, { advanceProjectSummaryClock: (milliseconds: number) => { offset += milliseconds; } });
+    Date.now = () => clock() + offset;
+  });
+  let scenario: Scenario = "healthy";
+  let includeAnalytics = true;
+  let failCheckout = false;
+  let holdCheckout = false;
+  let releaseCheckout!: () => void;
+  let checkoutWaiting = false;
+  let proj2Readiness = 0;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/local/projects" && !includeAnalytics) {
+      const projects = fixture("proj-1", scenario).projects.filter((project) => project.id !== "proj-3");
+      await route.fulfill({ body: JSON.stringify({ projects }), contentType: "application/json", status: 200 });
+      return;
+    }
+    if (path === "/api/local/projects/proj-2/readiness") proj2Readiness += 1;
+    if (path === "/api/local/projects/proj-1/readiness" && holdCheckout) {
+      checkoutWaiting = true;
+      await new Promise<void>((resolve) => { releaseCheckout = resolve; });
+      holdCheckout = false;
+    }
+    if (path === "/api/local/projects/proj-1/readiness" && failCheckout) {
+      await route.fulfill({ body: JSON.stringify({ error: { message: "summary refresh unavailable" } }), contentType: "application/json", status: 503 });
+      return;
+    }
+    await respond(route, scenario);
+  });
+
+  await page.goto("/?view=projects");
+  const checkout = page.locator(".projectRow").filter({ hasText: "Checkout Platform" });
+  await expect(checkout.locator('[data-label="Health"]').getByText("Healthy", { exact: true })).toBeVisible();
+  await expect(checkout.locator('[data-label="Services"]')).toHaveText("2");
+  const freshProj2Readiness = proj2Readiness;
+
+  await checkout.click();
+  await expect(page.getByRole("heading", { name: "Checkout Platform" })).toBeVisible();
+  await page.getByLabel("Switch project").click();
+  await page.getByRole("link", { name: "Browse all projects", exact: true }).click();
+  await expect(checkout.locator('[data-label="Health"]').getByText("Healthy", { exact: true })).toBeVisible();
+  expect(proj2Readiness).toBe(freshProj2Readiness);
+
+  scenario = "refreshed";
+  holdCheckout = true;
+  const search = page.getByLabel("Search projects");
+  await search.fill("checkout");
+  await search.focus();
+  await page.getByRole("button", { name: "Refresh current data" }).evaluate((button: HTMLButtonElement) => button.click());
+  await expect.poll(() => checkoutWaiting).toBe(true);
+  await expect(checkout.locator('[data-label="Health"]').getByText("Healthy", { exact: true })).toBeVisible();
+  await expect(checkout.locator('[data-label="Services"]')).toHaveText("2");
+  await expect(checkout.getByText("Refreshing", { exact: true })).toBeVisible();
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("checkout");
+  releaseCheckout();
+  await expect(checkout.locator('[data-label="Health"]').getByText("Degraded", { exact: true })).toBeVisible();
+  await expect(checkout.locator('[data-label="Services"]')).toHaveText("3");
+  await expect(checkout.locator('[data-label="Incidents"]')).toHaveText("1 open");
+
+  includeAnalytics = false;
+  failCheckout = true;
+  expectHTTPFailure(page, { path: "/api/local/projects/proj-1/readiness", status: 503, method: "GET" });
+  await page.getByRole("button", { name: "Refresh current data" }).click();
+  await expect(checkout.getByText("Stale — retry Refresh current data", { exact: true })).toBeVisible();
+  await expect(checkout.locator('[data-label="Health"]').getByText("Degraded", { exact: true })).toBeVisible();
+  await expect(checkout.locator('[data-label="Services"]')).toHaveText("3");
+  await expect(checkout.locator('[data-label="Incidents"]')).toHaveText("1 open");
+  await search.fill("");
+  await expect(page.getByText("Analytics", { exact: true })).toHaveCount(0);
+
+  failCheckout = false;
+  await checkout.click();
+  await expect(page.getByRole("heading", { name: "Checkout Platform" })).toBeVisible();
+  const beforeExpiry = proj2Readiness;
+  await page.evaluate((ttl) => (window as unknown as { advanceProjectSummaryClock: (milliseconds: number) => void }).advanceProjectSummaryClock(ttl + 1), PROJECT_SUMMARY_TTL_MS);
+  await page.getByLabel("Switch project").click();
+  await page.getByRole("link", { name: "Browse all projects", exact: true }).click();
+  await expect.poll(() => proj2Readiness).toBeGreaterThan(beforeExpiry);
+});
+
+test("obsolete workspace summary responses cannot overwrite a newer project operation", async ({ page }) => {
+  let scenario: Scenario = "healthy";
+  let readinessCalls = 0;
+  let releaseOld!: () => void;
+  let oldWaiting = false;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const responseScenario = scenario;
+    if (path === "/api/local/projects/proj-1/readiness") {
+      readinessCalls += 1;
+      if (readinessCalls === 2) {
+        oldWaiting = true;
+        await new Promise<void>((resolve) => { releaseOld = resolve; });
+      }
+    }
+    await respond(route, responseScenario);
+  });
+  await page.goto("/?view=projects");
+  const checkout = page.locator(".projectRow").filter({ hasText: "Checkout Platform" });
+  await expect(checkout.locator('[data-label="Health"]').getByText("Healthy", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Refresh current data" }).click();
+  await expect.poll(() => oldWaiting).toBe(true);
+  scenario = "refreshed";
+  await checkout.click();
+  await expect(page.getByRole("heading", { name: "Checkout Platform" })).toBeVisible();
+  await expect(page.locator(".statusLead strong")).toHaveText("Degraded");
+  releaseOld();
+  await page.getByLabel("Switch project").click();
+  await page.getByRole("link", { name: "Browse all projects", exact: true }).click();
+  await expect(checkout.locator('[data-label="Health"]').getByText("Degraded", { exact: true })).toBeVisible();
+  await expect(checkout.locator('[data-label="Services"]')).toHaveText("3");
+});
+
+test("shared project-summary limiter bounds every request and drains after telemetry failure", async ({ page }) => {
+  const projectIDs = ["proj-1", "proj-2", "proj-3"];
+  const servicesPerProject = 24;
+  let active = 0;
+  let maximum = 0;
+  let completed = 0;
+  let switchCalls = 0;
+  const failedTelemetryPath = "/api/local/projects/proj-2/telemetry/services/svc-2-7";
+  expectHTTPFailure(page, { path: `${failedTelemetryPath}?since_unix=0`, status: 503, method: "GET" });
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/local/session/project") switchCalls += 1;
+    if (path === "/api/local/session") {
+      await route.fulfill({ body: JSON.stringify({ authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", capabilities: [] }), contentType: "application/json", status: 200 });
+      return;
+    }
+    if (path === "/api/local/projects") {
+      await route.fulfill({ body: JSON.stringify({ projects: projectIDs.map((id, index) => ({ id, org_id: "org-1", name: `Project ${index + 1}`, slug: id, status: "ready" })) }), contentType: "application/json", status: 200 });
+      return;
+    }
+    const match = path.match(/^\/api\/local\/projects\/proj-(\d+)\/(.+)$/);
+    if (!match) {
+      await route.fulfill({ body: "{}", contentType: "application/json", status: 200 });
+      return;
+    }
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 12));
+    const projectNumber = Number(match[1]);
+    const suffix = match[2];
+    let body: unknown = {};
+    let status = 200;
+    if (suffix === "readiness") body = { project_id: `proj-${projectNumber}`, status: "ready", can_deploy: true };
+    else if (suffix === "services") body = { services: Array.from({ length: servicesPerProject }, (_, index) => ({ id: `svc-${projectNumber}-${index}`, name: `service-${index}`, type: "application", status: "ready", source_type: "image", replicas: 1 })) };
+    else if (suffix === "deployments") body = { deployments: [] };
+    else if (suffix === "topology/facts") body = { project_id: `proj-${projectNumber}`, environments: [], runtimes: [], nodes: [], agents: [], services: [] };
+    else if (suffix === "topology") body = { assignments: [] };
+    else if (suffix === "build-records") body = { records: [] };
+    else if (suffix.startsWith("telemetry/services/")) {
+      const serviceID = suffix.slice("telemetry/services/".length);
+      if (path === failedTelemetryPath) status = 503;
+      else body = { services: [{ service_id: serviceID, health: "healthy", pod_count: 1, ready_pods: 1, last_seen_unix: 1785290400 }] };
+    } else if (suffix === "incidents") body = { incidents: [] };
+    await route.fulfill({ body: JSON.stringify(status === 503 ? { error: { message: "one telemetry source failed" } } : body), contentType: "application/json", status });
+    active -= 1;
+    completed += 1;
+  });
+
+  await page.goto("/?view=projects");
+  await expect(page.locator(".projectRow")).toHaveCount(3);
+  await expect(page.locator(".projectRow").filter({ hasText: "Project 3" }).locator('[data-label="Services"]')).toHaveText(String(servicesPerProject));
+  await expect(page.locator(".projectRow").filter({ hasText: "Project 2" }).getByText("Unavailable", { exact: true })).toBeVisible();
+  await expect.poll(() => completed).toBe(3 * (7 + servicesPerProject));
+  expect(maximum).toBe(MAX_PROJECT_SUMMARY_REQUESTS);
+  expect(switchCalls).toBe(0);
+});
+
+test("console and resource gate records unexpected failures and page errors", async ({ page }) => {
+  await mockLocalAPI(page, "healthy");
+  await page.goto("/?view=projects");
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  expect(collectedErrors(page)).toEqual([]);
+
+  await page.route("**/api/local/unexpected-404", (route) => route.fulfill({ body: "{}", contentType: "application/json", status: 404 }));
+  await page.evaluate(() => fetch("/api/local/unexpected-404"));
+  await expect.poll(() => collectedErrors(page).some((error) => error.includes("HTTP 404") && error.includes("/api/local/unexpected-404"))).toBe(true);
+  resetConsoleErrors(page);
+
+  await page.route("**/api/local/unexpected-abort", (route) => route.abort("connectionfailed"));
+  await page.evaluate(() => fetch("/api/local/unexpected-abort").catch(() => undefined));
+  await expect.poll(() => collectedErrors(page).some((error) => error.includes("Request failed") && error.includes("/api/local/unexpected-abort"))).toBe(true);
+  resetConsoleErrors(page);
+
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    const script = document.createElement("script");
+    script.src = "/unexpected-missing-asset.js";
+    script.onload = () => resolve();
+    script.onerror = () => resolve();
+    document.head.append(script);
+  }));
+  await expect.poll(() => collectedErrors(page).some((error) => error.includes("unexpected-missing-asset.js"))).toBe(true);
+  resetConsoleErrors(page);
+
+  await page.evaluate(() => console.error("intentional application console error"));
+  await expect.poll(() => collectedErrors(page)).toContainEqual("console.error: intentional application console error");
+  resetConsoleErrors(page);
+
+  await page.evaluate(() => { setTimeout(() => { throw new Error("intentional page error"); }, 0); });
+  await expect.poll(() => collectedErrors(page)).toContainEqual("pageerror: intentional page error");
+  resetConsoleErrors(page);
 });
 
 test("tabs, activity outcomes, service drawer, mobile drawer, and target sizes follow accessible patterns", async ({ page }) => {
@@ -337,6 +552,7 @@ test("bootstrap failure requires a new credential and lifecycle exits clear it",
     }
     await respond(route, "healthy");
   });
+  expectHTTPFailure(page, { path: "/api/local/projects/proj-1/bootstrap-sessions", status: 503, method: "POST" });
   const trigger = await openBootstrapReview(page);
   const firstSecret = "first-secret-must-disappear";
   await page.getByLabel("One-time SSH password").fill(firstSecret);
@@ -417,11 +633,12 @@ async function respond(route: Route, scenario: Scenario) {
 function fixture(projectID: string, scenario: Scenario) {
   const long = scenario === "long";
   const empty = scenario === "empty";
-  const degraded = scenario === "degraded" || projectID === "proj-2";
+  const degraded = scenario === "degraded" || scenario === "refreshed" || projectID === "proj-2";
   const servicePrefix = projectID === "proj-2" ? "payments-" : "";
   const services = empty ? [] : [
     { id: `${servicePrefix}api`, name: long ? "checkout-api-with-an-intentionally-long-production-service-name-that-must-wrap-safely" : `${servicePrefix}api`, type: "application", status: "ready", source_type: "image", replicas: 2, container_port: 8080, health_path: "/healthz", namespace: "opsi-prod" },
     { id: `${servicePrefix}worker`, name: `${servicePrefix}worker`, type: "application", status: "ready", source_type: "image", replicas: 2 },
+    ...(scenario === "refreshed" && projectID === "proj-1" ? [{ id: "scheduler", name: "scheduler", type: "application", status: "ready", source_type: "image", replicas: 1 }] : []),
   ];
   const telemetry = services.map((service) => ({ service_id: service.id, health: degraded && service.id.endsWith("worker") ? "degraded" : "healthy", pod_count: 2, ready_pods: degraded && service.id.endsWith("worker") ? 1 : 2, last_seen_unix: 1785290400 }));
   const deployments = empty ? [] : [

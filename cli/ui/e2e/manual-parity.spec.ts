@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
+import { expectHTTPFailure, expectNoConsoleErrors, expectRequestFailure, watchConsoleErrors } from "./console-errors";
 
 const localOrigin = "http://127.0.0.1:19881";
 const controlURL = "http://127.0.0.1:19882/__control";
@@ -13,11 +13,16 @@ test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 test("manual Local UI parity stays behind the Local backend", async ({ page }) => {
   const browserAuthorities = new Set<string>();
   page.on("request", (request) => browserAuthorities.add(new URL(request.url()).origin));
+  expectHTTPFailure(page, { path: "/api/local/repository/config", status: 422, method: "GET" });
+  for (const projectID of ["proj-1", "proj-2"]) {
+    expectRequestFailure(page, { path: `/api/local/projects/${projectID}/incidents`, status: 200, method: "GET", errorText: "net::ERR_ABORTED" });
+  }
 
   await page.goto("/");
   await expect(page).toHaveTitle("Opsi Console");
   await page.getByRole("button", { name: "Browse projects" }).click();
   await expect(page.getByRole("link", { name: /Parity Project/ })).toBeVisible();
+  await expect(page.locator(".projectRow [role=status]")).toHaveCount(0);
   await page.getByRole("link", { name: /Parity Project/ }).click();
   await expect(page.getByRole("heading", { name: "Parity Project" })).toBeVisible();
 
@@ -35,6 +40,7 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await page.getByRole("button", { name: "Close" }).click();
   const createdProject = page.locator(".projectRow").filter({ hasText: "Created Project" });
   await expect(createdProject).toBeVisible();
+  await expect(page.locator(".projectRow [role=status]")).toHaveCount(0);
   await createdProject.click();
   await expect(page.getByRole("heading", { name: "Created Project" })).toBeVisible();
 
@@ -104,6 +110,7 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   expect(storage).toEqual({ local: [], session: [], databases: [], cookies: "" });
   expect([...browserAuthorities]).toEqual([localOrigin]);
 
+  await page.waitForLoadState("networkidle");
   await fetch(`${controlURL}?agent=down`);
   await page.reload();
   await page.getByRole("link", { name: "Infrastructure", exact: true }).click();
@@ -111,16 +118,20 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByText(/Cloud topology facts remain visible/)).toBeVisible();
   await expect(page.getByRole("button", { name: /Primary/ })).toBeVisible();
 
+  await page.waitForLoadState("networkidle");
   await fetch(`${controlURL}?mode=cloud-outage&agent=up`);
   await page.reload();
   await expect(page.getByText("Cloud is unavailable", { exact: false })).toBeVisible();
 
+  await page.waitForLoadState("networkidle");
   await fetch(`${controlURL}?mode=session-expired&agent=up`);
   await page.reload();
   await expect(page.getByText("saved Cloud session expired", { exact: false })).toBeVisible();
 
+  await page.waitForLoadState("networkidle");
   await fetch(`${controlURL}?mode=&agent=up`);
   await page.reload();
-  await expect(page.getByText("Created Project", { exact: true }).first()).toBeVisible();
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByLabel("Current context").getByText("Created Project", { exact: true })).toBeVisible();
   expect([...browserAuthorities]).toEqual([localOrigin]);
 });

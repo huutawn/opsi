@@ -51,10 +51,14 @@ export function ProjectsView({ console }: { console: ConsoleController }) {
             const deliveryIdentity = summary?.latestBuild
               ? `${shortIdentifier(summary.latestBuild.workload.sha, 9)} · ${shortIdentifier(summary.latestBuild.build.oci_digest, 15)}`
               : summary?.latestDeployment ? shortIdentifier(summary.latestDeployment.current_digest ?? summary.latestDeployment.desired_digest, 15) : "Not reported by Local API";
+            const freshness = entry?.refreshing
+              ? "Refreshing"
+              : entry?.stale ? "Stale — retry Refresh current data"
+                : entry?.status === "error" ? "Source unavailable — retry Refresh current data" : "";
             return (
               <a className="projectRow" href={routeHref({ projectID: project.id, view: "overview" })} key={project.id} onClick={(event) => openProject(event, project.id)}>
                 <span className="projectIdentity"><strong title={project.name}>{project.name}</strong><small>{project.status || "Lifecycle not reported"} · {entry?.environment || "Environment not reported by Local API"} · <code>{project.slug}</code></small></span>
-                <span data-label="Health">{entry?.status === "loading" ? <span role="status">Loading…</span> : <StatusBadge label={statusLabel(status as PresentationStatus)} value={status} />}</span>
+                <span data-label="Health"><span className="projectHealth">{entry?.status === "loading" ? <span role="status">Loading…</span> : <StatusBadge label={statusLabel(status as PresentationStatus)} value={status} />}{freshness ? <small role="status" title={entry?.error}>{freshness}</small> : null}</span></span>
                 <span data-label="Runtime">{entry?.status === "loading" ? "Loading…" : entry?.runtimeStatus ? <StatusBadge label={statusLabel(entry.runtimeStatus)} value={entry.runtimeStatus} /> : "Not reported by Local API"}</span>
                 <span data-label="Services">{entry?.status === "loading" ? "Loading…" : summary ? summary.serviceCount : "Not reported by Local API"}</span>
                 <span data-label="Latest delivery" className="projectDelivery">{entry?.status === "loading" ? "Loading…" : <>{delivery ? <StatusBadge value={delivery} /> : null}<small>{deliveryIdentity}</small></>}</span>

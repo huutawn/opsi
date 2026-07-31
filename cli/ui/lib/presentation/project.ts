@@ -219,8 +219,12 @@ export function deriveProjectSummary(input: {
 }
 
 export type ProjectSummary = ReturnType<typeof deriveProjectSummary>;
+export const PROJECT_SUMMARY_TTL_MS = 30_000;
 export type ProjectSummaryEntry = {
   status: "loading" | "ready" | "error";
+  fetchedAt?: number;
+  refreshing?: boolean;
+  stale?: boolean;
   environment?: string;
   runtimeStatus?: PresentationStatus;
   summary?: ProjectSummary;

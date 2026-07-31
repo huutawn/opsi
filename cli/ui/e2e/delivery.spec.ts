@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
+import { expectHTTPFailure, expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 type Scenario = "unconfigured" | "monorepo" | "no-build" | "build-ready" | "waiting" | "verified" | "failed" | "rolled-back" | "preview" | "exposure" | "unavailable";
 
@@ -87,6 +87,9 @@ test("Delivery browser fixtures preserve failure, rollback, preview, exposure, a
   await page.screenshot({ fullPage: true, path: `${screenshotDir}/source-monorepo-1440x900.png` });
 
   scenario = "unavailable";
+  for (const source of ["installations", "repositories", "bindings"]) {
+    expectHTTPFailure(page, { path: `/api/local/projects/proj-1/github/${source}`, status: 503, method: "GET" });
+  }
   await page.goto("/?project=proj-1&view=delivery&tab=pipeline&service=svc-web");
   await expect(page.getByText("Source unavailable", { exact: true })).toBeVisible();
 });

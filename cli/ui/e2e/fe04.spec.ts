@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
+import { expectHTTPFailure, expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 type Scenario = "default" | "ttl" | "agent-down" | "cloud-down" | "signed-out" | "audit-empty" | "audit-unavailable" | "unknown" | "unresolved" | "malformed" | "delivery-loading";
 
@@ -145,6 +145,8 @@ test("TTL cleanup, Agent availability, audit explorer, and unavailable history s
   await page.screenshot({ fullPage: true, path: "../../.tmp/ui-fe04/audit-1440x900.png" });
 
   await page.goto("/?project=proj-1&view=security&tab=secrets");
+  await expect(page.getByRole("heading", { name: "Secrets", exact: true })).toBeVisible();
+  await page.waitForLoadState("networkidle");
   await expect(page.getByText(/Agent unavailable/)).toHaveCount(0);
   await mockLocalAPI(page, "agent-down");
   await page.reload();
@@ -155,6 +157,7 @@ test("TTL cleanup, Agent availability, audit explorer, and unavailable history s
   await page.goto("/?project=proj-1&view=security&tab=audit");
   await expect(page.getByText("No audit events were returned.", { exact: true })).toBeVisible();
   await mockLocalAPI(page, "audit-unavailable");
+  expectHTTPFailure(page, { path: "/api/local/projects/proj-1/audit", status: 503, method: "GET" });
   await page.reload();
   await expect(page.getByRole("heading", { name: "Request failed" })).toBeVisible();
   await expect(page.getByText("audit unavailable", { exact: true })).toBeVisible();

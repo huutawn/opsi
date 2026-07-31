@@ -2,7 +2,7 @@
 
 ## R5-014 Local API/UI parity checkpoint
 
-`R5_014_UI_REWORK_SOURCE_PRESENT / CORRECTIVE_FRONTEND_GATES_PASS /
+`R5_014_UI_REWORK_SOURCE_PRESENT / PROJECT_REFRESH_AND_ERROR_GATE_PASS /
 REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
@@ -855,15 +855,37 @@ resolution remains a CLI handoff through factual `opsi action` commands; no
 browser approval material exists.
 
 The 2026-07-31 corrective pass adds latest-wins serialized project switching,
-bounded factual project summaries, staged bootstrap credential handling,
+staged bootstrap credential handling,
 native modal/drawer focus behavior, APG-associated tabs, 40px primary targets,
 all factual activity outcomes with text/table fallback, and restorable service
 detail. Audit loaded-history filters now include time bounds; Logs periodic
 refresh is real, bounded, and paused by default.
 
-`npm test` passes 31 tests, `npm run lint` passes, `npm run build` passes, and
-`npx playwright test` passes 24 Chromium scenarios at 1440x900, 1024x768,
-390x844, and 320x800 with application console/page errors gated. `make ui-test`,
+Workspace project summaries now have one factual cache entry with `fetchedAt`
+and a 30-second TTL. Fresh entries are reused when returning to Projects;
+expired, stale, and explicitly refreshed entries revalidate. Header refresh
+force-revalidates every visible project. Revalidation preserves the last factual
+health/counters/`Last changed` value while showing readable Refreshing or Stale
+retry text; first-load failure remains Unavailable. Auth invalidation clears the
+cache, removed projects are pruned, and obsolete operations cannot update cache
+or UI.
+
+One shared six-request limiter covers all Local API calls used to derive
+workspace summaries, including all per-service telemetry calls. A three-project,
+24-service-per-project delayed fixture completes 93 requests after one telemetry
+503, measures maximum concurrency six, retains partial factual values, and makes
+zero `/api/local/session/project` calls.
+
+The browser error gate no longer blanket-ignores resource messages. It records
+unexpected HTTP status responses, `requestfailed`, application `console.error`,
+resource errors, and `pageerror`; intentional negative fixtures declare an exact
+path/query plus status and optional method, while intentional browser failures
+also declare exact error text on the page that creates them. The matcher has
+focused unit coverage and expectations do not cross test pages.
+
+`npm test` passes 33 tests, `npm run lint` passes, `npm run build` passes, and
+`npx playwright test` passes 28 Chromium scenarios at 1440x900, 1024x768,
+390x844, and 320x800 with the exact console/resource gate. `make ui-test`,
 `make ui-lint`, and `make ui-build` pass.
 `make verify` stops at the repository toolchain check because the environment
 reports `go1.26.5-X:nodwarf5` while the Makefile requires `go1.26.4`; the wider

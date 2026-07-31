@@ -128,6 +128,8 @@ code, .monoWrap { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, mono
 .projectRow code { color: var(--muted); font-size: 11px; }
 .projectDelivery { display: grid; gap: 5px; }
 .projectDelivery small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; }
+.projectHealth { display: grid; gap: 4px; white-space: normal; }
+.projectHealth small { color: var(--muted); font-size: 10px; line-height: 1.3; }
 .projectRow [data-label]::before { display: none; }
 
 .status { display: inline-flex; width: fit-content; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 8px; background: var(--surface-muted); color: var(--muted); font-size: 11px; font-weight: 750; text-transform: capitalize; }

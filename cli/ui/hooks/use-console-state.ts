@@ -4,9 +4,9 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
 import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
-import { deriveProjectSummary, emptyFoundation, normalizeStatus, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
+import { deriveProjectSummary, emptyFoundation, normalizeStatus, PROJECT_SUMMARY_TTL_MS, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
 import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
-import { clearProjectPatch, loadFoundation, loadProject, loadProjectSummary, reconnect, secretBody, workspacePatch } from "@/hooks/console-state-support";
+import { clearProjectPatch, createRequestLimiter, loadFoundation, loadProject, loadProjectSummary, reconnect, secretBody, workspacePatch, type RequestRunner } from "@/hooks/console-state-support";
 
 export function useConsoleState() {
   const [session, setSession] = useState<LocalSessionStatus | null>(null);
@@ -45,6 +45,7 @@ export function useConsoleState() {
   });
 
   const client = useMemo(() => new LocalClient(), []);
+  const summaryRequest = useMemo(() => createRequestLimiter(), []);
   const currentProject = state.projects.find((item) => item.id === projectID) ?? null;
 
   function patch(value: Partial<ConsoleState & FoundationState>) {
@@ -85,38 +86,51 @@ export function useConsoleState() {
     return generation.current === operation && selectedProject.current === selectedProjectID;
   }
 
-  async function loadProjectSummaries(projects: typeof state.projects, agentStatus: string, operation: number) {
-    const pending = projects.filter((project) => !summaryCache.current.has(project.id));
-    const cached = Object.fromEntries(projects.flatMap((project) => {
+  async function loadProjectSummaries(projects: typeof state.projects, agentStatus: string, operation: number, force = false) {
+    if (!isCurrent(operation, "")) return;
+    const now = Date.now();
+    const projectIDs = new Set(projects.map((project) => project.id));
+    for (const id of summaryCache.current.keys()) if (!projectIDs.has(id)) summaryCache.current.delete(id);
+    const pending = projects.filter((project) => {
       const entry = summaryCache.current.get(project.id);
-      return entry ? [[project.id, entry]] : [];
-    }));
-    if (isCurrent(operation, "")) {
-      setProjectSummaries((current) => ({
-        ...current,
-        ...cached,
-        ...Object.fromEntries(pending.map((project) => [project.id, { status: "loading" as const }])),
-      }));
+      return force || entry?.status !== "ready" || entry.stale || !entry.fetchedAt || now - entry.fetchedAt >= PROJECT_SUMMARY_TTL_MS;
+    });
+    for (const project of pending) {
+      const entry = summaryCache.current.get(project.id);
+      if (entry?.summary) summaryCache.current.set(project.id, { ...entry, refreshing: true });
     }
+    setProjectSummaries(Object.fromEntries(projects.map((project) => [
+      project.id,
+      summaryCache.current.get(project.id) ?? { status: "loading" as const },
+    ])));
+    const run: RequestRunner = (request) => summaryRequest(() => {
+      if (!isCurrent(operation, "")) return Promise.reject(new Error("Obsolete project summary operation"));
+      return request();
+    });
     let cursor = 0;
     await Promise.all(Array.from({ length: Math.min(2, pending.length) }, async () => {
       for (;;) {
         const project = pending[cursor++];
         if (!project) return;
         try {
-          const entry = await loadProjectSummary(client, project, agentStatus);
+          const entry = await loadProjectSummary(client, project, agentStatus, run);
           if (!isCurrent(operation, "")) return;
           summaryCache.current.set(project.id, entry);
           setProjectSummaries((current) => ({ ...current, [project.id]: entry }));
         } catch (cause) {
           if (!isCurrent(operation, "")) return;
-          setProjectSummaries((current) => ({ ...current, [project.id]: { status: "error", error: (cause as Error).message } }));
+          const cached = summaryCache.current.get(project.id);
+          const entry: ProjectSummaryEntry = cached?.summary
+            ? { ...cached, status: "ready", refreshing: false, stale: true, error: (cause as Error).message }
+            : { status: "error", error: (cause as Error).message };
+          summaryCache.current.set(project.id, entry);
+          setProjectSummaries((current) => ({ ...current, [project.id]: entry }));
         }
       }
     }));
   }
 
-  async function load(selectedProjectID = selectedProject.current, operation = generation.current) {
+  async function load(selectedProjectID = selectedProject.current, operation = generation.current, forceSummaries = false) {
     if (!isCurrent(operation, selectedProjectID)) return;
     patch(state.status === "ready" ? { message: "" } : { status: "loading", message: "" });
     try {
@@ -149,7 +163,7 @@ export function useConsoleState() {
       const projects = list.projects ?? [];
       if (!selectedProjectID) {
         patch(workspacePatch(projects));
-        void loadProjectSummaries(projects, sessionStatus.agent_connected, operation);
+        void loadProjectSummaries(projects, sessionStatus.agent_connected, operation, forceSummaries);
         return;
       }
       const selected = projects.find((item) => item.id === selectedProjectID) ?? null;
@@ -175,6 +189,7 @@ export function useConsoleState() {
       const nodeStatuses = foundation.placement?.nodes.map((node) => normalizeStatus(node.status)) ?? [];
       const entry: ProjectSummaryEntry = {
         status: "ready",
+        fetchedAt: Date.now(),
         environment: foundation.placement?.environments.find((item) => item.status === "active")?.name,
         runtimeStatus: foundation.sources.runtime !== "available" ? "unavailable"
           : nodeStatuses.includes("failed") ? "failed"
@@ -215,10 +230,10 @@ export function useConsoleState() {
 
   useEffect(() => {
     const initial = parseRoute(window.location.search);
-    // URL state is the external source of truth for refresh/deep-link restoration.
-    setRoute(initial);
-    currentRoute.current = initial;
     queueMicrotask(() => {
+      // URL state is the external source of truth for refresh/deep-link restoration.
+      setRoute(initial);
+      currentRoute.current = initial;
       if (!initial.projectID) { void enterWorkspace(initial, true); return; }
       const operation = ++generation.current;
       selectedProject.current = initial.projectID;
@@ -318,6 +333,12 @@ export function useConsoleState() {
   function loadError(error: Error & { status?: number }, operation = generation.current, id = selectedProject.current) {
     if (!isCurrent(operation, id)) return;
     patch({ status: error.status === 401 || error.status === 403 ? "permission" : "error", message: error.message });
+  }
+
+  async function refreshCurrentData() {
+    const id = selectedProject.current;
+    const operation = ++generation.current;
+    await load(id, operation, true);
   }
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
@@ -584,7 +605,7 @@ export function useConsoleState() {
       createProject,
       createService,
       diagnostics,
-      load,
+      load: refreshCurrentData,
       loadBootstrapEvents,
       retryBootstrap,
       loadDeploymentEvents,
