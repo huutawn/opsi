@@ -16,6 +16,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts/bootstrap-worker-release.py"
 WORKFLOW = ROOT / ".github/workflows/publish-bootstrap-worker.yml"
+DOCKERFILE = ROOT / "cloud/Dockerfile"
+MAKEFILE = ROOT / "Makefile"
 SPEC = importlib.util.spec_from_file_location("bootstrap_worker_release", HELPER)
 assert SPEC and SPEC.loader
 release = importlib.util.module_from_spec(SPEC)
@@ -100,6 +102,8 @@ class WorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
+        cls.dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        cls.makefile = MAKEFILE.read_text(encoding="utf-8")
 
     def test_publish_is_manual_official_repository_only(self) -> None:
         self.assertIn("workflow_dispatch:", self.workflow)
@@ -130,6 +134,18 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("--file Dockerfile", build_block)
         self.assertTrue((ROOT / "cloud/Dockerfile").is_file())
         self.assertFalse((ROOT / "Dockerfile").exists())
+
+    def test_isolated_release_checks_are_fail_closed(self) -> None:
+        self.assertEqual(self.dockerfile.count("go build -mod=readonly"), 2)
+        self.assertIn("-o /out/opsi-cloud ./cmd/opsi-cloud", self.dockerfile)
+        self.assertIn("-o /out/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker", self.dockerfile)
+
+        start = self.makefile.index("verify-bootstrap-worker-release:")
+        end = self.makefile.index("\n\nverify:", start)
+        gate = self.makefile[start:end]
+        self.assertIn("GOWORK=off", gate)
+        self.assertIn("go list -mod=readonly -deps", gate)
+        self.assertIn("./cmd/opsi-cloud ./cmd/opsi-bootstrap-worker", gate)
 
     def test_workflow_emits_provenance_manifest_after_push(self) -> None:
         self.assertLess(self.workflow.index("docker push"), self.workflow.index("Create release manifest"))

@@ -31,6 +31,8 @@ verify-r5-005-github-app-preflight:
 
 verify-bootstrap-worker-release:
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/bootstrap-worker-release-test.py
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOWORK=off GOTOOLCHAIN=$(GOTOOLCHAIN) go list -mod=readonly -deps \
+	  ./cmd/opsi-cloud ./cmd/opsi-bootstrap-worker >/dev/null
 
 verify: check-toolchain source-hygiene lint test ui-test ui-build ui-lint
 

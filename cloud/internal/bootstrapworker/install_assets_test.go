@@ -110,8 +110,8 @@ func TestRegisterAgentConfigMatchesCurrentAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	binaryPath := filepath.Join(tmp, "opsi-agent")
-	build := exec.Command("go", "build", "-o", binaryPath, "./agent/cmd/opsi-agent")
-	build.Dir = repoRoot
+	build := exec.Command("go", "build", "-o", binaryPath, "./cmd/opsi-agent")
+	build.Dir = filepath.Join(repoRoot, "agent")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build Agent: %v: %s", err, output)
 	}

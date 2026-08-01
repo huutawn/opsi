@@ -15,6 +15,13 @@ workflow now selects that Dockerfile while retaining root context, and its
 regression test covers the build block, target, platform, immutable tag, and
 post-push manifest ordering. No image, artifact, manifest, staging mutation,
 or Agent VPS mutation resulted from the failed run.
+After corrective revision `906d7f350417b4061dea0507af0b1b4a87e71f6b` fixed the
+Dockerfile selection, the isolated Docker build exposed a second factual
+blocker: `cloud` was missing the transitive gRPC/protobuf module closure in its
+own `go.mod` and `go.sum`, which the root `go.work` had masked. The R5-017C3
+correction closes that module manifest with Go tooling, adds `GOWORK=off`
+readonly dependency checks, and makes both Docker builds fail closed with
+`-mod=readonly`. Publishing, deployment, and live acceptance remain unrun.
 R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
