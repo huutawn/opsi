@@ -425,6 +425,19 @@ Safe ActionPlane client.
 - Registration replay is idempotent after config/marker persistence. A narrow
   crash window remains if Cloud consumes the token before those files are
   installed; a safe isolated fault test is still required around this boundary.
+- `R5-017A BLOCKED`: the Bootstrap Worker now has
+  a dormant, staging/E2E-only file barrier exactly after successful remote
+  `install_k3s` and before its Cloud checkpoint. The marker is scoped by
+  session/run ID, uses atomic `armed -> reached -> consumed -> completed`
+  transitions, waits on context cancellation, and lets only a restarted Worker
+  replay `install_k3s`; production configuration rejects every barrier field.
+  Focused ordering, cancellation, replay-success, replay-failure, isolation,
+  malformed-state, permission, and secret-free marker tests pass. The required
+  repository `make verify` gate is currently blocked by the pre-existing CLI
+  test `TestBrowserUIDoesNotStorePATOrCallCloudDirectly` (`foundation.spec.ts`
+  contains forbidden `localStorage`) and an existing exposure CLI assertion;
+  no staging deployment or live R5-017 proof has run. R5-017 remains pending
+  and R5-018 is still blocked.
 - The existing Cloud binary exposes the local operator command
   `opsi-cloud admin bootstrap-owner`. It requires PostgreSQL and transactionally
   creates or reuses the normalized user, organization, canonical project plus

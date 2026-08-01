@@ -725,6 +725,7 @@ type daemonHarness struct {
 	maxActive             int
 	finishes              []finishRecord
 	cancel                context.CancelFunc
+	barrier               StagingCrashBarrierConfig
 }
 
 func newDaemonHarness(t *testing.T, leases []Lease) *daemonHarness {
@@ -737,7 +738,7 @@ func newDaemonHarness(t *testing.T, leases []Lease) *daemonHarness {
 }
 
 func (h *daemonHarness) config() Config {
-	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), Executor: h.executor, Logger: h.logger, HeartbeatInterval: 20 * time.Millisecond, HeartbeatRetryInterval: 5 * time.Millisecond, LeaseSafetyMargin: 10 * time.Millisecond}
+	return Config{CloudURL: h.server.URL, BootstrapWorkerToken: "worker-secret", WorkerID: "worker-1", PollInterval: minPollInterval, K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), Executor: h.executor, Logger: h.logger, HeartbeatInterval: 20 * time.Millisecond, HeartbeatRetryInterval: 5 * time.Millisecond, LeaseSafetyMargin: 10 * time.Millisecond, StagingCrashBarrier: h.barrier}
 }
 
 func (h *daemonHarness) serveHTTP(w http.ResponseWriter, r *http.Request) {

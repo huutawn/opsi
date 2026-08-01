@@ -43,6 +43,8 @@ docs/ui
 /deploy/staging-control-plane/.env
 /deploy/staging-control-plane/config/cloud.json
 /deploy/staging-control-plane/config/bootstrap-worker.json
+/deploy/staging-control-plane/config/bootstrap-worker.e2e.json
+/deploy/staging-control-plane/barrier-state/*
 /deploy/staging-control-plane/secrets/*
 !**/*.example.json
 
