@@ -3,17 +3,24 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
-import { normalizeRoute, parseRoute, routeForLegacy, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
-import { emptyFoundation, type FoundationState } from "@/lib/presentation/project";
+import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
+import { deriveProjectSummary, emptyFoundation, normalizeStatus, PROJECT_SUMMARY_TTL_MS, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
 import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
-import { clearProjectPatch, loadFoundation, loadProject, reconnect, secretBody, workspacePatch } from "@/hooks/console-state-support";
+import { clearProjectPatch, createRequestLimiter, loadFoundation, loadProject, loadProjectSummary, reconnect, secretBody, workspacePatch, type RequestRunner } from "@/hooks/console-state-support";
 
 export function useConsoleState() {
   const [session, setSession] = useState<LocalSessionStatus | null>(null);
   const [route, setRoute] = useState<ConsoleRoute>({ projectID: "", view: "projects", tab: "" });
   const [projectID, setSelectedProjectID] = useState("");
-  const [review, setReview] = useState<(MutationReview & { submit: (key: string) => Promise<string> }) | null>(null);
+  const [review, setReview] = useState<(MutationReview & { submit: (key: string, credential?: string) => Promise<string> }) | null>(null);
+  const [projectSummaries, setProjectSummaries] = useState<Record<string, ProjectSummaryEntry>>({});
   const revealTimer = useRef<number | null>(null);
+  const generation = useRef(0);
+  const selectedProject = useRef("");
+  const currentRoute = useRef(route);
+  const currentSession = useRef<LocalSessionStatus | null>(null);
+  const switchQueue = useRef<Promise<void>>(Promise.resolve());
+  const summaryCache = useRef(new Map<string, ProjectSummaryEntry>());
   const [state, setState] = useState<ConsoleState & FoundationState>({
     status: "loading",
     message: "",
@@ -38,6 +45,7 @@ export function useConsoleState() {
   });
 
   const client = useMemo(() => new LocalClient(), []);
+  const summaryRequest = useMemo(() => createRequestLimiter(), []);
   const currentProject = state.projects.find((item) => item.id === projectID) ?? null;
 
   function patch(value: Partial<ConsoleState & FoundationState>) {
@@ -50,15 +58,15 @@ export function useConsoleState() {
     patch({ secretReveal: null, totpSetup: null });
   }
 
-  function reviewMutation(request: MutationRequest, submit: (key: string) => Promise<string>) {
+  function reviewMutation(request: MutationRequest, submit: (key: string, credential?: string) => Promise<string>) {
     setReview({ ...request, idempotencyKey: crypto.randomUUID(), status: "reviewing", submit });
   }
 
-  async function submitReview() {
+  async function submitReview(credential?: string) {
     if (!review || review.status === "submitting") return;
     setReview((current) => (current ? { ...current, status: "submitting", error: "", nextAction: "" } : current));
     try {
-      const evidence = await review.submit(review.idempotencyKey);
+      const evidence = await review.submit(review.idempotencyKey, credential);
       setReview((current) => (current ? { ...current, status: "succeeded", evidence } : current));
     } catch (cause) {
       const error = cause as LocalAPIError;
@@ -74,13 +82,66 @@ export function useConsoleState() {
     setReview((current) => (current?.status === "submitting" ? current : null));
   }
 
-  async function load(selectedProjectID = projectID) {
+  function isCurrent(operation: number, selectedProjectID: string) {
+    return generation.current === operation && selectedProject.current === selectedProjectID;
+  }
+
+  async function loadProjectSummaries(projects: typeof state.projects, agentStatus: string, operation: number, force = false) {
+    if (!isCurrent(operation, "")) return;
+    const now = Date.now();
+    const projectIDs = new Set(projects.map((project) => project.id));
+    for (const id of summaryCache.current.keys()) if (!projectIDs.has(id)) summaryCache.current.delete(id);
+    const pending = projects.filter((project) => {
+      const entry = summaryCache.current.get(project.id);
+      return force || entry?.status !== "ready" || entry.stale || !entry.fetchedAt || now - entry.fetchedAt >= PROJECT_SUMMARY_TTL_MS;
+    });
+    for (const project of pending) {
+      const entry = summaryCache.current.get(project.id);
+      if (entry?.summary) summaryCache.current.set(project.id, { ...entry, refreshing: true });
+    }
+    setProjectSummaries(Object.fromEntries(projects.map((project) => [
+      project.id,
+      summaryCache.current.get(project.id) ?? { status: "loading" as const },
+    ])));
+    const run: RequestRunner = (request) => summaryRequest(() => {
+      if (!isCurrent(operation, "")) return Promise.reject(new Error("Obsolete project summary operation"));
+      return request();
+    });
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(2, pending.length) }, async () => {
+      for (;;) {
+        const project = pending[cursor++];
+        if (!project) return;
+        try {
+          const entry = await loadProjectSummary(client, project, agentStatus, run);
+          if (!isCurrent(operation, "")) return;
+          summaryCache.current.set(project.id, entry);
+          setProjectSummaries((current) => ({ ...current, [project.id]: entry }));
+        } catch (cause) {
+          if (!isCurrent(operation, "")) return;
+          const cached = summaryCache.current.get(project.id);
+          const entry: ProjectSummaryEntry = cached?.summary
+            ? { ...cached, status: "ready", refreshing: false, stale: true, error: (cause as Error).message }
+            : { status: "error", error: (cause as Error).message };
+          summaryCache.current.set(project.id, entry);
+          setProjectSummaries((current) => ({ ...current, [project.id]: entry }));
+        }
+      }
+    }));
+  }
+
+  async function load(selectedProjectID = selectedProject.current, operation = generation.current, forceSummaries = false) {
+    if (!isCurrent(operation, selectedProjectID)) return;
     patch(state.status === "ready" ? { message: "" } : { status: "loading", message: "" });
     try {
       const sessionStatus = await client.session(selectedProjectID || undefined);
+      if (!isCurrent(operation, selectedProjectID)) return;
       setSession(sessionStatus);
+      currentSession.current = sessionStatus;
       if (!sessionStatus.authenticated) {
         clearSensitive();
+        summaryCache.current.clear();
+        setProjectSummaries({});
         const cloudUnavailable = sessionStatus.cloud_connected !== "ok";
         const expired = sessionStatus.token_status === "invalid";
         patch({
@@ -98,15 +159,19 @@ export function useConsoleState() {
       const effectiveOrgID = sessionStatus.org_id ?? "";
       if (!effectiveOrgID) throw new Error("Authenticated session did not include an organization ID");
       const list = await client.projects(effectiveOrgID);
+      if (!isCurrent(operation, selectedProjectID)) return;
       const projects = list.projects ?? [];
       if (!selectedProjectID) {
         patch(workspacePatch(projects));
+        void loadProjectSummaries(projects, sessionStatus.agent_connected, operation, forceSummaries);
         return;
       }
       const selected = projects.find((item) => item.id === selectedProjectID) ?? null;
       if (!selected) {
+        selectedProject.current = "";
         setSelectedProjectID("");
         const next = normalizeRoute({ view: "projects" });
+        currentRoute.current = next;
         setRoute(next);
         window.history.replaceState({}, "", routeHref(next));
         patch({ ...workspacePatch(projects), message: "The selected project is unavailable. Choose another project." });
@@ -114,8 +179,27 @@ export function useConsoleState() {
       }
 
       const [readiness, nodes, services, deployments, sessions, audit, support] = await loadProject(client, selected.id);
-      const foundation = await loadFoundation(client, selected.id, services.services ?? [], sessionStatus.agent_connected);
-      const streamPatch = await reconnect(client, selected.id, sessions.sessions ?? [], deployments.deployments ?? []);
+      if (!isCurrent(operation, selectedProjectID)) return;
+      const records = services.services ?? [];
+      const jobs = deployments.deployments ?? [];
+      const foundation = await loadFoundation(client, selected.id, records, sessionStatus.agent_connected);
+      if (!isCurrent(operation, selectedProjectID)) return;
+      const streamPatch = await reconnect(client, selected.id, sessions.sessions ?? [], jobs);
+      if (!isCurrent(operation, selectedProjectID)) return;
+      const nodeStatuses = foundation.placement?.nodes.map((node) => normalizeStatus(node.status)) ?? [];
+      const entry: ProjectSummaryEntry = {
+        status: "ready",
+        fetchedAt: Date.now(),
+        environment: foundation.placement?.environments.find((item) => item.status === "active")?.name,
+        runtimeStatus: foundation.sources.runtime !== "available" ? "unavailable"
+          : nodeStatuses.includes("failed") ? "failed"
+            : nodeStatuses.includes("degraded") ? "degraded"
+              : nodeStatuses.includes("unavailable") ? "unavailable"
+                : nodeStatuses.length && nodeStatuses.every((status) => status === "healthy") ? "healthy" : "unknown",
+        summary: deriveProjectSummary({ project: selected, readiness, services: records, deployments: jobs, foundation }),
+      };
+      summaryCache.current.set(selected.id, entry);
+      setProjectSummaries((current) => ({ ...current, [selected.id]: entry }));
       setSelectedProjectID(selected.id);
       patch({
         status: "ready",
@@ -123,16 +207,18 @@ export function useConsoleState() {
         project: selected,
         readiness,
         nodes,
-        services: services.services ?? [],
-        deployments: deployments.deployments ?? [],
+        services: records,
+        deployments: jobs,
         sessions: sessions.sessions ?? [],
         audit: audit.events ?? [],
         support,
         incidents: foundation.incidents,
+        serviceDetail: currentRoute.current.view === "services" ? records.find((item) => item.id === currentRoute.current.service) ?? null : null,
         foundation,
         ...streamPatch,
       });
     } catch (error) {
+      if (!isCurrent(operation, selectedProjectID)) return;
       const err = error as Error & { status?: number };
       if (err.status === 401 || err.status === 403) clearSensitive();
       patch({
@@ -144,11 +230,17 @@ export function useConsoleState() {
 
   useEffect(() => {
     const initial = parseRoute(window.location.search);
-    // URL state is the external source of truth for refresh/deep-link restoration.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRoute(initial);
-    setSelectedProjectID(initial.projectID);
-    queueMicrotask(() => void load(initial.projectID));
+    queueMicrotask(() => {
+      // URL state is the external source of truth for refresh/deep-link restoration.
+      setRoute(initial);
+      currentRoute.current = initial;
+      if (!initial.projectID) { void enterWorkspace(initial, true); return; }
+      const operation = ++generation.current;
+      selectedProject.current = initial.projectID;
+      setSelectedProjectID(initial.projectID);
+      patch(clearProjectPatch("Loading project…"));
+      void load(initial.projectID, operation);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -157,43 +249,39 @@ export function useConsoleState() {
       const next = parseRoute(window.location.search);
       clearSensitive();
       setReview(null);
-      setRoute(next);
-      if (next.projectID === projectID) return;
-      setSelectedProjectID(next.projectID);
-      if (!next.projectID) {
-        patch(workspacePatch(state.projects));
+      if (next.projectID === selectedProject.current) {
+        setRoute(next);
+        currentRoute.current = next;
+        patch({ serviceDetail: next.view === "services" ? state.services.find((item) => item.id === next.service) ?? null : null });
         return;
       }
-      patch(clearProjectPatch("Restoring project…"));
-      void client.switchProject(next.projectID, crypto.randomUUID()).then(() => load(next.projectID)).catch(loadError);
+      if (!next.projectID) {
+        void enterWorkspace(next, true);
+        return;
+      }
+      void selectProject(next.projectID, next, true);
     }
     window.addEventListener("popstate", restoreRoute);
     return () => window.removeEventListener("popstate", restoreRoute);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectID, state.projects]);
+  }, [state.projects, state.services]);
 
-  useEffect(
-    () => () => {
-      if (revealTimer.current !== null) window.clearTimeout(revealTimer.current);
-    },
-    [],
-  );
+  useEffect(() => () => {
+    if (revealTimer.current !== null) window.clearTimeout(revealTimer.current);
+  }, []);
 
   function updateRoute(next: ConsoleRoute, replace = false) {
+    currentRoute.current = next;
     setRoute(next);
     window.history[replace ? "replaceState" : "pushState"]({}, "", routeHref(next));
   }
 
   function navigate(request: Partial<ConsoleRoute>) {
     const next = normalizeRoute({ ...route, ...request, projectID: request.projectID ?? route.projectID });
-    if (next.projectID !== projectID) {
+    if (next.projectID !== selectedProject.current) {
       setReview(null);
       if (!next.projectID) {
-        clearSensitive();
-        setReview(null);
-        setSelectedProjectID("");
-        updateRoute(next);
-        patch(workspacePatch(state.projects));
+        void enterWorkspace(next);
       } else {
         void selectProject(next.projectID, next);
       }
@@ -201,27 +289,56 @@ export function useConsoleState() {
     }
     if (next.view !== route.view || next.tab !== route.tab) {
       clearSensitive();
+      setReview(null);
       patch({ serviceDetail: next.view === "services" ? state.serviceDetail : null });
     }
     updateRoute(next);
   }
 
-  async function selectProject(id: string, destination = normalizeRoute({ projectID: id, view: "overview" })) {
-    if (!id) return;
+  async function enterWorkspace(destination = normalizeRoute({ view: "projects" }), replace = false) {
     clearSensitive();
-    setSelectedProjectID(id);
-    updateRoute(destination);
-    patch(clearProjectPatch("Switching project…"));
-    try {
-      await client.switchProject(id, crypto.randomUUID());
-      await load(id);
-    } catch (error) {
-      loadError(error as Error & { status?: number });
-    }
+    setReview(null);
+    const operation = ++generation.current;
+    selectedProject.current = "";
+    setSelectedProjectID("");
+    updateRoute(destination, replace);
+    patch(workspacePatch(state.projects));
+    const sessionStatus = currentSession.current;
+    if (sessionStatus) await loadProjectSummaries(state.projects, sessionStatus.agent_connected, operation);
+    else await load("", operation);
   }
 
-  function loadError(error: Error & { status?: number }) {
+  async function selectProject(id: string, destination = normalizeRoute({ projectID: id, view: "overview" }), replace = false) {
+    if (!id) return;
+    clearSensitive();
+    const operation = ++generation.current;
+    selectedProject.current = id;
+    setSelectedProjectID(id);
+    updateRoute(destination, replace);
+    patch(clearProjectPatch("Switching project…"));
+    const queued = switchQueue.current.catch(() => undefined).then(async () => {
+      if (!isCurrent(operation, id)) return;
+      try {
+        await client.switchProject(id, crypto.randomUUID());
+        if (!isCurrent(operation, id)) return;
+        await load(id, operation);
+      } catch (error) {
+        loadError(error as Error & { status?: number }, operation, id);
+      }
+    });
+    switchQueue.current = queued;
+    await queued;
+  }
+
+  function loadError(error: Error & { status?: number }, operation = generation.current, id = selectedProject.current) {
+    if (!isCurrent(operation, id)) return;
     patch({ status: error.status === 401 || error.status === 403 ? "permission" : "error", message: error.message });
+  }
+
+  async function refreshCurrentData() {
+    const id = selectedProject.current;
+    const operation = ++generation.current;
+    await load(id, operation, true);
   }
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
@@ -238,7 +355,7 @@ export function useConsoleState() {
         try {
           const created = await client.createProject(orgID, { name, slug }, key);
           formElement.reset();
-          await selectProject(created.id);
+          await load("", generation.current);
           return `Project ${created.id} created by the Local backend.`;
         } finally {
           patch({ busy: "" });
@@ -255,22 +372,26 @@ export function useConsoleState() {
     const authMethod = String(form.get("auth_method"));
     const host = String(form.get("public_host") ?? "");
     const role = String(form.get("role") ?? "");
+    const body: Record<string, unknown> = {
+      role,
+      public_host: host,
+      ssh_port: Number(form.get("ssh_port")),
+      ssh_username: String(form.get("ssh_username") ?? ""),
+      auth_method: authMethod,
+    };
+    formElement.reset();
     reviewMutation(
-      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, `auth: ${authMethod}`, `ssh port: ${String(form.get("ssh_port") || "not reported")}`], risk: "Starts the canonical bootstrap worker flow. Credentials are submitted once and stay out of browser storage." },
-      async (key) => {
-        const submitted = new FormData(formElement);
-        const submittedAuth = String(submitted.get("auth_method"));
-        const body: Record<string, unknown> = {
-          role: submitted.get("role"), public_host: submitted.get("public_host"),
-          ssh_port: Number(submitted.get("ssh_port")), ssh_username: submitted.get("ssh_username"), auth_method: submittedAuth,
-        };
-        body[submittedAuth === "private_key" ? "ssh_private_key" : "ssh_password"] = String(submitted.get("secret") ?? "");
+      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, `auth: ${authMethod}`, `ssh port: ${String(body.ssh_port || "not reported")}`], risk: "Starts the canonical bootstrap worker flow. The one-time credential is requested only at final confirmation.", credential: { label: authMethod === "private_key" ? "SSH private key" : "SSH password", inputLabel: authMethod === "private_key" ? "One-time SSH private key" : "One-time SSH password" } },
+      async (key, credential) => {
+        if (!credential) throw new Error("Enter the one-time credential again to submit this reviewed attempt.");
+        const operation = generation.current;
+        const request = { ...body, [authMethod === "private_key" ? "ssh_private_key" : "ssh_password"]: credential };
         patch({ busy: "server" });
         try {
-          const created = await client.createBootstrap(currentProject.id, body, key);
-          formElement.reset();
-          patch({ bootstrapEvents: await client.bootstrapEvents(currentProject.id, created.id) });
-          await load(currentProject.id);
+          const created = await client.createBootstrap(currentProject.id, request, key);
+          const events = await client.bootstrapEvents(currentProject.id, created.id);
+          if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events });
+          await load(currentProject.id, operation);
           return `Bootstrap ${created.id} accepted with status ${created.status}.`;
         } finally {
           patch({ busy: "" });
@@ -458,6 +579,7 @@ export function useConsoleState() {
     active: routeLabel(route),
     route,
     session,
+    projectSummaries,
     review: review
       ? (() => {
           const { submit, ...visible } = review;
@@ -466,22 +588,24 @@ export function useConsoleState() {
         })()
       : null,
     navigate,
-    setActive: (view: string) => navigate(routeForLegacy(view, projectID)),
     setProjectID: (id: string) => {
       setReview(null);
       void selectProject(id);
     },
-    setServiceDetail: (serviceDetail: ServiceRecord | null) => patch({ serviceDetail }),
+    setServiceDetail: (serviceDetail: ServiceRecord | null) => {
+      patch({ serviceDetail });
+      if (currentRoute.current.view === "services") updateRoute(normalizeRoute({ ...currentRoute.current, service: serviceDetail?.id ?? "" }), true);
+    },
     reviewMutation,
     closeReview,
     submitReview,
-    state: { ...state, project: currentProject },
+    state,
     actions: {
       addServer,
       createProject,
       createService,
       diagnostics,
-      load,
+      load: refreshCurrentData,
       loadBootstrapEvents,
       retryBootstrap,
       loadDeploymentEvents,

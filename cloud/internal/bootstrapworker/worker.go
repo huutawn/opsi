@@ -30,45 +30,48 @@ const (
 )
 
 type Config struct {
-	CloudURL                      string           `json:"cloud_url"`
-	AgentCloudURL                 string           `json:"agent_cloud_url"`
-	AllowInsecureInternalCloudURL bool             `json:"allow_insecure_internal_cloud_url"`
-	BootstrapWorkerToken          string           `json:"bootstrap_worker_token"`
-	WorkerID                      string           `json:"worker_id"`
-	PollInterval                  time.Duration    `json:"-"`
-	K3sVersion                    string           `json:"k3s_version"`
-	K3sInstallerURL               string           `json:"k3s_installer_url"`
-	K3sInstallerSHA256            string           `json:"k3s_installer_sha256"`
-	AgentInstallURL               string           `json:"agent_install_url"`
-	AgentInstallSHA256            string           `json:"agent_install_sha256"`
-	SSHKnownHostsPath             string           `json:"ssh_known_hosts_path"`
-	Production                    bool             `json:"production"`
-	Timeout                       time.Duration    `json:"-"`
-	HTTPClient                    *http.Client     `json:"-"`
-	Executor                      RemoteExecutor   `json:"-"`
-	Logger                        *slog.Logger     `json:"-"`
-	HeartbeatInterval             time.Duration    `json:"-"`
-	HeartbeatRetryInterval        time.Duration    `json:"-"`
-	LeaseSafetyMargin             time.Duration    `json:"-"`
-	Now                           func() time.Time `json:"-"`
+	CloudURL                      string                    `json:"cloud_url"`
+	AgentCloudURL                 string                    `json:"agent_cloud_url"`
+	AllowInsecureInternalCloudURL bool                      `json:"allow_insecure_internal_cloud_url"`
+	BootstrapWorkerToken          string                    `json:"bootstrap_worker_token"`
+	WorkerID                      string                    `json:"worker_id"`
+	PollInterval                  time.Duration             `json:"-"`
+	K3sVersion                    string                    `json:"k3s_version"`
+	K3sInstallerURL               string                    `json:"k3s_installer_url"`
+	K3sInstallerSHA256            string                    `json:"k3s_installer_sha256"`
+	AgentInstallURL               string                    `json:"agent_install_url"`
+	AgentInstallSHA256            string                    `json:"agent_install_sha256"`
+	SSHKnownHostsPath             string                    `json:"ssh_known_hosts_path"`
+	Production                    bool                      `json:"production"`
+	Timeout                       time.Duration             `json:"-"`
+	HTTPClient                    *http.Client              `json:"-"`
+	Executor                      RemoteExecutor            `json:"-"`
+	Logger                        *slog.Logger              `json:"-"`
+	HeartbeatInterval             time.Duration             `json:"-"`
+	HeartbeatRetryInterval        time.Duration             `json:"-"`
+	LeaseSafetyMargin             time.Duration             `json:"-"`
+	StagingCrashBarrier           StagingCrashBarrierConfig `json:"staging_crash_barrier"`
+	stagingCrashBarrierConfigured bool                      `json:"-"`
+	Now                           func() time.Time          `json:"-"`
 }
 
 type fileConfig struct {
-	CloudURL                      string `json:"cloud_url"`
-	AgentCloudURL                 string `json:"agent_cloud_url"`
-	AllowInsecureInternalCloudURL bool   `json:"allow_insecure_internal_cloud_url"`
-	BootstrapWorkerToken          string `json:"bootstrap_worker_token"`
-	BootstrapWorkerTokenFile      string `json:"bootstrap_worker_token_file"`
-	WorkerID                      string `json:"worker_id"`
-	PollInterval                  string `json:"poll_interval"`
-	K3sVersion                    string `json:"k3s_version"`
-	K3sInstallerURL               string `json:"k3s_installer_url"`
-	K3sInstallerSHA256            string `json:"k3s_installer_sha256"`
-	AgentInstallURL               string `json:"agent_install_url"`
-	AgentInstallSHA256            string `json:"agent_install_sha256"`
-	SSHKnownHostsPath             string `json:"ssh_known_hosts_path"`
-	Production                    bool   `json:"production"`
-	Timeout                       string `json:"timeout"`
+	CloudURL                      string                    `json:"cloud_url"`
+	AgentCloudURL                 string                    `json:"agent_cloud_url"`
+	AllowInsecureInternalCloudURL bool                      `json:"allow_insecure_internal_cloud_url"`
+	BootstrapWorkerToken          string                    `json:"bootstrap_worker_token"`
+	BootstrapWorkerTokenFile      string                    `json:"bootstrap_worker_token_file"`
+	WorkerID                      string                    `json:"worker_id"`
+	PollInterval                  string                    `json:"poll_interval"`
+	K3sVersion                    string                    `json:"k3s_version"`
+	K3sInstallerURL               string                    `json:"k3s_installer_url"`
+	K3sInstallerSHA256            string                    `json:"k3s_installer_sha256"`
+	AgentInstallURL               string                    `json:"agent_install_url"`
+	AgentInstallSHA256            string                    `json:"agent_install_sha256"`
+	SSHKnownHostsPath             string                    `json:"ssh_known_hosts_path"`
+	Production                    bool                      `json:"production"`
+	Timeout                       string                    `json:"timeout"`
+	StagingCrashBarrier           StagingCrashBarrierConfig `json:"staging_crash_barrier"`
 }
 
 type Bundle struct {
@@ -117,7 +120,9 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse bootstrap worker config: %w", err)
 	}
 	var fields map[string]json.RawMessage
+	barrierConfigured := false
 	if err := json.Unmarshal(data, &fields); err == nil {
+		_, barrierConfigured = fields["staging_crash_barrier"]
 		if _, ok := fields["session_id"]; ok {
 			return Config{}, errors.New("session_id is no longer supported; bootstrap workers lease sessions automatically")
 		}
@@ -136,7 +141,7 @@ func LoadConfig(path string) (Config, error) {
 		}
 		workerToken = strings.TrimSuffix(strings.TrimSuffix(string(tokenData), "\n"), "\r")
 	}
-	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, AllowInsecureInternalCloudURL: raw.AllowInsecureInternalCloudURL, BootstrapWorkerToken: workerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval}
+	cfg := Config{CloudURL: raw.CloudURL, AgentCloudURL: raw.AgentCloudURL, AllowInsecureInternalCloudURL: raw.AllowInsecureInternalCloudURL, BootstrapWorkerToken: workerToken, WorkerID: strings.TrimSpace(raw.WorkerID), K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, SSHKnownHostsPath: raw.SSHKnownHostsPath, Production: raw.Production, PollInterval: defaultPollInterval, StagingCrashBarrier: raw.StagingCrashBarrier, stagingCrashBarrierConfigured: barrierConfigured}
 	if cfg.AgentCloudURL == "" {
 		cfg.AgentCloudURL = cfg.CloudURL
 	}
@@ -159,6 +164,12 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.Production && c.stagingCrashBarrierConfigured {
+		return errors.New("staging_crash_barrier is not allowed in production")
+	}
+	if err := c.StagingCrashBarrier.validate(c.Production); err != nil {
+		return err
+	}
 	if c.CloudURL == "" {
 		return errors.New("cloud_url is required")
 	}
@@ -268,6 +279,7 @@ type Worker struct {
 	client   CloudClient
 	executor RemoteExecutor
 	logger   *slog.Logger
+	barrier  stagingCrashBarrier
 }
 
 func NewWorker(cfg Config) Worker {
@@ -299,7 +311,7 @@ func NewWorker(cfg Config) Worker {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return Worker{cfg: cfg, client: httpCloudClient{client: httpClient, cfg: cfg}, executor: executor, logger: logger}
+	return Worker{cfg: cfg, client: httpCloudClient{client: httpClient, cfg: cfg}, executor: executor, logger: logger, barrier: newStagingCrashBarrier(cfg.StagingCrashBarrier)}
 }
 
 func (w Worker) Run(ctx context.Context) error {
@@ -471,6 +483,15 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 				failure := classifyStepFailure(step.Status, redactForLease(cfg, lease, fmt.Sprintf("%s failed: %s %s %v", step.Status, result.Stdout, result.Stderr, err)))
 				return w.reportFailure(ctx, lease, failure)
 			}
+			if err := w.barrier.beforeCheckpoint(ctx, lease, step); err != nil {
+				stopHeartbeatAndWait()
+				heartbeatStopped = true
+				if parent.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					failure := JobFailure{Code: "BOOTSTRAP_WORKER_SHUTDOWN", Message: "bootstrap worker shut down", Retryable: true}
+					return w.reportFailure(ctx, lease, failure)
+				}
+				return w.reportFailure(ctx, lease, JobFailure{Code: "BOOTSTRAP_CRASH_BARRIER_INVALID", Message: boundedFailureMessage(err.Error()), Retryable: false})
+			}
 			requested := checkpoint
 			requested.NextStepIndex = index + 1
 			requested.LastCompletedStep = step.ID
@@ -493,6 +514,11 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 				return w.reportFailure(ctx, lease, classifyCheckpointFailure(err))
 			}
 			checkpoint = persisted
+			if err := w.barrier.afterCheckpoint(lease, step); err != nil {
+				stopHeartbeatAndWait()
+				heartbeatStopped = true
+				return fmt.Errorf("bootstrap crash barrier evidence after persisted checkpoint: %w", err)
+			}
 		}
 	}
 	if err := w.client.Progress(ctx, lease, "verifying_agent", "waiting for healthy Agent heartbeat"); err != nil {

@@ -1,0 +1,39 @@
+import { useMemo, type RefObject } from "react";
+import { routeLabel, type ConsoleRoute } from "@/features/console/navigation";
+import { LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
+import type { Project } from "@/lib/contracts/registry";
+import { ConnectionPopover } from "@/components/layout/connection-popover";
+
+export function ContextHeader({ environment, lastUpdated, menuButtonRef, onMenu, onRefresh, project, route, serviceScope, session }: {
+  environment: string;
+  lastUpdated?: string;
+  menuButtonRef: RefObject<HTMLButtonElement | null>;
+  onMenu: () => void;
+  onRefresh: () => void;
+  project: Project | null;
+  route: ConsoleRoute;
+  serviceScope?: string;
+  session: LocalSessionStatus;
+}) {
+  const client = useMemo(() => new LocalClient(), []);
+  async function logout() { try { await client.logout(); } finally { onRefresh(); } }
+  return <header className="contextHeader">
+    <button aria-label="Open navigation" className="iconButton mobileOnly" onClick={onMenu} ref={menuButtonRef} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3 5h14M3 10h14M3 15h14" /></svg></button>
+    <div className="contextIdentity" aria-label="Current context">
+      <div className="breadcrumb"><span>{session.org_id || "Workspace unavailable"}</span>{project ? <><i aria-hidden="true">/</i><strong title={project.name}>{project.name}</strong><i aria-hidden="true">/</i><span title={environment}>{environment}</span></> : null}</div>
+      <p>{routeLabel(route)}{project ? ` · ${environment}` : " · Workspace"}{serviceScope ? ` · Service ${serviceScope}` : ""}{lastUpdated ? ` · Updated ${formatUpdated(lastUpdated)}` : ""}</p>
+    </div>
+    <div className="headerActions">
+      {session.cloud_connected !== "ok" ? <span className="sourceWarning">Cloud unavailable</span> : null}
+      {project && session.agent_connected !== "ok" ? <span className="sourceWarning">Agent unavailable</span> : null}
+      <ConnectionPopover session={session} />
+      <button aria-label="Refresh current data" className="iconButton" onClick={onRefresh} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M16 6V2m0 0h-4m4 0-3 3a6 6 0 1 0 2 8" /></svg></button>
+      <details className="accountMenu"><summary aria-label="Account menu">Account</summary><div><button onClick={() => void logout()} type="button">Sign out</button></div></details>
+    </div>
+  </header>;
+}
+
+function formatUpdated(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}

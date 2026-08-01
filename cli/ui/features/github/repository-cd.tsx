@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Empty, Panel, StatePanel, StatusBadge } from "@/components/ui/primitives";
+import { Empty, StatePanel, StatusBadge, Surface } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import {
   LocalClient,
@@ -151,7 +151,7 @@ export function RepositoryCD({ console }: { console: ConsoleController }) {
       {message ? <StatePanel title="Repository CD action failed" text={message} retry={() => void load()} /> : null}
       {status === "success" ? <div className="notice">Repository config and workflow were written atomically. A repeated apply reports unchanged files.</div> : null}
 
-      <Panel title="Monorepo services">
+      <Surface title="Monorepo services">
         <p className="muted">Config hash: {configHash || "not available"}. This file contains repository intent only—no project, Cloud, node, runtime, or credential identity.</p>
         {config?.services.length ? (
           <div className="tableWrap"><table><thead><tr><th>Service</th><th>Build</th><th>Watch / shared</th><th>Dependencies</th><th /></tr></thead><tbody>
@@ -164,9 +164,9 @@ export function RepositoryCD({ console }: { console: ConsoleController }) {
             </tr>)}
           </tbody></table></div>
         ) : <Empty text="No valid v2 config is present yet. Preview a first service to create it." />}
-      </Panel>
+      </Surface>
 
-      <Panel title="Repository service configuration">
+      <Surface title="Repository service configuration">
         <details className="sourceAction">
           <summary>Add or Update One Service</summary>
         <form className="form" onSubmit={(event) => void previewMutation(event)}>
@@ -188,9 +188,9 @@ export function RepositoryCD({ console }: { console: ConsoleController }) {
           <button className="primary" disabled={status === "applying"} onClick={() => void apply()} type="button">{status === "applying" ? "Applying" : status === "error" ? "Retry apply" : "Apply reviewed changes"}</button>
         </div> : null}
         </details>
-      </Panel>
+      </Surface>
 
-      <Panel title="Affected-service preview">
+      <Surface title="Affected-service preview">
         <details className="sourceAction">
           <summary>Preview Affected Services</summary>
         <form className="form" onSubmit={(event) => void previewPlan(event)}>
@@ -205,7 +205,7 @@ export function RepositoryCD({ console }: { console: ConsoleController }) {
           {plan.services.map((service) => <div key={service.key}><b>{service.key}</b>{service.reasons.map((reason) => <p className="muted" key={`${reason.code}-${reason.path ?? reason.dependency ?? "global"}`}>{reason.code}: {reason.explanation}</p>)}</div>)}
         </div> : null}
         </details>
-      </Panel>
+      </Surface>
     </section>
   );
 }

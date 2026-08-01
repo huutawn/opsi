@@ -1,0 +1,7 @@
+# Explicit operator opt-in only. This file is never part of the normal
+# staging startup command and must be paired with a run-specific config.
+services:
+  bootstrap-worker:
+    volumes:
+      - ./config/bootstrap-worker.e2e.json:/etc/opsi/bootstrap-worker.json:ro,Z
+      - ./barrier-state:/var/lib/opsi/bootstrap-barrier:rw,Z

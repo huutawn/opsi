@@ -2,13 +2,59 @@
 
 ## R5-014 Local API/UI parity checkpoint
 
-`R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
+`R5_014_UI_REWORK_SOURCE_PRESENT / PROJECT_REFRESH_AND_ERROR_GATE_PASS /
+REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_017C_SOURCE_PRESENT / BLOCKED_BY_DEPLOYMENT_GAP_PENDING_REVIEW`.
+The R5-017 publisher run `30700943447` at revision
+`585293ee171454d8f8a6af54d37b3bb49a600ea9` failed before push because the
+repository-root build context did not select `cloud/Dockerfile`. The canonical
+workflow now selects that Dockerfile while retaining root context, and its
+regression test covers the build block, target, platform, immutable tag, and
+post-push manifest ordering. No image, artifact, manifest, staging mutation,
+or Agent VPS mutation resulted from the failed run.
+After corrective revision `906d7f350417b4061dea0507af0b1b4a87e71f6b` fixed the
+Dockerfile selection, the isolated Docker build exposed a second factual
+blocker: `cloud` was missing the transitive gRPC/protobuf module closure in its
+own `go.mod` and `go.sum`, which the root `go.work` had masked. The R5-017C3
+correction closes that module manifest with Go tooling, adds `GOWORK=off`
+readonly dependency checks, and makes both Docker builds fail closed with
+`-mod=readonly`. Publishing, deployment, and live acceptance remain unrun.
 R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
+
+R5-017C adds one manual, canonical Bootstrap Worker release path. The
+repository-root `cloud/Dockerfile` target `bootstrap-worker` remains the only
+image implementation. A fork/ref/confirmation-gated GitHub Actions workflow
+publishes only `ghcr.io/huutawn/opsi-bootstrap-worker`, records the full source
+revision in an immutable lookup tag and OCI labels, emits the registry digest,
+refuses revision-tag overwrite, and uploads a strict
+`opsi.bootstrap-worker.release/v1` JSON manifest for the factual `linux/amd64`
+platform. The manifest is provenance metadata and is not described as a signed
+attestation.
+
+The staging helper validates either that manifest or an immutable canonical
+image reference, requires the running Worker digest and persisted `.env`
+binding to match an operator-supplied expected digest, pulls before mutation,
+atomically backs up and changes only `OPSI_BOOTSTRAP_WORKER_IMAGE`, and recreates
+only `bootstrap-worker` with `--no-deps`. A host-local lock serializes release
+operations. It waits for Worker health, verifies
+the actual container repository digest, and checks public Cloud health before
+printing success. Explicit rollback uses the same checks and persists the prior
+digest. Fake Docker/Compose tests cover fork and mutable-reference rejection,
+strict digest/revision/manifest validation, pre-mutation mismatch failure,
+single-service targeting, health failures, rollback, barrier-override
+compatibility, and binding persistence.
+
+The discovered live rollback target remains
+`ghcr.io/huutawn/opsi-bootstrap-worker@sha256:220d3ecc7dba018871707fc57612b3730259fd90b23dfde454a3299759167cff`
+at Worker revision `0669bb5`. No image was published, no staging service was
+recreated, and no Agent VPS was accessed or mutated by R5-017C. R5-017 remains
+blocked until the new source revision is reviewed and the real publish/deploy
+evidence is accepted.
 
 R5-015 Agent-local Kubernetes identity is the exact `opsi.dev/service`
 ServiceKey. Opsi-managed Pods without a valid canonical service label are
@@ -47,7 +93,7 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-29 |
+| Last updated | 2026-08-01 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
@@ -424,6 +470,23 @@ Safe ActionPlane client.
 - Registration replay is idempotent after config/marker persistence. A narrow
   crash window remains if Cloud consumes the token before those files are
   installed; a safe isolated fault test is still required around this boundary.
+- `R5-017A SOURCE PASS`: the Bootstrap Worker has
+  a dormant, staging/E2E-only file barrier exactly after successful remote
+  `install_k3s` and before its Cloud checkpoint. The marker is scoped by
+  session/run ID, uses atomic `armed -> reached -> consumed -> completed`
+  transitions, waits on context cancellation, and lets only a restarted Worker
+  replay `install_k3s`; production configuration rejects every barrier field.
+  The helper publishes `armed` with atomic no-replace semantics, rejects
+  symlinked/private-state violations through a no-follow directory descriptor,
+  and strictly validates the same bounded marker schema and state/process rules
+  as the Worker. A failed evidence-only `consumed -> completed` update is
+  surfaced at the daemon boundary after the factual Cloud checkpoint without a
+  contradictory product `Finish failed`; resume starts after the persisted
+  step. The browser source gate excludes Playwright/test evidence while still
+  scanning runtime source, and the exposure negative test retains all three
+  mandatory safety flags without misleading Cobra output. Focused, race,
+  repository, source, and self-check gates pass with Go 1.26.4. No staging
+  deployment or live R5-017 proof has run; R5-017 and R5-018 remain pending.
 - The existing Cloud binary exposes the local operator command
   `opsi-cloud admin bootstrap-owner`. It requires PostgreSQL and transactionally
   creates or reuses the normalized user, organization, canonical project plus
@@ -842,9 +905,9 @@ make verify
 Go module tests run from `agent/`, `cli/`, `cloud/`, and `contracts/go/`, not
 from the workspace root.
 
-## FE-04 frontend source stabilization
+## FE-04 frontend source stabilization and corrective pass
 
-FE-01 through FE-04 frontend source redesign is complete. FE-04 replaces the
+FE-01 through FE-04 frontend source redesign exists in the canonical UI. FE-04 replaces the
 standalone Secrets and Audit implementations with one canonical Security view,
 redesigns workspace Settings around session/connections/install/PAT facts, and
 fixes the Delivery loading and observability factuality regressions. Protected
@@ -853,8 +916,47 @@ project switch, authentication invalidation, and PAT revoke/logout. Incident
 resolution remains a CLI handoff through factual `opsi action` commands; no
 browser approval material exists.
 
-Mock Local API browser acceptance passes at 1440x900, 1024x768, and 390x844.
-No live Agent/VPS acceptance occurred. R5-017 remains pending. The remaining
+The 2026-07-31 corrective pass adds latest-wins serialized project switching,
+staged bootstrap credential handling,
+native modal/drawer focus behavior, APG-associated tabs, 40px primary targets,
+all factual activity outcomes with text/table fallback, and restorable service
+detail. Audit loaded-history filters now include time bounds; Logs periodic
+refresh is real, bounded, and paused by default.
+
+Workspace project summaries now have one factual cache entry with `fetchedAt`
+and a 30-second TTL. Fresh entries are reused when returning to Projects;
+expired, stale, and explicitly refreshed entries revalidate. Header refresh
+force-revalidates every visible project. Revalidation preserves the last factual
+health/counters/`Last changed` value while showing readable Refreshing or Stale
+retry text; first-load failure remains Unavailable. Auth invalidation clears the
+cache, removed projects are pruned, and obsolete operations cannot update cache
+or UI.
+
+One shared six-request limiter covers all Local API calls used to derive
+workspace summaries, including all per-service telemetry calls. A three-project,
+24-service-per-project delayed fixture completes 93 requests after one telemetry
+503, measures maximum concurrency six, retains partial factual values, and makes
+zero `/api/local/session/project` calls.
+
+The browser error gate no longer blanket-ignores resource messages. It records
+unexpected HTTP status responses, `requestfailed`, application `console.error`,
+resource errors, and `pageerror`; intentional negative fixtures declare an exact
+path/query plus status and optional method, while intentional browser failures
+also declare exact error text on the page that creates them. The matcher has
+focused unit coverage and expectations do not cross test pages.
+
+`npm test` passes 33 tests, `npm run lint` passes, `npm run build` passes, and
+`npx playwright test` passes 28 Chromium scenarios at 1440x900, 1024x768,
+390x844, and 320x800 with the exact console/resource gate. `make ui-test`,
+`make ui-lint`, and `make ui-build` pass.
+`make verify` stops at the repository toolchain check because the environment
+reports `go1.26.5-X:nodwarf5` while the Makefile requires `go1.26.4`; the wider
+repository verification is therefore unproven, not a product-test failure.
+
+No live Agent/VPS or screen-reader acceptance occurred. R5-017 remains pending,
+and this evidence does not establish full WCAG conformance. Organization
+listing, members/RBAC, and secret metadata/listing remain the three backend
+gaps. The remaining
 PostCSS and Sharp advisories are upstream-blocked and are not present in the
 static browser export; PostCSS remains build-time reachable, so dependency
 remediation, supply-chain closure, release readiness, and production readiness

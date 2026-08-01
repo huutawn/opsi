@@ -1,6 +1,10 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { expectHTTPFailure, expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 type Scenario = "default" | "ttl" | "agent-down" | "cloud-down" | "signed-out" | "audit-empty" | "audit-unavailable" | "unknown" | "unresolved" | "malformed" | "delivery-loading";
+
+test.beforeEach(async ({ page }) => watchConsoleErrors(page));
+test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Security operations use explicit targets and protected results clear at every boundary", async ({ page }) => {
   const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -94,7 +98,7 @@ test("Security operations use explicit targets and protected results clear at ev
   await expect(page.locator("pre", { hasText: "SECRET_CANARY" })).toBeVisible();
   await mockLocalAPI(page, "signed-out");
   await page.getByRole("button", { name: "Refresh current data" }).evaluate((button: HTMLButtonElement) => button.click());
-  await expect(page.getByRole("heading", { name: "Sign in to your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sign in to Opsi" })).toBeVisible();
   await expect(page.locator("pre", { hasText: "SECRET_CANARY" })).toHaveCount(0);
 
   await mockLocalAPI(page, "default", requests);
@@ -133,11 +137,16 @@ test("TTL cleanup, Agent availability, audit explorer, and unavailable history s
   await expect(page.getByRole("button", { name: /deploy/ })).toBeVisible();
   await page.getByRole("combobox", { name: "Result" }).selectOption("denied");
   await expect(page.getByRole("button", { name: /deploy\.failed.*denied/i })).toBeVisible();
+  await page.getByLabel("From date").fill("2026-07-31");
+  await expect(page.getByText("No loaded audit events match these filters.", { exact: true })).toBeVisible();
+  await page.getByLabel("From date").fill("2026-07-30");
   await expect(page.getByText("req-audit-2", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("nested redacted", { exact: true })).toHaveCount(0);
   await page.screenshot({ fullPage: true, path: "../../.tmp/ui-fe04/audit-1440x900.png" });
 
   await page.goto("/?project=proj-1&view=security&tab=secrets");
+  await expect(page.getByRole("heading", { name: "Secrets", exact: true })).toBeVisible();
+  await page.waitForLoadState("networkidle");
   await expect(page.getByText(/Agent unavailable/)).toHaveCount(0);
   await mockLocalAPI(page, "agent-down");
   await page.reload();
@@ -148,6 +157,7 @@ test("TTL cleanup, Agent availability, audit explorer, and unavailable history s
   await page.goto("/?project=proj-1&view=security&tab=audit");
   await expect(page.getByText("No audit events were returned.", { exact: true })).toBeVisible();
   await mockLocalAPI(page, "audit-unavailable");
+  expectHTTPFailure(page, { path: "/api/local/projects/proj-1/audit", status: 503, method: "GET" });
   await page.reload();
   await expect(page.getByRole("heading", { name: "Request failed" })).toBeVisible();
   await expect(page.getByText("audit unavailable", { exact: true })).toBeVisible();
@@ -158,10 +168,14 @@ test("Settings exposes local facts, PAT review, capability limits, and connectio
   await mockLocalAPI(page, "default");
   await page.goto("/?project=proj-1&view=settings");
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
-  for (const heading of ["Session", "Connections", "Version and installation", "Access token lifecycle"]) await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "General", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "System", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "System", exact: true })).toBeVisible();
   await page.getByText("Capability limits", { exact: true }).click();
   await expect(page.getByText("organization listing", { exact: true })).toBeVisible();
 
+  await page.getByRole("tab", { name: "Authentication", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Authentication", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Review PAT rotation" }).click();
   await expect(page.getByText(/replace the PAT in the OS secure store/)).toBeVisible();
   await page.getByRole("button", { name: "Confirm and submit" }).click();
@@ -173,13 +187,13 @@ test("Settings exposes local facts, PAT review, capability limits, and connectio
   await expect(page.getByText(/PAT revoked true/)).toBeVisible();
 
   await mockLocalAPI(page, "cloud-down");
-  await page.goto("/?project=proj-1&view=settings");
+  await page.goto("/?project=proj-1&view=settings&tab=integrations");
   await expect(page.getByText("Cloud connection", { exact: true })).toBeVisible();
-  await expect(page.getByText("Unavailable", { exact: true }).first()).toBeVisible();
+  await expect(page.locator(".settingsFacts > div").filter({ hasText: "Cloud connection" }).getByText("Unavailable", { exact: true })).toBeVisible();
   await mockLocalAPI(page, "agent-down");
   await page.reload();
   await expect(page.getByText("Agent connection", { exact: true })).toBeVisible();
-  await expect(page.getByText("Unavailable", { exact: true }).first()).toBeVisible();
+  await expect(page.locator(".settingsFacts > div").filter({ hasText: "Agent connection" }).getByText("Unavailable", { exact: true })).toBeVisible();
 
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
@@ -209,7 +223,7 @@ test("Delivery and Observability stabilization never invents conclusions", async
   await mockLocalAPI(page, "unresolved");
   await page.goto("/?project=proj-1&view=observability&tab=health");
   await expect(page.getByText("Unresolved identity", { exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Incidents", exact: true }).click();
+  await page.getByRole("tab", { name: "Incidents", exact: true }).click();
   await page.getByRole("button", { name: /inc-1/ }).click();
   await expect(page.getByText("Evidence unavailable", { exact: true })).toBeVisible();
   await expect(page.getByText("opsi action preflight", { exact: false })).toBeVisible();

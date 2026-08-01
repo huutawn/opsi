@@ -1,0 +1,24 @@
+{
+  "cloud_url": "http://cloud:9800",
+  "agent_cloud_url": "https://REPLACE_WITH_AGENT_REACHABLE_CLOUD_HOST",
+  "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token",
+  "worker_id": "opsi-staging-bootstrap-worker-e2e-1",
+  "poll_interval": "3s",
+  "k3s_version": "REPLACE_WITH_PINNED_K3S_VERSION",
+  "k3s_installer_url": "https://REPLACE_WITH_K3S_INSTALLER_HOST/path",
+  "k3s_installer_sha256": "REPLACE_WITH_64_HEX_K3S_INSTALLER_SHA256",
+  "agent_install_url": "https://REPLACE_WITH_AGENT_ARTIFACT_HOST/path",
+  "agent_install_sha256": "REPLACE_WITH_64_HEX_AGENT_SHA256",
+  "ssh_known_hosts_path": "/run/secrets/ssh_known_hosts",
+  "production": false,
+  "timeout": "10m",
+  "staging_crash_barrier": {
+    "enabled": true,
+    "environment": "e2e",
+    "session_id": "REPLACE_WITH_BOOTSTRAP_SESSION_ID",
+    "run_id": "REPLACE_WITH_E2E_RUN_ID",
+    "step": "install_k3s",
+    "boundary": "after_execute_before_checkpoint",
+    "state_dir": "/var/lib/opsi/bootstrap-barrier"
+  }
+}

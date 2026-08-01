@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { expectHTTPFailure, expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 type Scenario = "unconfigured" | "monorepo" | "no-build" | "build-ready" | "waiting" | "verified" | "failed" | "rolled-back" | "preview" | "exposure" | "unavailable";
 
@@ -7,13 +8,15 @@ const screenshotDir = "../../.tmp/ui-fe02";
 const digest = (character: string) => `sha256:${character.repeat(64)}`;
 
 test.beforeAll(async () => { await mkdir(screenshotDir, { recursive: true }); });
+test.beforeEach(async ({ page }) => watchConsoleErrors(page));
+test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Delivery restores canonical URL state and renders truthful pipeline stages", async ({ page }) => {
   let scenario: Scenario = "unconfigured";
   await mockDeliveryAPI(page, () => scenario);
 
   await page.goto("/?project=proj-1&view=delivery");
-  await expect(page.getByRole("link", { name: "Pipeline", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Pipeline", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("Source not configured", { exact: true })).toBeVisible();
 
   scenario = "no-build";
@@ -26,16 +29,16 @@ test("Delivery restores canonical URL state and renders truthful pipeline stages
   await expect(page.getByText("Immutable artifact ready", { exact: true })).toBeVisible();
   await expect(page.getByText("Artifact ready — no deployment observed", { exact: true })).toBeVisible();
 
-  await page.getByRole("link", { name: "Builds", exact: true }).click();
+  await page.getByRole("tab", { name: "Builds", exact: true }).click();
   await page.getByRole("button", { name: /web.*main/i }).click();
   await expect(page).toHaveURL(/tab=builds.*service=svc-web.*build=build-web-1/);
   await page.reload();
   await expect(page.getByRole("button", { name: /web.*main/i })).toHaveAttribute("aria-pressed", "true");
-  await page.getByRole("link", { name: "Deployments", exact: true }).click();
+  await page.getByRole("tab", { name: "Deployments", exact: true }).click();
   await page.goBack();
-  await expect(page.getByRole("link", { name: "Builds", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Builds", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.goForward();
-  await expect(page.getByRole("link", { name: "Deployments", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Deployments", exact: true })).toHaveAttribute("aria-selected", "true");
 
   scenario = "waiting";
   await page.goto("/?project=proj-1&view=delivery&tab=pipeline&service=svc-web");
@@ -84,6 +87,9 @@ test("Delivery browser fixtures preserve failure, rollback, preview, exposure, a
   await page.screenshot({ fullPage: true, path: `${screenshotDir}/source-monorepo-1440x900.png` });
 
   scenario = "unavailable";
+  for (const source of ["installations", "repositories", "bindings"]) {
+    expectHTTPFailure(page, { path: `/api/local/projects/proj-1/github/${source}`, status: 503, method: "GET" });
+  }
   await page.goto("/?project=proj-1&view=delivery&tab=pipeline&service=svc-web");
   await expect(page.getByText("Source unavailable", { exact: true })).toBeVisible();
 });

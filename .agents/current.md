@@ -1,7 +1,8 @@
 # Opsi Current Snapshot
 
 The consolidated manual backlog source fixes are implemented locally.
-`R5_014_SOURCE_COMPLETE / UI_REWORK_AND_BROWSER_E2E_DEFERRED`.
+`R5_014_UI_REWORK_SOURCE_PRESENT / PROJECT_REFRESH_AND_ERROR_GATE_PASS /
+REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
@@ -489,3 +490,41 @@ Dependency status is `OPEN / UPSTREAM_BLOCKED /
 NOT_SHIPPED_TO_BROWSER_RUNTIME / BUILD_TIME_RISK_REMAINS`. No live Agent/VPS
 acceptance occurred, R5-017 remains pending, and no release or production
 readiness claim is made.
+
+## 2026-07-31 UI corrective pass
+
+The canonical frontend now serializes project-switch mutations and rejects
+obsolete load/error/refresh results. Workspace project summaries use one
+30-second TTL cache entry per project with factual value plus `fetchedAt`;
+header refresh force-revalidates visible projects, expired/stale entries
+revalidate on workspace navigation, and failed revalidation keeps the last
+factual value with readable stale/retry state. Removed projects and signed-out
+sessions clear their cached rows. Bootstrap credentials are
+requested only at final confirmation, cleared from DOM/state before the request
+waits, and required again after failure. Native modal/drawer behavior, APG tabs,
+40px targets, complete activity outcomes, and URL-restorable service detail are
+covered by browser regressions. Audit time filtering and paused-by-default
+periodic Logs refresh close the remaining Prompt 01 acceptance gaps without a
+new API or parallel UI path.
+
+One shared six-request limiter now covers every Local API call used to build
+workspace summaries, including per-service telemetry. The stress fixture uses
+three projects with 24 services each, completes all 93 summary requests after
+one telemetry 503, measures maximum concurrency six, and makes no project-switch
+mutation. Obsolete queued work fails before starting and obsolete results cannot
+update cache or UI.
+
+The Playwright gate now records unexpected HTTP responses, request failures,
+application `console.error`, resource errors, and `pageerror`. Intentional HTTP
+or request failures require exact path/query, status, method, and (for browser
+failures) error text declarations in the test that creates them; declarations
+are page-local and reset per test.
+
+Frontend evidence: 33 unit/source tests pass; lint and build pass; all 28
+Playwright Chromium scenarios pass with the exact console/resource gate;
+`make ui-test`, `make ui-lint`, and
+`make ui-build` pass. `make verify` stops before repository verification because
+the environment reports `go1.26.5-X:nodwarf5` and the Makefile requires
+`go1.26.4`. Live Agent/VPS and screen-reader acceptance remain unproven,
+R5-017 remains pending, and organization listing, members/RBAC, and secret
+metadata/listing remain the three backend gaps.
