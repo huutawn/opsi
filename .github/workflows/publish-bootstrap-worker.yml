@@ -1,0 +1,136 @@
+name: publish-bootstrap-worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full reviewed commit currently selected on developer
+        required: true
+        type: string
+      confirmation:
+        description: Type publish-bootstrap-worker to publish the selected developer revision
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-bootstrap-worker-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_digest: ${{ steps.publish.outputs.digest }}
+    env:
+      IMAGE_REPOSITORY: ghcr.io/huutawn/opsi-bootstrap-worker
+      PLATFORM: linux/amd64
+    steps:
+      - name: Enforce trusted source
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          set -eu
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REPOSITORY" = huutawn/opsi
+          test "$GITHUB_REF" = refs/heads/developer
+          test "$SOURCE_REVISION" = "$GITHUB_SHA"
+          test "$CONFIRMATION" = publish-bootstrap-worker
+          printf '%s\n' "$GITHUB_SHA" | grep -Eq '^[0-9a-f]{40}$'
+
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          existing=$(gh api --paginate '/users/huutawn/packages/container/opsi-bootstrap-worker/versions?per_page=100' \
+            --jq ".[] | select(.metadata.container.tags[]? == \"$GITHUB_SHA\") | .id")
+          if test -n "$existing"; then
+            echo "revision tag already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+
+      - name: Record release time
+        id: metadata
+        run: echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish immutable Worker image
+        id: publish
+        env:
+          CREATED_AT: ${{ steps.metadata.outputs.created_at }}
+        run: |
+          set -euo pipefail
+          image_tag="$IMAGE_REPOSITORY:$GITHUB_SHA"
+          docker build \
+            --platform "$PLATFORM" \
+            --target bootstrap-worker \
+            --build-arg "VERSION=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$GITHUB_SHA" \
+            --label "org.opencontainers.image.created=$CREATED_AT" \
+            --tag "$image_tag" \
+            .
+          docker push "$image_tag"
+
+          count=0
+          digest=
+          while IFS= read -r reference; do
+            case "$reference" in
+              "$IMAGE_REPOSITORY"@sha256:*)
+                digest=${reference#*@}
+                count=$((count + 1))
+                ;;
+            esac
+          done < <(docker image inspect "$image_tag" --format '{{range .RepoDigests}}{{println .}}{{end}}')
+          test "$count" -eq 1
+          printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Create release manifest
+        env:
+          CREATED_AT: ${{ steps.metadata.outputs.created_at }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          scripts/bootstrap-worker-release.py manifest \
+            --source-revision "$GITHUB_SHA" \
+            --image-digest "$IMAGE_DIGEST" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --created-at "$CREATED_AT" \
+            --output bootstrap-worker-release.json
+
+      # actions/upload-artifact v4.6.2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bootstrap-worker-release-${{ github.sha }}
+          path: bootstrap-worker-release.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish summary
+        env:
+          CREATED_AT: ${{ steps.metadata.outputs.created_at }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          {
+            echo '## Bootstrap Worker release'
+            echo
+            echo "- Source revision: \`$GITHUB_SHA\`"
+            echo "- Image digest: \`$IMAGE_DIGEST\`"
+            echo "- Image reference: \`$IMAGE_REPOSITORY@$IMAGE_DIGEST\`"
+            echo "- Platform: \`$PLATFORM\`"
+            echo "- Created: \`$CREATED_AT\`"
+            echo "- Manifest artifact: \`bootstrap-worker-release-$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
