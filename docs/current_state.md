@@ -8,6 +8,13 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 `R5_017C_SOURCE_PRESENT / BLOCKED_BY_DEPLOYMENT_GAP_PENDING_REVIEW`.
+The R5-017 publisher run `30700943447` at revision
+`585293ee171454d8f8a6af54d37b3bb49a600ea9` failed before push because the
+repository-root build context did not select `cloud/Dockerfile`. The canonical
+workflow now selects that Dockerfile while retaining root context, and its
+regression test covers the build block, target, platform, immutable tag, and
+post-push manifest ordering. No image, artifact, manifest, staging mutation,
+or Agent VPS mutation resulted from the failed run.
 R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.

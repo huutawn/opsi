@@ -115,9 +115,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("jobs:\n  publish:", self.workflow)
         self.assertIn("group: publish-bootstrap-worker-${{ github.sha }}", self.workflow)
         self.assertIn("revision tag already exists; refusing to overwrite it", self.workflow)
-        self.assertIn("--target bootstrap-worker", self.workflow)
         self.assertIn("ghcr.io/huutawn/opsi-bootstrap-worker", self.workflow)
         self.assertIn("^sha256:[0-9a-f]{64}$", self.workflow)
+
+    def test_build_uses_cloud_dockerfile_and_repository_root_context(self) -> None:
+        start = self.workflow.index("          docker build \\\n")
+        end = self.workflow.index("          docker push", start)
+        build_block = self.workflow[start:end]
+
+        self.assertIn("--file cloud/Dockerfile \\\n", build_block)
+        self.assertIn("--platform \"$PLATFORM\" \\\n", build_block)
+        self.assertIn("--target bootstrap-worker \\\n", build_block)
+        self.assertIn('--tag "$image_tag" \\\n            .\n', build_block)
+        self.assertNotIn("--file Dockerfile", build_block)
+        self.assertTrue((ROOT / "cloud/Dockerfile").is_file())
+        self.assertFalse((ROOT / "Dockerfile").exists())
 
     def test_workflow_emits_provenance_manifest_after_push(self) -> None:
         self.assertLess(self.workflow.index("docker push"), self.workflow.index("Create release manifest"))
