@@ -8,6 +8,8 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 `R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
+`R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is the source-only corrective gate;
+live retry remains operator-run and was not started.
 The R5-017 publisher run `30700943447` at revision
 `585293ee171454d8f8a6af54d37b3bb49a600ea9` failed before push because the
 repository-root build context did not select `cloud/Dockerfile`. The canonical
@@ -58,6 +60,20 @@ barrier helper. Session/config/arm/recreate failures restore only the normal
 Worker profile; restoration failure is separately reported and nonzero. The
 Worker barrier protocol remains unchanged and production configuration still
 rejects every barrier field.
+
+R5-017D2 closes the three follow-up blockers. Barrier config generation keeps
+the production staging `cloud_url` but sets `production: false` and
+`allow_insecure_internal_cloud_url: false`; the generated file remains private,
+exclusive, placeholder-free, and run/session scoped. `--barrier-restart` now
+uses the release helper's dedicated `barrier-replay` operation and accepts only
+an exact `reached` marker with `process_id`. `--barrier-restore` uses the base
+Compose profile through the dedicated helper, without pull, `.env` mutation, or
+binding backup, and proves replacement, binding, RepoDigest, Worker health, and
+Cloud health. Prepare failure cleanup restores first, then disarms only an
+exact `armed` marker and removes only a matching private generated config;
+reached/consumed/completed state is preserved and every restoration/cleanup
+failure is separately reported nonzero. The source tests use fake tools that
+assert Compose argument ordering and canonical helper invocation.
 
 The discovered live rollback target remains
 `ghcr.io/huutawn/opsi-bootstrap-worker@sha256:220d3ecc7dba018871707fc57612b3730259fd90b23dfde454a3299759167cff`

@@ -253,7 +253,9 @@ def contains_placeholder(value: object) -> bool:
     return False
 
 
-def validate_same_image_barrier(args: argparse.Namespace) -> None:
+def validate_same_image_barrier(
+    args: argparse.Namespace, marker_state: str = "armed", expected_session: str | None = None, expected_run: str | None = None
+) -> tuple[str, str]:
     if len(args.compose_file) != 1:
         raise ReleaseError(f"same-image barrier recreation requires exactly {BARRIER_OVERRIDE}")
     raw = pathlib.Path(args.compose_file[0])
@@ -275,6 +277,10 @@ def validate_same_image_barrier(args: argparse.Namespace) -> None:
         raise ReleaseError("run-specific barrier config contains a placeholder")
     if config.get("production") is not False:
         raise ReleaseError("production barrier configuration is forbidden")
+    if config.get("allow_insecure_internal_cloud_url") is not False:
+        raise ReleaseError("barrier configuration must disable insecure internal Cloud URLs")
+    if not isinstance(config.get("cloud_url"), str) or not config["cloud_url"]:
+        raise ReleaseError("barrier configuration must preserve cloud_url")
     barrier = config.get("staging_crash_barrier")
     expected_keys = {"enabled", "environment", "session_id", "run_id", "step", "boundary", "state_dir"}
     if not isinstance(barrier, dict) or set(barrier) != expected_keys:
@@ -293,6 +299,10 @@ def validate_same_image_barrier(args: argparse.Namespace) -> None:
         or barrier.get("state_dir") != "/var/lib/opsi/bootstrap-barrier"
     ):
         raise ReleaseError("run-specific barrier config target is invalid")
+    if expected_session is not None and session_id != expected_session:
+        raise ReleaseError("barrier session does not match the requested operation")
+    if expected_run is not None and run_id != expected_run:
+        raise ReleaseError("barrier run does not match the requested operation")
 
     marker_name = "install_k3s-" + hashlib.sha256((session_id + "\0" + run_id).encode()).hexdigest()[:32] + ".json"
     marker = load_private_json(args._directory / BARRIER_STATE_DIR / marker_name, "barrier marker", 4096)
@@ -303,10 +313,15 @@ def validate_same_image_barrier(args: argparse.Namespace) -> None:
         "run_id": run_id,
         "step": BARRIER_STEP,
         "boundary": BARRIER_BOUNDARY,
-        "state": "armed",
+        "state": marker_state,
     }
+    if marker_state == "reached":
+        if set(marker) != set(expected_marker) | {"process_id"} or not isinstance(marker.get("process_id"), str) or not marker["process_id"]:
+            raise ReleaseError("barrier marker must be reached with a process_id")
+        marker = {key: marker[key] for key in expected_marker}
     if marker != expected_marker:
-        raise ReleaseError("barrier marker must be armed for the configured session and run")
+        raise ReleaseError(f"barrier marker must be {marker_state} for the configured session and run")
+    return session_id, run_id
 
 
 def read_binding(env_file: pathlib.Path) -> tuple[str, list[str], int]:
@@ -390,10 +405,40 @@ def release_target(args: argparse.Namespace, target: str, action: str) -> None:
         os.close(lock_fd)
 
 
+def quiesce_target(args: argparse.Namespace) -> None:
+    compose = compose_prefix(args)
+    lock_path = args._directory / ".env.bootstrap-worker-release.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ReleaseError("another Bootstrap Worker release operation is active") from exc
+        before = current_container_id(compose)
+        existing = current_container_id(compose, include_stopped=True)
+        if before != existing:
+            raise ReleaseError("expected exactly one running Bootstrap Worker before quiesce")
+        expected = f"{IMAGE_REPOSITORY}@{require_digest(args.expected_current_digest)}"
+        if current_image_reference(compose, before) != expected:
+            raise ReleaseError("running Worker digest does not match expected quiesce digest")
+        binding, _, _ = read_binding(args._env_file)
+        if binding != expected:
+            raise ReleaseError("runtime image binding does not match expected quiesce digest")
+        run(compose + ["stop", SERVICE])
+        if run(compose + ["ps", "-q", SERVICE]):
+            raise ReleaseError("Bootstrap Worker remained running after quiesce")
+        if current_container_id(compose, include_stopped=True) != before:
+            raise ReleaseError("Bootstrap Worker container identity changed during quiesce")
+        print(f"quiesced_container_id={before}")
+    finally:
+        os.close(lock_fd)
+
+
 def release_target_locked(
     args: argparse.Namespace, target: str, action: str, expected: str, compose: list[str]
 ) -> None:
-    force_same = bool(getattr(args, "force_recreate_same_image", False))
+    force_same = bool(getattr(args, "force_recreate_same_image", False)) or args.command in {"barrier-replay", "barrier-restore"}
     before_container = current_container_id(compose, include_stopped=force_same)
     running = current_image_reference(compose, before_container)
     binding, lines, index = read_binding(args._env_file)
@@ -401,12 +446,18 @@ def release_target_locked(
         raise ReleaseError(f"running Worker digest mismatch: expected {expected}, found {running}")
     if binding != expected:
         raise ReleaseError(f"runtime image binding mismatch: expected {expected}, found {binding}")
-    if force_same and action != "deploy":
+    if force_same and action not in {"deploy", "barrier-replay", "barrier-restore"}:
         raise ReleaseError("same-image barrier recreation is deploy-only")
     if force_same and target != expected:
         raise ReleaseError("same-image barrier recreation requires target digest to equal expected current digest")
     if force_same:
-        validate_same_image_barrier(args)
+        if args.command == "barrier-replay":
+            validate_same_image_barrier(args, "reached", args.barrier_session_id, args.barrier_run_id)
+        elif args.command == "barrier-restore":
+            if args.compose_file:
+                raise ReleaseError("normal Worker restoration must not use a barrier compose override")
+        else:
+            validate_same_image_barrier(args)
     print(f"rollback_target={expected}")
     if target == expected:
         if force_same:
@@ -421,7 +472,11 @@ def release_target_locked(
             run(["curl", "--fail", "--silent", "--show-error", "--max-time", "15", CLOUD_HEALTH_URL])
             print(f"previous_container_id={before_container}")
             print(f"container_id={after_container}")
-            print("result=same-image-barrier-recreated")
+            result = {
+                "barrier-replay": "barrier-replay-recreated",
+                "barrier-restore": "normal-same-image-restored",
+            }.get(args.command, "same-image-barrier-recreated")
+            print(f"result={result}")
             print(f"final_image={target}")
             return
         wait_for_health(compose, args.health_timeout)
@@ -464,6 +519,11 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--health-timeout", required=True, type=int)
 
 
+def add_barrier_identity_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--barrier-session-id", required=True)
+    parser.add_argument("--barrier-run-id", required=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -479,6 +539,13 @@ def parse_args() -> argparse.Namespace:
     source.add_argument("--image")
     deploy.add_argument("--force-recreate-same-image", action="store_true")
     add_runtime_arguments(deploy)
+    replay = commands.add_parser("barrier-replay")
+    add_runtime_arguments(replay)
+    add_barrier_identity_arguments(replay)
+    restore = commands.add_parser("barrier-restore")
+    add_runtime_arguments(restore)
+    quiesce = commands.add_parser("barrier-quiesce")
+    add_runtime_arguments(quiesce)
     rollback = commands.add_parser("rollback")
     rollback.add_argument("--to", required=True)
     add_runtime_arguments(rollback)
@@ -492,8 +559,14 @@ def main() -> int:
     elif args.command == "deploy":
         target = load_manifest(pathlib.Path(args.manifest))["image_reference"] if args.manifest else args.image
         release_target(args, target, "deploy")
-    else:
+    elif args.command == "rollback":
         release_target(args, args.to, "rollback")
+    elif args.command == "barrier-replay":
+        release_target(args, f"{IMAGE_REPOSITORY}@{require_digest(args.expected_current_digest)}", "barrier-replay")
+    elif args.command == "barrier-quiesce":
+        quiesce_target(args)
+    else:
+        release_target(args, f"{IMAGE_REPOSITORY}@{require_digest(args.expected_current_digest)}", "barrier-restore")
     return 0
 
 

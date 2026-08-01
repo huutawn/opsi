@@ -240,6 +240,8 @@ class RuntimeTests(unittest.TestCase):
 
     def write_barrier(self, session_id: str = "boot-test", run_id: str = "run-test", state: str = "armed") -> pathlib.Path:
         config = {
+            "cloud_url": "http://cloud:9800",
+            "allow_insecure_internal_cloud_url": False,
             "production": False,
             "staging_crash_barrier": {
                 "enabled": True,
@@ -266,6 +268,7 @@ class RuntimeTests(unittest.TestCase):
                     "step": "install_k3s",
                     "boundary": "after_execute_before_checkpoint",
                     "state": state,
+                    **({"process_id": "worker-process-1"} if state != "armed" else {}),
                 }
             ),
             encoding="utf-8",
@@ -317,6 +320,25 @@ class RuntimeTests(unittest.TestCase):
         if override:
             command.extend(("--compose-file", override))
         return command
+
+    def barrier_command(self, operation: str, session_id: str = "boot-test", run_id: str = "run-test") -> list[str]:
+        return [
+            sys.executable,
+            str(HELPER),
+            operation,
+            "--expected-current-digest",
+            DIGEST_A,
+            "--compose-project",
+            "opsi-staging",
+            "--compose-directory",
+            str(self.compose),
+            "--service",
+            "bootstrap-worker",
+            "--health-timeout",
+            "1",
+            *((["--compose-file", "compose.e2e-bootstrap-barrier.yaml"] if operation == "barrier-replay" else [])),
+            *((["--barrier-session-id", session_id, "--barrier-run-id", run_id]) if operation == "barrier-replay" else []),
+        ]
 
     def manifest_a(self) -> pathlib.Path:
         return self.write_manifest(manifest(image_digest=DIGEST_A, image_reference=REF_A))
@@ -472,6 +494,34 @@ class RuntimeTests(unittest.TestCase):
         cloud_down = self.run_helper(self.force_command(), FAKE_CURL_EXIT="22")
         self.assertNotEqual(cloud_down.returncode, 0)
 
+    def test_barrier_replay_requires_reached_marker_and_recreates_via_helper(self) -> None:
+        self.write_env(REF_A)
+        for state in ("armed", "consumed", "completed"):
+            self.write_barrier(state=state)
+            rejected = self.run_helper(self.barrier_command("barrier-replay"))
+            self.assertNotEqual(rejected.returncode, 0)
+            self.log.unlink(missing_ok=True)
+        self.write_barrier(state="reached")
+        result = self.run_helper(self.barrier_command("barrier-replay"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("compose.e2e-bootstrap-barrier.yaml", log)
+        self.assertNotIn(" pull ", " " + log)
+        self.assertIn("result=barrier-replay-recreated", result.stdout)
+
+    def test_barrier_restore_uses_normal_compose_without_binding_mutation(self) -> None:
+        self.write_env(REF_A)
+        before = (self.compose / ".env").read_bytes()
+        result = self.run_helper(self.barrier_command("barrier-restore"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("compose.yaml", log)
+        self.assertNotIn("compose.e2e-bootstrap-barrier.yaml", log)
+        self.assertNotIn(" pull ", " " + log)
+        self.assertFalse(list(self.compose.glob(".env.bootstrap-worker-release.*.bak")))
+        self.assertEqual((self.compose / ".env").read_bytes(), before)
+        self.assertIn("result=normal-same-image-restored", result.stdout)
+
     def test_deploy_targets_only_worker_and_persists_binding_with_barrier(self) -> None:
         self.write_env(REF_A)
         command = self.command(
@@ -544,7 +594,7 @@ class BarrierProcedureTests(unittest.TestCase):
         (self.compose / "compose.e2e-bootstrap-barrier.yaml").write_text("services:\n  bootstrap-worker: {}\n", encoding="utf-8")
         (self.compose / ".env").write_text("OPSI_BOOTSTRAP_WORKER_IMAGE=" + REF_A + "\n", encoding="utf-8")
         (self.compose / "config/bootstrap-worker.json").write_text(
-            json.dumps({"production": True, "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token"}),
+            json.dumps({"cloud_url": "http://cloud:9800", "allow_insecure_internal_cloud_url": True, "production": True, "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token"}),
             encoding="utf-8",
         )
         self.bin = self.root / "bin"
@@ -584,6 +634,15 @@ class BarrierProcedureTests(unittest.TestCase):
                     *" stop bootstrap-worker "*) rm -f "$FAKE_RUNTIME/running" ;;
                     *" up -d --no-deps --force-recreate bootstrap-worker "*)
                       if [[ "$*" == *compose.e2e-bootstrap-barrier.yaml* ]]; then
+                        if test "${FAKE_BARRIER_REACH_BEFORE_FAIL:-0}" = 1; then
+                          python3 - "$FAKE_MARKER" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data.update({"state": "reached", "process_id": "worker-process-1"})
+json.dump(data, open(path, "w"), separators=(",", ":"))
+PY
+                        fi
                         test "${FAKE_BARRIER_UP_EXIT:-0}" = 0 || exit "$FAKE_BARRIER_UP_EXIT"
                         test -f "$FAKE_MARKER" || exit 31
                         grep -q '"state": "armed"\|"state":"armed"' "$FAKE_MARKER" || exit 32
@@ -711,6 +770,15 @@ class BarrierProcedureTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("barrier failure restoration: normal Worker profile restored", result.stdout)
         self.assertTrue((self.runtime / "running").exists())
+        self.assertFalse((self.compose / "config/bootstrap-worker.e2e.json").exists())
+        self.assertFalse(list((self.compose / "barrier-state").glob("install_k3s-*.json")))
+
+    def test_failure_after_reached_preserves_marker_and_generated_config(self) -> None:
+        result = self.run_prepare(FAKE_BARRIER_UP_EXIT="19", FAKE_BARRIER_REACH_BEFORE_FAIL="1")
+        self.assertNotEqual(result.returncode, 0)
+        marker = self.compose / ("barrier-state/install_k3s-" + hashlib.sha256(b"boot-factual\0run-order").hexdigest()[:32] + ".json")
+        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["state"], "reached")
+        self.assertTrue((self.compose / "config/bootstrap-worker.e2e.json").exists())
 
     def test_restoration_failure_is_reported_separately(self) -> None:
         result = self.run_prepare(FAKE_SESSION_CREATE_EXIT="17", FAKE_RESTORE_EXIT="23")
@@ -721,6 +789,10 @@ class BarrierProcedureTests(unittest.TestCase):
     def test_resume_uses_existing_session_without_posting_a_second_one(self) -> None:
         prepared = self.run_prepare()
         self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        state["phase"] = "replay_started"
+        self.state.write_text(json.dumps(state), encoding="utf-8")
+        self.state.chmod(0o600)
         before = self.log.read_text(encoding="utf-8").count("/nodes/bootstrap")
         env = os.environ.copy()
         env.update(

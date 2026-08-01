@@ -59,12 +59,21 @@ with tempfile.TemporaryDirectory() as raw_root:
     state_dir.mkdir(mode=0o700)
     args = ("--state-dir", str(state_dir), "--session-id", session_id, "--run-id", run_id)
     source = root / "bootstrap-worker.json"
-    source.write_text(json.dumps({"production": True, "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token"}))
+    original = {
+        "cloud_url": "http://cloud:9800",
+        "allow_insecure_internal_cloud_url": True,
+        "production": True,
+        "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token",
+    }
+    source.write_text(json.dumps(original))
     output = root / "bootstrap-worker.e2e.json"
     run("configure", "--source-config", str(source), "--output-config", str(output), "--session-id", session_id, "--run-id", run_id)
     configured = json.loads(output.read_text())
     assert output.stat().st_mode & 0o777 == 0o600
     assert configured["production"] is False
+    assert configured["allow_insecure_internal_cloud_url"] is False
+    assert json.loads(source.read_text()) == original
+    assert configured["cloud_url"] == original["cloud_url"]
     assert configured["staging_crash_barrier"]["session_id"] == session_id
     assert configured["staging_crash_barrier"]["run_id"] == run_id
     run("configure", "--source-config", str(source), "--output-config", str(output), "--session-id", session_id, "--run-id", run_id, ok=False)
@@ -86,8 +95,15 @@ with tempfile.TemporaryDirectory() as raw_root:
         os.chmod(marker, 0o600)
         content, inode = marker.read_bytes(), marker.stat().st_ino
         run("arm", *args, ok=False)
+        run("disarm", *args, ok=False)
         assert marker.read_bytes() == content and marker.stat().st_ino == inode
         assert run("status", *args).stdout.strip() == state
+
+    marker.write_text(json.dumps(marker_payload("completed", "worker-1"), separators=(",", ":")))
+    os.chmod(marker, 0o600)
+    content, inode = marker.read_bytes(), marker.stat().st_ino
+    run("disarm", *args, ok=False)
+    assert marker.read_bytes() == content and marker.stat().st_ino == inode
 
     target_mismatches = {
         "version": 2,
@@ -180,8 +196,15 @@ if command == "configure":
     info = os.lstat(source_config)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size < 1 or info.st_size > 65536:
         raise SystemExit("source config must be a bounded regular non-symlink file")
+    def no_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise SystemExit(f"source config contains duplicate field: {key}")
+            result[key] = value
+        return result
     with open(source_config, "r", encoding="utf-8") as source:
-        config = json.load(source)
+        config = json.load(source, object_pairs_hook=no_duplicates)
     if not isinstance(config, dict) or config.get("production") is not True or "staging_crash_barrier" in config:
         raise SystemExit("source config must be the normal production Worker config")
     forbidden = {"bootstrap_worker_token", "ssh_private_key", "ssh_password", "password", "pat", "otp_code", "totp_code", "kubeconfig"}
@@ -197,7 +220,10 @@ if command == "configure":
         elif isinstance(value, str) and "REPLACE_WITH" in value:
             raise SystemExit("source config contains a placeholder")
     validate(config)
+    if not isinstance(config.get("cloud_url"), str) or not config["cloud_url"]:
+        raise SystemExit("source config must contain cloud_url")
     config["production"] = False
+    config["allow_insecure_internal_cloud_url"] = False
     config["staging_crash_barrier"] = {
         "enabled": True,
         "environment": "e2e",
@@ -312,8 +338,17 @@ try:
             raise SystemExit(0)
         with os.fdopen(fd, "rb") as marker:
             info = os.fstat(marker.fileno())
+            if info.st_size > 4096:
+                raise SystemExit("barrier marker is too large")
+            data = marker.read(4097)
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
             raise SystemExit("barrier marker must be a private regular file")
+        try:
+            payload = json.loads(data, parse_constant=reject_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise SystemExit(f"invalid barrier marker JSON: {error}")
+        if not isinstance(payload, dict) or set(payload) != {*base, "state"} or any(payload.get(key) != value for key, value in base.items()) or payload.get("state") != "armed":
+            raise SystemExit("only the exact armed barrier marker may be disarmed")
         os.unlink(name, dir_fd=directory_fd)
         os.fsync(directory_fd)
         print("disarmed")

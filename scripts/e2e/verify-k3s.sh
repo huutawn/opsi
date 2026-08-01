@@ -38,6 +38,11 @@ COMPOSE_DIRECTORY="${OPSI_E2E_STAGING_COMPOSE_DIRECTORY:-$ROOT/deploy/staging-co
 WORKER_DIGEST="${OPSI_E2E_BOOTSTRAP_WORKER_DIGEST:-}"
 BARRIER_HELPER="$ROOT/scripts/e2e/bootstrap-worker-barrier.sh"
 RELEASE_HELPER="$ROOT/scripts/bootstrap-worker-release.py"
+BARRIER_ATTEMPT_SESSION=""
+BARRIER_ATTEMPT_RUN=""
+BARRIER_CONFIG_PATH=""
+BARRIER_STATE_FILE=""
+BARRIER_FORENSIC_PRESERVE=0
 KNOWN_HOSTS_FILE=""
 BOOTSTRAP_REQUEST_FILE=""
 SELF_TEST_DIR=""
@@ -627,12 +632,6 @@ compose_worker() {
     --env-file "$COMPOSE_DIRECTORY/.env" -f "$COMPOSE_DIRECTORY/compose.yaml" "$@"
 }
 
-compose_barrier_worker() {
-  docker compose --project-name opsi-staging --project-directory "$COMPOSE_DIRECTORY" \
-    --env-file "$COMPOSE_DIRECTORY/.env" -f "$COMPOSE_DIRECTORY/compose.yaml" \
-    -f "$COMPOSE_DIRECTORY/compose.e2e-bootstrap-barrier.yaml" "$@"
-}
-
 single_worker_id() {
   local include_stopped="$1" output
   if [ "$include_stopped" = 1 ]; then
@@ -645,14 +644,17 @@ single_worker_id() {
 }
 
 quiesce_worker() {
-  local running existing
-  running="$(single_worker_id 0)" || return 1
-  existing="$(single_worker_id 1)" || return 1
-  [ "$running" = "$existing" ] || return 1
-  compose_worker stop bootstrap-worker >/dev/null || return 1
-  [ -z "$(compose_worker ps -q bootstrap-worker)" ] || return 1
-  [ "$(single_worker_id 1)" = "$existing" ] || return 1
-  printf '%s' "$existing"
+  [ -n "$WORKER_DIGEST" ] || return 1
+  python3 "$RELEASE_HELPER" barrier-quiesce \
+    --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
+    --compose-directory "$COMPOSE_DIRECTORY" --service bootstrap-worker \
+    --health-timeout 180 | python3 -c 'import sys
+for line in sys.stdin:
+    if line.startswith("quiesced_container_id="):
+        print(line.split("=", 1)[1].strip())
+        break
+else:
+    raise SystemExit("canonical quiesce helper returned no container ID")'
 }
 
 wait_worker_healthy() {
@@ -672,7 +674,11 @@ wait_worker_healthy() {
 }
 
 restore_normal_worker() {
-  compose_worker up -d --no-deps --force-recreate bootstrap-worker >/dev/null && wait_worker_healthy
+  [ -n "$WORKER_DIGEST" ] || return 1
+  python3 "$RELEASE_HELPER" barrier-restore \
+    --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
+    --compose-directory "$COMPOSE_DIRECTORY" --service bootstrap-worker \
+    --health-timeout 180
 }
 
 write_barrier_state() {
@@ -708,6 +714,19 @@ else:
     for key in ("schema_version", "run_id", "project_id", "session_id", "pre_barrier_container_id", "compose_directory"):
         if old.get(key) != payload[key]:
             raise SystemExit("barrier state identity changed")
+    allowed = {
+        "session_created": {"armed", "prepare_failed"},
+        "armed": {"barrier_started", "prepare_failed"},
+        "barrier_started": {"replay_started", "prepare_failed"},
+        "replay_started": {"consumed"},
+        "consumed": {"completed"},
+        "completed": {"normal_restored"},
+        "prepare_failed": {"normal_restored"},
+        "normal_restored": {"explicitly_disarmed"},
+        "explicitly_disarmed": set(),
+    }
+    if old.get("phase") not in allowed or phase not in allowed[old.get("phase")]:
+        raise SystemExit("barrier state transition is invalid")
     fd, temporary = tempfile.mkstemp(prefix=".bootstrap-barrier-state.", dir=parent)
     os.fchmod(fd, 0o600)
 try:
@@ -744,6 +763,8 @@ if not isinstance(data, dict) or set(data) != keys or data.get("schema_version")
 identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 if not identifier.fullmatch(data.get("run_id", "")) or not identifier.fullmatch(data.get("session_id", "")):
     raise SystemExit("barrier state identifiers are invalid")
+if data.get("phase") not in {"session_created", "armed", "barrier_started", "replay_started", "consumed", "completed", "prepare_failed", "normal_restored", "explicitly_disarmed"}:
+    raise SystemExit("barrier state phase is invalid")
 for key in ("run_id","project_id","session_id","phase","pre_barrier_container_id","compose_directory"):
     print(data[key])
 PY
@@ -751,6 +772,55 @@ PY
 
 barrier_marker_status() {
   "$BARRIER_HELPER" status --state-dir "$COMPOSE_DIRECTORY/barrier-state" --session-id "$1" --run-id "$2"
+}
+
+cleanup_barrier_marker() {
+  [ -n "$BARRIER_ATTEMPT_SESSION" ] || return 0
+  local status
+  status="$(barrier_marker_status "$BARRIER_ATTEMPT_SESSION" "$BARRIER_ATTEMPT_RUN")" || return 1
+  case "$status" in
+    armed)
+      "$BARRIER_HELPER" disarm --state-dir "$COMPOSE_DIRECTORY/barrier-state" \
+        --session-id "$BARRIER_ATTEMPT_SESSION" --run-id "$BARRIER_ATTEMPT_RUN" >/dev/null || return 1
+      ;;
+    absent|reached|consumed|completed) ;;
+    *) return 1 ;;
+  esac
+}
+
+cleanup_barrier_config() {
+  [ -n "$BARRIER_CONFIG_PATH" ] || return 0
+  if [ -n "$BARRIER_ATTEMPT_SESSION" ]; then
+    local marker_status
+    marker_status="$(barrier_marker_status "$BARRIER_ATTEMPT_SESSION" "$BARRIER_ATTEMPT_RUN")" || return 1
+    case "$marker_status" in
+      reached|consumed|completed) BARRIER_FORENSIC_PRESERVE=1; return 0 ;;
+      armed|absent) ;;
+      *) return 1 ;;
+    esac
+  fi
+  python3 - "$BARRIER_CONFIG_PATH" "$BARRIER_ATTEMPT_SESSION" "$BARRIER_ATTEMPT_RUN" <<'PY'
+import json, os, pathlib, stat, sys
+path, session, run = map(pathlib.Path, sys.argv[1:])
+if not path.exists():
+    raise SystemExit(0)
+info = path.lstat()
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+    raise SystemExit("generated barrier config is not a private regular file")
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"generated barrier config is unreadable: {exc}")
+barrier = data.get("staging_crash_barrier") if isinstance(data, dict) else None
+if not isinstance(barrier, dict) or barrier.get("session_id") != str(session) or barrier.get("run_id") != str(run):
+    raise SystemExit("generated barrier config identity mismatch")
+path.unlink()
+directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
 }
 
 verify_runtime() {
@@ -833,20 +903,57 @@ verify_agent_incident_resolve_audit() {
     > "$ARTIFACT_DIR/incident-resolve-audit.txt" || fail "Agent incident.resolve audit missing"
 }
 
+update_barrier_attempt_phase() {
+  local phase="$1"
+  [ -n "$BARRIER_STATE_FILE" ] && [ -f "$BARRIER_STATE_FILE" ] || return 0
+  local -a context
+  mapfile -t context < <(read_barrier_state "$BARRIER_STATE_FILE") || return 1
+  [ "${#context[@]}" -eq 6 ] || return 1
+  RUN_ID="${context[0]}"; PROJECT_ID="${context[1]}"
+  write_barrier_state "$BARRIER_STATE_FILE" "$phase" "${context[2]}" "${context[4]}"
+}
+
 barrier_prepare_failed() {
   local primary="$1"
   log "barrier prepare failed: $primary"
-  if restore_normal_worker; then
+  local restored=0 marker_clean=0 config_clean=0 state_clean=1
+  update_barrier_attempt_phase prepare_failed || { log "barrier state cleanup failure: could not record prepare_failed"; state_clean=0; }
+  if restore_normal_worker && wait_worker_healthy; then
+    restored=1
     log "barrier failure restoration: normal Worker profile restored"
+    update_barrier_attempt_phase normal_restored || { log "barrier state cleanup failure: could not record normal_restored"; state_clean=0; }
   else
     log "barrier failure restoration failed: normal Worker profile is not healthy"
+    log "barrier marker cleanup failure: skipped because normal Worker restoration failed"
+    log "barrier config cleanup failure: skipped because normal Worker restoration failed"
   fi
+  if [ "$restored" = 1 ]; then
+    if cleanup_barrier_marker; then
+      marker_clean=1
+    else
+      log "barrier marker cleanup failure: protected marker was not safely disarmed"
+    fi
+    if cleanup_barrier_config; then
+      config_clean=1
+    else
+      log "barrier config cleanup failure: generated config was not safely removed"
+    fi
+  fi
+  if [ "$restored" = 1 ] && [ "$marker_clean" = 1 ] && [ "$config_clean" = 1 ] && [ "$BARRIER_FORENSIC_PRESERVE" = 0 ]; then
+    update_barrier_attempt_phase explicitly_disarmed || {
+      log "barrier state cleanup failure: could not record explicitly_disarmed"
+      state_clean=0
+      return 1
+    }
+  fi
+  [ "$restored" = 1 ] && [ "$marker_clean" = 1 ] && [ "$config_clean" = 1 ] && [ "$state_clean" = 1 ] || return 1
   return 1
 }
 
 barrier_prepare() {
   local state_file="$1" body session_id before_container config marker_status
   [ -n "$state_file" ] || { echo "protected barrier state path is required" >&2; return 2; }
+  BARRIER_STATE_FILE="$state_file"
   mkdir -p "$ARTIFACT_DIR"
   for tool in curl docker python3; do command -v "$tool" >/dev/null 2>&1 || { log "barrier prepare missing tool: $tool"; return 1; }; done
   for name in OPSI_E2E_PROJECT_ID OPSI_E2E_VPS_HOST OPSI_E2E_VPS_SSH_USER OPSI_E2E_SSH_KEY_PATH OPSI_E2E_BOOTSTRAP_WORKER_DIGEST; do
@@ -860,7 +967,10 @@ barrier_prepare() {
   LOCAL_SESSION="$(printf '%s' "$body" | json_get local_session 2>/dev/null || true)"
   [ -n "$LOCAL_SESSION" ] || { log "barrier prepare local session token missing"; return 1; }
 
-  before_container="$(quiesce_worker)" || { log "barrier prepare could not prove and quiesce one Worker"; return 1; }
+  if ! before_container="$(quiesce_worker)"; then
+    barrier_prepare_failed "barrier prepare could not prove and quiesce one Worker"
+    return 1
+  fi
   log "barrier ordering: Worker quiesced container=$before_container"
 
   BOOTSTRAP_REQUEST_FILE="$(mktemp)"
@@ -878,6 +988,8 @@ barrier_prepare() {
   rm -f -- "$BOOTSTRAP_REQUEST_FILE"; BOOTSTRAP_REQUEST_FILE=""
   session_id="$(printf '%s' "$body" | json_get id 2>/dev/null || true)"
   [ -n "$session_id" ] || { barrier_prepare_failed "bootstrap response missing factual session_id"; return 1; }
+  BARRIER_ATTEMPT_SESSION="$session_id"
+  BARRIER_ATTEMPT_RUN="$RUN_ID"
   if ! write_barrier_state "$state_file" session_created "$session_id" "$before_container" 1; then
     barrier_prepare_failed "protected session state creation failed"
     return 1
@@ -886,6 +998,7 @@ barrier_prepare() {
 
   install -d -m 700 "$COMPOSE_DIRECTORY/barrier-state" || { barrier_prepare_failed "private barrier state directory creation failed"; return 1; }
   config="$COMPOSE_DIRECTORY/config/bootstrap-worker.e2e.json"
+  BARRIER_CONFIG_PATH="$config"
   if ! "$BARRIER_HELPER" configure \
     --source-config "$COMPOSE_DIRECTORY/config/bootstrap-worker.json" \
     --output-config "$config" --session-id "$session_id" --run-id "$RUN_ID" >/dev/null; then
@@ -928,11 +1041,16 @@ barrier_restart() {
   status="$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" || return 1
   [ "$status" = reached ] || { echo "barrier marker must be reached before replay restart" >&2; return 1; }
   before="$(single_worker_id 0)" || return 1
-  compose_barrier_worker up -d --no-deps --force-recreate bootstrap-worker >/dev/null || return 1
+  RUN_ID="${BARRIER_CONTEXT[0]}"; PROJECT_ID="${BARRIER_CONTEXT[1]}"; WORKER_DIGEST="${OPSI_E2E_BOOTSTRAP_WORKER_DIGEST:-$WORKER_DIGEST}"
+  [ -n "$WORKER_DIGEST" ] || { echo "expected Worker digest is required for replay restart" >&2; return 1; }
+  python3 "$RELEASE_HELPER" barrier-replay \
+    --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
+    --compose-directory "$COMPOSE_DIRECTORY" --service bootstrap-worker \
+    --health-timeout 180 --barrier-session-id "${BARRIER_CONTEXT[2]}" \
+    --barrier-run-id "${BARRIER_CONTEXT[0]}" || return 1
   after="$(single_worker_id 0)" || return 1
   [ "$after" != "$before" ] || { echo "barrier replay restart did not replace the Worker container" >&2; return 1; }
   wait_worker_healthy || return 1
-  RUN_ID="${BARRIER_CONTEXT[0]}"; PROJECT_ID="${BARRIER_CONTEXT[1]}"
   write_barrier_state "$state_file" replay_started "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
   log "barrier replay Worker restarted container=$after session=${BARRIER_CONTEXT[2]} run=$RUN_ID"
 }
@@ -940,8 +1058,12 @@ barrier_restart() {
 barrier_restore() {
   local state_file="$1"
   load_barrier_context "$state_file" || { echo "protected barrier state is invalid" >&2; return 1; }
+  [ "${BARRIER_CONTEXT[3]}" = completed ] || { echo "normal restoration requires completed barrier evidence" >&2; return 1; }
+  [ "$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" = completed ] || { echo "normal restoration requires a completed barrier marker" >&2; return 1; }
+  RUN_ID="${BARRIER_CONTEXT[0]}"; PROJECT_ID="${BARRIER_CONTEXT[1]}"; WORKER_DIGEST="${OPSI_E2E_BOOTSTRAP_WORKER_DIGEST:-$WORKER_DIGEST}"
+  [ -n "$WORKER_DIGEST" ] || { echo "expected Worker digest is required for normal restoration" >&2; return 1; }
   restore_normal_worker || { echo "normal Worker restoration failed" >&2; return 1; }
-  RUN_ID="${BARRIER_CONTEXT[0]}"; PROJECT_ID="${BARRIER_CONTEXT[1]}"
+  wait_worker_healthy || { echo "normal Worker restoration health check failed" >&2; return 1; }
   write_barrier_state "$state_file" normal_restored "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
   log "normal Worker profile restored without recreating dependencies"
 }
@@ -949,11 +1071,20 @@ barrier_restore() {
 resume_bootstrap_session() {
   local state_file="$1"
   load_barrier_context "$state_file" || { echo "protected barrier state is invalid" >&2; return 1; }
-  case "${BARRIER_CONTEXT[3]}" in barrier_started|replay_started|normal_restored) ;; *) echo "barrier state is not resumable" >&2; return 1 ;; esac
+  [ "${BARRIER_CONTEXT[3]}" = replay_started ] || { echo "barrier state is not resumable before replay restart" >&2; return 1; }
   RUN_ID="${BARRIER_CONTEXT[0]}"
   PROJECT_ID="${BARRIER_CONTEXT[1]}"
   [ -n "$ARTIFACT_DIR_EXPLICIT" ] || ARTIFACT_DIR="$ROOT/.tmp/e2e-k3s/$RUN_ID"
-  run_e2e "${BARRIER_CONTEXT[2]}"
+  run_e2e "${BARRIER_CONTEXT[2]}" || return 1
+  if [ "${BARRIER_CONTEXT[3]}" = replay_started ]; then
+    if [ "$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" = consumed ]; then
+      write_barrier_state "$state_file" consumed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
+      BARRIER_CONTEXT[3]=consumed
+    fi
+  fi
+  if [ "${BARRIER_CONTEXT[3]}" = consumed ] && [ "$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" = completed ]; then
+    write_barrier_state "$state_file" completed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
+  fi
 }
 
 manual_cleanup() {

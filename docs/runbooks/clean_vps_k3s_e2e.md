@@ -131,7 +131,8 @@ scripts/e2e/bootstrap-worker-barrier.sh status \
   --session-id <factual-session-id> --run-id "$OPSI_E2E_RUN_ID"
 ```
 
-After `reached`, restart only the Worker through the helper and require
+After `reached`, restart only the Worker through the canonical `barrier-replay`
+helper operation and require
 `consumed -> completed` evidence:
 
 ```bash
@@ -143,8 +144,9 @@ scripts/e2e/verify-k3s.sh --resume-bootstrap-session \
 
 The resume path uses the existing factual session and never POSTs a second
 bootstrap request. Review checkpoint/session events and read-only K3s evidence
-before cleanup. Restore the normal profile, then explicitly disarm; never
-delete or reset `reached`, `consumed`, or `completed` as retry logic:
+before cleanup. Restore the normal profile with `barrier-restore` (no barrier
+override, pull, `.env` mutation, or binding backup), then explicitly disarm;
+never delete or reset `reached`, `consumed`, or `completed` as retry logic:
 
 ```bash
 scripts/e2e/verify-k3s.sh --barrier-restore \
