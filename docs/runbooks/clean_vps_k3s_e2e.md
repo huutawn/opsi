@@ -164,6 +164,13 @@ scripts/e2e/bootstrap-worker-barrier.sh arm \
 sudo chown -R 1000:1000 deploy/staging-control-plane/barrier-state
 ```
 
+`arm` fails if that run's marker already exists; it never overwrites `reached`,
+`consumed`, or `completed` evidence. Inspect it with `status`, then use the
+separate explicit `disarm` command before intentionally arming the same
+session/run again. The helper rejects symlinked state directories and `status`
+rejects non-private, oversized, malformed, trailing, unknown-field,
+target-mismatched, or invalid state/process markers.
+
 Start or recreate only the Bootstrap Worker with the explicit override:
 
 ```bash
@@ -205,8 +212,13 @@ The new Worker must see the `reached` marker, bypass the barrier once, execute
 `install_k3s` again, then write its checkpoint. Confirm the replay from Worker
 logs and the factual session events, followed by `install_agent`,
 `register_agent`, and `ready`. A replay failure must leave the checkpoint at
-`preflight`; retry only after the Worker is restarted again. Finally disarm and
-remove the run-specific state after collecting redacted evidence:
+`preflight`; retry only after the Worker is restarted again. If the factual
+Cloud checkpoint persists but the evidence-only `consumed -> completed` write
+fails, the Worker logs a redacted evidence error and stops that attempt without
+sending a contradictory product failure. The next lease resumes after the
+persisted step; the marker must not be reported or rewritten as `completed`.
+Finally disarm and remove the run-specific state after collecting redacted
+evidence:
 
 ```bash
 sudo scripts/e2e/bootstrap-worker-barrier.sh disarm \

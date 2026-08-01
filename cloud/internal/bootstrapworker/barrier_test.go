@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 func testBarrierConfig(t *testing.T, dir, session, run string) StagingCrashBarrierConfig {
@@ -148,6 +151,58 @@ func TestStagingCrashBarrierReplayAfterRestartAndCompletion(t *testing.T) {
 	state, exists, err := readCrashBarrierState((newStagingCrashBarrier(h.barrier)).statePath())
 	if err != nil || !exists || state.State != crashBarrierCompleted {
 		t.Fatalf("barrier completion state=%+v exists=%v err=%v", state, exists, err)
+	}
+}
+
+func TestStagingCrashBarrierCompletionFailureDoesNotContradictPersistedCheckpoint(t *testing.T) {
+	first := testLease("boot-1", "host-1")
+	second := testLease("boot-1", "host-1")
+	h := newDaemonHarness(t, []Lease{first, second})
+	h.barrier = testBarrierConfig(t, t.TempDir(), "boot-1", "run-1")
+	h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], 1)
+	h.leases[1].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[1], 2)
+	barrier := armTestBarrier(t, h.barrier)
+	if err := writeCrashBarrierState(barrier.statePath(), crashBarrierStateForConfig(h.barrier, crashBarrierReached, "old-worker-process")); err != nil {
+		t.Fatal(err)
+	}
+	var evidenceFailure bool
+	h.checkpointPersisted = func(checkpoint registry.BootstrapCheckpoint) {
+		if checkpoint.NextStepIndex == 2 && !evidenceFailure {
+			evidenceFailure = true
+			if err := os.Chmod(barrier.statePath(), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	var logs strings.Builder
+	h.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	runUntilFinishes(t, h, 1)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !evidenceFailure || len(h.checkpointRequests) != 3 || h.checkpointRequests[0].NextStepIndex != 2 {
+		t.Fatalf("checkpoint evidence failure=%v requests=%+v", evidenceFailure, h.checkpointRequests)
+	}
+	if len(h.finishes) != 1 || h.finishes[0].status != "completed" || h.finishes[0].failureCode != "" {
+		t.Fatalf("post-checkpoint evidence failure produced product failure: %+v", h.finishes)
+	}
+	var ran []string
+	for _, script := range h.executor.runScripts {
+		ran = append(ran, stepIDForScript(script))
+	}
+	if !equalStrings(ran, []string{"install_k3s", "install_agent", "register_agent"}) {
+		t.Fatalf("resume reran persisted step or skipped later work: %v", ran)
+	}
+	data, err := os.ReadFile(barrier.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state crashBarrierState
+	if err := json.Unmarshal(data, &state); err != nil || state.State != crashBarrierConsumed {
+		t.Fatalf("marker was faked completed: state=%+v err=%v", state, err)
+	}
+	if !strings.Contains(logs.String(), "after persisted checkpoint") {
+		t.Fatalf("evidence failure was not surfaced at daemon boundary: %s", logs.String())
 	}
 }
 

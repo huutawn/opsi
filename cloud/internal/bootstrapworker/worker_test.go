@@ -719,6 +719,7 @@ type daemonHarness struct {
 	checkpointErrorCode   string
 	checkpoints           map[string]registry.BootstrapCheckpoint
 	checkpointRequests    []registry.BootstrapCheckpoint
+	checkpointPersisted   func(registry.BootstrapCheckpoint)
 	statusRequests        int
 	events                []string
 	active                int
@@ -798,6 +799,9 @@ func (h *daemonHarness) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		checkpoint.UpdatedAt = &now
 		h.checkpoints[parts[4]] = checkpoint
+		if h.checkpointPersisted != nil {
+			h.checkpointPersisted(checkpoint)
+		}
 		_ = json.NewEncoder(w).Encode(checkpoint)
 	case strings.HasSuffix(r.URL.Path, "/lease-heartbeat"):
 		h.requireLeaseHeaders(w, r)

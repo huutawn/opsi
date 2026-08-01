@@ -835,6 +835,7 @@ run_e2e() {
 self_test() {
   local key_public fixture match original_key forbidden pem_marker expected request incident_fixture
   mkdir -p "$ARTIFACT_DIR"
+  "$ROOT/scripts/e2e/bootstrap-worker-barrier.sh" self-test >/dev/null || fail "bootstrap Worker barrier helper self-test failed"
   OPSI_E2E_APP_SECRET_VALUE="app-secret" OPSI_E2E_TOTP_CODE="123456" OPSI_E2E_OTP_CODE="" \
     bash -c 'printf "token=abc kubeconfig=raw app-secret 123456" | '"$0"' --redact-only' > "$ARTIFACT_DIR/redaction-test.txt"
   grep -q '\[REDACTED\]' "$ARTIFACT_DIR/redaction-test.txt" || fail "self-test redaction failed"

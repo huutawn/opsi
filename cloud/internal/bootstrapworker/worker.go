@@ -517,7 +517,7 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 			if err := w.barrier.afterCheckpoint(lease, step); err != nil {
 				stopHeartbeatAndWait()
 				heartbeatStopped = true
-				return w.reportFailure(ctx, lease, JobFailure{Code: "BOOTSTRAP_CRASH_BARRIER_INVALID", Message: boundedFailureMessage(err.Error()), Retryable: false})
+				return fmt.Errorf("bootstrap crash barrier evidence after persisted checkpoint: %w", err)
 			}
 		}
 	}

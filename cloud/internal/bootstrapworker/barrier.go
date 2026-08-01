@@ -127,9 +127,6 @@ func (b stagingCrashBarrier) beforeCheckpoint(ctx context.Context, lease Lease, 
 	}
 	switch state.State {
 	case crashBarrierArmed:
-		if state.ProcessID != "" {
-			return errors.New("staging_crash_barrier armed marker has a process ID")
-		}
 		state.State = crashBarrierReached
 		state.ProcessID = b.processID
 		if err := writeCrashBarrierState(b.statePath(), state); err != nil {
@@ -137,9 +134,6 @@ func (b stagingCrashBarrier) beforeCheckpoint(ctx context.Context, lease Lease, 
 		}
 		return waitForCrashBarrier(ctx)
 	case crashBarrierReached:
-		if state.ProcessID == "" {
-			return errors.New("staging_crash_barrier reached marker has no process ID")
-		}
 		if state.ProcessID == b.processID {
 			return waitForCrashBarrier(ctx)
 		}
@@ -147,13 +141,9 @@ func (b stagingCrashBarrier) beforeCheckpoint(ctx context.Context, lease Lease, 
 		state.ProcessID = b.processID
 		return writeCrashBarrierState(b.statePath(), state)
 	case crashBarrierConsumed, crashBarrierCompleted:
-		if state.ProcessID == "" {
-			return errors.New("staging_crash_barrier consumed marker has no process ID")
-		}
 		return nil
-	default:
-		return fmt.Errorf("staging_crash_barrier state %q is invalid", state.State)
 	}
+	return nil
 }
 
 func (b stagingCrashBarrier) afterCheckpoint(lease Lease, step BootstrapStep) error {
@@ -177,6 +167,18 @@ func (b stagingCrashBarrier) afterCheckpoint(lease Lease, step BootstrapStep) er
 func (b stagingCrashBarrier) validateState(state crashBarrierState) error {
 	if state.Version != crashBarrierStateVersion || state.Environment != b.cfg.Environment || state.SessionID != b.cfg.SessionID || state.RunID != b.cfg.RunID || state.Step != crashBarrierStep || state.Boundary != crashBarrierBoundary {
 		return errors.New("staging_crash_barrier marker does not match configured target")
+	}
+	switch state.State {
+	case crashBarrierArmed:
+		if state.ProcessID != "" {
+			return errors.New("staging_crash_barrier armed marker has a process ID")
+		}
+	case crashBarrierReached, crashBarrierConsumed, crashBarrierCompleted:
+		if state.ProcessID == "" {
+			return fmt.Errorf("staging_crash_barrier %s marker has no process ID", state.State)
+		}
+	default:
+		return fmt.Errorf("staging_crash_barrier state %q is invalid", state.State)
 	}
 	return nil
 }

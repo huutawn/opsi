@@ -1854,20 +1854,63 @@ func TestLocalLogoutRevokesAndClearsKeychain(t *testing.T) {
 }
 
 func TestBrowserUIDoesNotStorePATOrCallCloudDirectly(t *testing.T) {
-	root := filepath.Clean("../../ui")
+	if err := scanBrowserRuntimeSource(filepath.Clean("../../ui")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBrowserRuntimeSourceScannerBoundaries(t *testing.T) {
+	root := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		path = filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("app/runtime.ts", "localStorage.setItem('pat', 'unsafe')")
+	if err := scanBrowserRuntimeSource(root); err == nil || !strings.Contains(err.Error(), "app/runtime.ts") {
+		t.Fatalf("production storage violation was not detected: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "app/runtime.ts")); err != nil {
+		t.Fatal(err)
+	}
+	write("e2e/evidence.spec.ts", "Object.keys(localStorage)")
+	if err := scanBrowserRuntimeSource(root); err != nil {
+		t.Fatalf("E2E storage evidence was scanned as runtime source: %v", err)
+	}
+	write("features/runtime.tsx", "fetch('http://127.0.0.1:9800/api/projects')")
+	if err := scanBrowserRuntimeSource(root); err == nil || !strings.Contains(err.Error(), "features/runtime.tsx") {
+		t.Fatalf("production direct-Cloud violation was not detected: %v", err)
+	}
+}
+
+func scanBrowserRuntimeSource(root string) error {
 	forbidden := []string{"localStorage", "sessionStorage", "indexedDB", "document.cookie", "NEXT_PUBLIC_CLOUD", "CloudRegistryClient", "cloudURL", "localhost:9800", "127.0.0.1:9800"}
-	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	skipDirs := map[string]bool{"node_modules": true, "e2e": true, "fixtures": true, "testdata": true, "__tests__": true}
+	skipRootDirs := map[string]bool{"out": true, ".next": true, "dist": true, "build": true, "coverage": true, "playwright-report": true, "test-results": true}
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			switch entry.Name() {
-			case "node_modules", "out", ".next":
+		if entry.IsDir() && path != root {
+			relative, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return relErr
+			}
+			if skipDirs[entry.Name()] || (!strings.Contains(relative, string(filepath.Separator)) && skipRootDirs[entry.Name()]) {
 				return filepath.SkipDir
 			}
-			return nil
 		}
 		if !strings.HasSuffix(path, ".ts") && !strings.HasSuffix(path, ".tsx") {
+			return nil
+		}
+		name := entry.Name()
+		if strings.Contains(name, ".test.") || strings.Contains(name, ".generated.") || name == "next-env.d.ts" {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -1877,13 +1920,11 @@ func TestBrowserUIDoesNotStorePATOrCallCloudDirectly(t *testing.T) {
 		text := string(data)
 		for _, token := range forbidden {
 			if strings.Contains(text, token) {
-				t.Fatalf("%s contains forbidden browser auth/direct-cloud token %q", path, token)
+				return fmt.Errorf("%s contains forbidden browser auth/direct-cloud token %q", path, token)
 			}
 		}
 		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 }
 
 type localSecretServer struct {
