@@ -74,6 +74,7 @@ jobs:
           set -euo pipefail
           image_tag="$IMAGE_REPOSITORY:$GITHUB_SHA"
           docker build \
+            --file cloud/Dockerfile \
             --platform "$PLATFORM" \
             --target bootstrap-worker \
             --build-arg "VERSION=$GITHUB_SHA" \
