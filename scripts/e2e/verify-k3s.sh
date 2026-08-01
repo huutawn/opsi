@@ -2,8 +2,10 @@
 set -euo pipefail
 
 MODE="${1:-run}"
+MODE_STATE="${2:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_ID="${OPSI_E2E_RUN_ID:-e2e-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+ARTIFACT_DIR_EXPLICIT="${OPSI_E2E_ARTIFACT_DIR:+1}"
 ARTIFACT_DIR="${OPSI_E2E_ARTIFACT_DIR:-$ROOT/.tmp/e2e-k3s/$RUN_ID}"
 LOCAL_URL="${OPSI_E2E_LOCAL_URL:-http://127.0.0.1:9780}"
 PROJECT_ID="${OPSI_E2E_PROJECT_ID:-}"
@@ -32,6 +34,10 @@ OTP_REQUEST_ID="${OPSI_E2E_OTP_REQUEST_ID:-}"
 OTP_CODE="${OPSI_E2E_OTP_CODE:-}"
 APP_SECRET_VALUE="${OPSI_E2E_APP_SECRET_VALUE:-e2e-secret-value-$RUN_ID}"
 POLL_SECONDS="${OPSI_E2E_POLL_SECONDS:-900}"
+COMPOSE_DIRECTORY="${OPSI_E2E_STAGING_COMPOSE_DIRECTORY:-$ROOT/deploy/staging-control-plane}"
+WORKER_DIGEST="${OPSI_E2E_BOOTSTRAP_WORKER_DIGEST:-}"
+BARRIER_HELPER="$ROOT/scripts/e2e/bootstrap-worker-barrier.sh"
+RELEASE_HELPER="$ROOT/scripts/bootstrap-worker-release.py"
 KNOWN_HOSTS_FILE=""
 BOOTSTRAP_REQUEST_FILE=""
 SELF_TEST_DIR=""
@@ -50,6 +56,10 @@ Usage:
   make verify-e2e-k3s-preflight
   make verify-e2e-k3s
   ./scripts/e2e/verify-k3s.sh --self-test
+  ./scripts/e2e/verify-k3s.sh --barrier-prepare /protected/path/bootstrap-state.json
+  ./scripts/e2e/verify-k3s.sh --barrier-restart /protected/path/bootstrap-state.json
+  ./scripts/e2e/verify-k3s.sh --resume-bootstrap-session /protected/path/bootstrap-state.json
+  ./scripts/e2e/verify-k3s.sh --barrier-restore /protected/path/bootstrap-state.json
 
 Required env for full run:
   OPSI_E2E_PROJECT_ID
@@ -612,6 +622,137 @@ remote_k3s() {
   ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS_FILE" -o ConnectTimeout=20 -i "$OPSI_E2E_SSH_KEY_PATH" -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER@$TARGET_HOST" "$@"
 }
 
+compose_worker() {
+  docker compose --project-name opsi-staging --project-directory "$COMPOSE_DIRECTORY" \
+    --env-file "$COMPOSE_DIRECTORY/.env" -f "$COMPOSE_DIRECTORY/compose.yaml" "$@"
+}
+
+compose_barrier_worker() {
+  docker compose --project-name opsi-staging --project-directory "$COMPOSE_DIRECTORY" \
+    --env-file "$COMPOSE_DIRECTORY/.env" -f "$COMPOSE_DIRECTORY/compose.yaml" \
+    -f "$COMPOSE_DIRECTORY/compose.e2e-bootstrap-barrier.yaml" "$@"
+}
+
+single_worker_id() {
+  local include_stopped="$1" output
+  if [ "$include_stopped" = 1 ]; then
+    output="$(compose_worker ps -a -q bootstrap-worker)" || return 1
+  else
+    output="$(compose_worker ps -q bootstrap-worker)" || return 1
+  fi
+  [ -n "$output" ] && [ "${output#*$'\n'}" = "$output" ] || return 1
+  printf '%s' "$output"
+}
+
+quiesce_worker() {
+  local running existing
+  running="$(single_worker_id 0)" || return 1
+  existing="$(single_worker_id 1)" || return 1
+  [ "$running" = "$existing" ] || return 1
+  compose_worker stop bootstrap-worker >/dev/null || return 1
+  [ -z "$(compose_worker ps -q bootstrap-worker)" ] || return 1
+  [ "$(single_worker_id 1)" = "$existing" ] || return 1
+  printf '%s' "$existing"
+}
+
+wait_worker_healthy() {
+  local start now container status
+  start="$(date +%s)"
+  while :; do
+    container="$(single_worker_id 0 2>/dev/null || true)"
+    if [ -n "$container" ]; then
+      status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
+      [ "$status" = healthy ] && return 0
+      [ "$status" = unhealthy ] && return 1
+    fi
+    now="$(date +%s)"
+    [ $((now - start)) -lt 180 ] || return 1
+    sleep 1
+  done
+}
+
+restore_normal_worker() {
+  compose_worker up -d --no-deps --force-recreate bootstrap-worker >/dev/null && wait_worker_healthy
+}
+
+write_barrier_state() {
+  local path="$1" phase="$2" session_id="$3" container_id="$4" create="${5:-0}"
+  python3 - "$path" "$phase" "$session_id" "$container_id" "$create" "$RUN_ID" "$PROJECT_ID" "$COMPOSE_DIRECTORY" <<'PY'
+import json, os, pathlib, stat, sys, tempfile
+
+raw_path, phase, session_id, container_id, create, run_id, project_id, compose_directory = sys.argv[1:]
+path = pathlib.Path(raw_path)
+if not path.is_absolute():
+    raise SystemExit("barrier state path must be absolute")
+parent = path.parent
+info = parent.lstat()
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+    raise SystemExit("barrier state parent must be a private directory")
+payload = {
+    "schema_version": "opsi.e2e.bootstrap-barrier-state/v1",
+    "run_id": run_id,
+    "project_id": project_id,
+    "session_id": session_id,
+    "phase": phase,
+    "pre_barrier_container_id": container_id,
+    "compose_directory": str(pathlib.Path(compose_directory).resolve()),
+}
+if create == "1":
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    temporary = None
+else:
+    current = path.lstat()
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) or current.st_mode & 0o077 or current.st_size > 4096:
+        raise SystemExit("barrier state must be a private regular file")
+    old = json.loads(path.read_text())
+    for key in ("schema_version", "run_id", "project_id", "session_id", "pre_barrier_container_id", "compose_directory"):
+        if old.get(key) != payload[key]:
+            raise SystemExit("barrier state identity changed")
+    fd, temporary = tempfile.mkstemp(prefix=".bootstrap-barrier-state.", dir=parent)
+    os.fchmod(fd, 0o600)
+try:
+    with os.fdopen(fd, "w") as output:
+        json.dump(payload, output, separators=(",", ":"), sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    if temporary:
+        os.replace(temporary, path)
+finally:
+    if temporary:
+        try: os.unlink(temporary)
+        except FileNotFoundError: pass
+directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+try: os.fsync(directory)
+finally: os.close(directory)
+PY
+}
+
+read_barrier_state() {
+  python3 - "$1" <<'PY'
+import json, os, pathlib, re, stat, sys
+
+path = pathlib.Path(sys.argv[1])
+if not path.is_absolute(): raise SystemExit("barrier state path must be absolute")
+info = path.lstat()
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size < 1 or info.st_size > 4096:
+    raise SystemExit("barrier state must be a private regular file")
+data = json.loads(path.read_text())
+keys = {"schema_version","run_id","project_id","session_id","phase","pre_barrier_container_id","compose_directory"}
+if not isinstance(data, dict) or set(data) != keys or data.get("schema_version") != "opsi.e2e.bootstrap-barrier-state/v1":
+    raise SystemExit("barrier state schema is invalid")
+identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+if not identifier.fullmatch(data.get("run_id", "")) or not identifier.fullmatch(data.get("session_id", "")):
+    raise SystemExit("barrier state identifiers are invalid")
+for key in ("run_id","project_id","session_id","phase","pre_barrier_container_id","compose_directory"):
+    print(data[key])
+PY
+}
+
+barrier_marker_status() {
+  "$BARRIER_HELPER" status --state-dir "$COMPOSE_DIRECTORY/barrier-state" --session-id "$1" --run-id "$2"
+}
+
 verify_runtime() {
   local digest="${1:-}" label="${2:-k3s}"
   remote_k3s "sudo k3s kubectl -n $WORKLOAD_NAMESPACE rollout status deployment/$SERVICE_NAME --timeout=120s" | redact > "$ARTIFACT_DIR/$label-rollout.redacted.log" || fail "K3s rollout status failed"
@@ -692,6 +833,129 @@ verify_agent_incident_resolve_audit() {
     > "$ARTIFACT_DIR/incident-resolve-audit.txt" || fail "Agent incident.resolve audit missing"
 }
 
+barrier_prepare_failed() {
+  local primary="$1"
+  log "barrier prepare failed: $primary"
+  if restore_normal_worker; then
+    log "barrier failure restoration: normal Worker profile restored"
+  else
+    log "barrier failure restoration failed: normal Worker profile is not healthy"
+  fi
+  return 1
+}
+
+barrier_prepare() {
+  local state_file="$1" body session_id before_container config marker_status
+  [ -n "$state_file" ] || { echo "protected barrier state path is required" >&2; return 2; }
+  mkdir -p "$ARTIFACT_DIR"
+  for tool in curl docker python3; do command -v "$tool" >/dev/null 2>&1 || { log "barrier prepare missing tool: $tool"; return 1; }; done
+  for name in OPSI_E2E_PROJECT_ID OPSI_E2E_VPS_HOST OPSI_E2E_VPS_SSH_USER OPSI_E2E_SSH_KEY_PATH OPSI_E2E_BOOTSTRAP_WORKER_DIGEST; do
+    [ -n "${!name:-}" ] || { log "barrier prepare missing env: $name"; return 1; }
+  done
+  [[ "$WORKER_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { log "barrier prepare Worker digest is invalid"; return 1; }
+  [ -f "$COMPOSE_DIRECTORY/compose.yaml" ] && [ -f "$COMPOSE_DIRECTORY/.env" ] || { log "barrier prepare canonical Compose files are missing"; return 1; }
+  validate_ssh_key_path || { log "barrier prepare SSH key validation failed"; return 1; }
+  curl -fsS "$LOCAL_URL/health" >/dev/null || { log "barrier prepare Local API health failed"; return 1; }
+  body="$(curl -fsS "$LOCAL_URL/api/local/session")" || { log "barrier prepare local session unavailable"; return 1; }
+  LOCAL_SESSION="$(printf '%s' "$body" | json_get local_session 2>/dev/null || true)"
+  [ -n "$LOCAL_SESSION" ] || { log "barrier prepare local session token missing"; return 1; }
+
+  before_container="$(quiesce_worker)" || { log "barrier prepare could not prove and quiesce one Worker"; return 1; }
+  log "barrier ordering: Worker quiesced container=$before_container"
+
+  BOOTSTRAP_REQUEST_FILE="$(mktemp)"
+  chmod 600 "$BOOTSTRAP_REQUEST_FILE"
+  if ! write_json "$BOOTSTRAP_REQUEST_FILE" bootstrap "$OPSI_E2E_SSH_KEY_PATH"; then
+    rm -f -- "$BOOTSTRAP_REQUEST_FILE"; BOOTSTRAP_REQUEST_FILE=""
+    barrier_prepare_failed "bootstrap request generation failed"
+    return 1
+  fi
+  if ! body="$(api_file POST "/api/local/projects/$PROJECT_ID/nodes/bootstrap" "$BOOTSTRAP_REQUEST_FILE" bootstrap 1)"; then
+    rm -f -- "$BOOTSTRAP_REQUEST_FILE"; BOOTSTRAP_REQUEST_FILE=""
+    barrier_prepare_failed "bootstrap session creation failed"
+    return 1
+  fi
+  rm -f -- "$BOOTSTRAP_REQUEST_FILE"; BOOTSTRAP_REQUEST_FILE=""
+  session_id="$(printf '%s' "$body" | json_get id 2>/dev/null || true)"
+  [ -n "$session_id" ] || { barrier_prepare_failed "bootstrap response missing factual session_id"; return 1; }
+  if ! write_barrier_state "$state_file" session_created "$session_id" "$before_container" 1; then
+    barrier_prepare_failed "protected session state creation failed"
+    return 1
+  fi
+  log "barrier ordering: factual session created session=$session_id"
+
+  install -d -m 700 "$COMPOSE_DIRECTORY/barrier-state" || { barrier_prepare_failed "private barrier state directory creation failed"; return 1; }
+  config="$COMPOSE_DIRECTORY/config/bootstrap-worker.e2e.json"
+  if ! "$BARRIER_HELPER" configure \
+    --source-config "$COMPOSE_DIRECTORY/config/bootstrap-worker.json" \
+    --output-config "$config" --session-id "$session_id" --run-id "$RUN_ID" >/dev/null; then
+    barrier_prepare_failed "run-specific barrier config generation failed"
+    return 1
+  fi
+  if ! "$BARRIER_HELPER" arm --state-dir "$COMPOSE_DIRECTORY/barrier-state" --session-id "$session_id" --run-id "$RUN_ID" >/dev/null; then
+    barrier_prepare_failed "barrier arm failed"
+    return 1
+  fi
+  marker_status="$(barrier_marker_status "$session_id" "$RUN_ID")" || { barrier_prepare_failed "barrier marker validation failed"; return 1; }
+  [ "$marker_status" = armed ] || { barrier_prepare_failed "barrier marker is not armed"; return 1; }
+  write_barrier_state "$state_file" armed "$session_id" "$before_container" || { barrier_prepare_failed "protected state arm update failed"; return 1; }
+  log "barrier ordering: config generated and marker armed session=$session_id run=$RUN_ID"
+
+  if ! python3 "$RELEASE_HELPER" deploy \
+    --image "ghcr.io/huutawn/opsi-bootstrap-worker@$WORKER_DIGEST" \
+    --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
+    --compose-directory "$COMPOSE_DIRECTORY" --compose-file compose.e2e-bootstrap-barrier.yaml \
+    --service bootstrap-worker --health-timeout 180 --force-recreate-same-image; then
+    barrier_prepare_failed "same-image barrier Worker recreation failed"
+    return 1
+  fi
+  write_barrier_state "$state_file" barrier_started "$session_id" "$before_container" || { barrier_prepare_failed "protected state start update failed"; return 1; }
+  log "barrier ordering: Worker recreated only after marker armed; state=$state_file session=$session_id run=$RUN_ID"
+}
+
+load_barrier_context() {
+  local state_file="$1"
+  mapfile -t BARRIER_CONTEXT < <(read_barrier_state "$state_file") || return 1
+  [ "${#BARRIER_CONTEXT[@]}" -eq 6 ] || return 1
+  [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "${BARRIER_CONTEXT[1]}" ] || return 1
+  [ "$(realpath "$COMPOSE_DIRECTORY")" = "${BARRIER_CONTEXT[5]}" ] || return 1
+}
+
+barrier_restart() {
+  local state_file="$1" before after status
+  load_barrier_context "$state_file" || { echo "protected barrier state is invalid" >&2; return 1; }
+  [ "${BARRIER_CONTEXT[3]}" = barrier_started ] || { echo "barrier state is not ready for replay restart" >&2; return 1; }
+  status="$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" || return 1
+  [ "$status" = reached ] || { echo "barrier marker must be reached before replay restart" >&2; return 1; }
+  before="$(single_worker_id 0)" || return 1
+  compose_barrier_worker up -d --no-deps --force-recreate bootstrap-worker >/dev/null || return 1
+  after="$(single_worker_id 0)" || return 1
+  [ "$after" != "$before" ] || { echo "barrier replay restart did not replace the Worker container" >&2; return 1; }
+  wait_worker_healthy || return 1
+  RUN_ID="${BARRIER_CONTEXT[0]}"; PROJECT_ID="${BARRIER_CONTEXT[1]}"
+  write_barrier_state "$state_file" replay_started "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
+  log "barrier replay Worker restarted container=$after session=${BARRIER_CONTEXT[2]} run=$RUN_ID"
+}
+
+barrier_restore() {
+  local state_file="$1"
+  load_barrier_context "$state_file" || { echo "protected barrier state is invalid" >&2; return 1; }
+  restore_normal_worker || { echo "normal Worker restoration failed" >&2; return 1; }
+  RUN_ID="${BARRIER_CONTEXT[0]}"; PROJECT_ID="${BARRIER_CONTEXT[1]}"
+  write_barrier_state "$state_file" normal_restored "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
+  log "normal Worker profile restored without recreating dependencies"
+}
+
+resume_bootstrap_session() {
+  local state_file="$1"
+  load_barrier_context "$state_file" || { echo "protected barrier state is invalid" >&2; return 1; }
+  case "${BARRIER_CONTEXT[3]}" in barrier_started|replay_started|normal_restored) ;; *) echo "barrier state is not resumable" >&2; return 1 ;; esac
+  RUN_ID="${BARRIER_CONTEXT[0]}"
+  PROJECT_ID="${BARRIER_CONTEXT[1]}"
+  [ -n "$ARTIFACT_DIR_EXPLICIT" ] || ARTIFACT_DIR="$ROOT/.tmp/e2e-k3s/$RUN_ID"
+  run_e2e "${BARRIER_CONTEXT[2]}"
+}
+
 manual_cleanup() {
   mkdir -p "$ARTIFACT_DIR"
   cat > "$ARTIFACT_DIR/cleanup.txt" <<EOF
@@ -704,23 +968,39 @@ EOF
 }
 
 run_e2e() {
+  local resume_session="${1:-}"
+  if [ -n "$resume_session" ] && [ "${OPSI_E2E_BARRIER_HANDOFF_ONLY:-0}" = 1 ]; then
+    mkdir -p "$ARTIFACT_DIR"
+    body="$(api_file GET "/api/local/projects/$PROJECT_ID/bootstrap-sessions/$resume_session" - bootstrap-resume 0)" || return 1
+    [ "$(printf '%s' "$body" | json_get id 2>/dev/null || true)" = "$resume_session" ] || return 1
+    [ "$(printf '%s' "$body" | json_get status 2>/dev/null || true)" = completed ] || return 1
+    log "barrier resume handoff verified existing session=$resume_session without creating a second session"
+    return 0
+  fi
   preflight
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
   local f body id good_deploy_id bad_deploy_id exposure_deploy_id bad_deployment_started_at service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record good_values bad_digest exposure_record exposure_values exposure_preview restored_hash
   local -a good_fields
   local -a exposure_fields
-  BOOTSTRAP_REQUEST_FILE="$(mktemp)"
-  chmod 600 "$BOOTSTRAP_REQUEST_FILE"
-  write_json "$BOOTSTRAP_REQUEST_FILE" bootstrap "$OPSI_E2E_SSH_KEY_PATH"
-  if ! body="$(api_file POST "/api/local/projects/$PROJECT_ID/nodes/bootstrap" "$BOOTSTRAP_REQUEST_FILE" bootstrap 1)"; then
+  if [ -z "$resume_session" ]; then
+    BOOTSTRAP_REQUEST_FILE="$(mktemp)"
+    chmod 600 "$BOOTSTRAP_REQUEST_FILE"
+    write_json "$BOOTSTRAP_REQUEST_FILE" bootstrap "$OPSI_E2E_SSH_KEY_PATH"
+    if ! body="$(api_file POST "/api/local/projects/$PROJECT_ID/nodes/bootstrap" "$BOOTSTRAP_REQUEST_FILE" bootstrap 1)"; then
+      rm -f -- "$BOOTSTRAP_REQUEST_FILE"
+      BOOTSTRAP_REQUEST_FILE=""
+      fail "bootstrap session create failed"
+    fi
     rm -f -- "$BOOTSTRAP_REQUEST_FILE"
     BOOTSTRAP_REQUEST_FILE=""
-    fail "bootstrap session create failed"
+    id="$(printf '%s' "$body" | json_get id)" || fail "bootstrap response missing id"
+  else
+    id="$resume_session"
+    body="$(api_file GET "/api/local/projects/$PROJECT_ID/bootstrap-sessions/$id" - bootstrap-resume 0)" || fail "existing bootstrap session fetch failed"
+    [ "$(printf '%s' "$body" | json_get id 2>/dev/null || true)" = "$id" ] || fail "existing bootstrap session identity mismatch"
+    log "step 0/14 resuming factual bootstrap session=$id without a second create request"
   fi
-  rm -f -- "$BOOTSTRAP_REQUEST_FILE"
-  BOOTSTRAP_REQUEST_FILE=""
-  id="$(printf '%s' "$body" | json_get id)" || fail "bootstrap response missing id"
   wait_json_field "/api/local/projects/$PROJECT_ID/bootstrap-sessions/$id" status completed bootstrap-session
   log "step 1/11 bootstrap completed through local backend: session=$id target=$TARGET_HOST"
   wait_json_field "/api/local/projects/$PROJECT_ID/readiness" status ready readiness
@@ -1032,6 +1312,10 @@ case "$MODE" in
   --preflight) preflight ;;
   --self-test) self_test ;;
   --redact-only) redact ;;
+  --barrier-prepare) barrier_prepare "$MODE_STATE" ;;
+  --barrier-restart) barrier_restart "$MODE_STATE" ;;
+  --resume-bootstrap-session) resume_bootstrap_session "$MODE_STATE" ;;
+  --barrier-restore) barrier_restore "$MODE_STATE" ;;
   run) run_e2e ;;
   *) usage; exit 2 ;;
 esac

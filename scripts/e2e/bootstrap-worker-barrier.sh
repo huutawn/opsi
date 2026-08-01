@@ -4,13 +4,15 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
+  scripts/e2e/bootstrap-worker-barrier.sh configure --source-config FILE --output-config FILE --session-id ID --run-id ID
   scripts/e2e/bootstrap-worker-barrier.sh arm --state-dir DIR --session-id ID --run-id ID
   scripts/e2e/bootstrap-worker-barrier.sh status --state-dir DIR --session-id ID --run-id ID
   scripts/e2e/bootstrap-worker-barrier.sh disarm --state-dir DIR --session-id ID --run-id ID
   scripts/e2e/bootstrap-worker-barrier.sh self-test
 
-This helper manages only the staging install_k3s crash-barrier marker. It does
-not contact Cloud, the Agent VPS, or any public endpoint.
+This helper creates the run-specific non-production config and manages the
+staging install_k3s crash-barrier marker. It does not contact Cloud, the Agent
+VPS, or any public endpoint.
 EOF
 }
 
@@ -56,6 +58,22 @@ with tempfile.TemporaryDirectory() as raw_root:
     state_dir = root / "state"
     state_dir.mkdir(mode=0o700)
     args = ("--state-dir", str(state_dir), "--session-id", session_id, "--run-id", run_id)
+    source = root / "bootstrap-worker.json"
+    source.write_text(json.dumps({"production": True, "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token"}))
+    output = root / "bootstrap-worker.e2e.json"
+    run("configure", "--source-config", str(source), "--output-config", str(output), "--session-id", session_id, "--run-id", run_id)
+    configured = json.loads(output.read_text())
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert configured["production"] is False
+    assert configured["staging_crash_barrier"]["session_id"] == session_id
+    assert configured["staging_crash_barrier"]["run_id"] == run_id
+    run("configure", "--source-config", str(source), "--output-config", str(output), "--session-id", session_id, "--run-id", run_id, ok=False)
+
+    source.write_text(json.dumps({"production": True, "bootstrap_worker_token": "must-not-copy"}))
+    run("configure", "--source-config", str(source), "--output-config", str(root / "secret.json"), "--session-id", session_id, "--run-id", run_id, ok=False)
+    source.write_text(json.dumps({"production": True, "cloud_url": "https://REPLACE_WITH_HOST"}))
+    run("configure", "--source-config", str(source), "--output-config", str(root / "placeholder.json"), "--session-id", session_id, "--run-id", run_id, ok=False)
+
     marker = pathlib.Path(run("arm", *args).stdout.strip())
     original = marker.read_bytes()
     original_inode = marker.stat().st_ino
@@ -128,19 +146,23 @@ fi
 STATE_DIR=""
 SESSION_ID=""
 RUN_ID=""
+SOURCE_CONFIG=""
+OUTPUT_CONFIG=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --state-dir) STATE_DIR="${2:?missing value for --state-dir}"; shift 2 ;;
     --session-id) SESSION_ID="${2:?missing value for --session-id}"; shift 2 ;;
     --run-id) RUN_ID="${2:?missing value for --run-id}"; shift 2 ;;
+    --source-config) SOURCE_CONFIG="${2:?missing value for --source-config}"; shift 2 ;;
+    --output-config) OUTPUT_CONFIG="${2:?missing value for --output-config}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-case "$COMMAND" in arm|status|disarm) ;; *) echo "unknown command: $COMMAND" >&2; usage >&2; exit 2 ;; esac
+case "$COMMAND" in configure|arm|status|disarm) ;; *) echo "unknown command: $COMMAND" >&2; usage >&2; exit 2 ;; esac
 
-python3 - "$COMMAND" "$STATE_DIR" "$SESSION_ID" "$RUN_ID" <<'PY'
+python3 - "$COMMAND" "$STATE_DIR" "$SESSION_ID" "$RUN_ID" "$SOURCE_CONFIG" "$OUTPUT_CONFIG" <<'PY'
 import hashlib
 import json
 import os
@@ -148,12 +170,66 @@ import re
 import stat
 import sys
 
-command, raw_dir, session_id, run_id = sys.argv[1:]
+command, raw_dir, session_id, run_id, source_config, output_config = sys.argv[1:]
 identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-if not raw_dir or not os.path.isabs(raw_dir):
-    raise SystemExit("state directory must be absolute")
 if not identifier.fullmatch(session_id) or not identifier.fullmatch(run_id):
     raise SystemExit("session and run IDs must be bounded safe identifiers")
+if command == "configure":
+    if not os.path.isabs(source_config) or not os.path.isabs(output_config):
+        raise SystemExit("config paths must be absolute")
+    info = os.lstat(source_config)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size < 1 or info.st_size > 65536:
+        raise SystemExit("source config must be a bounded regular non-symlink file")
+    with open(source_config, "r", encoding="utf-8") as source:
+        config = json.load(source)
+    if not isinstance(config, dict) or config.get("production") is not True or "staging_crash_barrier" in config:
+        raise SystemExit("source config must be the normal production Worker config")
+    forbidden = {"bootstrap_worker_token", "ssh_private_key", "ssh_password", "password", "pat", "otp_code", "totp_code", "kubeconfig"}
+    def validate(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key.lower() in forbidden and child not in (None, "", False):
+                    raise SystemExit("source config contains an inline credential")
+                validate(child)
+        elif isinstance(value, list):
+            for child in value:
+                validate(child)
+        elif isinstance(value, str) and "REPLACE_WITH" in value:
+            raise SystemExit("source config contains a placeholder")
+    validate(config)
+    config["production"] = False
+    config["staging_crash_barrier"] = {
+        "enabled": True,
+        "environment": "e2e",
+        "session_id": session_id,
+        "run_id": run_id,
+        "step": "install_k3s",
+        "boundary": "after_execute_before_checkpoint",
+        "state_dir": "/var/lib/opsi/bootstrap-barrier",
+    }
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(output_config, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(config, output, indent=2, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+    except Exception:
+        try:
+            os.unlink(output_config)
+        except FileNotFoundError:
+            pass
+        raise
+    directory_fd = os.open(os.path.dirname(output_config), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    print(output_config)
+    raise SystemExit(0)
+if not raw_dir or not os.path.isabs(raw_dir):
+    raise SystemExit("state directory must be absolute")
 info = os.lstat(raw_dir)
 if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
     raise SystemExit("state directory must be a private directory")

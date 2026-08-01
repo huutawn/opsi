@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -24,9 +25,15 @@ PLATFORM = "linux/amd64"
 COMPOSE_PROJECT = "opsi-staging"
 SERVICE = "bootstrap-worker"
 CLOUD_HEALTH_URL = "https://opsidev.site/health"
+BARRIER_OVERRIDE = "compose.e2e-bootstrap-barrier.yaml"
+BARRIER_CONFIG = pathlib.Path("config/bootstrap-worker.e2e.json")
+BARRIER_STATE_DIR = pathlib.Path("barrier-state")
+BARRIER_STEP = "install_k3s"
+BARRIER_BOUNDARY = "after_execute_before_checkpoint"
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 CREATED_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+BARRIER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 MANIFEST_KEYS = {
     "schema_version",
     "repository",
@@ -191,10 +198,19 @@ def compose_prefix(args: argparse.Namespace) -> list[str]:
     return command
 
 
-def current_image_reference(compose: list[str]) -> str:
-    container = run(compose + ["ps", "-q", SERVICE])
+def current_container_id(compose: list[str], include_stopped: bool = False) -> str:
+    command = compose + ["ps"]
+    if include_stopped:
+        command.append("-a")
+    container = run(command + ["-q", SERVICE])
     if not container or "\n" in container:
-        raise ReleaseError("expected exactly one running Bootstrap Worker container")
+        state = "existing" if include_stopped else "running"
+        raise ReleaseError(f"expected exactly one {state} Bootstrap Worker container")
+    return container
+
+
+def current_image_reference(compose: list[str], container: str | None = None) -> str:
+    container = container or current_container_id(compose)
     image_id = run(["docker", "inspect", "--format", "{{.Image}}", container])
     raw = run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image_id])
     try:
@@ -207,6 +223,90 @@ def current_image_reference(compose: list[str]) -> str:
     if len(matches) != 1:
         raise ReleaseError("running Worker image has no unique canonical repository digest")
     return require_image_reference(matches[0])
+
+
+def load_private_json(path: pathlib.Path, label: str, maximum: int = 65536) -> dict[str, object]:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ReleaseError(f"{label} is unavailable: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+        raise ReleaseError(f"{label} must be a private regular non-symlink file")
+    if info.st_size < 1 or info.st_size > maximum:
+        raise ReleaseError(f"{label} size is invalid")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_object)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError(f"cannot parse {label}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ReleaseError(f"{label} must contain one JSON object")
+    return value
+
+
+def contains_placeholder(value: object) -> bool:
+    if isinstance(value, str):
+        return "REPLACE_WITH" in value
+    if isinstance(value, dict):
+        return any(contains_placeholder(item) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_placeholder(item) for item in value)
+    return False
+
+
+def validate_same_image_barrier(args: argparse.Namespace) -> None:
+    if len(args.compose_file) != 1:
+        raise ReleaseError(f"same-image barrier recreation requires exactly {BARRIER_OVERRIDE}")
+    raw = pathlib.Path(args.compose_file[0])
+    if ".." in raw.parts:
+        raise ReleaseError("barrier compose override must not contain traversal")
+    override = raw if raw.is_absolute() else args._directory / raw
+    expected_override = args._directory / BARRIER_OVERRIDE
+    if override.absolute() != expected_override:
+        raise ReleaseError(f"same-image barrier recreation requires exactly {BARRIER_OVERRIDE}")
+    try:
+        override_info = override.lstat()
+    except OSError as exc:
+        raise ReleaseError(f"barrier compose override is unavailable: {exc}") from exc
+    if stat.S_ISLNK(override_info.st_mode) or not stat.S_ISREG(override_info.st_mode):
+        raise ReleaseError("barrier compose override must be a regular non-symlink file")
+
+    config = load_private_json(args._directory / BARRIER_CONFIG, "run-specific barrier config")
+    if contains_placeholder(config):
+        raise ReleaseError("run-specific barrier config contains a placeholder")
+    if config.get("production") is not False:
+        raise ReleaseError("production barrier configuration is forbidden")
+    barrier = config.get("staging_crash_barrier")
+    expected_keys = {"enabled", "environment", "session_id", "run_id", "step", "boundary", "state_dir"}
+    if not isinstance(barrier, dict) or set(barrier) != expected_keys:
+        raise ReleaseError("run-specific barrier config is malformed")
+    session_id = barrier.get("session_id")
+    run_id = barrier.get("run_id")
+    if not isinstance(session_id, str) or not BARRIER_ID_RE.fullmatch(session_id):
+        raise ReleaseError("run-specific barrier session_id is invalid")
+    if not isinstance(run_id, str) or not BARRIER_ID_RE.fullmatch(run_id):
+        raise ReleaseError("run-specific barrier run_id is invalid")
+    if (
+        barrier.get("enabled") is not True
+        or barrier.get("environment") != "e2e"
+        or barrier.get("step") != BARRIER_STEP
+        or barrier.get("boundary") != BARRIER_BOUNDARY
+        or barrier.get("state_dir") != "/var/lib/opsi/bootstrap-barrier"
+    ):
+        raise ReleaseError("run-specific barrier config target is invalid")
+
+    marker_name = "install_k3s-" + hashlib.sha256((session_id + "\0" + run_id).encode()).hexdigest()[:32] + ".json"
+    marker = load_private_json(args._directory / BARRIER_STATE_DIR / marker_name, "barrier marker", 4096)
+    expected_marker = {
+        "version": 1,
+        "environment": "e2e",
+        "session_id": session_id,
+        "run_id": run_id,
+        "step": BARRIER_STEP,
+        "boundary": BARRIER_BOUNDARY,
+        "state": "armed",
+    }
+    if marker != expected_marker:
+        raise ReleaseError("barrier marker must be armed for the configured session and run")
 
 
 def read_binding(env_file: pathlib.Path) -> tuple[str, list[str], int]:
@@ -293,16 +393,43 @@ def release_target(args: argparse.Namespace, target: str, action: str) -> None:
 def release_target_locked(
     args: argparse.Namespace, target: str, action: str, expected: str, compose: list[str]
 ) -> None:
-    running = current_image_reference(compose)
+    force_same = bool(getattr(args, "force_recreate_same_image", False))
+    before_container = current_container_id(compose, include_stopped=force_same)
+    running = current_image_reference(compose, before_container)
     binding, lines, index = read_binding(args._env_file)
     if running != expected:
         raise ReleaseError(f"running Worker digest mismatch: expected {expected}, found {running}")
     if binding != expected:
         raise ReleaseError(f"runtime image binding mismatch: expected {expected}, found {binding}")
+    if force_same and action != "deploy":
+        raise ReleaseError("same-image barrier recreation is deploy-only")
+    if force_same and target != expected:
+        raise ReleaseError("same-image barrier recreation requires target digest to equal expected current digest")
+    if force_same:
+        validate_same_image_barrier(args)
     print(f"rollback_target={expected}")
     if target == expected:
+        if force_same:
+            run(compose + ["up", "-d", "--no-deps", "--force-recreate", SERVICE])
+            after_container = current_container_id(compose)
+            if after_container == before_container:
+                raise ReleaseError("same-image barrier recreation did not replace the Worker container")
+            wait_for_health(compose, args.health_timeout)
+            actual = current_image_reference(compose, after_container)
+            if actual != target:
+                raise ReleaseError(f"running Worker digest mismatch after barrier recreation: expected {target}, found {actual}")
+            run(["curl", "--fail", "--silent", "--show-error", "--max-time", "15", CLOUD_HEALTH_URL])
+            print(f"previous_container_id={before_container}")
+            print(f"container_id={after_container}")
+            print("result=same-image-barrier-recreated")
+            print(f"final_image={target}")
+            return
         wait_for_health(compose, args.health_timeout)
+        actual = current_image_reference(compose)
+        if actual != target:
+            raise ReleaseError(f"running Worker digest mismatch after no-op deploy: expected {target}, found {actual}")
         run(["curl", "--fail", "--silent", "--show-error", "--max-time", "15", CLOUD_HEALTH_URL])
+        print("result=same-image-no-op")
         print(f"final_image={target}")
         return
     run(["docker", "pull", target])
@@ -350,6 +477,7 @@ def parse_args() -> argparse.Namespace:
     source = deploy.add_mutually_exclusive_group(required=True)
     source.add_argument("--manifest")
     source.add_argument("--image")
+    deploy.add_argument("--force-recreate-same-image", action="store_true")
     add_runtime_arguments(deploy)
     rollback = commands.add_parser("rollback")
     rollback.add_argument("--to", required=True)

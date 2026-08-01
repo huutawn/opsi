@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import pathlib
@@ -160,12 +161,19 @@ class RuntimeTests(unittest.TestCase):
         self.root = pathlib.Path(self.temp.name)
         self.compose = self.root / "staging-control-plane"
         self.compose.mkdir()
+        (self.compose / "config").mkdir()
+        (self.compose / "barrier-state").mkdir(mode=0o700)
         (self.compose / "compose.yaml").write_text("services:\n  bootstrap-worker: {}\n", encoding="utf-8")
         (self.compose / "compose.e2e-bootstrap-barrier.yaml").write_text("services:\n  bootstrap-worker: {}\n", encoding="utf-8")
+        (self.compose / "wrong.yaml").write_text("services: {}\n", encoding="utf-8")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "commands.log"
         self.state = self.root / "recreated"
+        self.runtime = self.root / "runtime"
+        self.runtime.mkdir()
+        (self.runtime / "container").write_text("worker-old", encoding="utf-8")
+        (self.runtime / "running").touch()
         self.write_fake_tools()
 
     def tearDown(self) -> None:
@@ -181,9 +189,15 @@ class RuntimeTests(unittest.TestCase):
                 printf '%s\n' "$*" >> "$FAKE_LOG"
                 if test "$1" = compose; then
                   case " $* " in
-                    *" ps -q bootstrap-worker "*) printf '%s\n' worker-container ;;
+                    *" ps -a -q bootstrap-worker "*) cat "$FAKE_RUNTIME/container" ;;
+                    *" ps -q bootstrap-worker "*) test ! -e "$FAKE_RUNTIME/running" || cat "$FAKE_RUNTIME/container" ;;
+                    *" stop bootstrap-worker "*) rm -f "$FAKE_RUNTIME/running" ;;
                     *" up -d --no-deps --force-recreate bootstrap-worker "*)
                       test "${FAKE_COMPOSE_UP_EXIT:-0}" = 0 || exit "$FAKE_COMPOSE_UP_EXIT"
+                      if test "${FAKE_SAME_CONTAINER:-0}" != 1; then
+                        printf '%s\n' "worker-new-${FAKE_CONTAINER_SUFFIX:-1}" > "$FAKE_RUNTIME/container"
+                      fi
+                      : > "$FAKE_RUNTIME/running"
                       : > "$FAKE_STATE"
                       ;;
                     *) exit 9 ;;
@@ -196,7 +210,7 @@ class RuntimeTests(unittest.TestCase):
                 elif test "$1" = image; then
                   reference=$FAKE_RUNNING_IMAGE
                   if test -e "$FAKE_STATE"; then
-                    reference=$(sed -n 's/^OPSI_BOOTSTRAP_WORKER_IMAGE=//p' "$FAKE_COMPOSE_DIR/.env")
+                    reference=${FAKE_AFTER_IMAGE:-$(sed -n 's/^OPSI_BOOTSTRAP_WORKER_IMAGE=//p' "$FAKE_COMPOSE_DIR/.env")}
                   fi
                   printf '["%s"]\n' "$reference"
                 elif test "$1" = pull; then
@@ -209,7 +223,7 @@ class RuntimeTests(unittest.TestCase):
             encoding="utf-8",
         )
         curl = self.bin / "curl"
-        curl.write_text("#!/usr/bin/env bash\nexit \"${FAKE_CURL_EXIT:-0}\"\n", encoding="utf-8")
+        curl.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$FAKE_LOG\"\nexit \"${FAKE_CURL_EXIT:-0}\"\n", encoding="utf-8")
         docker.chmod(0o755)
         curl.chmod(0o755)
 
@@ -224,10 +238,46 @@ class RuntimeTests(unittest.TestCase):
         path.write_text(json.dumps(value or manifest()), encoding="utf-8")
         return path
 
+    def write_barrier(self, session_id: str = "boot-test", run_id: str = "run-test", state: str = "armed") -> pathlib.Path:
+        config = {
+            "production": False,
+            "staging_crash_barrier": {
+                "enabled": True,
+                "environment": "e2e",
+                "session_id": session_id,
+                "run_id": run_id,
+                "step": "install_k3s",
+                "boundary": "after_execute_before_checkpoint",
+                "state_dir": "/var/lib/opsi/bootstrap-barrier",
+            },
+        }
+        config_path = self.compose / "config/bootstrap-worker.e2e.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        config_path.chmod(0o600)
+        marker_name = "install_k3s-" + hashlib.sha256((session_id + "\0" + run_id).encode()).hexdigest()[:32] + ".json"
+        marker = self.compose / "barrier-state" / marker_name
+        marker.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "environment": "e2e",
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "step": "install_k3s",
+                    "boundary": "after_execute_before_checkpoint",
+                    "state": state,
+                }
+            ),
+            encoding="utf-8",
+        )
+        marker.chmod(0o600)
+        return marker
+
     def command(self, operation: str, target: pathlib.Path | str, expected: str, *extra: str) -> list[str]:
         command = [sys.executable, str(HELPER), operation]
         if operation == "deploy":
-            command.extend(("--manifest", str(target)))
+            option = "--manifest" if isinstance(target, pathlib.Path) else "--image"
+            command.extend((option, str(target)))
         else:
             command.extend(("--to", str(target)))
         command.extend(
@@ -255,11 +305,21 @@ class RuntimeTests(unittest.TestCase):
                 "FAKE_LOG": str(self.log),
                 "FAKE_STATE": str(self.state),
                 "FAKE_COMPOSE_DIR": str(self.compose),
+                "FAKE_RUNTIME": str(self.runtime),
                 "FAKE_RUNNING_IMAGE": changes.pop("FAKE_RUNNING_IMAGE", REF_A),
             }
         )
         env.update(changes)
         return subprocess.run(command, text=True, capture_output=True, env=env, check=False)
+
+    def force_command(self, target: str = REF_A, override: str = "compose.e2e-bootstrap-barrier.yaml") -> list[str]:
+        command = self.command("deploy", target, DIGEST_A, "--force-recreate-same-image")
+        if override:
+            command.extend(("--compose-file", override))
+        return command
+
+    def manifest_a(self) -> pathlib.Path:
+        return self.write_manifest(manifest(image_digest=DIGEST_A, image_reference=REF_A))
 
     def test_mutable_image_reference_is_rejected(self) -> None:
         self.write_env(REF_A)
@@ -276,6 +336,141 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("pull ", log)
         self.assertNotIn(" up ", log)
         self.assertIn(REF_A, (self.compose / ".env").read_text(encoding="utf-8"))
+
+    def test_normal_same_image_deploy_remains_a_noop(self) -> None:
+        self.write_env(REF_A)
+        before = (self.compose / ".env").read_bytes()
+        result = self.run_helper(self.command("deploy", self.manifest_a(), DIGEST_A))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertNotIn(" pull ", " " + log)
+        self.assertNotIn(" up ", " " + log)
+        self.assertEqual((self.compose / ".env").read_bytes(), before)
+        self.assertFalse(list(self.compose.glob(".env.bootstrap-worker-release.*.bak")))
+        self.assertIn("result=same-image-no-op", result.stdout)
+
+    def test_same_image_force_requires_only_the_canonical_override(self) -> None:
+        self.write_env(REF_A)
+        self.write_barrier()
+        cases = {
+            "missing": "",
+            "wrong-name": "wrong.yaml",
+            "traversal": "../outside.yaml",
+            "outside": str(self.root / "outside.yaml"),
+        }
+        (self.root / "outside.yaml").write_text("services: {}\n", encoding="utf-8")
+        for name, override in cases.items():
+            with self.subTest(name=name):
+                self.log.unlink(missing_ok=True)
+                result = self.run_helper(self.force_command(override=override))
+                self.assertNotEqual(result.returncode, 0)
+                if self.log.exists():
+                    self.assertNotIn(" up ", " " + self.log.read_text(encoding="utf-8"))
+
+        canonical = self.compose / "compose.e2e-bootstrap-barrier.yaml"
+        canonical.unlink()
+        canonical.symlink_to(self.compose / "wrong.yaml")
+        result = self.run_helper(self.force_command())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_same_image_force_rejects_invalid_config_and_marker(self) -> None:
+        self.write_env(REF_A)
+        marker = self.write_barrier()
+        config = self.compose / "config/bootstrap-worker.e2e.json"
+
+        config.unlink()
+        missing = self.run_helper(self.force_command())
+        self.assertNotEqual(missing.returncode, 0)
+
+        marker.unlink(missing_ok=True)
+        self.write_barrier()
+        config.chmod(0o644)
+        insecure = self.run_helper(self.force_command())
+        self.assertNotEqual(insecure.returncode, 0)
+
+        marker = self.write_barrier()
+        value = json.loads(config.read_text(encoding="utf-8"))
+        value["cloud_url"] = "https://REPLACE_WITH_HOST"
+        config.write_text(json.dumps(value), encoding="utf-8")
+        config.chmod(0o600)
+        placeholder = self.run_helper(self.force_command())
+        self.assertNotEqual(placeholder.returncode, 0)
+
+        marker = self.write_barrier()
+        marker.unlink()
+        absent = self.run_helper(self.force_command())
+        self.assertNotEqual(absent.returncode, 0)
+
+        marker = self.write_barrier(state="reached")
+        not_armed = self.run_helper(self.force_command())
+        self.assertNotEqual(not_armed.returncode, 0)
+
+        marker = self.write_barrier()
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload["run_id"] = "run-other"
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+        marker.chmod(0o600)
+        mismatch = self.run_helper(self.force_command())
+        self.assertNotEqual(mismatch.returncode, 0)
+
+    def test_same_image_force_rejects_target_and_precondition_mismatches_before_mutation(self) -> None:
+        self.write_env(REF_A)
+        target = self.run_helper(self.force_command(REF_B))
+        self.assertNotEqual(target.returncode, 0)
+        self.assertNotIn(" up ", " " + self.log.read_text(encoding="utf-8"))
+
+        self.log.unlink()
+        running = self.run_helper(self.force_command(), FAKE_RUNNING_IMAGE=REF_B)
+        self.assertNotEqual(running.returncode, 0)
+        self.assertNotIn(" up ", " " + self.log.read_text(encoding="utf-8"))
+
+        self.log.unlink()
+        self.write_env(REF_B)
+        binding = self.run_helper(self.force_command())
+        self.assertNotEqual(binding.returncode, 0)
+        self.assertNotIn(" up ", " " + self.log.read_text(encoding="utf-8"))
+
+    def test_valid_same_image_force_recreates_one_worker_without_binding_mutation(self) -> None:
+        self.write_env(REF_A)
+        self.write_barrier()
+        before = (self.compose / ".env").read_bytes()
+        result = self.run_helper(self.force_command())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertEqual(log.count("up -d --no-deps --force-recreate bootstrap-worker"), 1)
+        self.assertNotIn(" pull ", " " + log)
+        self.assertNotIn(" cloud", log)
+        self.assertNotIn(" postgres", log)
+        self.assertNotIn(" reverse-proxy", log)
+        self.assertEqual((self.compose / ".env").read_bytes(), before)
+        self.assertFalse(list(self.compose.glob(".env.bootstrap-worker-release.*.bak")))
+        self.assertIn("previous_container_id=worker-old", result.stdout)
+        self.assertIn("container_id=worker-new-1", result.stdout)
+        self.assertIn("result=same-image-barrier-recreated", result.stdout)
+
+    def test_same_image_force_fails_when_container_digest_or_health_evidence_is_wrong(self) -> None:
+        self.write_env(REF_A)
+        self.write_barrier()
+        unchanged = self.run_helper(self.force_command(), FAKE_SAME_CONTAINER="1")
+        self.assertNotEqual(unchanged.returncode, 0)
+
+        self.state.unlink(missing_ok=True)
+        (self.runtime / "container").write_text("worker-old", encoding="utf-8")
+        self.log.unlink(missing_ok=True)
+        wrong_digest = self.run_helper(self.force_command(), FAKE_AFTER_IMAGE=REF_B)
+        self.assertNotEqual(wrong_digest.returncode, 0)
+
+        self.state.unlink(missing_ok=True)
+        (self.runtime / "container").write_text("worker-old", encoding="utf-8")
+        self.log.unlink(missing_ok=True)
+        unhealthy = self.run_helper(self.force_command(), FAKE_HEALTH="unhealthy")
+        self.assertNotEqual(unhealthy.returncode, 0)
+
+        self.state.unlink(missing_ok=True)
+        (self.runtime / "container").write_text("worker-old", encoding="utf-8")
+        self.log.unlink(missing_ok=True)
+        cloud_down = self.run_helper(self.force_command(), FAKE_CURL_EXIT="22")
+        self.assertNotEqual(cloud_down.returncode, 0)
 
     def test_deploy_targets_only_worker_and_persists_binding_with_barrier(self) -> None:
         self.write_env(REF_A)
@@ -336,6 +531,221 @@ class RuntimeTests(unittest.TestCase):
             FAKE_HEALTH="unhealthy",
         )
         self.assertNotEqual(failed.returncode, 0)
+
+
+class BarrierProcedureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.compose = self.root / "staging-control-plane"
+        (self.compose / "config").mkdir(parents=True)
+        (self.compose / "barrier-state").mkdir(mode=0o700)
+        (self.compose / "compose.yaml").write_text("services:\n  bootstrap-worker: {}\n", encoding="utf-8")
+        (self.compose / "compose.e2e-bootstrap-barrier.yaml").write_text("services:\n  bootstrap-worker: {}\n", encoding="utf-8")
+        (self.compose / ".env").write_text("OPSI_BOOTSTRAP_WORKER_IMAGE=" + REF_A + "\n", encoding="utf-8")
+        (self.compose / "config/bootstrap-worker.json").write_text(
+            json.dumps({"production": True, "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token"}),
+            encoding="utf-8",
+        )
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.runtime = self.root / "runtime"
+        self.runtime.mkdir()
+        (self.runtime / "container").write_text("worker-old", encoding="utf-8")
+        (self.runtime / "running").touch()
+        self.log = self.root / "commands.log"
+        self.artifacts = self.root / "artifacts"
+        self.artifacts.mkdir(mode=0o700)
+        self.state_parent = self.root / "protected"
+        self.state_parent.mkdir(mode=0o700)
+        self.state = self.state_parent / "bootstrap-state.json"
+        self.key = self.root / "operator-key"
+        pem_marker = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
+        pem_end = "-----END OPENSSH " + "PRIVATE KEY-----"
+        self.key.write_text(pem_marker + "\nfixture\n" + pem_end + "\n", encoding="utf-8")
+        self.key.chmod(0o600)
+        self.write_fake_tools()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def write_fake_tools(self) -> None:
+        docker = self.bin / "docker"
+        docker.write_text(
+            textwrap.dedent(
+                r'''
+                #!/usr/bin/env bash
+                set -eu
+                printf 'docker %s\n' "$*" >> "$FAKE_LOG"
+                if test "$1" = compose; then
+                  case " $* " in
+                    *" ps -a -q bootstrap-worker "*) cat "$FAKE_RUNTIME/container" ;;
+                    *" ps -q bootstrap-worker "*) test ! -e "$FAKE_RUNTIME/running" || cat "$FAKE_RUNTIME/container" ;;
+                    *" stop bootstrap-worker "*) rm -f "$FAKE_RUNTIME/running" ;;
+                    *" up -d --no-deps --force-recreate bootstrap-worker "*)
+                      if [[ "$*" == *compose.e2e-bootstrap-barrier.yaml* ]]; then
+                        test "${FAKE_BARRIER_UP_EXIT:-0}" = 0 || exit "$FAKE_BARRIER_UP_EXIT"
+                        test -f "$FAKE_MARKER" || exit 31
+                        grep -q '"state": "armed"\|"state":"armed"' "$FAKE_MARKER" || exit 32
+                      else
+                        test "${FAKE_RESTORE_EXIT:-0}" = 0 || exit "$FAKE_RESTORE_EXIT"
+                      fi
+                      printf 'worker-new\n' > "$FAKE_RUNTIME/container"
+                      : > "$FAKE_RUNTIME/running"
+                      ;;
+                    *) exit 9 ;;
+                  esac
+                elif test "$1" = inspect; then
+                  case " $* " in
+                    *State.Health*) printf '%s\n' "${FAKE_HEALTH:-healthy}" ;;
+                    *) printf 'image-id\n' ;;
+                  esac
+                elif test "$1" = image; then
+                  printf '["%s"]\n' "${FAKE_IMAGE:-$FAKE_RUNNING_IMAGE}"
+                else
+                  exit 9
+                fi
+                '''
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        curl = self.bin / "curl"
+        curl.write_text(
+            textwrap.dedent(
+                r'''
+                #!/usr/bin/env bash
+                set -eu
+                original="$*"
+                printf 'curl %s\n' "$original" >> "$FAKE_LOG"
+                if [[ "$*" == *"/health"* ]]; then exit "${FAKE_HEALTH_CURL_EXIT:-0}"; fi
+                if [[ "$*" == *"/api/local/session"* ]]; then printf '%s\n' '{"local_session":"local-session"}'; exit 0; fi
+                out=""; status=200; previous=""
+                while test "$#" -gt 0; do
+                  case "$1" in
+                    -o) out="$2"; shift 2 ;;
+                    -w) shift 2 ;;
+                    -X) previous="$2"; shift 2 ;;
+                    *) shift ;;
+                  esac
+                done
+                if test "$previous" = POST; then
+                  status=201
+                  test "${FAKE_SESSION_CREATE_EXIT:-0}" = 0 || exit "$FAKE_SESSION_CREATE_EXIT"
+                  test -z "$out" || printf '%s\n' '{"id":"boot-factual","status":"pending"}' > "$out"
+                  printf '%s' "$status"
+                  exit 0
+                fi
+                if [[ "$original" == *"bootstrap-sessions/boot-factual"* ]]; then
+                  test -z "$out" || printf '%s\n' '{"id":"boot-factual","status":"completed"}' > "$out"
+                fi
+                printf '%s' "$status"
+                exit 0
+                '''
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        docker.chmod(0o755)
+        curl.chmod(0o755)
+
+    def run_prepare(self, **changes: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": str(self.bin) + os.pathsep + env["PATH"],
+                "FAKE_LOG": str(self.log),
+                "FAKE_RUNTIME": str(self.runtime),
+                "FAKE_MARKER": str(self.compose / ("barrier-state/install_k3s-" + hashlib.sha256(b"boot-factual\0run-order").hexdigest()[:32] + ".json")),
+                "FAKE_RUNNING_IMAGE": REF_A,
+                "OPSI_E2E_PROJECT_ID": "project-1",
+                "OPSI_E2E_LOCAL_URL": "http://local",
+                "OPSI_E2E_VPS_HOST": "fixture-host",
+                "OPSI_E2E_VPS_SSH_USER": "operator",
+                "OPSI_E2E_SSH_KEY_PATH": str(self.key),
+                "OPSI_E2E_BOOTSTRAP_WORKER_DIGEST": DIGEST_A,
+                "OPSI_E2E_RUN_ID": "run-order",
+                "OPSI_E2E_ARTIFACT_DIR": str(self.artifacts),
+                "OPSI_E2E_STAGING_COMPOSE_DIRECTORY": str(self.compose),
+            }
+        )
+        env.update(changes)
+        return subprocess.run(
+            [str(ROOT / "scripts/e2e/verify-k3s.sh"), "--barrier-prepare", str(self.state)],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+    def test_quiesce_session_arm_and_start_order_is_factual(self) -> None:
+        result = self.run_prepare()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertLess(log.index("stop bootstrap-worker"), log.index("/nodes/bootstrap"))
+        self.assertLess(log.index("/nodes/bootstrap"), log.index("up -d --no-deps --force-recreate bootstrap-worker"))
+        self.assertNotIn("lease", log)
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(state["session_id"], "boot-factual")
+        self.assertEqual(state["run_id"], "run-order")
+        self.assertEqual(state["phase"], "barrier_started")
+        self.assertNotIn("PRIVATE KEY", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("local-session", result.stdout + result.stderr)
+
+    def test_session_creation_failure_restores_normal_worker(self) -> None:
+        result = self.run_prepare(FAKE_SESSION_CREATE_EXIT="17")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("barrier failure restoration: normal Worker profile restored", result.stdout)
+        self.assertTrue((self.runtime / "running").exists())
+        self.assertFalse((self.compose / "config/bootstrap-worker.e2e.json").exists())
+
+    def test_arm_failure_restores_normal_worker(self) -> None:
+        marker = self.compose / ("barrier-state/install_k3s-" + hashlib.sha256(b"boot-factual\0run-order").hexdigest()[:32] + ".json")
+        marker.write_text('{"version":1,"state":"armed"}', encoding="utf-8")
+        marker.chmod(0o600)
+        result = self.run_prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("barrier failure restoration: normal Worker profile restored", result.stdout)
+        self.assertTrue((self.runtime / "running").exists())
+
+    def test_barrier_recreate_failure_restores_normal_worker(self) -> None:
+        result = self.run_prepare(FAKE_BARRIER_UP_EXIT="19")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("barrier failure restoration: normal Worker profile restored", result.stdout)
+        self.assertTrue((self.runtime / "running").exists())
+
+    def test_restoration_failure_is_reported_separately(self) -> None:
+        result = self.run_prepare(FAKE_SESSION_CREATE_EXIT="17", FAKE_RESTORE_EXIT="23")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("barrier failure restoration failed", result.stdout)
+        self.assertFalse((self.runtime / "running").exists())
+
+    def test_resume_uses_existing_session_without_posting_a_second_one(self) -> None:
+        prepared = self.run_prepare()
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        before = self.log.read_text(encoding="utf-8").count("/nodes/bootstrap")
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": str(self.bin) + os.pathsep + env["PATH"],
+                "FAKE_LOG": str(self.log),
+                "FAKE_RUNTIME": str(self.runtime),
+                "FAKE_RUNNING_IMAGE": REF_A,
+                "OPSI_E2E_PROJECT_ID": "project-1",
+                "OPSI_E2E_LOCAL_URL": "http://local",
+                "OPSI_E2E_ARTIFACT_DIR": str(self.artifacts),
+                "OPSI_E2E_STAGING_COMPOSE_DIRECTORY": str(self.compose),
+                "OPSI_E2E_BARRIER_HANDOFF_ONLY": "1",
+            }
+        )
+        resumed = subprocess.run(
+            [str(ROOT / "scripts/e2e/verify-k3s.sh"), "--resume-bootstrap-session", str(self.state)],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(resumed.returncode, 0, resumed.stderr + resumed.stdout)
+        self.assertEqual(self.log.read_text(encoding="utf-8").count("/nodes/bootstrap"), before)
+        self.assertIn("without creating a second session", resumed.stdout)
 
 
 if __name__ == "__main__":
