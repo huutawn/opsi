@@ -7,9 +7,40 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_017C_SOURCE_PRESENT / BLOCKED_BY_DEPLOYMENT_GAP_PENDING_REVIEW`.
 R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
+
+R5-017C adds one manual, canonical Bootstrap Worker release path. The
+repository-root `cloud/Dockerfile` target `bootstrap-worker` remains the only
+image implementation. A fork/ref/confirmation-gated GitHub Actions workflow
+publishes only `ghcr.io/huutawn/opsi-bootstrap-worker`, records the full source
+revision in an immutable lookup tag and OCI labels, emits the registry digest,
+refuses revision-tag overwrite, and uploads a strict
+`opsi.bootstrap-worker.release/v1` JSON manifest for the factual `linux/amd64`
+platform. The manifest is provenance metadata and is not described as a signed
+attestation.
+
+The staging helper validates either that manifest or an immutable canonical
+image reference, requires the running Worker digest and persisted `.env`
+binding to match an operator-supplied expected digest, pulls before mutation,
+atomically backs up and changes only `OPSI_BOOTSTRAP_WORKER_IMAGE`, and recreates
+only `bootstrap-worker` with `--no-deps`. A host-local lock serializes release
+operations. It waits for Worker health, verifies
+the actual container repository digest, and checks public Cloud health before
+printing success. Explicit rollback uses the same checks and persists the prior
+digest. Fake Docker/Compose tests cover fork and mutable-reference rejection,
+strict digest/revision/manifest validation, pre-mutation mismatch failure,
+single-service targeting, health failures, rollback, barrier-override
+compatibility, and binding persistence.
+
+The discovered live rollback target remains
+`ghcr.io/huutawn/opsi-bootstrap-worker@sha256:220d3ecc7dba018871707fc57612b3730259fd90b23dfde454a3299759167cff`
+at Worker revision `0669bb5`. No image was published, no staging service was
+recreated, and no Agent VPS was accessed or mutated by R5-017C. R5-017 remains
+blocked until the new source revision is reviewed and the real publish/deploy
+evidence is accepted.
 
 R5-015 Agent-local Kubernetes identity is the exact `opsi.dev/service`
 ServiceKey. Opsi-managed Pods without a valid canonical service label are
@@ -48,7 +79,7 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-07-31 |
+| Last updated | 2026-08-01 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |

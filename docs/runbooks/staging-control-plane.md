@@ -36,6 +36,8 @@ persistent Caddy state.
   to the Cloudflare zone, and a maintenance/rollback window.
 - Immutable Cloud and Bootstrap Worker image references are available. Do not
   use `latest`.
+- Bootstrap Worker publication and single-service digest rollout use the
+  canonical procedure in `docs/runbooks/bootstrap-worker-release.md`.
 - TCP 443 can be opened to the origin during cutover. Preserve a separate,
   tested administrative recovery path before restricting origin traffic.
 - PostgreSQL backup/restore and the prior deployment rollback path are known.
@@ -218,6 +220,10 @@ Start the staging project only after validation:
 make staging-control-plane-up
 docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml ps
 ```
+
+Changing only the Bootstrap Worker image is not a full-stack startup. Use the
+release helper in `docs/runbooks/bootstrap-worker-release.md`; it persists one
+immutable image binding and recreates only `bootstrap-worker` with `--no-deps`.
 
 Cloud applies its PostgreSQL migrations during startup. Confirm all four health
 checks are healthy and inspect only redacted service errors. Do not dump the

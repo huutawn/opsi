@@ -19,7 +19,7 @@ DEV_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/dev-contro
 STAGING_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml
 STAGING_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env.example -f deploy/staging-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build build-cli-release verify-cli-release agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres build build-cli-release verify-cli-release agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -28,6 +28,9 @@ check-toolchain:
 
 verify-r5-005-github-app-preflight:
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify_r5_005_github_app_preflight_test.py
+
+verify-bootstrap-worker-release:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/bootstrap-worker-release-test.py
 
 verify: check-toolchain source-hygiene lint test ui-test ui-build ui-lint
 
@@ -139,7 +142,7 @@ lint:
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 
-source-hygiene: verify-source-package-policy
+source-hygiene: verify-source-package-policy verify-bootstrap-worker-release
 	$(RUN) ./scripts/source-package.sh check-tree
 	@if sed -n '/func (s \*Service) expireDeploymentLeasesLocked/,/^}/p' cloud/internal/registry/service.go | rg -n 'delete\(s\.deployLocks'; then echo "canonical lease exhaustion deletes service ownership"; exit 1; fi
 	@if sed -n '/func expireDeploymentLeases(/,/^}/p' cloud/internal/registry/postgres.go | rg -n 'DELETE FROM service_deployment_locks'; then echo "Postgres canonical lease exhaustion deletes service ownership"; exit 1; fi
@@ -230,7 +233,7 @@ verify-staging-control-plane-policy:
 verify-staging-control-plane-caddy-smoke: staging-control-plane-validate
 	@./scripts/e2e/verify-staging-control-plane-caddy.sh
 
-staging-control-plane-validate-source: verify-staging-control-plane-policy
+staging-control-plane-validate-source: verify-staging-control-plane-policy verify-bootstrap-worker-release
 	@python3 scripts/validate-staging-control-plane.py --source
 	@command -v docker >/dev/null 2>&1 || { echo "Docker is required for Compose parsing"; exit 1; }
 	@docker compose version >/dev/null 2>&1 || { echo "Docker Compose plugin is required"; exit 1; }
