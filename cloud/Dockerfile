@@ -8,8 +8,8 @@ COPY cloud/go.mod cloud/go.sum ./
 RUN go mod download
 COPY cloud/cmd ./cmd
 COPY cloud/internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/opsi-cloud ./cmd/opsi-cloud && \
-    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker
+RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/opsi-cloud ./cmd/opsi-cloud && \
+    CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker
 
 FROM alpine:3.22 AS runtime-base
 RUN apk add --no-cache ca-certificates && \

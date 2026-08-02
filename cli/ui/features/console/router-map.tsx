@@ -5,7 +5,8 @@ import { SecurityView } from "@/features/security/security-view";
 import { SettingsView } from "@/features/settings/settings-view";
 import { groupedTabs, routeHref, type ConsoleRoute } from "@/features/console/navigation";
 import { OverviewView } from "@/features/overview/overview-view";
-import { ProjectsView } from "@/features/projects/projects-view";
+import { ProjectsView, WorkspaceHomeView } from "@/features/projects/projects-view";
+import { Tabs, tabPanelProps } from "@/components/navigation/tabs";
 import { ServicesView } from "@/features/services/services-view";
 import type { ConsoleController } from "@/features/console/types";
 
@@ -20,16 +21,19 @@ const tabViewMap: Record<string, Record<string, (props: { console: ConsoleContro
 
 export function routeView(route: ConsoleRoute, console: ConsoleController) {
   if (route.view === "projects") return <ProjectsView console={console} />;
+  if (route.view === "home") return <WorkspaceHomeView console={console} />;
   if (route.view === "settings") return <SettingsView console={console} />;
   const CoreView = coreViewMap[route.view as keyof typeof coreViewMap];
   if (CoreView) return <CoreView console={console} />;
   const View = tabViewMap[route.view]?.[route.tab] ?? tabViewMap[route.view]?.[groupedTabs[route.view as keyof typeof groupedTabs]?.[0]?.id ?? ""];
   if (!View) return null;
   const tabs = groupedTabs[route.view as keyof typeof groupedTabs];
-  return <section className="groupedPage"><div className="groupedHeader"><div><p className="eyebrow">Project workspace</p><h1>{groupedTitle(route.view)}</h1><p>{groupedDescription(route.view)}</p></div></div><nav aria-label={`${groupedTitle(route.view)} sections`} className="tabs">{tabs.map((tab) => <a aria-current={route.tab === tab.id ? "page" : undefined} className={route.tab === tab.id ? "active" : ""} href={routeHref({ ...route, tab: tab.id })} key={tab.id} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); console.navigate({ tab: tab.id }); }}>{tab.label}</a>)}</nav><View console={console} /></section>;
+  const label = `${groupedTitle(route.view)} sections`;
+  return <section className="groupedPage"><div className="groupedHeader"><div><p className="eyebrow">Project workspace</p><h1>{groupedTitle(route.view)}</h1><p>{groupedDescription(route.view)}</p></div></div><Tabs label={label} items={tabs.map((tab) => ({ ...tab, href: routeHref({ ...route, tab: tab.id }) }))} selected={route.tab} onSelect={(event, tab) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); console.navigate({ tab }); }} /><div {...tabPanelProps(label, route.tab)}><View console={console} /></div></section>;
 }
 
 function groupedTitle(view: string) { return view[0].toUpperCase() + view.slice(1); }
 function groupedDescription(view: string) {
-  return { delivery: "Commit, artifact, rollout, and exposure evidence.", infrastructure: "Runtime placement and Agent-backed infrastructure facts.", observability: "Health, telemetry, logs, incidents, and support evidence.", security: "Protected secret flows and audit history." }[view as keyof typeof groupedTabs] ?? "";
+  const descriptions: Record<string, string> = { delivery: "Commit, artifact, rollout, and exposure evidence.", infrastructure: "Runtime placement and Agent-backed infrastructure facts.", observability: "Health, telemetry, logs, incidents, and support evidence.", security: "Protected secret flows and audit history." };
+  return descriptions[view] ?? "";
 }

@@ -51,6 +51,10 @@ func TestExposureApplyRequiresExplicitConfirmationAndIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := newExposureCommand(nil, nil)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
 	cmd.SetArgs([]string{"apply", "--project-id", "proj-1", "--base-deployment-id", "base-1", "--file", path})
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "requires --yes, --idempotency-key, and --expected-state-hash") {
 		t.Fatalf("unexpected confirmation error=%v", err)

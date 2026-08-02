@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import { normalizeStatus, statusLabel, type PresentationStatus } from "@/lib/presentation/project";
 
-export function Panel({ children, title }: { children: ReactNode; title: string }) {
+export function Surface({ children, title }: { children: ReactNode; title: string }) {
   return (
-    <section className="panel">
+    <section className="surfaceBlock">
       <h2>{title}</h2>
       {children}
     </section>
@@ -12,15 +12,6 @@ export function Panel({ children, title }: { children: ReactNode; title: string 
 
 export function Empty({ action, text, title = "No data yet" }: { action?: ReactNode; text: string; title?: string }) {
   return <div className="empty" role="status"><strong>{title}</strong><p>{text}</p>{action}</div>;
-}
-
-export function Metric({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="metric">
-      <span className="muted">{label}</span>
-      <b>{value}</b>
-    </div>
-  );
 }
 
 export function StatusBadge({ label, value }: { label?: string; value: string | PresentationStatus }) {
@@ -35,7 +26,7 @@ export function PageHeader({ action, eyebrow, title, description }: { action?: R
 
 export function StatePanel({ title, text, retry }: { title: string; text: string; retry?: () => void }) {
   return (
-    <Panel title={title}>
+    <Surface title={title}>
       <div className="empty">
         <p>{text}</p>
         {retry ? (
@@ -44,6 +35,6 @@ export function StatePanel({ title, text, retry }: { title: string; text: string
           </button>
         ) : null}
       </div>
-    </Panel>
+    </Surface>
   );
 }

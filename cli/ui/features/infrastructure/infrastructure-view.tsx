@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Empty, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { PlacementDialog } from "@/features/infrastructure/placement-dialog";
@@ -11,18 +11,26 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
   const { data, source, error, load } = useInfrastructureData(console);
   const [placementOpen, setPlacementOpen] = useState(false);
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
+  const bootstrapTrigger = useRef<HTMLButtonElement>(null);
+  const projectID = console.state.project?.id ?? "";
+  useEffect(() => {
+    // Project-scoped dialogs never survive a context change.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPlacementOpen(false);
+    setBootstrapOpen(false);
+  }, [projectID]);
   if (!console.state.project) return <Empty text="Select a project first." />;
   if (source === "loading" && !data.facts) return <Empty title="Loading infrastructure…" text="Reading factual topology and runtime inventory from Local API." />;
   if (!data.facts) return <Empty title="Infrastructure unavailable" text={error || "Local API did not return topology facts."} action={<button onClick={() => void load()} type="button">Retry</button>} />;
 
   return <div className="infrastructurePage">
-    <div className="destinationToolbar"><p>{error || "Cloud topology facts remain visible when Agent runtime data is unavailable."}</p><button onClick={() => console.route.tab === "bootstrap" ? setBootstrapOpen(true) : setPlacementOpen(true)} type="button">{console.route.tab === "bootstrap" ? "Add server" : "Plan placement"}</button></div>
+    <div className="destinationToolbar"><p>{error || "Cloud topology facts remain visible when Agent runtime data is unavailable."}</p><button data-review-trigger={console.route.tab === "bootstrap" ? "bootstrap" : undefined} onClick={(event) => { if (console.route.tab === "bootstrap") { bootstrapTrigger.current = event.currentTarget; setBootstrapOpen(true); } else setPlacementOpen(true); }} type="button">{console.route.tab === "bootstrap" ? "Add server" : "Plan placement"}</button></div>
     {console.route.tab === "topology" ? <TopologyTab console={console} facts={data.facts} topology={data.topology} /> : null}
     {console.route.tab === "runtimes" ? <RuntimesTab console={console} facts={data.facts} topology={data.topology} /> : null}
     {console.route.tab === "nodes" ? <NodesTab console={console} facts={data.facts} /> : null}
     {console.route.tab === "bootstrap" ? <BootstrapTab console={console} /> : null}
     {placementOpen ? <PlacementDialog console={console} data={{ facts: data.facts, topology: data.topology, repositories: data.repositories, bindings: data.bindings, builds: data.builds, policies: data.policies }} onApplied={() => void load()} onClose={() => setPlacementOpen(false)} /> : null}
-    {bootstrapOpen ? <BootstrapDialog console={console} onClose={() => setBootstrapOpen(false)} /> : null}
+    {bootstrapOpen ? <BootstrapDialog console={console} onClose={() => { setBootstrapOpen(false); window.requestAnimationFrame(() => bootstrapTrigger.current?.focus()); }} /> : null}
   </div>;
 }
 
@@ -63,7 +71,15 @@ function BootstrapTab({ console }: { console: ConsoleController }) {
   return <div className="bootstrapLayout"><section className="bootstrapInventory"><div className="sectionHeading"><div><h2>Bootstrap sessions</h2><p>Durable Cloud worker sessions; no public DNS assumption.</p></div></div>{console.state.sessions.length ? <ul>{console.state.sessions.map((session) => <li key={session.id}><button aria-pressed={selected?.id === session.id} onClick={() => { console.navigate({ session: session.id }); void console.actions.loadBootstrapEvents(session.id); }} type="button"><span><strong>{session.public_host || session.id}</strong><small>{session.role} · attempt {session.attempt_count ?? "?"}/{session.max_attempts ?? "?"}</small></span><StatusBadge value={session.status} /></button></li>)}</ul> : <Empty title="No bootstrap sessions" text="Use Add server to review connection input and create a Local API bootstrap session." />}</section><section className="bootstrapDetail">{selected ? <><div className="detailHeading"><div><p className="eyebrow">Selected session</p><h2>{selected.id}</h2></div><StatusBadge value={selected.status} /></div><dl className="evidenceGrid"><Fact label="Attempt" value={`${selected.attempt_count ?? "Unknown"}/${selected.max_attempts ?? "Unknown"}`} /><Fact label="Progress" value={progress.percent === null ? progress.label : `${progress.percent}% · ${progress.label}`} /><Fact label="Next step" value={selected.checkpoint ? `Step ${selected.checkpoint.next_step_index}` : "Not reported"} /><Fact label="Failure" value={selected.last_failure_message_redacted || selected.last_failure_code || "None reported"} /></dl><ol className="eventTimeline">{console.state.bootstrapEvents.map((event) => <li key={event.id}><span aria-hidden="true" /><div><b>{event.step}</b><p>{event.message_redacted}</p><small>{event.created_at}</small></div></li>)}</ol><button disabled={!['failed', 'dead_letter'].includes(selected.status)} onClick={() => console.actions.retryBootstrap(selected.id)} type="button">Retry eligible session</button></> : <Empty text="Select a bootstrap session." />}</section></div>;
 }
 
-function BootstrapDialog({ console, onClose }: { console: ConsoleController; onClose: () => void }) { return <dialog className="placementDialog" open aria-labelledby="bootstrap-title"><div className="dialogHeading"><div><p className="eyebrow">Bootstrap action</p><h2 id="bootstrap-title">Add server</h2><p>Review input before the canonical Local API session is created.</p></div><button aria-label="Close add server dialog" className="iconButton" onClick={onClose} type="button">×</button></div><form className="form placementForm" onSubmit={(event) => { void console.actions.addServer(event); onClose(); }}><label>Role<select className="select" name="role" required><option value="">Choose role…</option><option value="first_server">First server</option><option value="worker">Worker</option></select></label><label>SSH host or IP<input autoComplete="off" className="field" name="public_host" placeholder="203.0.113.10…" required /></label><label>SSH port<input className="field" inputMode="numeric" min="1" name="ssh_port" required type="number" /></label><label>SSH username<input autoComplete="username" className="field" name="ssh_username" required spellCheck={false} /></label><label>Authentication<select className="select" name="auth_method" required><option value="">Choose method…</option><option value="password">Password</option><option value="private_key">Private key</option></select></label><label className="span2">One-time credential<textarea autoComplete="off" className="textarea" name="secret" required /></label><p className="notice span2">Credential is submitted once, never stored in browser storage, and removed after worker handoff.</p><div className="dialogActions span2"><button onClick={onClose} type="button">Cancel</button><button type="submit">Review bootstrap request</button></div></form></dialog>; }
+function BootstrapDialog({ console, onClose }: { console: ConsoleController; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => { if (element?.open) element.close(); };
+  }, []);
+  return <dialog aria-describedby="bootstrap-description" aria-labelledby="bootstrap-title" className="placementDialog" onCancel={(event) => { event.preventDefault(); onClose(); }} ref={dialog}><div className="dialogHeading"><div><p className="eyebrow">Bootstrap action</p><h2 id="bootstrap-title">Add server</h2><p id="bootstrap-description">Review non-sensitive target facts first. The one-time credential is requested only at final confirmation.</p></div><button aria-label="Close add server dialog" autoFocus className="iconButton" onClick={onClose} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button></div><form className="form placementForm" onSubmit={(event) => { void console.actions.addServer(event); onClose(); }}><label>Role<select className="select" name="role" required><option value="">Choose role…</option><option value="first_server">First server</option><option value="worker">Worker</option></select></label><label>SSH host or IP<input autoComplete="off" className="field" name="public_host" placeholder="203.0.113.10…" required /></label><label>SSH port<input className="field" inputMode="numeric" min="1" name="ssh_port" required type="number" /></label><label>SSH username<input autoComplete="username" className="field" name="ssh_username" required spellCheck={false} /></label><label>Authentication<select className="select" name="auth_method" required><option value="">Choose method…</option><option value="password">Password</option><option value="private_key">Private key</option></select></label><p className="notice span2">No credential is collected on this step.</p><div className="dialogActions span2"><button onClick={onClose} type="button">Cancel</button><button type="submit">Review bootstrap request</button></div></form></dialog>;
+}
 
 function Fact({ label, value }: { label: string; value: string }) { return <div><dt>{label}</dt><dd>{value}</dd></div>; }
 function Related({ title, values }: { title: string; values: string[] }) { return <section><h3>{title}</h3>{values.length ? <ul className="compactList">{values.map((value) => <li key={value}>{value}</li>)}</ul> : <p className="muted">None reported.</p>}</section>; }

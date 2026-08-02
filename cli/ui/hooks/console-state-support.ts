@@ -10,6 +10,34 @@ import type {
   TimelineEvent,
 } from "@/lib/contracts/registry";
 import { emptyFoundation, type FoundationData, type FoundationState } from "@/lib/presentation/project";
+import { deriveProjectSummary, normalizeStatus, type ProjectSummaryEntry } from "@/lib/presentation/project";
+
+export const MAX_PROJECT_SUMMARY_REQUESTS = 6;
+
+export type RequestRunner = <T>(request: () => Promise<T>) => Promise<T>;
+
+export function createRequestLimiter(limit = MAX_PROJECT_SUMMARY_REQUESTS): RequestRunner {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  const next = () => {
+    if (active >= limit) return;
+    const start = queue.shift();
+    if (!start) return;
+    active += 1;
+    start();
+  };
+  return <T>(request: () => Promise<T>) => new Promise<T>((resolve, reject) => {
+    queue.push(() => {
+      Promise.resolve().then(request).then(resolve, reject).finally(() => {
+        active -= 1;
+        next();
+      });
+    });
+    next();
+  });
+}
+
+const directRequest: RequestRunner = (request) => request();
 
 export function secretBody(form: FormData) {
   return {
@@ -34,11 +62,11 @@ export async function loadProject(client: LocalClient, projectID: string) {
   ]);
 }
 
-export async function loadFoundation(client: LocalClient, projectID: string, services: ServiceRecord[], agentStatus: string): Promise<FoundationData> {
+export async function loadFoundation(client: LocalClient, projectID: string, services: ServiceRecord[], agentStatus: string, run: RequestRunner = directRequest): Promise<FoundationData> {
   const [placementResult, topologyResult, buildsResult] = await Promise.allSettled([
-    client.placementFacts(projectID),
-    client.topology(projectID),
-    client.buildRecords(projectID),
+    run(() => client.placementFacts(projectID)),
+    run(() => client.topology(projectID)),
+    run(() => client.buildRecords(projectID)),
   ]);
   let telemetry: FoundationData["telemetry"] = [];
   let incidents: FoundationData["incidents"] = [];
@@ -46,8 +74,8 @@ export async function loadFoundation(client: LocalClient, projectID: string, ser
   let incidentSource: FoundationData["sources"]["incidents"] = agentStatus === "ok" ? "available" : "unavailable";
   if (agentStatus === "ok") {
     const [telemetryResults, incidentResult] = await Promise.all([
-      Promise.allSettled(services.map((service) => client.telemetryService(projectID, service.id))),
-      client.incidents(projectID).then((value) => ({ ok: true as const, value })).catch(() => ({ ok: false as const })),
+      Promise.allSettled(services.map((service) => run(() => client.telemetryService(projectID, service.id)))),
+      run(() => client.incidents(projectID)).then((value) => ({ ok: true as const, value })).catch(() => ({ ok: false as const })),
     ]);
     telemetrySource = telemetryResults.some((result) => result.status === "rejected") ? "unavailable" : "available";
     telemetry = telemetryResults.flatMap((result) => result.status === "fulfilled" ? result.value.services ?? [] : []);
@@ -66,6 +94,30 @@ export async function loadFoundation(client: LocalClient, projectID: string, ser
       telemetry: telemetrySource,
       incidents: incidentSource,
     },
+  };
+}
+
+export async function loadProjectSummary(client: LocalClient, project: Project, agentStatus: string, run: RequestRunner = directRequest): Promise<ProjectSummaryEntry> {
+  const [readiness, services, deployments] = await Promise.all([
+    run(() => client.readiness(project.id)),
+    run(() => client.services(project.id)),
+    run(() => client.deployments(project.id)),
+  ]);
+  const records = services.services ?? [];
+  const foundation = await loadFoundation(client, project.id, records, agentStatus, run);
+  const nodeStatuses = foundation.placement?.nodes.map((node) => normalizeStatus(node.status)) ?? [];
+  const runtimeStatus = foundation.sources.runtime !== "available"
+    ? "unavailable"
+    : nodeStatuses.includes("failed") ? "failed"
+      : nodeStatuses.includes("degraded") ? "degraded"
+        : nodeStatuses.includes("unavailable") ? "unavailable"
+          : nodeStatuses.length && nodeStatuses.every((status) => status === "healthy") ? "healthy" : "unknown";
+  return {
+    status: "ready",
+    fetchedAt: Date.now(),
+    environment: foundation.placement?.environments.find((item) => item.status === "active")?.name,
+    runtimeStatus,
+    summary: deriveProjectSummary({ project, readiness, services: records, deployments: deployments.deployments ?? [], foundation }),
   };
 }
 

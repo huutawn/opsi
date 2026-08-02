@@ -22,6 +22,8 @@ opsi-cloud
 .AGENTS
 .AGENTS/*
 
+docs/ui
+
 # Local runtime configuration
 **/config.local.yaml
 **/config.local.yml
@@ -41,6 +43,8 @@ opsi-cloud
 /deploy/staging-control-plane/.env
 /deploy/staging-control-plane/config/cloud.json
 /deploy/staging-control-plane/config/bootstrap-worker.json
+/deploy/staging-control-plane/config/bootstrap-worker.e2e.json
+/deploy/staging-control-plane/barrier-state/*
 /deploy/staging-control-plane/secrets/*
 !**/*.example.json
 

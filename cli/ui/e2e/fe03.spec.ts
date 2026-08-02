@@ -1,15 +1,17 @@
 import { expect, test, type Route } from "@playwright/test";
+import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
-test.beforeEach(async ({ page }) => { await page.route("**/api/local/**", respond); });
+test.beforeEach(async ({ page }) => { watchConsoleErrors(page); await page.route("**/api/local/**", respond); });
+test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Infrastructure uses canonical edges, truthful capacity, and URL state", async ({ page }) => {
   await page.goto("/?project=proj-1&view=infrastructure");
-  await expect(page.getByRole("link", { name: "Topology", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("tab", { name: "Topology", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".topologyEdges line")).toHaveCount(10);
   await expect(page.getByText("Unassigned services")).toBeVisible();
   await expect(page.getByText("Unknown capacity", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Support", exact: true })).toHaveCount(0);
-  await page.getByRole("link", { name: "Runtimes", exact: true }).click();
+  await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
   await page.getByRole("button", { name: /Edge runtime/ }).click();
   await expect(page).toHaveURL(/runtime=runtime-edge/);
   await page.reload();
@@ -20,15 +22,19 @@ test("Observability preserves factual semantics, text rendering, evidence, and U
   await page.goto("/?project=proj-1&view=observability&tab=health");
   await expect(page.getByText("Degraded", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Operational evidence")).toBeVisible();
-  await page.getByRole("link", { name: "Metrics", exact: true }).click();
+  await page.getByRole("tab", { name: "Metrics", exact: true }).click();
   await expect(page.getByText(/timestamps not reported/i)).toBeVisible();
   await expect(page.getByText(/time axis/i)).toBeVisible();
-  await page.getByRole("link", { name: "Logs", exact: true }).click();
+  await page.getByRole("tab", { name: "Logs", exact: true }).click();
   await expect(page.getByText("<script>alert('x')</script> token=should-hide", { exact: true })).toHaveCount(0);
   await expect(page.getByText(/redaction contract violation/i)).toBeVisible();
+  const resume = page.getByRole("button", { name: "Resume periodic refresh" });
+  await resume.click();
+  await expect(page.getByRole("button", { name: "Pause periodic refresh" })).toHaveAttribute("aria-pressed", "false");
+  await page.getByRole("button", { name: "Pause periodic refresh" }).click();
   await page.getByLabel("Search loaded page").fill("timeout");
   await expect(page).toHaveURL(/query=timeout/);
-  await page.getByRole("link", { name: "Incidents", exact: true }).click();
+  await page.getByRole("tab", { name: "Incidents", exact: true }).click();
   await page.getByRole("button", { name: /inc-1/ }).click();
   await expect(page.getByText("Partial evidence")).toBeVisible();
   await expect(page.getByText("Continue in CLI")).toBeVisible();

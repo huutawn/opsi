@@ -31,10 +31,16 @@ export const groupedTabs = {
     { id: "secrets", label: "Secrets" },
     { id: "audit", label: "Audit" },
   ],
+  settings: [
+    { id: "general", label: "General" },
+    { id: "authentication", label: "Authentication" },
+    { id: "integrations", label: "Integrations" },
+    { id: "system", label: "System" },
+  ],
 } as const;
 
 export type ProjectView = (typeof projectDestinations)[number]["id"];
-export type ConsoleView = ProjectView | "projects" | "settings";
+export type ConsoleView = ProjectView | "home" | "projects" | "settings";
 export type ConsoleRoute = {
   projectID: string;
   view: ConsoleView;
@@ -69,9 +75,9 @@ export function defaultTab(view: ConsoleView) {
 
 export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {
   const projectID = route.projectID ?? "";
-  let view = route.view ?? (projectID ? "overview" : "projects");
+  let view = route.view ?? (projectID ? "overview" : "home");
   if (!projectID && isProjectView(view)) view = "projects";
-  if (view === "projects") return { projectID: "", view, tab: "" };
+  if (view === "home" || view === "projects") return { projectID: "", view, tab: "" };
   const tabs = view in groupedTabs ? groupedTabs[view as keyof typeof groupedTabs] : [];
   const tab = tabs.some((item) => item.id === route.tab) ? route.tab ?? "" : defaultTab(view);
   return { projectID, view, tab, ...compactViewState(view, route) };
@@ -80,7 +86,7 @@ export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {
 export function parseRoute(search: string): ConsoleRoute {
   const params = new URLSearchParams(search);
   const requested = params.get("view") as ConsoleView | null;
-  const valid = requested === "projects" || requested === "settings" || projectViews.has(requested as ConsoleView);
+  const valid = requested === "home" || requested === "projects" || requested === "settings" || projectViews.has(requested as ConsoleView);
   return normalizeRoute({
     projectID: params.get("project") ?? "",
     view: valid ? requested ?? undefined : undefined,
@@ -124,6 +130,8 @@ function compactViewState(view: ConsoleView, route: Partial<ConsoleRoute>) {
       ? ["runtime", "node", "session", "service", "topology"] as const
       : view === "observability"
         ? ["service", "incident", "status", "level", "query", "cursor", "window"] as const
+        : view === "services"
+          ? ["service"] as const
         : [] as const;
   for (const key of keys) {
     if (route[key]) state[key] = route[key];
@@ -135,31 +143,5 @@ export function routeLabel(route: ConsoleRoute) {
   if (route.tab && route.view in groupedTabs) {
     return groupedTabs[route.view as keyof typeof groupedTabs].find((item) => item.id === route.tab)?.label ?? route.view;
   }
-  return projectDestinations.find((item) => item.id === route.view)?.label ?? (route.view === "projects" ? "Projects" : "Settings");
-}
-
-export function routeForLegacy(label: string, projectID: string): ConsoleRoute {
-  const routes: Record<string, Partial<ConsoleRoute>> = {
-    Projects: { projectID: "", view: "projects" },
-    Overview: { view: "overview" },
-    Services: { view: "services" },
-    GitHub: { view: "delivery", tab: "source" },
-    "Build Records": { view: "delivery", tab: "builds" },
-    Deployments: { view: "delivery", tab: "deployments" },
-    Exposure: { view: "delivery", tab: "exposure" },
-    Runtime: { view: "infrastructure", tab: "runtimes" },
-    Runtimes: { view: "infrastructure", tab: "runtimes" },
-    "Servers / Nodes": { view: "infrastructure", tab: "nodes" },
-    Nodes: { view: "infrastructure", tab: "nodes" },
-    Bootstrap: { view: "infrastructure", tab: "bootstrap" },
-    Topology: { view: "infrastructure", tab: "topology" },
-    Health: { view: "observability", tab: "health" },
-    Metrics: { view: "observability", tab: "metrics" },
-    Logs: { view: "observability", tab: "logs" },
-    Incidents: { view: "observability", tab: "incidents" },
-    Secrets: { view: "security", tab: "secrets" },
-    Audit: { view: "security", tab: "audit" },
-    Settings: { view: "settings" },
-  };
-  return normalizeRoute({ projectID, ...(routes[label] ?? { view: "overview" }) });
+  return projectDestinations.find((item) => item.id === route.view)?.label ?? (route.view === "home" ? "Home" : route.view === "projects" ? "Projects" : "Settings");
 }

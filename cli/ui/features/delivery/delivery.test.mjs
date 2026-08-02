@@ -54,9 +54,11 @@ test("deployment actions and exposure semantics are factual and Local-only", asy
 });
 
 test("router keeps Delivery URL drill-down state when changing tabs", async () => {
-  const router = await readFile(files.router, "utf8");
+  const [router, tabs] = await Promise.all([readFile(files.router, "utf8"), readFile(new URL("../../components/navigation/tabs.tsx", import.meta.url), "utf8")]);
   assert.match(router, /routeHref\(\{ \.\.\.route, tab: tab\.id \}\)/);
-  assert.match(router, /aria-current=/);
+  assert.match(tabs, /role="tablist"/);
+  assert.match(tabs, /aria-selected=/);
+  for (const key of ["ArrowRight", "ArrowLeft", "Home", "End"]) assert.match(tabs, new RegExp(key));
 });
 
 test("pipeline loading remains distinct from empty or ready conclusions", async () => {

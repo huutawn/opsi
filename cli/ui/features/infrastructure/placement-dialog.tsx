@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Empty, Panel, StatusBadge } from "@/components/ui/primitives";
+import { useEffect, useRef, useState } from "react";
+import { Empty, Surface, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { LocalClient } from "@/lib/api/local-client";
 import type { BuildRecord, DeploymentPolicy, GitHubBinding, GitHubRepository, PlacementFacts, TopologyDiff, TopologyDraft, TopologyPlan, TopologyPreview, TopologyValidation } from "@/lib/contracts/registry";
@@ -12,6 +12,7 @@ type Preview = { topology: TopologyPreview; validation: TopologyValidation; diff
 const client = new LocalClient();
 
 export function PlacementDialog({ console, data, onClose, onApplied }: { console: ConsoleController; data: PlacementData; onClose: () => void; onApplied: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
   const project = console.state.project;
   const projectID = project?.id ?? "";
   const [phase, setPhase] = useState<"target" | "capacity" | "validate" | "review">("target");
@@ -30,6 +31,11 @@ export function PlacementDialog({ console, data, onClose, onApplied }: { console
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState("");
   const [allowUnknown, setAllowUnknown] = useState(false);
+  useEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => { if (element?.open) element.close(); };
+  }, []);
 
   const environments = data.facts.environments;
   const runtimes = data.facts.runtimes.filter((item) => item.environment_id === environmentID);
@@ -94,8 +100,8 @@ export function PlacementDialog({ console, data, onClose, onApplied }: { console
     finally { setBusy(false); }
   }
 
-  return <dialog className="placementDialog" open aria-labelledby="placement-title">
-    <div className="dialogHeading"><div><p className="eyebrow">Infrastructure action</p><h2 id="placement-title">Plan placement</h2><p>Review exact target, capacity, validation, and immutable revisions before apply.</p></div><button aria-label="Close placement dialog" className="iconButton" onClick={onClose} type="button">×</button></div>
+  return <dialog className="placementDialog" onCancel={(event) => { event.preventDefault(); onClose(); }} ref={dialog} aria-labelledby="placement-title">
+    <div className="dialogHeading"><div><p className="eyebrow">Infrastructure action</p><h2 id="placement-title">Plan placement</h2><p>Review exact target, capacity, validation, and immutable revisions before apply.</p></div><button aria-label="Close placement dialog" autoFocus className="iconButton" onClick={onClose} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button></div>
     <ol className="phaseRail" aria-label="Placement phases">{["Target", "Capacity", "Validate", "Review & apply"].map((item, index) => <li className={phase === ["target", "capacity", "validate", "review"][index] ? "active" : ""} key={item}>{index + 1}. {item}</li>)}</ol>
     {phase === "target" ? <div className="form placementForm">
       <label>Repository<select aria-label="Repository" className="select" value={repositoryID} onChange={(event) => { setRepositoryID(event.target.value); setServiceKey(""); setBuildID(""); }}><option value="">Choose exact repository…</option>{repositories.map((item) => <option key={item.repository_id} value={item.repository_id}>{item.full_name}</option>)}</select></label>
@@ -115,8 +121,8 @@ export function PlacementDialog({ console, data, onClose, onApplied }: { console
       <label className="span2"><input checked={allowUnknown} onChange={(event) => setAllowUnknown(event.target.checked)} type="checkbox" /> Allow unknown capacity only if the reviewed policy explicitly grants it.</label>
       <div className="dialogActions"><button onClick={() => setPhase("target")} type="button">Back</button><button disabled={!capacityReady} onClick={() => setPhase("validate")} type="button">Next: Validate</button></div>
     </div> : null}
-    {phase === "validate" ? <div className="form placementForm"><Panel title="Validation inputs"><p>Runtime eligibility, heartbeat freshness, requested/reserved/available capacity, oversubscription, and policy match are evaluated by Local API.</p><button disabled={busy} onClick={() => void validate()} type="button">{busy ? "Validating…" : "Run factual validation"}</button></Panel><div className="dialogActions"><button onClick={() => setPhase("capacity")} type="button">Back</button></div></div> : null}
-    {phase === "review" && preview ? <div className="form placementForm"><Panel title="Review & apply"><div className="hashPair"><div><span>Topology plan hash</span><code>{preview.topology.plan_hash}</code></div><div><span>Policy hash</span><code>{preview.policyHash}</code></div></div><StatusBadge value={preview.validation.valid ? "ready" : "blocked"} /><p>{preview.validation.issues.length ? preview.validation.issues.map((item) => `${item.code}: ${item.message}`).join(" · ") : "No deterministic validation issues."}</p><p>{preview.diff.changes.length} topology changes; {preview.policyDiff.length} policy changes. Policy and topology apply are sequential, not atomic.</p>{preview.validation.runtimes.map((runtime) => <div className="capacityCard" key={runtime.runtime_id}><b>{runtime.runtime_id}</b><p>CPU {runtime.capacity.available_cpu_millicores === undefined ? "Unknown" : `${runtime.capacity.available_cpu_millicores}m available`} · memory {runtime.capacity.available_memory_bytes === undefined ? "Unknown" : `${runtime.capacity.available_memory_bytes} bytes available`} · heartbeat {runtime.capacity.heartbeat_age_seconds === undefined ? "Unknown" : `${runtime.capacity.heartbeat_age_seconds}s`}</p></div>)}<label>Type APPLY to confirm<input aria-label="Apply confirmation" className="field" onChange={(event) => setConfirm(event.target.value)} value={confirm} /></label><div className="dialogActions"><button onClick={() => setPhase("validate")} type="button">Back</button><button disabled={busy || confirm !== "APPLY" || (!preview.validation.valid && !(allowUnknown && onlyUnknownCapacity(preview.validation)))} onClick={() => void apply()} type="button">{busy ? "Applying…" : "Apply reviewed revisions"}</button></div></Panel></div> : <Empty text="Validation preview is unavailable." />}
+    {phase === "validate" ? <div className="form placementForm"><Surface title="Validation inputs"><p>Runtime eligibility, heartbeat freshness, requested/reserved/available capacity, oversubscription, and policy match are evaluated by Local API.</p><button disabled={busy} onClick={() => void validate()} type="button">{busy ? "Validating…" : "Run factual validation"}</button></Surface><div className="dialogActions"><button onClick={() => setPhase("capacity")} type="button">Back</button></div></div> : null}
+    {phase === "review" && preview ? <div className="form placementForm"><Surface title="Review & apply"><div className="hashPair"><div><span>Topology plan hash</span><code>{preview.topology.plan_hash}</code></div><div><span>Policy hash</span><code>{preview.policyHash}</code></div></div><StatusBadge value={preview.validation.valid ? "ready" : "blocked"} /><p>{preview.validation.issues.length ? preview.validation.issues.map((item) => `${item.code}: ${item.message}`).join(" · ") : "No deterministic validation issues."}</p><p>{preview.diff.changes.length} topology changes; {preview.policyDiff.length} policy changes. Policy and topology apply are sequential, not atomic.</p>{preview.validation.runtimes.map((runtime) => <div className="capacityCard" key={runtime.runtime_id}><b>{runtime.runtime_id}</b><p>CPU {runtime.capacity.available_cpu_millicores === undefined ? "Unknown" : `${runtime.capacity.available_cpu_millicores}m available`} · memory {runtime.capacity.available_memory_bytes === undefined ? "Unknown" : `${runtime.capacity.available_memory_bytes} bytes available`} · heartbeat {runtime.capacity.heartbeat_age_seconds === undefined ? "Unknown" : `${runtime.capacity.heartbeat_age_seconds}s`}</p></div>)}<label>Type APPLY to confirm<input aria-label="Apply confirmation" className="field" onChange={(event) => setConfirm(event.target.value)} value={confirm} /></label><div className="dialogActions"><button onClick={() => setPhase("validate")} type="button">Back</button><button disabled={busy || confirm !== "APPLY" || (!preview.validation.valid && !(allowUnknown && onlyUnknownCapacity(preview.validation)))} onClick={() => void apply()} type="button">{busy ? "Applying…" : "Apply reviewed revisions"}</button></div></Surface></div> : <Empty text="Validation preview is unavailable." />}
     {message ? <p className="inlineError" role="alert">{message}</p> : null}
   </dialog>;
 }
