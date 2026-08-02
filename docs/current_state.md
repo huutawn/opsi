@@ -10,7 +10,7 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
 `R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is the source-only corrective gate;
 live retry remains operator-run and was not started.
-`R5_017G_CONTROL_PLANE_PUBLISH_SOURCE_READY / LIVE_PUBLISH_PENDING` replaces
+`R5_017G_CONTROL_PLANE_PUBLISH_PASS` replaces
 the Worker-only publisher with one manual control-plane workflow for Cloud and
 Bootstrap Worker. Both targets use `cloud/Dockerfile`, repository-root context,
 `linux/amd64`, the same full revision tag and OCI provenance labels. Exact-tag
@@ -20,8 +20,23 @@ One strict combined manifest is uploaded only after both images are verified.
 The unified workflow no longer calls the Worker helper's manifest command; the
 canonical control-plane helper owns combined manifest validation and extracts
 the immutable Worker reference for the existing `--image` deployment path.
-Live publication and staging deployment are not claimed by this source
-snapshot.
+Workflow run `30750598790` published revision
+`246c924f56f7d28db43d06154b39c558f214c686` as Cloud digest
+`sha256:c20359577e546885d6e607010ac1fe8cff146b41042e32d5ff14de340cfb564e`
+and Bootstrap Worker digest
+`sha256:760a4ce0274ea2c03ffc4d86a96741745a783748dd45f0547e3bf6531874b7dd`;
+artifact `control-plane-release-246c924f56f7d28db43d06154b39c558f214c686`
+records both. This publication did not deploy staging.
+
+The Agent now has one canonical manual publisher source. It accepts only the
+full reviewed `developer` revision plus `confirmation=publish-agent`, derives
+the version and immutable prerelease tag from that revision, builds Linux amd64
+twice in clean directories with Go 1.26.4, and requires byte-identical binary,
+checksums, and strict metadata. Publication refuses existing tags/releases and
+then anonymously downloads and re-verifies the exact three public assets. The
+publisher adds no Cloud or Worker path; workflow registration and per-revision
+publication remain external evidence gates and do not imply staging deployment
+or R5-017 live acceptance.
 The R5-017 publisher run `30700943447` at revision
 `585293ee171454d8f8a6af54d37b3bb49a600ea9` failed before push because the
 repository-root build context did not select `cloud/Dockerfile`. The canonical

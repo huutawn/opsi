@@ -124,9 +124,10 @@ verify-cli-release: build-cli-release
 	test -f "$$prefix/opsi-ui/index.html"
 
 agent-release:
-	$(RUN) env AGENT_VERSION="$(AGENT_VERSION)" AGENT_COMMIT="$(AGENT_COMMIT)" OUT_DIR="$(AGENT_RELEASE_DIR)" GOCACHE="$(GOCACHE)" GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/build-agent-release.sh
+	$(RUN) env GOCACHE="$(GOCACHE)" GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/build-agent-release.sh "$(AGENT_COMMIT)" "$(AGENT_RELEASE_DIR)"
 
 verify-agent-release:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/agent-release-test.py
 	$(RUN) env GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/verify-agent-release.sh
 
 ui-build:
@@ -145,7 +146,7 @@ lint:
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 
-source-hygiene: verify-source-package-policy verify-bootstrap-worker-release
+source-hygiene: verify-source-package-policy verify-bootstrap-worker-release verify-agent-release
 	$(RUN) ./scripts/source-package.sh check-tree
 	@if sed -n '/func (s \*Service) expireDeploymentLeasesLocked/,/^}/p' cloud/internal/registry/service.go | rg -n 'delete\(s\.deployLocks'; then echo "canonical lease exhaustion deletes service ownership"; exit 1; fi
 	@if sed -n '/func expireDeploymentLeases(/,/^}/p' cloud/internal/registry/postgres.go | rg -n 'DELETE FROM service_deployment_locks'; then echo "Postgres canonical lease exhaustion deletes service ownership"; exit 1; fi

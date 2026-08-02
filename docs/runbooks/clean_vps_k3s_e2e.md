@@ -20,6 +20,16 @@ Set the Local API/UI and canonical immutable-delivery inputs from operator-owned
 secure environment/configuration. Do not put credentials in shell history or
 evidence.
 
+Before staging deployment, require one exact reviewed revision across the
+runtime set. Resolve Cloud and Bootstrap Worker only from the combined
+control-plane manifest. Resolve Agent only from the immutable public prerelease
+tag `agent-<full-source-revision>` and its stable anonymous assets:
+`opsi-agent-linux-amd64`, `checksums.txt`, and `release.json`. Verify the exact
+asset set, lowercase SHA-256, Linux amd64 ELF, `opsi-agent --version`, embedded
+full revision, and strict metadata before installing. A publisher workflow run
+is artifact evidence only; it does not authorize staging deployment or begin
+Run 1/Run 2.
+
 ```bash
 export OPSI_E2E_LOCAL_URL=http://127.0.0.1:9780
 export OPSI_E2E_PROJECT_ID=...

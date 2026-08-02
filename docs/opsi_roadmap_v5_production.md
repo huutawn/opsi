@@ -668,6 +668,13 @@ backend gap fail-closed cho tới native acceptance ở R5-017.
 
 **CẦN VPS:** tối thiểu một Agent VPS. Để tuyên bố hỗ trợ multi-VPS production path, cần **hai Agent VPS** trong cùng project nhưng hai single-node runtimes độc lập.
 
+**Artifact prerequisite:** trước khi deploy staging hoặc bắt đầu Run 1, publish
+Cloud, Bootstrap Worker, và Agent từ cùng một full reviewed monorepo revision.
+Cloud/Worker dùng immutable GHCR digests và combined manifest; Agent dùng
+revision-scoped prerelease tag với binary, `checksums.txt`, và strict
+`release.json` đã được tải anonymous và verify. Không dùng Agent binary cũ để
+tuyên bố runtime alignment.
+
 **Mục tiêu:** chứng minh sản phẩm đầy đủ không cần MCP/AI.
 
 **Quy trình thực hiện:**

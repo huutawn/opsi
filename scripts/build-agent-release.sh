@@ -2,41 +2,41 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AGENT_VERSION="${AGENT_VERSION:-}"
-AGENT_COMMIT="${AGENT_COMMIT:-}"
-OUT_DIR="${OUT_DIR:-dist/agent}"
 
-if [[ -z "$AGENT_VERSION" ]]; then
-  echo "AGENT_VERSION is required" >&2
-  exit 2
-fi
-if [[ "$AGENT_VERSION" =~ [[:space:]/] ]]; then
-  echo "AGENT_VERSION must not contain whitespace or slash" >&2
-  exit 2
-fi
-if [[ ! "$AGENT_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
-  echo "AGENT_COMMIT must be exactly 40 hexadecimal characters" >&2
+if [[ $# -ne 2 ]]; then
+  echo "usage: $0 <full-source-revision> <output-directory>" >&2
   exit 2
 fi
 
-if [[ "$OUT_DIR" != /* ]]; then
-  OUT_DIR="$ROOT/$OUT_DIR"
+revision="$1"
+output="$2"
+if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "source revision must be exactly 40 lowercase hexadecimal characters" >&2
+  exit 2
 fi
-parent="$(dirname "$OUT_DIR")"
+if [[ "$(git -C "$ROOT" rev-parse HEAD)" != "$revision" ]]; then
+  echo "source revision does not match the checked-out revision" >&2
+  exit 1
+fi
+if [[ "$(go env GOVERSION)" != "go1.26.4" ]]; then
+  echo "Go 1.26.4 is required" >&2
+  exit 1
+fi
+
+if [[ "$output" != /* ]]; then
+  output="$ROOT/$output"
+fi
+if [[ -e "$output" ]]; then
+  echo "output directory already exists: $output" >&2
+  exit 1
+fi
+
+parent="$(dirname "$output")"
 mkdir -p "$parent"
-
 stage="$(mktemp -d "$parent/.agent-release.XXXXXX")"
-backup=""
-cleanup() {
-  if [[ -n "$stage" ]]; then
-    rm -rf "$stage"
-  fi
-  if [[ -n "$backup" ]]; then
-    rm -rf "$backup"
-  fi
-}
-trap cleanup EXIT
+trap 'rm -rf "$stage"' EXIT
 
+version="agent-$revision"
 binary="$stage/opsi-agent-linux-amd64"
 (
   cd "$ROOT/agent"
@@ -44,100 +44,41 @@ binary="$stage/opsi-agent-linux-amd64"
     CGO_ENABLED=0 \
     GOOS=linux \
     GOARCH=amd64 \
-    GOCACHE="${GOCACHE:-/tmp/opsi-go-cache}" \
-    GOTOOLCHAIN="${GOTOOLCHAIN:-local}" \
     go build \
       -trimpath \
       -buildvcs=false \
-      -ldflags "-X=main.version=$AGENT_VERSION -X=main.commit=$AGENT_COMMIT -buildid= -s -w" \
+      -ldflags "-X=main.version=$version -X=main.commit=$revision -buildid= -s -w" \
       -o "$binary" \
       ./cmd/opsi-agent
 )
-
-if [[ ! -x "$binary" ]]; then
-  echo "release binary is missing or not executable" >&2
-  exit 1
-fi
 
 (
   cd "$stage"
   sha256sum opsi-agent-linux-amd64 > checksums.txt
 )
 sha256="$(awk '{print $1}' "$stage/checksums.txt")"
-if [[ ! "$sha256" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "invalid SHA-256 output" >&2
-  exit 1
-fi
 
-RELEASE_ROOT="$stage" \
-RELEASE_VERSION="$AGENT_VERSION" \
-RELEASE_COMMIT="$AGENT_COMMIT" \
-RELEASE_SHA256="$sha256" \
-python3 <<'PY'
+RELEASE_ROOT="$stage" RELEASE_REVISION="$revision" RELEASE_VERSION="$version" RELEASE_SHA256="$sha256" python3 <<'PY'
 import json
 import os
 from pathlib import Path
 
 root = Path(os.environ["RELEASE_ROOT"])
 metadata = {
-    "schema_version": 1,
-    "name": "opsi-agent",
+    "schema_version": "opsi.agent_release.v1",
+    "source_revision": os.environ["RELEASE_REVISION"],
     "version": os.environ["RELEASE_VERSION"],
-    "commit": os.environ["RELEASE_COMMIT"],
     "os": "linux",
     "arch": "amd64",
     "binary": "opsi-agent-linux-amd64",
     "sha256": os.environ["RELEASE_SHA256"],
 }
-(root / "release.json").write_text(json.dumps(metadata, indent=2) + "\n")
+(root / "release.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 PY
 
-(
-  cd "$stage"
-  sha256sum --check checksums.txt
-)
-RELEASE_ROOT="$stage" python3 <<'PY'
-import hashlib
-import json
-import os
-from pathlib import Path
-
-root = Path(os.environ["RELEASE_ROOT"])
-binary = root / "opsi-agent-linux-amd64"
-metadata = json.loads((root / "release.json").read_text())
-digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-expected_keys = [
-    "schema_version",
-    "name",
-    "version",
-    "commit",
-    "os",
-    "arch",
-    "binary",
-    "sha256",
-]
-if list(metadata) != expected_keys:
-    raise SystemExit("release.json fields or order are invalid")
-if metadata["sha256"] != digest:
-    raise SystemExit("release.json checksum does not match binary")
-PY
-
-if [[ -e "$OUT_DIR" ]]; then
-  backup="$(mktemp -d "$parent/.agent-release-old.XXXXXX")"
-  rmdir "$backup"
-  mv "$OUT_DIR" "$backup"
-fi
-if ! mv "$stage" "$OUT_DIR"; then
-  if [[ -n "$backup" ]]; then
-    mv "$backup" "$OUT_DIR"
-    backup=""
-  fi
-  exit 1
-fi
+"$ROOT/scripts/verify-agent-release.sh" "$stage" "$revision"
+mv "$stage" "$output"
 stage=""
-if [[ -n "$backup" ]]; then
-  rm -rf "$backup"
-  backup=""
-fi
+trap - EXIT
 
-echo "Agent release artifact: $OUT_DIR"
+echo "Agent release artifact: $output"

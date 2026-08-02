@@ -9,8 +9,13 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
 `R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is pending final source gates.
 `R5_017_NODE_RETIREMENT_IDEMPOTENCY_SOURCE_FIXED / RUNTIME_PUBLISH_PENDING`.
-`R5_017G_CONTROL_PLANE_PUBLISH_SOURCE_READY / LIVE_PUBLISH_PENDING` replaces
-the Worker-only workflow with one canonical Cloud + Bootstrap Worker publisher.
+`R5_017G_CONTROL_PLANE_PUBLISH_PASS` replaces the Worker-only workflow with one
+canonical Cloud + Bootstrap Worker publisher; run `30750598790` records the
+published `246c924f56f7d28db43d06154b39c558f214c686` manifest and digests.
+One Agent-only publisher source now derives an immutable prerelease from the
+same exact reviewed revision, proves two clean builds byte-identical, and
+verifies the three public assets anonymously. It does not add another Cloud or
+Worker publisher.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
 ActionPlane restart recovery is one non-blocking root-context loop with an
 immediate pass, five-second default retry, 30-second pass budget, and bounded
@@ -42,6 +47,21 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   publisher-specific test assumptions are removed.
 - Source gates are required before publish. No staging deploy, Agent/VPS work,
   live idempotency replay, Run 1, or Run 2 is claimed here.
+
+### R5-017H — immutable Agent artifact publisher
+
+- One manual `developer`-only workflow accepts a lowercase full revision and
+  exact `publish-agent` confirmation; the revision must equal `GITHUB_SHA`.
+- The canonical build script derives `agent-<full-revision>`, emits only the
+  Linux amd64 Agent binary, checksum, and strict metadata, and refuses an
+  existing output directory.
+- Two clean Go 1.26.4 builds must be byte-identical. The immutable prerelease
+  refuses an existing tag/release and is re-downloaded without credentials for
+  checksum, ELF/amd64, version, embedded revision, metadata, URL, and asset-set
+  verification.
+- Registration/publication evidence is external to the source commit. No
+  staging deploy, Agent/VPS mutation, Run 1, Run 2, R5-017 completion, or
+  release-readiness claim follows from this publisher alone.
 
 ### R5-017F — durable node retirement replay
 
