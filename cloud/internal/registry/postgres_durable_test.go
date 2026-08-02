@@ -392,8 +392,8 @@ func TestPostgresConfirmedResetReleasesOwnershipAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fresh().MarkNodeOffline(project.ID, oldJob.NodeID); err != nil {
-		t.Fatal(err)
+	if _, reused, err := fresh().MarkNodeOffline(project.ID, oldJob.NodeID, userID, "confirmed-reset", "confirmed-reset"); err != nil || reused {
+		t.Fatalf("confirmed reset reused=%v err=%v", reused, err)
 	}
 	oldNode, err := fresh().getNode(ctx, oldJob.NodeID)
 	if err != nil {

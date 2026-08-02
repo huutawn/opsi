@@ -8,6 +8,7 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
 `R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
 `R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is pending final source gates.
+`R5_017_NODE_RETIREMENT_IDEMPOTENCY_SOURCE_FIXED / RUNTIME_PUBLISH_PENDING`.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
 ActionPlane restart recovery is one non-blocking root-context loop with an
 immediate pass, five-second default retry, 30-second pass budget, and bounded
@@ -25,6 +26,21 @@ former Agent VPS no longer exists. R5-012 still requires a live delivery retest.
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
+
+### R5-017F — durable node retirement replay
+
+- Node retirement now passes the authenticated actor, actual idempotency key,
+  and request ID into one authoritative registry operation.
+- In-memory replay is serialized under the service lock. PostgreSQL replay uses
+  the existing `idempotency_keys` table, an operation/key advisory transaction
+  lock, target row locking, conditional state writes, and one transactional
+  `NODE_MARKED_OFFLINE` audit for a factual transition.
+- Exact replay and a new key against the exact retired state do not churn node,
+  Agent, runtime, or project timestamps. Reusing a key for another node returns
+  `IDEMPOTENCY_CONFLICT` without mutation or another success audit.
+- Memory, HTTP, race, and disposable PostgreSQL restart/concurrency regressions
+  pass. No migration, second idempotency store, live request, publish, deploy,
+  Run 1 resume, or Run 2 start was performed.
 
 ### R5-017D1 — source barrier orchestration
 

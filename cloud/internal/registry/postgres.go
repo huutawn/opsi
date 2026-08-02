@@ -506,39 +506,123 @@ func (s PostgresService) RemoveNode(projectID, nodeID string, force bool) (Node,
 	return Node{}, APIError{Status: 501, Code: "NODE_LIFECYCLE_AGENT_REQUIRED", Message: "node remove must execute through Agent/K3s; registry metadata cannot mark it complete", NextAction: "wire_agent_node_lifecycle_endpoint"}
 }
 
-func (s PostgresService) MarkNodeOffline(projectID, nodeID string) (Node, error) {
+func (s PostgresService) MarkNodeOffline(projectID, nodeID, actorUserID, key, requestID string) (Node, bool, error) {
+	if !validDeploymentIdempotencyKey(key) {
+		return Node{}, false, APIError{Status: 400, Code: "IDEMPOTENCY_KEY_INVALID", Message: "node retirement idempotency key is invalid", RequestID: requestID}
+	}
+	if actorUserID == "" {
+		return Node{}, false, APIError{Status: 403, Code: "PERMISSION_DENIED", Message: "authenticated principal user ID is required", RequestID: requestID}
+	}
 	ctx := context.Background()
-	node, err := s.getNode(ctx, nodeID)
-	if err != nil {
-		return Node{}, err
-	}
-	if node.ProjectID != projectID {
-		return Node{}, ErrNotFound
-	}
-	now := s.clock()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return Node{}, err
+		return Node{}, false, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET status = $1, failure_code = $2, failure_message_redacted = $3, updated_at = $4 WHERE id = $5 AND project_id = $6`, NodeOffline, "OPERATOR_CONFIRMED_TARGET_RESET", "operator confirmed target reset; record is offline", now, nodeID, projectID); err != nil {
-		return Node{}, err
+	scope := nodeOfflineScope + projectID
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, scope+":"+key); err != nil {
+		return Node{}, false, err
+	}
+	var existingType, existingID string
+	err = tx.QueryRowContext(ctx, `SELECT resource_type, resource_id FROM idempotency_keys WHERE scope=$1 AND key=$2`, scope, key).Scan(&existingType, &existingID)
+	if err == nil {
+		if existingType != "node" || existingID != nodeID {
+			return Node{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used for another node retirement", RequestID: requestID}
+		}
+		if err := tx.Commit(); err != nil {
+			return Node{}, false, err
+		}
+		node, err := s.getNode(ctx, nodeID)
+		if err != nil || node.ProjectID != projectID {
+			if err == nil {
+				err = ErrNotFound
+			}
+			return Node{}, false, err
+		}
+		return node, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Node{}, false, err
+	}
+	node, err := scanNode(tx.QueryRowContext(ctx, nodeSelectSQL+` WHERE id=$1 AND project_id=$2 FOR UPDATE`, nodeID, projectID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Node{}, false, ErrNotFound
+	}
+	if err != nil {
+		return Node{}, false, err
+	}
+	now := s.clock()
+	changed := false
+	if node.Status != NodeOffline || node.FailureCode != nodeOfflineCode || node.FailureMessageRedacted != nodeOfflineMessage {
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET status=$1, failure_code=$2, failure_message_redacted=$3, updated_at=$4 WHERE id=$5`, NodeOffline, nodeOfflineCode, nodeOfflineMessage, now, nodeID); err != nil {
+			return Node{}, false, err
+		}
+		changed = true
 	}
 	if node.AgentID != "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE agents SET status = 'revoked', updated_at = $1 WHERE id = $2 AND project_id = $3`, now, node.AgentID, projectID); err != nil {
-			return Node{}, err
+		result, err := tx.ExecContext(ctx, `UPDATE agents SET status='revoked', updated_at=$1 WHERE id=$2 AND project_id=$3 AND status IS DISTINCT FROM 'revoked'`, now, node.AgentID, projectID)
+		if err != nil {
+			return Node{}, false, err
+		}
+		if rows, err := result.RowsAffected(); err != nil {
+			return Node{}, false, err
+		} else if rows > 0 {
+			changed = true
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runtimes SET status = $1, server_node_id = NULL, updated_at = $2 WHERE id = $3 AND server_node_id = $4`, RuntimeNoNodes, now, node.RuntimeID, node.ID); err != nil {
-		return Node{}, err
+	result, err := tx.ExecContext(ctx, `UPDATE runtimes SET status=$1, server_node_id=NULL, updated_at=$2 WHERE id=$3 AND server_node_id=$4`, RuntimeNoNodes, now, node.RuntimeID, node.ID)
+	if err != nil {
+		return Node{}, false, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE projects SET status = $1, updated_at = $2 WHERE id = $3`, ProjectNoNodes, now, projectID); err != nil {
-		return Node{}, err
+	if rows, err := result.RowsAffected(); err != nil {
+		return Node{}, false, err
+	} else if rows > 0 {
+		changed = true
+	}
+	var projectStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM projects WHERE id=$1 FOR UPDATE`, projectID).Scan(&projectStatus); errors.Is(err, sql.ErrNoRows) {
+		return Node{}, false, ErrNotFound
+	} else if err != nil {
+		return Node{}, false, err
+	}
+	desiredStatus := ProjectNoNodes
+	if projectStatus == "archived" {
+		desiredStatus = "archived"
+	} else {
+		var healthyServers, activeBootstraps int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE project_id=$1 AND role='server' AND status='healthy'`, projectID).Scan(&healthyServers); err != nil {
+			return Node{}, false, err
+		}
+		if healthyServers > 0 {
+			desiredStatus = ProjectReady
+		} else {
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id=$1 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID).Scan(&activeBootstraps); err != nil {
+				return Node{}, false, err
+			}
+			if activeBootstraps > 0 {
+				desiredStatus = ProjectBootstrapping
+			}
+		}
+	}
+	if desiredStatus != projectStatus {
+		if _, err := tx.ExecContext(ctx, `UPDATE projects SET status=$1, updated_at=$2 WHERE id=$3`, desiredStatus, now, projectID); err != nil {
+			return Node{}, false, err
+		}
+		changed = true
+	}
+	if err := insertIdempotency(ctx, tx, scope, key, "node", nodeID); err != nil {
+		return Node{}, false, err
+	}
+	if changed {
+		if err := insertCloudAudit(ctx, tx, node.OrgID, projectID, actorUserID, "NODE_MARKED_OFFLINE", "node", nodeID, "success", map[string]any{"reason": "operator_confirmed_target_reset", "request_id": boundedAuditRequestID(requestID)}); err != nil {
+			return Node{}, false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return Node{}, err
+		return Node{}, false, err
 	}
-	return s.getNode(ctx, nodeID)
+	node, err = s.getNode(ctx, nodeID)
+	return node, false, err
 }
 
 func (s PostgresService) RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error) {
