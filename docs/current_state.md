@@ -10,6 +10,18 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
 `R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is the source-only corrective gate;
 live retry remains operator-run and was not started.
+`R5_017G_CONTROL_PLANE_PUBLISH_SOURCE_READY / LIVE_PUBLISH_PENDING` replaces
+the Worker-only publisher with one manual control-plane workflow for Cloud and
+Bootstrap Worker. Both targets use `cloud/Dockerfile`, repository-root context,
+`linux/amd64`, the same full revision tag and OCI provenance labels. Exact-tag
+resume validates repository, target/component, platform, labels, and one
+lowercase SHA-256 digest before reuse; inconsistent existing tags fail closed.
+One strict combined manifest is uploaded only after both images are verified.
+The unified workflow no longer calls the Worker helper's manifest command; the
+canonical control-plane helper owns combined manifest validation and extracts
+the immutable Worker reference for the existing `--image` deployment path.
+Live publication and staging deployment are not claimed by this source
+snapshot.
 The R5-017 publisher run `30700943447` at revision
 `585293ee171454d8f8a6af54d37b3bb49a600ea9` failed before push because the
 repository-root build context did not select `cloud/Dockerfile`. The canonical
@@ -28,18 +40,16 @@ R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
 
-R5-017C adds one manual, canonical Bootstrap Worker release path. The
-repository-root `cloud/Dockerfile` target `bootstrap-worker` remains the only
-image implementation. A fork/ref/confirmation-gated GitHub Actions workflow
-publishes only `ghcr.io/huutawn/opsi-bootstrap-worker`, records the full source
-revision in an immutable lookup tag and OCI labels, emits the registry digest,
-refuses revision-tag overwrite, and uploads a strict
-`opsi.bootstrap-worker.release/v1` JSON manifest for the factual `linux/amd64`
-platform. The manifest is provenance metadata and is not described as a signed
-attestation.
+R5-017C introduced the original manual Bootstrap Worker publisher. R5-017G
+replaces that workflow rather than retaining a parallel path: the canonical
+publisher now owns both `ghcr.io/huutawn/opsi-cloud` and
+`ghcr.io/huutawn/opsi-bootstrap-worker`, while the two existing Docker targets
+remain the only image implementations. Its combined manifest is provenance
+metadata and is not described as a signed attestation.
 
-The staging helper validates either that manifest or an immutable canonical
-image reference, requires the Worker RepoDigest and persisted `.env` binding to
+The staging helper accepts the immutable Worker reference extracted from the
+combined manifest through its existing `--image` path, requires the Worker
+RepoDigest and persisted `.env` binding to
 match an operator-supplied expected digest, and serializes releases with a
 host-local lock. Normal same-image deploy remains a factual health/RepoDigest/
 Cloud-health no-op with no pull, `.env` edit, backup, or recreate. The explicit
@@ -118,7 +128,7 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-08-01 |
+| Last updated | 2026-08-02 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |

@@ -1,0 +1,191 @@
+name: publish-control-plane
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full reviewed commit currently selected on developer
+        required: true
+        type: string
+      confirmation:
+        description: Type publish-control-plane to publish both control-plane images
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-control-plane-${{ inputs.source_revision }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'huutawn/opsi' && github.ref == 'refs/heads/developer'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PLATFORM: linux/amd64
+    steps:
+      - name: Enforce trusted source
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          set -eu
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REPOSITORY" = huutawn/opsi
+          test "$GITHUB_REF" = refs/heads/developer
+          test "$SOURCE_REVISION" = "$GITHUB_SHA"
+          test "$CONFIRMATION" = publish-control-plane
+          printf '%s\n' "$SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$'
+
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_revision }}
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Record release time
+        id: metadata
+        run: echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish or reuse immutable component images
+        id: components
+        env:
+          CREATED_AT: ${{ steps.metadata.outputs.created_at }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          while IFS='|' read -r component package repository target; do
+            image_tag="$repository:$GITHUB_SHA"
+            api_error=$(mktemp)
+            if versions=$(gh api --paginate "/users/huutawn/packages/container/$package/versions?per_page=100" \
+              --jq ".[] | select(any(.metadata.container.tags[]?; . == \"$GITHUB_SHA\")) | .id" 2>"$api_error"); then
+              existing_id="$versions"
+            elif grep -q 'HTTP 404' "$api_error"; then
+              existing_id=
+            else
+              cat "$api_error" >&2
+              exit 1
+            fi
+            rm -f "$api_error"
+            test "$(printf '%s\n' "$existing_id" | sed '/^$/d' | wc -l)" -le 1
+
+            if test -z "$existing_id"; then
+              registry_error=$(mktemp)
+              if docker manifest inspect "$image_tag" >/dev/null 2>"$registry_error"; then
+                existing_id=registry
+              elif grep -Eqi 'manifest unknown|no such manifest|not found' "$registry_error"; then
+                existing_id=
+              else
+                cat "$registry_error" >&2
+                exit 1
+              fi
+              rm -f "$registry_error"
+            fi
+
+            if test -z "$existing_id"; then
+              docker build \
+                --file cloud/Dockerfile \
+                --platform "$PLATFORM" \
+                --target "$target" \
+                --build-arg "VERSION=$GITHUB_SHA" \
+                --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+                --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+                --label "org.opencontainers.image.version=$GITHUB_SHA" \
+                --label "org.opencontainers.image.created=$CREATED_AT" \
+                --label "io.opsi.control-plane.component=$component" \
+                --label "io.opsi.control-plane.target=$target" \
+                --tag "$image_tag" \
+                .
+              docker push "$image_tag"
+            else
+              echo "reusing verified immutable tag for $component"
+            fi
+
+            docker pull --platform "$PLATFORM" "$image_tag"
+            inspect_file=$(mktemp)
+            docker image inspect "$image_tag" > "$inspect_file"
+            digest=$(python3 scripts/control-plane-release.py verify-image \
+              --component "$component" \
+              --source-revision "$GITHUB_SHA" \
+              --image-tag "$image_tag" \
+              --inspect-json "$inspect_file")
+            rm -f "$inspect_file"
+            printf '%s_digest=%s\n' "$component" "$digest" >> "$GITHUB_OUTPUT"
+          done <<'COMPONENTS'
+          cloud|opsi-cloud|ghcr.io/huutawn/opsi-cloud|cloud
+          bootstrap_worker|opsi-bootstrap-worker|ghcr.io/huutawn/opsi-bootstrap-worker|bootstrap-worker
+          COMPONENTS
+
+      - name: Create strict combined manifest
+        env:
+          CREATED_AT: ${{ steps.metadata.outputs.created_at }}
+          CLOUD_DIGEST: ${{ steps.components.outputs.cloud_digest }}
+          WORKER_DIGEST: ${{ steps.components.outputs.bootstrap_worker_digest }}
+        run: |
+          set -eu
+          scripts/control-plane-release.py manifest \
+            --source-revision "$GITHUB_SHA" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --created-at "$CREATED_AT" \
+            --cloud-digest "$CLOUD_DIGEST" \
+            --bootstrap-worker-digest "$WORKER_DIGEST" \
+            --output control-plane-release.json
+          scripts/control-plane-release.py validate --manifest control-plane-release.json
+
+      - name: Cross-check manifest against immutable registry images
+        run: |
+          set -euo pipefail
+          while IFS='|' read -r component repository; do
+            digest=$(scripts/control-plane-release.py extract \
+              --manifest control-plane-release.json --component "$component" --field image_digest)
+            reference=$(scripts/control-plane-release.py extract \
+              --manifest control-plane-release.json --component "$component" --field image_reference)
+            test "$reference" = "$repository@$digest"
+            docker pull --platform "$PLATFORM" "$reference"
+            inspect_file=$(mktemp)
+            docker image inspect "$repository:$GITHUB_SHA" > "$inspect_file"
+            verified=$(scripts/control-plane-release.py verify-image \
+              --component "$component" \
+              --source-revision "$GITHUB_SHA" \
+              --image-tag "$repository:$GITHUB_SHA" \
+              --inspect-json "$inspect_file")
+            rm -f "$inspect_file"
+            test "$verified" = "$digest"
+          done <<'COMPONENTS'
+          cloud|ghcr.io/huutawn/opsi-cloud
+          bootstrap_worker|ghcr.io/huutawn/opsi-bootstrap-worker
+          COMPONENTS
+
+      # actions/upload-artifact v4.6.2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: control-plane-release-${{ inputs.source_revision }}
+          path: control-plane-release.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish summary
+        env:
+          CLOUD_DIGEST: ${{ steps.components.outputs.cloud_digest }}
+          WORKER_DIGEST: ${{ steps.components.outputs.bootstrap_worker_digest }}
+        run: |
+          {
+            echo '## Immutable control-plane release'
+            echo
+            echo "- Source revision: \`$GITHUB_SHA\`"
+            echo "- Cloud: \`ghcr.io/huutawn/opsi-cloud@$CLOUD_DIGEST\`"
+            echo "- Bootstrap Worker: \`ghcr.io/huutawn/opsi-bootstrap-worker@$WORKER_DIGEST\`"
+            echo "- Platform: \`$PLATFORM\`"
+            echo "- Manifest artifact: \`control-plane-release-$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"

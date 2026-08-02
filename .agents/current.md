@@ -9,6 +9,8 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
 `R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is pending final source gates.
 `R5_017_NODE_RETIREMENT_IDEMPOTENCY_SOURCE_FIXED / RUNTIME_PUBLISH_PENDING`.
+`R5_017G_CONTROL_PLANE_PUBLISH_SOURCE_READY / LIVE_PUBLISH_PENDING` replaces
+the Worker-only workflow with one canonical Cloud + Bootstrap Worker publisher.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
 ActionPlane restart recovery is one non-blocking root-context loop with an
 immediate pass, five-second default retry, 30-second pass budget, and bounded
@@ -26,6 +28,20 @@ former Agent VPS no longer exists. R5-012 still requires a live delivery retest.
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
+
+### R5-017G — unified immutable control-plane publisher
+
+- One manual workflow publishes both `cloud` and `bootstrap-worker` targets
+  from `cloud/Dockerfile`, root context, `linux/amd64`, and the same full
+  reviewed revision.
+- Exact revision tags are built only when absent. Existing tags are reused only
+  after repository, target/component, platform, OCI labels, and one lowercase
+  SHA-256 digest validate; mismatches fail closed.
+- One strict combined manifest is created and uploaded only after both images
+  and immutable references cross-check. The old Worker-only workflow and its
+  publisher-specific test assumptions are removed.
+- Source gates are required before publish. No staging deploy, Agent/VPS work,
+  live idempotency replay, Run 1, or Run 2 is claimed here.
 
 ### R5-017F — durable node retirement replay
 

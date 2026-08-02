@@ -30,6 +30,7 @@ verify-r5-005-github-app-preflight:
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify_r5_005_github_app_preflight_test.py
 
 verify-bootstrap-worker-release:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/control-plane-release-test.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/bootstrap-worker-release-test.py
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOWORK=off GOTOOLCHAIN=$(GOTOOLCHAIN) go list -mod=readonly -deps \
 	  ./cmd/opsi-cloud ./cmd/opsi-bootstrap-worker >/dev/null
