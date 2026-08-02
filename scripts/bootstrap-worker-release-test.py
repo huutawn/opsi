@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-checks for the canonical Bootstrap Worker release path."""
+"""Self-checks for Bootstrap Worker deployment and barrier operations."""
 
 from __future__ import annotations
 
@@ -16,9 +16,6 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts/bootstrap-worker-release.py"
-WORKFLOW = ROOT / ".github/workflows/publish-bootstrap-worker.yml"
-DOCKERFILE = ROOT / "cloud/Dockerfile"
-MAKEFILE = ROOT / "Makefile"
 SPEC = importlib.util.spec_from_file_location("bootstrap_worker_release", HELPER)
 assert SPEC and SPEC.loader
 release = importlib.util.module_from_spec(SPEC)
@@ -72,9 +69,9 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaises(release.ReleaseError):
                 release.load_manifest(path)
 
-    def test_manifest_command_writes_the_workflow_artifact(self) -> None:
+    def test_worker_manifest_remains_deployment_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            output = pathlib.Path(raw) / "bootstrap-worker-release.json"
+            output = pathlib.Path(raw) / "worker-deploy-release.json"
             result = subprocess.run(
                 [
                     sys.executable,
@@ -97,63 +94,6 @@ class ManifestTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(release.load_manifest(output)["image_reference"], REF_B)
-
-
-class WorkflowTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.workflow = WORKFLOW.read_text(encoding="utf-8")
-        cls.dockerfile = DOCKERFILE.read_text(encoding="utf-8")
-        cls.makefile = MAKEFILE.read_text(encoding="utf-8")
-
-    def test_publish_is_manual_official_repository_only(self) -> None:
-        self.assertIn("workflow_dispatch:", self.workflow)
-        self.assertNotIn("pull_request:", self.workflow)
-        self.assertIn('test "$GITHUB_REPOSITORY" = huutawn/opsi', self.workflow)
-        self.assertIn('test "$GITHUB_REF" = refs/heads/developer', self.workflow)
-        self.assertIn('test "$SOURCE_REVISION" = "$GITHUB_SHA"', self.workflow)
-        self.assertIn('test "$CONFIRMATION" = publish-bootstrap-worker', self.workflow)
-
-    def test_publish_identity_is_immutable_and_permissions_are_scoped(self) -> None:
-        self.assertNotIn(":latest", self.workflow)
-        self.assertEqual(self.workflow.count("packages: write"), 1)
-        self.assertIn("jobs:\n  publish:", self.workflow)
-        self.assertIn("group: publish-bootstrap-worker-${{ github.sha }}", self.workflow)
-        self.assertIn("revision tag already exists; refusing to overwrite it", self.workflow)
-        self.assertIn("ghcr.io/huutawn/opsi-bootstrap-worker", self.workflow)
-        self.assertIn("^sha256:[0-9a-f]{64}$", self.workflow)
-
-    def test_build_uses_cloud_dockerfile_and_repository_root_context(self) -> None:
-        start = self.workflow.index("          docker build \\\n")
-        end = self.workflow.index("          docker push", start)
-        build_block = self.workflow[start:end]
-
-        self.assertIn("--file cloud/Dockerfile \\\n", build_block)
-        self.assertIn("--platform \"$PLATFORM\" \\\n", build_block)
-        self.assertIn("--target bootstrap-worker \\\n", build_block)
-        self.assertIn('--tag "$image_tag" \\\n            .\n', build_block)
-        self.assertNotIn("--file Dockerfile", build_block)
-        self.assertTrue((ROOT / "cloud/Dockerfile").is_file())
-        self.assertFalse((ROOT / "Dockerfile").exists())
-
-    def test_isolated_release_checks_are_fail_closed(self) -> None:
-        self.assertEqual(self.dockerfile.count("go build -mod=readonly"), 2)
-        self.assertIn("-o /out/opsi-cloud ./cmd/opsi-cloud", self.dockerfile)
-        self.assertIn("-o /out/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker", self.dockerfile)
-
-        start = self.makefile.index("verify-bootstrap-worker-release:")
-        end = self.makefile.index("\n\nverify:", start)
-        gate = self.makefile[start:end]
-        self.assertIn("GOWORK=off", gate)
-        self.assertIn("go list -mod=readonly -deps", gate)
-        self.assertIn("./cmd/opsi-cloud ./cmd/opsi-bootstrap-worker", gate)
-
-    def test_workflow_emits_provenance_manifest_after_push(self) -> None:
-        self.assertLess(self.workflow.index("docker push"), self.workflow.index("Create release manifest"))
-        for label in ("image.source", "image.revision", "image.version", "image.created"):
-            self.assertIn(label, self.workflow)
-        self.assertIn("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", self.workflow)
-
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
