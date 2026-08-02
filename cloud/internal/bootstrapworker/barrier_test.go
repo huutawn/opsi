@@ -1,12 +1,16 @@
 package bootstrapworker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +94,58 @@ func TestLoadConfigProductionRejectsExplicitDisabledBarrier(t *testing.T) {
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "not allowed in production") {
 		t.Fatalf("explicit disabled production barrier was accepted: %v", err)
 	}
+}
+
+func TestGeneratedBarrierConfigPassesWorkerValidator(t *testing.T) {
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(mustCallerFile(t)))))
+	fixture := t.TempDir()
+	tokenPath := filepath.Join(fixture, "worker-token")
+	knownHostsPath := filepath.Join(fixture, "known_hosts")
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("t", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(knownHostsPath, []byte("example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEexample\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(fixture, "bootstrap-worker.json")
+	output := filepath.Join(fixture, "bootstrap-worker.e2e.json")
+	sourceData := []byte(fmt.Sprintf(`{"cloud_url":"http://cloud:9800","allow_insecure_internal_cloud_url":true,"bootstrap_worker_token_file":%q,"worker_id":"worker-1","poll_interval":"1s","k3s_version":"v1.32.5+k3s1","k3s_installer_url":"https://get.k3s.io","k3s_installer_sha256":"%s","agent_install_url":"https://downloads.example/agent","agent_install_sha256":"%s","ssh_known_hosts_path":%q,"production":true,"timeout":"10m"}`, tokenPath, strings.Repeat("b", 64), strings.Repeat("a", 64), knownHostsPath))
+	if err := os.WriteFile(source, sourceData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(root, "scripts/e2e/bootstrap-worker-barrier.sh"), "configure", "--source-config", source, "--output-config", output, "--session-id", "boot-validator", "--run-id", "run-validator")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("barrier configure failed: %v: %s", err, output)
+	}
+	if got, err := os.ReadFile(source); err != nil || !bytes.Equal(got, sourceData) {
+		t.Fatalf("source config changed: %v", err)
+	}
+	cfg, err := LoadConfig(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AllowInsecureInternalCloudURL || cfg.Production || cfg.CloudURL != "http://cloud:9800" {
+		t.Fatalf("generated config fields are wrong: %+v", cfg)
+	}
+	// The container mount is unavailable in the host test; validate the generated
+	// config with the real validator after pointing only state_dir at a private fixture.
+	cfg.StagingCrashBarrier.StateDir = stateDir
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("generated barrier config failed Worker validation: %v", err)
+	}
+}
+
+func mustCallerFile(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(1)
+	if !ok {
+		t.Fatal("runtime caller unavailable")
+	}
+	return file
 }
 
 func TestStagingCrashBarrierInsertionPointAndCancellation(t *testing.T) {

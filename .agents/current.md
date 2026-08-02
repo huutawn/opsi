@@ -6,6 +6,8 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
+`R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
+`R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is pending final source gates.
 No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
 ActionPlane restart recovery is one non-blocking root-context loop with an
 immediate pass, five-second default retry, 30-second pass budget, and bounded
@@ -23,6 +25,39 @@ former Agent VPS no longer exists. R5-012 still requires a live delivery retest.
 Detailed state: `docs/current_state.md`. Architecture: `docs/architecture.md`.
 Requirements: `docs/opsi_srs.md`. Evidence: `docs/status_matrix.md`.
 Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
+
+### R5-017D1 — source barrier orchestration
+
+- Normal same-image Worker release remains a health/RepoDigest/Cloud-health
+  no-op with no pull, `.env` mutation, backup, or recreate.
+- Explicit deploy-only `--force-recreate-same-image` is accepted only for the
+  canonical staging barrier override, private placeholder-free run config,
+  matching `armed` marker, exact expected digest, and one Worker target. It
+  proves container ID replacement, health, immutable RepoDigest, and Cloud
+  health without changing `.env`.
+- `verify-k3s.sh --barrier-prepare` proves Worker quiescence before factual
+  Local API session creation, stores protected run/session/container state,
+  creates config and arms the marker after the factual session ID exists, and
+  restores only the normal Worker profile on failure. Replay/resume/restore
+  modes keep one Worker and one bootstrap session path.
+- Source/fake-state gates pass. No image publish, staging deploy, SSH, VPS
+  reset, or live E2E was performed; R5-017 live retry remains pending.
+
+### R5-017D2 — canonical replay/restore and failure cleanup
+
+- Barrier generation preserves the staging `cloud_url`, forces
+  `production: false` and `allow_insecure_internal_cloud_url: false`, and
+  writes one private run/session-scoped barrier config without changing the
+  production source config.
+- Replay and normal restoration use dedicated `barrier-replay` and
+  `barrier-restore` operations in `bootstrap-worker-release.py`; both prove
+  expected binding/RepoDigest, singleton replacement, Worker health, and
+  Cloud health under the release lock. Normal restoration uses base Compose
+  only and never pulls or edits `.env`.
+- Prepare failure restores through the canonical helper, reports restoration,
+  marker, and config cleanup failures separately, disarms only an exact
+  `armed` attempt, and preserves `reached`, `consumed`, and `completed` state.
+  No live publish, staging deploy, SSH, VPS reset, or E2E run was performed.
 
 ### R5-015 corrective — R5_015_AGENT_SERVICE_IDENTITY_PASS
 
