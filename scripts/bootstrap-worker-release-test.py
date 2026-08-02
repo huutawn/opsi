@@ -128,6 +128,8 @@ class WorkflowTests(unittest.TestCase):
         end = self.workflow.index("          docker push", start)
         build_block = self.workflow[start:end]
 
+        self.assertIn("docker build \\\n            --file cloud/Dockerfile \\\n", build_block)
+        self.assertNotRegex(build_block, r"\\\n[ \t]*\n")
         self.assertIn("--file cloud/Dockerfile \\\n", build_block)
         self.assertIn("--platform \"$PLATFORM\" \\\n", build_block)
         self.assertIn("--target bootstrap-worker \\\n", build_block)
