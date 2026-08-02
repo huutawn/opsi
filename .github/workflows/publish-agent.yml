@@ -1,0 +1,152 @@
+name: publish-agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full reviewed developer revision to publish
+        required: true
+        type: string
+      confirmation:
+        description: Type publish-agent
+        required: true
+        type: string
+
+concurrency:
+  group: publish-agent-${{ inputs.source_revision }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'huutawn/opsi' && github.ref == 'refs/heads/developer'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce trusted source
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          set -eu
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REPOSITORY" = huutawn/opsi
+          test "$GITHUB_REF" = refs/heads/developer
+          test "$SOURCE_REVISION" = "$GITHUB_SHA"
+          test "$CONFIRMATION" = publish-agent
+          printf '%s\n' "$SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$'
+
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # actions/setup-go v5.0.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version: '1.26.4'
+          cache: false
+
+      - name: Build twice and prove reproducibility
+        env:
+          BUILDER: scripts/build-agent-release.sh
+        run: |
+          set -euo pipefail
+          for build in one two; do
+            mkdir -p "$RUNNER_TEMP/cache-$build"
+            GOCACHE="$RUNNER_TEMP/cache-$build" GOTOOLCHAIN=local \
+              "$BUILDER" "$GITHUB_SHA" "$RUNNER_TEMP/release-$build"
+          done
+          for asset in opsi-agent-linux-amd64 checksums.txt release.json; do
+            cmp "$RUNNER_TEMP/release-one/$asset" "$RUNNER_TEMP/release-two/$asset"
+          done
+
+      - name: Refuse an existing tag or release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: agent-${{ inputs.source_revision }}
+        run: |
+          set -euo pipefail
+          test -z "$(git ls-remote --tags origin "refs/tags/$TAG")"
+          error_file="$(mktemp)"
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" >/dev/null 2>"$error_file"; then
+            echo "release already exists: $TAG" >&2
+            exit 1
+          fi
+          grep -q 'HTTP 404' "$error_file"
+          rm -f "$error_file"
+
+      - name: Publish immutable prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: agent-${{ inputs.source_revision }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" "$RUNNER_TEMP/release-one/opsi-agent-linux-amd64" \
+            "$RUNNER_TEMP/release-one/checksums.txt" \
+            "$RUNNER_TEMP/release-one/release.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "$TAG" \
+            --notes "Immutable Linux amd64 Agent artifact built from $GITHUB_SHA"
+
+      - name: Verify anonymous immutable downloads
+        env:
+          TAG: agent-${{ inputs.source_revision }}
+        run: |
+          set -euo pipefail
+          download="$RUNNER_TEMP/anonymous-download"
+          mkdir "$download"
+          for asset in opsi-agent-linux-amd64 checksums.txt release.json; do
+            env -u GH_TOKEN -u GITHUB_TOKEN curl --fail --location --retry 5 --retry-all-errors \
+              --silent --show-error \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$asset" \
+              --output "$download/$asset"
+          done
+          chmod +x "$download/opsi-agent-linux-amd64"
+          scripts/verify-agent-release.sh "$download" "$GITHUB_SHA"
+          for asset in opsi-agent-linux-amd64 checksums.txt release.json; do
+            cmp "$RUNNER_TEMP/release-one/$asset" "$download/$asset"
+          done
+
+          env -u GH_TOKEN -u GITHUB_TOKEN curl --fail --retry 5 --retry-all-errors \
+            --silent --show-error \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            --output "$RUNNER_TEMP/release-api.json"
+          RELEASE_API="$RUNNER_TEMP/release-api.json" TAG="$TAG" REPOSITORY="$GITHUB_REPOSITORY" python3 <<'PY'
+          import json
+          import os
+
+          release = json.load(open(os.environ["RELEASE_API"], encoding="utf-8"))
+          tag = os.environ["TAG"]
+          repository = os.environ["REPOSITORY"]
+          expected = {"opsi-agent-linux-amd64", "checksums.txt", "release.json"}
+          assets = release.get("assets", [])
+          if release.get("tag_name") != tag or not release.get("prerelease") or release.get("draft"):
+              raise SystemExit("release metadata is not the expected immutable prerelease")
+          if {asset.get("name") for asset in assets} != expected or len(assets) != len(expected):
+              raise SystemExit("release assets were added, removed, or replaced")
+          for asset in assets:
+              expected_url = f"https://github.com/{repository}/releases/download/{tag}/{asset['name']}"
+              if asset.get("id", 0) <= 0 or asset.get("browser_download_url") != expected_url:
+                  raise SystemExit("release asset identity or anonymous URL is invalid")
+          PY
+          test "$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')" = "$GITHUB_SHA"
+
+      - name: Publish summary
+        env:
+          TAG: agent-${{ inputs.source_revision }}
+        run: |
+          digest="$(awk '{print $1}' "$RUNNER_TEMP/release-one/checksums.txt")"
+          {
+            echo '## Immutable Agent release'
+            echo
+            echo "- Source revision: \`$GITHUB_SHA\`"
+            echo "- Version: \`agent-$GITHUB_SHA\`"
+            echo "- Tag: \`$TAG\`"
+            echo "- Linux amd64 SHA-256: \`$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
