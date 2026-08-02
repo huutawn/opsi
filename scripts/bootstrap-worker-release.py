@@ -259,9 +259,11 @@ def validate_same_image_barrier(
     if len(args.compose_file) != 1:
         raise ReleaseError(f"same-image barrier recreation requires exactly {BARRIER_OVERRIDE}")
     raw = pathlib.Path(args.compose_file[0])
+    if raw.is_absolute():
+        raise ReleaseError("barrier compose override must be relative")
     if ".." in raw.parts:
         raise ReleaseError("barrier compose override must not contain traversal")
-    override = raw if raw.is_absolute() else args._directory / raw
+    override = args._directory / raw
     expected_override = args._directory / BARRIER_OVERRIDE
     if override.absolute() != expected_override:
         raise ReleaseError(f"same-image barrier recreation requires exactly {BARRIER_OVERRIDE}")

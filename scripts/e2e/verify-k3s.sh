@@ -1045,7 +1045,8 @@ barrier_restart() {
   [ -n "$WORKER_DIGEST" ] || { echo "expected Worker digest is required for replay restart" >&2; return 1; }
   python3 "$RELEASE_HELPER" barrier-replay \
     --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
-    --compose-directory "$COMPOSE_DIRECTORY" --service bootstrap-worker \
+    --compose-directory "$COMPOSE_DIRECTORY" --compose-file compose.e2e-bootstrap-barrier.yaml \
+    --service bootstrap-worker \
     --health-timeout 180 --barrier-session-id "${BARRIER_CONTEXT[2]}" \
     --barrier-run-id "${BARRIER_CONTEXT[0]}" || return 1
   after="$(single_worker_id 0)" || return 1
@@ -1069,22 +1070,35 @@ barrier_restore() {
 }
 
 resume_bootstrap_session() {
-  local state_file="$1"
+  local state_file="$1" marker_status
   load_barrier_context "$state_file" || { echo "protected barrier state is invalid" >&2; return 1; }
-  [ "${BARRIER_CONTEXT[3]}" = replay_started ] || { echo "barrier state is not resumable before replay restart" >&2; return 1; }
+  [ "${BARRIER_CONTEXT[3]}" = replay_started ] || [ "${BARRIER_CONTEXT[3]}" = consumed ] || { echo "barrier state is not resumable before replay completion" >&2; return 1; }
   RUN_ID="${BARRIER_CONTEXT[0]}"
   PROJECT_ID="${BARRIER_CONTEXT[1]}"
   [ -n "$ARTIFACT_DIR_EXPLICIT" ] || ARTIFACT_DIR="$ROOT/.tmp/e2e-k3s/$RUN_ID"
   run_e2e "${BARRIER_CONTEXT[2]}" || return 1
-  if [ "${BARRIER_CONTEXT[3]}" = replay_started ]; then
-    if [ "$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" = consumed ]; then
-      write_barrier_state "$state_file" consumed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
-      BARRIER_CONTEXT[3]=consumed
-    fi
-  fi
-  if [ "${BARRIER_CONTEXT[3]}" = consumed ] && [ "$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" = completed ]; then
-    write_barrier_state "$state_file" completed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
-  fi
+  marker_status="$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" || return 1
+  case "${BARRIER_CONTEXT[3]}:$marker_status" in
+    replay_started:consumed)
+      write_barrier_state "$state_file" consumed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" || return 1
+      ;;
+    replay_started:completed)
+      write_barrier_state "$state_file" consumed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" || return 1
+      write_barrier_state "$state_file" completed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
+      ;;
+    consumed:completed)
+      write_barrier_state "$state_file" completed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" || return 1
+      ;;
+    consumed:consumed) ;;
+    replay_started:reached)
+      echo "barrier marker has not proved replay consumption" >&2
+      return 1
+      ;;
+    *)
+      echo "barrier marker regressed or is inconsistent with protected state" >&2
+      return 1
+      ;;
+  esac
 }
 
 manual_cleanup() {

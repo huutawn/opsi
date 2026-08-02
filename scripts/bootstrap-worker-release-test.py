@@ -379,6 +379,7 @@ class RuntimeTests(unittest.TestCase):
             "wrong-name": "wrong.yaml",
             "traversal": "../outside.yaml",
             "outside": str(self.root / "outside.yaml"),
+            "absolute-canonical": str(self.compose / "compose.e2e-bootstrap-barrier.yaml"),
         }
         (self.root / "outside.yaml").write_text("services: {}\n", encoding="utf-8")
         for name, override in cases.items():
@@ -602,6 +603,7 @@ class BarrierProcedureTests(unittest.TestCase):
         self.runtime = self.root / "runtime"
         self.runtime.mkdir()
         (self.runtime / "container").write_text("worker-old", encoding="utf-8")
+        (self.runtime / "counter").write_text("0", encoding="utf-8")
         (self.runtime / "running").touch()
         self.log = self.root / "commands.log"
         self.artifacts = self.root / "artifacts"
@@ -614,6 +616,7 @@ class BarrierProcedureTests(unittest.TestCase):
         pem_end = "-----END OPENSSH " + "PRIVATE KEY-----"
         self.key.write_text(pem_marker + "\nfixture\n" + pem_end + "\n", encoding="utf-8")
         self.key.chmod(0o600)
+        self.marker = self.compose / ("barrier-state/install_k3s-" + hashlib.sha256(b"boot-factual\0run-order").hexdigest()[:32] + ".json")
         self.write_fake_tools()
 
     def tearDown(self) -> None:
@@ -645,11 +648,13 @@ PY
                         fi
                         test "${FAKE_BARRIER_UP_EXIT:-0}" = 0 || exit "$FAKE_BARRIER_UP_EXIT"
                         test -f "$FAKE_MARKER" || exit 31
-                        grep -q '"state": "armed"\|"state":"armed"' "$FAKE_MARKER" || exit 32
+                        grep -Eq '"state"[[:space:]]*:[[:space:]]*"(armed|reached)"' "$FAKE_MARKER" || exit 32
                       else
                         test "${FAKE_RESTORE_EXIT:-0}" = 0 || exit "$FAKE_RESTORE_EXIT"
                       fi
-                      printf 'worker-new\n' > "$FAKE_RUNTIME/container"
+                      counter=$(( $(cat "$FAKE_RUNTIME/counter") + 1 ))
+                      printf '%s\n' "$counter" > "$FAKE_RUNTIME/counter"
+                      printf 'worker-new-%s\n' "$counter" > "$FAKE_RUNTIME/container"
                       : > "$FAKE_RUNTIME/running"
                       ;;
                     *) exit 9 ;;
@@ -706,14 +711,14 @@ PY
         docker.chmod(0o755)
         curl.chmod(0o755)
 
-    def run_prepare(self, **changes: str) -> subprocess.CompletedProcess[str]:
+    def environment(self, **changes: str) -> dict[str, str]:
         env = os.environ.copy()
         env.update(
             {
                 "PATH": str(self.bin) + os.pathsep + env["PATH"],
                 "FAKE_LOG": str(self.log),
                 "FAKE_RUNTIME": str(self.runtime),
-                "FAKE_MARKER": str(self.compose / ("barrier-state/install_k3s-" + hashlib.sha256(b"boot-factual\0run-order").hexdigest()[:32] + ".json")),
+                "FAKE_MARKER": str(self.marker),
                 "FAKE_RUNNING_IMAGE": REF_A,
                 "OPSI_E2E_PROJECT_ID": "project-1",
                 "OPSI_E2E_LOCAL_URL": "http://local",
@@ -727,13 +732,35 @@ PY
             }
         )
         env.update(changes)
+        return env
+
+    def run_mode(self, mode: str, **changes: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(ROOT / "scripts/e2e/verify-k3s.sh"), "--barrier-prepare", str(self.state)],
+            [str(ROOT / "scripts/e2e/verify-k3s.sh"), mode, str(self.state)],
             text=True,
             capture_output=True,
-            env=env,
+            env=self.environment(**changes),
             check=False,
         )
+
+    def run_prepare(self, **changes: str) -> subprocess.CompletedProcess[str]:
+        return self.run_mode("--barrier-prepare", **changes)
+
+    def write_marker(self, state: str, **changes: str) -> None:
+        payload = {
+            "version": 1,
+            "environment": "e2e",
+            "session_id": "boot-factual",
+            "run_id": "run-order",
+            "step": "install_k3s",
+            "boundary": "after_execute_before_checkpoint",
+            "state": state,
+        }
+        if state != "armed":
+            payload["process_id"] = "worker-process-1"
+        payload.update(changes)
+        self.marker.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        self.marker.chmod(0o600)
 
     def test_quiesce_session_arm_and_start_order_is_factual(self) -> None:
         result = self.run_prepare()
@@ -793,31 +820,79 @@ PY
         state["phase"] = "replay_started"
         self.state.write_text(json.dumps(state), encoding="utf-8")
         self.state.chmod(0o600)
+        self.write_marker("consumed")
         before = self.log.read_text(encoding="utf-8").count("/nodes/bootstrap")
-        env = os.environ.copy()
-        env.update(
-            {
-                "PATH": str(self.bin) + os.pathsep + env["PATH"],
-                "FAKE_LOG": str(self.log),
-                "FAKE_RUNTIME": str(self.runtime),
-                "FAKE_RUNNING_IMAGE": REF_A,
-                "OPSI_E2E_PROJECT_ID": "project-1",
-                "OPSI_E2E_LOCAL_URL": "http://local",
-                "OPSI_E2E_ARTIFACT_DIR": str(self.artifacts),
-                "OPSI_E2E_STAGING_COMPOSE_DIRECTORY": str(self.compose),
-                "OPSI_E2E_BARRIER_HANDOFF_ONLY": "1",
-            }
-        )
-        resumed = subprocess.run(
-            [str(ROOT / "scripts/e2e/verify-k3s.sh"), "--resume-bootstrap-session", str(self.state)],
-            text=True,
-            capture_output=True,
-            env=env,
-            check=False,
-        )
+        resumed = self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1")
         self.assertEqual(resumed.returncode, 0, resumed.stderr + resumed.stdout)
         self.assertEqual(self.log.read_text(encoding="utf-8").count("/nodes/bootstrap"), before)
         self.assertIn("without creating a second session", resumed.stdout)
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "consumed")
+
+        self.write_marker("completed")
+        resumed = self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr + resumed.stdout)
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "completed")
+        self.assertEqual(self.log.read_text(encoding="utf-8").count("/nodes/bootstrap"), before)
+
+    def test_full_barrier_replay_reconciles_completed_marker_and_restores_base_profile(self) -> None:
+        prepared = self.run_mode("--barrier-prepare")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr + prepared.stdout)
+        prepared_container = (self.runtime / "container").read_text(encoding="utf-8").strip()
+        self.write_marker("reached")
+
+        restarted = self.run_mode("--barrier-restart")
+        self.assertEqual(restarted.returncode, 0, restarted.stderr + restarted.stdout)
+        replay_container = (self.runtime / "container").read_text(encoding="utf-8").strip()
+        self.assertNotEqual(replay_container, prepared_container)
+
+        self.write_marker("completed")
+        resumed = self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr + resumed.stdout)
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "completed")
+
+        restored = self.run_mode("--barrier-restore")
+        self.assertEqual(restored.returncode, 0, restored.stderr + restored.stdout)
+        restored_container = (self.runtime / "container").read_text(encoding="utf-8").strip()
+        self.assertNotEqual(restored_container, replay_container)
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "normal_restored")
+
+        log = self.log.read_text(encoding="utf-8")
+        self.assertEqual(log.count("/nodes/bootstrap"), 1)
+        recreates = [line for line in log.splitlines() if "up -d --no-deps --force-recreate bootstrap-worker" in line]
+        self.assertEqual(len(recreates), 3, log)
+        self.assertEqual(recreates[1].count("compose.e2e-bootstrap-barrier.yaml"), 1)
+        self.assertIn("compose.yaml", recreates[2])
+        self.assertNotIn("compose.e2e-bootstrap-barrier.yaml", recreates[2])
+        self.assertNotRegex(recreates[2], r"\b(cloud|postgres|reverse-proxy)\b")
+
+        orchestration = (ROOT / "scripts/e2e/verify-k3s.sh").read_text(encoding="utf-8")
+        for start, end in (("barrier_restart()", "barrier_restore()"), ("barrier_restore()", "resume_bootstrap_session()")):
+            body = orchestration.split(start, 1)[1].split(end, 1)[0]
+            self.assertNotIn("docker compose", body)
+        self.assertIn('python3 "$RELEASE_HELPER" barrier-replay', orchestration)
+        self.assertIn("restore_normal_worker", orchestration.split("barrier_restore()", 1)[1].split("resume_bootstrap_session()", 1)[0])
+
+    def test_reached_marker_cannot_be_promoted_by_completed_api_status(self) -> None:
+        self.assertEqual(self.run_mode("--barrier-prepare").returncode, 0)
+        self.write_marker("reached")
+        self.assertEqual(self.run_mode("--barrier-restart").returncode, 0)
+
+        resumed = self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1")
+        self.assertNotEqual(resumed.returncode, 0)
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "replay_started")
+        self.assertEqual(self.log.read_text(encoding="utf-8").count("/nodes/bootstrap"), 1)
+
+    def test_reconciliation_rejects_wrong_marker_identity_and_process(self) -> None:
+        self.assertEqual(self.run_mode("--barrier-prepare").returncode, 0)
+        self.write_marker("reached")
+        self.assertEqual(self.run_mode("--barrier-restart").returncode, 0)
+
+        for changes in ({"session_id": "boot-other"}, {"run_id": "run-other"}, {"process_id": ""}):
+            with self.subTest(changes=changes):
+                self.write_marker("completed", **changes)
+                resumed = self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1")
+                self.assertNotEqual(resumed.returncode, 0)
+                self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "replay_started")
 
 
 if __name__ == "__main__":
