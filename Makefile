@@ -68,6 +68,7 @@ verify-e2e-k3s:
 	$(RUN) ./scripts/e2e/verify-k3s.sh
 
 verify-e2e-k3s-selfcheck:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/e2e/second_factor_handoff_test.py
 	$(RUN) ./scripts/e2e/verify-k3s.sh --self-test
 	@if rg -n 'OPSI_E2E_APPROVE_MITIGATION|incidents/.*/analyze|incidents/.*/actions/.*/approve|recommended_actions|action_hash' scripts/e2e/verify-k3s.sh; then echo "stale incident RCA/approval E2E dependency found"; exit 1; fi
 

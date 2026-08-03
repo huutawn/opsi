@@ -29,15 +29,14 @@ HOST_KEY_SHA256="${OPSI_E2E_VPS_HOST_KEY_SHA256:-}"
 PUBLIC_HOSTNAME="${OPSI_E2E_PUBLIC_HOSTNAME:-}"
 PUBLIC_PORT="${OPSI_E2E_PUBLIC_PORT:-80}"
 SECRET_NAME="${OPSI_E2E_SECRET_NAME:-opsi-e2e-secret}"
-TOTP_CODE="${OPSI_E2E_TOTP_CODE:-}"
-OTP_REQUEST_ID="${OPSI_E2E_OTP_REQUEST_ID:-}"
-OTP_CODE="${OPSI_E2E_OTP_CODE:-}"
-APP_SECRET_VALUE="${OPSI_E2E_APP_SECRET_VALUE:-e2e-secret-value-$RUN_ID}"
+SECOND_FACTOR_DIR="${OPSI_E2E_SECOND_FACTOR_DIR:-}"
+SECOND_FACTOR_TIMEOUT="${OPSI_E2E_SECOND_FACTOR_TIMEOUT:-60}"
 POLL_SECONDS="${OPSI_E2E_POLL_SECONDS:-900}"
 COMPOSE_DIRECTORY="${OPSI_E2E_STAGING_COMPOSE_DIRECTORY:-$ROOT/deploy/staging-control-plane}"
 WORKER_DIGEST="${OPSI_E2E_BOOTSTRAP_WORKER_DIGEST:-}"
 BARRIER_HELPER="$ROOT/scripts/e2e/bootstrap-worker-barrier.sh"
 RELEASE_HELPER="$ROOT/scripts/bootstrap-worker-release.py"
+SECOND_FACTOR_HELPER="$ROOT/scripts/e2e/second_factor_handoff.py"
 BARRIER_ATTEMPT_SESSION=""
 BARRIER_ATTEMPT_RUN=""
 BARRIER_CONFIG_PATH=""
@@ -46,14 +45,33 @@ BARRIER_FORENSIC_PRESERVE=0
 KNOWN_HOSTS_FILE=""
 BOOTSTRAP_REQUEST_FILE=""
 SELF_TEST_DIR=""
+PRIVATE_TEMP_DIR=""
+REDACTION_VALUES_FILE=""
+ROTATE_FACTOR_REQUEST=""
+REVEAL_FACTOR_REQUEST=""
+PAIRED_TOTP_REQUEST=""
+SECOND_FACTOR_METADATA=""
 
 cleanup_temps() {
   [ -z "$BOOTSTRAP_REQUEST_FILE" ] || rm -f -- "$BOOTSTRAP_REQUEST_FILE"
   [ -z "$KNOWN_HOSTS_FILE" ] || rm -f -- "$KNOWN_HOSTS_FILE"
   [ -z "$SELF_TEST_DIR" ] || rm -rf -- "$SELF_TEST_DIR"
+  [ -z "$PRIVATE_TEMP_DIR" ] || rm -rf -- "$PRIVATE_TEMP_DIR"
 }
 
 trap cleanup_temps EXIT
+
+init_private_temp() {
+  [ -n "$PRIVATE_TEMP_DIR" ] && return 0
+  PRIVATE_TEMP_DIR="$(mktemp -d)"
+  chmod 700 "$PRIVATE_TEMP_DIR"
+  REDACTION_VALUES_FILE="$PRIVATE_TEMP_DIR/redaction-values"
+  : > "$REDACTION_VALUES_FILE"
+  chmod 600 "$REDACTION_VALUES_FILE"
+  ROTATE_FACTOR_REQUEST="$PRIVATE_TEMP_DIR/rotate-request.json"
+  REVEAL_FACTOR_REQUEST="$PRIVATE_TEMP_DIR/reveal-request.json"
+  PAIRED_TOTP_REQUEST="$PRIVATE_TEMP_DIR/paired-totp-reveal.json"
+}
 
 usage() {
   cat <<'EOF'
@@ -82,12 +100,12 @@ Required env for full run:
   OPSI_E2E_MEMORY_REQUEST
   OPSI_E2E_CPU_LIMIT
   OPSI_E2E_MEMORY_LIMIT
-  OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE
+  OPSI_E2E_SECOND_FACTOR_DIR
   OPSI_E2E_PUBLIC_HOSTNAME
 
   The local URL must be the CLI local backend. Immutable BuildRecords and
   topology/policy authority are resolved by Cloud; this script supplies no
-  source, manifest, digest, or caller identity.
+  source, manifest, digest, caller identity, or second-factor content.
 EOF
 }
 
@@ -103,18 +121,7 @@ fail() {
 }
 
 redact() {
-  python3 -c 'import re, sys
-secrets = [s for s in sys.argv[1:] if s]
-data = sys.stdin.read()
-for s in secrets:
-    data = data.replace(s, "[REDACTED]")
-patterns = [
-    r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\",}]+",
-    r"(?i)((token|agent_token|registration_token|pat|private_key|kubeconfig|app_secret|otp_code|totp_code)\s*[\"=:]+\s*)(\"[^\"]*\"|[^,\s}]+)",
-]
-for pat in patterns:
-    data = re.sub(pat, lambda m: m.group(1) + "[REDACTED]", data)
-sys.stdout.write(data)' "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE"
+  python3 "$SECOND_FACTOR_HELPER" redact --redaction-values "$REDACTION_VALUES_FILE"
 }
 
 json_get() {
@@ -244,9 +251,8 @@ preflight() {
   done
   need_env OPSI_E2E_VPS_SSH_USER
   need_env OPSI_E2E_PUBLIC_HOSTNAME
-  if [ -z "$TOTP_CODE" ] && { [ -z "$OTP_REQUEST_ID" ] || [ -z "$OTP_CODE" ]; }; then
-    fail "missing second factor: set OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE"
-  fi
+  need_env OPSI_E2E_SECOND_FACTOR_DIR
+  python3 "$SECOND_FACTOR_HELPER" preflight --directory "$SECOND_FACTOR_DIR" --timeout "$SECOND_FACTOR_TIMEOUT" >/dev/null || fail "second-factor handoff readiness validation failed"
   validate_ssh_key_path || fail "OPSI_E2E_SSH_KEY_PATH failed protected private-key validation"
   pin_host_identity || fail "SSH host-key fingerprint pinning failed"
   curl -fsS "$LOCAL_URL/health" >/dev/null || fail "local backend unavailable at OPSI_E2E_LOCAL_URL"
@@ -355,10 +361,6 @@ elif kind == "exposure":
         data["expected_state_hash"] = e["OPSI_E2E_EXPOSURE_STATE_HASH"]
 elif kind == "secret":
     data = {"service_id":e["OPSI_E2E_SERVICE_ID"],"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default"}
-elif kind == "second_factor":
-    data = {"service_id":e["OPSI_E2E_SERVICE_ID"],"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default","reveal":True}
-    if e.get("OPSI_E2E_TOTP_CODE"): data["totp_code"] = e["OPSI_E2E_TOTP_CODE"]
-    else: data.update({"otp_request_id":e["OPSI_E2E_OTP_REQUEST_ID"],"otp_code":e["OPSI_E2E_OTP_CODE"]})
 elif kind == "incident_resolve":
     data = {}
 else:
@@ -605,22 +607,26 @@ for expected in ("failed", "rolling_back", "rolled_back"):
 }
 
 check_artifacts_clean() {
-  python3 - "$ARTIFACT_DIR" "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE" <<'PY'
-import pathlib, re, sys
-root = pathlib.Path(sys.argv[1])
-secrets = [s for s in sys.argv[2:] if s]
-for path in root.rglob("*"):
-    if not path.is_file():
-        continue
-    text = path.read_text(errors="ignore")
-    if re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", text):
-        print(path)
-        raise SystemExit(1)
-    for secret in secrets:
-        if secret and secret in text:
-            print(path)
-            raise SystemExit(1)
-PY
+  python3 "$SECOND_FACTOR_HELPER" scan --artifact-directory "$ARTIFACT_DIR" --redaction-values "$REDACTION_VALUES_FILE"
+}
+
+consume_second_factor() {
+  local operation="$1" reject_fingerprint="${2:-}" output paired_args=()
+  case "$operation" in
+    rotate)
+      output="$ROTATE_FACTOR_REQUEST"
+      paired_args=(--paired-output "$PAIRED_TOTP_REQUEST")
+      ;;
+    reveal) output="$REVEAL_FACTOR_REQUEST" ;;
+    *) return 1 ;;
+  esac
+  rm -f -- "$output"
+  [ "$operation" != rotate ] || rm -f -- "$PAIRED_TOTP_REQUEST"
+  SECOND_FACTOR_METADATA="$(python3 "$SECOND_FACTOR_HELPER" consume \
+    --directory "$SECOND_FACTOR_DIR" --operation "$operation" --timeout "$SECOND_FACTOR_TIMEOUT" \
+    --output "$output" "${paired_args[@]}" --redaction-values "$REDACTION_VALUES_FILE" \
+    --service-id "$OPSI_E2E_SERVICE_ID" --secret-name "$SECRET_NAME" \
+    --reject-fingerprint "$reject_fingerprint")"
 }
 
 remote_k3s() {
@@ -1126,6 +1132,7 @@ run_e2e() {
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
   local f body id good_deploy_id bad_deploy_id exposure_deploy_id bad_deployment_started_at service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record good_values bad_digest exposure_record exposure_values exposure_preview restored_hash
+  local rotate_method rotate_expiry rotate_fingerprint reveal_request
   local -a good_fields
   local -a exposure_fields
   if [ -z "$resume_session" ]; then
@@ -1197,12 +1204,23 @@ run_e2e() {
 
   f="$(mktemp)"; write_json "$f" secret
   api_file POST "/api/local/projects/$PROJECT_ID/secrets" "$f" secret-create 1 >/dev/null || fail "secret create failed"
-  write_json "$f" second_factor
-  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/rotate" "$f" secret-rotate 1 >/dev/null || fail "secret rotate failed"
-  if api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/reveal" "$f" secret-reveal 1 | grep -q "$APP_SECRET_VALUE"; then
-    fail "secret value leaked into reveal output"
-  fi
   rm -f "$f"
+  consume_second_factor rotate || fail "rotate second-factor handoff failed"
+  rotate_method="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get method)" || fail "rotate second-factor metadata is invalid"
+  rotate_expiry="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get expires_at_unix)" || fail "rotate second-factor metadata is invalid"
+  rotate_fingerprint="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get fingerprint)" || fail "rotate second-factor metadata is invalid"
+  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/rotate" "$ROTATE_FACTOR_REQUEST" secret-rotate 1 >/dev/null || fail "secret rotate failed"
+  rm -f -- "$ROTATE_FACTOR_REQUEST"
+  reveal_request=""
+  if [ "$rotate_method" = totp ] && [ "$(date +%s)" -lt "$rotate_expiry" ]; then
+    reveal_request="$PAIRED_TOTP_REQUEST"
+  else
+    rm -f -- "$PAIRED_TOTP_REQUEST"
+    consume_second_factor reveal "$rotate_fingerprint" || fail "reveal second-factor handoff failed"
+    reveal_request="$REVEAL_FACTOR_REQUEST"
+  fi
+  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/reveal" "$reveal_request" secret-reveal 1 >/dev/null || fail "secret reveal failed"
+  rm -f -- "$reveal_request"
   log "step 6/14 secret create/rotate/reveal path ran via local Agent facade"
 
   api_file GET "/api/local/projects/$PROJECT_ID/telemetry/summary?service_id=$service_id" - telemetry-summary 0 >/dev/null || fail "telemetry summary failed"
@@ -1258,12 +1276,15 @@ run_e2e() {
 }
 
 self_test() {
-  local key_public fixture match original_key forbidden pem_marker expected request incident_fixture
+  local key_public fixture match original_key forbidden pem_marker expected request incident_fixture redaction_marker
   mkdir -p "$ARTIFACT_DIR"
   "$ROOT/scripts/e2e/bootstrap-worker-barrier.sh" self-test >/dev/null || fail "bootstrap Worker barrier helper self-test failed"
-  OPSI_E2E_APP_SECRET_VALUE="app-secret" OPSI_E2E_TOTP_CODE="123456" OPSI_E2E_OTP_CODE="" \
-    bash -c 'printf "token=abc kubeconfig=raw app-secret 123456" | '"$0"' --redact-only' > "$ARTIFACT_DIR/redaction-test.txt"
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/e2e/second_factor_handoff_test.py" >/dev/null || fail "second-factor handoff regression test failed"
+  redaction_marker="self-test-factor"
+  printf '%s\n' "$redaction_marker" >> "$REDACTION_VALUES_FILE"
+  printf 'token=abc kubeconfig=raw %s' "$redaction_marker" | redact > "$ARTIFACT_DIR/redaction-test.txt"
   grep -q '\[REDACTED\]' "$ARTIFACT_DIR/redaction-test.txt" || fail "self-test redaction failed"
+  if grep -q "$redaction_marker" "$ARTIFACT_DIR/redaction-test.txt"; then fail "self-test exact-value redaction failed"; fi
   original_key="$OPSI_E2E_SSH_KEY_PATH"
   OPSI_E2E_SSH_KEY_PATH=""
   if validate_ssh_key_path >/dev/null 2>&1; then fail "self-test accepted missing PEM-key input"; fi
@@ -1451,6 +1472,8 @@ PY
   grep -q "Manual cleanup" "$0" || fail "self-test cleanup path missing"
   log "self-test: ok"
 }
+
+init_private_temp
 
 case "$MODE" in
   --help|-h) usage ;;

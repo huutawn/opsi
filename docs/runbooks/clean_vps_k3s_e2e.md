@@ -47,7 +47,7 @@ export OPSI_E2E_CPU_REQUEST=100m
 export OPSI_E2E_MEMORY_REQUEST=128Mi
 export OPSI_E2E_CPU_LIMIT=500m
 export OPSI_E2E_MEMORY_LIMIT=512Mi
-export OPSI_E2E_TOTP_CODE=...
+export OPSI_E2E_SECOND_FACTOR_DIR=/protected/operator/opsi-second-factor
 ```
 
 The script validates the key without printing or copying it to evidence. It
@@ -57,6 +57,49 @@ private-key marker. Host identity is pinned with `ssh-keyscan` and `ssh-keygen`;
 every direct SSH call uses `BatchMode=yes`, `IdentitiesOnly=yes`,
 `StrictHostKeyChecking=yes`, a dedicated mode-0600 `known_hosts`, and the
 protected key path. A changed or ambiguous fingerprint fails closed.
+
+Prepare the second-factor handoff directory before preflight. This validates a
+current-user-owned, non-symlink directory with exact mode 0700; preflight does
+not require an expiring code:
+
+```bash
+python3 scripts/e2e/second_factor_handoff.py prepare \
+  --directory "$OPSI_E2E_SECOND_FACTOR_DIR"
+```
+
+When the running harness reaches secret rotation, use a separate trusted local
+terminal to stage one factor through a hidden prompt. The value is never a
+command argument or shell-history entry:
+
+```bash
+python3 scripts/e2e/second_factor_handoff.py stage-totp \
+  --directory "$OPSI_E2E_SECOND_FACTOR_DIR" --operation rotate
+```
+
+The harness consumes and deletes `rotate.json` only at the rotate boundary. A
+TOTP handoff is accepted only in its recorded 30-second period and is reused
+only for the immediately adjacent reveal while still current. If it expires
+between operations, stage a fresh TOTP for `--operation reveal`.
+
+Cloud OTP fallback requires two distinct one-time pairs. Stage the factual
+rotate pair when rotation is waiting, then stage a separately requested factual
+reveal pair when reveal is waiting:
+
+```bash
+python3 scripts/e2e/second_factor_handoff.py stage-otp \
+  --directory "$OPSI_E2E_SECOND_FACTOR_DIR" --operation rotate
+python3 scripts/e2e/second_factor_handoff.py stage-otp \
+  --directory "$OPSI_E2E_SECOND_FACTOR_DIR" --operation reveal
+```
+
+Each handoff must be a current-user-owned regular non-symlink file with exact
+mode 0600 and at most 512 bytes. The harness waits 60 seconds by default; the
+optional `OPSI_E2E_SECOND_FACTOR_TIMEOUT` must be between 1 and 120 seconds.
+Malformed, stale, oversized, insecure, or reused input fails closed and is
+removed. Request bodies and exact redaction values live only in a private
+temporary directory that is removed on exit. Never provide OTP, TOTP, PAT, or
+TOTP seed content through chat, and never store or expose the TOTP seed in this
+workflow.
 
 ## Local API/UI and bootstrap
 
