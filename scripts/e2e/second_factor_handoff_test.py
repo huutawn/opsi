@@ -322,12 +322,189 @@ class HandoffTest(unittest.TestCase):
                 self.helper.scan_artifacts(evidence, self.values)
             leak.unlink()
 
+    def test_redaction_registry_completes_positive_short_writes(self):
+        username = "generated-user-canary"
+        password = "generated-password-canary"
+        real_write = os.write
+        original_inode = self.values.stat().st_ino
+
+        def short_write(fd, data):
+            return real_write(fd, data[: max(1, len(data) // 2)])
+
+        with mock.patch.object(self.helper.os, "write", side_effect=short_write):
+            self.helper._append_redaction_values(self.values, (username, password))
+
+        self.assertEqual(
+            self.helper.read_redaction_values(self.values), (username, password)
+        )
+        self.assertNotEqual(self.values.stat().st_ino, original_inode)
+        self.assertEqual(self.values.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(self.private.iterdir()), [self.values])
+
+    def test_redaction_registry_rejects_zero_and_interrupted_writes_atomically(self):
+        original = b"existing-canary\n"
+        username = "generated-user-canary"
+        password = "generated-password-canary"
+        real_write = os.write
+
+        calls = 0
+
+        def interrupted_write(fd, data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_write(fd, data[:1])
+            raise InterruptedError("injected incomplete write")
+
+        for label, writer in (
+            ("zero", lambda _fd, _data: 0),
+            ("interrupted", interrupted_write),
+        ):
+            with self.subTest(label=label):
+                calls = 0
+                self.values.write_bytes(original)
+                with mock.patch.object(self.helper.os, "write", side_effect=writer):
+                    with self.assertRaises(OSError):
+                        self.helper._append_redaction_values(
+                            self.values, (username, password)
+                        )
+                self.assertEqual(self.values.read_bytes(), original)
+                self.assertEqual(
+                    self.helper.read_redaction_values(self.values), ("existing-canary",)
+                )
+                self.assertEqual(list(self.private.iterdir()), [self.values])
+
+    def test_redaction_registry_preserves_previous_file_when_replace_fails(self):
+        original = b"existing-canary\n"
+        self.values.write_bytes(original)
+        with mock.patch.object(
+            self.helper.os, "replace", side_effect=OSError("injected replace failure")
+        ):
+            with self.assertRaises(OSError):
+                self.helper._append_redaction_values(
+                    self.values,
+                    ("generated-user-canary", "generated-password-canary"),
+                )
+        self.assertEqual(self.values.read_bytes(), original)
+        self.assertEqual(list(self.private.iterdir()), [self.values])
+
+    def test_redaction_registry_enforces_size_bound_before_replacement(self):
+        existing = tuple(f"{index:02d}-" + "x" * 253 for index in range(15))
+        original = "".join(f"{value}\n" for value in existing).encode()
+        self.values.write_bytes(original)
+        with self.assertRaisesRegex(ValueError, "size"):
+            self.helper._append_redaction_values(
+                self.values, ("generated-user-canary" + "x" * 235,)
+            )
+        self.assertEqual(self.values.read_bytes(), original)
+
+    def test_redaction_registry_rejects_truncated_and_malformed_entries(self):
+        username = "generated-user-canary"
+        original = b"existing-canary\n"
+        self.values.write_bytes(b"existing-canary\n" + username.encode())
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            self.helper.read_redaction_values(self.values)
+
+        for value in (
+            "",
+            123,
+            "x" * 257,
+            username + "\ncorrupt",
+            username + "\u2028corrupt",
+        ):
+            with self.subTest(value=repr(value)):
+                self.values.write_bytes(original)
+                with self.assertRaisesRegex(ValueError, "malformed"):
+                    self.helper._append_redaction_values(self.values, (value,))
+                self.assertEqual(self.values.read_bytes(), original)
+
+    def test_redaction_registry_verifies_exact_values_after_publication(self):
+        username = "generated-user-canary"
+        password = "generated-password-canary"
+        real_read = self.helper.read_redaction_values
+        calls = 0
+
+        def omit_requested_value(path):
+            nonlocal calls
+            calls += 1
+            values = real_read(path)
+            if calls == 1:
+                return tuple(value for value in values if value != password)
+            return values
+
+        with mock.patch.object(
+            self.helper, "read_redaction_values", side_effect=omit_requested_value
+        ):
+            with self.assertRaisesRegex(ValueError, "registration"):
+                self.helper._append_redaction_values(self.values, (username, password))
+
+    def test_secret_response_emits_nothing_when_registry_write_is_incomplete(self):
+        username = b"generated-user-canary"
+        password = b"generated-password-canary"
+        original = b"existing-canary\n"
+        self.values.write_bytes(original)
+        evidence = self.root / "secret-create.redacted.json"
+        child = r'''
+import os
+import runpy
+import sys
+from unittest import mock
+
+helper_path, registry_path = sys.argv[1:]
+real_write = os.write
+calls = 0
+
+def incomplete_write(fd, data):
+    global calls
+    calls += 1
+    if calls == 1:
+        return real_write(fd, data[:max(1, len(data) // 2)])
+    raise InterruptedError("injected incomplete write")
+
+sys.argv = [helper_path, "redact-secret-response", "--redaction-values", registry_path]
+with mock.patch("os.write", side_effect=incomplete_write):
+    runpy.run_path(helper_path, run_name="__main__")
+'''
+        with evidence.open("wb") as stdout:
+            result = subprocess.run(
+                [sys.executable, "-c", child, str(HELPER_PATH), str(self.values)],
+                input=b'{"username":"'
+                + username
+                + b'","password":"'
+                + password
+                + b'"}',
+                stdout=stdout,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(evidence.read_bytes(), b"")
+        self.assertNotIn(username, result.stderr)
+        self.assertNotIn(password, result.stderr)
+        self.assertEqual(self.values.read_bytes(), original)
+        self.assertEqual(
+            self.helper.read_redaction_values(self.values), ("existing-canary",)
+        )
+
     def test_secret_response_rejects_malformed_and_oversized_input_without_echo(self):
         username = b"generated-user-canary"
         password = b"generated-password-canary"
         cases = (
             b'{"username":"' + username + b'","password":"' + password,
             b'{"username":"' + b"x" * 5000 + b'"}',
+            json.dumps(
+                {
+                    "username": username.decode() + "\ncorrupt",
+                    "password": password.decode(),
+                }
+            ).encode(),
+            json.dumps(
+                {
+                    "username": username.decode() + "\u2028corrupt",
+                    "password": password.decode(),
+                }
+            ).encode(),
         )
         for body in cases:
             with self.subTest(size=len(body)):
@@ -388,6 +565,8 @@ class StageCommandTest(unittest.TestCase):
                         stdin=read_fd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
+                        start_new_session=True,
+                        close_fds=True,
                     )
                     stdout, stderr = process.communicate(timeout=5)
                     remaining = os.read(read_fd, len(supplied))
@@ -401,24 +580,25 @@ class StageCommandTest(unittest.TestCase):
                 self.assertTrue(safe, "staging accepted or consumed redirected stdin")
                 self.assertNotIn(supplied.strip(), stdout + stderr)
 
-    def run_pty_stage(self, stage, entries, *, terminate=False):
+    def run_pty_stage(self, stage, entries, *, interrupt_signal=None):
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
+        process = None
 
         def attach_controlling_tty():
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
-        process = subprocess.Popen(
-            self.command(stage),
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            preexec_fn=attach_controlling_tty,
-            close_fds=True,
-        )
         output = bytearray()
         try:
+            process = subprocess.Popen(
+                self.command(stage),
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                preexec_fn=attach_controlling_tty,
+                close_fds=True,
+            )
             prompts = (
                 (b"TOTP code: ",) if stage == "stage-totp" else
                 (b"OTP request ID: ", b"OTP code: ")
@@ -430,8 +610,9 @@ class StageCommandTest(unittest.TestCase):
                     if ready:
                         output.extend(os.read(master, 4096))
                 self.assertIn(prompt, output)
-                if terminate:
-                    process.send_signal(signal.SIGTERM)
+                if interrupt_signal is not None:
+                    os.write(master, entry)
+                    process.send_signal(interrupt_signal)
                     break
                 os.write(master, entry + b"\n")
             process.wait(timeout=5)
@@ -445,12 +626,16 @@ class StageCommandTest(unittest.TestCase):
             )
             return process.returncode, bytes(output), restored
         finally:
-            termios.tcsetattr(slave, termios.TCSANOW, original)
-            os.close(master)
-            os.close(slave)
-            if process.poll() is None:
-                process.kill()
-                process.wait()
+            try:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait()
+            finally:
+                try:
+                    termios.tcsetattr(slave, termios.TCSANOW, original)
+                finally:
+                    os.close(master)
+                    os.close(slave)
 
     def test_pty_staging_hides_input_restores_echo_and_publishes_atomically(self):
         cases = (
@@ -469,20 +654,26 @@ class StageCommandTest(unittest.TestCase):
                 self.assertEqual(list(self.handoff.iterdir()), [path])
                 path.unlink()
 
-    def test_pty_staging_restores_echo_after_failure_and_termination(self):
+    def test_pty_staging_restores_echo_after_validation_failure(self):
         result, output, restored = self.run_pty_stage("stage-totp", (b"12345",))
         self.assertNotEqual(result, 0)
         self.assertTrue(restored)
         self.assertNotIn(b"12345", output)
         self.assertFalse((self.handoff / "rotate.json").exists())
 
-        result, output, restored = self.run_pty_stage(
-            "stage-totp", (b"ignored",), terminate=True
-        )
-        self.assertNotEqual(result, 0)
-        self.assertTrue(restored)
-        self.assertNotIn(b"ignored", output)
-        self.assertFalse((self.handoff / "rotate.json").exists())
+    def test_pty_staging_restores_echo_after_each_handled_signal(self):
+        staged = b"signal-canary"
+        for signal_name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"):
+            with self.subTest(signal=signal_name):
+                result, output, restored = self.run_pty_stage(
+                    "stage-totp",
+                    (staged,),
+                    interrupt_signal=getattr(signal, signal_name),
+                )
+                self.assertNotEqual(result, 0)
+                self.assertTrue(restored)
+                self.assertNotIn(staged, output)
+                self.assertFalse((self.handoff / "rotate.json").exists())
 
 
 if __name__ == "__main__":

@@ -129,42 +129,121 @@ def _read_private_file(path, label, maximum, allow_empty=False):
     minimum = 0 if allow_empty else 1
     if not minimum <= len(data) <= maximum:
         raise ValueError(f"{label} size is invalid")
-    return data
+    return data, current
 
 
-def read_redaction_values(path):
-    data = _read_private_file(
-        path, "redaction values file", MAX_REDACTION_VALUES_SIZE, allow_empty=True
-    )
+def _validate_redaction_value(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 256
+        or value.splitlines() != [value]
+    ):
+        raise ValueError("redaction value is malformed")
     try:
-        values = data.decode("utf-8").splitlines()
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("redaction value is malformed") from exc
+
+
+def _decode_redaction_values(data):
+    if data and not data.endswith(b"\n"):
+        raise ValueError("redaction values file is malformed")
+    try:
+        values = data[:-1].decode("utf-8").split("\n") if data else []
     except UnicodeDecodeError as exc:
         raise ValueError("redaction values file is malformed") from exc
-    if any(not value or len(value) > 256 for value in values):
-        raise ValueError("redaction values file is malformed")
+    try:
+        for value in values:
+            _validate_redaction_value(value)
+    except ValueError as exc:
+        raise ValueError("redaction values file is malformed") from exc
     return tuple(dict.fromkeys(values))
 
 
-def _append_redaction_values(path, values):
-    expected = _validate_private_file(
+def read_redaction_values(path):
+    data, _ = _read_private_file(
         path, "redaction values file", MAX_REDACTION_VALUES_SIZE, allow_empty=True
     )
-    payload = "".join(f"{value}\n" for value in values if value).encode()
-    if not payload:
+    return _decode_redaction_values(data)
+
+
+def _write_all(fd, payload):
+    written = 0
+    while written < len(payload):
+        count = os.write(fd, payload[written:])
+        if count <= 0:
+            raise OSError("redaction values file write made no progress")
+        written += count
+
+
+def _append_redaction_values(path, values):
+    requested = tuple(values)
+    for value in requested:
+        _validate_redaction_value(value)
+    path = _absolute(path, "redaction values file")
+    data, expected = _read_private_file(
+        path, "redaction values file", MAX_REDACTION_VALUES_SIZE, allow_empty=True
+    )
+    existing = _decode_redaction_values(data)
+    merged = tuple(dict.fromkeys((*existing, *requested)))
+    payload = "".join(f"{value}\n" for value in merged).encode("utf-8")
+    if len(payload) > MAX_REDACTION_VALUES_SIZE:
+        raise ValueError("redaction values file size is invalid")
+    if merged == existing:
         return
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0))
+
+    directory_fd = os.open(
+        path.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    )
+    temporary = f".{path.name}.{os.getpid()}.{time.time_ns()}"
+    fd = -1
+    created = False
+    published = False
     try:
+        current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ValueError("redaction values file changed during validation")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+        created = True
+        os.fchmod(fd, 0o600)
         info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino):
-            raise ValueError("redaction values file changed during validation")
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
-            raise ValueError("redaction values file changed during validation")
-        if info.st_size + len(payload) > MAX_REDACTION_VALUES_SIZE:
-            raise ValueError("redaction values file size is invalid")
-        os.write(fd, payload)
+            raise ValueError("temporary redaction values file is insecure")
+        _write_all(fd, payload)
         os.fsync(fd)
-    finally:
         os.close(fd)
+        fd = -1
+
+        current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ValueError("redaction values file changed during publication")
+        os.replace(
+            temporary,
+            path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        published = True
+        os.fsync(directory_fd)
+    finally:
+        try:
+            if fd >= 0:
+                os.close(fd)
+        finally:
+            try:
+                if created and not published:
+                    try:
+                        os.unlink(temporary, dir_fd=directory_fd)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                os.close(directory_fd)
+
+    if read_redaction_values(path) != merged:
+        raise ValueError("redaction value registration verification failed")
 
 
 def _write_private_json(path, payload):
@@ -385,11 +464,7 @@ def redact_secret_response(raw, redaction_values_path):
             credentials.append(value)
         payload[field] = "[REDACTED]"
 
-    existing = set(read_redaction_values(redaction_values_path))
-    _append_redaction_values(
-        redaction_values_path,
-        (value for value in credentials if value not in existing),
-    )
+    _append_redaction_values(redaction_values_path, credentials)
     redaction_values = read_redaction_values(redaction_values_path)
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return redact_text(encoded, redaction_values) + "\n"
