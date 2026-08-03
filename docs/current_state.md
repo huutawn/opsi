@@ -40,15 +40,18 @@ or R5-017 live acceptance.
 
 Run `r5-017-run1-20260802T142745Z` remains blocked and immutable as evidence.
 Deployment `dep-255109f89b9efb64` remains terminal `failed`; it was not retried
-or rewritten. The source defect was cross-target previous-known-good selection:
-Cloud used project, environment, runtime, and service without exact node and
-Agent identity, and could accept a failed pre-mutation row that echoed an old
-reference. Cloud now scopes known-good selection to the exact node and Agent
-identity and only factual `succeeded` or `rolled_back` terminal results with a
-complete known-good identity and digest. The fix is not deployed. Cloud,
-Bootstrap Worker, and Agent artifacts must be republished from the aligned new
-revision, followed by a new live Run 1 with a new Run ID. R5-017, release
-readiness, and production readiness remain unclaimed.
+or rewritten. The source defect was cross-target previous-known-good selection.
+Commit `7623266fdbebd96087ab525f6e38b6066570c259` fixed exact node/Agent
+scoping and failed-job poisoning, but review before republishing found
+incomplete historical-row validation. Cloud now also rejects legacy,
+malformed, or internally inconsistent candidates unless rollout mode, current
+schemas, canonical intent and non-preview snapshot, exact target identity,
+factual `succeeded` or `rolled_back` result, and normalized terminal fields all
+agree. Memory and PostgreSQL use the same Go candidate predicate. No deployment
+record was modified. The correction is not deployed. Cloud, Bootstrap Worker,
+and Agent artifacts must be republished from the aligned new revision, followed
+by a new live Run 1 with a new Run ID. R5-017, release readiness, and production
+readiness remain unclaimed.
 The R5-017 publisher run `30700943447` at revision
 `585293ee171454d8f8a6af54d37b3bb49a600ea9` failed before push because the
 repository-root build context did not select `cloud/Dockerfile`. The canonical

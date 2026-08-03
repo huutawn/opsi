@@ -45,13 +45,32 @@ At revision `45ba2d09547294dae33f82d95704f52d2eed7eb2`:
 
 No test repaired deployment state with direct SQL before asserting behavior.
 
+Commit `7623266fdbebd96087ab525f6e38b6066570c259` fixed cross-target
+inheritance and failed-job poisoning. Review before runtime republishing found
+that exact-target history validation was still incomplete: memory could accept
+a rollout-shaped row without rollout mode, canonical intent, or a valid
+snapshot, while PostgreSQL could accept legacy JSON or normalized columns that
+disagreed with the terminal result.
+
+At revision `7623266fdbebd96087ab525f6e38b6066570c259`, test-first regressions
+proved that memory selected an exact-target legacy row and disposable
+PostgreSQL 16 selected an equivalent legacy row, a terminal-result/column
+mismatch, and a canonical rollout intent whose Agent target differed from the
+normalized row. The regressions failed on the historical selector behavior;
+no test repaired state with direct SQL.
+
 ## Required correction
 
 Each storage backend must keep one canonical lookup that requires the exact
 project, environment, runtime, service, node, and Agent target; a non-preview
-row; an immutable factual terminal result; terminal rollout state exactly
-`succeeded` or `rolled_back`; and non-empty known-good ID, hash, and current
-digest. Exact-target history must never fall back to runtime-wide history.
+row; current job, snapshot, rollout-intent, and result schemas; rollout mode; a
+canonical intent matching the normalized target and snapshot; an immutable
+factual terminal result; terminal rollout state exactly `succeeded` or
+`rolled_back`; matching normalized state, hashes, digests, and known-good
+fields; and non-empty known-good ID, hash, and current digest. Exact-target
+history must never fall back to runtime-wide history. Legacy, malformed, or
+internally inconsistent history fails closed in memory and PostgreSQL through
+the same Go candidate predicate.
 
 Historical deployment rows remain immutable and queryable. Agent conflict
 validation, explicit rollback semantics, rollout IDs, intent hashing,
@@ -59,10 +78,13 @@ idempotency, leases, WAL behavior, and result validation remain unchanged.
 
 ## Delivery boundary
 
-The source correction commit is named
-`fix(deploy): scope known-good to exact runtime target`.
+The target history-validation correction commit is named
+`fix(deploy): reject malformed known-good history`. It follows commit
+`7623266fdbebd96087ab525f6e38b6066570c259`, which fixed cross-target
+inheritance and failed-job poisoning.
 
 The fix is not deployed. Aligned Cloud, Bootstrap Worker, and Agent artifacts
 must be republished from the corrected revision before a new live Run 1 with a
 new Run ID. R5-017, release readiness, and production readiness remain
-unclaimed.
+unclaimed. No deployment record was modified, retried, rewritten, or migrated;
+the previous failed Run 1 remains immutable.

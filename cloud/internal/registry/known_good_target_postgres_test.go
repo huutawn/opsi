@@ -66,72 +66,135 @@ func TestPostgresKnownGoodAcceptsExactSuccessAndRollbackAcrossRestart(t *testing
 	fixture := newKnownGoodPostgresFixture(t, "restartselection")
 	base := fixture.completeSuccess(t, fixture.snapshot, "base", "a")
 	assertPostgresKnownGood(t, fixture, base, base.KnownGoodID, base.KnownGoodHash, base.CurrentDigest)
+	differentAgent := base
+	differentAgent.AgentID = "agent-other"
+	assertPostgresKnownGood(t, fixture, differentAgent, "", "", "")
+	differentNode := base
+	differentNode.NodeID = "node-other"
+	assertPostgresKnownGood(t, fixture, differentNode, "", "", "")
 	fixture.advance()
 
-	rolledBack := knownGoodCandidate(base, "postgres-rolled-back", deploymentv1.RolloutStateRolledBack, fixture.now)
-	rolledBack.SchemaVersion = deploymentv1.JobSchemaVersion
-	rolledBack.Mode = "rollout"
-	rolledBack.OrgID = base.OrgID
-	rolledBack.Action = deploymentv1.RolloutOperationApply
-	rolledBack.IdempotencyKey = rolledBack.ID
-	rolledBack.PayloadHash = "payload-" + rolledBack.ID
-	rolledBack.Snapshot = base.Snapshot
+	rolledBack := canonicalKnownGoodCandidate(t, base, "dep-postgres-rolled-back", deploymentv1.RolloutStateRolledBack, fixture.now)
+	if !validKnownGoodCandidate(rolledBack) {
+		t.Fatal("canonical rolled-back fixture was invalid before persistence")
+	}
 	insertKnownGoodPostgresCandidate(t, fixture, rolledBack)
+	persistedRollback, err := fixture.service().GetDeployment(fixture.projectID, rolledBack.ID)
+	if err != nil || !validKnownGoodCandidate(persistedRollback) {
+		t.Fatalf("canonical rolled-back fixture was invalid after reconstruction: %+v err=%v", persistedRollback, err)
+	}
 
 	fixture.advance()
-	failed := rolledBack
-	failed.ID = "dep-postgres-failed"
+	failed := canonicalKnownGoodCandidate(t, base, "dep-postgres-failed", deploymentv1.RolloutStateSucceeded, fixture.now)
 	failed.Status = deploymentv1.RolloutStateFailed
 	failed.RolloutState = deploymentv1.RolloutStateFailed
-	failed.TerminalResult = cloneRolloutResult(rolledBack.TerminalResult)
 	failed.TerminalResult.Status = deploymentv1.RolloutStateFailed
 	failed.TerminalResult.RolloutState = deploymentv1.RolloutStateFailed
-	failed.IdempotencyKey = failed.ID
-	failed.PayloadHash = "payload-" + failed.ID
-	failed.CreatedAt = fixture.now
-	failed.UpdatedAt = fixture.now
+	setKnownGoodCandidateIdentity(&failed, "c")
 	insertKnownGoodPostgresCandidate(t, fixture, failed)
 
 	for _, state := range []string{deploymentv1.RolloutStateRollbackFailed, "cancelled"} {
 		fixture.advance()
-		excluded := failed
-		excluded.ID = "dep-postgres-" + state
+		excluded := canonicalKnownGoodCandidate(t, base, "dep-postgres-"+state, deploymentv1.RolloutStateSucceeded, fixture.now)
 		excluded.Status = state
 		excluded.RolloutState = state
-		excluded.TerminalResult = cloneRolloutResult(failed.TerminalResult)
 		excluded.TerminalResult.Status = state
 		excluded.TerminalResult.RolloutState = state
-		excluded.IdempotencyKey = excluded.ID
-		excluded.PayloadHash = "payload-" + excluded.ID
-		excluded.CreatedAt = fixture.now
-		excluded.UpdatedAt = fixture.now
+		setKnownGoodCandidateIdentity(&excluded, "c")
 		insertKnownGoodPostgresCandidate(t, fixture, excluded)
 	}
 	fixture.advance()
-	resultless := failed
-	resultless.ID = "dep-postgres-resultless"
-	resultless.Status = deploymentv1.RolloutStateSucceeded
-	resultless.RolloutState = deploymentv1.RolloutStateSucceeded
+	resultless := canonicalKnownGoodCandidate(t, base, "dep-postgres-resultless", deploymentv1.RolloutStateSucceeded, fixture.now)
+	setKnownGoodCandidateIdentity(&resultless, "c")
 	resultless.TerminalResult = nil
-	resultless.IdempotencyKey = resultless.ID
-	resultless.PayloadHash = "payload-" + resultless.ID
-	resultless.CreatedAt = fixture.now
-	resultless.UpdatedAt = fixture.now
 	insertKnownGoodPostgresCandidate(t, fixture, resultless)
 
 	fixture.advance()
-	preview := rolledBack
-	preview.ID = "dep-postgres-preview"
+	preview := canonicalKnownGoodCandidate(t, base, "dep-postgres-preview", deploymentv1.RolloutStateSucceeded, fixture.now)
 	previewSnapshot := *base.Snapshot
 	previewSnapshot.Preview = &deploymentv1.PreviewSpec{}
 	preview.Snapshot = &previewSnapshot
-	preview.IdempotencyKey = preview.ID
-	preview.PayloadHash = "payload-" + preview.ID
-	preview.CreatedAt = fixture.now
-	preview.UpdatedAt = fixture.now
+	setKnownGoodCandidateIdentity(&preview, "c")
 	insertKnownGoodPostgresCandidate(t, fixture, preview)
 
+	malformed := []struct {
+		name   string
+		mutate func(*DeploymentJob)
+	}{
+		{"legacy-mode", func(job *DeploymentJob) { job.Mode = "" }},
+		{"nil-intent", func(job *DeploymentJob) { job.RolloutIntent = nil }},
+		{"invalid-intent-schema", func(job *DeploymentJob) { job.RolloutIntent.SchemaVersion = "" }},
+		{"invalid-snapshot", func(job *DeploymentJob) { job.Snapshot.SchemaVersion = "" }},
+		{"invalid-job-schema", func(job *DeploymentJob) { job.SchemaVersion = "" }},
+		{"invalid-result-schema", func(job *DeploymentJob) { job.TerminalResult.SchemaVersion = "" }},
+		{"invalid-hash", func(job *DeploymentJob) { job.TerminalResult.KnownGoodHash = "" }},
+		{"invalid-digest", func(job *DeploymentJob) { job.TerminalResult.CurrentDigest = "sha256:invalid" }},
+	}
+	for _, test := range malformed {
+		fixture.advance()
+		candidate := canonicalKnownGoodCandidate(t, base, "dep-postgres-"+test.name, deploymentv1.RolloutStateSucceeded, fixture.now)
+		setKnownGoodCandidateIdentity(&candidate, "c")
+		test.mutate(&candidate)
+		insertKnownGoodPostgresCandidate(t, fixture, candidate)
+	}
+
 	assertPostgresKnownGood(t, fixture, base, rolledBack.KnownGoodID, rolledBack.KnownGoodHash, rolledBack.CurrentDigest)
+}
+
+func TestPostgresKnownGoodRejectsLegacyExactTargetHistory(t *testing.T) {
+	fixture := newKnownGoodPostgresFixture(t, "legacyhistory")
+	base := fixture.completeSuccess(t, fixture.snapshot, "base", "a")
+	fixture.advance()
+	legacy := legacyKnownGoodCandidate(base, "postgres-legacy-history", deploymentv1.RolloutStateSucceeded, fixture.now)
+	legacy.SchemaVersion = deploymentv1.JobSchemaVersion
+	legacy.OrgID = base.OrgID
+	legacy.Action = deploymentv1.RolloutOperationApply
+	legacy.IdempotencyKey = legacy.ID
+	legacy.PayloadHash = "payload-" + legacy.ID
+	legacy.KnownGoodID, legacy.KnownGoodHash = knownGoodIdentity("c")
+	legacy.CurrentDigest = "sha256:" + strings.Repeat("c", 64)
+	legacy.TerminalResult.KnownGoodID = legacy.KnownGoodID
+	legacy.TerminalResult.KnownGoodHash = legacy.KnownGoodHash
+	legacy.TerminalResult.CurrentDigest = legacy.CurrentDigest
+	insertKnownGoodPostgresCandidate(t, fixture, legacy)
+
+	assertPostgresKnownGood(t, fixture, base, base.KnownGoodID, base.KnownGoodHash, base.CurrentDigest)
+}
+
+func TestPostgresKnownGoodRejectsTerminalColumnMismatch(t *testing.T) {
+	fixture := newKnownGoodPostgresFixture(t, "terminalmismatch")
+	base := fixture.completeSuccess(t, fixture.snapshot, "base", "a")
+	fixture.advance()
+	mismatch := canonicalKnownGoodCandidate(t, base, "dep-postgres-terminal-mismatch", deploymentv1.RolloutStateSucceeded, fixture.now)
+	mismatch.KnownGoodID, mismatch.KnownGoodHash = knownGoodIdentity("c")
+	mismatch.CurrentDigest = "sha256:" + strings.Repeat("c", 64)
+	insertKnownGoodPostgresCandidate(t, fixture, mismatch)
+
+	assertPostgresKnownGood(t, fixture, base, base.KnownGoodID, base.KnownGoodHash, base.CurrentDigest)
+}
+
+func TestPostgresKnownGoodRejectsIntentTargetMismatch(t *testing.T) {
+	fixture := newKnownGoodPostgresFixture(t, "intenttargetmismatch")
+	base := fixture.completeSuccess(t, fixture.snapshot, "base", "a")
+	fixture.advance()
+	mismatch := canonicalKnownGoodCandidate(t, base, "dep-postgres-intent-target-mismatch", deploymentv1.RolloutStateSucceeded, fixture.now)
+	mismatch.RolloutIntent.Target.AgentID = "agent-other"
+	mismatch.RolloutIntent.Desired.Target.AgentID = "agent-other"
+	mismatch.RolloutIntent.IntentHash = ""
+	intent, err := mismatch.RolloutIntent.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatch.RolloutIntent = &intent
+	mismatch.IntentHash = intent.IntentHash
+	mismatch.TerminalResult.RolloutID = intent.RolloutID
+	mismatch.TerminalResult.IntentHash = intent.IntentHash
+	mismatch.KnownGoodID, mismatch.KnownGoodHash = knownGoodIdentity("c")
+	mismatch.TerminalResult.KnownGoodID = mismatch.KnownGoodID
+	mismatch.TerminalResult.KnownGoodHash = mismatch.KnownGoodHash
+	insertKnownGoodPostgresCandidate(t, fixture, mismatch)
+
+	assertPostgresKnownGood(t, fixture, base, base.KnownGoodID, base.KnownGoodHash, base.CurrentDigest)
 }
 
 func TestPostgresExposureKnownGoodDoesNotCrossAgentTarget(t *testing.T) {
@@ -147,7 +210,9 @@ func TestPostgresExposureKnownGoodDoesNotCrossAgentTarget(t *testing.T) {
 	}
 
 	legacyBase := legacyBaseForRuntimeTarget(base, base.NodeID, agent.ID, "dep-postgres-exposure-new-target", fixture.now)
-	legacyBase.TerminalResult = &deploymentv1.AgentResult{Status: deploymentv1.RolloutStateSucceeded, RolloutState: deploymentv1.RolloutStateSucceeded}
+	legacyBase.KnownGoodID, legacyBase.KnownGoodHash = knownGoodIdentity("c")
+	legacyBase.CurrentDigest = "sha256:" + strings.Repeat("c", 64)
+	legacyBase.TerminalResult = &deploymentv1.AgentResult{Status: deploymentv1.RolloutStateSucceeded, RolloutState: deploymentv1.RolloutStateSucceeded, KnownGoodID: legacyBase.KnownGoodID, KnownGoodHash: legacyBase.KnownGoodHash, CurrentDigest: legacyBase.CurrentDigest}
 	legacyBase.SchemaVersion = deploymentv1.JobSchemaVersion
 	legacyBase.Mode = "rollout"
 	legacyBase.OrgID = base.OrgID

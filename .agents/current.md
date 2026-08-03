@@ -9,14 +9,18 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
 `R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is pending final source gates.
 `R5_017_NODE_RETIREMENT_IDEMPOTENCY_SOURCE_FIXED / RUNTIME_PUBLISH_PENDING`.
-`R5_017_RUNTIME_TARGET_KNOWN_GOOD_SOURCE_FIXED /
-ALIGNED_RUNTIME_REPUBLISH_REQUIRED` scopes Cloud known-good authority to the
-exact node and Agent identity and factual `succeeded` or `rolled_back` terminal
-results. Run `r5-017-run1-20260802T142745Z` remains blocked and immutable;
-deployment `dep-255109f89b9efb64` remains terminal `failed` and was not retried
-or rewritten. The fix is not deployed. A new aligned runtime publication and a
-new live Run 1 with a new Run ID are required; R5-017, release readiness, and
-production readiness remain unclaimed.
+`R5_017_KNOWN_GOOD_HISTORY_VALIDATION_SOURCE_FIXED /
+ALIGNED_RUNTIME_REPUBLISH_REQUIRED` follows commit `7623266f…`, which fixed
+cross-target inheritance and failed-job poisoning. Review before republishing
+found incomplete historical-row validation; Cloud now also rejects legacy,
+malformed, or internally inconsistent exact-target rows unless rollout mode,
+current schemas, canonical intent/snapshot, factual success or rollback, and
+normalized terminal fields agree through one shared memory/PostgreSQL
+predicate. Run `r5-017-run1-20260802T142745Z` remains blocked and immutable;
+deployment `dep-255109f89b9efb64` remains terminal `failed` and was not retried,
+rewritten, or migrated. The correction is not deployed. A new aligned runtime
+publication and a new live Run 1 with a new Run ID are required; R5-017, release
+readiness, and production readiness remain unclaimed.
 `R5_017G_CONTROL_PLANE_PUBLISH_PASS` replaces the Worker-only workflow with one
 canonical Cloud + Bootstrap Worker publisher; run `30750598790` records the
 published `246c924f56f7d28db43d06154b39c558f214c686` manifest and digests.

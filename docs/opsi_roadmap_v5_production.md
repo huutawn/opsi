@@ -671,10 +671,16 @@ remains blocked and immutable as evidence, and deployment
 `dep-255109f89b9efb64` remains terminal `failed` without retry or rewrite. The
 source defect was cross-target previous-known-good selection. Cloud now requires
 the exact node and Agent identity plus a factual `succeeded` or `rolled_back`
-terminal result. The fix is not deployed. All aligned runtime artifacts must be
-republished from the new revision, and live acceptance must restart as a new
-Run 1 with a new Run ID. R5-017, release readiness, and production readiness
-remain unclaimed.
+terminal result. Commit `7623266fdbebd96087ab525f6e38b6066570c259` fixed that
+cross-target inheritance and failed-job poisoning, but review before
+republishing found incomplete historical-row validation. The correction now
+rejects legacy, malformed, or internally inconsistent history unless rollout
+mode, current schemas, canonical intent and snapshot, exact target, and
+normalized terminal fields agree. No deployment record was modified. The
+correction is not deployed. All aligned runtime artifacts must be republished
+from the new revision, and live acceptance must restart as a new Run 1 with a
+new Run ID. R5-017, release readiness, and production readiness remain
+unclaimed.
 
 **CẦN VPS:** tối thiểu một Agent VPS. Để tuyên bố hỗ trợ multi-VPS production path, cần **hai Agent VPS** trong cùng project nhưng hai single-node runtimes độc lập.
 

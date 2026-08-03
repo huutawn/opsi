@@ -166,10 +166,19 @@ func latestPostgresExposure(ctx context.Context, queryer rolloutQueryer, project
 }
 
 func latestPostgresKnownGood(ctx context.Context, tx *sql.Tx, projectID, environmentID, runtimeID, serviceID, nodeID, agentID string) (string, string, string, error) {
-	var id, hash, digest string
-	err := tx.QueryRowContext(ctx, `SELECT known_good_id, known_good_hash, current_digest FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND node_id=$5 AND agent_id=$6 AND snapshot_json->'preview' IS NULL AND terminal_result_json IS NOT NULL AND rollout_state IN ('succeeded','rolled_back') AND status=rollout_state AND terminal_result_json->>'rollout_state'=rollout_state AND terminal_result_json->>'status'=rollout_state AND known_good_id IS NOT NULL AND known_good_id <> '' AND known_good_hash ~ '^[a-f0-9]{64}$' AND current_digest ~ '^sha256:[a-f0-9]{64}$' ORDER BY updated_at DESC, id DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID, nodeID, agentID).Scan(&id, &hash, &digest)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", "", nil
+	rows, err := tx.QueryContext(ctx, deploymentSelectSQL+` WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND node_id=$5 AND agent_id=$6 AND schema_version=$7 AND mode=$8 AND snapshot_json IS NOT NULL AND snapshot_json <> '{}'::jsonb AND snapshot_json->>'schema_version'=$7 AND snapshot_json->'preview' IS NULL AND rollout_intent_json IS NOT NULL AND rollout_intent_json <> '{}'::jsonb AND rollout_intent_json->>'schema_version'=$9 AND rollout_intent_json->'target'->>'project_id'=project_id AND rollout_intent_json->'target'->>'environment_id'=environment_id AND rollout_intent_json->'target'->>'runtime_id'=runtime_id AND rollout_intent_json->'target'->>'service_key'=snapshot_json->'workload'->>'service_key' AND rollout_intent_json->'target'->>'node_id'=node_id AND rollout_intent_json->'target'->>'agent_id'=agent_id AND terminal_result_json IS NOT NULL AND terminal_result_json <> '{}'::jsonb AND terminal_result_json->>'schema_version'=$10 AND rollout_state IN ($11,$12) AND status=rollout_state AND terminal_result_json->>'rollout_state'=rollout_state AND terminal_result_json->>'status'=status AND terminal_result_json->>'known_good_id'=known_good_id AND terminal_result_json->>'known_good_hash'=known_good_hash AND terminal_result_json->>'current_digest'=current_digest AND terminal_result_json->>'desired_digest'=desired_digest AND COALESCE(terminal_result_json->>'previous_digest','')=COALESCE(previous_digest,'') ORDER BY updated_at DESC, id DESC LIMIT 100`, projectID, environmentID, runtimeID, serviceID, nodeID, agentID, deploymentv1.JobSchemaVersion, "rollout", deploymentv1.RolloutSchemaVersion, deploymentv1.ResultSchemaVersion, deploymentv1.RolloutStateSucceeded, deploymentv1.RolloutStateRolledBack)
+	if err != nil {
+		return "", "", "", err
 	}
-	return id, hash, digest, err
+	defer rows.Close()
+	for rows.Next() {
+		job, err := scanDeployment(rows)
+		if err != nil {
+			return "", "", "", err
+		}
+		if validKnownGoodCandidate(job) {
+			return job.KnownGoodID, job.KnownGoodHash, job.CurrentDigest, nil
+		}
+	}
+	return "", "", "", rows.Err()
 }
