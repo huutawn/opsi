@@ -94,7 +94,6 @@ class ManifestTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(release.load_manifest(output)["image_reference"], REF_B)
-
 class RuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -164,8 +163,82 @@ class RuntimeTests(unittest.TestCase):
         )
         curl = self.bin / "curl"
         curl.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$FAKE_LOG\"\nexit \"${FAKE_CURL_EXIT:-0}\"\n", encoding="utf-8")
-        docker.chmod(0o755)
-        curl.chmod(0o755)
+        git = self.bin / "git"
+        git.write_text(
+            "#!/usr/bin/env bash\nset -eu\ncase \"$*\" in *'remote get-url origin'*) echo fixture-origin;; *':scripts/e2e/staging-barrier-remote.sh'*) printf '%040d\\n' 0 | tr 0 b;; *'rev-parse HEAD'*) printf '%040d\\n' 0 | tr 0 c;; *'diff --quiet --exit-code'*|*'diff --cached --quiet --exit-code'*) exit 0;; *) exit 2;; esac\n",
+            encoding="utf-8",
+        )
+        ssh_keygen = self.bin / "ssh-keygen"
+        ssh_keygen.write_text("#!/usr/bin/env bash\necho '256 SHA256:" + "A" * 43 + " fixture (ED25519)'\n", encoding="utf-8")
+        ssh = self.bin / "ssh"
+        ssh.write_text(
+            textwrap.dedent(
+                r'''
+                #!/usr/bin/env bash
+                set -eu
+                ulimit -f unlimited
+                root="$(dirname "$0")/.."
+                printf 'ssh-argv %s\n' "$*" >> "$root/commands.log"
+                env | LC_ALL=C sort | sed 's/^/ssh-env /' >> "$root/commands.log"
+                request="$(cat)"
+                printf 'ssh-stdin %s\n' "$request" >> "$root/commands.log"
+                mode="normal"; test ! -e "$root/ssh-mode" || mode="$(cat "$root/ssh-mode")"
+                case "$mode" in
+                  empty) exit 0 ;;
+                  stderr) echo diagnostic >&2; exit 0 ;;
+                  malformed) echo '{'; exit 0 ;;
+                  multiple) echo '{}{}'; exit 0 ;;
+                  oversized) python3 -c 'print("x" * 4097)'; exit 0 ;;
+                  nonzero) exit 19 ;;
+                esac
+                python3 - "$root" "$mode" "$request" <<'PY'
+import json, pathlib, sys
+root, mode, raw = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+request = json.loads(raw)
+state_path = root / "remote-state.json"
+state = json.loads(state_path.read_text())
+phase, before, container_before = request["phase"], state["phase"], state["container"]
+if mode == "abort-fail" and phase == "abort": raise SystemExit(23)
+if phase == "preflight": after, result = "absent", "preflight-ok"
+elif phase == "prepare":
+    state = {"phase":"worker_quiesced","session":"","container":"worker-old"}; after, result = state["phase"], "worker-quiesced"
+elif phase == "start":
+    state = {"phase":"barrier_started","session":request["session_id"],"container":"worker-barrier"}; after, result = state["phase"], "barrier-started"
+elif phase == "restart":
+    state = {"phase":"replay_started","session":request["session_id"],"container":"worker-replay"}; after, result = state["phase"], "replay-started"
+elif phase == "restore":
+    state = {"phase":"normal_restored","session":request["session_id"],"container":"worker-normal"}; after, result = state["phase"], "normal-restored"
+elif phase == "abort":
+    state = {"phase":"absent","session":"","container":"worker-normal"}; after, result = "absent", "pre-session-aborted"
+else: after, result = state["phase"], "status-ok"
+state_path.write_text(json.dumps(state))
+marker_path = root / "remote-marker"
+marker = marker_path.read_text().strip() if marker_path.exists() else {"barrier_started":"armed","replay_started":"reached","normal_restored":"completed"}.get(after, "absent")
+receipt = {
+    "schema_version":"opsi.e2e.staging-barrier-receipt/v1","source_revision":request["source_revision"],
+    "run_id":request["run_id"],"phase":phase,"staging_host":request["staging_host"],
+    "repository_directory":request["repository_directory"],"repository_identity":request["repository_identity"],
+    "compose_directory":request["compose_directory"],"helper_blob":"b"*40,
+    "state_before":before,"state_after":after,"worker_digest":request["worker_digest"],
+    "session_id":request["session_id"],"worker_container_before":container_before,
+    "worker_container_after":state["container"] if after != "absent" or phase == "abort" else "worker-old",
+    "marker_state":marker,"result":result,"timestamp":"2026-08-03T12:00:00Z",
+}
+wrong = {"wrong-schema":("schema_version","wrong"),"wrong-run":("run_id","other-run"),"wrong-phase":("phase","status"),"wrong-revision":("source_revision","d"*40),"wrong-host":("staging_host","other.example")}
+if mode in wrong: receipt[wrong[mode][0]] = wrong[mode][1]
+print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
+if mode in {"ambiguous-start","timeout-start"} and phase == "start":
+    (root / "ssh-mode").unlink(); raise SystemExit(255 if mode.startswith("ambiguous") else 124)
+if mode == "start-fail-session" and phase == "start":
+    state_path.write_text(json.dumps({"phase":"session_created","session":request["session_id"],"container":"worker-old"}))
+    (root / "ssh-mode").unlink(); raise SystemExit(19)
+PY
+                '''
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        for tool in (docker, curl, git, ssh_keygen, ssh):
+            tool.chmod(0o755)
 
     def write_env(self, reference: str) -> None:
         (self.compose / ".env").write_text(
@@ -523,92 +596,48 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertNotEqual(failed.returncode, 0)
 
-
 class BarrierProcedureTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temp.name)
-        self.compose = self.root / "staging-control-plane"
-        (self.compose / "config").mkdir(parents=True)
-        (self.compose / "barrier-state").mkdir(mode=0o700)
-        (self.compose / "compose.yaml").write_text("services:\n  bootstrap-worker: {}\n", encoding="utf-8")
-        (self.compose / "compose.e2e-bootstrap-barrier.yaml").write_text("services:\n  bootstrap-worker: {}\n", encoding="utf-8")
-        (self.compose / ".env").write_text("OPSI_BOOTSTRAP_WORKER_IMAGE=" + REF_A + "\n", encoding="utf-8")
-        (self.compose / "config/bootstrap-worker.json").write_text(
-            json.dumps({"cloud_url": "http://cloud:9800", "allow_insecure_internal_cloud_url": True, "production": True, "bootstrap_worker_token_file": "/run/secrets/bootstrap-worker-token"}),
-            encoding="utf-8",
-        )
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.runtime = self.root / "runtime"
-        self.runtime.mkdir()
-        (self.runtime / "container").write_text("worker-old", encoding="utf-8")
-        (self.runtime / "counter").write_text("0", encoding="utf-8")
-        (self.runtime / "running").touch()
         self.log = self.root / "commands.log"
+        self.remote_state = self.root / "remote-state.json"
+        self.remote_state.write_text(json.dumps({"phase": "absent", "session": "", "container": "worker-old"}), encoding="utf-8")
+        self.remote_marker = self.root / "remote-marker"
+        self.ssh_mode = self.root / "ssh-mode"
         self.artifacts = self.root / "artifacts"
         self.artifacts.mkdir(mode=0o700)
         self.state_parent = self.root / "protected"
         self.state_parent.mkdir(mode=0o700)
         self.state = self.state_parent / "bootstrap-state.json"
-        self.key = self.root / "operator-key"
+        self.key = self.root / "agent-key"
+        self.staging_key = self.root / "staging-key"
+        self.known_hosts = self.root / "staging-known-hosts"
         pem_marker = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
         pem_end = "-----END OPENSSH " + "PRIVATE KEY-----"
         self.key.write_text(pem_marker + "\nfixture\n" + pem_end + "\n", encoding="utf-8")
+        self.staging_key.write_text(pem_marker + "\nstaging-fixture\n" + pem_end + "\n", encoding="utf-8")
+        self.known_hosts.write_text("staging.example ssh-ed25519 AAAA\n", encoding="utf-8")
         self.key.chmod(0o600)
-        self.marker = self.compose / ("barrier-state/install_k3s-" + hashlib.sha256(b"boot-factual\0run-order").hexdigest()[:32] + ".json")
+        self.staging_key.chmod(0o600)
+        self.known_hosts.chmod(0o600)
         self.write_fake_tools()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
     def write_fake_tools(self) -> None:
+        RuntimeTests.write_fake_tools(self)
         docker = self.bin / "docker"
         docker.write_text(
             textwrap.dedent(
                 r'''
                 #!/usr/bin/env bash
                 set -eu
-                printf 'docker %s\n' "$*" >> "$FAKE_LOG"
-                if test "$1" = compose; then
-                  case " $* " in
-                    *" ps -a -q bootstrap-worker "*) cat "$FAKE_RUNTIME/container" ;;
-                    *" ps -q bootstrap-worker "*) test ! -e "$FAKE_RUNTIME/running" || cat "$FAKE_RUNTIME/container" ;;
-                    *" stop bootstrap-worker "*) rm -f "$FAKE_RUNTIME/running" ;;
-                    *" up -d --no-deps --force-recreate bootstrap-worker "*)
-                      if [[ "$*" == *compose.e2e-bootstrap-barrier.yaml* ]]; then
-                        if test "${FAKE_BARRIER_REACH_BEFORE_FAIL:-0}" = 1; then
-                          python3 - "$FAKE_MARKER" <<'PY'
-import json, sys
-path = sys.argv[1]
-data = json.load(open(path))
-data.update({"state": "reached", "process_id": "worker-process-1"})
-json.dump(data, open(path, "w"), separators=(",", ":"))
-PY
-                        fi
-                        test "${FAKE_BARRIER_UP_EXIT:-0}" = 0 || exit "$FAKE_BARRIER_UP_EXIT"
-                        test -f "$FAKE_MARKER" || exit 31
-                        grep -Eq '"state"[[:space:]]*:[[:space:]]*"(armed|reached)"' "$FAKE_MARKER" || exit 32
-                      else
-                        test "${FAKE_RESTORE_EXIT:-0}" = 0 || exit "$FAKE_RESTORE_EXIT"
-                      fi
-                      counter=$(( $(cat "$FAKE_RUNTIME/counter") + 1 ))
-                      printf '%s\n' "$counter" > "$FAKE_RUNTIME/counter"
-                      printf 'worker-new-%s\n' "$counter" > "$FAKE_RUNTIME/container"
-                      : > "$FAKE_RUNTIME/running"
-                      ;;
-                    *) exit 9 ;;
-                  esac
-                elif test "$1" = inspect; then
-                  case " $* " in
-                    *State.Health*) printf '%s\n' "${FAKE_HEALTH:-healthy}" ;;
-                    *) printf 'image-id\n' ;;
-                  esac
-                elif test "$1" = image; then
-                  printf '["%s"]\n' "${FAKE_IMAGE:-$FAKE_RUNNING_IMAGE}"
-                else
-                  exit 9
-                fi
+                printf 'LOCAL_DOCKER_CANARY %s\n' "$*" >> "$(dirname "$0")/../commands.log"
+                exit 99
                 '''
             ).lstrip(),
             encoding="utf-8",
@@ -620,7 +649,7 @@ PY
                 #!/usr/bin/env bash
                 set -eu
                 original="$*"
-                printf 'curl %s\n' "$original" >> "$FAKE_LOG"
+                printf 'curl %s\n' "$original" >> "$(dirname "$0")/../commands.log"
                 if [[ "$*" == *"/health"* ]]; then exit "${FAKE_HEALTH_CURL_EXIT:-0}"; fi
                 if [[ "$*" == *"/api/local/session"* ]]; then printf '%s\n' '{"local_session":"local-session"}'; exit 0; fi
                 out=""; status=200; previous=""
@@ -634,7 +663,12 @@ PY
                 done
                 if test "$previous" = POST; then
                   status=201
-                  test "${FAKE_SESSION_CREATE_EXIT:-0}" = 0 || exit "$FAKE_SESSION_CREATE_EXIT"
+                  test ! -e "$(dirname "$0")/../session-create-ambiguous" || exit 17
+                  if test -e "$(dirname "$0")/../session-create-fail"; then
+                    test -z "$out" || printf '%s\n' '{"error":"rejected"}' > "$out"
+                    printf '500'
+                    exit 0
+                  fi
                   test -z "$out" || printf '%s\n' '{"id":"boot-factual","status":"pending"}' > "$out"
                   printf '%s' "$status"
                   exit 0
@@ -656,10 +690,6 @@ PY
         env.update(
             {
                 "PATH": str(self.bin) + os.pathsep + env["PATH"],
-                "FAKE_LOG": str(self.log),
-                "FAKE_RUNTIME": str(self.runtime),
-                "FAKE_MARKER": str(self.marker),
-                "FAKE_RUNNING_IMAGE": REF_A,
                 "OPSI_E2E_PROJECT_ID": "project-1",
                 "OPSI_E2E_LOCAL_URL": "http://local",
                 "OPSI_E2E_VPS_HOST": "fixture-host",
@@ -668,7 +698,20 @@ PY
                 "OPSI_E2E_BOOTSTRAP_WORKER_DIGEST": DIGEST_A,
                 "OPSI_E2E_RUN_ID": "run-order",
                 "OPSI_E2E_ARTIFACT_DIR": str(self.artifacts),
-                "OPSI_E2E_STAGING_COMPOSE_DIRECTORY": str(self.compose),
+                "OPSI_E2E_STAGING_HOST": "staging.example",
+                "OPSI_E2E_STAGING_SSH_PORT": "22",
+                "OPSI_E2E_STAGING_SSH_USER": "staging-user",
+                "OPSI_E2E_STAGING_SSH_KEY_PATH": str(self.staging_key),
+                "OPSI_E2E_STAGING_KNOWN_HOSTS_PATH": str(self.known_hosts),
+                "OPSI_E2E_STAGING_HOST_KEY_SHA256": "SHA256:" + "A" * 43,
+                "OPSI_E2E_STAGING_REPOSITORY_DIRECTORY": "/srv/opsi",
+                "OPSI_E2E_STAGING_COMPOSE_DIRECTORY": "/srv/opsi/deploy/staging-control-plane",
+                "OPSI_E2E_SOURCE_REVISION": REVISION,
+                "OPSI_LOCAL_SESSION_CANARY": "local-only-canary",
+                "OPSI_SECOND_FACTOR_CANARY": "second-factor-canary",
+                "SSH_AUTH_SOCK": "/tmp/ambient-agent-canary",
+                "HTTPS_PROXY": "http://proxy-canary",
+                "GIT_SSH_COMMAND": "git-ssh-command-canary",
             }
         )
         env.update(changes)
@@ -687,79 +730,176 @@ PY
         return self.run_mode("--barrier-prepare", **changes)
 
     def write_marker(self, state: str, **changes: str) -> None:
-        payload = {
-            "version": 1,
-            "environment": "e2e",
-            "session_id": "boot-factual",
-            "run_id": "run-order",
-            "step": "install_k3s",
-            "boundary": "after_execute_before_checkpoint",
-            "state": state,
-        }
-        if state != "armed":
-            payload["process_id"] = "worker-process-1"
-        payload.update(changes)
-        self.marker.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        self.marker.chmod(0o600)
+        del changes
+        self.remote_marker.write_text(state, encoding="utf-8")
 
     def test_quiesce_session_arm_and_start_order_is_factual(self) -> None:
         result = self.run_prepare()
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         log = self.log.read_text(encoding="utf-8")
-        self.assertLess(log.index("stop bootstrap-worker"), log.index("/nodes/bootstrap"))
-        self.assertLess(log.index("/nodes/bootstrap"), log.index("up -d --no-deps --force-recreate bootstrap-worker"))
-        self.assertNotIn("lease", log)
+        requests = [json.loads(line.removeprefix("ssh-stdin ")) for line in log.splitlines() if line.startswith("ssh-stdin ")]
+        phases = [request["phase"] for request in requests]
+        self.assertEqual(phases, ["preflight", "prepare", "start"])
+        self.assertLess(log.index('"phase":"prepare"'), log.index("/nodes/bootstrap"))
+        self.assertLess(log.index("/nodes/bootstrap"), log.index('"phase":"start"'))
+        self.assertNotIn("LOCAL_DOCKER_CANARY", log)
         state = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertEqual(state["session_id"], "boot-factual")
         self.assertEqual(state["run_id"], "run-order")
         self.assertEqual(state["phase"], "barrier_started")
-        self.assertNotIn("PRIVATE KEY", self.log.read_text(encoding="utf-8"))
+        self.assertEqual(state["source_revision"], REVISION)
+        self.assertEqual(state["staging_host"], "staging.example")
+        self.assertNotIn("PRIVATE KEY", log)
         self.assertNotIn("local-session", result.stdout + result.stderr)
 
     def test_session_creation_failure_restores_normal_worker(self) -> None:
-        result = self.run_prepare(FAKE_SESSION_CREATE_EXIT="17")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("barrier failure restoration: normal Worker profile restored", result.stdout)
-        self.assertTrue((self.runtime / "running").exists())
-        self.assertFalse((self.compose / "config/bootstrap-worker.e2e.json").exists())
-
-    def test_arm_failure_restores_normal_worker(self) -> None:
-        marker = self.compose / ("barrier-state/install_k3s-" + hashlib.sha256(b"boot-factual\0run-order").hexdigest()[:32] + ".json")
-        marker.write_text('{"version":1,"state":"armed"}', encoding="utf-8")
-        marker.chmod(0o600)
+        (self.root / "session-create-fail").touch()
         result = self.run_prepare()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("barrier failure restoration: normal Worker profile restored", result.stdout)
-        self.assertTrue((self.runtime / "running").exists())
+        self.assertIn("remote normal Worker profile restored before session creation", result.stdout)
+        self.assertEqual(json.loads(self.remote_state.read_text())["phase"], "absent")
+        self.assertFalse(self.state.exists())
 
-    def test_barrier_recreate_failure_restores_normal_worker(self) -> None:
-        result = self.run_prepare(FAKE_BARRIER_UP_EXIT="19")
+    def test_session_failure_preserves_primary_and_cleanup_errors(self) -> None:
+        (self.root / "session-create-fail").touch()
+        self.ssh_mode.write_text("abort-fail", encoding="utf-8")
+        result = self.run_prepare()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("barrier failure restoration: normal Worker profile restored", result.stdout)
-        self.assertTrue((self.runtime / "running").exists())
-        self.assertFalse((self.compose / "config/bootstrap-worker.e2e.json").exists())
-        self.assertFalse(list((self.compose / "barrier-state").glob("install_k3s-*.json")))
-
-    def test_failure_after_reached_preserves_marker_and_generated_config(self) -> None:
-        result = self.run_prepare(FAKE_BARRIER_UP_EXIT="19", FAKE_BARRIER_REACH_BEFORE_FAIL="1")
-        self.assertNotEqual(result.returncode, 0)
-        marker = self.compose / ("barrier-state/install_k3s-" + hashlib.sha256(b"boot-factual\0run-order").hexdigest()[:32] + ".json")
-        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["state"], "reached")
-        self.assertTrue((self.compose / "config/bootstrap-worker.e2e.json").exists())
-
-    def test_restoration_failure_is_reported_separately(self) -> None:
-        result = self.run_prepare(FAKE_SESSION_CREATE_EXIT="17", FAKE_RESTORE_EXIT="23")
-        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bootstrap session creation failed", result.stdout)
         self.assertIn("barrier failure restoration failed", result.stdout)
-        self.assertFalse((self.runtime / "running").exists())
+        self.assertEqual(json.loads(self.remote_state.read_text())["phase"], "worker_quiesced")
+
+    def test_ambiguous_bootstrap_post_preserves_stopped_worker(self) -> None:
+        (self.root / "session-create-ambiguous").touch()
+        result = self.run_prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bootstrap POST result is ambiguous", result.stdout)
+        self.assertEqual(json.loads(self.remote_state.read_text())["phase"], "worker_quiesced")
+        self.assertFalse(self.state.exists())
+
+    def test_post_session_failure_preserves_state_and_continues_without_second_post(self) -> None:
+        self.ssh_mode.write_text("start-fail-session", encoding="utf-8")
+        failed = self.run_prepare()
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(json.loads(self.state.read_text())["phase"], "session_created")
+        self.assertEqual(json.loads(self.remote_state.read_text())["phase"], "session_created")
+        continued = self.run_prepare()
+        self.assertEqual(continued.returncode, 0, continued.stderr + continued.stdout)
+        self.assertIn("without a second bootstrap POST", continued.stdout)
+        self.assertEqual(self.log.read_text().count("/nodes/bootstrap"), 1)
+
+    def test_ambiguous_mutation_uses_status_reconciliation_only(self) -> None:
+        self.ssh_mode.write_text("ambiguous-start", encoding="utf-8")
+        result = self.run_prepare()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        phases = [json.loads(line.removeprefix("ssh-stdin "))["phase"] for line in self.log.read_text().splitlines() if line.startswith("ssh-stdin ")]
+        self.assertEqual(phases, ["preflight", "prepare", "start", "status"])
+        self.assertEqual(phases.count("start"), 1)
+
+    def test_timeout_mutation_uses_status_reconciliation_only(self) -> None:
+        self.ssh_mode.write_text("timeout-start", encoding="utf-8")
+        result = self.run_prepare()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        phases = [json.loads(line.removeprefix("ssh-stdin "))["phase"] for line in self.log.read_text().splitlines() if line.startswith("ssh-stdin ")]
+        self.assertEqual(phases, ["preflight", "prepare", "start", "status"])
+
+    def test_pinned_ssh_options_and_sanitized_boundary(self) -> None:
+        result = self.run_prepare()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        log = self.log.read_text()
+        boundary = "\n".join(line for line in log.splitlines() if line.startswith(("ssh-argv", "ssh-env", "ssh-stdin")))
+        for option in ("-F /dev/null", "-T", "BatchMode=yes", "IdentitiesOnly=yes", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=/dev/null", "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "ControlMaster=no", "PermitLocalCommand=no", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no", "LogLevel=ERROR"):
+            self.assertIn(option, log)
+        for canary in ("local-only-canary", "second-factor-canary", "ambient-agent-canary", "proxy-canary", "git-ssh-command-canary", "local-session"):
+            self.assertNotIn(canary, boundary + result.stdout + result.stderr)
+        self.assertNotIn(str(self.key), boundary)
+
+    def test_invalid_transport_and_receipts_fail_before_bootstrap(self) -> None:
+        cases = (
+            {"OPSI_E2E_STAGING_HOST": ""},
+            {"OPSI_E2E_STAGING_HOST": "-unsafe"},
+            {"OPSI_E2E_STAGING_SSH_PORT": "0"},
+            {"OPSI_E2E_STAGING_SSH_USER": "bad user"},
+            {"OPSI_E2E_RUN_ID": "bad run"},
+            {"OPSI_E2E_SOURCE_REVISION": "ABC"},
+            {"OPSI_E2E_STAGING_REPOSITORY_DIRECTORY": "/srv/../opsi"},
+            {"OPSI_E2E_STAGING_COMPOSE_DIRECTORY": "/tmp/other"},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.log.unlink(missing_ok=True)
+                self.state.unlink(missing_ok=True)
+                self.remote_state.write_text(json.dumps({"phase":"absent","session":"","container":"worker-old"}))
+                result = self.run_prepare(**changes)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("/nodes/bootstrap", self.log.read_text() if self.log.exists() else "")
+        for mode in ("empty", "stderr", "malformed", "multiple", "oversized", "nonzero", "wrong-schema", "wrong-run", "wrong-phase", "wrong-revision", "wrong-host"):
+            with self.subTest(mode=mode):
+                self.log.unlink(missing_ok=True)
+                self.state.unlink(missing_ok=True)
+                self.remote_state.write_text(json.dumps({"phase":"absent","session":"","container":"worker-old"}))
+                self.ssh_mode.write_text(mode, encoding="utf-8")
+                result = self.run_prepare()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("/nodes/bootstrap", self.log.read_text() if self.log.exists() else "")
+                self.ssh_mode.unlink()
+
+    def test_protected_staging_files_and_agent_key_separation(self) -> None:
+        original_key = self.staging_key.read_text()
+        original_known_hosts = self.known_hosts.read_text()
+        self.staging_key.chmod(0o644)
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.staging_key.chmod(0o600)
+        self.staging_key.write_text("")
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.staging_key.write_text("x" * (1024 * 1024 + 1))
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.staging_key.write_text(original_key)
+        key_link = self.root / "staging-key-link"
+        key_link.symlink_to(self.staging_key)
+        self.assertNotEqual(self.run_prepare(OPSI_E2E_STAGING_SSH_KEY_PATH=str(key_link)).returncode, 0)
+
+        if os.geteuid() == 0:
+            wrong_owner = self.root / "wrong-owner-key"
+            wrong_owner.write_text(original_key)
+            wrong_owner.chmod(0o600)
+            os.chown(wrong_owner, 65534, 65534)
+        else:
+            wrong_owner = pathlib.Path("/etc/hosts")
+        wrong_owner_result = self.run_prepare(OPSI_E2E_STAGING_SSH_KEY_PATH=str(wrong_owner))
+        self.assertNotEqual(wrong_owner_result.returncode, 0)
+        self.assertIn("staging key is not an owned regular file", wrong_owner_result.stderr)
+
+        self.known_hosts.chmod(0o644)
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.known_hosts.chmod(0o600)
+        self.known_hosts.write_text("")
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.known_hosts.write_text("x" * 16385)
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.known_hosts.write_text(original_known_hosts)
+        known_link = self.root / "known-hosts-link"
+        known_link.symlink_to(self.known_hosts)
+        self.assertNotEqual(self.run_prepare(OPSI_E2E_STAGING_KNOWN_HOSTS_PATH=str(known_link)).returncode, 0)
+        self.known_hosts.write_text("staging.example ssh-ed25519 AAAA\nsecond ssh-ed25519 BBBB\n")
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.known_hosts.write_text("other.example ssh-ed25519 AAAA\n")
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.known_hosts.write_text("staging.example ssh-ed25519 AAAA\n")
+        self.assertNotEqual(self.run_prepare(OPSI_E2E_STAGING_HOST_KEY_SHA256="SHA256:" + "B" * 43).returncode, 0)
+        self.assertNotEqual(self.run_prepare(OPSI_E2E_STAGING_SSH_KEY_PATH=str(self.key)).returncode, 0)
+        source = (ROOT / "scripts/e2e/verify-k3s.sh").read_text()
+        self.assertGreaterEqual(source.count("info.st_uid != os.geteuid()"), 2)
 
     def test_resume_uses_existing_session_without_posting_a_second_one(self) -> None:
         prepared = self.run_prepare()
         self.assertEqual(prepared.returncode, 0, prepared.stderr)
         state = json.loads(self.state.read_text(encoding="utf-8"))
         state["phase"] = "replay_started"
+        state["current_container_id"] = "worker-replay"
         self.state.write_text(json.dumps(state), encoding="utf-8")
         self.state.chmod(0o600)
+        self.remote_state.write_text(json.dumps({"phase":"replay_started","session":"boot-factual","container":"worker-replay"}))
         self.write_marker("consumed")
         before = self.log.read_text(encoding="utf-8").count("/nodes/bootstrap")
         resumed = self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1")
@@ -777,13 +917,11 @@ PY
     def test_full_barrier_replay_reconciles_completed_marker_and_restores_base_profile(self) -> None:
         prepared = self.run_mode("--barrier-prepare")
         self.assertEqual(prepared.returncode, 0, prepared.stderr + prepared.stdout)
-        prepared_container = (self.runtime / "container").read_text(encoding="utf-8").strip()
         self.write_marker("reached")
 
         restarted = self.run_mode("--barrier-restart")
         self.assertEqual(restarted.returncode, 0, restarted.stderr + restarted.stdout)
-        replay_container = (self.runtime / "container").read_text(encoding="utf-8").strip()
-        self.assertNotEqual(replay_container, prepared_container)
+        self.assertEqual(json.loads(self.state.read_text())["current_container_id"], "worker-replay")
 
         self.write_marker("completed")
         resumed = self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1")
@@ -792,25 +930,12 @@ PY
 
         restored = self.run_mode("--barrier-restore")
         self.assertEqual(restored.returncode, 0, restored.stderr + restored.stdout)
-        restored_container = (self.runtime / "container").read_text(encoding="utf-8").strip()
-        self.assertNotEqual(restored_container, replay_container)
         self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "normal_restored")
+        self.assertEqual(json.loads(self.remote_state.read_text())["container"], "worker-normal")
 
         log = self.log.read_text(encoding="utf-8")
         self.assertEqual(log.count("/nodes/bootstrap"), 1)
-        recreates = [line for line in log.splitlines() if "up -d --no-deps --force-recreate bootstrap-worker" in line]
-        self.assertEqual(len(recreates), 3, log)
-        self.assertEqual(recreates[1].count("compose.e2e-bootstrap-barrier.yaml"), 1)
-        self.assertIn("compose.yaml", recreates[2])
-        self.assertNotIn("compose.e2e-bootstrap-barrier.yaml", recreates[2])
-        self.assertNotRegex(recreates[2], r"\b(cloud|postgres|reverse-proxy)\b")
-
-        orchestration = (ROOT / "scripts/e2e/verify-k3s.sh").read_text(encoding="utf-8")
-        for start, end in (("barrier_restart()", "barrier_restore()"), ("barrier_restore()", "resume_bootstrap_session()")):
-            body = orchestration.split(start, 1)[1].split(end, 1)[0]
-            self.assertNotIn("docker compose", body)
-        self.assertIn('python3 "$RELEASE_HELPER" barrier-replay', orchestration)
-        self.assertIn("restore_normal_worker", orchestration.split("barrier_restore()", 1)[1].split("resume_bootstrap_session()", 1)[0])
+        self.assertNotIn("LOCAL_DOCKER_CANARY", log)
 
     def test_reached_marker_cannot_be_promoted_by_completed_api_status(self) -> None:
         self.assertEqual(self.run_mode("--barrier-prepare").returncode, 0)
@@ -822,17 +947,125 @@ PY
         self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "replay_started")
         self.assertEqual(self.log.read_text(encoding="utf-8").count("/nodes/bootstrap"), 1)
 
-    def test_reconciliation_rejects_wrong_marker_identity_and_process(self) -> None:
-        self.assertEqual(self.run_mode("--barrier-prepare").returncode, 0)
-        self.write_marker("reached")
-        self.assertEqual(self.run_mode("--barrier-restart").returncode, 0)
+    def test_illegal_reuse_and_conflicting_state_fail_closed(self) -> None:
+        self.assertEqual(self.run_prepare().returncode, 0)
+        self.assertNotEqual(self.run_prepare().returncode, 0)
+        self.assertNotEqual(self.run_mode("--barrier-restart").returncode, 0)
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        state["source_revision"] = "d" * 40
+        self.state.write_text(json.dumps(state), encoding="utf-8")
+        self.state.chmod(0o600)
+        self.assertNotEqual(self.run_mode("--barrier-restart").returncode, 0)
 
-        for changes in ({"session_id": "boot-other"}, {"run_id": "run-other"}, {"process_id": ""}):
+    def test_remote_helper_rejects_untrusted_request_shapes(self) -> None:
+        helper = ROOT / "scripts/e2e/staging-barrier-remote.sh"
+        request = {
+            "schema_version":"opsi.e2e.staging-barrier-request/v1", "phase":"unknown",
+            "source_revision":REVISION, "run_id":"run-request", "staging_host":"staging.example",
+            "repository_directory":"/srv/opsi", "repository_identity":"a" * 64,
+            "compose_directory":"/srv/opsi/deploy/staging-control-plane",
+            "worker_digest":DIGEST_A, "session_id":"", "expected_state":"absent",
+        }
+        unknown_field = dict(request, phase="preflight", unexpected="value")
+        unsafe_host = dict(request, phase="preflight", staging_host="staging.example;id")
+        for raw in (
+            b"", b"{}", b'{"schema_version":"x","schema_version":"y"}', b"x" * 4097,
+            json.dumps(request).encode(), json.dumps(unknown_field).encode(), json.dumps(unsafe_host).encode(),
+        ):
+            with self.subTest(size=len(raw)):
+                result = subprocess.run(["bash", str(helper)], input=raw, capture_output=True, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertLessEqual(len(result.stderr), 1024)
+
+class BarrierTrustDomainRegressionTests(unittest.TestCase):
+    def test_barrier_has_no_local_staging_docker_path(self) -> None:
+        source = (ROOT / "scripts/e2e/verify-k3s.sh").read_text(encoding="utf-8")
+        self.assertNotIn("compose_worker()", source)
+        self.assertNotIn('python3 "$RELEASE_HELPER" barrier-quiesce', source)
+
+    def test_prepare_requires_revision_bound_remote_receipt_before_bootstrap(self) -> None:
+        source = (ROOT / "scripts/e2e/verify-k3s.sh").read_text(encoding="utf-8")
+        prepare = source.split("barrier_prepare()", 1)[1].split("load_barrier_context()", 1)[0]
+        self.assertIn("staging_barrier_remote prepare", prepare)
+        self.assertLess(prepare.index("staging_barrier_remote prepare"), prepare.index('/nodes/bootstrap'))
+
+    def test_separated_operator_fixture_does_not_reach_local_docker_canary(self) -> None:
+        fixture = BarrierProcedureTests(methodName="runTest")
+        fixture.setUp()
+        try:
+            result = fixture.run_prepare()
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            log = fixture.log.read_text(encoding="utf-8")
+            self.assertNotIn("docker ", log, "baseline local Docker canary was reached")
+        finally:
+            fixture.tearDown()
+
+
+class StagingBarrierRepositoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.repository = pathlib.Path(self.temp.name) / "repo"
+        self.compose = self.repository / "deploy/staging-control-plane"
+        self.helper = self.repository / "scripts/e2e/staging-barrier-remote.sh"
+        self.helper.parent.mkdir(parents=True)
+        self.compose.mkdir(parents=True)
+        self.helper.write_bytes((ROOT / "scripts/e2e/staging-barrier-remote.sh").read_bytes())
+        self.helper.chmod(0o755)
+        for command in (
+            ("init", "-q"), ("config", "user.email", "fixture@example.test"),
+            ("config", "user.name", "Fixture"), ("add", "."), ("commit", "-qm", "fixture"),
+            ("remote", "add", "origin", "fixture-origin"),
+        ):
+            subprocess.run(["git", "-C", str(self.repository), *command], check=True)
+        self.revision = subprocess.check_output(["git", "-C", str(self.repository), "rev-parse", "HEAD"], text=True).strip()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def request(self, **changes: str) -> bytes:
+        value = {
+            "schema_version":"opsi.e2e.staging-barrier-request/v1", "phase":"preflight",
+            "source_revision":self.revision, "run_id":"run-repository-test", "staging_host":"staging.example",
+            "repository_directory":str(self.repository), "repository_identity":hashlib.sha256(b"fixture-origin").hexdigest(),
+            "compose_directory":str(self.compose), "worker_digest":DIGEST_A, "session_id":"", "expected_state":"absent",
+        }
+        value.update(changes)
+        return json.dumps(value, separators=(",", ":")).encode()
+
+    def run_helper(self, request: bytes) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run([str(self.helper)], input=request, capture_output=True, check=False)
+
+    def test_revision_mismatch_and_dirty_worktree_fail_before_docker(self) -> None:
+        original = self.helper.read_bytes()
+        mismatch = self.run_helper(self.request(source_revision="d" * 40))
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn(b"repository revision mismatch", mismatch.stderr)
+        self.helper.write_bytes(self.helper.read_bytes() + b"\n")
+        dirty = self.run_helper(self.request())
+        self.assertNotEqual(dirty.returncode, 0)
+        self.assertIn(b"tracked worktree check failed", dirty.stderr)
+        self.helper.write_bytes(original)
+
+    def test_helper_blob_mismatch_fails_before_docker(self) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.repository), "update-index", "--assume-unchanged", "scripts/e2e/staging-barrier-remote.sh"],
+            check=True,
+        )
+        self.helper.write_bytes(self.helper.read_bytes() + b"\n")
+        mismatch = self.run_helper(self.request())
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn(b"remote helper blob mismatch", mismatch.stderr)
+
+    def test_symlinked_repository_or_compose_root_is_rejected(self) -> None:
+        repository_link = self.repository.parent / "repo-link"
+        repository_link.symlink_to(self.repository, target_is_directory=True)
+        compose_link = self.repository / "compose-link"
+        compose_link.symlink_to(self.compose, target_is_directory=True)
+        for changes in ({"repository_directory":str(repository_link)}, {"compose_directory":str(compose_link)}):
             with self.subTest(changes=changes):
-                self.write_marker("completed", **changes)
-                resumed = self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1")
-                self.assertNotEqual(resumed.returncode, 0)
-                self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["phase"], "replay_started")
+                result = self.run_helper(self.request(**changes))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"contains a symlink", result.stderr)
 
 
 if __name__ == "__main__":

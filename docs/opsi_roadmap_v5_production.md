@@ -682,6 +682,18 @@ from the new revision, and live acceptance must restart as a new Run 1 with a
 new Run ID. R5-017, release readiness, and production readiness remain
 unclaimed.
 
+**Barrier trust-domain checkpoint:** the source verifier no longer requires the
+loopback Local API and staging Docker/Compose on one host. The operator retains
+Local API/session, second factor, Agent VPS bootstrap key, orchestration state,
+and acceptance. A single committed staging executor owns revision-bound
+Compose/Worker/barrier operations through separate pinned direct SSH and strict
+bounded receipts. Pre-session failure restores remotely; post-session failure
+preserves the factual session and Worker state, and continuation never creates
+a second session. Ambiguous mutation loss uses read-only status only. Local
+fake transport regressions pass, but no live staging/VPS/K3s action or Run 1
+occurred. Aligned Cloud, Worker, and Agent artifacts must be republished from
+this new source revision before a new Run 1; R5-017 remains pending.
+
 **CẦN VPS:** tối thiểu một Agent VPS. Để tuyên bố hỗ trợ multi-VPS production path, cần **hai Agent VPS** trong cùng project nhưng hai single-node runtimes độc lập.
 
 **Artifact prerequisite:** trước khi deploy staging hoặc bắt đầu Run 1, publish

@@ -7,9 +7,9 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
-`R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is the source-only corrective gate;
-live retry remains operator-run and was not started.
+`R5_017_BARRIER_TRUST_DOMAIN_SOURCE_FIXED /
+ALIGNED_RUNTIME_REPUBLISH_REQUIRED / NEW_RUN_1_PENDING` is the source-only
+corrective gate; live retry remains operator-run and was not started.
 `R5_017G_CONTROL_PLANE_PUBLISH_PASS` replaces
 the Worker-only publisher with one manual control-plane workflow for Cloud and
 Bootstrap Worker. Both targets use `cloud/Dockerfile`, repository-root context,
@@ -91,15 +91,25 @@ RepoDigest, and Cloud health without changing `.env` or creating a backup.
 Fake Docker/Compose/Local API tests exercise precondition negatives, one-worker
 recreate, evidence, ordering, restoration, and resume without a second POST.
 
-R5-017D1 adds executable `--barrier-prepare`, `--barrier-restart`,
-`--resume-bootstrap-session`, and `--barrier-restore` modes. Prepare proves a
-singleton Worker is stopped before creating the factual Local API session,
-stores only protected run/session/container metadata, generates config and
-arms the marker after the session ID exists, then invokes the same-image
-barrier helper. Session/config/arm/recreate failures restore only the normal
-Worker profile; restoration failure is separately reported and nonzero. The
-Worker barrier protocol remains unchanged and production configuration still
-rejects every barrier field.
+The R5-017 trust-domain correction keeps `verify-k3s.sh` on the operator
+workstation for the loopback Local API, Agent VPS bootstrap key, one bootstrap
+POST, protected local state, second factor, and acceptance. It removes local
+staging Docker/Compose execution. One committed `staging-barrier-remote.sh`
+executor owns staging repository checks, canonical Compose, Worker
+quiesce/start/replay/restore, config, marker, and protected remote state.
+Pinned direct SSH uses a separate private key and one-entry known_hosts file,
+disables ambient configuration, agents, forwarding, and interactive auth,
+sanitizes the child environment, and accepts only one bounded revision/helper-
+bound JSON receipt with empty stderr.
+
+Remote `preflight` and `prepare` receipts precede the single Local API
+bootstrap POST. The factual session is fsynced locally before remote config,
+arm, and same-digest Worker recreation. Pre-session failure restores through
+remote `abort`; post-session failure preserves the session and stopped/barrier
+Worker. Continuation reuses the same protected state and never posts again.
+Ambiguous SSH mutation is reconciled only through read-only `status`, and an
+`armed` state is not blindly replayed. Staging receives no Local API,
+second-factor, PAT, secret, Agent key, or bootstrap-body material.
 
 R5-017D2 closes the three follow-up blockers. Barrier config generation keeps
 the production staging `cloud_url` but sets `production: false` and
@@ -109,17 +119,20 @@ uses the release helper's dedicated `barrier-replay` operation and accepts only
 an exact `reached` marker with `process_id`. `--barrier-restore` uses the base
 Compose profile through the dedicated helper, without pull, `.env` mutation, or
 binding backup, and proves replacement, binding, RepoDigest, Worker health, and
-Cloud health. Prepare failure cleanup restores first, then disarms only an
-exact `armed` marker and removes only a matching private generated config;
-reached/consumed/completed state is preserved and every restoration/cleanup
-failure is separately reported nonzero. The source tests use fake tools that
-assert Compose argument ordering and canonical helper invocation.
+Cloud health. The remote executor reuses the existing release and barrier
+helpers, so there is no second Worker deployment implementation or local
+fallback. Reached/consumed/completed evidence remains forensic state; normal
+restoration is allowed only after completed evidence or a proved pre-session
+abort. Local fake-SSH/Docker tests cover ordering, transport hardening, canary
+isolation, receipt rejection, ambiguous reconciliation, continuation, replay,
+and restore.
 
 The discovered live rollback target remains
 `ghcr.io/huutawn/opsi-bootstrap-worker@sha256:220d3ecc7dba018871707fc57612b3730259fd90b23dfde454a3299759167cff`
 at Worker revision `0669bb5`. No image was published, no staging service was
-recreated, and no Agent VPS was accessed or mutated by R5-017C or R5-017D1.
-Source gates pass; live publish, deploy, and Agent/VPS retry remain pending.
+recreated, and no Agent VPS was accessed or mutated by this correction. The new
+source revision requires aligned Cloud, Worker, and Agent republication before
+a new Run 1. R5-017, release readiness, and production readiness are unclaimed.
 
 R5-015 Agent-local Kubernetes identity is the exact `opsi.dev/service`
 ServiceKey. Opsi-managed Pods without a valid canonical service label are

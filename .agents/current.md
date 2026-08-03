@@ -6,8 +6,8 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
-`R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is pending final source gates.
+`R5_017_BARRIER_TRUST_DOMAIN_SOURCE_FIXED /
+ALIGNED_RUNTIME_REPUBLISH_REQUIRED / NEW_RUN_1_PENDING`.
 `R5_017_NODE_RETIREMENT_IDEMPOTENCY_SOURCE_FIXED / RUNTIME_PUBLISH_PENDING`.
 `R5_017_KNOWN_GOOD_HISTORY_VALIDATION_SOURCE_FIXED /
 ALIGNED_RUNTIME_REPUBLISH_REQUIRED` follows commit `7623266f…`, which fixed
@@ -100,13 +100,20 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   matching `armed` marker, exact expected digest, and one Worker target. It
   proves container ID replacement, health, immutable RepoDigest, and Cloud
   health without changing `.env`.
-- `verify-k3s.sh --barrier-prepare` proves Worker quiescence before factual
-  Local API session creation, stores protected run/session/container state,
-  creates config and arms the marker after the factual session ID exists, and
-  restores only the normal Worker profile on failure. Replay/resume/restore
-  modes keep one Worker and one bootstrap session path.
-- Source/fake-state gates pass. No image publish, staging deploy, SSH, VPS
-  reset, or live E2E was performed; R5-017 live retry remains pending.
+- `verify-k3s.sh` remains the operator controller for the loopback Local API,
+  Agent VPS bootstrap key, single bootstrap POST, protected local state, and
+  later acceptance. It no longer invokes local staging Docker/Compose.
+- One committed `staging-barrier-remote.sh` executor owns staging repository,
+  Compose, Worker, config, marker, and remote state operations. Pinned direct
+  SSH uses a separate protected key/known_hosts/fingerprint and a sanitized
+  environment; strict bounded receipts bind the exact revision and helper blob.
+- Pre-session failure restores through remote `abort`. Post-session failure
+  preserves the factual session and stopped/barrier Worker; continuation uses
+  the same state and never sends a second bootstrap POST. Ambiguous mutation
+  loss is reconciled only through read-only `status`.
+- Local fake-SSH/Docker regressions pass. No image publish, staging deploy,
+  live SSH, VPS reset, or E2E run was performed; aligned Cloud, Worker, and
+  Agent republication and a new Run 1 remain pending.
 
 ### R5-017D2 — canonical replay/restore and failure cleanup
 
@@ -119,10 +126,11 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   expected binding/RepoDigest, singleton replacement, Worker health, and
   Cloud health under the release lock. Normal restoration uses base Compose
   only and never pulls or edits `.env`.
-- Prepare failure restores through the canonical helper, reports restoration,
-  marker, and config cleanup failures separately, disarms only an exact
-  `armed` attempt, and preserves `reached`, `consumed`, and `completed` state.
-  No live publish, staging deploy, SSH, VPS reset, or E2E run was performed.
+- The staging executor reuses the canonical barrier and release helpers; no
+  second Worker deployment implementation or local fallback remains. Normal
+  restoration is permitted only after completed marker evidence or a proved
+  pre-session abort, and reached/consumed/completed evidence is preserved.
+- No live publish, staging deploy, SSH, VPS reset, or E2E run was performed.
 
 ### R5-015 corrective — R5_015_AGENT_SERVICE_IDENTITY_PASS
 

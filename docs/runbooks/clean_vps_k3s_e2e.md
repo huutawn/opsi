@@ -151,47 +151,50 @@ webhook relay participates in this path.
 
 ## Deterministic Bootstrap Worker crash proof
 
-R5-017D1 closes the orchestration gap with one fail-closed source procedure.
-The operator context owns the Local API and protected bootstrap key; the
-staging control-plane host owns Compose, `.env`, the run-specific config, and
-the private marker directory. Host, key, fingerprint, project, and immutable
-digest values come only from operator-owned environment or secure config.
+The barrier uses three separate trust domains. The operator workstation owns
+the loopback-only Local API, Local API session, second factor, Agent VPS key,
+and a distinct staging SSH key and pinned host identity. The staging host owns
+the exact repository checkout, Docker/Compose, Worker lifecycle, barrier
+config, marker, and remote state. The Agent VPS remains the existing separate
+pinned target. No tunnel, SSHFS, shared mount, local Docker fallback, or Agent
+SSH identity reuse is permitted.
 
-The release must already be published/deployed or otherwise present at the
-approved immutable digest. Normal same-image release remains a no-op. The
-barrier path uses explicit `--force-recreate-same-image`; it never changes
-`.env`, pulls the image, or creates a binding backup.
+Before this procedure, use the separately authorized source-alignment process
+to place the exact committed source revision on staging. Do not fetch, pull,
+checkout, or upload source through the verifier. The operator checkout and the
+staging checkout must have the same full revision; the staging tracked
+worktree/index and committed helper blob must be clean and exact.
 
 ```bash
 export OPSI_E2E_LOCAL_URL=http://127.0.0.1:9780
 export OPSI_E2E_PROJECT_ID=...
 export OPSI_E2E_VPS_HOST=...
 export OPSI_E2E_VPS_SSH_USER=...
-export OPSI_E2E_SSH_KEY_PATH=/protected/operator/key
+export OPSI_E2E_SSH_KEY_PATH=/protected/operator/agent-vps.key
 export OPSI_E2E_BOOTSTRAP_WORKER_DIGEST=sha256:<currently-approved-digest>
-export OPSI_E2E_RUN_ID="r5-017d1-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-export OPSI_E2E_STAGING_COMPOSE_DIRECTORY=/home/operator/opsi/deploy/staging-control-plane
+export OPSI_E2E_RUN_ID="r5-017-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export OPSI_E2E_STAGING_HOST=staging.example
+export OPSI_E2E_STAGING_SSH_PORT=22
+export OPSI_E2E_STAGING_SSH_USER=opsi-staging
+export OPSI_E2E_STAGING_SSH_KEY_PATH=/protected/operator/staging.key
+export OPSI_E2E_STAGING_KNOWN_HOSTS_PATH=/protected/operator/staging.known_hosts
+export OPSI_E2E_STAGING_HOST_KEY_SHA256=SHA256:<approved-fingerprint>
+export OPSI_E2E_STAGING_REPOSITORY_DIRECTORY=/srv/opsi
+export OPSI_E2E_STAGING_COMPOSE_DIRECTORY=/srv/opsi/deploy/staging-control-plane
+export OPSI_E2E_SOURCE_REVISION="$(git rev-parse HEAD)"
 scripts/e2e/verify-k3s.sh --barrier-prepare \
   /protected/state/bootstrap-barrier.json
 ```
 
-`--barrier-prepare` proves exactly one Worker, stops it, and verifies it is
-stopped before POSTing the canonical Local API bootstrap route. The factual
-response `id` becomes the session ID; a protected state file stores only
-run/session/container metadata. The command creates a private config from the
-normal Worker config, arms the matching `armed` marker, and calls the canonical
-release helper. Any session, config, arm, or recreate failure restores only the
-normal Worker profile. Restoration failure is reported separately and is
-nonzero; PostgreSQL, Cloud, reverse proxy, and Agent VPS are never recreated by
-restoration.
-
-Poll factual state, without a fixed sleep:
-
-```bash
-scripts/e2e/bootstrap-worker-barrier.sh status \
-  --state-dir "$OPSI_E2E_STAGING_COMPOSE_DIRECTORY/barrier-state" \
-  --session-id <factual-session-id> --run-id "$OPSI_E2E_RUN_ID"
-```
+`--barrier-prepare` invokes only the committed remote helper over pinned SSH.
+It requires a revision/helper-bound `preflight` receipt, then a `prepare`
+receipt proving the single Worker is stopped, before it authenticates the
+Local API and sends exactly one bootstrap POST. The factual session ID is
+fsynced into protected local state before remote config, marker arm, and
+same-digest Worker recreation. Requests and receipts are strict, bounded JSON;
+successful SSH requires one receipt, empty stderr, and exit zero. Local API,
+second-factor, PAT, secret, Agent-key, and bootstrap-body material never enters
+remote stdin, stdout, stderr, state, or receipts.
 
 After `reached`, restart only the Worker through the canonical `barrier-replay`
 helper operation and require
@@ -204,23 +207,42 @@ scripts/e2e/verify-k3s.sh --resume-bootstrap-session \
   /protected/state/bootstrap-barrier.json
 ```
 
-The resume path uses the existing factual session and never POSTs a second
-bootstrap request. Review checkpoint/session events and read-only K3s evidence
-before cleanup. Restore the normal profile with `barrier-restore` (no barrier
-override, pull, `.env` mutation, or binding backup), then explicitly disarm;
-never delete or reset `reached`, `consumed`, or `completed` as retry logic:
+The resume path never POSTs a second bootstrap request. Restore the normal
+profile only after factual `completed`; restoration uses canonical base
+Compose with no pull, `.env` mutation, binding backup, or dependency target.
+Preserve `reached`, `consumed`, and `completed` marker evidence:
 
 ```bash
 scripts/e2e/verify-k3s.sh --barrier-restore \
   /protected/state/bootstrap-barrier.json
-scripts/e2e/bootstrap-worker-barrier.sh disarm \
-  --state-dir "$OPSI_E2E_STAGING_COMPOSE_DIRECTORY/barrier-state" \
-  --session-id <factual-session-id> --run-id "$OPSI_E2E_RUN_ID"
+```
+
+Before session creation, a failed prepare or bootstrap request invokes the
+remote pre-session abort and requires one healthy normal Worker. After factual
+session creation, any failure preserves the stopped/barrier Worker and both
+state records; it never restores an unbarriered Worker or sends another POST.
+Rerunning `--barrier-prepare` with the same protected state continues only when
+read-only status proves a safe pre-recreation state. An `armed` or otherwise
+ambiguous state stops for inspection. SSH timeout/disconnect is reconciled only
+with remote `status`; the mutating phase is accepted only when status proves
+its exact completed transition.
+
+Invoke `scripts/validate-staging-control-plane.py` directly, without an
+external wrapper, and capture stderr separately. The next live run fails
+acceptance if validator stderr is non-empty even when its exit status is zero.
+Historical `stat: missing operand` warnings came from an external/ad hoc
+wrapper and are not claimed fixed by this source correction.
+
+```bash
+python3 scripts/validate-staging-control-plane.py --runtime \
+  >validator.stdout 2>validator.stderr
+test ! -s validator.stderr
 ```
 
 The logical Agent Host header may use `curl --resolve`; it proves only the
-selected IP/Host route, not public DNS, HTTPS, or Agent TLS. This source
-procedure performs no publish, deploy, SSH, VPS reset, or live E2E mutation.
+selected IP/Host route, not public DNS, HTTPS, or Agent TLS. This correction was
+tested only with local fake SSH/Docker fixtures; no live staging, Agent VPS,
+K3s, PostgreSQL, deployment, or Run 1 action occurred.
 
 ## Limits and status
 
@@ -228,4 +250,6 @@ The full scenario has no accepted real-infrastructure artifact until an
 operator runs it against the protected Local API/UI and reviews redacted
 evidence. Do not change `MANUAL_GATED` without that evidence. R5-011 remains
 `PARTIAL`; R5-011.4 remains `MANUAL_GATED`. This runbook does not claim R5-012,
-MCP, AI, DNS, TLS, or public endpoint acceptance.
+MCP, AI, DNS, TLS, or public endpoint acceptance. The new source revision makes
+the previous runtime artifacts revision-unaligned; aligned Cloud, Worker, and
+Agent artifacts must be republished before a new Run 1. R5-017 remains pending.
