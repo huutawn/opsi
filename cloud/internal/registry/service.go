@@ -1568,7 +1568,7 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	}
 	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: environmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
 	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
-	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
+	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.NodeID, job.AgentID)
 	var exposure *exposurev1.ExposureSpec
 	if snapshot.Preview != nil {
 		exposure, err = previewExposureForDeployment(job, snapshot.Preview)

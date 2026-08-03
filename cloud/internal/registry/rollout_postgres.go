@@ -124,7 +124,7 @@ func (s PostgresService) StartExposureRollout(projectID, actorUserID, key, reque
 	if collision != 0 {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_ID_CONFLICT", Message: "deployment_job_id already exists", RequestID: requestID}
 	}
-	previousID, previousHash, previousDigest, err := latestPostgresKnownGood(ctx, tx, projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID)
+	previousID, previousHash, previousDigest, err := latestPostgresKnownGood(ctx, tx, projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID, base.NodeID, base.AgentID)
 	if err != nil {
 		return DeploymentJob{}, false, err
 	}
@@ -165,9 +165,9 @@ func latestPostgresExposure(ctx context.Context, queryer rolloutQueryer, project
 	return &exposure, nil
 }
 
-func latestPostgresKnownGood(ctx context.Context, tx *sql.Tx, projectID, environmentID, runtimeID, serviceID string) (string, string, string, error) {
+func latestPostgresKnownGood(ctx context.Context, tx *sql.Tx, projectID, environmentID, runtimeID, serviceID, nodeID, agentID string) (string, string, string, error) {
 	var id, hash, digest string
-	err := tx.QueryRowContext(ctx, `SELECT COALESCE(known_good_id,''), COALESCE(known_good_hash,''), COALESCE(current_digest,'') FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND snapshot_json->'preview' IS NULL AND known_good_id IS NOT NULL AND known_good_id <> '' ORDER BY updated_at DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID).Scan(&id, &hash, &digest)
+	err := tx.QueryRowContext(ctx, `SELECT known_good_id, known_good_hash, current_digest FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND node_id=$5 AND agent_id=$6 AND snapshot_json->'preview' IS NULL AND terminal_result_json IS NOT NULL AND rollout_state IN ('succeeded','rolled_back') AND status=rollout_state AND terminal_result_json->>'rollout_state'=rollout_state AND terminal_result_json->>'status'=rollout_state AND known_good_id IS NOT NULL AND known_good_id <> '' AND known_good_hash ~ '^[a-f0-9]{64}$' AND current_digest ~ '^sha256:[a-f0-9]{64}$' ORDER BY updated_at DESC, id DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID, nodeID, agentID).Scan(&id, &hash, &digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", "", nil
 	}

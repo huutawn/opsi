@@ -1182,7 +1182,7 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	if !errors.Is(err, sql.ErrNoRows) {
 		return DeploymentJob{}, false, err
 	}
-	previousID, previousHash, previousDigest, err := latestPostgresKnownGood(ctx, tx, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
+	previousID, previousHash, previousDigest, err := latestPostgresKnownGood(ctx, tx, job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.NodeID, job.AgentID)
 	if err != nil {
 		return DeploymentJob{}, false, err
 	}

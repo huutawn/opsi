@@ -666,6 +666,16 @@ backend gap fail-closed cho tới native acceptance ở R5-017.
 
 **Trạng thái frontend:** FE-01 đến FE-04 source redesign và browser fixture acceptance đã pass. Security/Settings, Delivery loading, observability factuality, và CLI-only ActionPlane handoff đã được ổn định. Các advisory PostCSS/Sharp vẫn `UPSTREAM_BLOCKED`; PostCSS còn build-time risk và không có claim dependency closure. Không có live Agent/VPS acceptance trong FE-04, nên R5-017 vẫn pending và roadmap tổng thể chưa complete.
 
+**Source correction checkpoint:** Run `r5-017-run1-20260802T142745Z`
+remains blocked and immutable as evidence, and deployment
+`dep-255109f89b9efb64` remains terminal `failed` without retry or rewrite. The
+source defect was cross-target previous-known-good selection. Cloud now requires
+the exact node and Agent identity plus a factual `succeeded` or `rolled_back`
+terminal result. The fix is not deployed. All aligned runtime artifacts must be
+republished from the new revision, and live acceptance must restart as a new
+Run 1 with a new Run ID. R5-017, release readiness, and production readiness
+remain unclaimed.
+
 **CẦN VPS:** tối thiểu một Agent VPS. Để tuyên bố hỗ trợ multi-VPS production path, cần **hai Agent VPS** trong cùng project nhưng hai single-node runtimes độc lập.
 
 **Artifact prerequisite:** trước khi deploy staging hoặc bắt đầu Run 1, publish

@@ -89,7 +89,7 @@ func (s *Service) StartExposureRollout(projectID, actorUserID, key, requestID st
 	if _, exists := s.deployments[preview.Desired.DeploymentJobID]; exists {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_ID_CONFLICT", Message: "deployment_job_id already exists", RequestID: requestID}
 	}
-	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID)
+	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID, base.NodeID, base.AgentID)
 	intent, err := buildRolloutIntent(base, &preview.Desired, previousID, previousHash, previousDigest, "", "", deploymentv1.RolloutOperationApply, now)
 	if err != nil {
 		return DeploymentJob{}, false, APIError{Status: 400, Code: "ROLLOUT_INTENT_INVALID", Message: err.Error(), RequestID: requestID}
@@ -194,11 +194,14 @@ func (s *Service) latestProjectExposuresLocked(projectID string) []exposurev1.Ex
 	return result
 }
 
-func (s *Service) latestKnownGoodLocked(projectID, environmentID, runtimeID, serviceID string) (string, string, string) {
+func (s *Service) latestKnownGoodLocked(projectID, environmentID, runtimeID, serviceID, nodeID, agentID string) (string, string, string) {
 	var selected *DeploymentJob
 	for id := range s.deployments {
 		job := s.deployments[id]
-		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && job.Snapshot != nil && job.Snapshot.Preview == nil && job.TerminalResult != nil && job.TerminalResult.KnownGoodID != "" && (selected == nil || job.UpdatedAt.After(selected.UpdatedAt)) {
+		result := job.TerminalResult
+		factual := result != nil && (result.RolloutState == deploymentv1.RolloutStateSucceeded || result.RolloutState == deploymentv1.RolloutStateRolledBack) && result.Status == result.RolloutState && job.Status == result.RolloutState && job.RolloutState == result.RolloutState && result.KnownGoodID != "" && validRolloutHash(result.KnownGoodHash) && len(result.CurrentDigest) == 71 && result.CurrentDigest[:7] == "sha256:" && validRolloutHash(result.CurrentDigest[7:])
+		newer := selected == nil || job.UpdatedAt.After(selected.UpdatedAt) || job.UpdatedAt.Equal(selected.UpdatedAt) && job.ID > selected.ID
+		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && job.NodeID == nodeID && job.AgentID == agentID && job.Snapshot != nil && job.Snapshot.Preview == nil && factual && newer {
 			copy := job
 			selected = &copy
 		}

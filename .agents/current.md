@@ -9,6 +9,14 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
 `R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is pending final source gates.
 `R5_017_NODE_RETIREMENT_IDEMPOTENCY_SOURCE_FIXED / RUNTIME_PUBLISH_PENDING`.
+`R5_017_RUNTIME_TARGET_KNOWN_GOOD_SOURCE_FIXED /
+ALIGNED_RUNTIME_REPUBLISH_REQUIRED` scopes Cloud known-good authority to the
+exact node and Agent identity and factual `succeeded` or `rolled_back` terminal
+results. Run `r5-017-run1-20260802T142745Z` remains blocked and immutable;
+deployment `dep-255109f89b9efb64` remains terminal `failed` and was not retried
+or rewritten. The fix is not deployed. A new aligned runtime publication and a
+new live Run 1 with a new Run ID are required; R5-017, release readiness, and
+production readiness remain unclaimed.
 `R5_017G_CONTROL_PLANE_PUBLISH_PASS` replaces the Worker-only workflow with one
 canonical Cloud + Bootstrap Worker publisher; run `30750598790` records the
 published `246c924f56f7d28db43d06154b39c558f214c686` manifest and digests.
@@ -16,7 +24,8 @@ One Agent-only publisher source now derives an immutable prerelease from the
 same exact reviewed revision, proves two clean builds byte-identical, and
 verifies the three public assets anonymously. It does not add another Cloud or
 Worker publisher.
-No live Agent/VPS, Cloud cutover, UI redesign, or browser acceptance was done.
+This source correction did not mutate staging or Agent VPS state, deploy a
+runtime, or perform new live UI/browser acceptance.
 ActionPlane restart recovery is one non-blocking root-context loop with an
 immediate pass, five-second default retry, 30-second pass budget, and bounded
 per-record opportunity. It is read/post-check only and retains unresolved locks until factual completion;
