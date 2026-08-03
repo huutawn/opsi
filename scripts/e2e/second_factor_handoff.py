@@ -123,13 +123,64 @@ def _read_private_file(path, label, maximum, allow_empty=False):
         current = os.fstat(fd)
         if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
             raise ValueError(f"{label} changed during validation")
-        data = os.read(fd, maximum + 1)
+        snapshot = (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_uid,
+            current.st_gid,
+            current.st_mode,
+            current.st_mtime_ns,
+            current.st_ctime_ns,
+        )
+        if snapshot != (
+            expected.st_dev,
+            expected.st_ino,
+            expected.st_size,
+            expected.st_uid,
+            expected.st_gid,
+            expected.st_mode,
+            expected.st_mtime_ns,
+            expected.st_ctime_ns,
+        ):
+            raise ValueError(f"{label} changed during validation")
+
+        chunks = []
+        size = 0
+        while True:
+            chunk = os.read(fd, maximum + 1 - size)
+            if not chunk:
+                if size != current.st_size:
+                    raise ValueError(f"{label} ended before its validated size")
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > maximum:
+                raise ValueError(f"{label} size is invalid")
+            if size > current.st_size:
+                raise ValueError(f"{label} changed while reading")
+
+        final = os.fstat(fd)
+        if snapshot != (
+            final.st_dev,
+            final.st_ino,
+            final.st_size,
+            final.st_uid,
+            final.st_gid,
+            final.st_mode,
+            final.st_mtime_ns,
+            final.st_ctime_ns,
+        ):
+            raise ValueError(f"{label} changed while reading")
+        if size != current.st_size:
+            raise ValueError(f"{label} size changed while reading")
+        data = b"".join(chunks)
     finally:
         os.close(fd)
     minimum = 0 if allow_empty else 1
     if not minimum <= len(data) <= maximum:
         raise ValueError(f"{label} size is invalid")
-    return data, current
+    return data, final
 
 
 def _validate_redaction_value(value):

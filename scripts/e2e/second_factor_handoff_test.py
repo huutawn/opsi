@@ -94,6 +94,47 @@ class HandoffTest(unittest.TestCase):
         )
         return metadata, output
 
+    def run_secret_response_with_read_fault(self, fault, partial_size, body):
+        child = r'''
+import os
+import runpy
+import sys
+from unittest import mock
+
+helper_path, registry_path, fault, partial_size = sys.argv[1:]
+real_read = os.read
+calls = 0
+
+def faulty_read(fd, maximum):
+    global calls
+    calls += 1
+    if calls == 1:
+        if fault == "eof":
+            return b""
+        return real_read(fd, int(partial_size))
+    raise InterruptedError("injected interrupted registry read")
+
+sys.argv = [helper_path, "redact-secret-response", "--redaction-values", registry_path]
+with mock.patch("os.read", side_effect=faulty_read):
+    runpy.run_path(helper_path, run_name="__main__")
+'''
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                child,
+                str(HELPER_PATH),
+                str(self.values),
+                fault,
+                str(partial_size),
+            ],
+            input=body,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+        )
+
     def test_expired_totp_is_rejected_and_removed(self):
         handoff = self.stage(
             "rotate", {"type": "totp", "code": "1" * 6, "period_start_unix": 60}
@@ -340,6 +381,89 @@ class HandoffTest(unittest.TestCase):
         self.assertNotEqual(self.values.stat().st_ino, original_inode)
         self.assertEqual(self.values.stat().st_mode & 0o777, 0o600)
         self.assertEqual(list(self.private.iterdir()), [self.values])
+
+    def test_redaction_registry_completes_positive_short_reads(self):
+        existing = ("existing-first-canary", "existing-second-canary")
+        requested = ("generated-user-canary", "generated-password-canary")
+        original = "".join(f"{value}\n" for value in existing).encode()
+        first_line_size = len(f"{existing[0]}\n".encode())
+        self.values.write_bytes(original)
+        original_inode = self.values.stat().st_ino
+        real_read = os.read
+        calls = 0
+
+        def short_read(fd, maximum):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_read(fd, first_line_size)
+            return real_read(fd, maximum)
+
+        with mock.patch.object(self.helper.os, "read", side_effect=short_read):
+            self.helper._append_redaction_values(self.values, requested)
+
+        self.assertNotEqual(self.values.stat().st_ino, original_inode)
+        self.assertEqual(
+            self.helper.read_redaction_values(self.values), (*existing, *requested)
+        )
+        self.assertEqual(list(self.private.iterdir()), [self.values])
+
+    def test_redaction_registry_rejects_premature_eof_before_publication(self):
+        original = b"existing-first-canary\nexisting-second-canary\n"
+        body = b'{"username":"generated-user-canary","password":"generated-password-canary"}'
+        self.values.write_bytes(original)
+        original_inode = self.values.stat().st_ino
+
+        result = self.run_secret_response_with_read_fault("eof", 0, body)
+
+        self.assertEqual(self.values.read_bytes(), original)
+        self.assertEqual(self.values.stat().st_ino, original_inode)
+        self.assertEqual(list(self.private.iterdir()), [self.values])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        for canary in original.splitlines() + body.split(b'"'):
+            if b"canary" in canary:
+                self.assertNotIn(canary, result.stderr)
+
+    def test_redaction_registry_rejects_interrupted_read_before_publication(self):
+        original = b"existing-first-canary\nexisting-second-canary\n"
+        body = b'{"username":"generated-user-canary","password":"generated-password-canary"}'
+        self.values.write_bytes(original)
+        original_inode = self.values.stat().st_ino
+
+        result = self.run_secret_response_with_read_fault(
+            "interrupted", len(b"existing-first-canary\n"), body
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(self.values.read_bytes(), original)
+        self.assertEqual(self.values.stat().st_ino, original_inode)
+        self.assertEqual(list(self.private.iterdir()), [self.values])
+        for canary in original.splitlines() + body.split(b'"'):
+            if b"canary" in canary:
+                self.assertNotIn(canary, result.stderr)
+
+    def test_artifact_scan_accumulates_short_registry_reads(self):
+        harmless = b"harmless-value\n"
+        secret = b"leak-scan-secret-canary"
+        self.values.write_bytes(harmless + secret + b"\n")
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+        (evidence / "leak.txt").write_bytes(secret)
+        real_read = os.read
+        calls = 0
+
+        def short_read(fd, maximum):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_read(fd, len(harmless))
+            return real_read(fd, maximum)
+
+        with mock.patch.object(self.helper.os, "read", side_effect=short_read):
+            with self.assertRaisesRegex(ValueError, "sensitive"):
+                self.helper.scan_artifacts(evidence, self.values)
 
     def test_redaction_registry_rejects_zero_and_interrupted_writes_atomically(self):
         original = b"existing-canary\n"
