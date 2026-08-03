@@ -268,10 +268,37 @@ session_token() {
 }
 
 api_file() {
-  local method="$1" path="$2" body_file="$3" label="$4" write="${5:-0}"
-  local out status headers=(-H "content-type: application/json" -H "X-Request-ID: $RUN_ID-$label")
+  local method="$1" path="$2" body_file="$3" label="$4" write="${5:-0}" secret_response="${6:-0}"
+  local out status response_headers headers=(-H "content-type: application/json" -H "X-Request-ID: $RUN_ID-$label")
   if [ "$write" = "1" ]; then
     headers+=(-H "Idempotency-Key: $RUN_ID-$label" -H "X-Local-Session: $LOCAL_SESSION")
+  fi
+  if [ "$secret_response" = "1" ]; then
+    response_headers="$PRIVATE_TEMP_DIR/$label.headers"
+    : > "$response_headers"
+    chmod 600 "$response_headers"
+    if [ "$body_file" = "-" ]; then
+      if ! curl -sS -D "$response_headers" -X "$method" "${headers[@]}" "$LOCAL_URL$path" |
+        python3 "$SECOND_FACTOR_HELPER" redact-secret-response --redaction-values "$REDACTION_VALUES_FILE" > "$ARTIFACT_DIR/$label.redacted.json"; then
+        rm -f -- "$response_headers" "$ARTIFACT_DIR/$label.redacted.json"
+        return 1
+      fi
+    else
+      if ! curl -sS -D "$response_headers" -X "$method" "${headers[@]}" --data-binary "@$body_file" "$LOCAL_URL$path" |
+        python3 "$SECOND_FACTOR_HELPER" redact-secret-response --redaction-values "$REDACTION_VALUES_FILE" > "$ARTIFACT_DIR/$label.redacted.json"; then
+        rm -f -- "$response_headers" "$ARTIFACT_DIR/$label.redacted.json"
+        return 1
+      fi
+    fi
+    status="$(awk '/^HTTP\// { status=$2 } END { print status }' "$response_headers")"
+    rm -f -- "$response_headers"
+    [[ "$status" =~ ^[0-9]{3}$ ]] || status="000"
+    if [ "${status#2}" = "$status" ]; then
+      log "api $label failed status=$status body=$(tr '\n' ' ' < "$ARTIFACT_DIR/$label.redacted.json")"
+      return 1
+    fi
+    cat "$ARTIFACT_DIR/$label.redacted.json"
+    return 0
   fi
   out="$(mktemp)"
   if [ "$body_file" = "-" ]; then
@@ -1203,13 +1230,13 @@ run_e2e() {
   log "step 5/14 exposure preview/apply, Traefik backend and direct public routing verified: job=$exposure_deploy_id ingress=${exposure_fields[1]} public_hash=$PUBLIC_A_HASH"
 
   f="$(mktemp)"; write_json "$f" secret
-  api_file POST "/api/local/projects/$PROJECT_ID/secrets" "$f" secret-create 1 >/dev/null || fail "secret create failed"
+  api_file POST "/api/local/projects/$PROJECT_ID/secrets" "$f" secret-create 1 1 >/dev/null || fail "secret create failed"
   rm -f "$f"
   consume_second_factor rotate || fail "rotate second-factor handoff failed"
   rotate_method="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get method)" || fail "rotate second-factor metadata is invalid"
   rotate_expiry="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get expires_at_unix)" || fail "rotate second-factor metadata is invalid"
   rotate_fingerprint="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get fingerprint)" || fail "rotate second-factor metadata is invalid"
-  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/rotate" "$ROTATE_FACTOR_REQUEST" secret-rotate 1 >/dev/null || fail "secret rotate failed"
+  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/rotate" "$ROTATE_FACTOR_REQUEST" secret-rotate 1 1 >/dev/null || fail "secret rotate failed"
   rm -f -- "$ROTATE_FACTOR_REQUEST"
   reveal_request=""
   if [ "$rotate_method" = totp ] && [ "$(date +%s)" -lt "$rotate_expiry" ]; then
@@ -1219,7 +1246,7 @@ run_e2e() {
     consume_second_factor reveal "$rotate_fingerprint" || fail "reveal second-factor handoff failed"
     reveal_request="$REVEAL_FACTOR_REQUEST"
   fi
-  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/reveal" "$reveal_request" secret-reveal 1 >/dev/null || fail "secret reveal failed"
+  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/reveal" "$reveal_request" secret-reveal 1 1 >/dev/null || fail "secret reveal failed"
   rm -f -- "$reveal_request"
   log "step 6/14 secret create/rotate/reveal path ran via local Agent facade"
 

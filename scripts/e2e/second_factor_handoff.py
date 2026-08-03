@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 import argparse
-import getpass
 import hashlib
 import hmac
 import json
 import os
 import pathlib
 import re
+import signal
 import stat
 import sys
+import termios
 import time
 
 
 MAX_HANDOFF_SIZE = 512
 MAX_REDACTION_VALUES_SIZE = 4096
+MAX_SECRET_RESPONSE_SIZE = 4096
 TOTP_PERIOD_SECONDS = 30
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 CODE = re.compile(r"^[0-9]{6}$")
@@ -21,6 +23,16 @@ SENSITIVE_FIELD = (
     r"token|agent_token|registration_token|pat|private_key|kubeconfig|"
     r"app_secret|password|otp_code|otp_request_id|totp_code|totp_seed|totp_secret"
 )
+PROTECTED_CREDENTIAL_FIELDS = ("username", "password")
+
+
+def _no_duplicate_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("JSON contains duplicate fields")
+        result[key] = value
+    return result
 
 
 def _absolute(path, label):
@@ -176,17 +188,9 @@ def _write_private_json(path, payload):
 
 
 def _decode_handoff(raw, wall_clock):
-    def no_duplicates(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("second-factor handoff contains duplicate fields")
-            result[key] = value
-        return result
-
     try:
-        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_fields)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("second-factor handoff is malformed") from exc
     if not isinstance(payload, dict):
         raise ValueError("second-factor handoff is malformed")
@@ -360,6 +364,124 @@ def redact_text(text, secrets):
     return text
 
 
+def redact_secret_response(raw, redaction_values_path):
+    if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_SECRET_RESPONSE_SIZE:
+        raise ValueError("secret response size is invalid")
+    try:
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_fields)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("secret response is malformed") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("secret response is malformed")
+
+    credentials = []
+    for field in PROTECTED_CREDENTIAL_FIELDS:
+        if field not in payload:
+            continue
+        value = payload[field]
+        if not isinstance(value, str) or len(value) > 256:
+            raise ValueError("secret response credential is malformed")
+        if value:
+            credentials.append(value)
+        payload[field] = "[REDACTED]"
+
+    existing = set(read_redaction_values(redaction_values_path))
+    _append_redaction_values(
+        redaction_values_path,
+        (value for value in credentials if value not in existing),
+    )
+    redaction_values = read_redaction_values(redaction_values_path)
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return redact_text(encoded, redaction_values) + "\n"
+
+
+def _write_tty(fd, value):
+    while value:
+        written = os.write(fd, value)
+        if written <= 0:
+            raise OSError("controlling TTY write failed")
+        value = value[written:]
+
+
+def read_tty_secret(prompt, maximum):
+    fd = -1
+    original = None
+    prompted = False
+    handlers = {}
+
+    def interrupt(_signum, _frame):
+        raise InterruptedError("secret input interrupted")
+
+    try:
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open("/dev/tty", flags)
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISCHR(info.st_mode)
+            or not os.isatty(fd)
+            or os.tcgetpgrp(fd) != os.getpgrp()
+        ):
+            raise ValueError("secret input requires a controlling TTY")
+        original = termios.tcgetattr(fd)
+        hidden = list(original)
+        hidden[3] &= ~(termios.ECHO | getattr(termios, "ECHONL", 0))
+        for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"):
+            signum = getattr(signal, name, None)
+            if signum is not None:
+                handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, interrupt)
+        termios.tcsetattr(fd, termios.TCSAFLUSH, hidden)
+        if termios.tcgetattr(fd)[3] & termios.ECHO:
+            raise ValueError("controlling TTY echo could not be disabled")
+        _write_tty(fd, prompt.encode("ascii"))
+        prompted = True
+
+        value = bytearray()
+        oversized = False
+        while True:
+            byte = os.read(fd, 1)
+            if not byte:
+                raise ValueError("secret input was not completed")
+            if byte in (b"\n", b"\r"):
+                break
+            if len(value) <= maximum:
+                value.extend(byte)
+            else:
+                oversized = True
+        if oversized or len(value) > maximum:
+            raise ValueError("secret input is too long")
+        try:
+            decoded = value.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("secret input is malformed") from exc
+        if not decoded:
+            raise ValueError("secret input is empty")
+        return decoded
+    except OSError as exc:
+        if isinstance(exc, InterruptedError):
+            raise
+        raise ValueError("secret input requires an accessible controlling TTY") from exc
+    finally:
+        restore_error = None
+        if fd >= 0 and original is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSANOW, original)
+                restored = termios.tcgetattr(fd)
+                echo_flags = termios.ECHO | getattr(termios, "ECHONL", 0)
+                if restored[3] & echo_flags != original[3] & echo_flags:
+                    raise ValueError("controlling TTY echo state was not restored")
+                if prompted:
+                    _write_tty(fd, b"\n")
+            except (OSError, ValueError) as exc:
+                restore_error = exc
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+        if fd >= 0:
+            os.close(fd)
+        if restore_error is not None:
+            raise ValueError("controlling TTY state could not be restored") from restore_error
+
+
 def scan_artifacts(root, redaction_values_path):
     root = pathlib.Path(root)
     secrets = read_redaction_values(redaction_values_path)
@@ -427,6 +549,8 @@ def main():
 
     redact = sub.add_parser("redact")
     redact.add_argument("--redaction-values", required=True)
+    redact_secret = sub.add_parser("redact-secret-response")
+    redact_secret.add_argument("--redaction-values", required=True)
     scan = sub.add_parser("scan")
     scan.add_argument("--artifact-directory", required=True)
     scan.add_argument("--redaction-values", required=True)
@@ -438,24 +562,27 @@ def main():
     elif args.command == "prepare":
         prepare_directory(args.directory)
     elif args.command == "stage-totp":
+        code = read_tty_secret("TOTP code: ", 6)
         now = int(time.time())
         stage_handoff(
             args.directory,
             args.operation,
             {
                 "type": "totp",
-                "code": getpass.getpass("TOTP code: ").strip(),
+                "code": code,
                 "period_start_unix": now - now % TOTP_PERIOD_SECONDS,
             },
         )
     elif args.command == "stage-otp":
+        request_id = read_tty_secret("OTP request ID: ", 128)
+        code = read_tty_secret("OTP code: ", 6)
         stage_handoff(
             args.directory,
             args.operation,
             {
                 "type": "otp",
-                "request_id": getpass.getpass("OTP request ID: ").strip(),
-                "code": getpass.getpass("OTP code: ").strip(),
+                "request_id": request_id,
+                "code": code,
             },
         )
     elif args.command == "consume":
@@ -475,6 +602,9 @@ def main():
         sys.stdout.write(
             redact_text(sys.stdin.read(), read_redaction_values(args.redaction_values))
         )
+    elif args.command == "redact-secret-response":
+        raw = sys.stdin.buffer.read(MAX_SECRET_RESPONSE_SIZE + 1)
+        sys.stdout.write(redact_secret_response(raw, args.redaction_values))
     elif args.command == "scan":
         scan_artifacts(args.artifact_directory, args.redaction_values)
 

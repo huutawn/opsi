@@ -68,8 +68,10 @@ python3 scripts/e2e/second_factor_handoff.py prepare \
 ```
 
 When the running harness reaches secret rotation, use a separate trusted local
-terminal to stage one factor through a hidden prompt. The value is never a
-command argument or shell-history entry:
+terminal to stage one factor through a hidden prompt. Staging opens and
+validates the controlling `/dev/tty`, disables echo, and fails closed without
+reading redirected stdin when no controlling terminal is available. The value
+is never a command argument, environment variable, or shell-history entry:
 
 ```bash
 python3 scripts/e2e/second_factor_handoff.py stage-totp \
@@ -100,6 +102,13 @@ removed. Request bodies and exact redaction values live only in a private
 temporary directory that is removed on exit. Never provide OTP, TOTP, PAT, or
 TOTP seed content through chat, and never store or expose the TOTP seed in this
 workflow.
+
+Secret create, rotate, and reveal responses are parsed through a bounded JSON
+stream before evidence is written. Exact non-empty generated `username` and
+`password` values are added to the private mode-0600 redaction registry, both
+fields are redacted in response evidence, and later unlabeled occurrences fail
+the artifact leak scan. The unredacted response body is never written to an
+evidence or temporary file.
 
 ## Local API/UI and bootstrap
 

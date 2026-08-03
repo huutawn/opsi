@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
+import fcntl
 import importlib.util
 import json
 import os
 import pathlib
+import pty
+import select
+import signal
+import subprocess
+import sys
 import tempfile
+import termios
 import time
 import unittest
 from unittest import mock
@@ -41,6 +48,14 @@ class HarnessIntegrationTest(unittest.TestCase):
         self.assertLess(rotate_handoff, rotate_call)
         self.assertLess(rotate_call, reveal_handoff)
         self.assertLess(reveal_handoff, reveal_call)
+
+    def test_harness_streams_secret_responses_through_credential_redaction(self):
+        source = HARNESS_PATH.read_text()
+        branch = source.index('if [ "$secret_response" = "1" ]')
+        raw_temporary_file = source.index('out="$(mktemp)"', branch)
+        self.assertLess(source.index("redact-secret-response", branch), raw_temporary_file)
+        for label in ("secret-create", "secret-rotate", "secret-reveal"):
+            self.assertIn(f"{label} 1 1", source)
 
 
 class HandoffTest(unittest.TestCase):
@@ -103,6 +118,33 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(path.read_text())["request_id"], "request-stage")
         self.assertEqual(list(self.handoff.iterdir()), [path])
+
+    def test_totp_period_is_recorded_after_protected_input(self):
+        input_obtained = False
+
+        def read_input(_prompt, _maximum):
+            nonlocal input_obtained
+            input_obtained = True
+            return "1" * 6
+
+        def clock():
+            self.assertTrue(input_obtained)
+            return 89
+
+        argv = [
+            str(HELPER_PATH),
+            "stage-totp",
+            "--directory",
+            str(self.handoff),
+            "--operation",
+            "rotate",
+        ]
+        with mock.patch.object(self.helper, "read_tty_secret", side_effect=read_input):
+            with mock.patch.object(self.helper.time, "time", side_effect=clock):
+                with mock.patch.object(self.helper, "stage_handoff") as stage:
+                    with mock.patch.object(sys, "argv", argv):
+                        self.helper.main()
+        self.assertEqual(stage.call_args.args[2]["period_start_unix"], 60)
 
     def test_fresh_totp_creates_adjacent_rotate_and_reveal_requests(self):
         handoff = self.stage(
@@ -255,6 +297,192 @@ class HandoffTest(unittest.TestCase):
         (evidence / "leak.txt").write_text(code)
         with self.assertRaisesRegex(ValueError, "sensitive"):
             self.helper.scan_artifacts(evidence, self.values)
+
+    def test_secret_responses_harvest_and_redact_generated_credentials(self):
+        username = "generated-user-canary"
+        password = "generated-password-canary"
+        response = json.dumps({"username": username, "password": password}).encode()
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+
+        for label in ("secret-create", "secret-rotate", "secret-reveal"):
+            redacted = self.helper.redact_secret_response(response, self.values)
+            self.assertNotIn(username, redacted)
+            self.assertNotIn(password, redacted)
+            (evidence / f"{label}.redacted.json").write_text(redacted)
+
+        values = self.helper.read_redaction_values(self.values)
+        self.assertIn(username, values)
+        self.assertIn(password, values)
+        self.helper.scan_artifacts(evidence, self.values)
+        for value in (username, password):
+            leak = evidence / "unlabeled.txt"
+            leak.write_text(value)
+            with self.assertRaisesRegex(ValueError, "sensitive"):
+                self.helper.scan_artifacts(evidence, self.values)
+            leak.unlink()
+
+    def test_secret_response_rejects_malformed_and_oversized_input_without_echo(self):
+        username = b"generated-user-canary"
+        password = b"generated-password-canary"
+        cases = (
+            b'{"username":"' + username + b'","password":"' + password,
+            b'{"username":"' + b"x" * 5000 + b'"}',
+        )
+        for body in cases:
+            with self.subTest(size=len(body)):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(HELPER_PATH),
+                        "redact-secret-response",
+                        "--redaction-values",
+                        str(self.values),
+                    ],
+                    input=body,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, b"")
+                self.assertNotIn(username, result.stderr)
+                self.assertNotIn(password, result.stderr)
+                self.assertEqual(self.helper.read_redaction_values(self.values), ())
+
+
+class StageCommandTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.handoff = pathlib.Path(self.temp.name) / "handoff"
+        self.handoff.mkdir(mode=0o700)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def command(self, stage):
+        return [
+            sys.executable,
+            str(HELPER_PATH),
+            stage,
+            "--directory",
+            str(self.handoff),
+            "--operation",
+            "rotate",
+        ]
+
+    def test_stage_commands_reject_and_do_not_consume_redirected_stdin(self):
+        cases = (
+            ("stage-totp", b"1" * 6 + b"\n"),
+            ("stage-otp", b"request-canary\n" + b"2" * 6 + b"\n"),
+        )
+        for stage, supplied in cases:
+            with self.subTest(stage=stage):
+                read_fd, write_fd = os.pipe()
+                os.write(write_fd, supplied)
+                os.close(write_fd)
+                try:
+                    process = subprocess.Popen(
+                        self.command(stage),
+                        stdin=read_fd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    stdout, stderr = process.communicate(timeout=5)
+                    remaining = os.read(read_fd, len(supplied))
+                finally:
+                    os.close(read_fd)
+                safe = (
+                    process.returncode != 0
+                    and remaining == supplied
+                    and not (self.handoff / "rotate.json").exists()
+                )
+                self.assertTrue(safe, "staging accepted or consumed redirected stdin")
+                self.assertNotIn(supplied.strip(), stdout + stderr)
+
+    def run_pty_stage(self, stage, entries, *, terminate=False):
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+
+        def attach_controlling_tty():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+        process = subprocess.Popen(
+            self.command(stage),
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            preexec_fn=attach_controlling_tty,
+            close_fds=True,
+        )
+        output = bytearray()
+        try:
+            prompts = (
+                (b"TOTP code: ",) if stage == "stage-totp" else
+                (b"OTP request ID: ", b"OTP code: ")
+            )
+            for prompt, entry in zip(prompts, entries):
+                deadline = time.monotonic() + 5
+                while prompt not in output and time.monotonic() < deadline:
+                    ready, _, _ = select.select([master], [], [], 0.1)
+                    if ready:
+                        output.extend(os.read(master, 4096))
+                self.assertIn(prompt, output)
+                if terminate:
+                    process.send_signal(signal.SIGTERM)
+                    break
+                os.write(master, entry + b"\n")
+            process.wait(timeout=5)
+            while select.select([master], [], [], 0)[0]:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError:
+                    break
+            restored = bool(termios.tcgetattr(slave)[3] & termios.ECHO) == bool(
+                original[3] & termios.ECHO
+            )
+            return process.returncode, bytes(output), restored
+        finally:
+            termios.tcsetattr(slave, termios.TCSANOW, original)
+            os.close(master)
+            os.close(slave)
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+    def test_pty_staging_hides_input_restores_echo_and_publishes_atomically(self):
+        cases = (
+            ("stage-totp", (b"1" * 6,)),
+            ("stage-otp", (b"request-canary", b"2" * 6)),
+        )
+        for stage, entries in cases:
+            with self.subTest(stage=stage):
+                result, output, restored = self.run_pty_stage(stage, entries)
+                self.assertEqual(result, 0)
+                self.assertTrue(restored)
+                for entry in entries:
+                    self.assertNotIn(entry, output)
+                path = self.handoff / "rotate.json"
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(list(self.handoff.iterdir()), [path])
+                path.unlink()
+
+    def test_pty_staging_restores_echo_after_failure_and_termination(self):
+        result, output, restored = self.run_pty_stage("stage-totp", (b"12345",))
+        self.assertNotEqual(result, 0)
+        self.assertTrue(restored)
+        self.assertNotIn(b"12345", output)
+        self.assertFalse((self.handoff / "rotate.json").exists())
+
+        result, output, restored = self.run_pty_stage(
+            "stage-totp", (b"ignored",), terminate=True
+        )
+        self.assertNotEqual(result, 0)
+        self.assertTrue(restored)
+        self.assertNotIn(b"ignored", output)
+        self.assertFalse((self.handoff / "rotate.json").exists())
 
 
 if __name__ == "__main__":
