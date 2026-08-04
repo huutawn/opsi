@@ -6,7 +6,7 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_017_BARRIER_TRUST_DOMAIN_SOURCE_FIXED /
+`R5_017_BARRIER_SECURITY_CORRECTION_SOURCE_PRESENT /
 ALIGNED_RUNTIME_REPUBLISH_REQUIRED / NEW_RUN_1_PENDING`.
 `R5_017_NODE_RETIREMENT_IDEMPOTENCY_SOURCE_FIXED / RUNTIME_PUBLISH_PENDING`.
 `R5_017_KNOWN_GOOD_HISTORY_VALIDATION_SOURCE_FIXED /
@@ -114,6 +114,27 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
 - Local fake-SSH/Docker regressions pass. No image publish, staging deploy,
   live SSH, VPS reset, or E2E run was performed; aligned Cloud, Worker, and
   Agent republication and a new Run 1 remain pending.
+
+### R5-017 barrier security correction
+
+- Pinned SSH now runs one fixed bounded launcher, never the staging
+  working-tree helper. The launcher validates the closed non-secret request,
+  exact revision, clean tracked worktree/index, repository identity, and
+  expected helper blob, then materializes and rehashes the exact committed Git
+  object in private temporary files before execution.
+- `OPSI_E2E_STAGING_HOST` is only the transport endpoint;
+  `OPSI_E2E_STAGING_EXPECTED_HOSTNAME` independently binds remote
+  `hostname -f`. Request, receipt, remote-state, and local-state schemas were
+  bumped and bind both identities plus expected/executed helper blobs.
+- One remote runtime validator proves every durable phase against current
+  Worker profile, running/health state, immutable digest, exact container,
+  marker, barrier config, and unchanged Cloud/PostgreSQL/reverse-proxy
+  containers. State-only status and reconciliation fail closed.
+- Proven remote restart/restore completion can be adopted after a local
+  protected-state write failure without replaying the mutation or sending
+  another bootstrap POST. No live staging, Agent VPS, K3s, PostgreSQL,
+  publication, deployment, or Run 1 action occurred; aligned Cloud, Worker,
+  and Agent republication remains required.
 
 ### R5-017D2 — canonical replay/restore and failure cleanup
 

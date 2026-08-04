@@ -7,7 +7,7 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_017_BARRIER_TRUST_DOMAIN_SOURCE_FIXED /
+`R5_017_BARRIER_SECURITY_CORRECTION_SOURCE_PRESENT /
 ALIGNED_RUNTIME_REPUBLISH_REQUIRED / NEW_RUN_1_PENDING` is the source-only
 corrective gate; live retry remains operator-run and was not started.
 `R5_017G_CONTROL_PLANE_PUBLISH_PASS` replaces
@@ -95,12 +95,15 @@ The R5-017 trust-domain correction keeps `verify-k3s.sh` on the operator
 workstation for the loopback Local API, Agent VPS bootstrap key, one bootstrap
 POST, protected local state, second factor, and acceptance. It removes local
 staging Docker/Compose execution. One committed `staging-barrier-remote.sh`
-executor owns staging repository checks, canonical Compose, Worker
-quiesce/start/replay/restore, config, marker, and protected remote state.
-Pinned direct SSH uses a separate private key and one-entry known_hosts file,
-disables ambient configuration, agents, forwarding, and interactive auth,
-sanitizes the child environment, and accepts only one bounded revision/helper-
-bound JSON receipt with empty stderr.
+is now materialized by one fixed bounded SSH launcher rather than executed from
+the staging working tree. Before execution, the launcher validates the closed
+non-secret request, exact revision, clean tracked worktree/index, repository
+identity, and expected helper blob; reads the exact committed Git object into a
+private temporary executable; rehashes it; and keeps the request in a separate
+private file. Those verified bytes own canonical Compose, Worker
+quiesce/start/replay/restore, config, marker, and protected remote state. The
+transport endpoint and factual `hostname -f` are independent required inputs
+bound separately by v2 request/receipt/remote-state and v3 local-state schemas.
 
 Remote `preflight` and `prepare` receipts precede the single Local API
 bootstrap POST. The factual session is fsynced locally before remote config,
@@ -108,8 +111,13 @@ arm, and same-digest Worker recreation. Pre-session failure restores through
 remote `abort`; post-session failure preserves the session and stopped/barrier
 Worker. Continuation reuses the same protected state and never posts again.
 Ambiguous SSH mutation is reconciled only through read-only `status`, and an
-`armed` state is not blindly replayed. Staging receives no Local API,
-second-factor, PAT, secret, Agent key, or bootstrap-body material.
+`armed` state is not blindly replayed. One runtime validator proves every
+durable phase against the current Worker profile, running and health state,
+immutable digest, exact container, barrier config and marker, and unchanged
+Cloud/PostgreSQL/reverse-proxy container identities. Proven remote restart or
+restore completion can be adopted after failed local protected-state
+publication without another mutation or bootstrap POST. Staging receives no
+Local API, second-factor, PAT, secret, Agent key, or bootstrap-body material.
 
 R5-017D2 closes the three follow-up blockers. Barrier config generation keeps
 the production staging `cloud_url` but sets `production: false` and
@@ -123,9 +131,10 @@ Cloud health. The remote executor reuses the existing release and barrier
 helpers, so there is no second Worker deployment implementation or local
 fallback. Reached/consumed/completed evidence remains forensic state; normal
 restoration is allowed only after completed evidence or a proved pre-session
-abort. Local fake-SSH/Docker tests cover ordering, transport hardening, canary
-isolation, receipt rejection, ambiguous reconciliation, continuation, replay,
-and restore.
+abort. Local fake-SSH/Docker tests cover exact Git-object execution,
+working-tree canary isolation, endpoint/hostname separation, every factual
+runtime phase, contradictory state rejection, exact ambiguous reconciliation,
+local-state adoption, continuation, replay, and restore.
 
 The discovered live rollback target remains
 `ghcr.io/huutawn/opsi-bootstrap-worker@sha256:220d3ecc7dba018871707fc57612b3730259fd90b23dfde454a3299759167cff`

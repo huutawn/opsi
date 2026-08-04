@@ -163,7 +163,10 @@ Before this procedure, use the separately authorized source-alignment process
 to place the exact committed source revision on staging. Do not fetch, pull,
 checkout, or upload source through the verifier. The operator checkout and the
 staging checkout must have the same full revision; the staging tracked
-worktree/index and committed helper blob must be clean and exact.
+worktree/index and committed helper blob must be clean and exact. The SSH
+endpoint is only a pinned transport address; the separately supplied factual
+hostname must equal remote `hostname -f` and is never inferred from that
+endpoint.
 
 ```bash
 export OPSI_E2E_LOCAL_URL=http://127.0.0.1:9780
@@ -173,7 +176,8 @@ export OPSI_E2E_VPS_SSH_USER=...
 export OPSI_E2E_SSH_KEY_PATH=/protected/operator/agent-vps.key
 export OPSI_E2E_BOOTSTRAP_WORKER_DIGEST=sha256:<currently-approved-digest>
 export OPSI_E2E_RUN_ID="r5-017-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-export OPSI_E2E_STAGING_HOST=staging.example
+export OPSI_E2E_STAGING_HOST=203.0.113.10
+export OPSI_E2E_STAGING_EXPECTED_HOSTNAME=staging.internal.example
 export OPSI_E2E_STAGING_SSH_PORT=22
 export OPSI_E2E_STAGING_SSH_USER=opsi-staging
 export OPSI_E2E_STAGING_SSH_KEY_PATH=/protected/operator/staging.key
@@ -186,10 +190,16 @@ scripts/e2e/verify-k3s.sh --barrier-prepare \
   /protected/state/bootstrap-barrier.json
 ```
 
-`--barrier-prepare` invokes only the committed remote helper over pinned SSH.
-It requires a revision/helper-bound `preflight` receipt, then a `prepare`
-receipt proving the single Worker is stopped, before it authenticates the
-Local API and sends exactly one bootstrap POST. The factual session ID is
+`--barrier-prepare` sends a bounded non-secret request to a fixed remote
+launcher. Before any helper byte executes, that launcher proves the requested
+revision, clean tracked worktree/index, repository identity, and expected blob;
+materializes `REVISION:scripts/e2e/staging-barrier-remote.sh` from Git into a
+private temporary executable; hashes it again; and executes only those bytes
+with the request in a separate private file. It never executes the staging
+working-tree helper. It requires a revision/helper-bound `preflight` receipt,
+then a `prepare` receipt and a separate read-only factual `status` proving the
+single Worker is stopped, before it authenticates the Local API and sends
+exactly one bootstrap POST. The factual session ID is
 fsynced into protected local state before remote config, marker arm, and
 same-digest Worker recreation. Requests and receipts are strict, bounded JSON;
 successful SSH requires one receipt, empty stderr, and exit zero. Local API,
@@ -225,7 +235,14 @@ Rerunning `--barrier-prepare` with the same protected state continues only when
 read-only status proves a safe pre-recreation state. An `armed` or otherwise
 ambiguous state stops for inspection. SSH timeout/disconnect is reconciled only
 with remote `status`; the mutating phase is accepted only when status proves
-its exact completed transition.
+its exact completed transition, including revision/run/session, endpoint,
+hostname, repository and helper identity, Worker digest/profile/health/current
+container, dependency container identities, and marker state. Every status
+phase validates current Docker/Compose facts against durable state. If restart
+or restore completed remotely but the corresponding local protected-state
+publication failed, rerunning adopts the exact proved `replay_started` or
+`normal_restored` transition, fsyncs and rereads local state, and returns
+without another remote mutation or bootstrap POST.
 
 Invoke `scripts/validate-staging-control-plane.py` directly, without an
 external wrapper, and capture stderr separately. The next live run fails

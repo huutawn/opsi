@@ -685,14 +685,22 @@ unclaimed.
 **Barrier trust-domain checkpoint:** the source verifier no longer requires the
 loopback Local API and staging Docker/Compose on one host. The operator retains
 Local API/session, second factor, Agent VPS bootstrap key, orchestration state,
-and acceptance. A single committed staging executor owns revision-bound
-Compose/Worker/barrier operations through separate pinned direct SSH and strict
-bounded receipts. Pre-session failure restores remotely; post-session failure
-preserves the factual session and Worker state, and continuation never creates
-a second session. Ambiguous mutation loss uses read-only status only. Local
-fake transport regressions pass, but no live staging/VPS/K3s action or Run 1
-occurred. Aligned Cloud, Worker, and Agent artifacts must be republished from
-this new source revision before a new Run 1; R5-017 remains pending.
+and acceptance. Pinned direct SSH invokes one fixed bounded launcher that
+validates the closed non-secret request, exact revision, clean tracked
+worktree/index, repository identity, and expected helper blob before it
+materializes, rehashes, and executes the exact committed helper Git object.
+The transport endpoint and factual remote hostname are independent bound
+inputs. One runtime validator makes every status phase prove current Worker
+profile/running/health/container/digest, marker/config, and unchanged dependency
+container identities. Pre-session failure restores remotely; post-session
+failure preserves the factual session and Worker state, and continuation never
+creates a second session. Ambiguous mutation loss uses read-only factual status
+only, while proved restart/restore completion may repair stale local protected
+state without replaying the mutation or POST. Local fake transport regressions
+pass, but no live staging/VPS/K3s action or Run 1 occurred. Historical external
+`stat` warnings are not claimed fixed. Aligned Cloud, Worker, and Agent
+artifacts must be republished from this new source revision before a new Run 1;
+R5-017 remains pending, with no release-readiness or production-readiness claim.
 
 **CẦN VPS:** tối thiểu một Agent VPS. Để tuyên bố hỗ trợ multi-VPS production path, cần **hai Agent VPS** trong cùng project nhưng hai single-node runtimes độc lập.
 

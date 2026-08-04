@@ -192,9 +192,14 @@ class RuntimeTests(unittest.TestCase):
                   nonzero) exit 19 ;;
                 esac
                 python3 - "$root" "$mode" "$request" <<'PY'
-import json, pathlib, sys
+import json, os, pathlib, sys
 root, mode, raw = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 request = json.loads(raw)
+if mode == "factual-hostname" and (
+    request.get("staging_endpoint") != "203.0.113.10"
+    or request.get("staging_hostname") != "staging.internal.example"
+):
+    raise SystemExit(23)
 state_path = root / "remote-state.json"
 state = json.loads(state_path.read_text())
 phase, before, container_before = request["phase"], state["phase"], state["container"]
@@ -214,17 +219,22 @@ else: after, result = state["phase"], "status-ok"
 state_path.write_text(json.dumps(state))
 marker_path = root / "remote-marker"
 marker = marker_path.read_text().strip() if marker_path.exists() else {"barrier_started":"armed","replay_started":"reached","normal_restored":"completed"}.get(after, "absent")
+profile = (root / "remote-runtime-profile").read_text().strip() if (root / "remote-runtime-profile").exists() else ("barrier" if after in {"barrier_started","replay_started"} else "normal")
+running = after not in {"worker_quiesced","session_created","armed"}
 receipt = {
-    "schema_version":"opsi.e2e.staging-barrier-receipt/v1","source_revision":request["source_revision"],
-    "run_id":request["run_id"],"phase":phase,"staging_host":request["staging_host"],
+    "schema_version":"opsi.e2e.staging-barrier-receipt/v2","source_revision":request["source_revision"],
+    "run_id":request["run_id"],"phase":phase,"staging_endpoint":request["staging_endpoint"],
+    "staging_hostname":request["staging_hostname"],
     "repository_directory":request["repository_directory"],"repository_identity":request["repository_identity"],
-    "compose_directory":request["compose_directory"],"helper_blob":"b"*40,
+    "compose_directory":request["compose_directory"],"expected_helper_blob":"b"*40,"executed_helper_blob":"b"*40,
     "state_before":before,"state_after":after,"worker_digest":request["worker_digest"],
     "session_id":request["session_id"],"worker_container_before":container_before,
     "worker_container_after":state["container"] if after != "absent" or phase == "abort" else "worker-old",
+    "worker_profile":profile,"worker_running":running,"worker_health":"healthy" if running else "stopped",
+    "dependency_containers":{"cloud":"cloud-1","postgres":"postgres-1","reverse-proxy":"proxy-1"},
     "marker_state":marker,"result":result,"timestamp":"2026-08-03T12:00:00Z",
 }
-wrong = {"wrong-schema":("schema_version","wrong"),"wrong-run":("run_id","other-run"),"wrong-phase":("phase","status"),"wrong-revision":("source_revision","d"*40),"wrong-host":("staging_host","other.example")}
+wrong = {"wrong-schema":("schema_version","wrong"),"wrong-run":("run_id","other-run"),"wrong-phase":("phase","status"),"wrong-revision":("source_revision","d"*40),"wrong-host":("staging_endpoint","other.example"),"wrong-hostname":("staging_hostname","other.internal.example")}
 if mode in wrong: receipt[wrong[mode][0]] = wrong[mode][1]
 print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
 if mode in {"ambiguous-start","timeout-start"} and phase == "start":
@@ -232,6 +242,10 @@ if mode in {"ambiguous-start","timeout-start"} and phase == "start":
 if mode == "start-fail-session" and phase == "start":
     state_path.write_text(json.dumps({"phase":"session_created","session":request["session_id"],"container":"worker-old"}))
     (root / "ssh-mode").unlink(); raise SystemExit(19)
+if mode == "restart-local-state-fail" and phase == "restart":
+    os.chmod(root / "protected", 0o500); (root / "ssh-mode").unlink()
+if mode == "restore-local-state-fail" and phase == "restore":
+    os.chmod(root / "protected", 0o500); (root / "ssh-mode").unlink()
 PY
                 '''
             ).lstrip(),
@@ -699,6 +713,7 @@ class BarrierProcedureTests(unittest.TestCase):
                 "OPSI_E2E_RUN_ID": "run-order",
                 "OPSI_E2E_ARTIFACT_DIR": str(self.artifacts),
                 "OPSI_E2E_STAGING_HOST": "staging.example",
+                "OPSI_E2E_STAGING_EXPECTED_HOSTNAME": "staging.example",
                 "OPSI_E2E_STAGING_SSH_PORT": "22",
                 "OPSI_E2E_STAGING_SSH_USER": "staging-user",
                 "OPSI_E2E_STAGING_SSH_KEY_PATH": str(self.staging_key),
@@ -739,7 +754,7 @@ class BarrierProcedureTests(unittest.TestCase):
         log = self.log.read_text(encoding="utf-8")
         requests = [json.loads(line.removeprefix("ssh-stdin ")) for line in log.splitlines() if line.startswith("ssh-stdin ")]
         phases = [request["phase"] for request in requests]
-        self.assertEqual(phases, ["preflight", "prepare", "start"])
+        self.assertEqual(phases, ["preflight", "prepare", "status", "start"])
         self.assertLess(log.index('"phase":"prepare"'), log.index("/nodes/bootstrap"))
         self.assertLess(log.index("/nodes/bootstrap"), log.index('"phase":"start"'))
         self.assertNotIn("LOCAL_DOCKER_CANARY", log)
@@ -748,7 +763,8 @@ class BarrierProcedureTests(unittest.TestCase):
         self.assertEqual(state["run_id"], "run-order")
         self.assertEqual(state["phase"], "barrier_started")
         self.assertEqual(state["source_revision"], REVISION)
-        self.assertEqual(state["staging_host"], "staging.example")
+        self.assertEqual(state["staging_endpoint"], "staging.example")
+        self.assertEqual(state["staging_hostname"], "staging.example")
         self.assertNotIn("PRIVATE KEY", log)
         self.assertNotIn("local-session", result.stdout + result.stderr)
 
@@ -793,7 +809,7 @@ class BarrierProcedureTests(unittest.TestCase):
         result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         phases = [json.loads(line.removeprefix("ssh-stdin "))["phase"] for line in self.log.read_text().splitlines() if line.startswith("ssh-stdin ")]
-        self.assertEqual(phases, ["preflight", "prepare", "start", "status"])
+        self.assertEqual(phases, ["preflight", "prepare", "status", "start", "status"])
         self.assertEqual(phases.count("start"), 1)
 
     def test_timeout_mutation_uses_status_reconciliation_only(self) -> None:
@@ -801,7 +817,32 @@ class BarrierProcedureTests(unittest.TestCase):
         result = self.run_prepare()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         phases = [json.loads(line.removeprefix("ssh-stdin "))["phase"] for line in self.log.read_text().splitlines() if line.startswith("ssh-stdin ")]
-        self.assertEqual(phases, ["preflight", "prepare", "start", "status"])
+        self.assertEqual(phases, ["preflight", "prepare", "status", "start", "status"])
+
+    def test_ambiguous_mutation_reconciliation_requires_runtime_proof(self) -> None:
+        self.ssh_mode.write_text("ambiguous-start", encoding="utf-8")
+        (self.root / "remote-runtime-profile").write_text("normal", encoding="utf-8")
+        result = self.run_prepare()
+        self.assertNotEqual(result.returncode, 0)
+        phases = [json.loads(line.removeprefix("ssh-stdin "))["phase"] for line in self.log.read_text().splitlines() if line.startswith("ssh-stdin ")]
+        self.assertEqual(phases.count("start"), 1)
+        self.assertEqual(phases[-1], "status")
+
+    def test_status_rejects_durable_phase_without_matching_runtime_profile(self) -> None:
+        self.assertEqual(self.run_prepare().returncode, 0)
+        self.write_marker("reached")
+        (self.root / "remote-runtime-profile").write_text("normal", encoding="utf-8")
+        result = self.run_mode("--barrier-restart")
+        self.assertNotEqual(result.returncode, 0, "state-only status allowed a normal-profile Worker as barrier_started")
+
+    def test_transport_endpoint_and_factual_hostname_are_independent(self) -> None:
+        self.known_hosts.write_text("203.0.113.10 ssh-ed25519 AAAA\n", encoding="utf-8")
+        self.ssh_mode.write_text("factual-hostname", encoding="utf-8")
+        result = self.run_prepare(
+            OPSI_E2E_STAGING_HOST="203.0.113.10",
+            OPSI_E2E_STAGING_EXPECTED_HOSTNAME="staging.internal.example",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def test_pinned_ssh_options_and_sanitized_boundary(self) -> None:
         result = self.run_prepare()
@@ -818,6 +859,9 @@ class BarrierProcedureTests(unittest.TestCase):
         cases = (
             {"OPSI_E2E_STAGING_HOST": ""},
             {"OPSI_E2E_STAGING_HOST": "-unsafe"},
+            {"OPSI_E2E_STAGING_HOST": "999.999.999.999"},
+            {"OPSI_E2E_STAGING_EXPECTED_HOSTNAME": ""},
+            {"OPSI_E2E_STAGING_EXPECTED_HOSTNAME": "-unsafe"},
             {"OPSI_E2E_STAGING_SSH_PORT": "0"},
             {"OPSI_E2E_STAGING_SSH_USER": "bad user"},
             {"OPSI_E2E_RUN_ID": "bad run"},
@@ -833,7 +877,7 @@ class BarrierProcedureTests(unittest.TestCase):
                 result = self.run_prepare(**changes)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("/nodes/bootstrap", self.log.read_text() if self.log.exists() else "")
-        for mode in ("empty", "stderr", "malformed", "multiple", "oversized", "nonzero", "wrong-schema", "wrong-run", "wrong-phase", "wrong-revision", "wrong-host"):
+        for mode in ("empty", "stderr", "malformed", "multiple", "oversized", "nonzero", "wrong-schema", "wrong-run", "wrong-phase", "wrong-revision", "wrong-host", "wrong-hostname"):
             with self.subTest(mode=mode):
                 self.log.unlink(missing_ok=True)
                 self.state.unlink(missing_ok=True)
@@ -957,17 +1001,52 @@ class BarrierProcedureTests(unittest.TestCase):
         self.state.chmod(0o600)
         self.assertNotEqual(self.run_mode("--barrier-restart").returncode, 0)
 
+    def test_local_state_endpoint_and_hostname_mismatches_fail_closed(self) -> None:
+        self.assertEqual(self.run_prepare().returncode, 0)
+        self.write_marker("reached")
+        self.assertNotEqual(self.run_mode("--barrier-restart", OPSI_E2E_STAGING_HOST="other.example").returncode, 0)
+        self.assertNotEqual(self.run_mode("--barrier-restart", OPSI_E2E_STAGING_EXPECTED_HOSTNAME="other.internal.example").returncode, 0)
+
+    def test_proven_remote_completion_is_adopted_after_local_state_write_failure(self) -> None:
+        self.assertEqual(self.run_prepare().returncode, 0)
+        self.write_marker("reached")
+        self.ssh_mode.write_text("restart-local-state-fail", encoding="utf-8")
+        failed_restart = self.run_mode("--barrier-restart")
+        self.assertNotEqual(failed_restart.returncode, 0)
+        os.chmod(self.state_parent, 0o700)
+        self.assertEqual(json.loads(self.remote_state.read_text())["phase"], "replay_started")
+        self.assertEqual(json.loads(self.state.read_text())["phase"], "barrier_started")
+        adopted_restart = self.run_mode("--barrier-restart")
+        self.assertEqual(adopted_restart.returncode, 0, adopted_restart.stderr + adopted_restart.stdout)
+
+        self.write_marker("completed")
+        self.assertEqual(self.run_mode("--resume-bootstrap-session", OPSI_E2E_BARRIER_HANDOFF_ONLY="1").returncode, 0)
+        self.ssh_mode.write_text("restore-local-state-fail", encoding="utf-8")
+        failed_restore = self.run_mode("--barrier-restore")
+        self.assertNotEqual(failed_restore.returncode, 0)
+        os.chmod(self.state_parent, 0o700)
+        self.assertEqual(json.loads(self.remote_state.read_text())["phase"], "normal_restored")
+        self.assertEqual(json.loads(self.state.read_text())["phase"], "completed")
+        adopted_restore = self.run_mode("--barrier-restore")
+        self.assertEqual(adopted_restore.returncode, 0, adopted_restore.stderr + adopted_restore.stdout)
+
+        phases = [json.loads(line.removeprefix("ssh-stdin "))["phase"] for line in self.log.read_text().splitlines() if line.startswith("ssh-stdin ")]
+        self.assertEqual(phases.count("restart"), 1)
+        self.assertEqual(phases.count("restore"), 1)
+        self.assertEqual(self.log.read_text().count("/nodes/bootstrap"), 1)
+
     def test_remote_helper_rejects_untrusted_request_shapes(self) -> None:
         helper = ROOT / "scripts/e2e/staging-barrier-remote.sh"
         request = {
-            "schema_version":"opsi.e2e.staging-barrier-request/v1", "phase":"unknown",
-            "source_revision":REVISION, "run_id":"run-request", "staging_host":"staging.example",
+            "schema_version":"opsi.e2e.staging-barrier-request/v2", "phase":"unknown",
+            "source_revision":REVISION, "run_id":"run-request", "staging_endpoint":"staging.example",
+            "staging_hostname":"staging.example",
             "repository_directory":"/srv/opsi", "repository_identity":"a" * 64,
             "compose_directory":"/srv/opsi/deploy/staging-control-plane",
-            "worker_digest":DIGEST_A, "session_id":"", "expected_state":"absent",
+            "expected_helper_blob":"b" * 40, "worker_digest":DIGEST_A, "session_id":"", "expected_state":"absent",
         }
         unknown_field = dict(request, phase="preflight", unexpected="value")
-        unsafe_host = dict(request, phase="preflight", staging_host="staging.example;id")
+        unsafe_host = dict(request, phase="preflight", staging_endpoint="staging.example;id")
         for raw in (
             b"", b"{}", b'{"schema_version":"x","schema_version":"y"}', b"x" * 4097,
             json.dumps(request).encode(), json.dumps(unknown_field).encode(), json.dumps(unsafe_host).encode(),
@@ -1004,13 +1083,38 @@ class BarrierTrustDomainRegressionTests(unittest.TestCase):
 class StagingBarrierRepositoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.repository = pathlib.Path(self.temp.name) / "repo"
+        self.root = pathlib.Path(self.temp.name)
+        self.repository = self.root / "repo"
         self.compose = self.repository / "deploy/staging-control-plane"
         self.helper = self.repository / "scripts/e2e/staging-barrier-remote.sh"
+        self.bin = self.root / "bin"
+        self.runtime = self.root / "runtime.json"
+        self.docker_log = self.root / "docker.log"
+        self.bin.mkdir()
         self.helper.parent.mkdir(parents=True)
-        self.compose.mkdir(parents=True)
-        self.helper.write_bytes((ROOT / "scripts/e2e/staging-barrier-remote.sh").read_bytes())
+        (self.compose / "config").mkdir(parents=True)
+        (self.compose / "barrier-state").mkdir(mode=0o700)
+        helper_source = (ROOT / "scripts/e2e/staging-barrier-remote.sh").read_text(encoding="utf-8")
+        helper_source = helper_source.replace(
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            str(self.bin) + ":/usr/bin:/bin",
+        )
+        self.helper.write_text(helper_source, encoding="utf-8")
         self.helper.chmod(0o755)
+        for name in ("compose.yaml", "compose.e2e-bootstrap-barrier.yaml"):
+            (self.compose / name).write_text("services:\n  bootstrap-worker: {}\n", encoding="utf-8")
+        (self.compose / ".env").write_text(
+            "COMPOSE_PROJECT_NAME=opsi-staging\nOPSI_BOOTSTRAP_WORKER_IMAGE=" + REF_A + "\n",
+            encoding="utf-8",
+        )
+        (self.compose / "config/bootstrap-worker.json").write_text('{"production":true}\n', encoding="utf-8")
+        for relative in ("scripts/bootstrap-worker-release.py", "scripts/e2e/bootstrap-worker-barrier.sh"):
+            target = self.repository / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / relative).read_bytes())
+            target.chmod(0o755)
+        self.write_fake_remote_tools()
+        self.write_runtime()
         for command in (
             ("init", "-q"), ("config", "user.email", "fixture@example.test"),
             ("config", "user.name", "Fixture"), ("add", "."), ("commit", "-qm", "fixture"),
@@ -1019,42 +1123,276 @@ class StagingBarrierRepositoryTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(self.repository), *command], check=True)
         self.revision = subprocess.check_output(["git", "-C", str(self.repository), "rev-parse", "HEAD"], text=True).strip()
 
+    def write_fake_remote_tools(self) -> None:
+        docker = self.bin / "docker"
+        docker.write_text(
+            textwrap.dedent(
+                f'''#!/usr/bin/env python3
+import json, pathlib, sys
+runtime_path = pathlib.Path({str(self.runtime)!r})
+log_path = pathlib.Path({str(self.docker_log)!r})
+compose = pathlib.Path({str(self.compose)!r})
+runtime = json.loads(runtime_path.read_text())
+log_path.write_text(log_path.read_text() + " ".join(sys.argv[1:]) + "\\n" if log_path.exists() else " ".join(sys.argv[1:]) + "\\n")
+args = sys.argv[1:]
+if args[0] == "compose":
+    if args[-2:] == ["config", "--services"]:
+        print("bootstrap-worker\\ncloud\\npostgres\\nreverse-proxy")
+    elif "ps" in args:
+        service = args[-1]
+        running = "-a" not in args
+        if service == "bootstrap-worker":
+            if not running or runtime["worker_running"]: print(runtime["worker_container"])
+        else:
+            print(runtime["dependencies"][service])
+    else: raise SystemExit(9)
+elif args[0] == "inspect":
+    container = args[-1]
+    template = args[args.index("--format") + 1]
+    if template == "{{{{.Config.Image}}}}": print(runtime["worker_reference"])
+    elif template == "{{{{.Image}}}}": print("sha256:" + "1" * 64)
+    elif template == "{{{{json .Mounts}}}}":
+        config = compose / "config" / ("bootstrap-worker.e2e.json" if runtime["worker_profile"] == "barrier" else "bootstrap-worker.json")
+        mounts = [{{"Source":str(config),"Destination":"/etc/opsi/bootstrap-worker.json","RW":False}}]
+        if runtime["worker_profile"] == "barrier": mounts.append({{"Source":str(compose / "barrier-state"),"Destination":"/var/lib/opsi/bootstrap-barrier","RW":True}})
+        print(json.dumps(mounts, separators=(",", ":")))
+    elif ".State.Health" in template: print(runtime["worker_health"])
+    else: raise SystemExit(9)
+elif args[:2] == ["image", "inspect"]:
+    print(json.dumps([runtime["worker_reference"]]))
+else: raise SystemExit(9)
+'''
+            ),
+            encoding="utf-8",
+        )
+        hostname = self.bin / "hostname"
+        hostname.write_text("#!/usr/bin/env bash\nprintf '%s\\n' staging.internal.example\n", encoding="utf-8")
+        docker.chmod(0o755)
+        hostname.chmod(0o755)
+
+    def write_runtime(
+        self,
+        *,
+        container: str = "worker-old",
+        running: bool = True,
+        profile: str = "normal",
+        health: str = "healthy",
+        reference: str = REF_A,
+        dependencies: dict[str, str] | None = None,
+    ) -> None:
+        self.runtime.write_text(
+            json.dumps(
+                {
+                    "worker_container": container,
+                    "worker_running": running,
+                    "worker_profile": profile,
+                    "worker_health": health,
+                    "worker_reference": reference,
+                    "dependencies": dependencies or {"cloud":"cloud-1","postgres":"postgres-1","reverse-proxy":"proxy-1"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def helper_blob(self) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(self.repository), "rev-parse", self.revision + ":scripts/e2e/staging-barrier-remote.sh"],
+            text=True,
+        ).strip()
+
+    def orchestration_state_path(self, run_id: str = "run-repository-test") -> pathlib.Path:
+        suffix = hashlib.sha256((self.revision + "\0" + run_id).encode()).hexdigest()[:32]
+        return self.compose / "barrier-state" / f"orchestration-{suffix}.json"
+
+    def write_remote_state(self, phase: str, session: str = "boot-factual", container: str = "worker-current") -> None:
+        pre = "worker-old"
+        if phase in {"worker_quiesced", "session_created", "armed"}:
+            container = pre
+        value = {
+            "schema_version":"opsi.e2e.staging-barrier-state/v2",
+            "source_revision":self.revision,
+            "run_id":"run-repository-test",
+            "repository_directory":str(self.repository),
+            "repository_identity":hashlib.sha256(b"fixture-origin").hexdigest(),
+            "compose_directory":str(self.compose),
+            "staging_endpoint":"203.0.113.10",
+            "staging_hostname":"staging.internal.example",
+            "worker_digest":DIGEST_A,
+            "expected_helper_blob":self.helper_blob(),
+            "executed_helper_blob":self.helper_blob(),
+            "phase":phase,
+            "session_id":"" if phase == "worker_quiesced" else session,
+            "pre_container_id":pre,
+            "current_container_id":container,
+            "dependency_containers":{"cloud":"cloud-1","postgres":"postgres-1","reverse-proxy":"proxy-1"},
+        }
+        path = self.orchestration_state_path()
+        path.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+        path.chmod(0o600)
+        if phase in {"armed", "barrier_started", "replay_started", "normal_restored"}:
+            (self.compose / "config/bootstrap-worker.e2e.json").write_text(
+                json.dumps({"staging_crash_barrier":{"session_id":session,"run_id":"run-repository-test"}}),
+                encoding="utf-8",
+            )
+        if phase in {"armed", "barrier_started", "replay_started", "normal_restored"}:
+            marker_state = {"armed":"armed","barrier_started":"reached","replay_started":"reached","normal_restored":"completed"}[phase]
+            marker_name = "install_k3s-" + hashlib.sha256((session + "\0run-repository-test").encode()).hexdigest()[:32] + ".json"
+            marker = self.compose / "barrier-state" / marker_name
+            payload = {"version":1,"environment":"e2e","session_id":session,"run_id":"run-repository-test","step":"install_k3s","boundary":"after_execute_before_checkpoint","state":marker_state}
+            if marker_state in {"reached","completed"}: payload["process_id"] = "worker-process"
+            marker.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            marker.chmod(0o600)
+
     def tearDown(self) -> None:
         self.temp.cleanup()
 
     def request(self, **changes: str) -> bytes:
+        helper_blob = self.helper_blob()
         value = {
-            "schema_version":"opsi.e2e.staging-barrier-request/v1", "phase":"preflight",
-            "source_revision":self.revision, "run_id":"run-repository-test", "staging_host":"staging.example",
+            "schema_version":"opsi.e2e.staging-barrier-request/v2", "phase":"preflight",
+            "source_revision":self.revision, "run_id":"run-repository-test", "staging_endpoint":"203.0.113.10",
+            "staging_hostname":"staging.internal.example",
             "repository_directory":str(self.repository), "repository_identity":hashlib.sha256(b"fixture-origin").hexdigest(),
-            "compose_directory":str(self.compose), "worker_digest":DIGEST_A, "session_id":"", "expected_state":"absent",
+            "compose_directory":str(self.compose), "expected_helper_blob":helper_blob,
+            "worker_digest":DIGEST_A, "session_id":"", "expected_state":"absent",
         }
         value.update(changes)
         return json.dumps(value, separators=(",", ":")).encode()
 
     def run_helper(self, request: bytes) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run([str(self.helper)], input=request, capture_output=True, check=False)
+        source = (ROOT / "scripts/e2e/verify-k3s.sh").read_text(encoding="utf-8")
+        launcher = source.split("STAGING_REMOTE_LAUNCHER_PY = r'''", 1)[1].split("\n'''", 1)[0]
+        return subprocess.run([sys.executable, "-c", launcher], input=request, capture_output=True, check=False)
 
     def test_revision_mismatch_and_dirty_worktree_fail_before_docker(self) -> None:
         original = self.helper.read_bytes()
         mismatch = self.run_helper(self.request(source_revision="d" * 40))
         self.assertNotEqual(mismatch.returncode, 0)
         self.assertIn(b"repository revision mismatch", mismatch.stderr)
+        clean_request = self.request()
         self.helper.write_bytes(self.helper.read_bytes() + b"\n")
-        dirty = self.run_helper(self.request())
+        dirty = self.run_helper(clean_request)
         self.assertNotEqual(dirty.returncode, 0)
         self.assertIn(b"tracked worktree check failed", dirty.stderr)
+        self.assertFalse(self.docker_log.exists())
         self.helper.write_bytes(original)
 
+        staged_file = self.repository / "staged-change"
+        staged_file.write_text("staged", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repository), "add", "staged-change"], check=True)
+        staged = self.run_helper(clean_request)
+        self.assertNotEqual(staged.returncode, 0)
+        self.assertIn(b"index check failed", staged.stderr)
+        self.assertFalse(self.docker_log.exists())
+
     def test_helper_blob_mismatch_fails_before_docker(self) -> None:
+        mismatch = self.run_helper(self.request(expected_helper_blob="d" * 40))
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn(b"expected helper blob mismatch", mismatch.stderr)
+        self.assertFalse(self.docker_log.exists())
+
+    def test_modified_worktree_helper_never_executes_before_blob_verification(self) -> None:
+        canary = self.repository / "unverified-helper-canary"
         subprocess.run(
             ["git", "-C", str(self.repository), "update-index", "--assume-unchanged", "scripts/e2e/staging-barrier-remote.sh"],
             check=True,
         )
-        self.helper.write_bytes(self.helper.read_bytes() + b"\n")
-        mismatch = self.run_helper(self.request())
-        self.assertNotEqual(mismatch.returncode, 0)
-        self.assertIn(b"remote helper blob mismatch", mismatch.stderr)
+        original = self.helper.read_text(encoding="utf-8")
+        self.helper.write_text(
+            original.replace("set -euo pipefail\n", f"set -euo pipefail\nprintf canary > {canary}\n", 1),
+            encoding="utf-8",
+        )
+        result = self.run_helper(self.request())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(canary.exists(), "the unverified working-tree helper executed before rejecting its blob")
+        self.assertFalse(self.docker_log.exists(), "the rejected helper reached Docker")
+
+    def test_exact_committed_git_object_is_executed_with_distinct_endpoint_and_hostname(self) -> None:
+        result = self.run_helper(self.request())
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["staging_endpoint"], "203.0.113.10")
+        self.assertEqual(receipt["staging_hostname"], "staging.internal.example")
+        self.assertEqual(receipt["expected_helper_blob"], self.helper_blob())
+        self.assertEqual(receipt["executed_helper_blob"], self.helper_blob())
+        self.assertEqual(receipt["worker_profile"], "normal")
+        self.assertTrue(receipt["worker_running"])
+
+        alias = self.run_helper(self.request(staging_endpoint="staging-public.example"))
+        self.assertEqual(alias.returncode, 0, alias.stderr.decode())
+
+    def test_missing_git_object_fails_before_helper_or_docker_execution(self) -> None:
+        request = self.request()
+        blob = self.helper_blob()
+        object_path = self.repository / ".git/objects" / blob[:2] / blob[2:]
+        object_path.unlink()
+        result = self.run_helper(request)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.docker_log.exists())
+
+    def test_hostname_and_bound_state_identity_mismatches_fail_closed(self) -> None:
+        for hostname in ("", "-bad.example", "other.internal.example"):
+            with self.subTest(hostname=hostname):
+                result = self.run_helper(self.request(staging_hostname=hostname))
+                self.assertNotEqual(result.returncode, 0)
+
+        self.write_remote_state("worker_quiesced")
+        state_path = self.orchestration_state_path()
+        for key, value in (("staging_endpoint", "198.51.100.5"), ("staging_hostname", "other.internal.example")):
+            with self.subTest(key=key):
+                state = json.loads(state_path.read_text())
+                original = state[key]
+                state[key] = value
+                state_path.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+                state_path.chmod(0o600)
+                result = self.run_helper(self.request(phase="status", expected_state="any", session_id=""))
+                self.assertNotEqual(result.returncode, 0)
+                state[key] = original
+                state_path.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+                state_path.chmod(0o600)
+
+    def test_status_rejects_durable_state_that_contradicts_runtime(self) -> None:
+        cases = (
+            ("worker_quiesced", {"container":"worker-old","running":True,"profile":"normal","health":"healthy"}),
+            ("barrier_started", {"container":"worker-replaced","running":True,"profile":"barrier","health":"healthy"}),
+            ("replay_started", {"container":"worker-current","running":True,"profile":"normal","health":"healthy"}),
+            ("normal_restored", {"container":"worker-current","running":True,"profile":"barrier","health":"healthy"}),
+            ("normal_restored", {"container":"worker-current","running":True,"profile":"normal","health":"unhealthy"}),
+            ("normal_restored", {"container":"worker-current","running":True,"profile":"normal","health":"healthy","reference":REF_B}),
+        )
+        for phase, runtime in cases:
+            with self.subTest(phase=phase, runtime=runtime):
+                for path in self.compose.glob("barrier-state/*.json"):
+                    path.unlink()
+                (self.compose / "config/bootstrap-worker.e2e.json").unlink(missing_ok=True)
+                self.write_remote_state(phase)
+                self.write_runtime(**runtime)
+                session = "" if phase == "worker_quiesced" else "boot-factual"
+                result = self.run_helper(self.request(phase="status", expected_state="any", session_id=session))
+                self.assertNotEqual(result.returncode, 0, result.stdout.decode())
+
+    def test_status_proves_runtime_for_every_durable_phase(self) -> None:
+        cases = (
+            ("worker_quiesced", "worker-old", False, "normal", "stopped"),
+            ("session_created", "worker-old", False, "normal", "stopped"),
+            ("armed", "worker-old", False, "normal", "stopped"),
+            ("barrier_started", "worker-current", True, "barrier", "healthy"),
+            ("replay_started", "worker-current", True, "barrier", "healthy"),
+            ("normal_restored", "worker-current", True, "normal", "healthy"),
+        )
+        for phase, container, running, profile, health in cases:
+            with self.subTest(phase=phase):
+                for path in self.compose.glob("barrier-state/*.json"):
+                    path.unlink()
+                (self.compose / "config/bootstrap-worker.e2e.json").unlink(missing_ok=True)
+                self.write_remote_state(phase, container=container)
+                self.write_runtime(container=container, running=running, profile=profile, health=health)
+                session = "" if phase == "worker_quiesced" else "boot-factual"
+                result = self.run_helper(self.request(phase="status", expected_state="any", session_id=session))
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                receipt = json.loads(result.stdout)
+                self.assertEqual(receipt["state_after"], phase)
+                self.assertEqual(receipt["worker_profile"], profile)
 
     def test_symlinked_repository_or_compose_root_is_rejected(self) -> None:
         repository_link = self.repository.parent / "repo-link"
