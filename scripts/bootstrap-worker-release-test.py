@@ -849,7 +849,7 @@ class BarrierProcedureTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         log = self.log.read_text()
         boundary = "\n".join(line for line in log.splitlines() if line.startswith(("ssh-argv", "ssh-env", "ssh-stdin")))
-        for option in ("-F /dev/null", "-T", "BatchMode=yes", "IdentitiesOnly=yes", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=/dev/null", "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "ControlMaster=no", "PermitLocalCommand=no", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no", "LogLevel=ERROR"):
+        for option in ("-F /dev/null", "-T", "BatchMode=yes", "IdentitiesOnly=yes", "IdentityAgent=none", "PreferredAuthentications=publickey", "PubkeyAuthentication=yes", "KbdInteractiveAuthentication=no", "ChallengeResponseAuthentication=no", "HostbasedAuthentication=no", "GSSAPIAuthentication=no", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=/dev/null", "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "Tunnel=no", "ControlMaster=no", "ControlPath=none", "ProxyCommand=none", "ProxyJump=none", "PermitLocalCommand=no", "LogLevel=ERROR"):
             self.assertIn(option, log)
         for canary in ("local-only-canary", "second-factor-canary", "ambient-agent-canary", "proxy-canary", "git-ssh-command-canary", "local-session"):
             self.assertNotIn(canary, boundary + result.stdout + result.stderr)

@@ -986,11 +986,15 @@ staging_barrier_remote() {
   ( ulimit -S -f 8
     env -i PATH="$PATH" LC_ALL=C timeout --signal=TERM --kill-after=5s 210s \
     ssh -F /dev/null -T -p "$STAGING_SSH_PORT" -i "$STAGING_SSH_KEY_PATH" \
-      -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+      -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
+      -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes \
+      -o KbdInteractiveAuthentication=no -o ChallengeResponseAuthentication=no \
+      -o HostbasedAuthentication=no -o GSSAPIAuthentication=no \
+      -o StrictHostKeyChecking=yes \
       -o "UserKnownHostsFile=$STAGING_KNOWN_HOSTS_PATH" -o GlobalKnownHostsFile=/dev/null \
       -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
-      -o ControlMaster=no -o ControlPath=none -o PermitLocalCommand=no \
-      -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
+      -o Tunnel=no -o ControlMaster=no -o ControlPath=none \
+      -o ProxyCommand=none -o ProxyJump=none -o PermitLocalCommand=no \
       -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 \
       -o ServerAliveCountMax=2 -o LogLevel=ERROR \
       "$STAGING_SSH_USER@$STAGING_HOST" "$remote_command"
@@ -1756,8 +1760,13 @@ PY
   for forbidden in 'ssh''pass' 'accept''-new'; do
     if grep -qi "$forbidden" "$0"; then fail "self-test found retired SSH transport token: $forbidden"; fi
   done
-  grep -q 'PasswordAuthentication=no' "$0" || fail "self-test staging interactive credential authentication was not disabled"
-  grep -q 'KbdInteractiveAuthentication=no' "$0" || fail "self-test staging keyboard-interactive authentication was not disabled"
+  for required in \
+    'PreferredAuthentications=publickey' 'PubkeyAuthentication=yes' \
+    'IdentityAgent=none' 'KbdInteractiveAuthentication=no' \
+    'ChallengeResponseAuthentication=no' 'HostbasedAuthentication=no' \
+    'GSSAPIAuthentication=no'; do
+    grep -q "$required" "$0" || fail "self-test staging public-key-only authentication policy is incomplete: $required"
+  done
   grep -q "Manual cleanup" "$0" || fail "self-test cleanup path missing"
   log "self-test: ok"
 }

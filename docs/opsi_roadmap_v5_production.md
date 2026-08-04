@@ -690,7 +690,11 @@ validates the closed non-secret request, exact revision, clean tracked
 worktree/index, repository identity, and expected helper blob before it
 materializes, rehashes, and executes the exact committed helper Git object.
 The transport endpoint and factual remote hostname are independent bound
-inputs. One runtime validator makes every status phase prove current Worker
+inputs. The isolated SSH client uses explicit identity and known-hosts files,
+strict host verification, and a public-key-only authentication allowlist; it
+disables ambient agent, interactive, host-based, and GSSAPI authentication plus
+forwarding, tunnels, multiplexing, proxy commands, and proxy jumps. One runtime
+validator makes every status phase prove current Worker
 profile/running/health/container/digest, marker/config, and unchanged dependency
 container identities. Pre-session failure restores remotely; post-session
 failure preserves the factual session and Worker state, and continuation never

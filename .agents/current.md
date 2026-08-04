@@ -122,6 +122,12 @@ Canonical roadmap: `docs/opsi_roadmap_v5_production.md`.
   exact revision, clean tracked worktree/index, repository identity, and
   expected helper blob, then materializes and rehashes the exact committed Git
   object in private temporary files before execution.
+- SSH ignores ambient configuration, uses only the explicit identity and
+  known-hosts files, and allowlists only public-key authentication. Batch mode,
+  identity-only operation, and a disabled ambient agent accompany explicit
+  rejection of keyboard-interactive, challenge-response, host-based, and
+  GSSAPI authentication; forwarding, tunnels, multiplexing, proxy commands,
+  and proxy jumps are disabled.
 - `OPSI_E2E_STAGING_HOST` is only the transport endpoint;
   `OPSI_E2E_STAGING_EXPECTED_HOSTNAME` independently binds remote
   `hostname -f`. Request, receipt, remote-state, and local-state schemas were

@@ -104,6 +104,12 @@ private file. Those verified bytes own canonical Compose, Worker
 quiesce/start/replay/restore, config, marker, and protected remote state. The
 transport endpoint and factual `hostname -f` are independent required inputs
 bound separately by v2 request/receipt/remote-state and v3 local-state schemas.
+SSH ignores ambient configuration, uses the explicit identity and known-hosts
+files with strict host verification, and allowlists only public-key
+authentication. Batch and identity-only operation are required; ambient agent,
+keyboard-interactive, challenge-response, host-based, and GSSAPI authentication
+are disabled, as are forwarding, tunnels, multiplexing, proxy commands, and
+proxy jumps.
 
 Remote `preflight` and `prepare` receipts precede the single Local API
 bootstrap POST. The factual session is fsynced locally before remote config,

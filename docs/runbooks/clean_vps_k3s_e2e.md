@@ -205,6 +205,13 @@ same-digest Worker recreation. Requests and receipts are strict, bounded JSON;
 successful SSH requires one receipt, empty stderr, and exit zero. Local API,
 second-factor, PAT, secret, Agent-key, and bootstrap-body material never enters
 remote stdin, stdout, stderr, state, or receipts.
+The SSH client ignores ambient configuration and uses only the explicit
+identity and known-hosts files with strict host verification. Its authentication
+method allowlist contains only `publickey`; batch and identity-only operation
+are mandatory, the ambient SSH agent is disabled, and keyboard-interactive,
+challenge-response, host-based, and GSSAPI methods are disabled. Agent/X11/port
+forwarding, tunnels, connection multiplexing, proxy commands, and proxy jumps
+are also disabled, with no alternate staging transport.
 
 After `reached`, restart only the Worker through the canonical `barrier-replay`
 helper operation and require
