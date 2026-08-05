@@ -89,7 +89,7 @@ func (s *Service) StartExposureRollout(projectID, actorUserID, key, requestID st
 	if _, exists := s.deployments[preview.Desired.DeploymentJobID]; exists {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_ID_CONFLICT", Message: "deployment_job_id already exists", RequestID: requestID}
 	}
-	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID)
+	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID, base.NodeID, base.AgentID)
 	intent, err := buildRolloutIntent(base, &preview.Desired, previousID, previousHash, previousDigest, "", "", deploymentv1.RolloutOperationApply, now)
 	if err != nil {
 		return DeploymentJob{}, false, APIError{Status: 400, Code: "ROLLOUT_INTENT_INVALID", Message: err.Error(), RequestID: requestID}
@@ -194,11 +194,12 @@ func (s *Service) latestProjectExposuresLocked(projectID string) []exposurev1.Ex
 	return result
 }
 
-func (s *Service) latestKnownGoodLocked(projectID, environmentID, runtimeID, serviceID string) (string, string, string) {
+func (s *Service) latestKnownGoodLocked(projectID, environmentID, runtimeID, serviceID, nodeID, agentID string) (string, string, string) {
 	var selected *DeploymentJob
 	for id := range s.deployments {
 		job := s.deployments[id]
-		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && job.Snapshot != nil && job.Snapshot.Preview == nil && job.TerminalResult != nil && job.TerminalResult.KnownGoodID != "" && (selected == nil || job.UpdatedAt.After(selected.UpdatedAt)) {
+		newer := selected == nil || job.UpdatedAt.After(selected.UpdatedAt) || job.UpdatedAt.Equal(selected.UpdatedAt) && job.ID > selected.ID
+		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && job.NodeID == nodeID && job.AgentID == agentID && validKnownGoodCandidate(job) && newer {
 			copy := job
 			selected = &copy
 		}
@@ -207,6 +208,33 @@ func (s *Service) latestKnownGoodLocked(projectID, environmentID, runtimeID, ser
 		return "", "", ""
 	}
 	return selected.TerminalResult.KnownGoodID, selected.TerminalResult.KnownGoodHash, selected.TerminalResult.CurrentDigest
+}
+
+func validKnownGoodCandidate(job DeploymentJob) bool {
+	if job.SchemaVersion != deploymentv1.JobSchemaVersion || job.Mode != "rollout" || job.Snapshot == nil || job.Snapshot.Preview != nil || job.RolloutIntent == nil || job.TerminalResult == nil || job.RolloutVersion == 0 {
+		return false
+	}
+	snapshot := job.Snapshot
+	if snapshot.SchemaVersion != deploymentv1.JobSchemaVersion || snapshot.ProjectID != job.ProjectID || snapshot.Authority.BuildRecord.ProjectID != job.ProjectID || snapshot.Authority.BuildRecord.ServiceID != job.ServiceID || snapshot.Authority.EnvironmentID != job.EnvironmentID || snapshot.Authority.RuntimeID != job.RuntimeID || snapshot.Authority.NodeID != job.NodeID || snapshot.Authority.AgentID != job.AgentID || snapshot.SpecHash != job.SpecHash || snapshot.CreatedAt.IsZero() || snapshot.ActorUserID == "" || !validDeploymentIdempotencyKey(snapshot.IdempotencyKey) || snapshot.PayloadHash == "" {
+		return false
+	}
+	if snapshot.Image.Validate() != nil || snapshot.Workload.Validate() != nil || !reflect.DeepEqual(snapshot.Workload, snapshot.Workload.Normalize()) || snapshot.Image.Repository != snapshot.Authority.BuildRecord.Build.OCIRepository || snapshot.Image.Digest != snapshot.Authority.BuildRecord.Build.OCIDigest {
+		return false
+	}
+	workloadHash, err := snapshot.Workload.Hash()
+	if err != nil || workloadHash != snapshot.SpecHash {
+		return false
+	}
+	intent := job.RolloutIntent
+	canonical, err := buildRolloutIntent(job, job.ExposureSpec, intent.PreviousKnownGoodID, intent.PreviousKnownGoodHash, intent.PreviousDigest, intent.ExpectedKnownGoodID, intent.ExpectedKnownGoodHash, intent.Operation, intent.CreatedAt)
+	if err != nil || !reflect.DeepEqual(canonical, *intent) || intent.Desired.DeploymentJobID != job.ID || job.IntentHash != intent.IntentHash || job.Action != intent.Operation {
+		return false
+	}
+	result := job.TerminalResult
+	if result.RolloutState != deploymentv1.RolloutStateSucceeded && result.RolloutState != deploymentv1.RolloutStateRolledBack || job.Status != result.Status || job.RolloutState != result.RolloutState || validateRolloutResult(job, result) != nil {
+		return false
+	}
+	return job.RolloutStateHash == result.StateHash && job.DesiredDigest == result.DesiredDigest && job.CurrentDigest == result.CurrentDigest && job.PreviousDigest == result.PreviousDigest && job.KnownGoodID == result.KnownGoodID && job.KnownGoodHash == result.KnownGoodHash && job.ReadinessEvidenceHash == result.ReadinessEvidenceHash && job.FailureCode == result.FailureCode && job.FailureMessageRedacted == result.FailureMessageRedacted
 }
 
 func exposureChanges(current *exposurev1.ExposureSpec, desired exposurev1.ExposureSpec) []string {

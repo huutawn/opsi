@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +57,146 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("retired service-scoped deployment status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegistryAPINodeOfflineReplayAuditsOnceAndRejectsInvalidKey(t *testing.T) {
+	trustedHash, err := auth.HashPAT("offline_pat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-offline", "Offline", "offline", "owner-offline", "offline-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := server.Registry.UpsertNode(project.ID, "target", "server", registry.NodeHealthy, "203.0.113.12", "", "offline-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.RegisterAgent(project.ID, node.ID, "sha256:offline", "credential", "v1", "offline-agent", map[string]any{"deploy": true}); err != nil {
+		t.Fatal(err)
+	}
+	other, err := server.Registry.UpsertNode(project.ID, "other", "worker", registry.NodeHealthy, "203.0.113.13", "", "offline-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	concurrent, err := server.Registry.UpsertNode(project.ID, "concurrent", "worker", registry.NodeHealthy, "203.0.113.14", "", "offline-concurrent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.RegisterAgent(project.ID, concurrent.ID, "sha256:concurrent", "credential", "v1", "offline-concurrent-agent", map[string]any{"deploy": true}); err != nil {
+		t.Fatal(err)
+	}
+	server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{{UserID: "owner-offline", OrgID: project.OrgID, ProjectID: project.ID, Role: "Owner", Hash: trustedHash}}}}
+	handler := server.Handler()
+	request := func(nodeID, key, requestID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/nodes/"+nodeID+"/offline", bytes.NewReader([]byte(`{"confirm_target_reset":true,"requested_by":"attacker"}`)))
+		req.Header.Set("Authorization", "Bearer offline_pat")
+		if key != "" {
+			req.Header.Set("Idempotency-Key", key)
+		}
+		req.Header.Set("X-Request-ID", requestID)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	sameNodes := func(left, right []registry.Node) bool {
+		if len(left) != len(right) {
+			return false
+		}
+		byID := make(map[string]registry.Node, len(left))
+		for _, node := range left {
+			byID[node.ID] = node
+		}
+		for _, node := range right {
+			if byID[node.ID] != node {
+				return false
+			}
+		}
+		return true
+	}
+	beforeInvalid, err := server.Registry.ListNodes(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, invalid := range []struct {
+		key  string
+		code string
+	}{{"", "IDEMPOTENCY_KEY_REQUIRED"}, {"invalid key", "IDEMPOTENCY_KEY_INVALID"}} {
+		w := request(node.ID, invalid.key, "req-offline-invalid")
+		if w.Code != http.StatusBadRequest || !bytes.Contains(w.Body.Bytes(), []byte(`"error_code":"`+invalid.code+`"`)) {
+			t.Fatalf("invalid key %q status=%d body=%s", invalid.key, w.Code, w.Body.String())
+		}
+	}
+	nodes, err := server.Registry.ListNodes(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameNodes(beforeInvalid, nodes) {
+		t.Fatalf("invalid key changed nodes: before=%+v after=%+v", beforeInvalid, nodes)
+	}
+
+	key := "node-offline:" + node.ID
+	first := request(node.ID, key, "req-offline-first")
+	replay := request(node.ID, key, "req-offline-replay")
+	if first.Code != http.StatusOK || replay.Code != http.StatusOK || first.Body.String() != replay.Body.String() {
+		t.Fatalf("offline replay first=%d/%s replay=%d/%s", first.Code, first.Body.String(), replay.Code, replay.Body.String())
+	}
+	beforeConflict, err := server.Registry.ListNodes(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict := request(other.ID, key, "req-offline-conflict")
+	if conflict.Code != http.StatusConflict || !bytes.Contains(conflict.Body.Bytes(), []byte(`"error_code":"IDEMPOTENCY_CONFLICT"`)) {
+		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	afterConflict, err := server.Registry.ListNodes(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameNodes(beforeConflict, afterConflict) {
+		t.Fatalf("conflict changed nodes: before=%+v after=%+v", beforeConflict, afterConflict)
+	}
+
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	var wait sync.WaitGroup
+	for i := range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			responses <- request(concurrent.ID, "concurrent-offline", "req-concurrent-"+string(rune('a'+i)))
+		}()
+	}
+	wait.Wait()
+	close(responses)
+	var concurrentBody string
+	for response := range responses {
+		if response.Code != http.StatusOK {
+			t.Fatalf("concurrent status=%d body=%s", response.Code, response.Body.String())
+		}
+		if concurrentBody == "" {
+			concurrentBody = response.Body.String()
+		} else if response.Body.String() != concurrentBody {
+			t.Fatalf("concurrent results differ: %s / %s", concurrentBody, response.Body.String())
+		}
+	}
+	events, err := server.Registry.ListAudit(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := map[string]int{}
+	for _, event := range events {
+		if event.Action == "NODE_MARKED_OFFLINE" {
+			marked[event.ResourceID]++
+			if event.ActorUserID != "owner-offline" || bytes.Contains(mustJSON(t, event), []byte("attacker")) {
+				t.Fatalf("offline audit actor=%q event=%+v", event.ActorUserID, event)
+			}
+		}
+	}
+	if marked[node.ID] != 1 || marked[concurrent.ID] != 1 || len(marked) != 2 {
+		t.Fatalf("NODE_MARKED_OFFLINE audit counts=%v events=%+v", marked, events)
 	}
 }
 

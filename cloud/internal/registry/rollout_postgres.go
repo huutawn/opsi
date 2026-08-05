@@ -124,7 +124,7 @@ func (s PostgresService) StartExposureRollout(projectID, actorUserID, key, reque
 	if collision != 0 {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_ID_CONFLICT", Message: "deployment_job_id already exists", RequestID: requestID}
 	}
-	previousID, previousHash, previousDigest, err := latestPostgresKnownGood(ctx, tx, projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID)
+	previousID, previousHash, previousDigest, err := latestPostgresKnownGood(ctx, tx, projectID, base.EnvironmentID, base.RuntimeID, base.ServiceID, base.NodeID, base.AgentID)
 	if err != nil {
 		return DeploymentJob{}, false, err
 	}
@@ -165,11 +165,20 @@ func latestPostgresExposure(ctx context.Context, queryer rolloutQueryer, project
 	return &exposure, nil
 }
 
-func latestPostgresKnownGood(ctx context.Context, tx *sql.Tx, projectID, environmentID, runtimeID, serviceID string) (string, string, string, error) {
-	var id, hash, digest string
-	err := tx.QueryRowContext(ctx, `SELECT COALESCE(known_good_id,''), COALESCE(known_good_hash,''), COALESCE(current_digest,'') FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND snapshot_json->'preview' IS NULL AND known_good_id IS NOT NULL AND known_good_id <> '' ORDER BY updated_at DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID).Scan(&id, &hash, &digest)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", "", nil
+func latestPostgresKnownGood(ctx context.Context, tx *sql.Tx, projectID, environmentID, runtimeID, serviceID, nodeID, agentID string) (string, string, string, error) {
+	rows, err := tx.QueryContext(ctx, deploymentSelectSQL+` WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND node_id=$5 AND agent_id=$6 AND schema_version=$7 AND mode=$8 AND snapshot_json IS NOT NULL AND snapshot_json <> '{}'::jsonb AND snapshot_json->>'schema_version'=$7 AND snapshot_json->'preview' IS NULL AND rollout_intent_json IS NOT NULL AND rollout_intent_json <> '{}'::jsonb AND rollout_intent_json->>'schema_version'=$9 AND rollout_intent_json->'target'->>'project_id'=project_id AND rollout_intent_json->'target'->>'environment_id'=environment_id AND rollout_intent_json->'target'->>'runtime_id'=runtime_id AND rollout_intent_json->'target'->>'service_key'=snapshot_json->'workload'->>'service_key' AND rollout_intent_json->'target'->>'node_id'=node_id AND rollout_intent_json->'target'->>'agent_id'=agent_id AND terminal_result_json IS NOT NULL AND terminal_result_json <> '{}'::jsonb AND terminal_result_json->>'schema_version'=$10 AND rollout_state IN ($11,$12) AND status=rollout_state AND terminal_result_json->>'rollout_state'=rollout_state AND terminal_result_json->>'status'=status AND terminal_result_json->>'known_good_id'=known_good_id AND terminal_result_json->>'known_good_hash'=known_good_hash AND terminal_result_json->>'current_digest'=current_digest AND terminal_result_json->>'desired_digest'=desired_digest AND COALESCE(terminal_result_json->>'previous_digest','')=COALESCE(previous_digest,'') ORDER BY updated_at DESC, id DESC LIMIT 100`, projectID, environmentID, runtimeID, serviceID, nodeID, agentID, deploymentv1.JobSchemaVersion, "rollout", deploymentv1.RolloutSchemaVersion, deploymentv1.ResultSchemaVersion, deploymentv1.RolloutStateSucceeded, deploymentv1.RolloutStateRolledBack)
+	if err != nil {
+		return "", "", "", err
 	}
-	return id, hash, digest, err
+	defer rows.Close()
+	for rows.Next() {
+		job, err := scanDeployment(rows)
+		if err != nil {
+			return "", "", "", err
+		}
+		if validKnownGoodCandidate(job) {
+			return job.KnownGoodID, job.KnownGoodHash, job.CurrentDigest, nil
+		}
+	}
+	return "", "", "", rows.Err()
 }

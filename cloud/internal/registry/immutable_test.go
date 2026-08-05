@@ -276,9 +276,9 @@ func TestOperatorConfirmedTargetResetReleasesDeploymentOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	offline, err := service.MarkNodeOffline(projectID, oldJob.NodeID)
-	if err != nil {
-		t.Fatal(err)
+	offline, reused, err := service.MarkNodeOffline(projectID, oldJob.NodeID, "user-1", "retire-old-target", "retire-old-target")
+	if err != nil || reused {
+		t.Fatalf("offline=%+v reused=%v err=%v", offline, reused, err)
 	}
 	if offline.Status != NodeOffline || offline.FailureCode != "OPERATOR_CONFIRMED_TARGET_RESET" || service.agents[oldJob.AgentID].Status != "revoked" {
 		t.Fatalf("reset evidence node=%+v agent=%+v", offline, service.agents[oldJob.AgentID])

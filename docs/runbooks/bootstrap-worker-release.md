@@ -5,12 +5,23 @@ remain operator-gated; this document does not claim a live pass.
 
 ## Context and normal release
 
-The publish operator runs the reviewed GitHub workflow from `developer` and
-records its immutable `ghcr.io/huutawn/opsi-bootstrap-worker@sha256:<digest>`
-manifest. The staging operator runs the helper from the canonical checkout on
-the staging control-plane host. The Local API/session request runs from the
-operator context; host, key, and fingerprint values come only from secure
-operator-owned environment/configuration.
+The publish operator runs the reviewed `publish-control-plane` workflow from
+`developer`. One run publishes or safely reuses the matching immutable Cloud
+and Bootstrap Worker revision tags, verifies both images, and uploads the
+strict `control-plane-release-<revision>` manifest. The staging helper extracts
+only an immutable Worker reference supplied to its `--image` deployment path
+and remains the sole owner of Worker deploy/barrier behavior. Extract that
+reference with the control-plane helper's `extract` command, component
+`bootstrap_worker`, and field `image_reference`. The Local API/session request
+runs from the operator context; host, key, and fingerprint values come only
+from secure operator-owned environment/configuration.
+
+The publisher is safe to resume after a partial push. For each component it
+builds only when the exact revision tag is absent; an existing tag is reused
+only after its canonical repository digest, `linux/amd64` platform, component,
+Docker target, source revision, and OCI labels all validate. Any mismatch fails
+closed, and the combined manifest is created and uploaded only after both
+components pass the same verification.
 
 Normal same-image deploy is idempotent: when the running RepoDigest and
 persisted `OPSI_BOOTSTRAP_WORKER_IMAGE` both equal the expected digest, the

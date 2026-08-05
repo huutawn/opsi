@@ -666,7 +666,54 @@ backend gap fail-closed cho tới native acceptance ở R5-017.
 
 **Trạng thái frontend:** FE-01 đến FE-04 source redesign và browser fixture acceptance đã pass. Security/Settings, Delivery loading, observability factuality, và CLI-only ActionPlane handoff đã được ổn định. Các advisory PostCSS/Sharp vẫn `UPSTREAM_BLOCKED`; PostCSS còn build-time risk và không có claim dependency closure. Không có live Agent/VPS acceptance trong FE-04, nên R5-017 vẫn pending và roadmap tổng thể chưa complete.
 
+**Source correction checkpoint:** Run `r5-017-run1-20260802T142745Z`
+remains blocked and immutable as evidence, and deployment
+`dep-255109f89b9efb64` remains terminal `failed` without retry or rewrite. The
+source defect was cross-target previous-known-good selection. Cloud now requires
+the exact node and Agent identity plus a factual `succeeded` or `rolled_back`
+terminal result. Commit `7623266fdbebd96087ab525f6e38b6066570c259` fixed that
+cross-target inheritance and failed-job poisoning, but review before
+republishing found incomplete historical-row validation. The correction now
+rejects legacy, malformed, or internally inconsistent history unless rollout
+mode, current schemas, canonical intent and snapshot, exact target, and
+normalized terminal fields agree. No deployment record was modified. The
+correction is not deployed. All aligned runtime artifacts must be republished
+from the new revision, and live acceptance must restart as a new Run 1 with a
+new Run ID. R5-017, release readiness, and production readiness remain
+unclaimed.
+
+**Barrier trust-domain checkpoint:** the source verifier no longer requires the
+loopback Local API and staging Docker/Compose on one host. The operator retains
+Local API/session, second factor, Agent VPS bootstrap key, orchestration state,
+and acceptance. Pinned direct SSH invokes one fixed bounded launcher that
+validates the closed non-secret request, exact revision, clean tracked
+worktree/index, repository identity, and expected helper blob before it
+materializes, rehashes, and executes the exact committed helper Git object.
+The transport endpoint and factual remote hostname are independent bound
+inputs. The isolated SSH client uses explicit identity and known-hosts files,
+strict host verification, and a public-key-only authentication allowlist; it
+disables ambient agent, interactive, host-based, and GSSAPI authentication plus
+forwarding, tunnels, multiplexing, proxy commands, and proxy jumps. One runtime
+validator makes every status phase prove current Worker
+profile/running/health/container/digest, marker/config, and unchanged dependency
+container identities. Pre-session failure restores remotely; post-session
+failure preserves the factual session and Worker state, and continuation never
+creates a second session. Ambiguous mutation loss uses read-only factual status
+only, while proved restart/restore completion may repair stale local protected
+state without replaying the mutation or POST. Local fake transport regressions
+pass, but no live staging/VPS/K3s action or Run 1 occurred. Historical external
+`stat` warnings are not claimed fixed. Aligned Cloud, Worker, and Agent
+artifacts must be republished from this new source revision before a new Run 1;
+R5-017 remains pending, with no release-readiness or production-readiness claim.
+
 **CẦN VPS:** tối thiểu một Agent VPS. Để tuyên bố hỗ trợ multi-VPS production path, cần **hai Agent VPS** trong cùng project nhưng hai single-node runtimes độc lập.
+
+**Artifact prerequisite:** trước khi deploy staging hoặc bắt đầu Run 1, publish
+Cloud, Bootstrap Worker, và Agent từ cùng một full reviewed monorepo revision.
+Cloud/Worker dùng immutable GHCR digests và combined manifest; Agent dùng
+revision-scoped prerelease tag với binary, `checksums.txt`, và strict
+`release.json` đã được tải anonymous và verify. Không dùng Agent binary cũ để
+tuyên bố runtime alignment.
 
 **Mục tiêu:** chứng minh sản phẩm đầy đủ không cần MCP/AI.
 

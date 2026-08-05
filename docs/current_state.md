@@ -7,9 +7,51 @@ REPOSITORY_VERIFY_TOOLCHAIN_BLOCKED / R5_017_LIVE_AGENT_PENDING`.
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 `R5_015_AGENT_SERVICE_IDENTITY_PASS / LIVE_AGENT_PENDING`.
 `R5_016_SOURCE_FIXED / LIVE_AGENT_AND_UI_DEFERRED_TO_R5_017`.
-`R5_017D1_SOURCE_PASS / LIVE_RETRY_PENDING`.
-`R5_017D2 SOURCE PASS / LIVE_RETRY_PENDING` is the source-only corrective gate;
-live retry remains operator-run and was not started.
+`R5_017_BARRIER_SECURITY_CORRECTION_SOURCE_PRESENT /
+ALIGNED_RUNTIME_REPUBLISH_REQUIRED / NEW_RUN_1_PENDING` is the source-only
+corrective gate; live retry remains operator-run and was not started.
+`R5_017G_CONTROL_PLANE_PUBLISH_PASS` replaces
+the Worker-only publisher with one manual control-plane workflow for Cloud and
+Bootstrap Worker. Both targets use `cloud/Dockerfile`, repository-root context,
+`linux/amd64`, the same full revision tag and OCI provenance labels. Exact-tag
+resume validates repository, target/component, platform, labels, and one
+lowercase SHA-256 digest before reuse; inconsistent existing tags fail closed.
+One strict combined manifest is uploaded only after both images are verified.
+The unified workflow no longer calls the Worker helper's manifest command; the
+canonical control-plane helper owns combined manifest validation and extracts
+the immutable Worker reference for the existing `--image` deployment path.
+Workflow run `30750598790` published revision
+`246c924f56f7d28db43d06154b39c558f214c686` as Cloud digest
+`sha256:c20359577e546885d6e607010ac1fe8cff146b41042e32d5ff14de340cfb564e`
+and Bootstrap Worker digest
+`sha256:760a4ce0274ea2c03ffc4d86a96741745a783748dd45f0547e3bf6531874b7dd`;
+artifact `control-plane-release-246c924f56f7d28db43d06154b39c558f214c686`
+records both. This publication did not deploy staging.
+
+The Agent now has one canonical manual publisher source. It accepts only the
+full reviewed `developer` revision plus `confirmation=publish-agent`, derives
+the version and immutable prerelease tag from that revision, builds Linux amd64
+twice in clean directories with Go 1.26.4, and requires byte-identical binary,
+checksums, and strict metadata. Publication refuses existing tags/releases and
+then anonymously downloads and re-verifies the exact three public assets. The
+publisher adds no Cloud or Worker path; workflow registration and per-revision
+publication remain external evidence gates and do not imply staging deployment
+or R5-017 live acceptance.
+
+Run `r5-017-run1-20260802T142745Z` remains blocked and immutable as evidence.
+Deployment `dep-255109f89b9efb64` remains terminal `failed`; it was not retried
+or rewritten. The source defect was cross-target previous-known-good selection.
+Commit `7623266fdbebd96087ab525f6e38b6066570c259` fixed exact node/Agent
+scoping and failed-job poisoning, but review before republishing found
+incomplete historical-row validation. Cloud now also rejects legacy,
+malformed, or internally inconsistent candidates unless rollout mode, current
+schemas, canonical intent and non-preview snapshot, exact target identity,
+factual `succeeded` or `rolled_back` result, and normalized terminal fields all
+agree. Memory and PostgreSQL use the same Go candidate predicate. No deployment
+record was modified. The correction is not deployed. Cloud, Bootstrap Worker,
+and Agent artifacts must be republished from the aligned new revision, followed
+by a new live Run 1 with a new Run ID. R5-017, release readiness, and production
+readiness remain unclaimed.
 The R5-017 publisher run `30700943447` at revision
 `585293ee171454d8f8a6af54d37b3bb49a600ea9` failed before push because the
 repository-root build context did not select `cloud/Dockerfile`. The canonical
@@ -28,18 +70,16 @@ R5-015 is limited to deterministic fake TLS Agent/Kubernetes sources and
 Agent-local SQLite evidence persistence; no live workload or browser proof was
 performed.
 
-R5-017C adds one manual, canonical Bootstrap Worker release path. The
-repository-root `cloud/Dockerfile` target `bootstrap-worker` remains the only
-image implementation. A fork/ref/confirmation-gated GitHub Actions workflow
-publishes only `ghcr.io/huutawn/opsi-bootstrap-worker`, records the full source
-revision in an immutable lookup tag and OCI labels, emits the registry digest,
-refuses revision-tag overwrite, and uploads a strict
-`opsi.bootstrap-worker.release/v1` JSON manifest for the factual `linux/amd64`
-platform. The manifest is provenance metadata and is not described as a signed
-attestation.
+R5-017C introduced the original manual Bootstrap Worker publisher. R5-017G
+replaces that workflow rather than retaining a parallel path: the canonical
+publisher now owns both `ghcr.io/huutawn/opsi-cloud` and
+`ghcr.io/huutawn/opsi-bootstrap-worker`, while the two existing Docker targets
+remain the only image implementations. Its combined manifest is provenance
+metadata and is not described as a signed attestation.
 
-The staging helper validates either that manifest or an immutable canonical
-image reference, requires the Worker RepoDigest and persisted `.env` binding to
+The staging helper accepts the immutable Worker reference extracted from the
+combined manifest through its existing `--image` path, requires the Worker
+RepoDigest and persisted `.env` binding to
 match an operator-supplied expected digest, and serializes releases with a
 host-local lock. Normal same-image deploy remains a factual health/RepoDigest/
 Cloud-health no-op with no pull, `.env` edit, backup, or recreate. The explicit
@@ -51,15 +91,39 @@ RepoDigest, and Cloud health without changing `.env` or creating a backup.
 Fake Docker/Compose/Local API tests exercise precondition negatives, one-worker
 recreate, evidence, ordering, restoration, and resume without a second POST.
 
-R5-017D1 adds executable `--barrier-prepare`, `--barrier-restart`,
-`--resume-bootstrap-session`, and `--barrier-restore` modes. Prepare proves a
-singleton Worker is stopped before creating the factual Local API session,
-stores only protected run/session/container metadata, generates config and
-arms the marker after the session ID exists, then invokes the same-image
-barrier helper. Session/config/arm/recreate failures restore only the normal
-Worker profile; restoration failure is separately reported and nonzero. The
-Worker barrier protocol remains unchanged and production configuration still
-rejects every barrier field.
+The R5-017 trust-domain correction keeps `verify-k3s.sh` on the operator
+workstation for the loopback Local API, Agent VPS bootstrap key, one bootstrap
+POST, protected local state, second factor, and acceptance. It removes local
+staging Docker/Compose execution. One committed `staging-barrier-remote.sh`
+is now materialized by one fixed bounded SSH launcher rather than executed from
+the staging working tree. Before execution, the launcher validates the closed
+non-secret request, exact revision, clean tracked worktree/index, repository
+identity, and expected helper blob; reads the exact committed Git object into a
+private temporary executable; rehashes it; and keeps the request in a separate
+private file. Those verified bytes own canonical Compose, Worker
+quiesce/start/replay/restore, config, marker, and protected remote state. The
+transport endpoint and factual `hostname -f` are independent required inputs
+bound separately by v2 request/receipt/remote-state and v3 local-state schemas.
+SSH ignores ambient configuration, uses the explicit identity and known-hosts
+files with strict host verification, and allowlists only public-key
+authentication. Batch and identity-only operation are required; ambient agent,
+keyboard-interactive, challenge-response, host-based, and GSSAPI authentication
+are disabled, as are forwarding, tunnels, multiplexing, proxy commands, and
+proxy jumps.
+
+Remote `preflight` and `prepare` receipts precede the single Local API
+bootstrap POST. The factual session is fsynced locally before remote config,
+arm, and same-digest Worker recreation. Pre-session failure restores through
+remote `abort`; post-session failure preserves the session and stopped/barrier
+Worker. Continuation reuses the same protected state and never posts again.
+Ambiguous SSH mutation is reconciled only through read-only `status`, and an
+`armed` state is not blindly replayed. One runtime validator proves every
+durable phase against the current Worker profile, running and health state,
+immutable digest, exact container, barrier config and marker, and unchanged
+Cloud/PostgreSQL/reverse-proxy container identities. Proven remote restart or
+restore completion can be adopted after failed local protected-state
+publication without another mutation or bootstrap POST. Staging receives no
+Local API, second-factor, PAT, secret, Agent key, or bootstrap-body material.
 
 R5-017D2 closes the three follow-up blockers. Barrier config generation keeps
 the production staging `cloud_url` but sets `production: false` and
@@ -69,17 +133,21 @@ uses the release helper's dedicated `barrier-replay` operation and accepts only
 an exact `reached` marker with `process_id`. `--barrier-restore` uses the base
 Compose profile through the dedicated helper, without pull, `.env` mutation, or
 binding backup, and proves replacement, binding, RepoDigest, Worker health, and
-Cloud health. Prepare failure cleanup restores first, then disarms only an
-exact `armed` marker and removes only a matching private generated config;
-reached/consumed/completed state is preserved and every restoration/cleanup
-failure is separately reported nonzero. The source tests use fake tools that
-assert Compose argument ordering and canonical helper invocation.
+Cloud health. The remote executor reuses the existing release and barrier
+helpers, so there is no second Worker deployment implementation or local
+fallback. Reached/consumed/completed evidence remains forensic state; normal
+restoration is allowed only after completed evidence or a proved pre-session
+abort. Local fake-SSH/Docker tests cover exact Git-object execution,
+working-tree canary isolation, endpoint/hostname separation, every factual
+runtime phase, contradictory state rejection, exact ambiguous reconciliation,
+local-state adoption, continuation, replay, and restore.
 
 The discovered live rollback target remains
 `ghcr.io/huutawn/opsi-bootstrap-worker@sha256:220d3ecc7dba018871707fc57612b3730259fd90b23dfde454a3299759167cff`
 at Worker revision `0669bb5`. No image was published, no staging service was
-recreated, and no Agent VPS was accessed or mutated by R5-017C or R5-017D1.
-Source gates pass; live publish, deploy, and Agent/VPS retry remain pending.
+recreated, and no Agent VPS was accessed or mutated by this correction. The new
+source revision requires aligned Cloud, Worker, and Agent republication before
+a new Run 1. R5-017, release readiness, and production readiness are unclaimed.
 
 R5-015 Agent-local Kubernetes identity is the exact `opsi.dev/service`
 ServiceKey. Opsi-managed Pods without a valid canonical service label are
@@ -118,7 +186,7 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-08-01 |
+| Last updated | 2026-08-03 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |

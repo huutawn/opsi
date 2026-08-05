@@ -36,6 +36,9 @@ const (
 	NodeOffline         = "offline"
 	NodeDraining        = "draining"
 	NodeRemoved         = "removed"
+	nodeOfflineScope    = "node-offline:v1:"
+	nodeOfflineCode     = "OPERATOR_CONFIRMED_TARGET_RESET"
+	nodeOfflineMessage  = "operator confirmed target reset; record is offline"
 
 	NodeLifecycleRequested   = "requested"
 	NodeLifecycleAccepted    = "accepted"
@@ -647,7 +650,7 @@ type API interface {
 	RevokeAgent(projectID, agentID string) (Agent, error)
 	DrainNode(projectID, nodeID string) (Node, error)
 	RemoveNode(projectID, nodeID string, force bool) (Node, error)
-	MarkNodeOffline(projectID, nodeID string) (Node, error)
+	MarkNodeOffline(projectID, nodeID, actorUserID, key, requestID string) (Node, bool, error)
 	RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error)
 	LeaseNodeLifecycle(projectID, nodeID string) (NodeLifecycleLease, bool, error)
 	CompleteNodeLifecycle(projectID, nodeID, jobID, requestID string, result NodeLifecycleResult) (NodeLifecycleJob, error)
@@ -1074,24 +1077,48 @@ func (s *Service) RemoveNode(projectID, nodeID string, force bool) (Node, error)
 
 // MarkNodeOffline records an operator-confirmed target reset without claiming
 // that Agent/Kubernetes removal was performed through the old Agent.
-func (s *Service) MarkNodeOffline(projectID, nodeID string) (Node, error) {
+func (s *Service) MarkNodeOffline(projectID, nodeID, actorUserID, key, requestID string) (Node, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !validDeploymentIdempotencyKey(key) {
+		return Node{}, false, APIError{Status: 400, Code: "IDEMPOTENCY_KEY_INVALID", Message: "node retirement idempotency key is invalid", RequestID: requestID}
+	}
+	if actorUserID == "" {
+		return Node{}, false, APIError{Status: 403, Code: "PERMISSION_DENIED", Message: "authenticated principal user ID is required", RequestID: requestID}
+	}
+	binding := nodeOfflineScope + projectID + ":" + key
+	if existing, ok := s.idempotency[binding].(string); ok {
+		if existing != nodeID {
+			return Node{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used for another node retirement", RequestID: requestID}
+		}
+		node, ok := s.nodes[nodeID]
+		if !ok || node.ProjectID != projectID {
+			return Node{}, false, ErrNotFound
+		}
+		return node, true, nil
+	}
 	node, ok := s.nodes[nodeID]
 	if !ok || node.ProjectID != projectID {
-		return Node{}, ErrNotFound
+		return Node{}, false, ErrNotFound
 	}
 	now := s.clock()
-	node.Status = NodeOffline
-	node.FailureCode = "OPERATOR_CONFIRMED_TARGET_RESET"
-	node.FailureMessageRedacted = "operator confirmed target reset; record is offline"
-	node.UpdatedAt = now
-	s.nodes[node.ID] = node
+	changed := false
+	if node.Status != NodeOffline || node.FailureCode != nodeOfflineCode || node.FailureMessageRedacted != nodeOfflineMessage {
+		node.Status = NodeOffline
+		node.FailureCode = nodeOfflineCode
+		node.FailureMessageRedacted = nodeOfflineMessage
+		node.UpdatedAt = now
+		s.nodes[node.ID] = node
+		changed = true
+	}
 	if node.AgentID != "" {
 		agent := s.agents[node.AgentID]
-		agent.Status = "revoked"
-		agent.UpdatedAt = now
-		s.agents[agent.ID] = agent
+		if agent.ID != "" && agent.Status != "revoked" {
+			agent.Status = "revoked"
+			agent.UpdatedAt = now
+			s.agents[agent.ID] = agent
+			changed = true
+		}
 	}
 	runtime := s.runtimes[node.RuntimeID]
 	if runtime.ServerNodeID == node.ID {
@@ -1099,9 +1126,22 @@ func (s *Service) MarkNodeOffline(projectID, nodeID string) (Node, error) {
 		runtime.Status = RuntimeNoNodes
 		runtime.UpdatedAt = now
 		s.runtimes[runtime.ID] = runtime
+		changed = true
 	}
-	s.refreshProjectLocked(projectID)
-	return node, nil
+	project := s.projects[projectID]
+	status := s.projectStatusLocked(projectID)
+	if project.Status != status {
+		project.Status = status
+		project.UpdatedAt = now
+		s.projects[projectID] = project
+		changed = true
+	}
+	s.idempotency[binding] = nodeID
+	if changed {
+		actorType, actorUserID := machineAuditActor(actorUserID)
+		s.audit = append(s.audit, AuditEvent{ID: newID("aud"), OrgID: node.OrgID, ProjectID: projectID, ActorUserID: actorUserID, ActorType: actorType, Action: "NODE_MARKED_OFFLINE", ResourceType: "node", ResourceID: node.ID, Result: "success", MetadataRedacted: RedactMap(map[string]any{"reason": "operator_confirmed_target_reset", "request_id": boundedAuditRequestID(requestID)}), CreatedAt: now})
+	}
+	return node, false, nil
 }
 
 func (s *Service) RequestNodeLifecycle(projectID, targetNodeID, action, requestedBy, key, requestID string, confirmRemove, force bool) (NodeLifecycleJob, error) {
@@ -1528,7 +1568,7 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	}
 	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: environmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
 	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
-	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID)
+	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.NodeID, job.AgentID)
 	var exposure *exposurev1.ExposureSpec
 	if snapshot.Preview != nil {
 		exposure, err = previewExposureForDeployment(job, snapshot.Preview)
@@ -2081,6 +2121,13 @@ func validDeploymentIdempotencyKey(value string) bool {
 	return true
 }
 
+func boundedAuditRequestID(value string) string {
+	if len(value) > 128 {
+		return value[:128]
+	}
+	return value
+}
+
 func deploymentRetryBackoff(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
@@ -2329,6 +2376,15 @@ func (s *Service) readinessLocked(projectID string) (Readiness, error) {
 
 func (s *Service) refreshProjectLocked(projectID string) string {
 	project := s.projects[projectID]
+	status := s.projectStatusLocked(projectID)
+	project.Status = status
+	project.UpdatedAt = s.clock()
+	s.projects[projectID] = project
+	return status
+}
+
+func (s *Service) projectStatusLocked(projectID string) string {
+	project := s.projects[projectID]
 	status := ProjectNoNodes
 	for _, session := range s.bootstraps {
 		if session.ProjectID == projectID && isActiveBootstrap(session.Status) {
@@ -2345,9 +2401,6 @@ func (s *Service) refreshProjectLocked(projectID string) string {
 	if project.Status == "archived" {
 		status = "archived"
 	}
-	project.Status = status
-	project.UpdatedAt = s.clock()
-	s.projects[projectID] = project
 	return status
 }
 

@@ -292,7 +292,16 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		if !requireWriteHeaders(w, r) {
 			return
 		}
+		key := r.Header.Get("Idempotency-Key")
+		if !validDeploymentIdempotencyKey(key) {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "IDEMPOTENCY_KEY_INVALID", Message: "Idempotency-Key must be 1-128 printable characters without whitespace", RequestID: r.Header.Get("X-Request-ID")})
+			return
+		}
 		if !s.requireRole(w, r, principal, projectID, "node", parts[3], "owner", "admin") {
+			return
+		}
+		if principal.UserID == "" {
+			writeRegistryError(w, registry.APIError{Status: http.StatusForbidden, Code: "PERMISSION_DENIED", Message: "authenticated principal user ID is required", RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
 		var req struct {
@@ -305,10 +314,7 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "TARGET_RESET_CONFIRMATION_REQUIRED", Message: "confirm_target_reset=true is required", RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
-		value, err := s.Registry.MarkNodeOffline(projectID, parts[3])
-		if err == nil {
-			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "NODE_MARKED_OFFLINE", "node", value.ID, "success", map[string]any{"reason": "operator_confirmed_target_reset"})
-		}
+		value, _, err := s.Registry.MarkNodeOffline(projectID, parts[3], principal.UserID, key, r.Header.Get("X-Request-ID"))
 		writeRegistryResult(w, r, value, err, http.StatusOK)
 		return
 	}

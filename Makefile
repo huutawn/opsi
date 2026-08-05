@@ -30,6 +30,7 @@ verify-r5-005-github-app-preflight:
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify_r5_005_github_app_preflight_test.py
 
 verify-bootstrap-worker-release:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/control-plane-release-test.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/bootstrap-worker-release-test.py
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOWORK=off GOTOOLCHAIN=$(GOTOOLCHAIN) go list -mod=readonly -deps \
 	  ./cmd/opsi-cloud ./cmd/opsi-bootstrap-worker >/dev/null
@@ -67,6 +68,7 @@ verify-e2e-k3s:
 	$(RUN) ./scripts/e2e/verify-k3s.sh
 
 verify-e2e-k3s-selfcheck:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/e2e/second_factor_handoff_test.py
 	$(RUN) ./scripts/e2e/verify-k3s.sh --self-test
 	@if rg -n 'OPSI_E2E_APPROVE_MITIGATION|incidents/.*/analyze|incidents/.*/actions/.*/approve|recommended_actions|action_hash' scripts/e2e/verify-k3s.sh; then echo "stale incident RCA/approval E2E dependency found"; exit 1; fi
 
@@ -123,9 +125,10 @@ verify-cli-release: build-cli-release
 	test -f "$$prefix/opsi-ui/index.html"
 
 agent-release:
-	$(RUN) env AGENT_VERSION="$(AGENT_VERSION)" AGENT_COMMIT="$(AGENT_COMMIT)" OUT_DIR="$(AGENT_RELEASE_DIR)" GOCACHE="$(GOCACHE)" GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/build-agent-release.sh
+	$(RUN) env GOCACHE="$(GOCACHE)" GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/build-agent-release.sh "$(AGENT_COMMIT)" "$(AGENT_RELEASE_DIR)"
 
 verify-agent-release:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/agent-release-test.py
 	$(RUN) env GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/verify-agent-release.sh
 
 ui-build:
@@ -144,7 +147,7 @@ lint:
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 	cd contracts/go && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go vet ./...
 
-source-hygiene: verify-source-package-policy verify-bootstrap-worker-release
+source-hygiene: verify-source-package-policy verify-bootstrap-worker-release verify-agent-release
 	$(RUN) ./scripts/source-package.sh check-tree
 	@if sed -n '/func (s \*Service) expireDeploymentLeasesLocked/,/^}/p' cloud/internal/registry/service.go | rg -n 'delete\(s\.deployLocks'; then echo "canonical lease exhaustion deletes service ownership"; exit 1; fi
 	@if sed -n '/func expireDeploymentLeases(/,/^}/p' cloud/internal/registry/postgres.go | rg -n 'DELETE FROM service_deployment_locks'; then echo "Postgres canonical lease exhaustion deletes service ownership"; exit 1; fi

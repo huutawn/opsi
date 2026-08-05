@@ -29,31 +29,56 @@ HOST_KEY_SHA256="${OPSI_E2E_VPS_HOST_KEY_SHA256:-}"
 PUBLIC_HOSTNAME="${OPSI_E2E_PUBLIC_HOSTNAME:-}"
 PUBLIC_PORT="${OPSI_E2E_PUBLIC_PORT:-80}"
 SECRET_NAME="${OPSI_E2E_SECRET_NAME:-opsi-e2e-secret}"
-TOTP_CODE="${OPSI_E2E_TOTP_CODE:-}"
-OTP_REQUEST_ID="${OPSI_E2E_OTP_REQUEST_ID:-}"
-OTP_CODE="${OPSI_E2E_OTP_CODE:-}"
-APP_SECRET_VALUE="${OPSI_E2E_APP_SECRET_VALUE:-e2e-secret-value-$RUN_ID}"
+SECOND_FACTOR_DIR="${OPSI_E2E_SECOND_FACTOR_DIR:-}"
+SECOND_FACTOR_TIMEOUT="${OPSI_E2E_SECOND_FACTOR_TIMEOUT:-60}"
 POLL_SECONDS="${OPSI_E2E_POLL_SECONDS:-900}"
-COMPOSE_DIRECTORY="${OPSI_E2E_STAGING_COMPOSE_DIRECTORY:-$ROOT/deploy/staging-control-plane}"
 WORKER_DIGEST="${OPSI_E2E_BOOTSTRAP_WORKER_DIGEST:-}"
-BARRIER_HELPER="$ROOT/scripts/e2e/bootstrap-worker-barrier.sh"
-RELEASE_HELPER="$ROOT/scripts/bootstrap-worker-release.py"
-BARRIER_ATTEMPT_SESSION=""
-BARRIER_ATTEMPT_RUN=""
-BARRIER_CONFIG_PATH=""
+STAGING_HOST="${OPSI_E2E_STAGING_HOST:-}"
+STAGING_EXPECTED_HOSTNAME="${OPSI_E2E_STAGING_EXPECTED_HOSTNAME:-}"
+STAGING_SSH_PORT="${OPSI_E2E_STAGING_SSH_PORT:-}"
+STAGING_SSH_USER="${OPSI_E2E_STAGING_SSH_USER:-}"
+STAGING_SSH_KEY_PATH="${OPSI_E2E_STAGING_SSH_KEY_PATH:-}"
+STAGING_KNOWN_HOSTS_PATH="${OPSI_E2E_STAGING_KNOWN_HOSTS_PATH:-}"
+STAGING_HOST_KEY_SHA256="${OPSI_E2E_STAGING_HOST_KEY_SHA256:-}"
+STAGING_REPOSITORY_DIRECTORY="${OPSI_E2E_STAGING_REPOSITORY_DIRECTORY:-}"
+STAGING_COMPOSE_DIRECTORY="${OPSI_E2E_STAGING_COMPOSE_DIRECTORY:-}"
+SOURCE_REVISION="${OPSI_E2E_SOURCE_REVISION:-}"
+STAGING_REPOSITORY_IDENTITY=""
+STAGING_HELPER_BLOB=""
+STAGING_RECEIPT_FILE=""
+STAGING_SSH_EXIT=0
+SECOND_FACTOR_HELPER="$ROOT/scripts/e2e/second_factor_handoff.py"
 BARRIER_STATE_FILE=""
-BARRIER_FORENSIC_PRESERVE=0
 KNOWN_HOSTS_FILE=""
 BOOTSTRAP_REQUEST_FILE=""
 SELF_TEST_DIR=""
+PRIVATE_TEMP_DIR=""
+REDACTION_VALUES_FILE=""
+ROTATE_FACTOR_REQUEST=""
+REVEAL_FACTOR_REQUEST=""
+PAIRED_TOTP_REQUEST=""
+SECOND_FACTOR_METADATA=""
 
 cleanup_temps() {
   [ -z "$BOOTSTRAP_REQUEST_FILE" ] || rm -f -- "$BOOTSTRAP_REQUEST_FILE"
   [ -z "$KNOWN_HOSTS_FILE" ] || rm -f -- "$KNOWN_HOSTS_FILE"
   [ -z "$SELF_TEST_DIR" ] || rm -rf -- "$SELF_TEST_DIR"
+  [ -z "$PRIVATE_TEMP_DIR" ] || rm -rf -- "$PRIVATE_TEMP_DIR"
 }
 
 trap cleanup_temps EXIT
+
+init_private_temp() {
+  [ -n "$PRIVATE_TEMP_DIR" ] && return 0
+  PRIVATE_TEMP_DIR="$(mktemp -d)"
+  chmod 700 "$PRIVATE_TEMP_DIR"
+  REDACTION_VALUES_FILE="$PRIVATE_TEMP_DIR/redaction-values"
+  : > "$REDACTION_VALUES_FILE"
+  chmod 600 "$REDACTION_VALUES_FILE"
+  ROTATE_FACTOR_REQUEST="$PRIVATE_TEMP_DIR/rotate-request.json"
+  REVEAL_FACTOR_REQUEST="$PRIVATE_TEMP_DIR/reveal-request.json"
+  PAIRED_TOTP_REQUEST="$PRIVATE_TEMP_DIR/paired-totp-reveal.json"
+}
 
 usage() {
   cat <<'EOF'
@@ -82,12 +107,25 @@ Required env for full run:
   OPSI_E2E_MEMORY_REQUEST
   OPSI_E2E_CPU_LIMIT
   OPSI_E2E_MEMORY_LIMIT
-  OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE
+  OPSI_E2E_SECOND_FACTOR_DIR
   OPSI_E2E_PUBLIC_HOSTNAME
+
+Required additional env for barrier modes:
+  OPSI_E2E_BOOTSTRAP_WORKER_DIGEST
+  OPSI_E2E_STAGING_HOST
+  OPSI_E2E_STAGING_EXPECTED_HOSTNAME
+  OPSI_E2E_STAGING_SSH_PORT
+  OPSI_E2E_STAGING_SSH_USER
+  OPSI_E2E_STAGING_SSH_KEY_PATH
+  OPSI_E2E_STAGING_KNOWN_HOSTS_PATH
+  OPSI_E2E_STAGING_HOST_KEY_SHA256
+  OPSI_E2E_STAGING_REPOSITORY_DIRECTORY
+  OPSI_E2E_STAGING_COMPOSE_DIRECTORY
+  OPSI_E2E_SOURCE_REVISION
 
   The local URL must be the CLI local backend. Immutable BuildRecords and
   topology/policy authority are resolved by Cloud; this script supplies no
-  source, manifest, digest, or caller identity.
+  source, manifest, digest, caller identity, or second-factor content.
 EOF
 }
 
@@ -103,18 +141,7 @@ fail() {
 }
 
 redact() {
-  python3 -c 'import re, sys
-secrets = [s for s in sys.argv[1:] if s]
-data = sys.stdin.read()
-for s in secrets:
-    data = data.replace(s, "[REDACTED]")
-patterns = [
-    r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\",}]+",
-    r"(?i)((token|agent_token|registration_token|pat|private_key|kubeconfig|app_secret|otp_code|totp_code)\s*[\"=:]+\s*)(\"[^\"]*\"|[^,\s}]+)",
-]
-for pat in patterns:
-    data = re.sub(pat, lambda m: m.group(1) + "[REDACTED]", data)
-sys.stdout.write(data)' "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE"
+  python3 "$SECOND_FACTOR_HELPER" redact --redaction-values "$REDACTION_VALUES_FILE"
 }
 
 json_get() {
@@ -244,9 +271,8 @@ preflight() {
   done
   need_env OPSI_E2E_VPS_SSH_USER
   need_env OPSI_E2E_PUBLIC_HOSTNAME
-  if [ -z "$TOTP_CODE" ] && { [ -z "$OTP_REQUEST_ID" ] || [ -z "$OTP_CODE" ]; }; then
-    fail "missing second factor: set OPSI_E2E_TOTP_CODE or OPSI_E2E_OTP_REQUEST_ID + OPSI_E2E_OTP_CODE"
-  fi
+  need_env OPSI_E2E_SECOND_FACTOR_DIR
+  python3 "$SECOND_FACTOR_HELPER" preflight --directory "$SECOND_FACTOR_DIR" --timeout "$SECOND_FACTOR_TIMEOUT" >/dev/null || fail "second-factor handoff readiness validation failed"
   validate_ssh_key_path || fail "OPSI_E2E_SSH_KEY_PATH failed protected private-key validation"
   pin_host_identity || fail "SSH host-key fingerprint pinning failed"
   curl -fsS "$LOCAL_URL/health" >/dev/null || fail "local backend unavailable at OPSI_E2E_LOCAL_URL"
@@ -262,10 +288,37 @@ session_token() {
 }
 
 api_file() {
-  local method="$1" path="$2" body_file="$3" label="$4" write="${5:-0}"
-  local out status headers=(-H "content-type: application/json" -H "X-Request-ID: $RUN_ID-$label")
+  local method="$1" path="$2" body_file="$3" label="$4" write="${5:-0}" secret_response="${6:-0}"
+  local out status response_headers headers=(-H "content-type: application/json" -H "X-Request-ID: $RUN_ID-$label")
   if [ "$write" = "1" ]; then
     headers+=(-H "Idempotency-Key: $RUN_ID-$label" -H "X-Local-Session: $LOCAL_SESSION")
+  fi
+  if [ "$secret_response" = "1" ]; then
+    response_headers="$PRIVATE_TEMP_DIR/$label.headers"
+    : > "$response_headers"
+    chmod 600 "$response_headers"
+    if [ "$body_file" = "-" ]; then
+      if ! curl -sS -D "$response_headers" -X "$method" "${headers[@]}" "$LOCAL_URL$path" |
+        python3 "$SECOND_FACTOR_HELPER" redact-secret-response --redaction-values "$REDACTION_VALUES_FILE" > "$ARTIFACT_DIR/$label.redacted.json"; then
+        rm -f -- "$response_headers" "$ARTIFACT_DIR/$label.redacted.json"
+        return 1
+      fi
+    else
+      if ! curl -sS -D "$response_headers" -X "$method" "${headers[@]}" --data-binary "@$body_file" "$LOCAL_URL$path" |
+        python3 "$SECOND_FACTOR_HELPER" redact-secret-response --redaction-values "$REDACTION_VALUES_FILE" > "$ARTIFACT_DIR/$label.redacted.json"; then
+        rm -f -- "$response_headers" "$ARTIFACT_DIR/$label.redacted.json"
+        return 1
+      fi
+    fi
+    status="$(awk '/^HTTP\// { status=$2 } END { print status }' "$response_headers")"
+    rm -f -- "$response_headers"
+    [[ "$status" =~ ^[0-9]{3}$ ]] || status="000"
+    if [ "${status#2}" = "$status" ]; then
+      log "api $label failed status=$status body=$(tr '\n' ' ' < "$ARTIFACT_DIR/$label.redacted.json")"
+      return 1
+    fi
+    cat "$ARTIFACT_DIR/$label.redacted.json"
+    return 0
   fi
   out="$(mktemp)"
   if [ "$body_file" = "-" ]; then
@@ -281,6 +334,29 @@ api_file() {
   fi
   cat "$out"
   rm -f "$out"
+}
+
+bootstrap_session_post() {
+  local request_file="$1" out status curl_status
+  out="$(mktemp)"
+  set +e
+  status="$(curl -sS -o "$out" -w '%{http_code}' -X POST \
+    -H 'content-type: application/json' -H "X-Request-ID: $RUN_ID-bootstrap" \
+    -H "Idempotency-Key: $RUN_ID-bootstrap" -H "X-Local-Session: $LOCAL_SESSION" \
+    --data-binary "@$request_file" "$LOCAL_URL/api/local/projects/$PROJECT_ID/nodes/bootstrap")"
+  curl_status=$?
+  set -e
+  redact < "$out" > "$ARTIFACT_DIR/bootstrap.redacted.json"
+  if [ "$curl_status" -ne 0 ]; then
+    rm -f -- "$out"
+    return 2
+  fi
+  if [[ ! "$status" =~ ^2[0-9]{2}$ ]]; then
+    rm -f -- "$out"
+    return 1
+  fi
+  cat "$out"
+  rm -f -- "$out"
 }
 
 write_json() {
@@ -355,10 +431,6 @@ elif kind == "exposure":
         data["expected_state_hash"] = e["OPSI_E2E_EXPOSURE_STATE_HASH"]
 elif kind == "secret":
     data = {"service_id":e["OPSI_E2E_SERVICE_ID"],"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default"}
-elif kind == "second_factor":
-    data = {"service_id":e["OPSI_E2E_SERVICE_ID"],"name":e.get("OPSI_E2E_SECRET_NAME","opsi-e2e-secret"),"namespace":"default","reveal":True}
-    if e.get("OPSI_E2E_TOTP_CODE"): data["totp_code"] = e["OPSI_E2E_TOTP_CODE"]
-    else: data.update({"otp_request_id":e["OPSI_E2E_OTP_REQUEST_ID"],"otp_code":e["OPSI_E2E_OTP_CODE"]})
 elif kind == "incident_resolve":
     data = {}
 else:
@@ -605,138 +677,409 @@ for expected in ("failed", "rolling_back", "rolled_back"):
 }
 
 check_artifacts_clean() {
-  python3 - "$ARTIFACT_DIR" "$APP_SECRET_VALUE" "$TOTP_CODE" "$OTP_CODE" <<'PY'
-import pathlib, re, sys
-root = pathlib.Path(sys.argv[1])
-secrets = [s for s in sys.argv[2:] if s]
-for path in root.rglob("*"):
-    if not path.is_file():
-        continue
-    text = path.read_text(errors="ignore")
-    if re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", text):
-        print(path)
-        raise SystemExit(1)
-    for secret in secrets:
-        if secret and secret in text:
-            print(path)
-            raise SystemExit(1)
-PY
+  python3 "$SECOND_FACTOR_HELPER" scan --artifact-directory "$ARTIFACT_DIR" --redaction-values "$REDACTION_VALUES_FILE"
+}
+
+consume_second_factor() {
+  local operation="$1" reject_fingerprint="${2:-}" output paired_args=()
+  case "$operation" in
+    rotate)
+      output="$ROTATE_FACTOR_REQUEST"
+      paired_args=(--paired-output "$PAIRED_TOTP_REQUEST")
+      ;;
+    reveal) output="$REVEAL_FACTOR_REQUEST" ;;
+    *) return 1 ;;
+  esac
+  rm -f -- "$output"
+  [ "$operation" != rotate ] || rm -f -- "$PAIRED_TOTP_REQUEST"
+  SECOND_FACTOR_METADATA="$(python3 "$SECOND_FACTOR_HELPER" consume \
+    --directory "$SECOND_FACTOR_DIR" --operation "$operation" --timeout "$SECOND_FACTOR_TIMEOUT" \
+    --output "$output" "${paired_args[@]}" --redaction-values "$REDACTION_VALUES_FILE" \
+    --service-id "$OPSI_E2E_SERVICE_ID" --secret-name "$SECRET_NAME" \
+    --reject-fingerprint "$reject_fingerprint")"
 }
 
 remote_k3s() {
   ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS_FILE" -o ConnectTimeout=20 -i "$OPSI_E2E_SSH_KEY_PATH" -p "$TARGET_SSH_PORT" "$TARGET_SSH_USER@$TARGET_HOST" "$@"
 }
 
-compose_worker() {
-  docker compose --project-name opsi-staging --project-directory "$COMPOSE_DIRECTORY" \
-    --env-file "$COMPOSE_DIRECTORY/.env" -f "$COMPOSE_DIRECTORY/compose.yaml" "$@"
+validate_staging_transport() {
+  python3 - "$STAGING_HOST" "$STAGING_EXPECTED_HOSTNAME" "$STAGING_SSH_PORT" "$STAGING_SSH_USER" \
+    "$STAGING_SSH_KEY_PATH" "$STAGING_KNOWN_HOSTS_PATH" "$STAGING_HOST_KEY_SHA256" \
+    "$STAGING_REPOSITORY_DIRECTORY" "$STAGING_COMPOSE_DIRECTORY" "$SOURCE_REVISION" \
+    "$RUN_ID" "$OPSI_E2E_SSH_KEY_PATH" "$ROOT" <<'PY' || return 1
+import ipaddress, os, pathlib, re, stat, subprocess, sys
+
+endpoint, hostname, port, user, key_raw, known_raw, fingerprint, repo, compose, revision, run_id, agent_key, root = sys.argv[1:]
+identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+host_label = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+safe_user = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,63}$")
+safe_path = re.compile(r"^/[A-Za-z0-9._/-]{1,1023}$")
+def valid_hostname(value):
+    return isinstance(value, str) and 1 <= len(value) <= 253 and not value.endswith(".") and all(host_label.fullmatch(label) for label in value.split("."))
+def valid_endpoint(value):
+    if not isinstance(value, str) or any(ord(char) < 33 or ord(char) == 127 for char in value): return False
+    try: return ipaddress.ip_address(value).version == 4
+    except ValueError: return False if re.fullmatch(r"[0-9.]+", value) else valid_hostname(value)
+if not valid_endpoint(endpoint) or not valid_hostname(hostname) or not safe_user.fullmatch(user): raise SystemExit("staging endpoint, hostname, or user is invalid")
+if not port.isdigit() or not 1 <= int(port) <= 65535: raise SystemExit("staging port is invalid")
+if not identifier.fullmatch(run_id): raise SystemExit("staging run ID is invalid")
+if not re.fullmatch(r"[0-9a-f]{40}", revision): raise SystemExit("staging revision is invalid")
+if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}=?", fingerprint): raise SystemExit("staging fingerprint is invalid")
+for value, label in ((repo, "repository"), (compose, "Compose")):
+    path = pathlib.PurePosixPath(value)
+    if not safe_path.fullmatch(value) or ".." in path.parts or str(path) != os.path.normpath(value):
+        raise SystemExit(f"staging {label} path is invalid")
+if compose != repo + "/deploy/staging-control-plane": raise SystemExit("staging Compose path is not canonical")
+
+def protected(raw, label, maximum, exact_mode=None):
+    if not 1 <= len(raw) <= 1024 or any(ord(char) < 32 or ord(char) == 127 for char in raw):
+        raise SystemExit(f"{label} path is invalid")
+    path = pathlib.Path(raw)
+    if not path.is_absolute() or str(path) != os.path.normpath(raw): raise SystemExit(f"{label} path is invalid")
+    current = pathlib.Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode): raise SystemExit(f"{label} path contains a symlink")
+    info = path.lstat()
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid(): raise SystemExit(f"{label} is not an owned regular file")
+    if mode & 0o077 or (exact_mode is not None and mode != exact_mode): raise SystemExit(f"{label} permissions are not private")
+    if not 1 <= info.st_size <= maximum: raise SystemExit(f"{label} size is invalid")
+    return path
+
+key = protected(key_raw, "staging key", 1024 * 1024)
+known = protected(known_raw, "staging known_hosts", 16384, 0o600)
+if agent_key and os.path.realpath(key) == os.path.realpath(agent_key): raise SystemExit("staging and Agent keys must be separate")
+begin = b"-----BEGIN "
+markers = tuple(begin + kind + b"-----" for kind in (
+    b"OPENSSH PRIVATE KEY", b"PRIVATE KEY", b"ENCRYPTED PRIVATE KEY",
+    b"RSA PRIVATE KEY", b"EC PRIVATE KEY", b"DSA PRIVATE KEY",
+))
+if not any(marker in key.read_bytes() for marker in markers): raise SystemExit("staging key marker is invalid")
+lines = [line for line in known.read_text(encoding="utf-8").splitlines() if line]
+expected_host = endpoint if port == "22" else f"[{endpoint}]:{port}"
+if len(lines) != 1 or len(lines[0].split()) != 3 or lines[0].split()[0] != expected_host:
+    raise SystemExit("staging known_hosts must contain exactly one matching entry")
+checked = subprocess.run(["ssh-keygen", "-lf", str(known), "-E", "sha256"], text=True, capture_output=True, env={"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"})
+parts = checked.stdout.split()
+if checked.returncode or checked.stderr or len(parts) < 2 or parts[1] != fingerprint:
+    raise SystemExit("staging host fingerprint mismatch")
+head = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], text=True, capture_output=True, env={"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"})
+if head.returncode or head.stderr or head.stdout.strip() != revision: raise SystemExit("operator source revision mismatch")
+for arguments in (("diff","--quiet","--exit-code"), ("diff","--cached","--quiet","--exit-code")):
+    clean = subprocess.run(["git", "-C", root, *arguments], text=True, capture_output=True, env={"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"})
+    if clean.returncode or clean.stdout or clean.stderr: raise SystemExit("operator tracked source is not clean")
+PY
+  STAGING_REPOSITORY_IDENTITY="$(git -C "$ROOT" remote get-url origin | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().rstrip("\n").encode()).hexdigest())')" || return 1
+  STAGING_HELPER_BLOB="$(git -C "$ROOT" rev-parse "$SOURCE_REVISION:scripts/e2e/staging-barrier-remote.sh")" || return 1
+  [[ "$STAGING_REPOSITORY_IDENTITY" =~ ^[0-9a-f]{64}$ && "$STAGING_HELPER_BLOB" =~ ^[0-9a-f]{40}$ ]]
 }
 
-single_worker_id() {
-  local include_stopped="$1" output
-  if [ "$include_stopped" = 1 ]; then
-    output="$(compose_worker ps -a -q bootstrap-worker)" || return 1
-  else
-    output="$(compose_worker ps -q bootstrap-worker)" || return 1
+make_staging_request() {
+  python3 - "$1" "$2" "$3" "$SOURCE_REVISION" "$RUN_ID" "$STAGING_HOST" "$STAGING_EXPECTED_HOSTNAME" \
+    "$STAGING_REPOSITORY_DIRECTORY" "$STAGING_REPOSITORY_IDENTITY" "$STAGING_COMPOSE_DIRECTORY" "$STAGING_HELPER_BLOB" "$WORKER_DIGEST" <<'PY'
+import json, sys
+phase, expected, session, revision, run_id, endpoint, hostname, repository, identity, compose, helper, digest = sys.argv[1:]
+print(json.dumps({
+    "schema_version":"opsi.e2e.staging-barrier-request/v2", "phase":phase,
+    "source_revision":revision, "run_id":run_id, "staging_endpoint":endpoint,
+    "staging_hostname":hostname,
+    "repository_directory":repository, "repository_identity":identity,
+    "compose_directory":compose, "expected_helper_blob":helper, "worker_digest":digest,
+    "session_id":session, "expected_state":expected,
+}, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+validate_staging_receipt() {
+  python3 - "$1" "$2" "$3" "$SOURCE_REVISION" "$RUN_ID" "$STAGING_HOST" "$STAGING_EXPECTED_HOSTNAME" \
+    "$STAGING_REPOSITORY_DIRECTORY" "$STAGING_REPOSITORY_IDENTITY" "$STAGING_COMPOSE_DIRECTORY" \
+    "$STAGING_HELPER_BLOB" "$WORKER_DIGEST" <<'PY'
+import datetime, json, re, sys
+path, phase, session, revision, run_id, endpoint, hostname, repository, identity, compose, helper, digest = sys.argv[1:]
+raw = open(path, "rb").read(4097)
+if not 1 <= len(raw) <= 4096: raise SystemExit("staging receipt size is invalid")
+def pairs(values):
+    result = {}
+    for key, value in values:
+        if key in result: raise ValueError("duplicate field")
+        result[key] = value
+    return result
+try: data = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+except (UnicodeDecodeError, json.JSONDecodeError, ValueError): raise SystemExit("staging receipt is malformed")
+keys = {"schema_version","source_revision","run_id","phase","staging_endpoint","staging_hostname","repository_directory","repository_identity","compose_directory","expected_helper_blob","executed_helper_blob","state_before","state_after","worker_digest","session_id","worker_container_before","worker_container_after","worker_profile","worker_running","worker_health","dependency_containers","marker_state","result","timestamp"}
+if not isinstance(data, dict) or set(data) != keys: raise SystemExit("staging receipt schema is invalid")
+expected = {"schema_version":"opsi.e2e.staging-barrier-receipt/v2","source_revision":revision,"run_id":run_id,"phase":phase,"staging_endpoint":endpoint,"staging_hostname":hostname,"repository_directory":repository,"repository_identity":identity,"compose_directory":compose,"expected_helper_blob":helper,"executed_helper_blob":helper,"worker_digest":digest,"session_id":session}
+if any(data.get(key) != value for key, value in expected.items()): raise SystemExit("staging receipt identity mismatch")
+states = {"absent","worker_quiesced","session_created","armed","barrier_started","replay_started","normal_restored"}
+markers = {"absent","armed","reached","consumed","completed"}
+identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+if data["state_before"] not in states or data["state_after"] not in states or data["marker_state"] not in markers: raise SystemExit("staging receipt state is invalid")
+for key in ("worker_container_before","worker_container_after"):
+    if not isinstance(data[key], str) or (data[key] and not identifier.fullmatch(data[key])): raise SystemExit("staging receipt container identity is invalid")
+if not isinstance(data["result"], str) or not identifier.fullmatch(data["result"]): raise SystemExit("staging receipt result is invalid")
+if data["worker_profile"] not in {"normal","barrier"} or not isinstance(data["worker_running"], bool) or data["worker_health"] not in {"healthy","stopped"}: raise SystemExit("staging receipt Worker runtime is invalid")
+dependencies = data["dependency_containers"]
+if not isinstance(dependencies, dict) or set(dependencies) != {"cloud","postgres","reverse-proxy"} or any(not isinstance(value, str) or not identifier.fullmatch(value) for value in dependencies.values()): raise SystemExit("staging receipt dependency identity is invalid")
+try: timestamp = datetime.datetime.fromisoformat(data["timestamp"].replace("Z", "+00:00"))
+except (AttributeError, ValueError): raise SystemExit("staging receipt timestamp is invalid")
+if timestamp.tzinfo is None or timestamp.utcoffset() != datetime.timedelta(0): raise SystemExit("staging receipt timestamp is invalid")
+transition = (data["state_before"], data["state_after"], data["result"])
+allowed = {
+    "preflight": {("absent","absent","preflight-ok")},
+    "prepare": {("absent","worker_quiesced","worker-quiesced")},
+    "start": {("worker_quiesced","barrier_started","barrier-started"), ("session_created","barrier_started","barrier-started")},
+    "restart": {("barrier_started","replay_started","replay-started")},
+    "restore": {("replay_started","normal_restored","normal-restored")},
+    "abort": {("worker_quiesced","absent","pre-session-aborted")},
+}
+if phase == "status":
+    if data["state_before"] != data["state_after"] or data["result"] != "status-ok": raise SystemExit("staging status receipt transition is invalid")
+elif transition not in allowed[phase]: raise SystemExit("staging receipt transition is invalid")
+if not data["worker_container_after"]: raise SystemExit("staging receipt omitted Worker identity")
+if phase in {"restart","restore","abort"} and data["worker_container_before"] == data["worker_container_after"]: raise SystemExit("staging receipt did not prove Worker replacement")
+if phase == "restore" and data["marker_state"] != "completed": raise SystemExit("staging restore receipt lacks completed marker")
+runtime = {
+    "absent": ("normal", True, "healthy", {"absent"}),
+    "worker_quiesced": ("normal", False, "stopped", {"absent"}),
+    "session_created": ("normal", False, "stopped", {"absent"}),
+    "armed": ("normal", False, "stopped", {"armed"}),
+    "barrier_started": ("barrier", True, "healthy", {"armed","reached"}),
+    "replay_started": ("barrier", True, "healthy", {"reached","consumed","completed"}),
+    "normal_restored": ("normal", True, "healthy", {"completed"}),
+}[data["state_after"]]
+if (data["worker_profile"], data["worker_running"], data["worker_health"]) != runtime[:3] or data["marker_state"] not in runtime[3]: raise SystemExit("staging receipt runtime contradicts durable state")
+print(json.dumps(data, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+make_staging_remote_command() {
+  python3 - <<'PY'
+import shlex
+STAGING_REMOTE_LAUNCHER_PY = r'''import hashlib
+import ipaddress
+import json
+import os
+import pathlib
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+
+MAX_MESSAGE = 4096
+REVISION = re.compile(r"^[0-9a-f]{40}$")
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+SAFE_PATH = re.compile(r"^/[A-Za-z0-9._/-]{1,1023}$")
+HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+ENV = {"PATH":"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","LC_ALL":"C"}
+os.umask(0o077)
+
+def interrupted(signum, _frame):
+    raise SystemExit(128 + signum)
+
+for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(handled_signal, interrupted)
+
+def fail(message):
+    print("staging barrier launcher failed: " + message, file=sys.stderr)
+    raise SystemExit(1)
+
+def pairs(values):
+    result = {}
+    for key, value in values:
+        if key in result: fail("request contains duplicate fields")
+        result[key] = value
+    return result
+
+def hostname(value):
+    return isinstance(value, str) and 1 <= len(value) <= 253 and not value.endswith(".") and all(HOST_LABEL.fullmatch(label) for label in value.split("."))
+
+def endpoint(value):
+    if not isinstance(value, str) or any(ord(char) < 33 or ord(char) == 127 for char in value): return False
+    try: return ipaddress.ip_address(value).version == 4
+    except ValueError: return False if re.fullmatch(r"[0-9.]+", value) else hostname(value)
+
+def path(value):
+    return isinstance(value, str) and SAFE_PATH.fullmatch(value) and ".." not in pathlib.PurePosixPath(value).parts and value == os.path.normpath(value)
+
+def no_symlinks(value):
+    target = pathlib.Path(value)
+    current = pathlib.Path(target.anchor)
+    for part in target.parts[1:]:
+        current /= part
+        try: info = current.lstat()
+        except OSError: fail("repository path is unavailable")
+        if stat.S_ISLNK(info.st_mode): fail("repository path contains a symlink")
+
+def run(command, label):
+    try: result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired): fail(label + " failed")
+    if result.returncode or result.stderr or len(result.stdout.encode()) > MAX_MESSAGE: fail(label + " failed")
+    return result.stdout.strip()
+
+raw = sys.stdin.buffer.read(MAX_MESSAGE + 1)
+if not 1 <= len(raw) <= MAX_MESSAGE: fail("request size is invalid")
+try: request = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+except (UnicodeDecodeError, json.JSONDecodeError): fail("request is malformed")
+keys = {"schema_version","phase","source_revision","run_id","staging_endpoint","staging_hostname","repository_directory","repository_identity","compose_directory","expected_helper_blob","worker_digest","session_id","expected_state"}
+if not isinstance(request, dict) or set(request) != keys or request.get("schema_version") != "opsi.e2e.staging-barrier-request/v2": fail("request schema is invalid")
+if not REVISION.fullmatch(request.get("source_revision", "")) or not REVISION.fullmatch(request.get("expected_helper_blob", "")): fail("source identity is invalid")
+if not endpoint(request.get("staging_endpoint")) or not hostname(request.get("staging_hostname")): fail("staging identity is invalid")
+if not path(request.get("repository_directory")) or not path(request.get("compose_directory")): fail("repository path is invalid")
+if not re.fullmatch(r"[0-9a-f]{64}", request.get("repository_identity", "")): fail("repository identity is invalid")
+if request.get("phase") not in {"preflight","prepare","start","status","restart","restore","abort"}: fail("request phase is invalid")
+if not IDENTIFIER.fullmatch(request.get("run_id", "")): fail("request run ID is invalid")
+if not isinstance(request.get("session_id"), str) or (request["session_id"] and not IDENTIFIER.fullmatch(request["session_id"])): fail("request session ID is invalid")
+if request.get("expected_state") not in {"any","absent","worker_quiesced","session_created","armed","barrier_started","replay_started","normal_restored"}: fail("request expected state is invalid")
+if (request["phase"] == "status") != (request["expected_state"] == "any"): fail("request state transition is invalid")
+if not DIGEST.fullmatch(request.get("worker_digest", "")): fail("request Worker digest is invalid")
+repository = pathlib.Path(request["repository_directory"])
+compose = pathlib.Path(request["compose_directory"])
+no_symlinks(repository)
+no_symlinks(compose)
+if compose != repository / "deploy/staging-control-plane": fail("Compose path is not canonical")
+revision = request["source_revision"]
+expected_blob = request["expected_helper_blob"]
+if run(["git","-C",str(repository),"rev-parse","HEAD"], "repository HEAD") != revision: fail("repository revision mismatch")
+run(["git","-C",str(repository),"diff","--quiet","--exit-code"], "tracked worktree check")
+run(["git","-C",str(repository),"diff","--cached","--quiet","--exit-code"], "index check")
+tracking = run(["git","-C",str(repository),"ls-files","-v","--","scripts/e2e/staging-barrier-remote.sh"], "helper tracking check")
+if tracking != "H scripts/e2e/staging-barrier-remote.sh": fail("remote helper tracking flags are unsafe")
+blob = run(["git","-C",str(repository),"rev-parse",revision + ":scripts/e2e/staging-barrier-remote.sh"], "helper blob lookup")
+if blob != expected_blob: fail("expected helper blob mismatch")
+origin = run(["git","-C",str(repository),"remote","get-url","origin"], "repository identity")
+if hashlib.sha256(origin.encode()).hexdigest() != request["repository_identity"]: fail("repository identity mismatch")
+with tempfile.TemporaryDirectory(prefix=".opsi-staging-barrier-") as temporary:
+    root = pathlib.Path(temporary)
+    request_path = root / "request.json"
+    helper_path = root / "staging-barrier-remote.sh"
+    request_path.write_bytes(raw)
+    request_path.chmod(0o600)
+    with helper_path.open("wb") as output:
+        result = subprocess.run(["git","-C",str(repository),"cat-file","blob",blob], stdout=output, stderr=subprocess.PIPE, env=ENV, timeout=30, check=False)
+    if result.returncode or result.stderr: fail("helper Git object materialization failed")
+    helper_path.chmod(0o700)
+    if run(["git","hash-object",str(helper_path)], "materialized helper hash") != blob: fail("materialized helper blob mismatch")
+    with request_path.open("rb") as request_input:
+        result = subprocess.run([str(helper_path)], stdin=request_input, env=ENV, check=False)
+    raise SystemExit(result.returncode)
+'''
+print("python3 -c " + shlex.quote(STAGING_REMOTE_LAUNCHER_PY))
+PY
+}
+
+staging_barrier_remote() {
+  local phase="$1" expected="$2" session="$3" request stdout stderr remote_command status
+  request="$PRIVATE_TEMP_DIR/staging-request.json"
+  stdout="$PRIVATE_TEMP_DIR/staging-stdout.json"
+  stderr="$PRIVATE_TEMP_DIR/staging-stderr.txt"
+  STAGING_RECEIPT_FILE="$PRIVATE_TEMP_DIR/staging-receipt.json"
+  make_staging_request "$phase" "$expected" "$session" > "$request" || return 1
+  chmod 600 "$request"
+  remote_command="$(make_staging_remote_command)" || return 1
+  set +e
+  ( ulimit -S -f 8
+    env -i PATH="$PATH" LC_ALL=C timeout --signal=TERM --kill-after=5s 210s \
+    ssh -F /dev/null -T -p "$STAGING_SSH_PORT" -i "$STAGING_SSH_KEY_PATH" \
+      -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
+      -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes \
+      -o KbdInteractiveAuthentication=no -o ChallengeResponseAuthentication=no \
+      -o HostbasedAuthentication=no -o GSSAPIAuthentication=no \
+      -o StrictHostKeyChecking=yes \
+      -o "UserKnownHostsFile=$STAGING_KNOWN_HOSTS_PATH" -o GlobalKnownHostsFile=/dev/null \
+      -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
+      -o Tunnel=no -o ControlMaster=no -o ControlPath=none \
+      -o ProxyCommand=none -o ProxyJump=none -o PermitLocalCommand=no \
+      -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 \
+      -o ServerAliveCountMax=2 -o LogLevel=ERROR \
+      "$STAGING_SSH_USER@$STAGING_HOST" "$remote_command"
+  ) < "$request" > "$stdout" 2> "$stderr"
+  status=$?
+  set -e
+  STAGING_SSH_EXIT=$status
+  [ "$(wc -c < "$stdout")" -le 4096 ] && [ "$(wc -c < "$stderr")" -le 4096 ] || return 1
+  if [ "$status" -ne 0 ]; then
+    return 1
   fi
-  [ -n "$output" ] && [ "${output#*$'\n'}" = "$output" ] || return 1
-  printf '%s' "$output"
+  [ ! -s "$stderr" ] || return 1
+  validate_staging_receipt "$stdout" "$phase" "$session" > "$STAGING_RECEIPT_FILE"
 }
 
-quiesce_worker() {
-  [ -n "$WORKER_DIGEST" ] || return 1
-  python3 "$RELEASE_HELPER" barrier-quiesce \
-    --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
-    --compose-directory "$COMPOSE_DIRECTORY" --service bootstrap-worker \
-    --health-timeout 180 | python3 -c 'import sys
-for line in sys.stdin:
-    if line.startswith("quiesced_container_id="):
-        print(line.split("=", 1)[1].strip())
-        break
-else:
-    raise SystemExit("canonical quiesce helper returned no container ID")'
+staging_receipt_field() {
+  json_get "$1" < "$STAGING_RECEIPT_FILE"
 }
 
-wait_worker_healthy() {
-  local start now container status
-  start="$(date +%s)"
-  while :; do
-    container="$(single_worker_id 0 2>/dev/null || true)"
-    if [ -n "$container" ]; then
-      status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
-      [ "$status" = healthy ] && return 0
-      [ "$status" = unhealthy ] && return 1
-    fi
-    now="$(date +%s)"
-    [ $((now - start)) -lt 180 ] || return 1
-    sleep 1
-  done
+reconcile_staging_mutation() {
+  local expected="$1" session="$2" previous="${3:-}"
+  case "$STAGING_SSH_EXIT" in 124|137|143|255) ;; *) return 1 ;; esac
+  staging_barrier_remote status any "$session" || return 1
+  staging_receipt_proves_state "$expected" "$previous"
 }
 
-restore_normal_worker() {
-  [ -n "$WORKER_DIGEST" ] || return 1
-  python3 "$RELEASE_HELPER" barrier-restore \
-    --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
-    --compose-directory "$COMPOSE_DIRECTORY" --service bootstrap-worker \
-    --health-timeout 180
+staging_receipt_proves_state() {
+  local expected="$1" previous="${2:-}" after profile running health marker container
+  after="$(staging_receipt_field state_after)"
+  profile="$(staging_receipt_field worker_profile)"
+  running="$(staging_receipt_field worker_running)"
+  health="$(staging_receipt_field worker_health)"
+  marker="$(staging_receipt_field marker_state)"
+  container="$(staging_receipt_field worker_container_after)"
+  [ "$after" = "$expected" ] && [ -n "$container" ] || return 1
+  case "$expected" in
+    absent) [ "$profile:$running:$health:$marker" = "normal:True:healthy:absent" ] ;;
+    worker_quiesced) [ "$profile:$running:$health:$marker" = "normal:False:stopped:absent" ] ;;
+    barrier_started) [ "$profile:$running:$health" = "barrier:True:healthy" ] && [[ "$marker" =~ ^(armed|reached)$ ]] && [[ -z "$previous" || "$container" != "$previous" ]] ;;
+    replay_started) [ "$profile:$running:$health" = "barrier:True:healthy" ] && [[ "$marker" =~ ^(reached|consumed|completed)$ ]] && [[ -z "$previous" || "$container" != "$previous" ]] ;;
+    normal_restored) [ "$profile:$running:$health:$marker" = "normal:True:healthy:completed" ] && [[ -z "$previous" || "$container" != "$previous" ]] ;;
+    *) return 1 ;;
+  esac
 }
 
 write_barrier_state() {
-  local path="$1" phase="$2" session_id="$3" container_id="$4" create="${5:-0}"
-  python3 - "$path" "$phase" "$session_id" "$container_id" "$create" "$RUN_ID" "$PROJECT_ID" "$COMPOSE_DIRECTORY" <<'PY'
-import json, os, pathlib, stat, sys, tempfile
-
-raw_path, phase, session_id, container_id, create, run_id, project_id, compose_directory = sys.argv[1:]
+  local path="$1" phase="$2" session_id="$3" before_container="$4" current_container="$5" create="${6:-0}"
+  python3 - "$path" "$phase" "$session_id" "$before_container" "$current_container" "$create" \
+    "$RUN_ID" "$PROJECT_ID" "$STAGING_HOST" "$STAGING_EXPECTED_HOSTNAME" "$STAGING_REPOSITORY_DIRECTORY" "$STAGING_REPOSITORY_IDENTITY" \
+    "$STAGING_COMPOSE_DIRECTORY" "$SOURCE_REVISION" "$STAGING_HELPER_BLOB" "$STAGING_HELPER_BLOB" "$WORKER_DIGEST" <<'PY'
+import json, os, pathlib, re, stat, sys, tempfile
+raw_path, phase, session, before, current, create, run_id, project, endpoint, hostname, repository, identity, compose, revision, expected_helper, executed_helper, digest = sys.argv[1:]
 path = pathlib.Path(raw_path)
-if not path.is_absolute():
-    raise SystemExit("barrier state path must be absolute")
+if not path.is_absolute(): raise SystemExit("barrier state path must be absolute")
 parent = path.parent
 info = parent.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
-    raise SystemExit("barrier state parent must be a private directory")
-payload = {
-    "schema_version": "opsi.e2e.bootstrap-barrier-state/v1",
-    "run_id": run_id,
-    "project_id": project_id,
-    "session_id": session_id,
-    "phase": phase,
-    "pre_barrier_container_id": container_id,
-    "compose_directory": str(pathlib.Path(compose_directory).resolve()),
-}
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+    raise SystemExit("barrier state parent must be an owned mode-0700 directory")
+payload = {"schema_version":"opsi.e2e.bootstrap-barrier-state/v3","run_id":run_id,"project_id":project,"session_id":session,"phase":phase,"pre_barrier_container_id":before,"current_container_id":current,"staging_endpoint":endpoint,"staging_hostname":hostname,"repository_directory":repository,"repository_identity":identity,"compose_directory":compose,"source_revision":revision,"expected_helper_blob":expected_helper,"executed_helper_blob":executed_helper,"worker_digest":digest}
+temporary = None
 if create == "1":
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    temporary = None
 else:
-    current = path.lstat()
-    if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) or current.st_mode & 0o077 or current.st_size > 4096:
-        raise SystemExit("barrier state must be a private regular file")
-    old = json.loads(path.read_text())
-    for key in ("schema_version", "run_id", "project_id", "session_id", "pre_barrier_container_id", "compose_directory"):
-        if old.get(key) != payload[key]:
-            raise SystemExit("barrier state identity changed")
-    allowed = {
-        "session_created": {"armed", "prepare_failed"},
-        "armed": {"barrier_started", "prepare_failed"},
-        "barrier_started": {"replay_started", "prepare_failed"},
-        "replay_started": {"consumed"},
-        "consumed": {"completed"},
-        "completed": {"normal_restored"},
-        "prepare_failed": {"normal_restored"},
-        "normal_restored": {"explicitly_disarmed"},
-        "explicitly_disarmed": set(),
-    }
-    if old.get("phase") not in allowed or phase not in allowed[old.get("phase")]:
-        raise SystemExit("barrier state transition is invalid")
+    old_info = path.lstat()
+    if stat.S_ISLNK(old_info.st_mode) or not stat.S_ISREG(old_info.st_mode) or old_info.st_uid != os.geteuid() or stat.S_IMODE(old_info.st_mode) != 0o600 or not 1 <= old_info.st_size <= 4096:
+        raise SystemExit("barrier state must be an owned mode-0600 regular file")
+    def pairs(values):
+        result = {}
+        for key, value in values:
+            if key in result: raise ValueError("duplicate field")
+            result[key] = value
+        return result
+    old = json.loads(path.read_text(), object_pairs_hook=pairs)
+    immutable = set(payload) - {"phase","current_container_id"}
+    if any(old.get(key) != payload[key] for key in immutable): raise SystemExit("barrier state identity changed")
+    allowed = {"session_created":{"barrier_started"},"barrier_started":{"replay_started"},"replay_started":{"consumed"},"consumed":{"completed"},"completed":{"normal_restored"},"normal_restored":set()}
+    if phase not in allowed.get(old.get("phase"), set()): raise SystemExit("barrier state transition is invalid")
     fd, temporary = tempfile.mkstemp(prefix=".bootstrap-barrier-state.", dir=parent)
     os.fchmod(fd, 0o600)
+data = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode()
+if len(data) > 4096: raise SystemExit("barrier state is oversized")
 try:
-    with os.fdopen(fd, "w") as output:
-        json.dump(payload, output, separators=(",", ":"), sort_keys=True)
-        output.write("\n")
-        output.flush()
-        os.fsync(output.fileno())
-    if temporary:
-        os.replace(temporary, path)
+    with os.fdopen(fd, "wb") as output:
+        output.write(data); output.flush(); os.fsync(output.fileno())
+    if temporary: os.replace(temporary, path)
 finally:
     if temporary:
         try: os.unlink(temporary)
@@ -744,82 +1087,34 @@ finally:
 directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
 try: os.fsync(directory)
 finally: os.close(directory)
+if path.read_bytes() != data: raise SystemExit("barrier state publication verification failed")
 PY
 }
 
 read_barrier_state() {
   python3 - "$1" <<'PY'
 import json, os, pathlib, re, stat, sys
-
 path = pathlib.Path(sys.argv[1])
 if not path.is_absolute(): raise SystemExit("barrier state path must be absolute")
 info = path.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size < 1 or info.st_size > 4096:
-    raise SystemExit("barrier state must be a private regular file")
-data = json.loads(path.read_text())
-keys = {"schema_version","run_id","project_id","session_id","phase","pre_barrier_container_id","compose_directory"}
-if not isinstance(data, dict) or set(data) != keys or data.get("schema_version") != "opsi.e2e.bootstrap-barrier-state/v1":
-    raise SystemExit("barrier state schema is invalid")
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600 or not 1 <= info.st_size <= 4096:
+    raise SystemExit("barrier state must be an owned mode-0600 regular file")
+def pairs(values):
+    result = {}
+    for key, value in values:
+        if key in result: raise ValueError("duplicate field")
+        result[key] = value
+    return result
+data = json.loads(path.read_text(), object_pairs_hook=pairs)
+keys = {"schema_version","run_id","project_id","session_id","phase","pre_barrier_container_id","current_container_id","staging_endpoint","staging_hostname","repository_directory","repository_identity","compose_directory","source_revision","expected_helper_blob","executed_helper_blob","worker_digest"}
+if not isinstance(data, dict) or set(data) != keys or data.get("schema_version") != "opsi.e2e.bootstrap-barrier-state/v3": raise SystemExit("barrier state schema is invalid")
 identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-if not identifier.fullmatch(data.get("run_id", "")) or not identifier.fullmatch(data.get("session_id", "")):
-    raise SystemExit("barrier state identifiers are invalid")
-if data.get("phase") not in {"session_created", "armed", "barrier_started", "replay_started", "consumed", "completed", "prepare_failed", "normal_restored", "explicitly_disarmed"}:
-    raise SystemExit("barrier state phase is invalid")
-for key in ("run_id","project_id","session_id","phase","pre_barrier_container_id","compose_directory"):
+for key in ("run_id","project_id","session_id","pre_barrier_container_id","current_container_id"):
+    if not identifier.fullmatch(data.get(key, "")): raise SystemExit("barrier state identifiers are invalid")
+if data["phase"] not in {"session_created","barrier_started","replay_started","consumed","completed","normal_restored"}: raise SystemExit("barrier state phase is invalid")
+if not re.fullmatch(r"[0-9a-f]{40}", data["source_revision"]) or not re.fullmatch(r"[0-9a-f]{40}", data["expected_helper_blob"]) or data["executed_helper_blob"] != data["expected_helper_blob"] or not re.fullmatch(r"[0-9a-f]{64}", data["repository_identity"]) or not re.fullmatch(r"sha256:[0-9a-f]{64}", data["worker_digest"]): raise SystemExit("barrier state binding is invalid")
+for key in ("run_id","project_id","session_id","phase","pre_barrier_container_id","current_container_id","staging_endpoint","staging_hostname","repository_directory","repository_identity","compose_directory","source_revision","expected_helper_blob","executed_helper_blob","worker_digest"):
     print(data[key])
-PY
-}
-
-barrier_marker_status() {
-  "$BARRIER_HELPER" status --state-dir "$COMPOSE_DIRECTORY/barrier-state" --session-id "$1" --run-id "$2"
-}
-
-cleanup_barrier_marker() {
-  [ -n "$BARRIER_ATTEMPT_SESSION" ] || return 0
-  local status
-  status="$(barrier_marker_status "$BARRIER_ATTEMPT_SESSION" "$BARRIER_ATTEMPT_RUN")" || return 1
-  case "$status" in
-    armed)
-      "$BARRIER_HELPER" disarm --state-dir "$COMPOSE_DIRECTORY/barrier-state" \
-        --session-id "$BARRIER_ATTEMPT_SESSION" --run-id "$BARRIER_ATTEMPT_RUN" >/dev/null || return 1
-      ;;
-    absent|reached|consumed|completed) ;;
-    *) return 1 ;;
-  esac
-}
-
-cleanup_barrier_config() {
-  [ -n "$BARRIER_CONFIG_PATH" ] || return 0
-  if [ -n "$BARRIER_ATTEMPT_SESSION" ]; then
-    local marker_status
-    marker_status="$(barrier_marker_status "$BARRIER_ATTEMPT_SESSION" "$BARRIER_ATTEMPT_RUN")" || return 1
-    case "$marker_status" in
-      reached|consumed|completed) BARRIER_FORENSIC_PRESERVE=1; return 0 ;;
-      armed|absent) ;;
-      *) return 1 ;;
-    esac
-  fi
-  python3 - "$BARRIER_CONFIG_PATH" "$BARRIER_ATTEMPT_SESSION" "$BARRIER_ATTEMPT_RUN" <<'PY'
-import json, os, pathlib, stat, sys
-path, session, run = map(pathlib.Path, sys.argv[1:])
-if not path.exists():
-    raise SystemExit(0)
-info = path.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-    raise SystemExit("generated barrier config is not a private regular file")
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"generated barrier config is unreadable: {exc}")
-barrier = data.get("staging_crash_barrier") if isinstance(data, dict) else None
-if not isinstance(barrier, dict) or barrier.get("session_id") != str(session) or barrier.get("run_id") != str(run):
-    raise SystemExit("generated barrier config identity mismatch")
-path.unlink()
-directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-try:
-    os.fsync(directory)
-finally:
-    os.close(directory)
 PY
 }
 
@@ -903,169 +1198,169 @@ verify_agent_incident_resolve_audit() {
     > "$ARTIFACT_DIR/incident-resolve-audit.txt" || fail "Agent incident.resolve audit missing"
 }
 
-update_barrier_attempt_phase() {
-  local phase="$1"
-  [ -n "$BARRIER_STATE_FILE" ] && [ -f "$BARRIER_STATE_FILE" ] || return 0
-  local -a context
-  mapfile -t context < <(read_barrier_state "$BARRIER_STATE_FILE") || return 1
-  [ "${#context[@]}" -eq 6 ] || return 1
-  RUN_ID="${context[0]}"; PROJECT_ID="${context[1]}"
-  write_barrier_state "$BARRIER_STATE_FILE" "$phase" "${context[2]}" "${context[4]}"
+load_barrier_context() {
+  local state_file="$1"
+  mapfile -t BARRIER_CONTEXT < <(read_barrier_state "$state_file") || return 1
+  [ "${#BARRIER_CONTEXT[@]}" -eq 15 ] || return 1
+  [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "${BARRIER_CONTEXT[1]}" ] || return 1
+  [ "$STAGING_HOST" = "${BARRIER_CONTEXT[6]}" ] && \
+    [ "$STAGING_EXPECTED_HOSTNAME" = "${BARRIER_CONTEXT[7]}" ] && \
+    [ "$STAGING_REPOSITORY_DIRECTORY" = "${BARRIER_CONTEXT[8]}" ] && \
+    [ "$STAGING_COMPOSE_DIRECTORY" = "${BARRIER_CONTEXT[10]}" ] && \
+    [ "$SOURCE_REVISION" = "${BARRIER_CONTEXT[11]}" ] && \
+    [ "$WORKER_DIGEST" = "${BARRIER_CONTEXT[14]}" ] || return 1
+  RUN_ID="${BARRIER_CONTEXT[0]}"
+  PROJECT_ID="${BARRIER_CONTEXT[1]}"
+  validate_staging_transport || return 1
+  [ "$STAGING_REPOSITORY_IDENTITY" = "${BARRIER_CONTEXT[9]}" ] && \
+    [ "$STAGING_HELPER_BLOB" = "${BARRIER_CONTEXT[12]}" ] && \
+    [ "$STAGING_HELPER_BLOB" = "${BARRIER_CONTEXT[13]}" ]
 }
 
 barrier_prepare_failed() {
-  local primary="$1"
+  local primary="$1" prepared="${2:-0}"
   log "barrier prepare failed: $primary"
-  local restored=0 marker_clean=0 config_clean=0 state_clean=1
-  update_barrier_attempt_phase prepare_failed || { log "barrier state cleanup failure: could not record prepare_failed"; state_clean=0; }
-  if restore_normal_worker && wait_worker_healthy; then
-    restored=1
-    log "barrier failure restoration: normal Worker profile restored"
-    update_barrier_attempt_phase normal_restored || { log "barrier state cleanup failure: could not record normal_restored"; state_clean=0; }
-  else
-    log "barrier failure restoration failed: normal Worker profile is not healthy"
-    log "barrier marker cleanup failure: skipped because normal Worker restoration failed"
-    log "barrier config cleanup failure: skipped because normal Worker restoration failed"
-  fi
-  if [ "$restored" = 1 ]; then
-    if cleanup_barrier_marker; then
-      marker_clean=1
+  if [ "$prepared" = 1 ]; then
+    if staging_barrier_remote abort worker_quiesced "" || reconcile_staging_mutation absent ""; then
+      log "barrier failure restoration: remote normal Worker profile restored before session creation"
     else
-      log "barrier marker cleanup failure: protected marker was not safely disarmed"
-    fi
-    if cleanup_barrier_config; then
-      config_clean=1
-    else
-      log "barrier config cleanup failure: generated config was not safely removed"
+      log "barrier failure restoration failed: remote state was preserved for inspection"
     fi
   fi
-  if [ "$restored" = 1 ] && [ "$marker_clean" = 1 ] && [ "$config_clean" = 1 ] && [ "$BARRIER_FORENSIC_PRESERVE" = 0 ]; then
-    update_barrier_attempt_phase explicitly_disarmed || {
-      log "barrier state cleanup failure: could not record explicitly_disarmed"
-      state_clean=0
-      return 1
-    }
-  fi
-  [ "$restored" = 1 ] && [ "$marker_clean" = 1 ] && [ "$config_clean" = 1 ] && [ "$state_clean" = 1 ] || return 1
   return 1
 }
 
 barrier_prepare() {
-  local state_file="$1" body session_id before_container config marker_status
+  local state_file="$1" body session_id before_container current_container remote_state post_status
   [ -n "$state_file" ] || { echo "protected barrier state path is required" >&2; return 2; }
   BARRIER_STATE_FILE="$state_file"
   mkdir -p "$ARTIFACT_DIR"
-  for tool in curl docker python3; do command -v "$tool" >/dev/null 2>&1 || { log "barrier prepare missing tool: $tool"; return 1; }; done
-  for name in OPSI_E2E_PROJECT_ID OPSI_E2E_VPS_HOST OPSI_E2E_VPS_SSH_USER OPSI_E2E_SSH_KEY_PATH OPSI_E2E_BOOTSTRAP_WORKER_DIGEST; do
+  for tool in curl git python3 ssh ssh-keygen timeout; do command -v "$tool" >/dev/null 2>&1 || { log "barrier prepare missing tool: $tool"; return 1; }; done
+  for name in OPSI_E2E_PROJECT_ID OPSI_E2E_VPS_HOST OPSI_E2E_VPS_SSH_USER OPSI_E2E_SSH_KEY_PATH OPSI_E2E_BOOTSTRAP_WORKER_DIGEST OPSI_E2E_STAGING_HOST OPSI_E2E_STAGING_EXPECTED_HOSTNAME OPSI_E2E_STAGING_SSH_PORT OPSI_E2E_STAGING_SSH_USER OPSI_E2E_STAGING_SSH_KEY_PATH OPSI_E2E_STAGING_KNOWN_HOSTS_PATH OPSI_E2E_STAGING_HOST_KEY_SHA256 OPSI_E2E_STAGING_REPOSITORY_DIRECTORY OPSI_E2E_STAGING_COMPOSE_DIRECTORY OPSI_E2E_SOURCE_REVISION; do
     [ -n "${!name:-}" ] || { log "barrier prepare missing env: $name"; return 1; }
   done
   [[ "$WORKER_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { log "barrier prepare Worker digest is invalid"; return 1; }
-  [ -f "$COMPOSE_DIRECTORY/compose.yaml" ] && [ -f "$COMPOSE_DIRECTORY/.env" ] || { log "barrier prepare canonical Compose files are missing"; return 1; }
   validate_ssh_key_path || { log "barrier prepare SSH key validation failed"; return 1; }
-  curl -fsS "$LOCAL_URL/health" >/dev/null || { log "barrier prepare Local API health failed"; return 1; }
-  body="$(curl -fsS "$LOCAL_URL/api/local/session")" || { log "barrier prepare local session unavailable"; return 1; }
-  LOCAL_SESSION="$(printf '%s' "$body" | json_get local_session 2>/dev/null || true)"
-  [ -n "$LOCAL_SESSION" ] || { log "barrier prepare local session token missing"; return 1; }
+  validate_staging_transport || { log "barrier prepare staging transport validation failed"; return 1; }
 
-  if ! before_container="$(quiesce_worker)"; then
-    barrier_prepare_failed "barrier prepare could not prove and quiesce one Worker"
+  if [ -e "$state_file" ]; then
+    load_barrier_context "$state_file" || { log "protected barrier continuation state is invalid"; return 1; }
+    [ "${BARRIER_CONTEXT[3]}" = session_created ] || { log "barrier continuation requires session_created state"; return 1; }
+    session_id="${BARRIER_CONTEXT[2]}"
+    staging_barrier_remote status any "$session_id" || { log "barrier continuation status failed"; return 1; }
+    remote_state="$(staging_receipt_field state_after)"
+    if [ "$remote_state" = barrier_started ]; then
+      current_container="$(staging_receipt_field worker_container_after)"
+    elif [[ "$remote_state" =~ ^(worker_quiesced|session_created)$ ]]; then
+      if ! staging_barrier_remote start "$remote_state" "$session_id" && ! reconcile_staging_mutation barrier_started "$session_id" "${BARRIER_CONTEXT[5]}"; then
+        log "barrier start remains incomplete; rerun this command with the same protected state after read-only reconciliation"
+        return 1
+      fi
+      current_container="$(staging_receipt_field worker_container_after)"
+    elif [ "$remote_state" = armed ]; then
+      log "barrier continuation stopped: armed state does not prove whether Worker recreation ran"
+      return 1
+    else
+      log "barrier continuation remote state is not safe"
+      return 1
+    fi
+    write_barrier_state "$state_file" barrier_started "$session_id" "${BARRIER_CONTEXT[4]}" "$current_container" || return 1
+    log "barrier continuation used factual session=$session_id without a second bootstrap POST"
+    return 0
+  fi
+
+  curl -fsS "$LOCAL_URL/health" >/dev/null || { log "barrier prepare Local API health failed"; return 1; }
+  staging_barrier_remote preflight absent "" || { log "remote staging preflight failed"; return 1; }
+  [ "$(staging_receipt_field state_after)" = absent ] || { log "remote staging preflight receipt was invalid"; return 1; }
+  if ! staging_barrier_remote prepare absent "" && ! reconcile_staging_mutation worker_quiesced ""; then
+    log "remote Worker quiescence failed or remained ambiguous"
     return 1
   fi
-  log "barrier ordering: Worker quiesced container=$before_container"
+  [ "$(staging_receipt_field state_after)" = worker_quiesced ] || { barrier_prepare_failed "remote Worker quiescence receipt was invalid" 1; return 1; }
+  before_container="$(staging_receipt_field worker_container_after)"
+  log "barrier ordering: remote Worker quiesced container=$before_container"
+  staging_barrier_remote status any "" || { barrier_prepare_failed "remote Worker quiescence status failed" 1; return 1; }
+  staging_receipt_proves_state worker_quiesced || { barrier_prepare_failed "remote Worker quiescence runtime proof failed" 1; return 1; }
+
+  body="$(curl -fsS "$LOCAL_URL/api/local/session")" || { barrier_prepare_failed "barrier prepare local session unavailable" 1; return 1; }
+  LOCAL_SESSION="$(printf '%s' "$body" | json_get local_session 2>/dev/null || true)"
+  [ -n "$LOCAL_SESSION" ] || { barrier_prepare_failed "barrier prepare local session token missing" 1; return 1; }
 
   BOOTSTRAP_REQUEST_FILE="$(mktemp)"
   chmod 600 "$BOOTSTRAP_REQUEST_FILE"
   if ! write_json "$BOOTSTRAP_REQUEST_FILE" bootstrap "$OPSI_E2E_SSH_KEY_PATH"; then
     rm -f -- "$BOOTSTRAP_REQUEST_FILE"; BOOTSTRAP_REQUEST_FILE=""
-    barrier_prepare_failed "bootstrap request generation failed"
+    barrier_prepare_failed "bootstrap request generation failed" 1
     return 1
   fi
-  if ! body="$(api_file POST "/api/local/projects/$PROJECT_ID/nodes/bootstrap" "$BOOTSTRAP_REQUEST_FILE" bootstrap 1)"; then
+  set +e
+  body="$(bootstrap_session_post "$BOOTSTRAP_REQUEST_FILE")"
+  post_status=$?
+  set -e
+  if [ "$post_status" -ne 0 ]; then
     rm -f -- "$BOOTSTRAP_REQUEST_FILE"; BOOTSTRAP_REQUEST_FILE=""
-    barrier_prepare_failed "bootstrap session creation failed"
+    if [ "$post_status" -eq 2 ]; then
+      log "bootstrap POST result is ambiguous; remote Worker remains stopped and no retry or restoration is allowed"
+      return 1
+    fi
+    barrier_prepare_failed "bootstrap session creation failed" 1
     return 1
   fi
   rm -f -- "$BOOTSTRAP_REQUEST_FILE"; BOOTSTRAP_REQUEST_FILE=""
   session_id="$(printf '%s' "$body" | json_get id 2>/dev/null || true)"
-  [ -n "$session_id" ] || { barrier_prepare_failed "bootstrap response missing factual session_id"; return 1; }
-  BARRIER_ATTEMPT_SESSION="$session_id"
-  BARRIER_ATTEMPT_RUN="$RUN_ID"
-  if ! write_barrier_state "$state_file" session_created "$session_id" "$before_container" 1; then
-    barrier_prepare_failed "protected session state creation failed"
+  [ -n "$session_id" ] || { log "bootstrap response missing factual session_id; remote Worker remains stopped"; return 1; }
+  if ! write_barrier_state "$state_file" session_created "$session_id" "$before_container" "$before_container" 1; then
+    log "protected factual session state creation failed; remote Worker remains stopped and no retry is allowed"
     return 1
   fi
   log "barrier ordering: factual session created session=$session_id"
-
-  install -d -m 700 "$COMPOSE_DIRECTORY/barrier-state" || { barrier_prepare_failed "private barrier state directory creation failed"; return 1; }
-  config="$COMPOSE_DIRECTORY/config/bootstrap-worker.e2e.json"
-  BARRIER_CONFIG_PATH="$config"
-  if ! "$BARRIER_HELPER" configure \
-    --source-config "$COMPOSE_DIRECTORY/config/bootstrap-worker.json" \
-    --output-config "$config" --session-id "$session_id" --run-id "$RUN_ID" >/dev/null; then
-    barrier_prepare_failed "run-specific barrier config generation failed"
+  if ! staging_barrier_remote start worker_quiesced "$session_id" && ! reconcile_staging_mutation barrier_started "$session_id" "$before_container"; then
+    log "post-session barrier start failed; remote Worker and both protected state records are preserved"
     return 1
   fi
-  if ! "$BARRIER_HELPER" arm --state-dir "$COMPOSE_DIRECTORY/barrier-state" --session-id "$session_id" --run-id "$RUN_ID" >/dev/null; then
-    barrier_prepare_failed "barrier arm failed"
-    return 1
-  fi
-  marker_status="$(barrier_marker_status "$session_id" "$RUN_ID")" || { barrier_prepare_failed "barrier marker validation failed"; return 1; }
-  [ "$marker_status" = armed ] || { barrier_prepare_failed "barrier marker is not armed"; return 1; }
-  write_barrier_state "$state_file" armed "$session_id" "$before_container" || { barrier_prepare_failed "protected state arm update failed"; return 1; }
-  log "barrier ordering: config generated and marker armed session=$session_id run=$RUN_ID"
-
-  if ! python3 "$RELEASE_HELPER" deploy \
-    --image "ghcr.io/huutawn/opsi-bootstrap-worker@$WORKER_DIGEST" \
-    --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
-    --compose-directory "$COMPOSE_DIRECTORY" --compose-file compose.e2e-bootstrap-barrier.yaml \
-    --service bootstrap-worker --health-timeout 180 --force-recreate-same-image; then
-    barrier_prepare_failed "same-image barrier Worker recreation failed"
-    return 1
-  fi
-  write_barrier_state "$state_file" barrier_started "$session_id" "$before_container" || { barrier_prepare_failed "protected state start update failed"; return 1; }
-  log "barrier ordering: Worker recreated only after marker armed; state=$state_file session=$session_id run=$RUN_ID"
-}
-
-load_barrier_context() {
-  local state_file="$1"
-  mapfile -t BARRIER_CONTEXT < <(read_barrier_state "$state_file") || return 1
-  [ "${#BARRIER_CONTEXT[@]}" -eq 6 ] || return 1
-  [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "${BARRIER_CONTEXT[1]}" ] || return 1
-  [ "$(realpath "$COMPOSE_DIRECTORY")" = "${BARRIER_CONTEXT[5]}" ] || return 1
+  current_container="$(staging_receipt_field worker_container_after)"
+  write_barrier_state "$state_file" barrier_started "$session_id" "$before_container" "$current_container" || { log "local barrier start state update failed; remote state is preserved"; return 1; }
+  log "barrier ordering: remote config, arm, and same-digest Worker start followed the single bootstrap POST"
 }
 
 barrier_restart() {
-  local state_file="$1" before after status
+  local state_file="$1" after remote_state status
   load_barrier_context "$state_file" || { echo "protected barrier state is invalid" >&2; return 1; }
   [ "${BARRIER_CONTEXT[3]}" = barrier_started ] || { echo "barrier state is not ready for replay restart" >&2; return 1; }
-  status="$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" || return 1
+  staging_barrier_remote status any "${BARRIER_CONTEXT[2]}" || return 1
+  remote_state="$(staging_receipt_field state_after)"
+  if [ "$remote_state" = replay_started ]; then
+    staging_receipt_proves_state replay_started "${BARRIER_CONTEXT[5]}" || return 1
+    after="$(staging_receipt_field worker_container_after)"
+    write_barrier_state "$state_file" replay_started "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" "$after" || return 1
+    log "barrier replay completion adopted from factual remote status without another mutation"
+    return 0
+  fi
+  [ "$remote_state" = barrier_started ] && staging_receipt_proves_state barrier_started || return 1
+  status="$(staging_receipt_field marker_state)"
   [ "$status" = reached ] || { echo "barrier marker must be reached before replay restart" >&2; return 1; }
-  before="$(single_worker_id 0)" || return 1
-  RUN_ID="${BARRIER_CONTEXT[0]}"; PROJECT_ID="${BARRIER_CONTEXT[1]}"; WORKER_DIGEST="${OPSI_E2E_BOOTSTRAP_WORKER_DIGEST:-$WORKER_DIGEST}"
-  [ -n "$WORKER_DIGEST" ] || { echo "expected Worker digest is required for replay restart" >&2; return 1; }
-  python3 "$RELEASE_HELPER" barrier-replay \
-    --expected-current-digest "$WORKER_DIGEST" --compose-project opsi-staging \
-    --compose-directory "$COMPOSE_DIRECTORY" --compose-file compose.e2e-bootstrap-barrier.yaml \
-    --service bootstrap-worker \
-    --health-timeout 180 --barrier-session-id "${BARRIER_CONTEXT[2]}" \
-    --barrier-run-id "${BARRIER_CONTEXT[0]}" || return 1
-  after="$(single_worker_id 0)" || return 1
-  [ "$after" != "$before" ] || { echo "barrier replay restart did not replace the Worker container" >&2; return 1; }
-  wait_worker_healthy || return 1
-  write_barrier_state "$state_file" replay_started "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
+  if ! staging_barrier_remote restart barrier_started "${BARRIER_CONTEXT[2]}" && ! reconcile_staging_mutation replay_started "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[5]}"; then return 1; fi
+  after="$(staging_receipt_field worker_container_after)"
+  [ "$after" != "${BARRIER_CONTEXT[5]}" ] || { echo "barrier replay restart did not replace the Worker container" >&2; return 1; }
+  write_barrier_state "$state_file" replay_started "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" "$after"
   log "barrier replay Worker restarted container=$after session=${BARRIER_CONTEXT[2]} run=$RUN_ID"
 }
 
 barrier_restore() {
-  local state_file="$1"
+  local state_file="$1" remote_state
   load_barrier_context "$state_file" || { echo "protected barrier state is invalid" >&2; return 1; }
   [ "${BARRIER_CONTEXT[3]}" = completed ] || { echo "normal restoration requires completed barrier evidence" >&2; return 1; }
-  [ "$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" = completed ] || { echo "normal restoration requires a completed barrier marker" >&2; return 1; }
-  RUN_ID="${BARRIER_CONTEXT[0]}"; PROJECT_ID="${BARRIER_CONTEXT[1]}"; WORKER_DIGEST="${OPSI_E2E_BOOTSTRAP_WORKER_DIGEST:-$WORKER_DIGEST}"
-  [ -n "$WORKER_DIGEST" ] || { echo "expected Worker digest is required for normal restoration" >&2; return 1; }
-  restore_normal_worker || { echo "normal Worker restoration failed" >&2; return 1; }
-  wait_worker_healthy || { echo "normal Worker restoration health check failed" >&2; return 1; }
-  write_barrier_state "$state_file" normal_restored "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
+  staging_barrier_remote status any "${BARRIER_CONTEXT[2]}" || return 1
+  remote_state="$(staging_receipt_field state_after)"
+  if [ "$remote_state" = normal_restored ]; then
+    staging_receipt_proves_state normal_restored "${BARRIER_CONTEXT[5]}" || return 1
+    write_barrier_state "$state_file" normal_restored "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" "$(staging_receipt_field worker_container_after)" || return 1
+    log "normal Worker restoration adopted from factual remote status without another mutation"
+    return 0
+  fi
+  [ "$remote_state" = replay_started ] && staging_receipt_proves_state replay_started && [ "$(staging_receipt_field marker_state)" = completed ] || { echo "normal restoration requires completed remote barrier evidence" >&2; return 1; }
+  if ! staging_barrier_remote restore replay_started "${BARRIER_CONTEXT[2]}" && ! reconcile_staging_mutation normal_restored "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[5]}"; then return 1; fi
+  write_barrier_state "$state_file" normal_restored "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" "$(staging_receipt_field worker_container_after)"
   log "normal Worker profile restored without recreating dependencies"
 }
 
@@ -1077,17 +1372,19 @@ resume_bootstrap_session() {
   PROJECT_ID="${BARRIER_CONTEXT[1]}"
   [ -n "$ARTIFACT_DIR_EXPLICIT" ] || ARTIFACT_DIR="$ROOT/.tmp/e2e-k3s/$RUN_ID"
   run_e2e "${BARRIER_CONTEXT[2]}" || return 1
-  marker_status="$(barrier_marker_status "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[0]}")" || return 1
+  staging_barrier_remote status any "${BARRIER_CONTEXT[2]}" || return 1
+  [ "$(staging_receipt_field state_after)" = replay_started ] || return 1
+  marker_status="$(staging_receipt_field marker_state)"
   case "${BARRIER_CONTEXT[3]}:$marker_status" in
     replay_started:consumed)
-      write_barrier_state "$state_file" consumed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" || return 1
+      write_barrier_state "$state_file" consumed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" "${BARRIER_CONTEXT[5]}" || return 1
       ;;
     replay_started:completed)
-      write_barrier_state "$state_file" consumed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" || return 1
-      write_barrier_state "$state_file" completed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}"
+      write_barrier_state "$state_file" consumed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" "${BARRIER_CONTEXT[5]}" || return 1
+      write_barrier_state "$state_file" completed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" "${BARRIER_CONTEXT[5]}"
       ;;
     consumed:completed)
-      write_barrier_state "$state_file" completed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" || return 1
+      write_barrier_state "$state_file" completed "${BARRIER_CONTEXT[2]}" "${BARRIER_CONTEXT[4]}" "${BARRIER_CONTEXT[5]}" || return 1
       ;;
     consumed:consumed) ;;
     replay_started:reached)
@@ -1126,6 +1423,7 @@ run_e2e() {
   LOCAL_SESSION="$(session_token)"
   [ -n "$LOCAL_SESSION" ] || fail "local session token missing"
   local f body id good_deploy_id bad_deploy_id exposure_deploy_id bad_deployment_started_at service_id incidents incident_id incident_detail resolve audit deployment_events deployment_record good_values bad_digest exposure_record exposure_values exposure_preview restored_hash
+  local rotate_method rotate_expiry rotate_fingerprint reveal_request
   local -a good_fields
   local -a exposure_fields
   if [ -z "$resume_session" ]; then
@@ -1196,13 +1494,24 @@ run_e2e() {
   log "step 5/14 exposure preview/apply, Traefik backend and direct public routing verified: job=$exposure_deploy_id ingress=${exposure_fields[1]} public_hash=$PUBLIC_A_HASH"
 
   f="$(mktemp)"; write_json "$f" secret
-  api_file POST "/api/local/projects/$PROJECT_ID/secrets" "$f" secret-create 1 >/dev/null || fail "secret create failed"
-  write_json "$f" second_factor
-  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/rotate" "$f" secret-rotate 1 >/dev/null || fail "secret rotate failed"
-  if api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/reveal" "$f" secret-reveal 1 | grep -q "$APP_SECRET_VALUE"; then
-    fail "secret value leaked into reveal output"
-  fi
+  api_file POST "/api/local/projects/$PROJECT_ID/secrets" "$f" secret-create 1 1 >/dev/null || fail "secret create failed"
   rm -f "$f"
+  consume_second_factor rotate || fail "rotate second-factor handoff failed"
+  rotate_method="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get method)" || fail "rotate second-factor metadata is invalid"
+  rotate_expiry="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get expires_at_unix)" || fail "rotate second-factor metadata is invalid"
+  rotate_fingerprint="$(printf '%s' "$SECOND_FACTOR_METADATA" | json_get fingerprint)" || fail "rotate second-factor metadata is invalid"
+  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/rotate" "$ROTATE_FACTOR_REQUEST" secret-rotate 1 1 >/dev/null || fail "secret rotate failed"
+  rm -f -- "$ROTATE_FACTOR_REQUEST"
+  reveal_request=""
+  if [ "$rotate_method" = totp ] && [ "$(date +%s)" -lt "$rotate_expiry" ]; then
+    reveal_request="$PAIRED_TOTP_REQUEST"
+  else
+    rm -f -- "$PAIRED_TOTP_REQUEST"
+    consume_second_factor reveal "$rotate_fingerprint" || fail "reveal second-factor handoff failed"
+    reveal_request="$REVEAL_FACTOR_REQUEST"
+  fi
+  api_file POST "/api/local/projects/$PROJECT_ID/secrets/$SECRET_NAME/reveal" "$reveal_request" secret-reveal 1 1 >/dev/null || fail "secret reveal failed"
+  rm -f -- "$reveal_request"
   log "step 6/14 secret create/rotate/reveal path ran via local Agent facade"
 
   api_file GET "/api/local/projects/$PROJECT_ID/telemetry/summary?service_id=$service_id" - telemetry-summary 0 >/dev/null || fail "telemetry summary failed"
@@ -1258,12 +1567,15 @@ run_e2e() {
 }
 
 self_test() {
-  local key_public fixture match original_key forbidden pem_marker expected request incident_fixture
+  local key_public fixture match original_key forbidden pem_marker expected request incident_fixture redaction_marker
   mkdir -p "$ARTIFACT_DIR"
   "$ROOT/scripts/e2e/bootstrap-worker-barrier.sh" self-test >/dev/null || fail "bootstrap Worker barrier helper self-test failed"
-  OPSI_E2E_APP_SECRET_VALUE="app-secret" OPSI_E2E_TOTP_CODE="123456" OPSI_E2E_OTP_CODE="" \
-    bash -c 'printf "token=abc kubeconfig=raw app-secret 123456" | '"$0"' --redact-only' > "$ARTIFACT_DIR/redaction-test.txt"
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/e2e/second_factor_handoff_test.py" >/dev/null || fail "second-factor handoff regression test failed"
+  redaction_marker="self-test-factor"
+  printf '%s\n' "$redaction_marker" >> "$REDACTION_VALUES_FILE"
+  printf 'token=abc kubeconfig=raw %s' "$redaction_marker" | redact > "$ARTIFACT_DIR/redaction-test.txt"
   grep -q '\[REDACTED\]' "$ARTIFACT_DIR/redaction-test.txt" || fail "self-test redaction failed"
+  if grep -q "$redaction_marker" "$ARTIFACT_DIR/redaction-test.txt"; then fail "self-test exact-value redaction failed"; fi
   original_key="$OPSI_E2E_SSH_KEY_PATH"
   OPSI_E2E_SSH_KEY_PATH=""
   if validate_ssh_key_path >/dev/null 2>&1; then fail "self-test accepted missing PEM-key input"; fi
@@ -1445,12 +1757,21 @@ PY
   for forbidden in 'repo''_url' 'git''_sha' 'docker''file' 'manifest''_path' 'requested''_by' 'user''_id' 'role''='; do
     if grep -q "$forbidden" "$0"; then fail "self-test found retired caller/source field: $forbidden"; fi
   done
-  for forbidden in 'pass''word' 'ssh''pass' 'accept''-new'; do
+  for forbidden in 'ssh''pass' 'accept''-new'; do
     if grep -qi "$forbidden" "$0"; then fail "self-test found retired SSH transport token: $forbidden"; fi
+  done
+  for required in \
+    'PreferredAuthentications=publickey' 'PubkeyAuthentication=yes' \
+    'IdentityAgent=none' 'KbdInteractiveAuthentication=no' \
+    'ChallengeResponseAuthentication=no' 'HostbasedAuthentication=no' \
+    'GSSAPIAuthentication=no'; do
+    grep -q "$required" "$0" || fail "self-test staging public-key-only authentication policy is incomplete: $required"
   done
   grep -q "Manual cleanup" "$0" || fail "self-test cleanup path missing"
   log "self-test: ok"
 }
+
+init_private_temp
 
 case "$MODE" in
   --help|-h) usage ;;
