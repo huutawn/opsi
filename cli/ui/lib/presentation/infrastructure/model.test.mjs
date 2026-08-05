@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapPollInterval, bootstrapProgress, buildTopologyGraph, capacityLabel, latestActiveBootstrap, layoutTopology, serverLifecycle, topologyOnboarding } from "./model.ts";
+import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, topologyOnboarding } from "./model.ts";
 
 const facts = {
   project_id: "p1",
@@ -12,18 +12,21 @@ const facts = {
 };
 const plan = { schema_version: "opsi.topology_plan/v1", id: "topo-1", project_id: "p1", revision: 2, state_hash: "state", plan_hash: "plan", created_by: "u", applied_by: "u", created_at: "now", applied_at: "now", assignments: [{ service_key: "api", environment_id: "env-1", runtime_id: "rt-1", replicas: 2, cpu_request_millicores: 100, memory_request_bytes: 1024, exposure: { mode: "none" } }] };
 
-test("topology edges use exact IDs and keep unresolved identity separate", () => {
-  const graph = buildTopologyGraph(facts, plan);
-  assert.equal(graph.edges.filter((edge) => edge.relation === "TopologyPlan.assignments").length, 1);
-  assert.equal(graph.unresolved.length, 0);
-  const missing = buildTopologyGraph({ ...facts, nodes: [{ ...facts.nodes[0], runtime_id: "missing" }] }, plan);
-  assert.equal(missing.edges.some((edge) => edge.from === "runtime:missing"), false);
-  assert.match(missing.unresolved[0].reason, /Runtime missing/);
+test("canvas draft keeps applied fields, permits incomplete placement, and resets by deletion", () => {
+  const moved = moveCanvasPlacement(plan, {}, "api", { ...facts.runtimes[0], id: "rt-2" });
+  assert.equal(canvasDraftStatus(plan, moved, "api"), "moved");
+  assert.equal(canvasPlacement(plan, moved, "api").replicas, 2);
+  const removed = moveCanvasPlacement(plan, moved, "api");
+  assert.equal(canvasDraftStatus(plan, removed, "api"), "pending removal");
+  assert.equal(canvasDraftIssues(canvasPlacement(plan, removed, "api")).length, 0);
+  assert.deepEqual(moveCanvasPlacement(plan, removed, "api", facts.runtimes[0]), {});
+
+  const placed = moveCanvasPlacement(null, {}, "api", facts.runtimes[0]);
+  assert.equal(canvasDraftStatus(null, placed, "api"), "new placement");
+  assert.deepEqual(canvasDraftIssues(canvasPlacement(null, placed, "api")), ["Replicas are missing.", "CPU request is missing.", "Memory request is missing.", "Exposure is missing."]);
 });
 
-test("layout is deterministic and capacity/progress stay truthful", () => {
-  const graph = buildTopologyGraph(facts, plan);
-  assert.deepEqual(layoutTopology(graph.nodes), layoutTopology(graph.nodes));
+test("capacity and progress stay truthful", () => {
   assert.equal(capacityLabel(undefined, 512), "Unknown capacity");
   assert.deepEqual(bootstrapProgress(undefined), { label: "Not reported", percent: null });
   assert.deepEqual(bootstrapProgress({ next_step_index: 2, last_completed_step: "Installing" }), { label: "Installing", percent: 50 });
@@ -49,6 +52,7 @@ test("server lifecycle requires a usable node and active Agent", () => {
 test("ready facts win over stale bootstrap and failed sessions retry", () => {
   const stale = { id: "boot-old", status: "installing", role: "first_server", created_at: "2026-07-01T00:00:00Z" };
   assert.equal(serverLifecycle(facts, [stale]).status, "Ready");
+  assert.equal(serverLifecycle(facts, [stale]).session, undefined);
   assert.equal(topologyOnboarding({ ...facts, services: [] }, null, [stale]).action, "Add application");
   const failed = { id: "boot-failed", status: "dead_letter", role: "first_server", last_failure_code: "SSH_FAILED", last_failure_message_redacted: "Connection refused", created_at: "2026-07-02T00:00:00Z" };
   assert.deepEqual(topologyOnboarding({ ...facts, runtimes: [], nodes: [], agents: [], services: [] }, null, [failed]), { kind: "retry", title: "Server bootstrap failed", description: "Connection refused", action: "Retry bootstrap", sessionID: "boot-failed" });

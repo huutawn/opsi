@@ -6,10 +6,12 @@ Project creation and selection now land on the existing
 `Infrastructure / Topology` route. Topology is the first project navigation
 destination, the header shows `Projects / project / environment / Topology`,
 and the workspace separates Design facts (TopologyPlan and unassigned services)
-from Live runtime, node, Agent, and deployment facts. The factual next action is
-derived from current server/bootstrap/service/placement state and reuses the
-existing add-server, add-service, and placement review flows; drag-and-drop and
-fabricated runtime data remain out of scope.
+from Live runtime, node, Agent, and deployment facts. Design now uses one
+`@xyflow/react` canvas where factual servers contain application nodes and
+unassigned applications remain in Unplaced. Dragging creates an in-memory
+`CanvasDraft` with unpublished-change count, local semantic diff, reset, and
+incomplete-field issues; it makes no apply, policy, deployment, or backend
+write and is discarded when project or applied topology identity changes.
 
 ## R5-014 Local API/UI parity checkpoint
 

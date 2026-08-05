@@ -1,15 +1,22 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 test.beforeEach(async ({ page }) => { watchConsoleErrors(page); await page.route("**/api/local/**", (route) => respond(route)); });
 test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
-test("Infrastructure uses canonical edges, truthful capacity, and URL state", async ({ page }) => {
+test("Design renders applied placement, unplaced applications, factual servers, and URL selection", async ({ page }) => {
   await page.goto("/?project=proj-1&view=infrastructure");
   await expect(page.getByRole("tab", { name: "Topology", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Topology");
-  await expect(page.locator(".topologyEdges line")).toHaveCount(4);
-  await expect(page.getByRole("heading", { name: "Unassigned services", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Server Primary runtime, Ready, Agent active/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Application api, Assigned, unchanged/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Application worker, Assigned, unchanged/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Application reports, Unplaced, unchanged/ })).toBeVisible();
+  await expect(page.getByText("4 cores", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("8192 MiB", { exact: true }).first()).toBeVisible();
+  await page.getByRole("button", { name: /Application api, Assigned, unchanged/ }).press("Enter");
+  await expect(page).toHaveURL(/topology=service%3Aapi/);
+  await expect(page.getByRole("heading", { name: "api", exact: true })).toBeFocused();
   await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Live", exact: true }).click();
   await expect(page.locator(".liveRuntimeList").getByText("agent-primary", { exact: false })).toBeVisible();
@@ -22,6 +29,78 @@ test("Infrastructure uses canonical edges, truthful capacity, and URL state", as
   await expect(page).toHaveURL(/runtime=runtime-edge/);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Edge runtime" })).toBeVisible();
+});
+
+test("Design drag creates local semantic draft, survives Live, and Reset restores the applied plan without writes", async ({ page }) => {
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  const writes: string[] = [];
+  page.on("request", (request) => { if (request.method() !== "GET") writes.push(`${request.method()} ${new URL(request.url()).pathname}`); });
+
+  await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
+  await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Application reports, Assigned, new placement/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "reports", exact: true })).toBeFocused();
+  await expect(page.getByText("Replicas are missing.", { exact: true })).toBeVisible();
+  await expect(page.getByText("CPU request is missing.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Memory request is missing.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Exposure is missing.", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Review draft" }).click();
+  await expect(page.getByText("reports: unplaced → runtime-primary", { exact: true })).toBeVisible();
+  await expect(page.getByText(/not Cloud validation/i)).toBeVisible();
+  await page.getByRole("button", { name: "Review draft" }).click();
+  await page.getByRole("button", { name: "Live", exact: true }).click();
+  await page.getByRole("button", { name: "Design", exact: true }).click();
+  await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
+
+  await dragNode(page, /Application worker, Assigned, unchanged/, /Unplaced applications/);
+  await expect(page.getByText("2 unpublished changes", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Review draft" }).click();
+  await expect(page.getByText("worker: runtime-edge → unplaced", { exact: true })).toBeVisible();
+  await dragNode(page, /Application api, Assigned, unchanged/, /Server Edge runtime/);
+  await expect(page.getByText("3 unpublished changes", { exact: true })).toBeVisible();
+  await expect(page.getByText("api: runtime-primary → runtime-edge", { exact: true })).toBeVisible();
+  expect(writes).toEqual([]);
+
+  await page.getByRole("button", { name: "Reset changes" }).click();
+  await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Application reports, Unplaced, unchanged/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Application worker, Assigned, unchanged/ })).toBeVisible();
+});
+
+test("Design draft clears when the project changes", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  const projects = fixture().projects.concat({ id: "proj-2", org_id: "org-1", name: "Second Project", slug: "second", status: "ready" });
+  await page.route("**/api/local/**", async (route) => {
+    const projectID = new URL(route.request().url()).pathname.includes("/proj-2/") ? "proj-2" : "proj-1";
+    const data = fixture();
+    data.projects = projects;
+    await respondWithData(route, data, projectID);
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
+  await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
+  await page.getByLabel("Switch project").click();
+  await page.getByRole("link", { name: /Second Project/ }).click();
+  await expect(page.locator(".breadcrumb")).toContainText("Second Project");
+  await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
+});
+
+test("Design draft clears when the applied topology revision changes", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let revision = 4;
+  await page.route("**/api/local/**", async (route) => {
+    const data = fixture();
+    data.facts.agents = data.facts.agents.map((agent) => ({ ...agent, status: "offline" }));
+    data.topology = { ...data.topology, revision, state_hash: `topology-state-${revision}` };
+    await respondWithData(route, data, "proj-1");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
+  await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
+  revision = 5;
+  await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible({ timeout: 6_500 });
+  await expect(page.getByText("TopologyPlan r5", { exact: true })).toBeVisible();
 });
 
 test("Topology onboarding exposes the factual next action for every state", async ({ page }) => {
@@ -71,11 +150,30 @@ test("Topology polling moves an active bootstrap to ready and keeps the five lat
   });
   await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
   await expect(page.getByText("Bootstrapping", { exact: true })).toBeVisible();
-  await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add application" })).toBeVisible();
   await expect(page.locator(".serverLifecycle > .eventTimeline li")).toHaveCount(5);
   await expect(page.getByText("7 total", { exact: true })).toBeVisible();
   await expect(page.getByText("Open full bootstrap details", { exact: true })).toBeVisible();
+});
+
+test("Ready factual server does not keep stale bootstrap as its primary session or poll it", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let sessionReads = 0;
+  let eventReads = 0;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/bootstrap-sessions") && route.request().method() === "GET") sessionReads += 1;
+    if (path.endsWith("/bootstrap-sessions/boot-1/events")) eventReads += 1;
+    await respondWithData(route, fixture(), "proj-1");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
+  await expect(page.locator(".serverLifecycle").getByText("Bootstrap status", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".serverLifecycle").getByText("Open full bootstrap details", { exact: true })).toHaveCount(0);
+  await page.waitForTimeout(4_300);
+  expect(sessionReads).toBe(1);
+  expect(eventReads).toBe(1);
 });
 
 test("bootstrap polling is sequential and stops after a project switch", async ({ page }) => {
@@ -189,13 +287,17 @@ test("FE-03 visual acceptance screenshots and overflow", async ({ page }) => {
   }
   await page.setViewportSize({ width: 1024, height: 768 });
   await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
-  await expect(page.locator(".topologyTree")).toBeVisible();
+  await expect(page.locator(".topologyFlow")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
-  await expect(page.locator(".topologyTree")).toBeVisible();
+  await expect(page.locator(".topologyFlow")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ fullPage: true, path: "../../.tmp/ui-fe03/infrastructure-mobile-390x844.png" });
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await expect(page.locator(".topologyFlow")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.goto("/?project=proj-1&view=observability&tab=health");
   await expect(page.getByText("Service health matrix")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -255,4 +357,19 @@ function fixture() {
   const topology = { schema_version: "opsi.topology_plan/v1", id: "topo-1", project_id: "proj-1", revision: 4, state_hash: "topology-state", plan_hash: "topology-plan", created_by: "owner", applied_by: "owner", created_at: "2026-07-30T08:00:00Z", applied_at: "2026-07-30T08:00:00Z", assignments: [{ service_key: "api", environment_id: "env-prod", runtime_id: "runtime-primary", replicas: 2, cpu_request_millicores: 250, memory_request_bytes: 268435456, exposure: { mode: "none" } }, { service_key: "worker", environment_id: "env-prod", runtime_id: "runtime-edge", replicas: 2, cpu_request_millicores: 200, memory_request_bytes: 268435456, exposure: { mode: "internal" } }] };
   const incidents = [{ incident_id: "inc-1", project_id: "proj-1", service_id: "worker", node_id: "node-edge", pod_id: "worker-7", status: "open", severity: "warning", anomaly_type: "readiness", created_at_unix: 1785290100 }];
   return { projects: [{ id: "proj-1", org_id: "org-1", name: "Checkout Platform", slug: "checkout", status: "ready" }], services, nodes, facts, topology, telemetry: [{ service_id: "api", health: "healthy", pod_count: 2, ready_pods: 2, cpu_cores: 0.4, memory_bytes: 268435456, restart_count: 0, recent_error_count: 0, last_seen_unix: 1785290900 }, { service_id: "worker", health: "degraded", pod_count: 2, ready_pods: 1, cpu_cores: 0.2, memory_bytes: 201326592, restart_count: 3, recent_error_count: 1, last_seen_unix: 1785290800 }], incidents, logs: [{ service_id: "worker", pod_id: "worker-7", namespace: "opsi-prod", level: "error", message: "request timeout after 30s", fingerprint: "fp-timeout", observed_unix: 1785290800 }, { service_id: "api", pod_id: "api-9", namespace: "opsi-prod", level: "warning", message: "<script>alert('x')</script> token=should-hide", fingerprint: "fp-untrusted", observed_unix: 1785290700 }], sessions: [{ id: "boot-1", status: "installing", public_host: "203.0.113.10", role: "worker", attempt_count: 1, max_attempts: 3, checkpoint: { plan_version: "v1", next_step_index: 2, last_completed_step: "preflight" }, created_at: "2026-07-30T08:10:00Z" }, { id: "boot-failed", status: "failed", public_host: "203.0.113.11", role: "worker", attempt_count: 3, max_attempts: 3, last_failure_code: "SSH_HOST_KEY_MISMATCH", last_failure_message_redacted: "Pinned host key did not match", created_at: "2026-07-30T07:00:00Z" }], bootstrapEvents: [{ id: "be-1", step: "preflight", message_redacted: "Host identity verified", progress_percent: 0, created_at: "2026-07-30T08:12:00Z" }, { id: "be-2", step: "installing", message_redacted: "Installing K3s and Agent", progress_percent: 0, created_at: "2026-07-30T08:14:00Z" }], deployments: [{ id: "dep-1", service_id: "worker", status: "failed", created_at: "2026-07-30T08:00:00Z" }], support: { generated_at: "2026-07-30T09:00:00Z", readiness: { project_id: "proj-1", status: "degraded", can_deploy: true }, counts: { nodes: 2, healthy_nodes: 1, services: 3, deployment_jobs: 1, failed_deployments: 1, bootstrap_sessions: 2, open_bootstrap_jobs: 1, audit_events: 0 }, dashboard: { title: "Runtime evidence", datasource: "agent", refresh: "30s", panels: [{ id: "ordered", title: "Backend ordered samples", kind: "series", unit: "count", query: "agent.samples", series: [{ name: "worker", status: "degraded", value: 3, points: [1, 2, 3] }] }] }, signals: [{ name: "readiness", status: "warning", value: "3/4", target: "4/4" }], active_alerts: [{ id: "alert-1", severity: "warning", status: "active", title: "Worker readiness degraded", resource_id: "worker", runbook_id: "runbook-1" }], configured_alerts: [{ id: "rule-1", severity: "warning", title: "Readiness", metric: "ready_pods", runbook_id: "runbook-1" }], production_gates: [{ name: "runtime readiness", passed: false, detail: "worker has 1/2 ready pods" }], break_glass_policy: { time_limited: true, approval_required: true, reason_required: true, audited: true, secret_reveal_by_default: false, owner_notification: "required" }, runbooks: [{ id: "runbook-1", title: "Worker readiness", symptoms: "pod not ready", impact: "jobs delayed", dashboard_query: "worker", immediate_mitigation: "inspect rollout", long_term_fix: "fix readiness", customer_communication: "status page", escalation_path: "on-call" }], recent_request_ids: ["request-1"] }, evidence: { schema_version: "opsi.incident_evidence/v1", identity: incidents[0], generated_at_unix: 1785290900, observation_window: { start_unix: 1785290000, end_unix: 1785290900 }, deployment: { desired_digest: "sha256:desired", observed_digest: "sha256:observed" }, rollout: { rollout_id: "rollout-1", state: "failed", failure_code: "READINESS_FAILED", readiness_hash: "readiness-hash" }, timeline: [{ observed_at_unix: 1785290200, source: "kubernetes", kind: "readiness", detail: "probe failed", untrusted_content: true }], pods: [{ namespace: "opsi-prod", pod_id: "worker-7", node_id: "node-edge", ready_containers: 0, total_containers: 1, restart_count: 3 }], kubernetes_events: [], log_fingerprints: [{ fingerprint: "fp-timeout", level: "error", count: 3, first_observed_unix: 1785290200, last_observed_unix: 1785290800, excerpt: "request timeout", untrusted_content: true }], audit_references: [], coverage: [{ source: "rollout", status: "available", item_count: 1, truncated: false }, { source: "kubernetes", status: "partial", reason_code: "EVENT_LIMIT", item_count: 1, truncated: true }], truncations: [{ section: "kubernetes_events", omitted_items: 4, utf8_safe: true }], content_sha256: "content-hash-1" } };
+}
+
+async function dragNode(page: Page, sourceName: RegExp, targetName: RegExp) {
+  const source = page.getByRole("button", { name: sourceName });
+  const target = page.getByRole("button", { name: targetName });
+  await expect(source).toBeVisible();
+  await expect(target).toBeVisible();
+  await source.scrollIntoViewIfNeeded();
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+  if (!sourceBox || !targetBox) throw new Error("Canvas drag target is not measurable.");
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + Math.min(210, targetBox.height - 30), { steps: 14 });
+  await page.mouse.up();
 }

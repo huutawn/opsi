@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LocalClient } from "@/lib/api/local-client";
 import type { BuildRecord, DeploymentPolicy, GitHubBinding, GitHubRepository, PlacementFacts, TopologyPlan } from "@/lib/contracts/registry";
 import type { ConsoleController } from "@/features/console/types";
-import { bootstrapPollInterval, latestActiveBootstrap, terminalBootstrap } from "@/lib/presentation/infrastructure/model";
+import { bootstrapPollInterval, latestActiveBootstrap, serverLifecycle, terminalBootstrap } from "@/lib/presentation/infrastructure/model";
 
 export type SourceState = "loading" | "ready" | "empty" | "unavailable";
 export type InfrastructureData = {
@@ -87,7 +87,9 @@ export function useInfrastructureData(console: ConsoleController) {
     });
   }, [consoleFacts, projectID]);
 
-  const activeBootstrapID = latestActiveBootstrap(console.state.sessions)?.id ?? "";
+  const currentFacts = consoleFacts?.project_id === projectID ? consoleFacts : data.facts;
+  const factualServerReady = currentFacts ? serverLifecycle(currentFacts, []).status === "Ready" : false;
+  const activeBootstrapID = factualServerReady ? "" : latestActiveBootstrap(console.state.sessions)?.id ?? "";
   useEffect(() => {
     if (!projectID || console.route.tab !== "topology" || !activeBootstrapID) return;
     let disposed = false;
