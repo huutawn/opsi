@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapProgress, buildTopologyGraph, capacityLabel, layoutTopology, topologyOnboarding } from "./model.ts";
+import { bootstrapPollInterval, bootstrapProgress, buildTopologyGraph, capacityLabel, latestActiveBootstrap, layoutTopology, serverLifecycle, topologyOnboarding } from "./model.ts";
 
 const facts = {
   project_id: "p1",
@@ -33,9 +33,33 @@ test("topology onboarding follows factual project state", () => {
   const withoutServer = { ...facts, runtimes: [], nodes: [], agents: [], services: [] };
   assert.equal(topologyOnboarding(withoutServer, null, []).action, "Connect server");
   assert.deepEqual(topologyOnboarding(withoutServer, null, [{ id: "boot-1", status: "installing", role: "first_server", checkpoint: { plan_version: "v1", next_step_index: 2, last_completed_step: "preflight" }, created_at: "now" }]), {
-    kind: "bootstrap", title: "Server connection in progress", description: "Bootstrap boot-1 is installing.", action: "View progress", progress: { label: "preflight", percent: 50 }, sessionID: "boot-1",
+    kind: "bootstrap", title: "Server connection in progress", description: "Bootstrap boot-1 is installing.", action: "Inspect progress", progress: { label: "preflight", percent: 50 }, sessionID: "boot-1",
   });
   assert.equal(topologyOnboarding({ ...facts, services: [] }, null, []).action, "Add application");
   assert.equal(topologyOnboarding(facts, null, []).action, "Plan placement");
-  assert.equal(topologyOnboarding(facts, plan, []).action, "Review topology");
+  assert.equal(topologyOnboarding(facts, plan, []).action, "Inspect topology");
+});
+
+test("server lifecycle requires a usable node and active Agent", () => {
+  assert.equal(serverLifecycle(facts, []).status, "Ready");
+  assert.equal(serverLifecycle({ ...facts, agents: [{ ...facts.agents[0], status: "offline" }] }, []).status, "Offline");
+  assert.equal(topologyOnboarding({ ...facts, agents: [{ ...facts.agents[0], status: "offline" }] }, null, []).action, "Inspect topology");
+});
+
+test("ready facts win over stale bootstrap and failed sessions retry", () => {
+  const stale = { id: "boot-old", status: "installing", role: "first_server", created_at: "2026-07-01T00:00:00Z" };
+  assert.equal(serverLifecycle(facts, [stale]).status, "Ready");
+  assert.equal(topologyOnboarding({ ...facts, services: [] }, null, [stale]).action, "Add application");
+  const failed = { id: "boot-failed", status: "dead_letter", role: "first_server", last_failure_code: "SSH_FAILED", last_failure_message_redacted: "Connection refused", created_at: "2026-07-02T00:00:00Z" };
+  assert.deepEqual(topologyOnboarding({ ...facts, runtimes: [], nodes: [], agents: [], services: [] }, null, [failed]), { kind: "retry", title: "Server bootstrap failed", description: "Connection refused", action: "Retry bootstrap", sessionID: "boot-failed" });
+});
+
+test("newest active bootstrap is selected and polling stays within the requested interval", () => {
+  const sessions = [
+    { id: "older", status: "installing", role: "worker", created_at: "2026-07-01T00:00:00Z" },
+    { id: "failed-newer", status: "failed", role: "worker", created_at: "2026-07-03T00:00:00Z" },
+    { id: "newer-active", status: "waiting_agent", role: "worker", created_at: "2026-07-02T00:00:00Z" },
+  ];
+  assert.equal(latestActiveBootstrap(sessions)?.id, "newer-active");
+  assert.equal(bootstrapPollInterval, 4_000);
 });

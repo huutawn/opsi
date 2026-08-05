@@ -9,10 +9,10 @@ test("Infrastructure uses canonical edges, truthful capacity, and URL state", as
   await expect(page.getByRole("tab", { name: "Topology", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Topology");
   await expect(page.locator(".topologyEdges line")).toHaveCount(4);
-  await expect(page.getByText("Unassigned services")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Unassigned services", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Live", exact: true }).click();
-  await expect(page.getByText("agent-primary", { exact: false })).toBeVisible();
+  await expect(page.locator(".liveRuntimeList").getByText("agent-primary", { exact: false })).toBeVisible();
   await expect(page.getByText("node-primary (healthy)", { exact: true })).toBeVisible();
   await expect(page.getByText("dep-1", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Design", exact: true }).click();
@@ -30,10 +30,11 @@ test("Topology onboarding exposes the factual next action for every state", asyn
   await page.route("**/api/local/**", (route) => respond(route, scenario));
   for (const [next, state, action] of [
     ["connect", "connect", "Connect server"],
-    ["bootstrap", "bootstrap", "View progress"],
+    ["bootstrap", "bootstrap", "Inspect progress"],
+    ["failed", "retry", "Retry bootstrap"],
     ["application", "application", "Add application"],
     ["placement", "placement", "Plan placement"],
-    ["review", "review", "Review topology"],
+    ["review", "inspect", "Inspect topology"],
   ] as Array<[OnboardingScenario, string, string]>) {
     scenario = next;
     await page.goto(`/?project=proj-1&view=infrastructure&tab=topology&case=${next}`);
@@ -41,11 +42,102 @@ test("Topology onboarding exposes the factual next action for every state", asyn
     const button = page.getByRole("button", { name: action, exact: true });
     await expect(button).toBeVisible();
     if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Add server" })).toBeVisible(); await page.getByRole("button", { name: "Close add server dialog" }).click(); }
-    if (next === "bootstrap") { await expect(page.getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=bootstrap&session=boot-1/); }
+    if (next === "bootstrap") { await expect(page.locator(".topologyOnboarding").getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=topology/); await expect(page.getByRole("heading", { name: "203.0.113.10" })).toBeFocused(); }
+    if (next === "failed") { await button.click(); await expect(page.getByRole("dialog", { name: /retry bootstrap session/i })).toBeVisible(); await page.getByRole("button", { name: "Confirm and submit" }).click(); await expect(page.getByText(/Bootstrap boot-failed returned status pending/)).toBeVisible(); await page.getByRole("button", { name: "Close" }).click(); }
     if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add service" })).toBeVisible(); await page.getByRole("button", { name: "Close add service dialog" }).click(); }
     if (next === "placement") { await button.click(); await expect(page.getByRole("dialog", { name: "Plan placement" })).toBeVisible(); await page.getByRole("button", { name: "Close placement dialog" }).click(); }
     if (next === "review") { await page.getByRole("button", { name: "Live", exact: true }).click(); await button.click(); await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true"); }
   }
+});
+
+test("Topology polling moves an active bootstrap to ready and keeps the five latest events inline", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let sessionReads = 0;
+  let ready = false;
+  const events = Array.from({ length: 7 }, (_, index) => ({ id: `event-${index}`, step: `step-${index}`, message_redacted: `Event ${index}`, progress_percent: index * 10, created_at: `2026-07-30T08:${String(index).padStart(2, "0")}:00Z` }));
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/bootstrap-sessions") && route.request().method() === "GET") {
+      sessionReads += 1;
+      if (sessionReads > 1) { await new Promise((resolve) => setTimeout(resolve, 250)); ready = true; }
+      const session = { id: "boot-1", status: ready ? "succeeded" : "installing", public_host: "203.0.113.10", role: "first_server", checkpoint: { plan_version: "v1", next_step_index: ready ? 4 : 2, last_completed_step: ready ? "agent_ready" : "preflight" }, created_at: "2026-07-30T08:10:00Z" };
+      await route.fulfill({ body: JSON.stringify({ sessions: [session] }), contentType: "application/json", status: 200 });
+      return;
+    }
+    if (path.endsWith("/bootstrap-sessions/boot-1/events")) { await route.fulfill({ body: JSON.stringify(events), contentType: "application/json", status: 200 }); return; }
+    const data = onboardingFixture(fixture(), ready ? "application" : "bootstrap");
+    data.sessions = [{ id: "boot-1", status: ready ? "succeeded" : "installing", public_host: "203.0.113.10", role: "first_server", created_at: "2026-07-30T08:10:00Z" }];
+    await respondWithData(route, data, "proj-1");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await expect(page.getByText("Bootstrapping", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add application" })).toBeVisible();
+  await expect(page.locator(".serverLifecycle > .eventTimeline li")).toHaveCount(5);
+  await expect(page.getByText("7 total", { exact: true })).toBeVisible();
+  await expect(page.getByText("Open full bootstrap details", { exact: true })).toBeVisible();
+});
+
+test("bootstrap polling is sequential and stops after a project switch", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let projectOneReads = 0;
+  let activeRequests = 0;
+  let maxActiveRequests = 0;
+  const projects = [{ id: "proj-1", org_id: "org-1", name: "Checkout Platform", slug: "checkout", status: "ready" }, { id: "proj-2", org_id: "org-1", name: "Second Project", slug: "second", status: "ready" }];
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const projectID = path.includes("/proj-2/") ? "proj-2" : "proj-1";
+    if (path === "/api/local/projects") { await route.fulfill({ body: JSON.stringify({ projects }), contentType: "application/json", status: 200 }); return; }
+    if (projectID === "proj-1" && path.endsWith("/bootstrap-sessions") && route.request().method() === "GET") {
+      projectOneReads += 1;
+      activeRequests += 1;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      activeRequests -= 1;
+      await route.fulfill({ body: JSON.stringify({ sessions: [{ id: "boot-1", status: "installing", role: "first_server", created_at: "2026-07-30T08:10:00Z" }] }), contentType: "application/json", status: 200 });
+      return;
+    }
+    const data = onboardingFixture(fixture(), projectID === "proj-1" ? "bootstrap" : "application");
+    data.projects = projects;
+    await respondWithData(route, data, projectID);
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await expect(page.getByText("Bootstrapping", { exact: true })).toBeVisible();
+  await page.waitForTimeout(4_300);
+  expect(maxActiveRequests).toBe(1);
+  expect(projectOneReads).toBeGreaterThanOrEqual(3);
+  await page.getByLabel("Switch project").click();
+  await page.getByRole("link", { name: /Second Project/ }).click();
+  await expect(page.locator(".breadcrumb")).toContainText("Second Project");
+  const readsAfterSwitch = projectOneReads;
+  await page.waitForTimeout(4_300);
+  expect(projectOneReads).toBe(readsAfterSwitch);
+});
+
+test("confirmed service creation refreshes Topology onboarding without a page reload", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let created = false;
+  let navigationRequests = 0;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/services") && route.request().method() === "POST") {
+      created = true;
+      await route.fulfill({ body: JSON.stringify({ id: "api", name: "api", type: "application", status: "ready", source_type: "image" }), contentType: "application/json", status: 200 });
+      return;
+    }
+    const data = onboardingFixture(fixture(), created ? "placement" : "application");
+    await respondWithData(route, data, "proj-1");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  page.on("request", (request) => { if (request.isNavigationRequest()) navigationRequests += 1; });
+  await page.getByRole("button", { name: "Add application" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("api");
+  await page.getByRole("button", { name: "Review service" }).click();
+  await page.getByRole("button", { name: "Confirm and submit" }).click();
+  await expect(page.getByText(/Service api created with status ready/)).toBeVisible();
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByRole("button", { name: "Plan placement" })).toBeVisible();
+  expect(navigationRequests).toBe(0);
 });
 
 test("Observability preserves factual semantics, text rendering, evidence, and URL filters", async ({ page }) => {
@@ -110,22 +202,26 @@ test("FE-03 visual acceptance screenshots and overflow", async ({ page }) => {
   await page.screenshot({ fullPage: true, path: "../../.tmp/ui-fe03/observability-mobile-390x844.png" });
 });
 
-type OnboardingScenario = "base" | "connect" | "bootstrap" | "application" | "placement" | "review";
+type OnboardingScenario = "base" | "connect" | "bootstrap" | "failed" | "application" | "placement" | "review";
 
 async function respond(route: Route, scenario: OnboardingScenario = "base") {
+  await respondWithData(route, onboardingFixture(fixture(), scenario), "proj-1");
+}
+
+async function respondWithData(route: Route, data: ReturnType<typeof fixture>, projectID: string) {
   const url = new URL(route.request().url());
   const path = url.pathname;
-  const data = onboardingFixture(fixture(), scenario);
   let body: unknown = {};
-  if (path === "/api/local/session") body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: "proj-1" };
+  if (path === "/api/local/session") body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: projectID };
   else if (path === "/api/local/projects") body = { projects: data.projects };
-  else if (path.endsWith("/readiness")) body = { project_id: "proj-1", status: "degraded", can_deploy: true };
+  else if (path.endsWith("/readiness")) body = { project_id: projectID, status: "degraded", can_deploy: true };
   else if (path.endsWith("/nodes")) body = data.nodes;
   else if (/\/nodes\/[^/]+$/.test(path)) body = { node: data.nodes.find((item) => path.endsWith(item.id)), open_bootstrap_events: data.bootstrapEvents, recent_deployment_jobs: data.deployments };
   else if (path.endsWith("/services")) body = { services: data.services };
   else if (path.endsWith("/deployments")) body = { deployments: data.deployments };
+  else if (/\/bootstrap-sessions\/[^/]+\/retry$/.test(path)) body = { ...data.sessions.find((session) => path.includes(session.id)), status: "pending" };
   else if (path.endsWith("/bootstrap-sessions")) body = { sessions: data.sessions };
-  else if (path.endsWith("/bootstrap-sessions/boot-1/events")) body = data.bootstrapEvents;
+  else if (/\/bootstrap-sessions\/[^/]+\/events$/.test(path)) body = data.bootstrapEvents;
   else if (path.endsWith("/audit")) body = { events: [] };
   else if (path.endsWith("/support")) body = data.support;
   else if (path.endsWith("/topology/facts")) body = data.facts;
@@ -134,9 +230,9 @@ async function respond(route: Route, scenario: OnboardingScenario = "base") {
   else if (path.endsWith("/github/bindings")) body = { bindings: [] };
   else if (path.endsWith("/build-records")) body = { records: [] };
   else if (path.endsWith("/deployment-policies")) body = { policies: [] };
-  else if (path.endsWith("/telemetry/summary")) body = { project_id: "proj-1", since_unix: 0, chunk_count: 1, record_count: 8, start_unix: 1785290000, end_unix: 1785290900, done: true, source: "agent", payload_policy: "redacted", health: "degraded", metric_count: 6, log_count: 2, error_count: 1, service_count: 2 };
-  else if (/\/telemetry\/services\//.test(path)) body = { project_id: "proj-1", source: "agent", payload_policy: "redacted", services: data.telemetry.filter((item) => path.endsWith(item.service_id)) };
-  else if (path.endsWith("/logs")) body = { project_id: "proj-1", source: "agent", payload_policy: "redacted", logs: data.logs };
+  else if (path.endsWith("/telemetry/summary")) body = { project_id: projectID, since_unix: 0, chunk_count: 1, record_count: 8, start_unix: 1785290000, end_unix: 1785290900, done: true, source: "agent", payload_policy: "redacted", health: "degraded", metric_count: 6, log_count: 2, error_count: 1, service_count: 2 };
+  else if (/\/telemetry\/services\//.test(path)) body = { project_id: projectID, source: "agent", payload_policy: "redacted", services: data.telemetry.filter((item) => path.endsWith(item.service_id)) };
+  else if (path.endsWith("/logs")) body = { project_id: projectID, source: "agent", payload_policy: "redacted", logs: data.logs };
   else if (path.endsWith("/incidents")) body = { source: "agent", payload_policy: "redacted", incidents: data.incidents };
   else if (path.endsWith("/incidents/inc-1/evidence")) body = { ...data.evidence, content_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
   else if (path.endsWith("/incidents/inc-1")) body = { source: "agent", payload_policy: "redacted", incident: data.incidents[0] };
@@ -146,6 +242,7 @@ async function respond(route: Route, scenario: OnboardingScenario = "base") {
 function onboardingFixture(data: ReturnType<typeof fixture>, scenario: OnboardingScenario) {
   if (scenario === "base") return data;
   if (scenario === "connect" || scenario === "bootstrap") return { ...data, services: [], nodes: [], facts: { ...data.facts, runtimes: [], nodes: [], agents: [], services: [] }, topology: null, sessions: scenario === "bootstrap" ? data.sessions.slice(0, 1) : [] };
+  if (scenario === "failed") return { ...data, services: [], nodes: [], facts: { ...data.facts, runtimes: [], nodes: [], agents: [], services: [] }, topology: null, sessions: data.sessions.slice(1) };
   if (scenario === "application") return { ...data, services: [], facts: { ...data.facts, services: [] }, topology: null, sessions: [] };
   if (scenario === "placement") return { ...data, topology: null, sessions: [] };
   return { ...data, services: data.services.slice(0, 2), facts: { ...data.facts, services: data.facts.services.slice(0, 2) }, sessions: [] };

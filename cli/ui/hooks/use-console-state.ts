@@ -5,7 +5,8 @@ import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/l
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
 import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
 import { deriveProjectSummary, emptyFoundation, normalizeStatus, PROJECT_SUMMARY_TTL_MS, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
-import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
+import type { BootstrapSession, ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
+import { terminalBootstrap } from "@/lib/presentation/infrastructure/model";
 import { clearProjectPatch, createRequestLimiter, loadFoundation, loadProject, loadProjectSummary, reconnect, secretBody, workspacePatch, type RequestRunner } from "@/hooks/console-state-support";
 
 export function useConsoleState() {
@@ -32,6 +33,7 @@ export function useConsoleState() {
     deployments: [],
     sessions: [],
     bootstrapEvents: [],
+    bootstrapEventsSessionID: "",
     deploymentEvents: [],
     audit: [],
     support: null,
@@ -364,7 +366,7 @@ export function useConsoleState() {
     );
   }
 
-  async function addServer(event: FormEvent<HTMLFormElement>) {
+  async function addServer(event: FormEvent<HTMLFormElement>, onCreated?: () => void | Promise<void>) {
     event.preventDefault();
     if (!currentProject) return;
     const formElement = event.currentTarget;
@@ -390,8 +392,9 @@ export function useConsoleState() {
         try {
           const created = await client.createBootstrap(currentProject.id, request, key);
           const events = await client.bootstrapEvents(currentProject.id, created.id);
-          if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events });
+          if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events, bootstrapEventsSessionID: created.id });
           await load(currentProject.id, operation);
+          await onCreated?.();
           return `Bootstrap ${created.id} accepted with status ${created.status}.`;
         } finally {
           patch({ busy: "" });
@@ -400,7 +403,7 @@ export function useConsoleState() {
     );
   }
 
-  async function createService(event: FormEvent<HTMLFormElement>) {
+  async function createService(event: FormEvent<HTMLFormElement>, onCreated?: () => void | Promise<void>) {
     event.preventDefault();
     if (!currentProject) return;
     const formElement = event.currentTarget;
@@ -417,6 +420,7 @@ export function useConsoleState() {
           const created = await client.createService(currentProject.id, body, key);
           formElement.reset();
           await load(currentProject.id);
+          await onCreated?.();
           return `Service ${created.id} created with status ${created.status}.`;
         } finally {
           patch({ busy: "" });
@@ -450,16 +454,32 @@ export function useConsoleState() {
 
   async function loadBootstrapEvents(sessionID: string) {
     if (!currentProject) return;
-    patch({ bootstrapEvents: await client.bootstrapEvents(currentProject.id, sessionID) });
+    const operation = generation.current;
+    const events = await client.bootstrapEvents(currentProject.id, sessionID);
+    if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events, bootstrapEventsSessionID: sessionID });
   }
 
-  function retryBootstrap(sessionID: string) {
+  async function refreshBootstrap(sessionID: string): Promise<BootstrapSession | undefined> {
+    if (!currentProject) return;
+    const project = currentProject;
+    const operation = generation.current;
+    const [sessions, events] = await Promise.all([client.bootstrapSessions(project.id), client.bootstrapEvents(project.id, sessionID)]);
+    if (!isCurrent(operation, project.id)) return;
+    const records = sessions.sessions ?? [];
+    patch({ sessions: records, bootstrapEvents: events, bootstrapEventsSessionID: sessionID });
+    const updated = records.find((session) => session.id === sessionID);
+    if (terminalBootstrap(updated)) await load(project.id, operation);
+    return updated;
+  }
+
+  function retryBootstrap(sessionID: string, onRetried?: () => void | Promise<void>) {
     if (!currentProject) return;
     reviewMutation(
       { project: currentProject.name, targetType: "bootstrap session", targetID: sessionID, operation: "retry", diff: ["resume the same durable checkpoint"], risk: "Retries only a retryable/dead-letter bootstrap session." },
       async (key) => {
         const updated = await client.retryBootstrap(currentProject.id, sessionID, key);
         await load(currentProject.id);
+        await onRetried?.();
         return `Bootstrap ${sessionID} returned status ${updated.status}.`;
       },
     );
@@ -607,6 +627,7 @@ export function useConsoleState() {
       diagnostics,
       load: refreshCurrentData,
       loadBootstrapEvents,
+      refreshBootstrap,
       retryBootstrap,
       loadDeploymentEvents,
       hideSensitive: clearSensitive,

@@ -442,6 +442,13 @@ summary { cursor: pointer; }
 .topologyOnboarding p:not(.eyebrow) { max-width: 620px; margin: 7px 0 0; color: var(--muted); line-height: 1.5; }
 .bootstrapProgress { display: grid; width: min(420px, 100%); gap: 6px; margin-top: 12px; color: var(--muted); font-size: 11px; }
 .bootstrapProgress progress { width: 100%; accent-color: var(--blue); }
+.serverLifecycle { display: grid; min-width: 0; gap: 16px; padding: 18px; border: 1px solid var(--line-strong); background: var(--surface); }
+.serverLifecycle h3, .serverLifecycle h4 { margin: 0; }
+.lifecycleEventsHeading { align-items: end; padding-top: 4px; border-top: 1px solid var(--line); }
+.lifecycleDetails { border-top: 1px solid var(--line); padding-top: 12px; }
+.lifecycleDetails summary { cursor: pointer; font-weight: 750; }
+.lifecycleDetails[open] summary { margin-bottom: 12px; }
+.lifecycleDetails .eventTimeline { margin-top: 16px; }
 .topologyCanvas { position: relative; min-height: 240px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-muted); }
 .topologyEdges { position: absolute; inset: 0; overflow: visible; }
 .topologyEdges line { stroke: var(--line-strong); stroke-width: 1.5; marker-end: url(#topology-arrow); }

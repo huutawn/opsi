@@ -6,7 +6,8 @@ import type { ConsoleController } from "@/features/console/types";
 import { PlacementDialog } from "@/features/infrastructure/placement-dialog";
 import { useInfrastructureData } from "@/features/infrastructure/data";
 import { AddServiceDialog } from "@/features/services/services-view";
-import { bootstrapProgress, buildTopologyGraph, capacityLabel, layoutTopology, topologyOnboarding, type TopologyOnboardingState } from "@/lib/presentation/infrastructure/model";
+import type { TimelineEvent } from "@/lib/contracts/registry";
+import { bootstrapProgress, buildTopologyGraph, capacityLabel, layoutTopology, serverLifecycle, topologyOnboarding, type ServerLifecycle, type TopologyOnboardingState } from "@/lib/presentation/infrastructure/model";
 
 export function InfrastructureView({ console }: { console: ConsoleController }) {
   const { data, source, error, load } = useInfrastructureData(console);
@@ -32,17 +33,17 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
 
   return <div className="infrastructurePage">
     {console.route.tab !== "topology" ? <div className="destinationToolbar"><p>{error || "Cloud topology facts remain visible when Agent runtime data is unavailable."}</p><button data-review-trigger={console.route.tab === "bootstrap" ? "bootstrap" : undefined} onClick={(event) => { if (console.route.tab === "bootstrap") { bootstrapTrigger.current = event.currentTarget; setBootstrapOpen(true); } else { placementTrigger.current = event.currentTarget; setPlacementOpen(true); } }} type="button">{console.route.tab === "bootstrap" ? "Add server" : "Plan placement"}</button></div> : null}
-    {console.route.tab === "topology" ? <TopologyTab console={console} facts={data.facts} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={setMode} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} topology={data.topology} /> : null}
+    {console.route.tab === "topology" ? <TopologyTab console={console} error={error} facts={data.facts} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={setMode} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} onReload={load} topology={data.topology} /> : null}
     {console.route.tab === "runtimes" ? <RuntimesTab console={console} facts={data.facts} topology={data.topology} /> : null}
     {console.route.tab === "nodes" ? <NodesTab console={console} facts={data.facts} /> : null}
-    {console.route.tab === "bootstrap" ? <BootstrapTab console={console} /> : null}
-    {placementOpen ? <PlacementDialog console={console} data={{ facts: data.facts, topology: data.topology, repositories: data.repositories, bindings: data.bindings, builds: data.builds, policies: data.policies }} onApplied={() => void load()} onClose={() => { setPlacementOpen(false); window.requestAnimationFrame(() => placementTrigger.current?.focus()); }} /> : null}
-    {bootstrapOpen ? <BootstrapDialog console={console} onClose={() => { setBootstrapOpen(false); window.requestAnimationFrame(() => bootstrapTrigger.current?.focus()); }} /> : null}
-    {serviceOpen ? <AddServiceDialog console={console} onClose={() => { setServiceOpen(false); window.requestAnimationFrame(() => serviceTrigger.current?.focus()); }} /> : null}
+    {console.route.tab === "bootstrap" ? <BootstrapTab console={console} onReload={load} /> : null}
+    {placementOpen ? <PlacementDialog console={console} data={{ facts: data.facts, topology: data.topology, repositories: data.repositories, bindings: data.bindings, builds: data.builds, policies: data.policies }} onApplied={() => { void console.actions.load(); void load(); }} onClose={() => { setPlacementOpen(false); window.requestAnimationFrame(() => placementTrigger.current?.focus()); }} /> : null}
+    {bootstrapOpen ? <BootstrapDialog console={console} onClose={() => { setBootstrapOpen(false); window.requestAnimationFrame(() => bootstrapTrigger.current?.focus()); }} onCreated={load} /> : null}
+    {serviceOpen ? <AddServiceDialog console={console} onClose={() => { setServiceOpen(false); window.requestAnimationFrame(() => serviceTrigger.current?.focus()); }} onCreated={load} /> : null}
   </div>;
 }
 
-function TopologyTab({ console, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, topology }: { console: ConsoleController; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
+function TopologyTab({ console, error, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, onReload, topology }: { console: ConsoleController; error: string; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void>; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
   const graph = useMemo(() => {
     const full = buildTopologyGraph(facts, topology);
     const visible = new Set([...facts.environments.map((item) => item.id), ...facts.runtimes.map((item) => item.id), ...facts.services.map((item) => item.key)]);
@@ -54,10 +55,12 @@ function TopologyTab({ console, facts, mode, onAddService, onConnectServer, onMo
   const byID = new Map(positioned.map((item) => [item.id, item]));
   const height = Math.max(280, ...positioned.map((item) => item.y + 112));
   const unassigned = facts.services.filter((service) => !topology?.assignments.some((item) => item.service_key === service.key));
+  const lifecycle = serverLifecycle(facts, console.state.sessions);
   const onboarding = topologyOnboarding(facts, topology, console.state.sessions);
   function act(event: React.MouseEvent<HTMLButtonElement>) {
     if (onboarding.kind === "connect") onConnectServer(event.currentTarget);
-    else if (onboarding.kind === "bootstrap") { console.navigate({ tab: "bootstrap", session: onboarding.sessionID }); if (onboarding.sessionID) void console.actions.loadBootstrapEvents(onboarding.sessionID); }
+    else if (onboarding.kind === "bootstrap") { if (onboarding.sessionID) void console.actions.loadBootstrapEvents(onboarding.sessionID); window.requestAnimationFrame(() => document.getElementById("server-lifecycle-heading")?.focus()); }
+    else if (onboarding.kind === "retry" && onboarding.sessionID) console.actions.retryBootstrap(onboarding.sessionID, onReload);
     else if (onboarding.kind === "application") onAddService(event.currentTarget);
     else if (onboarding.kind === "placement") onPlanPlacement(event.currentTarget);
     else { onMode("design"); window.requestAnimationFrame(() => document.getElementById("topology-heading")?.focus()); }
@@ -65,6 +68,8 @@ function TopologyTab({ console, facts, mode, onAddService, onConnectServer, onMo
   return <section aria-labelledby="topology-heading">
     <div className="sectionHeading topologyHeading"><div><h2 id="topology-heading" tabIndex={-1}>Topology</h2><p>{mode === "design" ? "TopologyPlan assignments and services still waiting for placement." : "Runtime, node, Agent, and deployment facts reported by existing sources."}</p></div><div className="topologyControls"><span className="sourceTag">{mode === "design" ? topology ? `TopologyPlan r${topology.revision}` : "No TopologyPlan" : "Live facts"}</span><div aria-label="Topology view" className="topologyMode" role="group"><button aria-pressed={mode === "design"} onClick={() => onMode("design")} type="button">Design</button><button aria-pressed={mode === "live"} onClick={() => onMode("live")} type="button">Live</button></div></div></div>
     <TopologyOnboarding action={act} state={onboarding} />
+    <ServerLifecycleCard console={console} lifecycle={lifecycle} />
+    {error ? <p className="truthCallout" role="alert">{error}</p> : null}
     {mode === "design" ? <>
       {!topology ? <div className="truthCallout"><b>No topology plan</b><p>Infrastructure facts are shown without service placement edges. Service inventory is not used to fabricate assignments.</p></div> : null}
       {positioned.length ? <div className="topologyCanvas" style={{ height }}>
@@ -79,6 +84,43 @@ function TopologyTab({ console, facts, mode, onAddService, onConnectServer, onMo
 
 function TopologyOnboarding({ action, state }: { action: (event: React.MouseEvent<HTMLButtonElement>) => void; state: TopologyOnboardingState }) {
   return <section className="topologyOnboarding" data-state={state.kind} aria-labelledby="topology-next-step"><div><p className="eyebrow">Next step</p><h3 id="topology-next-step">{state.title}</h3><p>{state.description}</p>{state.progress ? <div className="bootstrapProgress" role="status"><span>{state.progress.percent === null ? state.progress.label : `${state.progress.percent}% · ${state.progress.label}`}</span>{state.progress.percent !== null ? <progress max="100" value={state.progress.percent} /> : null}</div> : null}</div><button className="primary" onClick={action} type="button">{state.action}</button></section>;
+}
+
+function ServerLifecycleCard({ console, lifecycle }: { console: ConsoleController; lifecycle: ServerLifecycle }) {
+  const session = lifecycle.session;
+  const nodeRecord = console.state.nodes.find((node) => node.id === lifecycle.node?.id);
+  const publicHost = session?.public_host || nodeRecord?.public_host;
+  const events = console.state.bootstrapEventsSessionID === session?.id ? [...console.state.bootstrapEvents].sort((a, b) => b.created_at.localeCompare(a.created_at)) : [];
+  const recent = events.slice(0, 5);
+  const progress = session ? bootstrapProgress(session.checkpoint, events.length) : null;
+  const facts: Array<[string, string] | null> = [
+    publicHost ? ["Public host", publicHost] : null,
+    lifecycle.runtime ? ["Runtime", `${lifecycle.runtime.name} · ${lifecycle.runtime.type} · ${lifecycle.runtime.status}`] : null,
+    lifecycle.node ? ["Node", `${lifecycle.node.id} · ${lifecycle.node.status}`] : null,
+    lifecycle.agent ? ["Agent", `${lifecycle.agent.id} · ${lifecycle.agent.status}${nodeRecord?.agent_version ? ` · ${nodeRecord.agent_version}` : ""}`] : null,
+    session ? ["Bootstrap status", `${session.status} · ${session.created_at}`] : null,
+    progress ? ["Bootstrap progress", progress.percent === null ? progress.label : `${progress.percent}% · ${progress.label}`] : null,
+    session?.last_failure_code ? ["Failure code", session.last_failure_code] : null,
+    session?.last_failure_message_redacted ? ["Failure", session.last_failure_message_redacted] : null,
+  ];
+  const reportedFacts = facts.filter((fact): fact is [string, string] => fact !== null);
+  const detailFacts: Array<[string, string] | null> = session ? [
+    ["Session", session.id],
+    ["Role", session.role],
+    session.attempt_count !== undefined ? ["Attempt", session.max_attempts === undefined ? String(session.attempt_count) : `${session.attempt_count}/${session.max_attempts}`] : null,
+    session.checkpoint ? ["Next step", String(session.checkpoint.next_step_index)] : null,
+  ] : [];
+  const reportedDetails = detailFacts.filter((fact): fact is [string, string] => fact !== null);
+  return <section className="serverLifecycle" aria-labelledby="server-lifecycle-heading" data-state={lifecycle.status.toLowerCase()}>
+    <div className="detailHeading"><div><p className="eyebrow">Server lifecycle</p><h3 id="server-lifecycle-heading" tabIndex={-1}>{publicHost || lifecycle.runtime?.name || session?.id || "Server facts"}</h3></div><StatusBadge label={lifecycle.status} value={lifecycle.status === "Connecting" ? "bootstrapping" : lifecycle.status} /></div>
+    {reportedFacts.length ? <dl className="evidenceGrid">{reportedFacts.map(([label, value]) => <Fact key={label} label={label} value={value} />)}</dl> : <p className="muted">No server identity or bootstrap facts have been reported.</p>}
+    {recent.length ? <><div className="sectionHeading lifecycleEventsHeading"><div><h4>Recent bootstrap events</h4><p>Latest five factual events for this session.</p></div><span>{events.length} total</span></div><EventTimeline events={recent} /></> : null}
+    {session ? <details className="lifecycleDetails"><summary>Open full bootstrap details</summary><dl className="evidenceGrid">{reportedDetails.map(([label, value]) => <Fact key={label} label={label} value={value} />)}</dl>{events.length > 5 ? <EventTimeline events={events} /> : null}</details> : null}
+  </section>;
+}
+
+function EventTimeline({ events }: { events: TimelineEvent[] }) {
+  return <ol className="eventTimeline">{events.map((event) => <li key={event.id}><span aria-hidden="true" /><div><b>{event.step}</b><p>{event.message_redacted}</p><small>{event.created_at}</small></div></li>)}</ol>;
 }
 
 function LiveTopology({ console, facts }: { console: ConsoleController; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]> }) {
@@ -96,20 +138,20 @@ function NodesTab({ console, facts }: { console: ConsoleController; facts: NonNu
   return <div className="masterDetail infrastructureMaster"><section className="masterList"><div className="sectionHeading"><h2>Nodes</h2><span>{console.state.nodes.length} records</span></div>{unavailable ? <p className="truthCallout">Agent source unavailable. Inventory remains visible; node mutations are disabled.</p> : null}<ul>{console.state.nodes.map((node) => <li key={node.id}><button aria-pressed={selected?.id === node.id} onClick={() => { console.navigate({ node: node.id }); void console.actions.diagnostics(node.id); }} type="button"><span><strong>{node.name}</strong><small>{facts.runtimes.find((runtime) => facts.nodes.some((item) => item.id === node.id && item.runtime_id === runtime.id))?.name || "Runtime unresolved"} · {node.role}</small><small>{node.agent_version || "Agent version unavailable"} · {node.last_seen_at || "last seen unknown"}</small></span><StatusBadge value={node.status} /></button></li>)}</ul></section><section className="detailPanel">{selected ? <><div className="detailHeading"><div><p className="eyebrow">Node detail</p><h2>{selected.name}</h2></div><StatusBadge value={selected.status} /></div><dl className="evidenceGrid"><Fact label="Canonical ID" value={selected.id} /><Fact label="Provider / region" value={[selected.provider, selected.region].filter(Boolean).join(" / ") || "Not reported"} /><Fact label="Capacity" value={`${capacityLabel(selected.cpu_cores, selected.memory_mb)} · disk ${selected.disk_total_gb === undefined ? "Unknown" : `${selected.disk_total_gb} GiB`}`} /><Fact label="K3s" value={selected.k3s_status || selected.k3s_role || "Not reported"} /><Fact label="Agent" value={[selected.agent_id, selected.agent_version].filter(Boolean).join(" · ") || "Unavailable"} /><Fact label="Heartbeat" value={selected.last_seen_at || "Not reported"} /></dl><Related title="Diagnostics" values={(console.state.nodeDetail?.open_bootstrap_events ?? []).map((item) => `${item.step}: ${item.message_redacted}`)} /><Related title="Recent deployment jobs" values={(console.state.nodeDetail?.recent_deployment_jobs ?? []).map((item) => `${item.id} · ${item.status}`)} /><div className="detailActions"><button disabled={unavailable} onClick={() => console.actions.nodeAction(selected.id, "offline")} type="button">Mark offline</button><button disabled={unavailable} onClick={() => console.actions.nodeAction(selected.id, "drain")} type="button">Drain</button><button className="danger" disabled={unavailable} onClick={() => console.actions.nodeAction(selected.id, "remove")} type="button">Remove…</button></div></> : <Empty text="No node inventory exists." />}</section></div>;
 }
 
-function BootstrapTab({ console }: { console: ConsoleController }) {
+function BootstrapTab({ console, onReload }: { console: ConsoleController; onReload: () => Promise<void> }) {
   const selected = console.state.sessions.find((item) => item.id === console.route.session) ?? console.state.sessions[0];
   const progress = bootstrapProgress(selected?.checkpoint, selected ? console.state.bootstrapEvents.length : 0);
-  return <div className="bootstrapLayout"><section className="bootstrapInventory"><div className="sectionHeading"><div><h2>Bootstrap sessions</h2><p>Durable Cloud worker sessions; no public DNS assumption.</p></div></div>{console.state.sessions.length ? <ul>{console.state.sessions.map((session) => <li key={session.id}><button aria-pressed={selected?.id === session.id} onClick={() => { console.navigate({ session: session.id }); void console.actions.loadBootstrapEvents(session.id); }} type="button"><span><strong>{session.public_host || session.id}</strong><small>{session.role} · attempt {session.attempt_count ?? "?"}/{session.max_attempts ?? "?"}</small></span><StatusBadge value={session.status} /></button></li>)}</ul> : <Empty title="No bootstrap sessions" text="Use Add server to review connection input and create a Local API bootstrap session." />}</section><section className="bootstrapDetail">{selected ? <><div className="detailHeading"><div><p className="eyebrow">Selected session</p><h2>{selected.id}</h2></div><StatusBadge value={selected.status} /></div><dl className="evidenceGrid"><Fact label="Attempt" value={`${selected.attempt_count ?? "Unknown"}/${selected.max_attempts ?? "Unknown"}`} /><Fact label="Progress" value={progress.percent === null ? progress.label : `${progress.percent}% · ${progress.label}`} /><Fact label="Next step" value={selected.checkpoint ? `Step ${selected.checkpoint.next_step_index}` : "Not reported"} /><Fact label="Failure" value={selected.last_failure_message_redacted || selected.last_failure_code || "None reported"} /></dl><ol className="eventTimeline">{console.state.bootstrapEvents.map((event) => <li key={event.id}><span aria-hidden="true" /><div><b>{event.step}</b><p>{event.message_redacted}</p><small>{event.created_at}</small></div></li>)}</ol><button disabled={!['failed', 'dead_letter'].includes(selected.status)} onClick={() => console.actions.retryBootstrap(selected.id)} type="button">Retry eligible session</button></> : <Empty text="Select a bootstrap session." />}</section></div>;
+  return <div className="bootstrapLayout"><section className="bootstrapInventory"><div className="sectionHeading"><div><h2>Bootstrap sessions</h2><p>Durable Cloud worker sessions; no public DNS assumption.</p></div></div>{console.state.sessions.length ? <ul>{console.state.sessions.map((session) => <li key={session.id}><button aria-pressed={selected?.id === session.id} onClick={() => { console.navigate({ session: session.id }); void console.actions.loadBootstrapEvents(session.id); }} type="button"><span><strong>{session.public_host || session.id}</strong><small>{session.role} · attempt {session.attempt_count ?? "?"}/{session.max_attempts ?? "?"}</small></span><StatusBadge value={session.status} /></button></li>)}</ul> : <Empty title="No bootstrap sessions" text="Use Add server to review connection input and create a Local API bootstrap session." />}</section><section className="bootstrapDetail">{selected ? <><div className="detailHeading"><div><p className="eyebrow">Selected session</p><h2>{selected.id}</h2></div><StatusBadge value={selected.status} /></div><dl className="evidenceGrid"><Fact label="Attempt" value={`${selected.attempt_count ?? "Unknown"}/${selected.max_attempts ?? "Unknown"}`} /><Fact label="Progress" value={progress.percent === null ? progress.label : `${progress.percent}% · ${progress.label}`} /><Fact label="Next step" value={selected.checkpoint ? `Step ${selected.checkpoint.next_step_index}` : "Not reported"} /><Fact label="Failure" value={selected.last_failure_message_redacted || selected.last_failure_code || "None reported"} /></dl><EventTimeline events={console.state.bootstrapEventsSessionID === selected.id ? console.state.bootstrapEvents : []} /><button disabled={!['failed', 'dead_letter'].includes(selected.status)} onClick={() => console.actions.retryBootstrap(selected.id, onReload)} type="button">Retry eligible session</button></> : <Empty text="Select a bootstrap session." />}</section></div>;
 }
 
-function BootstrapDialog({ console, onClose }: { console: ConsoleController; onClose: () => void }) {
+function BootstrapDialog({ console, onClose, onCreated }: { console: ConsoleController; onClose: () => void; onCreated: () => Promise<void> }) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const element = dialog.current;
     element?.showModal();
     return () => { if (element?.open) element.close(); };
   }, []);
-  return <dialog aria-describedby="bootstrap-description" aria-labelledby="bootstrap-title" className="placementDialog" onCancel={(event) => { event.preventDefault(); onClose(); }} ref={dialog}><div className="dialogHeading"><div><p className="eyebrow">Bootstrap action</p><h2 id="bootstrap-title">Add server</h2><p id="bootstrap-description">Review non-sensitive target facts first. The one-time credential is requested only at final confirmation.</p></div><button aria-label="Close add server dialog" autoFocus className="iconButton" onClick={onClose} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button></div><form className="form placementForm" onSubmit={(event) => { void console.actions.addServer(event); onClose(); }}><label>Role<select className="select" name="role" required><option value="">Choose role…</option><option value="first_server">First server</option><option value="worker">Worker</option></select></label><label>SSH host or IP<input autoComplete="off" className="field" name="public_host" placeholder="203.0.113.10…" required /></label><label>SSH port<input className="field" inputMode="numeric" min="1" name="ssh_port" required type="number" /></label><label>SSH username<input autoComplete="username" className="field" name="ssh_username" required spellCheck={false} /></label><label>Authentication<select className="select" name="auth_method" required><option value="">Choose method…</option><option value="password">Password</option><option value="private_key">Private key</option></select></label><p className="notice span2">No credential is collected on this step.</p><div className="dialogActions span2"><button onClick={onClose} type="button">Cancel</button><button type="submit">Review bootstrap request</button></div></form></dialog>;
+  return <dialog aria-describedby="bootstrap-description" aria-labelledby="bootstrap-title" className="placementDialog" onCancel={(event) => { event.preventDefault(); onClose(); }} ref={dialog}><div className="dialogHeading"><div><p className="eyebrow">Bootstrap action</p><h2 id="bootstrap-title">Add server</h2><p id="bootstrap-description">Review non-sensitive target facts first. The one-time credential is requested only at final confirmation.</p></div><button aria-label="Close add server dialog" autoFocus className="iconButton" onClick={onClose} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button></div><form className="form placementForm" onSubmit={(event) => { void console.actions.addServer(event, onCreated); onClose(); }}><label>Role<select className="select" name="role" required><option value="">Choose role…</option><option value="first_server">First server</option><option value="worker">Worker</option></select></label><label>SSH host or IP<input autoComplete="off" className="field" name="public_host" placeholder="203.0.113.10…" required /></label><label>SSH port<input className="field" inputMode="numeric" min="1" name="ssh_port" required type="number" /></label><label>SSH username<input autoComplete="username" className="field" name="ssh_username" required spellCheck={false} /></label><label>Authentication<select className="select" name="auth_method" required><option value="">Choose method…</option><option value="password">Password</option><option value="private_key">Private key</option></select></label><p className="notice span2">No credential is collected on this step.</p><div className="dialogActions span2"><button onClick={onClose} type="button">Cancel</button><button type="submit">Review bootstrap request</button></div></form></dialog>;
 }
 
 function Fact({ label, value }: { label: string; value: string }) { return <div><dt>{label}</dt><dd>{value}</dd></div>; }

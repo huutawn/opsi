@@ -11,6 +11,7 @@ import type {
 } from "@/lib/contracts/registry";
 import { emptyFoundation, type FoundationData, type FoundationState } from "@/lib/presentation/project";
 import { deriveProjectSummary, normalizeStatus, type ProjectSummaryEntry } from "@/lib/presentation/project";
+import { latestActiveBootstrap } from "@/lib/presentation/infrastructure/model";
 
 export const MAX_PROJECT_SUMMARY_REQUESTS = 6;
 
@@ -121,11 +122,11 @@ export async function loadProjectSummary(client: LocalClient, project: Project, 
   };
 }
 
-export async function reconnect(client: LocalClient, projectID: string, sessions: BootstrapSession[], deployments: DeploymentJob[]): Promise<Pick<ConsoleState, "bootstrapEvents" | "deploymentEvents">> {
-  const activeSession = sessions.find((item) => ["created", "preflight", "installing", "waiting_agent"].includes(item.status)) ?? sessions[0];
+export async function reconnect(client: LocalClient, projectID: string, sessions: BootstrapSession[], deployments: DeploymentJob[]): Promise<Pick<ConsoleState, "bootstrapEvents" | "bootstrapEventsSessionID" | "deploymentEvents">> {
+  const activeSession = latestActiveBootstrap(sessions) ?? [...sessions].sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
   const bootstrapEvents = activeSession ? await client.bootstrapEvents(projectID, activeSession.id) : [];
   const deploymentEvents = deployments[0] ? (await client.deploymentEvents(projectID, deployments[0].id)).events ?? [] : [];
-  return { bootstrapEvents, deploymentEvents };
+  return { bootstrapEvents, bootstrapEventsSessionID: activeSession?.id ?? "", deploymentEvents };
 }
 
 export function workspacePatch(projects: Project[]): Partial<ConsoleState & FoundationState> {
@@ -144,6 +145,7 @@ export function workspacePatch(projects: Project[]): Partial<ConsoleState & Foun
     totpSetup: null,
     incidents: [],
     bootstrapEvents: [] as TimelineEvent[],
+    bootstrapEventsSessionID: "",
     deploymentEvents: [] as TimelineEvent[],
     nodeDetail: null as NodeDiagnostics | null,
     serviceDetail: null,
@@ -162,6 +164,7 @@ export function clearProjectPatch(message: string): Partial<ConsoleState & Found
     deployments: [],
     sessions: [],
     bootstrapEvents: [],
+    bootstrapEventsSessionID: "",
     deploymentEvents: [],
     audit: [],
     support: null,

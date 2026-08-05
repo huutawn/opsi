@@ -575,6 +575,7 @@ export type ConsoleState = {
   deployments: DeploymentJob[];
   sessions: BootstrapSession[];
   bootstrapEvents: TimelineEvent[];
+  bootstrapEventsSessionID: string;
   deploymentEvents: TimelineEvent[];
   audit: AuditEvent[];
   support: SupportSummary | null;

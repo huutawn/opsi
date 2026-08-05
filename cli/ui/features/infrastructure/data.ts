@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LocalClient } from "@/lib/api/local-client";
 import type { BuildRecord, DeploymentPolicy, GitHubBinding, GitHubRepository, PlacementFacts, TopologyPlan } from "@/lib/contracts/registry";
 import type { ConsoleController } from "@/features/console/types";
+import { bootstrapPollInterval, latestActiveBootstrap, terminalBootstrap } from "@/lib/presentation/infrastructure/model";
 
 export type SourceState = "loading" | "ready" | "empty" | "unavailable";
 export type InfrastructureData = {
@@ -25,6 +26,14 @@ export function useInfrastructureData(console: ConsoleController) {
   const [data, setData] = useState<InfrastructureData>(emptyData);
   const [source, setSource] = useState<SourceState>(projectID ? "loading" : "empty");
   const [error, setError] = useState("");
+  const refreshBootstrap = useRef(console.actions.refreshBootstrap);
+  const pollingScope = useRef("");
+  useEffect(() => { refreshBootstrap.current = console.actions.refreshBootstrap; }, [console.actions.refreshBootstrap]);
+  const scope = `${projectID}:${console.route.tab}`;
+  useEffect(() => {
+    pollingScope.current = scope;
+    return () => { if (pollingScope.current === scope) pollingScope.current = ""; };
+  }, [scope]);
 
   const load = useCallback(async () => {
     if (!projectID) return;
@@ -66,6 +75,47 @@ export function useInfrastructureData(console: ConsoleController) {
       void load();
     });
   }, [projectID]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const consoleFacts = console.state.foundation.placement;
+  useEffect(() => {
+    if (!consoleFacts || consoleFacts.project_id !== projectID) return;
+    queueMicrotask(() => {
+      const next = { ...dataRef.current, facts: consoleFacts };
+      dataRef.current = next;
+      setData(next);
+      setSource((state) => state === "unavailable" ? state : consoleFacts.runtimes.length || consoleFacts.environments.length ? "ready" : "empty");
+    });
+  }, [consoleFacts, projectID]);
+
+  const activeBootstrapID = latestActiveBootstrap(console.state.sessions)?.id ?? "";
+  useEffect(() => {
+    if (!projectID || console.route.tab !== "topology" || !activeBootstrapID) return;
+    let disposed = false;
+    let inFlight = false;
+    let timer = 0;
+    async function refresh() {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      try {
+        const updated = await refreshBootstrap.current(activeBootstrapID);
+        if (pollingScope.current !== scope) return;
+        await load();
+        if (!disposed && !terminalBootstrap(updated)) timer = window.setTimeout(refresh, bootstrapPollInterval);
+      } catch (reason) {
+        if (!disposed) {
+          setError(reason instanceof Error ? `Bootstrap refresh failed: ${reason.message}` : "Bootstrap refresh failed; last factual state is preserved.");
+          timer = window.setTimeout(refresh, bootstrapPollInterval);
+        }
+      } finally {
+        inFlight = false;
+      }
+    }
+    void refresh();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeBootstrapID, console.route.tab, load, projectID, scope]);
 
   return { data, source, error, load };
 }
