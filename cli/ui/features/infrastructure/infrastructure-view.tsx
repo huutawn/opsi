@@ -5,53 +5,84 @@ import { Empty, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { PlacementDialog } from "@/features/infrastructure/placement-dialog";
 import { useInfrastructureData } from "@/features/infrastructure/data";
-import { bootstrapProgress, buildTopologyGraph, capacityLabel, layoutTopology } from "@/lib/presentation/infrastructure/model";
+import { AddServiceDialog } from "@/features/services/services-view";
+import { bootstrapProgress, buildTopologyGraph, capacityLabel, layoutTopology, topologyOnboarding, type TopologyOnboardingState } from "@/lib/presentation/infrastructure/model";
 
 export function InfrastructureView({ console }: { console: ConsoleController }) {
   const { data, source, error, load } = useInfrastructureData(console);
+  const [mode, setMode] = useState<"design" | "live">("design");
   const [placementOpen, setPlacementOpen] = useState(false);
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
+  const [serviceOpen, setServiceOpen] = useState(false);
+  const placementTrigger = useRef<HTMLButtonElement>(null);
   const bootstrapTrigger = useRef<HTMLButtonElement>(null);
+  const serviceTrigger = useRef<HTMLButtonElement>(null);
   const projectID = console.state.project?.id ?? "";
   useEffect(() => {
     // Project-scoped dialogs never survive a context change.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPlacementOpen(false);
     setBootstrapOpen(false);
+    setServiceOpen(false);
+    setMode("design");
   }, [projectID]);
   if (!console.state.project) return <Empty text="Select a project first." />;
   if (source === "loading" && !data.facts) return <Empty title="Loading infrastructure…" text="Reading factual topology and runtime inventory from Local API." />;
   if (!data.facts) return <Empty title="Infrastructure unavailable" text={error || "Local API did not return topology facts."} action={<button onClick={() => void load()} type="button">Retry</button>} />;
 
   return <div className="infrastructurePage">
-    <div className="destinationToolbar"><p>{error || "Cloud topology facts remain visible when Agent runtime data is unavailable."}</p><button data-review-trigger={console.route.tab === "bootstrap" ? "bootstrap" : undefined} onClick={(event) => { if (console.route.tab === "bootstrap") { bootstrapTrigger.current = event.currentTarget; setBootstrapOpen(true); } else setPlacementOpen(true); }} type="button">{console.route.tab === "bootstrap" ? "Add server" : "Plan placement"}</button></div>
-    {console.route.tab === "topology" ? <TopologyTab console={console} facts={data.facts} topology={data.topology} /> : null}
+    {console.route.tab !== "topology" ? <div className="destinationToolbar"><p>{error || "Cloud topology facts remain visible when Agent runtime data is unavailable."}</p><button data-review-trigger={console.route.tab === "bootstrap" ? "bootstrap" : undefined} onClick={(event) => { if (console.route.tab === "bootstrap") { bootstrapTrigger.current = event.currentTarget; setBootstrapOpen(true); } else { placementTrigger.current = event.currentTarget; setPlacementOpen(true); } }} type="button">{console.route.tab === "bootstrap" ? "Add server" : "Plan placement"}</button></div> : null}
+    {console.route.tab === "topology" ? <TopologyTab console={console} facts={data.facts} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={setMode} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} topology={data.topology} /> : null}
     {console.route.tab === "runtimes" ? <RuntimesTab console={console} facts={data.facts} topology={data.topology} /> : null}
     {console.route.tab === "nodes" ? <NodesTab console={console} facts={data.facts} /> : null}
     {console.route.tab === "bootstrap" ? <BootstrapTab console={console} /> : null}
-    {placementOpen ? <PlacementDialog console={console} data={{ facts: data.facts, topology: data.topology, repositories: data.repositories, bindings: data.bindings, builds: data.builds, policies: data.policies }} onApplied={() => void load()} onClose={() => setPlacementOpen(false)} /> : null}
+    {placementOpen ? <PlacementDialog console={console} data={{ facts: data.facts, topology: data.topology, repositories: data.repositories, bindings: data.bindings, builds: data.builds, policies: data.policies }} onApplied={() => void load()} onClose={() => { setPlacementOpen(false); window.requestAnimationFrame(() => placementTrigger.current?.focus()); }} /> : null}
     {bootstrapOpen ? <BootstrapDialog console={console} onClose={() => { setBootstrapOpen(false); window.requestAnimationFrame(() => bootstrapTrigger.current?.focus()); }} /> : null}
+    {serviceOpen ? <AddServiceDialog console={console} onClose={() => { setServiceOpen(false); window.requestAnimationFrame(() => serviceTrigger.current?.focus()); }} /> : null}
   </div>;
 }
 
-function TopologyTab({ console, facts, topology }: { console: ConsoleController; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
-  const graph = useMemo(() => buildTopologyGraph(facts, topology), [facts, topology]);
+function TopologyTab({ console, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, topology }: { console: ConsoleController; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
+  const graph = useMemo(() => {
+    const full = buildTopologyGraph(facts, topology);
+    const visible = new Set([...facts.environments.map((item) => item.id), ...facts.runtimes.map((item) => item.id), ...facts.services.map((item) => item.key)]);
+    return { nodes: full.nodes.filter((item) => item.kind === "environment" || item.kind === "runtime" || item.kind === "service"), edges: full.edges.filter((item) => item.relation === "runtime.environment_id" || item.relation === "TopologyPlan.assignments"), unresolved: full.unresolved.filter((item) => visible.has(item.id)) };
+  }, [facts, topology]);
   const positioned = useMemo(() => layoutTopology(graph.nodes), [graph.nodes]);
   const selectedID = console.route.topology || positioned[0]?.id || "";
   const selected = positioned.find((item) => item.id === selectedID);
   const byID = new Map(positioned.map((item) => [item.id, item]));
   const height = Math.max(280, ...positioned.map((item) => item.y + 112));
   const unassigned = facts.services.filter((service) => !topology?.assignments.some((item) => item.service_key === service.key));
+  const onboarding = topologyOnboarding(facts, topology, console.state.sessions);
+  function act(event: React.MouseEvent<HTMLButtonElement>) {
+    if (onboarding.kind === "connect") onConnectServer(event.currentTarget);
+    else if (onboarding.kind === "bootstrap") { console.navigate({ tab: "bootstrap", session: onboarding.sessionID }); if (onboarding.sessionID) void console.actions.loadBootstrapEvents(onboarding.sessionID); }
+    else if (onboarding.kind === "application") onAddService(event.currentTarget);
+    else if (onboarding.kind === "placement") onPlanPlacement(event.currentTarget);
+    else { onMode("design"); window.requestAnimationFrame(() => document.getElementById("topology-heading")?.focus()); }
+  }
   return <section aria-labelledby="topology-heading">
-    <div className="sectionHeading"><div><h2 id="topology-heading">Factual topology</h2><p>Environment → runtime → node/Agent and exact service assignment edges.</p></div><span className="sourceTag">{topology ? `TopologyPlan r${topology.revision}` : "No TopologyPlan"}</span></div>
-    {!topology ? <div className="truthCallout"><b>No topology plan</b><p>Infrastructure facts are shown without service placement edges. Service inventory is not used to fabricate assignments.</p></div> : null}
-    <div className="topologyCanvas" style={{ height }}>
-      <svg aria-hidden="true" className="topologyEdges" height={height} width="100%"><defs><marker id="topology-arrow" markerHeight="7" markerWidth="7" orient="auto" refX="6" refY="3.5"><path d="M0,0 L7,3.5 L0,7 z" /></marker></defs>{graph.edges.map((edge) => { const from = byID.get(edge.from); const to = byID.get(edge.to); return from && to ? <line key={`${edge.from}-${edge.to}-${edge.relation}`} markerEnd="url(#topology-arrow)" x1={from.x + 176} x2={to.x} y1={from.y + 31} y2={to.y + 31} /> : null; })}</svg>
-      {positioned.map((node) => <button aria-pressed={selectedID === node.id} className="topologyNode" key={node.id} onClick={() => console.navigate({ topology: node.id })} style={{ left: node.x, top: node.y }} type="button"><span>{node.kind}</span><strong>{node.label}</strong><StatusBadge value={node.status} /><small>{node.detail}</small></button>)}
-    </div>
-    <div className="topologyTree" aria-label="Topology relationship list">{facts.environments.map((environment) => <section key={environment.id}><h3>{environment.name}</h3>{facts.runtimes.filter((runtime) => runtime.environment_id === environment.id).map((runtime) => <div key={runtime.id}><b>{runtime.name}</b><p>Nodes: {facts.nodes.filter((node) => node.runtime_id === runtime.id).map((node) => node.id).join(", ") || "none"}</p><p>Agents: {facts.agents.filter((agent) => agent.runtime_id === runtime.id).map((agent) => agent.id).join(", ") || "none"}</p><p>Services: {topology?.assignments.filter((assignment) => assignment.runtime_id === runtime.id).map((assignment) => assignment.service_key).join(", ") || "none assigned"}</p></div>)}</section>)}</div>
-    <div className="infrastructureSplit"><section><h3>Relationship evidence</h3><ul className="relationshipList">{graph.edges.map((edge) => <li key={`${edge.from}-${edge.to}-${edge.relation}`}><code>{edge.from}</code><span>→</span><code>{edge.to}</code><small>{edge.relation}</small></li>)}</ul></section><aside className="inspector"><h3>{selected?.label || "Select a node"}</h3>{selected ? <><StatusBadge value={selected.status} /><p>{selected.detail}</p><code>{selected.id}</code></> : null}{graph.unresolved.length ? <><h4>Unresolved</h4>{graph.unresolved.map((item) => <p key={`${item.id}-${item.reason}`}><b>{item.label}</b> — {item.reason}</p>)}</> : null}{unassigned.length ? <><h4>Unassigned services</h4><p>{unassigned.map((item) => item.key).join(", ")}</p></> : null}</aside></div>
+    <div className="sectionHeading topologyHeading"><div><h2 id="topology-heading" tabIndex={-1}>Topology</h2><p>{mode === "design" ? "TopologyPlan assignments and services still waiting for placement." : "Runtime, node, Agent, and deployment facts reported by existing sources."}</p></div><div className="topologyControls"><span className="sourceTag">{mode === "design" ? topology ? `TopologyPlan r${topology.revision}` : "No TopologyPlan" : "Live facts"}</span><div aria-label="Topology view" className="topologyMode" role="group"><button aria-pressed={mode === "design"} onClick={() => onMode("design")} type="button">Design</button><button aria-pressed={mode === "live"} onClick={() => onMode("live")} type="button">Live</button></div></div></div>
+    <TopologyOnboarding action={act} state={onboarding} />
+    {mode === "design" ? <>
+      {!topology ? <div className="truthCallout"><b>No topology plan</b><p>Infrastructure facts are shown without service placement edges. Service inventory is not used to fabricate assignments.</p></div> : null}
+      {positioned.length ? <div className="topologyCanvas" style={{ height }}>
+        <svg aria-hidden="true" className="topologyEdges" height={height} width="100%"><defs><marker id="topology-arrow" markerHeight="7" markerWidth="7" orient="auto" refX="6" refY="3.5"><path d="M0,0 L7,3.5 L0,7 z" /></marker></defs>{graph.edges.map((edge) => { const from = byID.get(edge.from); const to = byID.get(edge.to); return from && to ? <line key={`${edge.from}-${edge.to}-${edge.relation}`} markerEnd="url(#topology-arrow)" x1={from.x + 176} x2={to.x} y1={from.y + 31} y2={to.y + 31} /> : null; })}</svg>
+        {positioned.map((node) => <button aria-pressed={selectedID === node.id} className="topologyNode" key={node.id} onClick={() => console.navigate({ topology: node.id })} style={{ left: node.x, top: node.y }} type="button"><span>{node.kind}</span><strong>{node.label}</strong><StatusBadge value={node.status} /><small>{node.detail}</small></button>)}
+      </div> : null}
+      <div className="topologyTree" aria-label="Topology relationship list">{facts.environments.map((environment) => <section key={environment.id}><h3>{environment.name}</h3>{facts.runtimes.filter((runtime) => runtime.environment_id === environment.id).map((runtime) => <div key={runtime.id}><b>{runtime.name}</b><p>Services: {topology?.assignments.filter((assignment) => assignment.runtime_id === runtime.id).map((assignment) => assignment.service_key).join(", ") || "none assigned"}</p></div>)}</section>)}</div>
+      {positioned.length ? <div className="infrastructureSplit"><section><h3>Relationship evidence</h3><ul className="relationshipList">{graph.edges.map((edge) => <li key={`${edge.from}-${edge.to}-${edge.relation}`}><code>{edge.from}</code><span>→</span><code>{edge.to}</code><small>{edge.relation}</small></li>)}</ul></section><aside className="inspector"><h3>{selected?.label || "Select an item"}</h3>{selected ? <><StatusBadge value={selected.status} /><p>{selected.detail}</p><code>{selected.id}</code></> : null}{graph.unresolved.length ? <><h4>Unresolved</h4>{graph.unresolved.map((item) => <p key={`${item.id}-${item.reason}`}><b>{item.label}</b> — {item.reason}</p>)}</> : null}{unassigned.length ? <><h4>Unassigned services</h4><p>{unassigned.map((item) => item.key).join(", ")}</p></> : null}</aside></div> : null}
+    </> : <LiveTopology console={console} facts={facts} />}
   </section>;
+}
+
+function TopologyOnboarding({ action, state }: { action: (event: React.MouseEvent<HTMLButtonElement>) => void; state: TopologyOnboardingState }) {
+  return <section className="topologyOnboarding" data-state={state.kind} aria-labelledby="topology-next-step"><div><p className="eyebrow">Next step</p><h3 id="topology-next-step">{state.title}</h3><p>{state.description}</p>{state.progress ? <div className="bootstrapProgress" role="status"><span>{state.progress.percent === null ? state.progress.label : `${state.progress.percent}% · ${state.progress.label}`}</span>{state.progress.percent !== null ? <progress max="100" value={state.progress.percent} /> : null}</div> : null}</div><button className="primary" onClick={action} type="button">{state.action}</button></section>;
+}
+
+function LiveTopology({ console, facts }: { console: ConsoleController; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]> }) {
+  return <div className="liveTopology"><section><div className="sectionHeading"><div><h3>Runtime and Agent facts</h3><p>Only identities returned by Local API are shown.</p></div><span>{facts.runtimes.length} runtimes</span></div>{facts.runtimes.length ? <div className="liveRuntimeList">{facts.runtimes.map((runtime) => <article key={runtime.id}><div><strong>{runtime.name}</strong><StatusBadge value={runtime.status} /></div><p>{facts.environments.find((environment) => environment.id === runtime.environment_id)?.name || runtime.environment_id} · <code>{runtime.id}</code></p><dl><Fact label="Nodes" value={facts.nodes.filter((node) => node.runtime_id === runtime.id).map((node) => `${node.id} (${node.status})`).join(", ") || "None reported"} /><Fact label="Agents" value={facts.agents.filter((agent) => agent.runtime_id === runtime.id).map((agent) => `${agent.id} (${agent.status})`).join(", ") || "None reported"} /></dl></article>)}</div> : <p className="muted">No runtime facts reported.</p>}</section><section><div className="sectionHeading"><div><h3>Deployment facts</h3><p>Durable jobs and rollout fields already loaded for this project.</p></div><span>{console.state.deployments.length} jobs</span></div>{console.state.deployments.length ? <ul className="liveDeploymentList">{console.state.deployments.map((deployment) => <li key={deployment.id}><span><strong>{deployment.id}</strong><small>{deployment.service_id} · {deployment.runtime_id || "runtime not reported"}</small><small>{[deployment.node_id, deployment.agent_id].filter(Boolean).join(" · ") || "node/Agent not reported"}</small></span><StatusBadge value={deployment.rollout_state ?? deployment.status} /></li>)}</ul> : <p className="muted">No deployment jobs reported.</p>}</section></div>;
 }
 
 function RuntimesTab({ console, facts, topology }: { console: ConsoleController; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {

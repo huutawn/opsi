@@ -1,8 +1,8 @@
 export const projectDestinations = [
+  { id: "infrastructure", label: "Topology" },
   { id: "overview", label: "Overview" },
   { id: "services", label: "Services" },
   { id: "delivery", label: "Delivery" },
-  { id: "infrastructure", label: "Infrastructure" },
   { id: "observability", label: "Observability" },
   { id: "security", label: "Security" },
 ] as const;
@@ -75,7 +75,7 @@ export function defaultTab(view: ConsoleView) {
 
 export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {
   const projectID = route.projectID ?? "";
-  let view = route.view ?? (projectID ? "overview" : "home");
+  let view = route.view ?? (projectID ? "infrastructure" : "home");
   if (!projectID && isProjectView(view)) view = "projects";
   if (view === "home" || view === "projects") return { projectID: "", view, tab: "" };
   const tabs = view in groupedTabs ? groupedTabs[view as keyof typeof groupedTabs] : [];

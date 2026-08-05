@@ -5,8 +5,11 @@ import { groupedTabs, normalizeRoute, parseRoute, projectDestinations, routeHref
 
 test("workspace and project navigation keep one authoritative route model", () => {
   assert.equal(projectDestinations.length, 6);
-  assert.deepEqual(projectDestinations.map((item) => item.label), ["Overview", "Services", "Delivery", "Infrastructure", "Observability", "Security"]);
+  assert.deepEqual(projectDestinations.map((item) => item.label), ["Topology", "Overview", "Services", "Delivery", "Observability", "Security"]);
   assert.deepEqual(normalizeRoute({ view: "overview" }), { projectID: "", view: "projects", tab: "" });
+  assert.deepEqual(normalizeRoute({ projectID: "proj-1" }), { projectID: "proj-1", view: "infrastructure", tab: "topology" });
+  assert.equal(routeHref({ projectID: "proj-1" }), "/?project=proj-1&view=infrastructure&tab=topology");
+  assert.deepEqual(parseRoute("?project=proj-1&view=overview"), { projectID: "proj-1", view: "overview", tab: "" });
   assert.deepEqual(parseRoute("?project=proj-1&view=observability&tab=logs"), { projectID: "proj-1", view: "observability", tab: "logs" });
   assert.equal(routeHref({ projectID: "proj-1", view: "delivery", tab: "builds" }), "/?project=proj-1&view=delivery&tab=builds");
   assert.equal(groupedTabs.delivery[0].id, "pipeline");

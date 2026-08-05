@@ -1,21 +1,51 @@
 import { expect, test, type Route } from "@playwright/test";
 import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
-test.beforeEach(async ({ page }) => { watchConsoleErrors(page); await page.route("**/api/local/**", respond); });
+test.beforeEach(async ({ page }) => { watchConsoleErrors(page); await page.route("**/api/local/**", (route) => respond(route)); });
 test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Infrastructure uses canonical edges, truthful capacity, and URL state", async ({ page }) => {
   await page.goto("/?project=proj-1&view=infrastructure");
   await expect(page.getByRole("tab", { name: "Topology", exact: true })).toHaveAttribute("aria-selected", "true");
-  await expect(page.locator(".topologyEdges line")).toHaveCount(10);
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Topology");
+  await expect(page.locator(".topologyEdges line")).toHaveCount(4);
   await expect(page.getByText("Unassigned services")).toBeVisible();
-  await expect(page.getByText("Unknown capacity", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Live", exact: true }).click();
+  await expect(page.getByText("agent-primary", { exact: false })).toBeVisible();
+  await expect(page.getByText("node-primary (healthy)", { exact: true })).toBeVisible();
+  await expect(page.getByText("dep-1", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Design", exact: true }).click();
   await expect(page.getByRole("link", { name: "Support", exact: true })).toHaveCount(0);
   await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
   await page.getByRole("button", { name: /Edge runtime/ }).click();
   await expect(page).toHaveURL(/runtime=runtime-edge/);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Edge runtime" })).toBeVisible();
+});
+
+test("Topology onboarding exposes the factual next action for every state", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let scenario: OnboardingScenario = "connect";
+  await page.route("**/api/local/**", (route) => respond(route, scenario));
+  for (const [next, state, action] of [
+    ["connect", "connect", "Connect server"],
+    ["bootstrap", "bootstrap", "View progress"],
+    ["application", "application", "Add application"],
+    ["placement", "placement", "Plan placement"],
+    ["review", "review", "Review topology"],
+  ] as Array<[OnboardingScenario, string, string]>) {
+    scenario = next;
+    await page.goto(`/?project=proj-1&view=infrastructure&tab=topology&case=${next}`);
+    await expect(page.locator(".topologyOnboarding")).toHaveAttribute("data-state", state);
+    const button = page.getByRole("button", { name: action, exact: true });
+    await expect(button).toBeVisible();
+    if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Add server" })).toBeVisible(); await page.getByRole("button", { name: "Close add server dialog" }).click(); }
+    if (next === "bootstrap") { await expect(page.getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=bootstrap&session=boot-1/); }
+    if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add service" })).toBeVisible(); await page.getByRole("button", { name: "Close add service dialog" }).click(); }
+    if (next === "placement") { await button.click(); await expect(page.getByRole("dialog", { name: "Plan placement" })).toBeVisible(); await page.getByRole("button", { name: "Close placement dialog" }).click(); }
+    if (next === "review") { await page.getByRole("button", { name: "Live", exact: true }).click(); await button.click(); await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true"); }
+  }
 });
 
 test("Observability preserves factual semantics, text rendering, evidence, and URL filters", async ({ page }) => {
@@ -80,10 +110,12 @@ test("FE-03 visual acceptance screenshots and overflow", async ({ page }) => {
   await page.screenshot({ fullPage: true, path: "../../.tmp/ui-fe03/observability-mobile-390x844.png" });
 });
 
-async function respond(route: Route) {
+type OnboardingScenario = "base" | "connect" | "bootstrap" | "application" | "placement" | "review";
+
+async function respond(route: Route, scenario: OnboardingScenario = "base") {
   const url = new URL(route.request().url());
   const path = url.pathname;
-  const data = fixture();
+  const data = onboardingFixture(fixture(), scenario);
   let body: unknown = {};
   if (path === "/api/local/session") body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: "proj-1" };
   else if (path === "/api/local/projects") body = { projects: data.projects };
@@ -109,6 +141,14 @@ async function respond(route: Route) {
   else if (path.endsWith("/incidents/inc-1/evidence")) body = { ...data.evidence, content_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
   else if (path.endsWith("/incidents/inc-1")) body = { source: "agent", payload_policy: "redacted", incident: data.incidents[0] };
   await route.fulfill({ body: JSON.stringify(body), contentType: "application/json", status: 200 });
+}
+
+function onboardingFixture(data: ReturnType<typeof fixture>, scenario: OnboardingScenario) {
+  if (scenario === "base") return data;
+  if (scenario === "connect" || scenario === "bootstrap") return { ...data, services: [], nodes: [], facts: { ...data.facts, runtimes: [], nodes: [], agents: [], services: [] }, topology: null, sessions: scenario === "bootstrap" ? data.sessions.slice(0, 1) : [] };
+  if (scenario === "application") return { ...data, services: [], facts: { ...data.facts, services: [] }, topology: null, sessions: [] };
+  if (scenario === "placement") return { ...data, topology: null, sessions: [] };
+  return { ...data, services: data.services.slice(0, 2), facts: { ...data.facts, services: data.facts.services.slice(0, 2) }, sessions: [] };
 }
 
 function fixture() {

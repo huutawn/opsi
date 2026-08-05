@@ -1,5 +1,16 @@
 # Opsi Current State
 
+## Topology project workspace
+
+Project creation and selection now land on the existing
+`Infrastructure / Topology` route. Topology is the first project navigation
+destination, the header shows `Projects / project / environment / Topology`,
+and the workspace separates Design facts (TopologyPlan and unassigned services)
+from Live runtime, node, Agent, and deployment facts. The factual next action is
+derived from current server/bootstrap/service/placement state and reuses the
+existing add-server, add-service, and placement review flows; drag-and-drop and
+fabricated runtime data remain out of scope.
+
 ## R5-014 Local API/UI parity checkpoint
 
 `R5_014_UI_REWORK_SOURCE_PRESENT / PROJECT_REFRESH_AND_ERROR_GATE_PASS /
@@ -186,7 +197,7 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-08-03 |
+| Last updated | 2026-08-05 |
 | Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |

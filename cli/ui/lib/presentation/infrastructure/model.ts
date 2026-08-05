@@ -1,10 +1,20 @@
-import type { PlacementFacts, TopologyAssignment, TopologyPlan } from "../../contracts/registry.ts";
+import type { BootstrapSession, PlacementFacts, TopologyAssignment, TopologyPlan } from "../../contracts/registry.ts";
 
 export type TopologyKind = "environment" | "runtime" | "node" | "agent" | "service";
 export type TopologyNode = { id: string; kind: TopologyKind; label: string; status: string; detail: string };
 export type TopologyEdge = { from: string; to: string; relation: string };
 export type TopologyGraph = { nodes: TopologyNode[]; edges: TopologyEdge[]; unresolved: Array<{ id: string; label: string; reason: string }> };
 export type PositionedNode = TopologyNode & { x: number; y: number };
+export type TopologyOnboardingState = {
+  kind: "connect" | "bootstrap" | "application" | "placement" | "review";
+  title: string;
+  description: string;
+  action: "Connect server" | "View progress" | "Add application" | "Plan placement" | "Review topology";
+  progress?: ReturnType<typeof bootstrapProgress>;
+  sessionID?: string;
+};
+
+const activeBootstrapStatuses = new Set(["created", "pending", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
 
 export function buildTopologyGraph(facts: PlacementFacts, plan: TopologyPlan | null): TopologyGraph {
   const nodes: TopologyNode[] = [];
@@ -79,6 +89,16 @@ export function bootstrapProgress(checkpoint?: { next_step_index: number; last_c
   if (!checkpoint) return { label: `${events} factual events`, percent: null };
   const bounded = Math.max(0, Math.min(4, checkpoint.next_step_index));
   return { label: checkpoint.last_completed_step || `Checkpoint ${bounded}`, percent: bounded * 25 };
+}
+
+export function topologyOnboarding(facts: PlacementFacts, plan: TopologyPlan | null, sessions: BootstrapSession[]): TopologyOnboardingState {
+  const active = sessions.find((session) => activeBootstrapStatuses.has(session.status));
+  if (active) return { kind: "bootstrap", title: "Server connection in progress", description: `Bootstrap ${active.id} is ${active.status}.`, action: "View progress", progress: bootstrapProgress(active.checkpoint), sessionID: active.id };
+  if (!facts.nodes.some((node) => ["healthy", "ready", "active"].includes(node.status))) return { kind: "connect", title: "Connect the first server", description: "No ready server is reported for this project.", action: "Connect server" };
+  if (facts.services.length === 0) return { kind: "application", title: "Add the first application", description: "A server is ready, but the service catalog is empty.", action: "Add application" };
+  const unassigned = facts.services.filter((service) => !plan?.assignments.some((assignment) => assignment.service_key === service.key));
+  if (unassigned.length) return { kind: "placement", title: "Place unassigned services", description: `${unassigned.map((service) => service.key).join(", ")} ${unassigned.length === 1 ? "needs" : "need"} a runtime assignment.`, action: "Plan placement" };
+  return { kind: "review", title: "Topology is ready for review", description: `TopologyPlan r${plan?.revision ?? 0} assigns every reported service.`, action: "Review topology" };
 }
 
 export function graphID(kind: TopologyKind, id: string) {

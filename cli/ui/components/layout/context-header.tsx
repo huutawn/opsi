@@ -20,7 +20,7 @@ export function ContextHeader({ environment, lastUpdated, menuButtonRef, onMenu,
   return <header className="contextHeader">
     <button aria-label="Open navigation" className="iconButton mobileOnly" onClick={onMenu} ref={menuButtonRef} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3 5h14M3 10h14M3 15h14" /></svg></button>
     <div className="contextIdentity" aria-label="Current context">
-      <div className="breadcrumb"><span>{session.org_id || "Workspace unavailable"}</span>{project ? <><i aria-hidden="true">/</i><strong title={project.name}>{project.name}</strong><i aria-hidden="true">/</i><span title={environment}>{environment}</span></> : null}</div>
+      <div className="breadcrumb" aria-label="Breadcrumb"><span>{project ? "Projects" : session.org_id || "Workspace unavailable"}</span>{project ? <><i aria-hidden="true">/</i><strong title={project.name}>{project.name}</strong><i aria-hidden="true">/</i><span title={environment}>{environment}</span><i aria-hidden="true">/</i><span>{routeLabel(route)}</span></> : null}</div>
       <p>{routeLabel(route)}{project ? ` · ${environment}` : " · Workspace"}{serviceScope ? ` · Service ${serviceScope}` : ""}{lastUpdated ? ` · Updated ${formatUpdated(lastUpdated)}` : ""}</p>
     </div>
     <div className="headerActions">

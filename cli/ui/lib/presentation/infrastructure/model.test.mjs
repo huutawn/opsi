@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapProgress, buildTopologyGraph, capacityLabel, layoutTopology } from "./model.ts";
+import { bootstrapProgress, buildTopologyGraph, capacityLabel, layoutTopology, topologyOnboarding } from "./model.ts";
 
 const facts = {
   project_id: "p1",
@@ -27,4 +27,15 @@ test("layout is deterministic and capacity/progress stay truthful", () => {
   assert.equal(capacityLabel(undefined, 512), "Unknown capacity");
   assert.deepEqual(bootstrapProgress(undefined), { label: "Not reported", percent: null });
   assert.deepEqual(bootstrapProgress({ next_step_index: 2, last_completed_step: "Installing" }), { label: "Installing", percent: 50 });
+});
+
+test("topology onboarding follows factual project state", () => {
+  const withoutServer = { ...facts, runtimes: [], nodes: [], agents: [], services: [] };
+  assert.equal(topologyOnboarding(withoutServer, null, []).action, "Connect server");
+  assert.deepEqual(topologyOnboarding(withoutServer, null, [{ id: "boot-1", status: "installing", role: "first_server", checkpoint: { plan_version: "v1", next_step_index: 2, last_completed_step: "preflight" }, created_at: "now" }]), {
+    kind: "bootstrap", title: "Server connection in progress", description: "Bootstrap boot-1 is installing.", action: "View progress", progress: { label: "preflight", percent: 50 }, sessionID: "boot-1",
+  });
+  assert.equal(topologyOnboarding({ ...facts, services: [] }, null, []).action, "Add application");
+  assert.equal(topologyOnboarding(facts, null, []).action, "Plan placement");
+  assert.equal(topologyOnboarding(facts, plan, []).action, "Review topology");
 });

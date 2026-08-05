@@ -308,7 +308,7 @@ export function useConsoleState() {
     else await load("", operation);
   }
 
-  async function selectProject(id: string, destination = normalizeRoute({ projectID: id, view: "overview" }), replace = false) {
+  async function selectProject(id: string, destination = normalizeRoute({ projectID: id }), replace = false) {
     if (!id) return;
     clearSensitive();
     const operation = ++generation.current;
@@ -355,7 +355,7 @@ export function useConsoleState() {
         try {
           const created = await client.createProject(orgID, { name, slug }, key);
           formElement.reset();
-          await load("", generation.current);
+          await selectProject(created.id);
           return `Project ${created.id} created by the Local backend.`;
         } finally {
           patch({ busy: "" });

@@ -19,8 +19,11 @@ test("workspace, grouped navigation, restoration, and back-forward behavior", as
   await expect(page.locator(".projectRow .status").first()).toHaveText("Healthy");
   await expect(page.locator(".projectRow").filter({ hasText: "Payments" }).locator(".status").first()).toHaveText("Degraded");
   await page.getByRole("link", { name: /Checkout Platform/ }).click();
+  await expect(page).toHaveURL(/view=infrastructure&tab=topology/);
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Topology");
   await expect(page.getByRole("link", { name: "Overview" })).toBeVisible();
-  for (const destination of ["Overview", "Services", "Delivery", "Infrastructure", "Observability", "Security"]) await expect(page.getByRole("link", { name: destination, exact: true })).toBeVisible();
+  for (const destination of ["Topology", "Overview", "Services", "Delivery", "Observability", "Security"]) await expect(page.getByRole("link", { name: destination, exact: true })).toBeVisible();
+  await expect(page.locator(".navSection a").first()).toHaveText("Topology");
   await expect(page.locator(".navSection a")).toHaveCount(6);
   await page.getByRole("button", { name: "Collapse sidebar" }).click();
   await expect(page.getByRole("button", { name: "Expand sidebar" })).toHaveAttribute("aria-pressed", "true");
@@ -145,6 +148,8 @@ for (const staleResult of ["success", "error"] as const) {
     await page.getByRole("link", { name: /Payments/ }).click();
     await expect(page).toHaveURL(/project=proj-2/);
     releaseOld();
+    await expect(page.locator(".breadcrumb")).toContainText("Payments");
+    await page.getByRole("link", { name: "Overview", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Payments" })).toBeVisible();
     await expect(page.getByRole("link", { name: /^payments-api / }).first()).toBeVisible();
     await expect(page.getByText("obsolete A failed", { exact: true })).toHaveCount(0);
@@ -181,6 +186,8 @@ for (const staleRefresh of ["success", "error"] as const) {
     await expect.poll(() => refreshWaiting).toBe(true);
     await page.getByLabel("Switch project").click();
     await page.getByRole("link", { name: /Payments/ }).click();
+    await expect(page.locator(".breadcrumb")).toContainText("Payments");
+    await page.getByRole("link", { name: "Overview", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Payments" })).toBeVisible();
     releaseRefresh();
     await expect(page.getByRole("link", { name: /^payments-api / }).first()).toBeVisible();
@@ -277,6 +284,8 @@ test("workspace project summaries reuse fresh cache and revalidate without disca
   const freshProj2Readiness = proj2Readiness;
 
   await checkout.click();
+  await expect(page.locator(".breadcrumb")).toContainText("Checkout Platform");
+  await page.getByRole("link", { name: "Overview", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Checkout Platform" })).toBeVisible();
   await page.getByLabel("Switch project").click();
   await page.getByRole("link", { name: "Browse all projects", exact: true }).click();
@@ -313,6 +322,8 @@ test("workspace project summaries reuse fresh cache and revalidate without disca
 
   failCheckout = false;
   await checkout.click();
+  await expect(page.locator(".breadcrumb")).toContainText("Checkout Platform");
+  await page.getByRole("link", { name: "Overview", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Checkout Platform" })).toBeVisible();
   const beforeExpiry = proj2Readiness;
   await page.evaluate((ttl) => (window as unknown as { advanceProjectSummaryClock: (milliseconds: number) => void }).advanceProjectSummaryClock(ttl + 1), PROJECT_SUMMARY_TTL_MS);
@@ -345,6 +356,8 @@ test("obsolete workspace summary responses cannot overwrite a newer project oper
   await expect.poll(() => oldWaiting).toBe(true);
   scenario = "refreshed";
   await checkout.click();
+  await expect(page.locator(".breadcrumb")).toContainText("Checkout Platform");
+  await page.getByRole("link", { name: "Overview", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Checkout Platform" })).toBeVisible();
   await expect(page.locator(".statusLead strong")).toHaveText("Degraded");
   releaseOld();
