@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
+import { expectHTTPFailure, expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 test.beforeEach(async ({ page }) => { watchConsoleErrors(page); await page.route("**/api/local/**", (route) => respond(route)); });
 test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
@@ -14,6 +14,11 @@ test("Design renders applied placement, unplaced applications, factual servers, 
   await expect(page.getByRole("button", { name: /Application reports, Unplaced, unchanged/ })).toBeVisible();
   await expect(page.getByText("4 cores", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("8192 MiB", { exact: true }).first()).toBeVisible();
+  const viewport = page.locator(".react-flow__viewport");
+  const transform = await viewport.evaluate((element) => { element.setAttribute("data-remount-probe", "stable"); return getComputedStyle(element).transform; });
+  await page.getByRole("button", { name: /Application worker, Assigned, unchanged/ }).click();
+  await expect(viewport).toHaveAttribute("data-remount-probe", "stable");
+  await expect.poll(() => viewport.evaluate((element) => getComputedStyle(element).transform)).toBe(transform);
   await page.getByRole("button", { name: /Application api, Assigned, unchanged/ }).press("Enter");
   await expect(page).toHaveURL(/topology=service%3Aapi/);
   await expect(page.getByRole("heading", { name: "api", exact: true })).toBeFocused();
@@ -31,36 +36,43 @@ test("Design renders applied placement, unplaced applications, factual servers, 
   await expect(page.getByRole("heading", { name: "Edge runtime" })).toBeVisible();
 });
 
-test("Design drag creates local semantic draft, survives Live, and Reset restores the applied plan without writes", async ({ page }) => {
+test("Design edits resources, reviews through Cloud, survives Live, and Reset avoids apply", async ({ page }) => {
   await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
-  const writes: string[] = [];
-  page.on("request", (request) => { if (request.method() !== "GET") writes.push(`${request.method()} ${new URL(request.url()).pathname}`); });
+  const reviewRequests: string[] = [];
+  let applyRequests = 0;
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (/\/topology\/(plan|validate|diff)$/.test(path)) reviewRequests.push(path.split("/").at(-1) ?? "");
+    if (path.endsWith("/topology/apply")) applyRequests += 1;
+  });
 
   await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
   await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Application reports, Assigned, new placement/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "reports", exact: true })).toBeFocused();
-  await expect(page.getByText("Replicas are missing.", { exact: true })).toBeVisible();
-  await expect(page.getByText("CPU request is missing.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Memory request is missing.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Exposure is missing.", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Replicas")).toHaveValue("1");
+  await expect(page.getByLabel("CPU request (millicores)")).toHaveValue("100");
+  await expect(page.getByLabel("Memory (MiB)")).toHaveValue("128");
+  await expect(page.getByLabel("Exposure")).toHaveValue("none");
+  await page.getByLabel("Replicas").fill("3");
+  await page.getByLabel("CPU request (millicores)").fill("350");
+  await page.getByLabel("Memory (MiB)").fill("512");
+  await page.getByLabel("Exposure").selectOption("public");
 
   await page.getByRole("button", { name: "Review draft" }).click();
-  await expect(page.getByText("reports: unplaced → runtime-primary", { exact: true })).toBeVisible();
-  await expect(page.getByText(/not Cloud validation/i)).toBeVisible();
-  await page.getByRole("button", { name: "Review draft" }).click();
+  const cloudReview = page.getByLabel("Cloud topology review");
+  await expect(page.getByRole("heading", { name: "Cloud topology review" })).toBeVisible();
+  await expect(cloudReview.getByText("Cloud semantic diff", { exact: true })).toBeVisible();
+  await expect(cloudReview.getByText("reports", { exact: true })).toBeVisible();
+  await expect(page.getByText("Requested 1550m / 2048 MiB", { exact: false })).toContainText("Available 4000m CPU / 8192 MiB memory");
+  await expect(page.getByText("topology-state", { exact: true })).toBeVisible();
+  await expect(page.getByText("proposal-hash", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply topology" })).toBeEnabled();
+  expect(reviewRequests).toEqual(["plan", "validate", "diff"]);
   await page.getByRole("button", { name: "Live", exact: true }).click();
   await page.getByRole("button", { name: "Design", exact: true }).click();
   await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
-
-  await dragNode(page, /Application worker, Assigned, unchanged/, /Unplaced applications/);
-  await expect(page.getByText("2 unpublished changes", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Review draft" }).click();
-  await expect(page.getByText("worker: runtime-edge → unplaced", { exact: true })).toBeVisible();
-  await dragNode(page, /Application api, Assigned, unchanged/, /Server Edge runtime/);
-  await expect(page.getByText("3 unpublished changes", { exact: true })).toBeVisible();
-  await expect(page.getByText("api: runtime-primary → runtime-edge", { exact: true })).toBeVisible();
-  expect(writes).toEqual([]);
+  expect(applyRequests).toBe(0);
 
   await page.getByRole("button", { name: "Reset changes" }).click();
   await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
@@ -86,7 +98,7 @@ test("Design draft clears when the project changes", async ({ page }) => {
   await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
 });
 
-test("Design draft clears when the applied topology revision changes", async ({ page }) => {
+test("Design draft survives an applied topology refresh", async ({ page }) => {
   await page.unroute("**/api/local/**");
   let revision = 4;
   await page.route("**/api/local/**", async (route) => {
@@ -99,8 +111,114 @@ test("Design draft clears when the applied topology revision changes", async ({ 
   await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
   await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
   revision = 5;
-  await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible({ timeout: 6_500 });
   await expect(page.getByText("TopologyPlan r5", { exact: true })).toBeVisible();
+  await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Application reports, Assigned, new placement/ })).toBeVisible();
+});
+
+test("Cloud validation issues disable apply", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let applyRequests = 0;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/topology/validate")) {
+      const { draft } = route.request().postDataJSON() as { draft: ReturnType<typeof fixture>["topology"] };
+      await route.fulfill({ body: JSON.stringify(topologyValidation(draft, false)), contentType: "application/json", status: 200 });
+      return;
+    }
+    if (path.endsWith("/topology/apply")) applyRequests += 1;
+    await respondWithData(route, fixture(), "proj-1");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
+  await page.getByRole("button", { name: "Review draft" }).click();
+  await expect(page.getByText("Cloud validation failed", { exact: true })).toBeVisible();
+  await expect(page.getByText(/reports \/ runtime-primary: Requested capacity exceeds available capacity/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply topology" })).toBeDisabled();
+  expect(applyRequests).toBe(0);
+});
+
+test("Apply sends reviewed authority, refreshes facts, and clears only the matching proposal", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let appliedPlan: ReturnType<typeof fixture>["topology"] | undefined;
+  let reviewedDraft: ReturnType<typeof fixture>["topology"] | undefined;
+  let applyBody: Record<string, unknown> | undefined;
+  let idempotencyKey = "";
+  let topologyReads = 0;
+  let factsReads = 0;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/topology/plan")) {
+      reviewedDraft = (route.request().postDataJSON() as { draft: ReturnType<typeof fixture>["topology"] }).draft;
+      await route.fulfill({ body: JSON.stringify({ draft: reviewedDraft, plan_hash: "proposal-hash", state_hash: "topology-state" }), contentType: "application/json", status: 200 });
+      return;
+    }
+    if (path.endsWith("/topology/apply")) {
+      const request = route.request().postDataJSON() as Record<string, unknown>;
+      applyBody = request;
+      idempotencyKey = route.request().headers()["idempotency-key"] ?? "";
+      appliedPlan = appliedTopology(request.draft as ReturnType<typeof fixture>["topology"]);
+      await route.fulfill({ body: JSON.stringify({ plan: appliedPlan, reused: true }), contentType: "application/json", status: 200 });
+      return;
+    }
+    const data = fixture();
+    if (appliedPlan) data.topology = appliedPlan;
+    if (path.endsWith("/topology")) topologyReads += 1;
+    if (path.endsWith("/topology/facts")) factsReads += 1;
+    await respondWithData(route, data, "proj-1");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
+  await page.getByRole("button", { name: "Review draft" }).click();
+  const readsBeforeApply = { topology: topologyReads, facts: factsReads };
+  await page.getByRole("button", { name: "Apply topology" }).click();
+  await expect(page.getByText("TopologyPlan r5", { exact: true })).toBeVisible();
+  await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
+  await expect(page.getByText(/idempotent replay/)).toBeVisible();
+  expect(applyBody?.expected_revision).toBe(4);
+  expect(applyBody?.expected_state_hash).toBe("topology-state");
+  expect(applyBody?.draft).toEqual(reviewedDraft);
+  expect((applyBody?.draft as ReturnType<typeof fixture>["topology"]).assignments.map((assignment) => assignment.service_key)).toEqual(["api", "reports", "worker"]);
+  expect(idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+  expect(topologyReads).toBeGreaterThan(readsBeforeApply.topology);
+  expect(factsReads).toBeGreaterThan(readsBeforeApply.facts);
+});
+
+test("State conflict refreshes once, preserves local edits, and requires review again", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  let conflicted = false;
+  let applyRequests = 0;
+  let topologyReads = 0;
+  let factsReads = 0;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/topology/apply")) {
+      applyRequests += 1;
+      conflicted = true;
+      await route.fulfill({ body: JSON.stringify({ error: { code: "TOPOLOGY_STATE_CONFLICT", message: "topology changed" } }), contentType: "application/json", status: 409 });
+      return;
+    }
+    const data = fixture();
+    if (conflicted) data.topology = { ...data.topology, revision: 5, state_hash: "topology-state-5" };
+    if (path.endsWith("/topology")) topologyReads += 1;
+    if (path.endsWith("/topology/facts")) factsReads += 1;
+    await respondWithData(route, data, "proj-1");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
+  await page.getByRole("button", { name: "Review draft" }).click();
+  const readsBeforeApply = { topology: topologyReads, facts: factsReads };
+  expectHTTPFailure(page, { path: "/api/local/projects/proj-1/topology/apply", status: 409, method: "POST" });
+  await page.getByRole("button", { name: "Apply topology" }).click();
+  await expect(page.getByText(/local changes were preserved; review the draft again/)).toBeVisible();
+  await expect(page.getByText("TopologyPlan r5", { exact: true })).toBeVisible();
+  await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Application reports, Assigned, new placement/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply topology" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review draft" })).toBeEnabled();
+  expect(applyRequests).toBe(1);
+  expect(topologyReads).toBeGreaterThan(readsBeforeApply.topology);
+  expect(factsReads).toBeGreaterThan(readsBeforeApply.facts);
 });
 
 test("Topology onboarding exposes the factual next action for every state", async ({ page }) => {
@@ -327,6 +445,22 @@ async function respondWithData(route: Route, data: ReturnType<typeof fixture>, p
   else if (path.endsWith("/audit")) body = { events: [] };
   else if (path.endsWith("/support")) body = data.support;
   else if (path.endsWith("/topology/facts")) body = data.facts;
+  else if (path.endsWith("/topology/plan")) {
+    const { draft } = route.request().postDataJSON() as { draft: ReturnType<typeof fixture>["topology"] };
+    body = { draft, plan_hash: "proposal-hash", state_hash: data.topology.state_hash };
+  }
+  else if (path.endsWith("/topology/validate")) {
+    const { draft } = route.request().postDataJSON() as { draft: ReturnType<typeof fixture>["topology"] };
+    body = topologyValidation(draft, true);
+  }
+  else if (path.endsWith("/topology/diff")) {
+    const { draft } = route.request().postDataJSON() as { draft: ReturnType<typeof fixture>["topology"] };
+    body = topologyDiff(data.topology, draft);
+  }
+  else if (path.endsWith("/topology/apply")) {
+    const request = route.request().postDataJSON() as { draft: ReturnType<typeof fixture>["topology"] };
+    body = { plan: appliedTopology(request.draft), reused: false };
+  }
   else if (path.endsWith("/topology")) body = data.topology;
   else if (path.endsWith("/github/repositories")) body = { repositories: [] };
   else if (path.endsWith("/github/bindings")) body = { bindings: [] };
@@ -339,6 +473,48 @@ async function respondWithData(route: Route, data: ReturnType<typeof fixture>, p
   else if (path.endsWith("/incidents/inc-1/evidence")) body = { ...data.evidence, content_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
   else if (path.endsWith("/incidents/inc-1")) body = { source: "agent", payload_policy: "redacted", incident: data.incidents[0] };
   await route.fulfill({ body: JSON.stringify(body), contentType: "application/json", status: 200 });
+}
+
+function topologyValidation(draft: ReturnType<typeof fixture>["topology"], valid: boolean) {
+  const runtimes = [...new Set(draft.assignments.map((assignment) => assignment.runtime_id))].map((runtimeID) => {
+    const assignments = draft.assignments.filter((assignment) => assignment.runtime_id === runtimeID);
+    const requestedCPU = assignments.reduce((sum, assignment) => sum + assignment.replicas * assignment.cpu_request_millicores, 0);
+    const requestedMemory = assignments.reduce((sum, assignment) => sum + assignment.replicas * assignment.memory_request_bytes, 0);
+    return {
+      runtime_id: runtimeID,
+      eligible: valid,
+      capacity: {
+        runtime_id: runtimeID, source: "placement_facts", heartbeat_fresh: true,
+        cpu_capacity_millicores: 4000, memory_capacity_bytes: 8192 * 1024 * 1024,
+        reserved_cpu_millicores: 0, reserved_memory_bytes: 0, assigned_cpu_millicores: 0, assigned_memory_bytes: 0,
+        requested_cpu_millicores: requestedCPU, requested_memory_bytes: requestedMemory,
+        available_cpu_millicores: 4000, available_memory_bytes: 8192 * 1024 * 1024,
+        unknown_capacity: false, unknown_capacity_policy_override: false, oversubscribed: !valid,
+      },
+      issues: valid ? [] : [{ code: "CAPACITY_EXCEEDED", message: "Requested capacity exceeds available capacity." }],
+    };
+  });
+  return {
+    schema_version: "opsi.topology_plan/v1", project_id: draft.project_id, plan_hash: "proposal-hash", valid, runtimes,
+    issues: valid ? [] : [{ code: "CAPACITY_EXCEEDED", message: "Requested capacity exceeds available capacity.", service_key: "reports", runtime_id: "runtime-primary" }],
+    validated_at: "2026-07-30T09:00:00Z",
+  };
+}
+
+function topologyDiff(current: ReturnType<typeof fixture>["topology"], proposed: ReturnType<typeof fixture>["topology"]) {
+  const before = new Map(current.assignments.map((assignment) => [assignment.service_key, assignment]));
+  const after = new Map(proposed.assignments.map((assignment) => [assignment.service_key, assignment]));
+  const changes = [...new Set([...before.keys(), ...after.keys()])].sort().flatMap((serviceKey) => {
+    const previous = before.get(serviceKey);
+    const next = after.get(serviceKey);
+    if (JSON.stringify(previous) === JSON.stringify(next)) return [];
+    return [{ service_key: serviceKey, change: previous ? next ? "updated" : "removed" : "added", ...(previous ? { before: previous } : {}), ...(next ? { after: next } : {}) }];
+  });
+  return { project_id: proposed.project_id, current_revision: current.revision, current_hash: current.state_hash, proposed_hash: "proposal-hash", changes };
+}
+
+function appliedTopology(draft: ReturnType<typeof fixture>["topology"]) {
+  return { ...draft, id: "topo-1", revision: 5, state_hash: "topology-state-5", plan_hash: "proposal-hash", created_by: "owner", applied_by: "owner", created_at: "2026-07-30T08:00:00Z", applied_at: "2026-07-30T09:00:00Z" };
 }
 
 function onboardingFixture(data: ReturnType<typeof fixture>, scenario: OnboardingScenario) {

@@ -479,7 +479,7 @@ summary { cursor: pointer; }
 .canvasUnplacedGroup small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; }
 .canvasApplicationNode { display: grid; width: 100%; height: 100%; align-content: center; gap: 2px; padding: 8px 11px; border: 1px solid var(--line-strong); border-left: 5px solid var(--line-strong); border-radius: 7px; background: var(--surface); box-shadow: 0 5px 12px rgb(32 33 31 / 12%); }
 .canvasApplicationNode[aria-pressed="true"] { border-color: var(--ink); box-shadow: 0 0 0 3px rgb(32 33 31 / 14%); }
-.canvasApplicationNode[data-draft="moved"], .canvasApplicationNode[data-draft="new-placement"] { border-left-color: var(--blue); }
+.canvasApplicationNode[data-draft="edited"], .canvasApplicationNode[data-draft="moved"], .canvasApplicationNode[data-draft="new-placement"] { border-left-color: var(--blue); }
 .canvasApplicationNode[data-draft="pending-removal"] { border-left-color: var(--bad); }
 .canvasApplicationNode strong { overflow-wrap: anywhere; }
 .canvasApplicationNode span:not(.canvasNodeKind), .canvasApplicationNode small { color: var(--muted); overflow-wrap: anywhere; font-size: 10px; }
@@ -495,7 +495,7 @@ summary { cursor: pointer; }
 .canvasInspector dt { color: var(--muted); font-size: 10px; font-weight: 800; }
 .canvasInspector dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 11px; }
 .draftState { display: inline-block; padding: 3px 7px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--ink); font-size: 10px; font-weight: 800; text-transform: uppercase; }
-.draftState.moved, .draftState.new-placement { border-color: var(--blue); background: var(--blue-bg); }
+.draftState.edited, .draftState.moved, .draftState.new-placement { border-color: var(--blue); background: var(--blue-bg); }
 .draftState.pending-removal { border-color: var(--bad); background: var(--bad-bg); }
 .draftIssues { margin: 0; padding-left: 20px; color: var(--bad); font-size: 12px; }
 .compactList { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }

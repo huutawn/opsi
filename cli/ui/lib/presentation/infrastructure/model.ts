@@ -1,4 +1,4 @@
-import type { BootstrapSession, PlacementFacts, TopologyAssignment, TopologyPlan } from "../../contracts/registry.ts";
+import type { BootstrapSession, PlacementFacts, TopologyAssignment, TopologyDraft, TopologyPlan } from "../../contracts/registry.ts";
 
 export type CanvasPlacement = {
   runtime_id: string | null;
@@ -7,9 +7,10 @@ export type CanvasPlacement = {
   cpu_request_millicores?: number;
   memory_request_bytes?: number;
   exposure?: TopologyAssignment["exposure"];
+  rationale?: TopologyAssignment["rationale"];
 };
 export type CanvasDraft = Record<string, CanvasPlacement>;
-export type CanvasDraftStatus = "unchanged" | "moved" | "new placement" | "pending removal";
+export type CanvasDraftStatus = "unchanged" | "edited" | "moved" | "new placement" | "pending removal";
 export type TopologyOnboardingState = {
   kind: "connect" | "bootstrap" | "retry" | "application" | "placement" | "inspect";
   title: string;
@@ -29,6 +30,8 @@ export type ServerLifecycle = {
 const activeBootstrapStatuses = new Set(["created", "pending", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
 const connectingBootstrapStatuses = new Set(["created", "pending", "retry_wait", "connecting"]);
 const usableNodeStatuses = new Set(["healthy", "ready", "active"]);
+const defaultCPURequestMillicores = 100;
+const defaultMemoryRequestBytes = 128 * 1024 * 1024;
 export const bootstrapPollInterval = 4_000;
 
 export function assignmentFor(plan: TopologyPlan | null, serviceKey: string): TopologyAssignment | undefined {
@@ -43,17 +46,50 @@ export function canvasPlacement(plan: TopologyPlan | null, draft: CanvasDraft, s
 
 export function moveCanvasPlacement(plan: TopologyPlan | null, draft: CanvasDraft, serviceKey: string, runtime?: PlacementFacts["runtimes"][number]): CanvasDraft {
   const current = canvasPlacement(plan, draft, serviceKey);
-  const next = runtime ? { ...current, runtime_id: runtime.id, environment_id: runtime.environment_id } : { ...current, runtime_id: null };
-  const appliedRuntime = assignmentFor(plan, serviceKey)?.runtime_id ?? null;
+  return updateCanvasPlacement(plan, draft, serviceKey, runtime ? {
+    runtime_id: runtime.id,
+    environment_id: runtime.environment_id,
+    replicas: current.replicas ?? 1,
+    cpu_request_millicores: current.cpu_request_millicores ?? defaultCPURequestMillicores,
+    memory_request_bytes: current.memory_request_bytes ?? defaultMemoryRequestBytes,
+    exposure: current.exposure ?? { mode: "none" },
+  } : { runtime_id: null });
+}
+
+export function updateCanvasPlacement(plan: TopologyPlan | null, draft: CanvasDraft, serviceKey: string, patch: Partial<CanvasPlacement>): CanvasDraft {
+  const next = { ...canvasPlacement(plan, draft, serviceKey), ...patch };
   const updated = { ...draft };
-  if (next.runtime_id === appliedRuntime) delete updated[serviceKey];
+  if (placementMatches(next, assignmentFor(plan, serviceKey))) delete updated[serviceKey];
   else updated[serviceKey] = next;
   return updated;
+}
+
+export function compileCanvasDraft(projectID: string, plan: TopologyPlan | null, draft: CanvasDraft): TopologyDraft {
+  const assignments = new Map((plan?.assignments ?? []).map((assignment) => [assignment.service_key, assignment]));
+  for (const [serviceKey, placement] of Object.entries(draft)) {
+    if (!placement.runtime_id) {
+      assignments.delete(serviceKey);
+      continue;
+    }
+    const rationale = placement.rationale?.summary ? { rationale: { summary: placement.rationale.summary } } : {};
+    assignments.set(serviceKey, {
+      service_key: serviceKey,
+      environment_id: placement.environment_id ?? "",
+      runtime_id: placement.runtime_id,
+      replicas: finiteInteger(placement.replicas),
+      cpu_request_millicores: finiteInteger(placement.cpu_request_millicores),
+      memory_request_bytes: finiteInteger(placement.memory_request_bytes),
+      exposure: { mode: placement.exposure?.mode ?? "none" },
+      ...rationale,
+    });
+  }
+  return { schema_version: "opsi.topology_plan/v1", project_id: projectID, assignments: [...assignments.values()].sort((a, b) => a.service_key < b.service_key ? -1 : a.service_key > b.service_key ? 1 : 0) };
 }
 
 export function canvasDraftStatus(plan: TopologyPlan | null, draft: CanvasDraft, serviceKey: string): CanvasDraftStatus {
   const applied = assignmentFor(plan, serviceKey)?.runtime_id ?? null;
   const target = canvasPlacement(plan, draft, serviceKey).runtime_id;
+  if (Object.hasOwn(draft, serviceKey) && applied === target) return "edited";
   if (applied === target) return "unchanged";
   if (!applied) return "new placement";
   if (!target) return "pending removal";
@@ -63,9 +99,9 @@ export function canvasDraftStatus(plan: TopologyPlan | null, draft: CanvasDraft,
 export function canvasDraftIssues(placement: CanvasPlacement): string[] {
   if (!placement.runtime_id) return [];
   const issues: string[] = [];
-  if (!placement.replicas) issues.push("Replicas are missing.");
-  if (!placement.cpu_request_millicores) issues.push("CPU request is missing.");
-  if (!placement.memory_request_bytes) issues.push("Memory request is missing.");
+  if (!validInteger(placement.replicas, 100)) issues.push("Replicas must be between 1 and 100.");
+  if (!validInteger(placement.cpu_request_millicores, 1_000_000)) issues.push("CPU request must be between 1 and 1,000,000 millicores.");
+  if (!validInteger(placement.memory_request_bytes, 2 ** 50)) issues.push("Memory request must be between 1 byte and 1 PiB.");
   if (!placement.exposure) issues.push("Exposure is missing.");
   return issues;
 }
@@ -94,9 +130,8 @@ export function serverLifecycle(facts: PlacementFacts, sessions: BootstrapSessio
   const active = latestActiveBootstrap(sessions);
   const latest = latestBootstrap(sessions);
   for (const runtime of facts.runtimes) {
-    const nodes = facts.nodes.filter((node) => node.runtime_id === runtime.id && usableNodeStatuses.has(node.status));
-    const agent = facts.agents.find((item) => item.runtime_id === runtime.id && item.status === "active" && nodes.some((node) => node.id === item.node_id));
-    if (agent) return { status: "Ready", runtime, node: nodes.find((node) => node.id === agent.node_id), agent, session: active ? undefined : latest };
+    const match = readyServer(facts.nodes.filter((node) => node.runtime_id === runtime.id), facts.agents.filter((agent) => agent.runtime_id === runtime.id));
+    if (match) return { status: "Ready", runtime, ...match, session: active ? undefined : latest };
   }
   if (active) return { status: connectingBootstrapStatuses.has(active.status) ? "Connecting" : "Bootstrapping", session: active };
   const runtime = facts.runtimes[0];
@@ -105,6 +140,11 @@ export function serverLifecycle(facts: PlacementFacts, sessions: BootstrapSessio
   if (latest && ["failed", "dead_letter"].includes(latest.status)) return { status: "Failed", runtime, node, agent, session: latest };
   if (runtime || node || agent) return { status: "Offline", runtime, node, agent, session: latest };
   return { status: "Unknown", session: latest };
+}
+
+export function serverStatus(nodes: PlacementFacts["nodes"], agents: PlacementFacts["agents"]): "Ready" | "Offline" | "Unknown" {
+  if (readyServer(nodes, agents)) return "Ready";
+  return nodes.length || agents.length ? "Offline" : "Unknown";
 }
 
 export function topologyOnboarding(facts: PlacementFacts, plan: TopologyPlan | null, sessions: BootstrapSession[]): TopologyOnboardingState {
@@ -121,4 +161,29 @@ export function topologyOnboarding(facts: PlacementFacts, plan: TopologyPlan | n
 
 function latestBootstrap(sessions: BootstrapSession[]) {
   return [...sessions].sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+}
+
+function readyServer(nodes: PlacementFacts["nodes"], agents: PlacementFacts["agents"]) {
+  const agent = agents.find((item) => item.status === "active" && nodes.some((node) => usableNodeStatuses.has(node.status) && node.id === item.node_id && node.runtime_id === item.runtime_id));
+  const node = agent && nodes.find((item) => item.id === agent.node_id);
+  return agent && node ? { agent, node } : undefined;
+}
+
+function placementMatches(placement: CanvasPlacement, assignment?: TopologyAssignment) {
+  if (!assignment) return !placement.runtime_id;
+  return placement.runtime_id === assignment.runtime_id
+    && placement.environment_id === assignment.environment_id
+    && placement.replicas === assignment.replicas
+    && placement.cpu_request_millicores === assignment.cpu_request_millicores
+    && placement.memory_request_bytes === assignment.memory_request_bytes
+    && placement.exposure?.mode === assignment.exposure.mode
+    && (placement.rationale?.summary ?? "") === (assignment.rationale?.summary ?? "");
+}
+
+function finiteInteger(value?: number) {
+  return Number.isSafeInteger(value) ? value as number : 0;
+}
+
+function validInteger(value: number | undefined, max: number) {
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= max;
 }

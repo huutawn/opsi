@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, topologyOnboarding } from "./model.ts";
+import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, updateCanvasPlacement } from "./model.ts";
 
 const facts = {
   project_id: "p1",
@@ -12,7 +12,7 @@ const facts = {
 };
 const plan = { schema_version: "opsi.topology_plan/v1", id: "topo-1", project_id: "p1", revision: 2, state_hash: "state", plan_hash: "plan", created_by: "u", applied_by: "u", created_at: "now", applied_at: "now", assignments: [{ service_key: "api", environment_id: "env-1", runtime_id: "rt-1", replicas: 2, cpu_request_millicores: 100, memory_request_bytes: 1024, exposure: { mode: "none" } }] };
 
-test("canvas draft keeps applied fields, permits incomplete placement, and resets by deletion", () => {
+test("canvas draft keeps applied fields, defaults new placements, and resets by deletion", () => {
   const moved = moveCanvasPlacement(plan, {}, "api", { ...facts.runtimes[0], id: "rt-2" });
   assert.equal(canvasDraftStatus(plan, moved, "api"), "moved");
   assert.equal(canvasPlacement(plan, moved, "api").replicas, 2);
@@ -23,7 +23,22 @@ test("canvas draft keeps applied fields, permits incomplete placement, and reset
 
   const placed = moveCanvasPlacement(null, {}, "api", facts.runtimes[0]);
   assert.equal(canvasDraftStatus(null, placed, "api"), "new placement");
-  assert.deepEqual(canvasDraftIssues(canvasPlacement(null, placed, "api")), ["Replicas are missing.", "CPU request is missing.", "Memory request is missing.", "Exposure is missing."]);
+  assert.deepEqual(canvasPlacement(null, placed, "api"), { runtime_id: "rt-1", environment_id: "env-1", replicas: 1, cpu_request_millicores: 100, memory_request_bytes: 134217728, exposure: { mode: "none" } });
+  assert.deepEqual(canvasDraftIssues(canvasPlacement(null, placed, "api")), []);
+  assert.deepEqual(canvasDraftIssues({ ...canvasPlacement(null, placed, "api"), replicas: -1 }), ["Replicas must be between 1 and 100."]);
+});
+
+test("canvas edits resources and exposure, excludes unplaced assignments, and compiles stably", () => {
+  const appliedPlan = { ...plan, assignments: [...plan.assignments, { ...plan.assignments[0], service_key: "worker" }] };
+  let draft = updateCanvasPlacement(appliedPlan, {}, "api", { replicas: 3, cpu_request_millicores: 350, memory_request_bytes: 512 * 1024 * 1024, exposure: { mode: "public" } });
+  assert.equal(canvasDraftStatus(appliedPlan, draft, "api"), "edited");
+  draft = moveCanvasPlacement(appliedPlan, draft, "worker");
+  draft = moveCanvasPlacement(appliedPlan, draft, "reports", facts.runtimes[0]);
+  const compiled = compileCanvasDraft("p1", appliedPlan, draft);
+  assert.deepEqual(compiled.assignments.map((assignment) => assignment.service_key), ["api", "reports"]);
+  assert.deepEqual(compiled.assignments[0], { service_key: "api", environment_id: "env-1", runtime_id: "rt-1", replicas: 3, cpu_request_millicores: 350, memory_request_bytes: 536870912, exposure: { mode: "public" } });
+  assert.equal(JSON.stringify(compiled).includes("position"), false);
+  assert.deepEqual(compileCanvasDraft("p1", null, { z: draft.reports, a: { ...draft.reports } }).assignments.map((assignment) => assignment.service_key), ["a", "z"]);
 });
 
 test("capacity and progress stay truthful", () => {
@@ -46,6 +61,9 @@ test("topology onboarding follows factual project state", () => {
 test("server lifecycle requires a usable node and active Agent", () => {
   assert.equal(serverLifecycle(facts, []).status, "Ready");
   assert.equal(serverLifecycle({ ...facts, agents: [{ ...facts.agents[0], status: "offline" }] }, []).status, "Offline");
+  const wrongNode = { ...facts, nodes: [...facts.nodes, { ...facts.nodes[0], id: "node-stale", status: "stale" }], agents: [{ ...facts.agents[0], node_id: "node-stale" }] };
+  assert.equal(serverStatus(wrongNode.nodes, wrongNode.agents), "Offline");
+  assert.equal(serverLifecycle(wrongNode, []).status, "Offline");
   assert.equal(topologyOnboarding({ ...facts, agents: [{ ...facts.agents[0], status: "offline" }] }, null, []).action, "Inspect topology");
 });
 

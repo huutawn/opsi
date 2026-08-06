@@ -34,7 +34,7 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
 
   return <div className="infrastructurePage">
     {console.route.tab !== "topology" ? <div className="destinationToolbar"><p>{error || "Cloud topology facts remain visible when Agent runtime data is unavailable."}</p><button data-review-trigger={console.route.tab === "bootstrap" ? "bootstrap" : undefined} onClick={(event) => { if (console.route.tab === "bootstrap") { bootstrapTrigger.current = event.currentTarget; setBootstrapOpen(true); } else { placementTrigger.current = event.currentTarget; setPlacementOpen(true); } }} type="button">{console.route.tab === "bootstrap" ? "Add server" : "Plan placement"}</button></div> : null}
-    {console.route.tab === "topology" ? <TopologyTab console={console} error={error} facts={data.facts} key={`${projectID}:${data.topology?.revision ?? 0}:${data.topology?.state_hash ?? "none"}`} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={setMode} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} onReload={load} topology={data.topology} /> : null}
+    {console.route.tab === "topology" ? <TopologyTab console={console} error={error} facts={data.facts} key={projectID} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={setMode} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} onReload={load} topology={data.topology} /> : null}
     {console.route.tab === "runtimes" ? <RuntimesTab console={console} facts={data.facts} topology={data.topology} /> : null}
     {console.route.tab === "nodes" ? <NodesTab console={console} facts={data.facts} /> : null}
     {console.route.tab === "bootstrap" ? <BootstrapTab console={console} onReload={load} /> : null}
@@ -63,7 +63,7 @@ function TopologyTab({ console, error, facts, mode, onAddService, onConnectServe
     {error ? <p className="truthCallout" role="alert">{error}</p> : null}
     {mode === "design" ? <>
       {!topology ? <div className="truthCallout"><b>No topology plan</b><p>Infrastructure facts are shown without service placement edges. Service inventory is not used to fabricate assignments.</p></div> : null}
-      <TopologyDesignCanvas console={console} draft={draft} facts={facts} onDraft={setDraft} topology={topology} />
+      <TopologyDesignCanvas console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} topology={topology} />
     </> : <LiveTopology console={console} facts={facts} />}
   </section>;
 }

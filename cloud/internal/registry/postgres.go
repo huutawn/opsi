@@ -1118,7 +1118,7 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	if job, reused, err := s.ReplayImmutableDeployment(snapshot.ProjectID, key, snapshot.PayloadHash); err != nil || reused {
 		return job, reused, err
 	}
-	if snapshot.SchemaVersion != deploymentv1.JobSchemaVersion || snapshot.ProjectID == "" || snapshot.Authority.BuildRecord.ProjectID != snapshot.ProjectID {
+	if !validImmutableDeploymentAuthority(snapshot) {
 		return DeploymentJob{}, false, APIError{Status: 400, Code: "DEPLOYMENT_SNAPSHOT_INVALID", Message: "deployment authority snapshot is invalid", RequestID: requestID}
 	}
 	if err := snapshot.Image.Validate(); err != nil {
@@ -1137,7 +1137,7 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	if err != nil || service.ProjectID != snapshot.ProjectID {
 		return DeploymentJob{}, false, ErrNotFound
 	}
-	if service.EnvironmentID != snapshot.Authority.EnvironmentID || service.RuntimeID != snapshot.Authority.RuntimeID {
+	if service.ID != snapshot.Authority.BuildRecord.ServiceID || service.Name != snapshot.Authority.BuildRecord.ServiceKey {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_SERVICE_BINDING_INVALID", Message: "service binding does not match the resolved target", RequestID: requestID}
 	}
 	node, agent, err := s.deployAgent(ctx, snapshot.ProjectID, snapshot.Authority.RuntimeID, requestID)

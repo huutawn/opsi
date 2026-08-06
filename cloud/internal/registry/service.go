@@ -15,6 +15,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	"golang.org/x/crypto/bcrypt"
@@ -1529,7 +1530,7 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 		existing.Reused = true
 		return existing, true, nil
 	}
-	if snapshot.SchemaVersion != deploymentv1.JobSchemaVersion || snapshot.ProjectID == "" || snapshot.Authority.BuildRecord.ProjectID != snapshot.ProjectID {
+	if !validImmutableDeploymentAuthority(snapshot) {
 		return DeploymentJob{}, false, APIError{Status: 400, Code: "DEPLOYMENT_SNAPSHOT_INVALID", Message: "deployment authority snapshot is invalid", RequestID: requestID}
 	}
 	if err := snapshot.Image.Validate(); err != nil {
@@ -1548,7 +1549,7 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	if !ok || service.ProjectID != snapshot.ProjectID || service.Name == "" {
 		return DeploymentJob{}, false, ErrNotFound
 	}
-	if service.ID != snapshot.Authority.BuildRecord.ServiceID || service.EnvironmentID != snapshot.Authority.EnvironmentID || service.RuntimeID != snapshot.Authority.RuntimeID {
+	if service.ID != snapshot.Authority.BuildRecord.ServiceID || service.Name != snapshot.Authority.BuildRecord.ServiceKey {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_SERVICE_BINDING_INVALID", Message: "service binding does not match the resolved target", RequestID: requestID}
 	}
 	node, agent, err := s.deployAgentLocked(snapshot.ProjectID, snapshot.Authority.RuntimeID, requestID)
@@ -1592,6 +1593,20 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	s.deployEvents[job.ID] = []DeploymentEvent{rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable BuildRecord rollout prepared", 0, requestID, now, "")}
 	s.idempotency["deploy:v1:"+snapshot.ProjectID+":"+key] = job
 	return job, false, nil
+}
+
+func validImmutableDeploymentAuthority(snapshot deploymentv1.JobSnapshot) bool {
+	authority := snapshot.Authority
+	record := authority.BuildRecord
+	return snapshot.SchemaVersion == deploymentv1.JobSchemaVersion &&
+		snapshot.ProjectID != "" && snapshot.PayloadHash != "" &&
+		record.SchemaVersion == buildrecordv1.SchemaVersion && record.ID != "" &&
+		record.ProjectID == snapshot.ProjectID && record.ServiceID != "" && record.ServiceKey != "" && record.ActiveBindingID != "" &&
+		record.Build.Status == "succeeded" && snapshot.Workload.ServiceKey == record.ServiceKey &&
+		authority.TopologyPlanID != "" && authority.TopologyRevision > 0 && len(authority.TopologyHash) == 64 &&
+		authority.DeploymentPolicyID != "" && authority.DeploymentPolicyRevision > 0 && len(authority.DeploymentPolicyHash) == 64 &&
+		len(authority.RoutingDecisionHash) == 64 &&
+		authority.EnvironmentID != "" && authority.RuntimeID != "" && authority.NodeID != "" && authority.AgentID != ""
 }
 
 func (s *Service) ReplayImmutableDeployment(projectID, key, payloadHash string) (DeploymentJob, bool, error) {

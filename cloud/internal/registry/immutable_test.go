@@ -31,6 +31,58 @@ func immutableSnapshot(t *testing.T, service *Service, projectID, serviceID, key
 	return deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: spec, SpecHash: specHash, PayloadHash: "payload-" + key, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + key, ProjectID: projectID, ServiceID: serviceID, ServiceKey: record.Name, ActiveBindingID: "binding-1", Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, TopologyPlanID: "topology-" + key, TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), DeploymentPolicyID: "policy-" + key, DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("2", 64), RoutingDecisionHash: strings.Repeat("3", 64), EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID, NodeID: nodes[0].ID, AgentID: agent.ID}}
 }
 
+func TestImmutableDeploymentUsesResolvedTopologyTargetInsteadOfLegacyServiceBinding(t *testing.T) {
+	service, projectID := readyRegistry(t)
+	created := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api", "svc-topology-target")
+	snapshot := immutableSnapshot(t, service, projectID, created.ID, "topology-target")
+	now := service.clock()
+	runtime := service.runtimes[created.RuntimeID]
+	runtime.ID, runtime.Name, runtime.ServerNodeID = "runtime-new", "New runtime", "node-new"
+	node := Node{ID: "node-new", OrgID: created.OrgID, ProjectID: projectID, EnvironmentID: created.EnvironmentID, RuntimeID: runtime.ID, Name: "New server", Role: "server", Status: NodeHealthy, AgentID: "agent-new", LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
+	agent := Agent{ID: "agent-new", OrgID: created.OrgID, ProjectID: projectID, RuntimeID: runtime.ID, NodeID: node.ID, Status: "active", Capabilities: map[string]any{"deploy": true}, LastSeenAt: &now, CreatedAt: now, UpdatedAt: now}
+	service.runtimes[runtime.ID], service.nodes[node.ID], service.agents[agent.ID] = runtime, node, agent
+
+	snapshot.Authority.RuntimeID, snapshot.Authority.NodeID, snapshot.Authority.AgentID = runtime.ID, node.ID, agent.ID
+	job, _, err := service.StartImmutableDeployment(snapshot, "user-1", "deploy-topology-target", "request-topology-target")
+	if err != nil || job.RuntimeID != runtime.ID || job.NodeID != node.ID || job.AgentID != agent.ID {
+		t.Fatalf("resolved topology target was blocked by legacy service fields: job=%+v err=%v", job, err)
+	}
+	if created.RuntimeID == job.RuntimeID {
+		t.Fatal("test did not move the deployment away from the legacy service runtime")
+	}
+}
+
+func TestImmutableDeploymentAuthorityStillFailsClosed(t *testing.T) {
+	tests := map[string]struct {
+		mutate func(*deploymentv1.JobSnapshot)
+		code   string
+	}{
+		"wrong project": {mutate: func(snapshot *deploymentv1.JobSnapshot) { snapshot.ProjectID = "other-project" }, code: "DEPLOYMENT_SNAPSHOT_INVALID"},
+		"wrong service": {mutate: func(snapshot *deploymentv1.JobSnapshot) { snapshot.Authority.BuildRecord.ServiceID = "missing-service" }},
+		"wrong service key": {mutate: func(snapshot *deploymentv1.JobSnapshot) {
+			snapshot.Authority.BuildRecord.ServiceKey, snapshot.Workload.ServiceKey = "other", "other"
+		}, code: "DEPLOYMENT_SERVICE_BINDING_INVALID"},
+		"wrong build artifact": {mutate: func(snapshot *deploymentv1.JobSnapshot) {
+			snapshot.Authority.BuildRecord.Build.OCIDigest = "sha256:" + strings.Repeat("b", 64)
+		}, code: "BUILD_ARTIFACT_MISMATCH"},
+		"wrong topology": {mutate: func(snapshot *deploymentv1.JobSnapshot) { snapshot.Authority.TopologyPlanID = "" }, code: "DEPLOYMENT_SNAPSHOT_INVALID"},
+		"wrong routing":  {mutate: func(snapshot *deploymentv1.JobSnapshot) { snapshot.Authority.RoutingDecisionHash = "" }, code: "DEPLOYMENT_SNAPSHOT_INVALID"},
+		"changed target": {mutate: func(snapshot *deploymentv1.JobSnapshot) { snapshot.Authority.NodeID = "other-node" }, code: "ROUTING_TARGET_CHANGED"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			service, projectID := readyRegistry(t)
+			created := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api", "svc-authority")
+			snapshot := immutableSnapshot(t, service, projectID, created.ID, name)
+			test.mutate(&snapshot)
+			snapshot.SpecHash, _ = snapshot.Workload.Hash()
+			if _, _, err := service.StartImmutableDeployment(snapshot, "user-1", "deploy-"+strings.ReplaceAll(name, " ", "-"), "request-authority"); err == nil || test.code != "" && apiCode(err) != test.code {
+				t.Fatalf("authority mismatch did not fail closed: code=%q err=%v", apiCode(err), err)
+			}
+		})
+	}
+}
+
 func TestImmutableDeploymentStateMachineAndIdempotency(t *testing.T) {
 	service, projectID := readyRegistry(t)
 	created := createRegistryService(t, service, projectID, "api", "Dockerfile", "deploy/api", "svc-api")
