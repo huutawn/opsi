@@ -2,10 +2,12 @@ package webhookrelay
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/topology"
 )
 
 func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
@@ -57,6 +60,33 @@ func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("retired service-scoped deployment status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateServiceDoesNotChangeAppliedTopology(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-topology", "Topology", "topology", "owner", "project-topology")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/services", bytes.NewReader([]byte(`{"name":"api","type":"application","source_type":"git","repo_url":"https://github.com/example/api","branch":"main","build_context":"services/api","dockerfile":"Dockerfile","container_port":8080,"health_path":"/health"}`)))
+	req.Header.Set("Idempotency-Key", "create-api")
+	req.Header.Set("X-Request-ID", "request-create-api")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create service status=%d body=%s", w.Code, w.Body.String())
+	}
+	var created registry.ServiceRecord
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.EnvironmentID == "" || created.RuntimeID == "" {
+		t.Fatalf("legacy scope fixture is missing: %+v", created)
+	}
+	after, err := server.Topology.Get(context.Background(), project.ID)
+	if !errors.Is(err, topology.ErrNotFound) || len(after.Assignments) != 0 {
+		t.Fatalf("service creation unexpectedly created applied placement: plan=%+v err=%v", after, err)
 	}
 }
 

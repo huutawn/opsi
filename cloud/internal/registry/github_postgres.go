@@ -580,8 +580,8 @@ func (s PostgresService) CreateGitHubServiceBinding(projectID string, draft GitH
 	if err != nil {
 		return GitHubServiceBinding{}, githubPostgresError(err)
 	}
-	var serviceProject, serviceStatus string
-	err = tx.QueryRowContext(ctx, `SELECT project_id,status FROM control_services WHERE id=$1 FOR UPDATE`, draft.ServiceID).Scan(&serviceProject, &serviceStatus)
+	var serviceProject, serviceStatus, serviceName string
+	err = tx.QueryRowContext(ctx, `SELECT project_id,status,name FROM control_services WHERE id=$1 FOR UPDATE`, draft.ServiceID).Scan(&serviceProject, &serviceStatus, &serviceName)
 	if errors.Is(err, sql.ErrNoRows) || err == nil && serviceProject != projectID {
 		return GitHubServiceBinding{}, ErrNotFound
 	}
@@ -590,6 +590,9 @@ func (s PostgresService) CreateGitHubServiceBinding(projectID string, draft GitH
 	}
 	if serviceStatus == "deleted" {
 		return GitHubServiceBinding{}, githubConflict("GITHUB_SERVICE_UNAVAILABLE", "service is deleted")
+	}
+	if draft.ServiceKey != serviceName {
+		return GitHubServiceBinding{}, githubConflict("GITHUB_SERVICE_KEY_MISMATCH", "service_key must match the service identity")
 	}
 	repository, installation, err := claimableGitHubRepositoryTx(ctx, tx, projectID, draft.RepositoryID)
 	if err != nil {

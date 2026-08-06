@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Empty, StatusBadge } from "@/components/ui/primitives";
+import { ApplicationWizard } from "@/features/applications/application-wizard";
 import type { ConsoleController } from "@/features/console/types";
 import { PlacementDialog } from "@/features/infrastructure/placement-dialog";
 import { useInfrastructureData } from "@/features/infrastructure/data";
 import { TopologyDesignCanvas } from "@/features/infrastructure/topology-canvas";
-import { AddServiceDialog } from "@/features/services/services-view";
 import type { TimelineEvent } from "@/lib/contracts/registry";
 import { bootstrapProgress, capacityLabel, serverLifecycle, topologyOnboarding, type CanvasDraft, type ServerLifecycle, type TopologyOnboardingState } from "@/lib/presentation/infrastructure/model";
 
@@ -34,17 +34,17 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
 
   return <div className="infrastructurePage">
     {console.route.tab !== "topology" ? <div className="destinationToolbar"><p>{error || "Cloud topology facts remain visible when Agent runtime data is unavailable."}</p><button data-review-trigger={console.route.tab === "bootstrap" ? "bootstrap" : undefined} onClick={(event) => { if (console.route.tab === "bootstrap") { bootstrapTrigger.current = event.currentTarget; setBootstrapOpen(true); } else { placementTrigger.current = event.currentTarget; setPlacementOpen(true); } }} type="button">{console.route.tab === "bootstrap" ? "Add server" : "Plan placement"}</button></div> : null}
-    {console.route.tab === "topology" ? <TopologyTab console={console} error={error} facts={data.facts} key={projectID} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={setMode} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} onReload={load} topology={data.topology} /> : null}
+    {console.route.tab === "topology" ? <TopologyTab bindings={data.bindings} builds={data.builds} console={console} error={error} facts={data.facts} key={projectID} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={setMode} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} onReload={load} repositories={data.repositories} topology={data.topology} /> : null}
     {console.route.tab === "runtimes" ? <RuntimesTab console={console} facts={data.facts} topology={data.topology} /> : null}
     {console.route.tab === "nodes" ? <NodesTab console={console} facts={data.facts} /> : null}
     {console.route.tab === "bootstrap" ? <BootstrapTab console={console} onReload={load} /> : null}
     {placementOpen ? <PlacementDialog console={console} data={{ facts: data.facts, topology: data.topology, repositories: data.repositories, bindings: data.bindings, builds: data.builds, policies: data.policies }} onApplied={() => { void console.actions.load(); void load(); }} onClose={() => { setPlacementOpen(false); window.requestAnimationFrame(() => placementTrigger.current?.focus()); }} /> : null}
     {bootstrapOpen ? <BootstrapDialog console={console} onClose={() => { setBootstrapOpen(false); window.requestAnimationFrame(() => bootstrapTrigger.current?.focus()); }} onCreated={load} /> : null}
-    {serviceOpen ? <AddServiceDialog console={console} onClose={() => { setServiceOpen(false); window.requestAnimationFrame(() => serviceTrigger.current?.focus()); }} onCreated={load} /> : null}
+    {serviceOpen ? <ApplicationWizard console={console} onClose={() => { setServiceOpen(false); window.requestAnimationFrame(() => serviceTrigger.current?.focus()); }} onCreated={async () => { setMode("design"); await load(); }} /> : null}
   </div>;
 }
 
-function TopologyTab({ console, error, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, onReload, topology }: { console: ConsoleController; error: string; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void>; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
+function TopologyTab({ bindings, builds, console, error, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, onReload, repositories, topology }: { bindings: ReturnType<typeof useInfrastructureData>["data"]["bindings"]; builds: ReturnType<typeof useInfrastructureData>["data"]["builds"]; console: ConsoleController; error: string; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void>; repositories: ReturnType<typeof useInfrastructureData>["data"]["repositories"]; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
   const [draft, setDraft] = useState<CanvasDraft>({});
   const lifecycle = serverLifecycle(facts, console.state.sessions);
   const onboarding = topologyOnboarding(facts, topology, console.state.sessions);
@@ -63,7 +63,7 @@ function TopologyTab({ console, error, facts, mode, onAddService, onConnectServe
     {error ? <p className="truthCallout" role="alert">{error}</p> : null}
     {mode === "design" ? <>
       {!topology ? <div className="truthCallout"><b>No topology plan</b><p>Infrastructure facts are shown without service placement edges. Service inventory is not used to fabricate assignments.</p></div> : null}
-      <TopologyDesignCanvas console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} topology={topology} />
+      <TopologyDesignCanvas bindings={bindings} builds={builds} console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} repositories={repositories} topology={topology} />
     </> : <LiveTopology console={console} facts={facts} />}
   </section>;
 }

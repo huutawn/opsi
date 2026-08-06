@@ -87,6 +87,16 @@ export function useInfrastructureData(console: ConsoleController) {
     });
   }, [consoleFacts, projectID]);
 
+  const consoleTopology = console.state.foundation.topology;
+  useEffect(() => {
+    if (!consoleTopology || consoleTopology.project_id !== projectID) return;
+    queueMicrotask(() => {
+      const next = { ...dataRef.current, topology: consoleTopology };
+      dataRef.current = next;
+      setData(next);
+    });
+  }, [consoleTopology, projectID]);
+
   const currentFacts = consoleFacts?.project_id === projectID ? consoleFacts : data.facts;
   const factualServerReady = currentFacts ? serverLifecycle(currentFacts, []).status === "Ready" : false;
   const activeBootstrapID = factualServerReady ? "" : latestActiveBootstrap(console.state.sessions)?.id ?? "";

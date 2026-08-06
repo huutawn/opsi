@@ -100,18 +100,22 @@ test("Design draft clears when the project changes", async ({ page }) => {
 
 test("Design draft survives an applied topology refresh", async ({ page }) => {
   await page.unroute("**/api/local/**");
-  let revision = 4;
+  let stateHash = "topology-state";
   await page.route("**/api/local/**", async (route) => {
     const data = fixture();
     data.facts.agents = data.facts.agents.map((agent) => ({ ...agent, status: "offline" }));
-    data.topology = { ...data.topology, revision, state_hash: `topology-state-${revision}` };
+    data.topology = { ...data.topology, state_hash: stateHash };
     await respondWithData(route, data, "proj-1");
   });
   await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
   await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
   await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
-  revision = 5;
-  await expect(page.getByText("TopologyPlan r5", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Review draft" }).click();
+  await expect(page.getByRole("heading", { name: "Cloud topology review" })).toBeVisible();
+  stateHash = "topology-state-changed";
+  await page.getByRole("button", { name: "Refresh current data" }).click();
+  await expect(page.getByText("Topology changed. Review draft again.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cloud topology review" })).toHaveCount(0);
   await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Application reports, Assigned, new placement/ })).toBeVisible();
 });
@@ -210,7 +214,7 @@ test("State conflict refreshes once, preserves local edits, and requires review 
   const readsBeforeApply = { topology: topologyReads, facts: factsReads };
   expectHTTPFailure(page, { path: "/api/local/projects/proj-1/topology/apply", status: 409, method: "POST" });
   await page.getByRole("button", { name: "Apply topology" }).click();
-  await expect(page.getByText(/local changes were preserved; review the draft again/)).toBeVisible();
+  await expect(page.getByText("Topology changed. Review draft again.", { exact: true })).toBeVisible();
   await expect(page.getByText("TopologyPlan r5", { exact: true })).toBeVisible();
   await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Application reports, Assigned, new placement/ })).toBeVisible();
@@ -241,7 +245,7 @@ test("Topology onboarding exposes the factual next action for every state", asyn
     if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Add server" })).toBeVisible(); await page.getByRole("button", { name: "Close add server dialog" }).click(); }
     if (next === "bootstrap") { await expect(page.locator(".topologyOnboarding").getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=topology/); await expect(page.getByRole("heading", { name: "203.0.113.10" })).toBeFocused(); }
     if (next === "failed") { await button.click(); await expect(page.getByRole("dialog", { name: /retry bootstrap session/i })).toBeVisible(); await page.getByRole("button", { name: "Confirm and submit" }).click(); await expect(page.getByText(/Bootstrap boot-failed returned status pending/)).toBeVisible(); await page.getByRole("button", { name: "Close" }).click(); }
-    if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add service" })).toBeVisible(); await page.getByRole("button", { name: "Close add service dialog" }).click(); }
+    if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add application" })).toBeVisible(); await page.getByRole("button", { name: "Close application wizard" }).click(); }
     if (next === "placement") { await button.click(); await expect(page.getByRole("dialog", { name: "Plan placement" })).toBeVisible(); await page.getByRole("button", { name: "Close placement dialog" }).click(); }
     if (next === "review") { await page.getByRole("button", { name: "Live", exact: true }).click(); await button.click(); await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true"); }
   }
@@ -333,12 +337,36 @@ test("bootstrap polling is sequential and stops after a project switch", async (
 test("confirmed service creation refreshes Topology onboarding without a page reload", async ({ page }) => {
   await page.unroute("**/api/local/**");
   let created = false;
+  let claimed = false;
+  let bound = false;
   let navigationRequests = 0;
   await page.route("**/api/local/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/github/installations")) {
+      await route.fulfill({ body: JSON.stringify({ installations: [{ installation_id: 11, account_login: "example", status: "active" }] }), contentType: "application/json", status: 200 });
+      return;
+    }
+    if (path.endsWith("/github/repositories") && route.request().method() === "GET") {
+      await route.fulfill({ body: JSON.stringify({ repositories: [{ repository_id: 101, installation_id: 11, full_name: "example/api", default_branch: "main", status: "active", claim_status: claimed ? "active" : "available" }] }), contentType: "application/json", status: 200 });
+      return;
+    }
+    if (path.endsWith("/github/repositories/101/claim")) {
+      claimed = true;
+      await route.fulfill({ body: JSON.stringify({ repository_id: 101, project_id: "proj-1", status: "active" }), contentType: "application/json", status: 200 });
+      return;
+    }
     if (path.endsWith("/services") && route.request().method() === "POST") {
       created = true;
-      await route.fulfill({ body: JSON.stringify({ id: "api", name: "api", type: "application", status: "ready", source_type: "image" }), contentType: "application/json", status: 200 });
+      await route.fulfill({ body: JSON.stringify({ id: "api", name: "api", type: "application", status: "ready", source_type: "git", repo_url: "https://github.com/example/api", branch: "main", build_context: ".", dockerfile: "Dockerfile", container_port: 8080, health_path: "/health" }), contentType: "application/json", status: 201 });
+      return;
+    }
+    if (path.endsWith("/github/bindings") && route.request().method() === "POST") {
+      bound = true;
+      await route.fulfill({ body: JSON.stringify({ id: "binding-api", project_id: "proj-1", service_id: "api", repository_id: 101, installation_id: 11, service_key: "api", config_path: ".opsi/opsi-cd.yaml", status: "active" }), contentType: "application/json", status: 201 });
+      return;
+    }
+    if (path.endsWith("/github/bindings")) {
+      await route.fulfill({ body: JSON.stringify({ bindings: bound ? [{ id: "binding-api", project_id: "proj-1", service_id: "api", repository_id: 101, installation_id: 11, service_key: "api", config_path: ".opsi/opsi-cd.yaml", status: "active" }] : [] }), contentType: "application/json", status: 200 });
       return;
     }
     const data = onboardingFixture(fixture(), created ? "placement" : "application");
@@ -347,11 +375,11 @@ test("confirmed service creation refreshes Topology onboarding without a page re
   await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
   page.on("request", (request) => { if (request.isNavigationRequest()) navigationRequests += 1; });
   await page.getByRole("button", { name: "Add application" }).click();
-  await page.getByLabel("Name", { exact: true }).fill("api");
-  await page.getByRole("button", { name: "Review service" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Service key").fill("api");
+  await page.getByLabel("Container port").fill("8080");
+  await page.getByRole("button", { name: "Review application" }).click();
   await page.getByRole("button", { name: "Confirm and submit" }).click();
-  await expect(page.getByText(/Service api created with status ready/)).toBeVisible();
-  await page.getByRole("button", { name: "Close" }).click();
   await expect(page.getByRole("button", { name: "Plan placement" })).toBeVisible();
   expect(navigationRequests).toBe(0);
 });

@@ -403,32 +403,6 @@ export function useConsoleState() {
     );
   }
 
-  async function createService(event: FormEvent<HTMLFormElement>, onCreated?: () => void | Promise<void>) {
-    event.preventDefault();
-    if (!currentProject) return;
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    const body = {
-      name: form.get("name"), type: form.get("type"), source_type: "image",
-      container_port: Number(form.get("container_port") || 0), health_path: form.get("health_path"), replicas: Number(form.get("replicas") || 1),
-    };
-    reviewMutation(
-      { project: currentProject.name, targetType: "service", targetID: String(body.name ?? ""), operation: "create catalog entry", diff: [`type: ${String(body.type ?? "")}`, `port: ${body.container_port || "unset"}`, `replicas: ${body.replicas}`], risk: "Creates service identity only. Source binding and immutable BuildRecords remain separate." },
-      async (key) => {
-        patch({ busy: "service" });
-        try {
-          const created = await client.createService(currentProject.id, body, key);
-          formElement.reset();
-          await load(currentProject.id);
-          await onCreated?.();
-          return `Service ${created.id} created with status ${created.status}.`;
-        } finally {
-          patch({ busy: "" });
-        }
-      },
-    );
-  }
-
   async function diagnostics(nodeID: string) {
     if (!currentProject) return;
     patch({ nodeDetail: await client.node(currentProject.id, nodeID) });
@@ -623,7 +597,6 @@ export function useConsoleState() {
     actions: {
       addServer,
       createProject,
-      createService,
       diagnostics,
       load: refreshCurrentData,
       loadBootstrapEvents,

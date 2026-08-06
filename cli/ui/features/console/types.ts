@@ -39,7 +39,6 @@ export type ConsoleController = {
   actions: {
     addServer: (event: FormEvent<HTMLFormElement>, onCreated?: () => void | Promise<void>) => Promise<void>;
     createProject: (event: FormEvent<HTMLFormElement>) => Promise<void>;
-    createService: (event: FormEvent<HTMLFormElement>, onCreated?: () => void | Promise<void>) => Promise<void>;
     diagnostics: (nodeID: string) => Promise<void>;
     load: () => Promise<void>;
     loadBootstrapEvents: (sessionID: string) => Promise<void>;

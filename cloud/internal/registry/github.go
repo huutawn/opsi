@@ -523,6 +523,9 @@ func (s *Service) ReleaseGitHubRepository(projectID string, repositoryID int64, 
 }
 
 func (s *Service) CreateGitHubServiceBinding(projectID string, draft GitHubServiceBindingDraft) (GitHubServiceBinding, error) {
+	if err := normalizeGitHubBindingDraft(&draft); err != nil {
+		return GitHubServiceBinding{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	project, ok := s.projects[projectID]
@@ -536,6 +539,9 @@ func (s *Service) CreateGitHubServiceBinding(projectID string, draft GitHubServi
 	if service.Status == "deleted" {
 		return GitHubServiceBinding{}, githubConflict("GITHUB_SERVICE_UNAVAILABLE", "service is deleted")
 	}
+	if draft.ServiceKey != service.Name {
+		return GitHubServiceBinding{}, githubConflict("GITHUB_SERVICE_KEY_MISMATCH", "service_key must match the service identity")
+	}
 	repository, installation, err := s.claimableRepositoryLocked(projectID, draft.RepositoryID)
 	if err != nil {
 		return GitHubServiceBinding{}, err
@@ -543,9 +549,6 @@ func (s *Service) CreateGitHubServiceBinding(projectID string, draft GitHubServi
 	claim, ok := s.githubRepositoryClaims[draft.RepositoryID]
 	if !ok || claim.Status != GitHubLinkActive || claim.ProjectID != projectID {
 		return GitHubServiceBinding{}, githubConflict("GITHUB_REPOSITORY_NOT_CLAIMED", "repository must be claimed by the project")
-	}
-	if err := normalizeGitHubBindingDraft(&draft); err != nil {
-		return GitHubServiceBinding{}, err
 	}
 	for _, binding := range s.githubServiceBindings {
 		if binding.Status != GitHubLinkActive {

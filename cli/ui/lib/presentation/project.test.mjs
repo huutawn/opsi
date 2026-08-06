@@ -51,6 +51,19 @@ test("service rows do not attach telemetry by display name", () => {
   assert.equal(row.health, "unknown");
 });
 
+test("service placement comes only from TopologyPlan assignments", () => {
+  const legacy = { ...service, environment_id: "legacy-env", runtime_id: "legacy-runtime" };
+  const placement = {
+    project_id: project.id,
+    environments: [{ id: "env-1", project_id: project.id, name: "Production", type: "prod", status: "active" }],
+    runtimes: [{ id: "runtime-1", project_id: project.id, environment_id: "env-1", name: "Primary", type: "k3s", status: "ready" }],
+    nodes: [], agents: [], services: [{ id: service.id, project_id: project.id, key: service.name }],
+  };
+  assert.equal(serviceRows({ services: [legacy], telemetry: [], telemetrySource: "available", deployments: [], placement, topology: null })[0].placement, "Unplaced");
+  const topology = { schema_version: "opsi.topology_plan/v1", project_id: project.id, id: "topology-1", revision: 1, state_hash: "state", plan_hash: "plan", created_by: "owner", applied_by: "owner", created_at: "2026-01-01T00:00:00Z", applied_at: "2026-01-01T00:00:00Z", assignments: [{ service_key: service.name, environment_id: "env-1", runtime_id: "runtime-1", replicas: 1, cpu_request_millicores: 100, memory_request_bytes: 128 * 1024 * 1024, exposure: { mode: "none" } }] };
+  assert.equal(serviceRows({ services: [legacy], telemetry: [], telemetrySource: "available", deployments: [], placement, topology })[0].placement, "Production / Primary");
+});
+
 test("failed latest build outranks an older successful deployment", () => {
   const result = summary({ builds: [{ id: "build-2", project_id: project.id, service_id: service.id, service_key: "api", repository_id: 1, repository_owner_id: 1, active_binding_id: "binding-1", created_at: "2026-07-29T02:00:00Z", schema_version: "opsi.build_record/v1", workload: { issuer: "github", subject: "repo", repository_id: 1, repository_owner_id: 1, ref: "refs/heads/main", sha: "abcdef", event_name: "push", workflow: "build", workflow_ref: "build.yml", run_id: 1, run_attempt: 1 }, build: { config_hash: "config", platform: "linux/amd64", oci_repository: "example/api", oci_digest: "sha256:abc", status: "failed" } }] });
   assert.equal(result.overall, "failed");
