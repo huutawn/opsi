@@ -274,6 +274,10 @@ func PathsConflict(first, second string) bool {
 	return strings.HasPrefix(first, second+"/") || strings.HasPrefix(second, first+"/")
 }
 
+// ManagedPathsConflict allows Opsi-managed longest-prefix routes while
+// rejecting an exact hostname/path duplicate.
+func ManagedPathsConflict(first, second string) bool { return first == second }
+
 func containsControl(value string) bool {
 	for _, r := range value {
 		if unicode.IsControl(r) {

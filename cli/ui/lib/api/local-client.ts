@@ -12,6 +12,12 @@ import type {
   Project,
   Readiness,
   ServiceRecord,
+  ServiceConfiguration,
+  ServiceConfigurationDraft,
+  ServiceConfigurationPreview,
+  ServiceConfigurationValidation,
+  ServiceConfigurationDiff,
+  ServiceConfigurationApplyResult,
   SecretResult,
   IncidentResult,
   IncidentListResult,
@@ -233,6 +239,12 @@ export class LocalClient {
   services(projectID: string) {
     return this.call<{ services: ServiceRecord[] }>(`/api/local/projects/${projectID}/services`);
   }
+
+  serviceConfiguration(projectID: string, serviceID: string) { return this.call<ServiceConfiguration>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration`); }
+  serviceConfigurationPreview(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationPreview>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/preview`, { method: "POST", body: JSON.stringify(draft) }); }
+  serviceConfigurationValidate(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationValidation>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/validate`, { method: "POST", body: JSON.stringify(draft) }); }
+  serviceConfigurationDiff(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationDiff>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/diff`, { method: "POST", body: JSON.stringify(draft) }); }
+  serviceConfigurationApply(projectID: string, serviceID: string, body: { draft: ServiceConfigurationDraft; expected_revision: number; expected_state_hash: string }, idempotencyKey: string) { return this.call<ServiceConfigurationApplyResult>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/apply`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
 
   buildRecords(projectID: string, filters: { serviceKey?: string; repositoryID?: string; sha?: string; status?: string; cursor?: string } = {}) {
     const query = new URLSearchParams({ limit: "50" });

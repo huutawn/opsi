@@ -1,6 +1,10 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { expectHTTPFailure, expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
+type FixtureBinding = { kind: "internal_http" | "browser_http"; target_service_id: string; target_service_key: string; env_prefix?: string; env_name?: string; path?: string };
+type FixtureConfiguration = { schema_version: "opsi.service_configuration/v1"; revision?: number; state_hash?: string; environment?: Array<{ name: string; value: string }>; public_route?: { hostname: string; path: string }; bindings?: FixtureBinding[] };
+type FixtureService = { id: string; name: string; type: string; status: string; source_type: string; replicas?: number; container_port: number; configuration: FixtureConfiguration };
+
 test.beforeEach(async ({ page }) => { watchConsoleErrors(page); await page.route("**/api/local/**", (route) => respond(route)); });
 test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
@@ -78,6 +82,42 @@ test("Design edits resources, reviews through Cloud, survives Live, and Reset av
   await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Application reports, Unplaced, unchanged/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Application worker, Assigned, unchanged/ })).toBeVisible();
+});
+
+test("Application edges review internal and same-origin browser HTTP without creating deployment state", async ({ page }) => {
+	await page.unroute("**/api/local/**");
+	const data = fixture();
+	const applyBodies: Array<Record<string, unknown>> = [];
+	await page.route("**/api/local/**", async (route) => {
+		const path = new URL(route.request().url()).pathname;
+		if (path.endsWith("/configuration/apply")) applyBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+		await respondWithData(route, data, "proj-1");
+	});
+	await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+	await connectApplications(page, /Application api, Assigned, unchanged/, /Application worker, Assigned, unchanged/);
+	await expect(page.getByRole("heading", { name: "HTTP connection" })).toBeVisible();
+	await expect(page.getByLabel("Runtime intent")).toHaveValue("internal_http");
+	await page.getByLabel("Environment prefix").fill("BACKEND");
+	await page.getByRole("button", { name: "Review connection" }).click();
+	await expect(page.getByLabel("Cloud service configuration review").getByText("generated environment", { exact: true }).first()).toBeVisible();
+	await page.getByRole("button", { name: "Apply service configuration" }).click();
+	await expect(page.getByText("Internal · applied", { exact: true })).toBeVisible();
+	expect(data.deployments).toHaveLength(1);
+
+	await page.locator(".react-flow__edge").first().click({ force: true });
+	await page.getByLabel("Runtime intent").selectOption("browser_http");
+	await expect(page.getByLabel("Same-origin path")).toHaveValue("/api");
+	await expect(page.getByLabel("Environment name")).toHaveValue("WORKER_BASE_URL");
+	await page.getByRole("button", { name: "Review connection" }).click();
+	await page.getByRole("button", { name: "Apply service configuration" }).click();
+	await expect(page.getByText("Browser · applied", { exact: true })).toBeVisible();
+	const appliedDraft = (applyBodies.at(-1)?.draft ?? {}) as { bindings?: Array<Record<string, unknown>> };
+	expect(appliedDraft.bindings?.[0]).toMatchObject({ kind: "browser_http", path: "/api", env_name: "WORKER_BASE_URL" });
+	expect(data.deployments).toHaveLength(1);
+
+	await page.locator(".react-flow__edge").first().click({ force: true });
+	await page.getByRole("button", { name: "Remove connection" }).click();
+	await expect(page.getByText("Browser · pending removal", { exact: true })).toBeVisible();
 });
 
 test("Design draft clears when the project changes", async ({ page }) => {
@@ -465,7 +505,20 @@ async function respondWithData(route: Route, data: ReturnType<typeof fixture>, p
   else if (path.endsWith("/readiness")) body = { project_id: projectID, status: "degraded", can_deploy: true };
   else if (path.endsWith("/nodes")) body = data.nodes;
   else if (/\/nodes\/[^/]+$/.test(path)) body = { node: data.nodes.find((item) => path.endsWith(item.id)), open_bootstrap_events: data.bootstrapEvents, recent_deployment_jobs: data.deployments };
-  else if (path.endsWith("/services")) body = { services: data.services };
+	else if (/\/services\/[^/]+\/configuration\/(preview|validate|diff|apply)$/.test(path)) {
+		const serviceID = path.split("/").at(-3) ?? "";
+		const service = data.services.find((item) => item.id === serviceID);
+		const action = path.split("/").at(-1);
+		const request = route.request().postDataJSON() as Record<string, unknown>;
+		const draft = ((action === "apply" ? request.draft : request) ?? service?.configuration) as FixtureConfiguration | undefined;
+		const generated = (draft?.bindings ?? []).flatMap((binding, index) => binding.kind === "internal_http" ? [`${binding.env_prefix}_HOST`, `${binding.env_prefix}_PORT`, `${binding.env_prefix}_URL`].map((name) => ({ name, value: name.endsWith("_PORT") ? "9000" : "generated", binding: index })) : [{ name: binding.env_name ?? "", value: binding.path ?? "/api", binding: index }]);
+		if (action === "preview") body = { configuration: draft, generated_environment: generated, current_revision: service?.configuration.revision ?? 0, current_state_hash: service?.configuration.state_hash ?? "empty", draft_state_hash: "configuration-draft-hash" };
+		if (action === "validate") body = { valid: true, issues: [] };
+		if (action === "diff") body = { changes: [{ kind: "connection", action: "change", name: serviceID }, ...generated.map((item) => ({ kind: "generated_environment", action: "set", name: item.name, after: item.value }))] };
+		if (action === "apply" && service && draft) { service.configuration = { ...draft, schema_version: "opsi.service_configuration/v1", revision: (service.configuration.revision ?? 0) + 1, state_hash: "configuration-draft-hash" }; body = { configuration: service.configuration, reused: false }; }
+	}
+	else if (/\/services\/[^/]+\/configuration$/.test(path)) body = data.services.find((item) => path.includes(`/${item.id}/`))?.configuration;
+	else if (path.endsWith("/services")) body = { services: data.services };
   else if (path.endsWith("/deployments")) body = { deployments: data.deployments };
   else if (/\/bootstrap-sessions\/[^/]+\/retry$/.test(path)) body = { ...data.sessions.find((session) => path.includes(session.id)), status: "pending" };
   else if (path.endsWith("/bootstrap-sessions")) body = { sessions: data.sessions };
@@ -555,7 +608,7 @@ function onboardingFixture(data: ReturnType<typeof fixture>, scenario: Onboardin
 }
 
 function fixture() {
-  const services = [{ id: "api", name: "api", type: "application", status: "ready", source_type: "image", replicas: 2 }, { id: "worker", name: "worker", type: "application", status: "ready", source_type: "image", replicas: 2 }, { id: "reports", name: "reports", type: "application", status: "ready", source_type: "image" }];
+	const services: FixtureService[] = [{ id: "api", name: "api", type: "application", status: "ready", source_type: "image", replicas: 2, container_port: 8080, configuration: { schema_version: "opsi.service_configuration/v1", revision: 1, state_hash: "api-config", environment: [], public_route: { hostname: "apps.example.com", path: "/" }, bindings: [] } }, { id: "worker", name: "worker", type: "application", status: "ready", source_type: "image", replicas: 2, container_port: 9000, configuration: { schema_version: "opsi.service_configuration/v1", revision: 1, state_hash: "worker-config", environment: [], public_route: { hostname: "apps.example.com", path: "/api" }, bindings: [] } }, { id: "reports", name: "reports", type: "application", status: "ready", source_type: "image", container_port: 7000, configuration: { schema_version: "opsi.service_configuration/v1", revision: 0, state_hash: "reports-config", environment: [], bindings: [] } }];
   const nodes = [{ id: "node-primary", name: "Primary node", role: "server", status: "healthy", cpu_cores: 4, memory_mb: 8192, disk_total_gb: 80, k3s_status: "ready", agent_id: "agent-primary", agent_version: "1.8.0", last_seen_at: "2026-07-30T09:00:00Z" }, { id: "node-edge", name: "Edge node", role: "worker", status: "stale", k3s_status: "ready", agent_id: "agent-stale", agent_version: "1.7.4", last_seen_at: "2026-07-30T08:20:00Z" }];
   const facts = { project_id: "proj-1", environments: [{ id: "env-prod", project_id: "proj-1", name: "Production", type: "prod", status: "active" }], runtimes: [{ id: "runtime-primary", project_id: "proj-1", environment_id: "env-prod", name: "Primary runtime", type: "k3s", status: "ready" }, { id: "runtime-edge", project_id: "proj-1", environment_id: "env-prod", name: "Edge runtime", type: "k3s", status: "degraded" }], nodes: [{ id: "node-primary", project_id: "proj-1", runtime_id: "runtime-primary", status: "healthy", cpu_cores: 4, memory_mb: 8192, last_seen_at: nodes[0].last_seen_at }, { id: "node-edge", project_id: "proj-1", runtime_id: "runtime-edge", status: "stale", last_seen_at: nodes[1].last_seen_at }], agents: [{ id: "agent-primary", project_id: "proj-1", runtime_id: "runtime-primary", node_id: "node-primary", status: "active", capabilities: { deploy: true }, last_seen_at: nodes[0].last_seen_at }, { id: "agent-stale", project_id: "proj-1", runtime_id: "runtime-edge", node_id: "node-edge", status: "stale", capabilities: { deploy: true }, last_seen_at: nodes[1].last_seen_at }], services: services.map((item) => ({ id: item.id, project_id: "proj-1", key: item.name })) };
   const topology = { schema_version: "opsi.topology_plan/v1", id: "topo-1", project_id: "proj-1", revision: 4, state_hash: "topology-state", plan_hash: "topology-plan", created_by: "owner", applied_by: "owner", created_at: "2026-07-30T08:00:00Z", applied_at: "2026-07-30T08:00:00Z", assignments: [{ service_key: "api", environment_id: "env-prod", runtime_id: "runtime-primary", replicas: 2, cpu_request_millicores: 250, memory_request_bytes: 268435456, exposure: { mode: "none" } }, { service_key: "worker", environment_id: "env-prod", runtime_id: "runtime-edge", replicas: 2, cpu_request_millicores: 200, memory_request_bytes: 268435456, exposure: { mode: "internal" } }] };
@@ -576,4 +629,22 @@ async function dragNode(page: Page, sourceName: RegExp, targetName: RegExp) {
   await page.mouse.down();
   await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + Math.min(210, targetBox.height - 30), { steps: 14 });
   await page.mouse.up();
+}
+
+async function connectApplications(page: Page, sourceName: RegExp, targetName: RegExp) {
+	const source = page.getByRole("button", { name: sourceName });
+	const target = page.getByRole("button", { name: targetName });
+	await source.scrollIntoViewIfNeeded();
+	await target.scrollIntoViewIfNeeded();
+	const sourceHandle = source.locator(".react-flow__handle-right");
+	const targetHandle = target.locator(".react-flow__handle-left");
+	await expect(sourceHandle).toBeVisible();
+	await expect(targetHandle).toBeVisible();
+	const sourceBox = await sourceHandle.boundingBox();
+	const targetBox = await targetHandle.boundingBox();
+	if (!sourceBox || !targetBox) throw new Error("Application connection handles are not measurable.");
+	await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 12 });
+	await page.mouse.up();
 }

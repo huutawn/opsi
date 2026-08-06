@@ -91,6 +91,17 @@ func TestTopologyAndPolicyCLIUsePATStrictFilesConfirmationAndIdempotency(t *test
 	}
 }
 
+func TestServiceConfigurationReviewRoutesAreNonMutating(t *testing.T) {
+	for _, suffix := range []string{"preview", "validate", "diff"} {
+		if !isPlacementPreview("/api/local/projects/p1/services/svc-1/configuration/" + suffix) {
+			t.Fatalf("configuration %s must not require mutation headers", suffix)
+		}
+	}
+	if isPlacementPreview("/api/local/projects/p1/services/svc-1/configuration/apply") {
+		t.Fatal("configuration apply must remain a protected mutation")
+	}
+}
+
 func TestLocalPlacementProxyPreservesHashesAndMutationHeaders(t *testing.T) {
 	const pat = "local-placement-pat"
 	cloudPaths := []string{}

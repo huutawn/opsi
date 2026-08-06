@@ -43,7 +43,7 @@ func (p ActionProjection) WorkloadIdentity(ctx context.Context, target actionv1.
 	}
 	ingressName := ""
 	if snapshot.Runtime.HasExternalExposure() {
-		ingressName = stableDNSName("opsi-ingress", snapshot.Runtime.Exposure.ServiceKey, snapshot.Runtime.Exposure.RuntimeID)
+		ingressName = deploymentv1.StableDNSName("opsi-ingress", snapshot.Runtime.Exposure.ServiceKey, snapshot.Runtime.Exposure.RuntimeID)
 	}
 	return ActionWorkloadIdentity{Namespace: namespace, DeploymentName: resources.DeploymentName, ServiceName: resources.ServiceName, IngressName: ingressName, Selector: cloneStringMap(resources.Selector), Snapshot: snapshot}, nil
 }

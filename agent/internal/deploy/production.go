@@ -3,8 +3,6 @@ package deploy
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -219,14 +217,14 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 	if err := spec.Validate(); err != nil {
 		return nil, renderedResources{}, "", err
 	}
-	namespace := stableDNSName("opsi", command.ProjectID, command.EnvironmentID)
-	resourceName := stableDNSName("opsi", spec.ServiceKey, command.RuntimeID)
+	namespace := deploymentv1.StableDNSName("opsi", command.ProjectID, command.EnvironmentID)
+	resourceName := deploymentv1.StableDNSName("opsi", spec.ServiceKey, command.RuntimeID)
 	if command.Preview != nil {
 		if err := command.Preview.Validate(); err != nil || command.Preview.ServiceKey != spec.ServiceKey || spec.Replicas > command.Preview.MaxReplicas {
 			return nil, renderedResources{}, "", errors.New("preview authority does not match workload")
 		}
 		namespace = command.Preview.Namespace
-		resourceName = stableDNSName("opsi", spec.ServiceKey, command.RuntimeID, namespace)
+		resourceName = deploymentv1.StableDNSName("opsi", spec.ServiceKey, command.RuntimeID, namespace)
 	}
 	selector := map[string]string{
 		"app.kubernetes.io/managed-by": "opsi",
@@ -289,27 +287,6 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 		return nil, renderedResources{}, "", err
 	}
 	return data, renderedResources{Namespace: namespace, DeploymentName: resourceName, ServiceName: resourceName, Selector: selector, Deployment: deployment, Service: service, NamespaceObject: namespaceObject, Quota: quota}, namespace, nil
-}
-
-func stableDNSName(prefix string, identities ...string) string {
-	parts := []string{safeLabel(prefix)}
-	for _, identity := range identities {
-		part := safeLabel(identity)
-		if len(part) > 18 {
-			part = part[:18]
-		}
-		parts = append(parts, strings.Trim(part, "-"))
-	}
-	base := strings.Trim(strings.Join(parts, "-"), "-")
-	sum := sha256.Sum256([]byte(strings.Join(identities, "\x00")))
-	suffix := hex.EncodeToString(sum[:])[:10]
-	if len(base) > 52 {
-		base = strings.TrimRight(base[:52], "-")
-	}
-	if base == "" {
-		base = "opsi"
-	}
-	return base + "-" + suffix
 }
 
 func probeObject(probe deploymentv1.Probe) map[string]any {

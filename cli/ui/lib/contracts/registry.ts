@@ -53,7 +53,43 @@ export type ServiceRecord = {
   health_path?: string;
   replicas?: number;
   namespace?: string;
+  configuration?: ServiceConfiguration;
 };
+
+export type EnvironmentVariable = { name: string; value: string };
+
+export type ServiceBinding = {
+  kind: "internal_http" | "browser_http";
+  target_service_id: string;
+  target_service_key: string;
+  env_prefix?: string;
+  env_name?: string;
+  path?: string;
+};
+
+export type PublicRouteIntent = { hostname: string; path: string };
+
+export type ServiceConfigurationDraft = {
+  schema_version?: "opsi.service_configuration/v1";
+  environment?: EnvironmentVariable[];
+  public_route?: PublicRouteIntent;
+  bindings?: ServiceBinding[];
+};
+
+export type ServiceConfiguration = ServiceConfigurationDraft & {
+  schema_version: "opsi.service_configuration/v1";
+  revision: number;
+  state_hash: string;
+  applied_by?: string;
+  applied_at?: string;
+};
+
+export type GeneratedEnvironment = { name: string; value: string; binding: number };
+export type ServiceConfigurationPreview = { configuration: ServiceConfigurationDraft; generated_environment?: GeneratedEnvironment[]; current_revision: number; current_state_hash: string; draft_state_hash: string };
+export type ServiceConfigurationValidation = { valid: boolean; issues?: { code: string; field?: string; message: string }[] };
+export type ServiceConfigurationChange = { kind: "connection" | "generated_environment" | "public_route" | "user_environment"; action: string; name?: string; before?: string; after?: string };
+export type ServiceConfigurationDiff = { changes: ServiceConfigurationChange[] };
+export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
 
 export type GitHubInstallation = {
   installation_id: number;

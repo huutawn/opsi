@@ -70,6 +70,28 @@ test("repository already claimed by the project is not claimed again", async ({ 
   expect(state.bindings).toHaveLength(1);
 });
 
+test("refresh resumes a missing source binding without creating a duplicate service", async ({ page }) => {
+	const state = applicationState("claimed");
+	state.services.push({ id: "svc-web", name: "web", type: "application", status: "draft", source_type: "git", repo_url: "https://github.com/example/web", branch: "main", container_port: 8080, configuration: { schema_version: "opsi.service_configuration/v1", revision: 0, state_hash: "empty", bindings: [] } });
+	state.facts.services.push({ id: "svc-web", project_id: "proj-1", key: "web" });
+	await page.route("**/api/local/**", (route) => respond(route, state));
+	await page.goto("/?project=proj-1&view=services");
+	await page.reload();
+	await page.locator(".pageHeader").getByRole("button", { name: "Add application" }).click();
+	await page.getByRole("button", { name: "Continue" }).click();
+	await page.getByLabel("Service key").fill("web");
+	await expect(page.getByText("Resume source binding", { exact: true }).first()).toBeVisible();
+	await page.getByLabel("Container port").fill("8080");
+	await page.getByRole("button", { name: "Resume source binding" }).click();
+	const review = page.getByRole("dialog", { name: "create application" });
+	await expect(review.getByText(/Create application identity/)).toHaveCount(0);
+	await review.getByRole("button", { name: "Confirm and submit" }).click();
+	await expect(review).toHaveCount(0);
+	expect(state.serviceBodies).toHaveLength(0);
+	expect(state.services).toHaveLength(1);
+	expect(state.bindings).toHaveLength(1);
+});
+
 for (const [scenario, failedPath] of [["service-failure", "/api/local/projects/proj-1/services"], ["binding-failure", "/api/local/projects/proj-1/github/bindings"]] as const) {
   test(`${scenario} retries the same reviewed operation without duplicate durable mutations`, async ({ page }) => {
     const state = applicationState(scenario);

@@ -363,33 +363,33 @@ type BootstrapEvent struct {
 }
 
 type ServiceRecord struct {
-	ID               string            `json:"id"`
-	OrgID            string            `json:"org_id"`
-	ProjectID        string            `json:"project_id"`
-	EnvironmentID    string            `json:"environment_id"`
-	RuntimeID        string            `json:"runtime_id"`
-	Name             string            `json:"name"`
-	Type             string            `json:"type"`
-	Status           string            `json:"status"`
-	SourceType       string            `json:"source_type"`
-	RepoURL          string            `json:"repo_url,omitempty"`
-	Image            string            `json:"image,omitempty"`
-	Branch           string            `json:"branch,omitempty"`
-	GitSHA           string            `json:"git_sha,omitempty"`
-	BuildMethod      string            `json:"build_method,omitempty"`
-	BuildContext     string            `json:"build_context,omitempty"`
-	Dockerfile       string            `json:"dockerfile,omitempty"`
-	ManifestPath     string            `json:"manifest_path,omitempty"`
-	WatchPaths       []string          `json:"watch_paths,omitempty"`
-	ContainerPort    int               `json:"container_port,omitempty"`
-	HealthPath       string            `json:"health_path,omitempty"`
-	Replicas         int               `json:"replicas,omitempty"`
-	ResourceRequests map[string]string `json:"resource_requests,omitempty"`
-	ResourceLimits   map[string]string `json:"resource_limits,omitempty"`
-	Bindings         []ServiceBinding  `json:"bindings,omitempty"`
-	Namespace        string            `json:"namespace"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	ID               string               `json:"id"`
+	OrgID            string               `json:"org_id"`
+	ProjectID        string               `json:"project_id"`
+	EnvironmentID    string               `json:"environment_id"`
+	RuntimeID        string               `json:"runtime_id"`
+	Name             string               `json:"name"`
+	Type             string               `json:"type"`
+	Status           string               `json:"status"`
+	SourceType       string               `json:"source_type"`
+	RepoURL          string               `json:"repo_url,omitempty"`
+	Image            string               `json:"image,omitempty"`
+	Branch           string               `json:"branch,omitempty"`
+	GitSHA           string               `json:"git_sha,omitempty"`
+	BuildMethod      string               `json:"build_method,omitempty"`
+	BuildContext     string               `json:"build_context,omitempty"`
+	Dockerfile       string               `json:"dockerfile,omitempty"`
+	ManifestPath     string               `json:"manifest_path,omitempty"`
+	WatchPaths       []string             `json:"watch_paths,omitempty"`
+	ContainerPort    int                  `json:"container_port,omitempty"`
+	HealthPath       string               `json:"health_path,omitempty"`
+	Replicas         int                  `json:"replicas,omitempty"`
+	ResourceRequests map[string]string    `json:"resource_requests,omitempty"`
+	ResourceLimits   map[string]string    `json:"resource_limits,omitempty"`
+	Configuration    ServiceConfiguration `json:"configuration"`
+	Namespace        string               `json:"namespace"`
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
 type ServiceDraft struct {
@@ -410,15 +410,15 @@ type ServiceDraft struct {
 	Replicas         int               `json:"replicas"`
 	ResourceRequests map[string]string `json:"resource_requests"`
 	ResourceLimits   map[string]string `json:"resource_limits"`
-	Bindings         []ServiceBinding  `json:"bindings"`
 }
 
 type ServiceBinding struct {
-	ServiceID       string   `json:"service_id"`
-	Alias           string   `json:"alias,omitempty"`
-	EnvPrefix       string   `json:"env_prefix,omitempty"`
-	ExposeAsDefault bool     `json:"expose_as_default,omitempty"`
-	EnvKeys         []string `json:"env_keys,omitempty"`
+	Kind             string `json:"kind"`
+	TargetServiceID  string `json:"target_service_id"`
+	TargetServiceKey string `json:"target_service_key"`
+	EnvPrefix        string `json:"env_prefix,omitempty"`
+	EnvName          string `json:"env_name,omitempty"`
+	Path             string `json:"path,omitempty"`
 }
 
 const DeploymentIntentVersion = "2026-07-opsi-deployment-intent-v1"
@@ -670,6 +670,11 @@ type API interface {
 	BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent, error)
 	CreateService(projectID string, draft ServiceDraft, key string) (ServiceRecord, error)
 	ListServices(projectID string) ([]ServiceRecord, error)
+	GetServiceConfiguration(projectID, serviceID string) (ServiceConfiguration, error)
+	PreviewServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationPreview, error)
+	ValidateServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationValidation, error)
+	DiffServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationDiff, error)
+	ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request ServiceConfigurationApplyRequest) (ServiceConfigurationApplyResult, error)
 	RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error)
 	LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error)
 	CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error)
@@ -1502,7 +1507,7 @@ func (s *Service) CreateService(projectID string, draft ServiceDraft, key string
 	if draft.Replicas == 0 {
 		draft.Replicas = 1
 	}
-	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, BuildContext: draft.BuildContext, Dockerfile: draft.Dockerfile, ManifestPath: draft.ManifestPath, WatchPaths: draft.WatchPaths, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, ResourceRequests: cloneStringMap(draft.ResourceRequests), ResourceLimits: cloneStringMap(draft.ResourceLimits), Bindings: cloneServiceBindings(draft.Bindings), Namespace: "default", CreatedAt: now, UpdatedAt: now}
+	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, BuildContext: draft.BuildContext, Dockerfile: draft.Dockerfile, ManifestPath: draft.ManifestPath, WatchPaths: draft.WatchPaths, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, ResourceRequests: cloneStringMap(draft.ResourceRequests), ResourceLimits: cloneStringMap(draft.ResourceLimits), Configuration: emptyServiceConfiguration(), Namespace: "default", CreatedAt: now, UpdatedAt: now}
 	if record.Name == "" {
 		record.Name = record.ID
 	}
@@ -2252,18 +2257,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for key, value := range in {
 		out[key] = value
-	}
-	return out
-}
-
-func cloneServiceBindings(in []ServiceBinding) []ServiceBinding {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]ServiceBinding, 0, len(in))
-	for _, binding := range in {
-		binding.EnvKeys = append([]string(nil), binding.EnvKeys...)
-		out = append(out, binding)
 	}
 	return out
 }

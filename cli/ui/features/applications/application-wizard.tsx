@@ -52,9 +52,14 @@ export function ApplicationWizard({ console, onClose, onCreated }: { console: Co
   }, [client, projectID]);
 
   const repository = repositories.find((item) => item.repository_id === repositoryID);
-  const keyConflict = services.some((service) => service.name === serviceKey)
-    ? "An application with this service key already exists."
-    : bindings.some((binding) => binding.repository_id === repositoryID && binding.service_key === serviceKey)
+  const existingService = services.find((service) => service.name === serviceKey);
+  const existingBinding = existingService ? bindings.find((binding) => binding.service_id === existingService.id) : undefined;
+  const expectedRepoURL = repository ? `https://github.com/${repository.full_name}` : "";
+  const resumeBinding = Boolean(existingService && !existingBinding && existingService.source_type === "git" && existingService.repo_url === expectedRepoURL);
+  const alreadyBound = Boolean(existingBinding && existingBinding.repository_id === repositoryID && existingBinding.service_key === serviceKey);
+  const keyConflict = existingService && !resumeBinding && !alreadyBound
+    ? "An application with this service key already exists with a different source binding."
+    : bindings.some((binding) => binding.repository_id === repositoryID && binding.service_key === serviceKey && binding.service_id !== existingService?.id)
       ? "This repository service key already has an active binding."
       : "";
 
@@ -82,6 +87,11 @@ export function ApplicationWizard({ console, onClose, onCreated }: { console: Co
   function reviewApplication(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!repository || !repositoryUsable(repository) || keyConflict) return;
+	if (alreadyBound) {
+		console.navigate({ view: "infrastructure", tab: "topology", topology: `service:${serviceKey}` });
+		onClose();
+		return;
+	}
     const form = new FormData(event.currentTarget);
     const configPath = String(form.get("config_path") || ".opsi/opsi-cd.yaml").trim();
     const buildContext = String(form.get("build_context") || ".").trim();
@@ -104,14 +114,14 @@ export function ApplicationWizard({ console, onClose, onCreated }: { console: Co
     const needsClaim = repository.claim_status === "available";
     const mutations = [
       ...(needsClaim ? [`Claim repository ${repository.full_name} for this project`] : []),
-      `Create application identity ${serviceKey}: git ${repoURL}#${branch}, context ${buildContext}, Dockerfile ${dockerfile}, port ${containerPort}, health ${healthPath}`,
+      ...(resumeBinding ? [] : [`Create application identity ${serviceKey}: git ${repoURL}#${branch}, context ${buildContext}, Dockerfile ${dockerfile}, port ${containerPort}, health ${healthPath}`]),
       `Create GitHub service binding: repository ${repository.repository_id}, service ${serviceKey}, config ${configPath}`,
     ];
     console.reviewMutation(
       { project: console.state.project?.name || projectID, targetType: "application", targetID: serviceKey, operation: "create", diff: mutations, risk: "Creates source identity only. It does not place, apply topology, deploy, or mutate the repository." },
       async (key) => {
         if (needsClaim) await client.claimGitHubRepository(projectID, repository.repository_id, key);
-        const created = await client.createService(projectID, serviceBody, key);
+		const created = existingService ?? await client.createService(projectID, serviceBody, key);
         await client.createGitHubBinding(projectID, { service_id: created.id, repository_id: repository.repository_id, service_key: serviceKey, config_path: configPath }, key);
         await Promise.all([
           console.actions.load(),
@@ -121,7 +131,7 @@ export function ApplicationWizard({ console, onClose, onCreated }: { console: Co
           onCreated?.(),
         ]);
         console.navigate({ view: "infrastructure", tab: "topology", topology: `service:${serviceKey}` });
-        return `Application ${serviceKey} created and GitHub bound. Placement remains Unplaced.`;
+		return `Application ${serviceKey} ${resumeBinding ? "source binding resumed" : "created and GitHub bound"}. Placement remains Unplaced.`;
       },
     );
     onClose();
@@ -134,7 +144,7 @@ export function ApplicationWizard({ console, onClose, onCreated }: { console: Co
     {loading ? <p role="status">Loading GitHub installations, repositories, claims, services, and bindings...</p> : null}
     {error ? <div className="errorBox" role="alert"><b>Source inventory unavailable</b><span>{error}</span></div> : null}
     {!loading && !error && step === "source" ? installations.length === 0 ? <form className="form" onSubmit={connectGitHub}><div className="span2"><h3>Connect GitHub</h3><p className="muted">No active GitHub installation is connected to this project.</p></div><label className="span2">Installation ID<input className="field" inputMode="numeric" min="1" name="installation_id" required type="number" /></label><div className="modalActions span2"><button onClick={onClose} type="button">Cancel</button><button className="primary" type="submit">Connect GitHub</button></div></form> : <div className="form"><label className="span2">Repository<select className="select" onChange={(event) => chooseRepository(event.target.value)} value={repositoryID || ""}><option disabled value="">Choose repository</option>{repositories.map((item) => <option disabled={!repositoryUsable(item)} key={item.repository_id} value={item.repository_id}>{item.full_name} - {repositoryReason(item)}</option>)}</select></label>{repositories.filter((item) => !repositoryUsable(item)).map((item) => <p className="repositoryConflict span2" key={item.repository_id}><b>{item.full_name}</b>: {repositoryReason(item)}</p>)}<div className="modalActions span2"><button onClick={onClose} type="button">Cancel</button><button className="primary" disabled={!repository || !repositoryUsable(repository)} onClick={() => setStep("application")} type="button">Continue</button></div></div> : null}
-    {!loading && !error && step === "application" && repository ? <form className="form" onSubmit={reviewApplication}><div className="span2 sourceSelection"><b>{repository.full_name}</b><span>{repository.claim_status === "active" ? "Already claimed by this project" : "Available - claim included in review"}</span></div><label>Service key<input autoComplete="off" className="field" onChange={(event) => setServiceKey(event.target.value)} pattern={serviceKeyPattern} placeholder="api" required spellCheck={false} value={serviceKey} /></label><label>Branch<input autoComplete="off" className="field" onChange={(event) => setBranch(event.target.value)} required value={branch} /></label><label>Project path / build context<input autoComplete="off" className="field" defaultValue="." name="build_context" required /></label><label>Dockerfile path<input autoComplete="off" className="field" defaultValue="Dockerfile" name="dockerfile" required /></label><label>Config path<input autoComplete="off" className="field" defaultValue=".opsi/opsi-cd.yaml" name="config_path" required /></label><label>Container port<input className="field" max="65535" min="1" name="container_port" required type="number" /></label><label>Health path<input autoComplete="off" className="field" defaultValue="/health" name="health_path" pattern="/.*" required /></label>{keyConflict ? <p className="repositoryConflict span2" role="alert">{keyConflict}</p> : null}<div className="modalActions span2"><button onClick={() => setStep("source")} type="button">Back</button><button className="primary" disabled={!serviceKey || Boolean(keyConflict)} type="submit">Review application</button></div></form> : null}
+    {!loading && !error && step === "application" && repository ? <form className="form" onSubmit={reviewApplication}><div className="span2 sourceSelection"><b>{repository.full_name}</b><span>{repository.claim_status === "active" ? "Already claimed by this project" : "Available - claim included in review"}</span></div><label>Service key<input autoComplete="off" className="field" onChange={(event) => setServiceKey(event.target.value)} pattern={serviceKeyPattern} placeholder="api" required spellCheck={false} value={serviceKey} /></label><label>Branch<input autoComplete="off" className="field" onChange={(event) => setBranch(event.target.value)} required value={branch} /></label><label>Project path / build context<input autoComplete="off" className="field" defaultValue="." name="build_context" required /></label><label>Dockerfile path<input autoComplete="off" className="field" defaultValue="Dockerfile" name="dockerfile" required /></label><label>Config path<input autoComplete="off" className="field" defaultValue=".opsi/opsi-cd.yaml" name="config_path" required /></label><label>Container port<input className="field" max="65535" min="1" name="container_port" required type="number" /></label><label>Health path<input autoComplete="off" className="field" defaultValue="/health" name="health_path" pattern="/.*" required /></label>{resumeBinding ? <p className="sourceSelection span2" role="status"><b>Resume source binding</b><span>The application identity exists; only the missing GitHub binding will be applied.</span></p> : null}{alreadyBound ? <p className="sourceSelection span2" role="status"><b>Source binding complete</b><span>This application is already bound. No service or binding will be created.</span></p> : null}{keyConflict ? <p className="repositoryConflict span2" role="alert">{keyConflict}</p> : null}<div className="modalActions span2"><button onClick={() => setStep("source")} type="button">Back</button><button className="primary" disabled={!serviceKey || Boolean(keyConflict)} type="submit">{alreadyBound ? "Open application" : resumeBinding ? "Resume source binding" : "Review application"}</button></div></form> : null}
   </dialog>;
 }
 

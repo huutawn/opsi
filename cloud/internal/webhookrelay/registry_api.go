@@ -188,6 +188,9 @@ func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID
 
 func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts []string, principal auth.VerifyResult) {
 	projectID := parts[1]
+	if s.handleServiceConfigurationAPI(w, r, projectID, parts, principal) {
+		return
+	}
 	if s.handleExposureAPI(w, r, projectID, parts, principal) {
 		return
 	}
@@ -562,6 +565,67 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func (s *Server) handleServiceConfigurationAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
+	if len(parts) < 5 || parts[2] != "services" || parts[4] != "configuration" {
+		return false
+	}
+	serviceID := parts[3]
+	if len(parts) == 5 && r.Method == http.MethodGet {
+		value, err := s.Registry.GetServiceConfiguration(projectID, serviceID)
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return true
+	}
+	if len(parts) != 6 || r.Method != http.MethodPost {
+		return false
+	}
+	switch parts[5] {
+	case "preview", "validate", "diff":
+		var draft registry.ServiceConfigurationDraft
+		if !decodeJSON(w, r, &draft) {
+			return true
+		}
+		var value any
+		var err error
+		switch parts[5] {
+		case "preview":
+			value, err = s.Registry.PreviewServiceConfiguration(projectID, serviceID, draft)
+		case "validate":
+			value, err = s.Registry.ValidateServiceConfiguration(projectID, serviceID, draft)
+		case "diff":
+			value, err = s.Registry.DiffServiceConfiguration(projectID, serviceID, draft)
+		}
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return true
+	case "apply":
+		if !requireWriteHeaders(w, r) {
+			return true
+		}
+		if !s.requireRole(w, r, principal, projectID, "service", serviceID, "owner", "admin", "developer") {
+			return true
+		}
+		var request registry.ServiceConfigurationApplyRequest
+		if !decodeJSON(w, r, &request) {
+			return true
+		}
+		value, err := s.Registry.ApplyServiceConfiguration(projectID, serviceID, principal.UserID, r.Header.Get("Idempotency-Key"), request)
+		if err == nil && !value.Reused {
+			orgID := ""
+			if services, listErr := s.Registry.ListServices(projectID); listErr == nil {
+				for _, service := range services {
+					if service.ID == serviceID {
+						orgID = service.OrgID
+						break
+					}
+				}
+			}
+			s.Registry.Audit(orgID, projectID, principal.UserID, "SERVICE_CONFIGURATION_APPLIED", "service", serviceID, "success", map[string]any{"revision": value.Configuration.Revision, "state_hash": value.Configuration.StateHash})
+		}
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return true
+	}
+	return false
 }
 
 func (s *Server) authorizeOrg(w http.ResponseWriter, r *http.Request, orgID string) (auth.VerifyResult, bool) {

@@ -199,7 +199,7 @@ func readyRegistry(t *testing.T) (*Service, string) {
 
 func createRegistryService(t *testing.T, service *Service, projectID, name, dockerfile, manifest, key string) ServiceRecord {
 	t.Helper()
-	record, err := service.CreateService(projectID, ServiceDraft{Name: name, Type: "application", SourceType: "git", RepoURL: "https://example.test/repo.git", Branch: "main", GitSHA: "0123456789abcdef", BuildContext: "services/" + name, Dockerfile: dockerfile, ManifestPath: manifest, WatchPaths: []string{"services/" + name + "/**"}, ContainerPort: 8080, HealthPath: "/health", ResourceRequests: map[string]string{"cpu": name + "-cpu"}, ResourceLimits: map[string]string{"memory": "512Mi"}, Bindings: []ServiceBinding{{ServiceID: "svc-db", Alias: "primary-db", EnvPrefix: "DB", ExposeAsDefault: true, EnvKeys: []string{"DATABASE_URL"}}}}, key)
+	record, err := service.CreateService(projectID, ServiceDraft{Name: name, Type: "application", SourceType: "git", RepoURL: "https://example.test/repo.git", Branch: "main", GitSHA: "0123456789abcdef", BuildContext: "services/" + name, Dockerfile: dockerfile, ManifestPath: manifest, WatchPaths: []string{"services/" + name + "/**"}, ContainerPort: 8080, HealthPath: "/health", ResourceRequests: map[string]string{"cpu": name + "-cpu"}, ResourceLimits: map[string]string{"memory": "512Mi"}}, key)
 	if err != nil {
 		t.Fatal(err)
 	}

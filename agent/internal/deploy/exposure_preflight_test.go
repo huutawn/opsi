@@ -96,7 +96,7 @@ func TestExposurePreflightRejectsSameNameAndRouteConflicts(t *testing.T) {
 		path   string
 		code   string
 	}{
-		{name: "opsi descendant", labels: map[string]any{"app.kubernetes.io/managed-by": "opsi"}, path: "/api/v1", code: CodeOpsiRouteConflict},
+		{name: "opsi exact", labels: map[string]any{"app.kubernetes.io/managed-by": "opsi"}, path: "/api", code: CodeOpsiRouteConflict},
 		{name: "foreign ancestor", labels: map[string]any{"app.kubernetes.io/managed-by": "other"}, path: "/", code: CodeForeignRouteConflict},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,6 +107,11 @@ func TestExposurePreflightRejectsSameNameAndRouteConflicts(t *testing.T) {
 				t.Fatalf("route conflict err=%v", err)
 			}
 		})
+	}
+	managedPrefix := ingressFixture("other-ns", "other-ingress", spec.Hostname, "/", map[string]any{"app.kubernetes.io/managed-by": "opsi"})
+	runner = newExposureRunner(t, rendered, service, nil, []map[string]any{managedPrefix})
+	if result, err := (ProductionAdapter{Runner: runner}).PreflightExposure(context.Background(), command, spec, nil); err != nil || result.State != ExposureCreateEligible {
+		t.Fatalf("managed longest-prefix route result=%+v err=%v", result, err)
 	}
 	nonConflict := ingressFixture("other-ns", "other-ingress", spec.Hostname, "/api2", map[string]any{"app.kubernetes.io/managed-by": "other"})
 	runner = newExposureRunner(t, rendered, service, nil, []map[string]any{nonConflict})

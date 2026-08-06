@@ -226,13 +226,14 @@ func preflightRouteConflicts(items []map[string]any, desired exposurev1.Exposure
 			if err != nil {
 				path = "/"
 			}
-			if !exposurev1.PathsConflict(path, desired.Path) {
-				continue
-			}
 			code := CodeForeignRouteConflict
 			labels := stringMap(metadata["labels"])
-			if labels["app.kubernetes.io/managed-by"] == "opsi" {
+			managed := labels["app.kubernetes.io/managed-by"] == "opsi"
+			if managed {
 				code = CodeOpsiRouteConflict
+			}
+			if (managed && !exposurev1.ManagedPathsConflict(path, desired.Path)) || (!managed && !exposurev1.PathsConflict(path, desired.Path)) {
+				continue
 			}
 			return exposureError(code, desired, "choose a non-conflicting hostname/path and retry")
 		}
