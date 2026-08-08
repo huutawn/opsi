@@ -1543,7 +1543,7 @@ func (s PostgresService) CompleteDeployment(projectID, nodeID, deploymentID, req
 	job.DesiredDigest, job.CurrentDigest, job.PreviousDigest = copy.DesiredDigest, copy.CurrentDigest, copy.PreviousDigest
 	job.KnownGoodID, job.KnownGoodHash, job.ReadinessEvidenceHash = copy.KnownGoodID, copy.KnownGoodHash, copy.ReadinessEvidenceHash
 	job.RolloutVersion++
-	job.RollbackEligible = copy.RolloutState == deploymentv1.RolloutStateSucceeded && job.RolloutIntent.PreviousKnownGoodID != ""
+	setRollbackAvailability(&job)
 	encoded, _ := json.Marshal(job.TerminalResult)
 	terminalJSON = string(encoded)
 	if _, err := tx.ExecContext(ctx, `UPDATE deployment_jobs SET status = $1, manifest_hash = NULLIF($2,''), rollback_eligible = $3, rollback_blocked_reason = NULLIF($4,''), failure_code = NULLIF($5,''), failure_message_redacted = NULLIF($6,''), lease_token = NULL, lease_expires_at = NULL, retry_after = NULL, finished_at = $7, updated_at = $7, terminal_result_json = COALESCE(terminal_result_json,$11::jsonb), rollout_state=NULLIF($12,''), rollout_state_hash=NULLIF($13,''), rollout_version=$14, desired_digest=NULLIF($15,''), current_digest=NULLIF($16,''), previous_digest=NULLIF($17,''), known_good_id=NULLIF($18,''), known_good_hash=NULLIF($19,''), readiness_evidence_hash=NULLIF($20,'') WHERE id = $8 AND project_id = $9 AND node_id = $10`, job.Status, job.ManifestHash, job.RollbackEligible, job.RollbackBlockedReason, job.FailureCode, job.FailureMessageRedacted, now, deploymentID, projectID, nodeID, terminalJSON, job.RolloutState, job.RolloutStateHash, job.RolloutVersion, job.DesiredDigest, job.CurrentDigest, job.PreviousDigest, job.KnownGoodID, job.KnownGoodHash, job.ReadinessEvidenceHash); err != nil {

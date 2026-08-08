@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
 import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
+import { deploymentPollInterval, terminalDeployment } from "@/features/delivery/polling-model";
 import { deriveProjectSummary, emptyFoundation, normalizeStatus, PROJECT_SUMMARY_TTL_MS, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
 import type { BootstrapSession, ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
 import { terminalBootstrap } from "@/lib/presentation/infrastructure/model";
@@ -289,7 +290,7 @@ export function useConsoleState() {
       }
       return;
     }
-    if (next.view !== route.view || next.tab !== route.tab) {
+    if (next.view !== route.view || next.tab !== route.tab || next.environment !== route.environment) {
       clearSensitive();
       setReview(null);
       patch({ serviceDetail: next.view === "services" ? state.serviceDetail : null });
@@ -467,15 +468,24 @@ export function useConsoleState() {
 
   function rollback(deploymentID: string) {
     if (!currentProject) return;
+    const source = state.deployments.find((deployment) => deployment.id === deploymentID);
+    if (!source?.rollback_eligible) return;
+    const currentDigest = source.current_digest || source.terminal_result?.current_digest || source.desired_digest || source.snapshot?.image.digest || "not reported";
+    const previousDigest = source.previous_digest || source.terminal_result?.previous_digest || "not reported";
     reviewMutation(
-      { project: currentProject.name, targetType: "deployment", targetID: deploymentID, operation: "rollback", diff: ["restore the exact previous Agent known-good snapshot"], risk: "Destructive runtime mutation; availability can change.", confirmation: deploymentID },
+      { project: currentProject.name, targetType: "deployment", targetID: deploymentID, operation: "rollback", diff: [`current digest: ${currentDigest}`, `previous known-good digest: ${previousDigest}`], risk: "Destructive runtime mutation; availability can change.", confirmation: deploymentID },
       async (key) => {
         patch({ busy: `rollback-${deploymentID}` });
         try {
-          const job = await client.rollback(currentProject.id, deploymentID, key);
+          let job = await client.rollback(currentProject.id, deploymentID, key);
+          for (let attempt = 0; attempt < 120 && !terminalDeployment(job); attempt++) {
+            await new Promise((resolve) => window.setTimeout(resolve, deploymentPollInterval));
+            job = await client.deployment(currentProject.id, job.id);
+          }
+          if (!terminalDeployment(job)) throw new Error(`Rollback ${job.id} did not reach a terminal state within 10 minutes.`);
           await loadDeploymentEvents(job.id);
           await load(currentProject.id);
-          return `Rollback job ${job.id} accepted with status ${job.status}.`;
+          return `Rollback job ${job.id} finished with state ${job.rollout_state || job.status}.`;
         } finally {
           patch({ busy: "" });
         }

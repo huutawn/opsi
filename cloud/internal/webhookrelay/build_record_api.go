@@ -176,8 +176,8 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 			break
 		}
 	}
-	assignment, ok := deploymentAssignment(plan.Assignments, record.ServiceKey, decision.EnvironmentID, decision.RuntimeID)
-	if !ok || service.ID == "" {
+	assignment, ok := deploymentAssignment(plan.Assignments, record.ServiceKey, decision.EnvironmentID)
+	if !ok || assignment.RuntimeID != decision.RuntimeID || service.ID == "" {
 		return nil, false, registry.APIError{Status: 409, Code: "ROUTING_SERVICE_AUTHORITY_INVALID", Message: "canonical service or topology assignment is unavailable"}
 	}
 	configuration, err := s.Registry.GetServiceConfiguration(record.ProjectID, service.ID)

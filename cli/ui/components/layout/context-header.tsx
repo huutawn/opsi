@@ -4,10 +4,13 @@ import { LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type { Project } from "@/lib/contracts/registry";
 import { ConnectionPopover } from "@/components/layout/connection-popover";
 
-export function ContextHeader({ environment, lastUpdated, menuButtonRef, onMenu, onRefresh, project, route, serviceScope, session }: {
+export function ContextHeader({ environment, environmentID, environments, lastUpdated, menuButtonRef, onEnvironment, onMenu, onRefresh, project, route, serviceScope, session }: {
   environment: string;
+  environmentID: string;
+  environments: Array<{ id: string; name: string }>;
   lastUpdated?: string;
   menuButtonRef: RefObject<HTMLButtonElement | null>;
+  onEnvironment: (environmentID: string) => void;
   onMenu: () => void;
   onRefresh: () => void;
   project: Project | null;
@@ -24,6 +27,7 @@ export function ContextHeader({ environment, lastUpdated, menuButtonRef, onMenu,
       <p>{routeLabel(route)}{project ? ` · ${environment}` : " · Workspace"}{serviceScope ? ` · Service ${serviceScope}` : ""}{lastUpdated ? ` · Updated ${formatUpdated(lastUpdated)}` : ""}</p>
     </div>
     <div className="headerActions">
+      {project && environments.length > 1 ? <label className="environmentPicker"><span>Environment</span><select aria-label="Current environment" onChange={(event) => onEnvironment(event.target.value)} value={environmentID}><option value="">Choose…</option>{environments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
       {session.cloud_connected !== "ok" ? <span className="sourceWarning">Cloud unavailable</span> : null}
       {project && session.agent_connected !== "ok" ? <span className="sourceWarning">Agent unavailable</span> : null}
       <ConnectionPopover session={session} />

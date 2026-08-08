@@ -213,6 +213,7 @@ export type DeploymentJob = {
 	 runtime_id?: string;
 	 service_id: string;
 	 status: string;
+	 action?: string;
 	 spec_hash?: string;
 	 attempt_count?: number;
 	 max_attempts?: number;
@@ -293,6 +294,12 @@ export type ExposureSpec = {
 	metadata?: { display_name?: string; rationale?: string };
 	spec_hash: string;
 };
+
+export async function hashExposure(spec: Omit<ExposureSpec, "spec_hash">) {
+	const data = new TextEncoder().encode(JSON.stringify({ ...spec, spec_hash: "" }));
+	const digest = await crypto.subtle.digest("SHA-256", data);
+	return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+}
 
 export type ExposureMutationRequest = {
 	schema_version: "opsi.exposure_mutation/v1";

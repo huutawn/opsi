@@ -35,6 +35,8 @@ test("Topology reviews canonical multi-service deployments, retries only missing
       }
       let job = state.deployments.find((item) => item.service_id === build.service_id);
       if (!job) { job = deployment(build); state.deployments.push(job); }
+      job.status = "succeeded";
+      job.rollout_state = "succeeded";
       await json(route, job, 202);
       return;
     }
@@ -52,19 +54,19 @@ test("Topology reviews canonical multi-service deployments, retries only missing
   await expect(page.getByText("configuration revision 1", { exact: true }).first()).toBeVisible();
   await expect(page.locator(".deploymentReviewRow").filter({ hasText: "reports" })).toContainText("No succeeded accepted BuildRecord");
   await page.getByLabel("Select all placed applications").uncheck();
-  await expect(page.getByRole("button", { name: "Submit missing jobs" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Deploy" })).toBeDisabled();
   await page.getByLabel("Select all placed applications").check();
   await page.getByRole("button", { name: "Review selected" }).click();
 
   expectHTTPFailure(page, { path: "/api/local/projects/proj-1/deployments", status: 503, method: "POST" });
-  await page.getByRole("button", { name: "Submit missing jobs" }).click();
+  await page.getByRole("button", { name: "Deploy" }).click();
   await expect(page).toHaveURL(/topologyMode=live/);
   await page.getByRole("button", { name: "Design", exact: true }).click();
-  await expect(page.locator(".deploymentReviewRow").filter({ hasText: "api" })).toContainText("queued");
+  await expect(page.locator(".deploymentReviewRow").filter({ hasText: "api" })).toContainText("Running");
   await expect(page.locator(".deploymentReviewRow").filter({ hasText: "worker" })).toContainText("Failed");
   await expect(page.locator(".deploymentReviewRow").filter({ hasText: "reports" })).toContainText("blocked");
 
-  await page.getByRole("button", { name: "Submit missing jobs" }).click();
+  await page.getByRole("button", { name: "Deploy" }).click();
   await expect(page).toHaveURL(/topologyMode=live/);
   expect(submissions.filter((item) => item.service === "api")).toHaveLength(1);
   const workerSubmissions = submissions.filter((item) => item.service === "worker");
@@ -80,6 +82,175 @@ test("Topology reviews canonical multi-service deployments, retries only missing
   await expect(page.getByText("Workload is ready", { exact: true }).first()).toBeVisible();
 });
 
+test("deployment review fails closed without a current environment and selects the exact environment assignment", async ({ page }) => {
+  const state = fixture();
+  state.facts.environments.push({ id: "env-stage", project_id: "proj-1", name: "Staging", type: "stage", status: "active" });
+  state.facts.runtimes.push({ ...state.facts.runtimes[0], id: "runtime-stage", environment_id: "env-stage", name: "Staging runtime" });
+  state.topology.assignments.push({ ...state.topology.assignments[0], environment_id: "env-stage", runtime_id: "runtime-stage" });
+  const environments: string[] = [];
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() === "POST" && path.endsWith("/deployments/preview")) {
+      const request = route.request().postDataJSON() as { build_record_id: string; environment_id: string };
+      environments.push(request.environment_id);
+      const buildRecord = state.builds.find((item) => item.id === request.build_record_id)!;
+      const serviceRecord = state.services.find((item) => item.id === buildRecord.service_id)!;
+      const assignment = state.topology.assignments.find((item) => item.service_key === serviceRecord.name && item.environment_id === request.environment_id)!;
+      await json(route, preview(buildRecord, serviceRecord, assignment));
+      return;
+    }
+    await respond(route, state);
+  });
+
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await expect(page.getByText("Choose the current environment before reviewing or deploying.")).toBeVisible();
+  await page.getByLabel("Current environment").selectOption("env-stage");
+  await expect(page).toHaveURL(/environment=env-stage/);
+  await expect(page.getByText("Deployment authority · Staging")).toBeVisible();
+  await page.getByRole("button", { name: "Review selected" }).click();
+  expect(environments).toEqual(["env-stage"]);
+  await expect(page.getByText("runtime-stage", { exact: false }).first()).toBeVisible();
+});
+
+test("public deployment waits for workload success and keeps route failure as a degraded second phase", async ({ page }) => {
+  const state = fixture();
+  const api = state.services.find((item) => item.id === "api")! as ReturnType<typeof service> & { configuration: ReturnType<typeof service>["configuration"] & { public_route?: { hostname: string; path: string } } };
+  api.configuration.public_route = { hostname: "apps.example.com", path: "/api" };
+  (state.topology.assignments.find((item) => item.service_key === "api")!.exposure as { mode: string }).mode = "public";
+  const calls: string[] = [];
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() === "POST" && path.endsWith("/deployments/preview")) {
+      const buildRecord = state.builds.find((item) => item.id === (route.request().postDataJSON() as { build_record_id: string }).build_record_id)!;
+      const serviceRecord = state.services.find((item) => item.id === buildRecord.service_id)!;
+      const assignment = state.topology.assignments.find((item) => item.service_key === serviceRecord.name)!;
+      await json(route, preview(buildRecord, serviceRecord, assignment));
+      return;
+    }
+    if (route.request().method() === "POST" && path.endsWith("/deployments")) {
+      calls.push("workload-succeeded");
+      const buildRecord = state.builds.find((item) => item.id === (route.request().postDataJSON() as { build_record_id: string }).build_record_id)!;
+      const job = { ...deployment(buildRecord), status: "succeeded", rollout_state: "succeeded", current_digest: buildRecord.build.oci_digest, snapshot: preview(buildRecord, state.services.find((item) => item.id === buildRecord.service_id)!, state.topology.assignments.find((item) => item.service_key === buildRecord.service_id)!).snapshot };
+      state.deployments.push(job);
+      await json(route, job, 202);
+      return;
+    }
+    if (route.request().method() === "POST" && path.endsWith("/exposures/preview")) {
+      calls.push("exposure-preview");
+      const request = route.request().postDataJSON() as { exposure: Record<string, unknown> };
+      await json(route, { schema_version: "opsi.exposure_preview/v1", base_deployment_job_id: "deployment-api", desired: request.exposure, changes: ["add"], eligible: true, decision_code: "EXPOSURE_READY", message: "Ready", state_hash: hash("e"), resolved_at: "2026-08-08T08:00:00Z" });
+      return;
+    }
+    if (route.request().method() === "POST" && path.endsWith("/exposures")) {
+      calls.push("exposure-failed");
+      const request = route.request().postDataJSON() as { base_deployment_job_id: string; exposure: Record<string, unknown> };
+      const job = { id: String(request.exposure.deployment_job_id), project_id: "proj-1", environment_id: "env-prod", runtime_id: "runtime-primary", service_id: "api", status: "failed", rollout_state: "failed", action: "apply", base_deployment_id: request.base_deployment_job_id, desired_digest: digest("a"), exposure_spec: request.exposure, failure_code: "EXPOSURE_APPLY_FAILED", failure_message_redacted: "Ingress reconciliation failed", rollback_eligible: false, rollback_blocked_reason: "route rollout did not succeed", created_at: "2026-08-08T08:01:00Z" };
+      state.deployments.push(job as ReturnType<typeof deployment>);
+      await json(route, job, 202);
+      return;
+    }
+    await respond(route, state);
+  });
+
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology&environment=env-prod");
+  await page.getByLabel("Select all placed applications").uncheck();
+  await page.getByLabel("Select api").check();
+  await page.getByRole("button", { name: "Review selected" }).click();
+  await page.getByRole("button", { name: "Deploy" }).click();
+  await expect(page).toHaveURL(/topologyMode=live/);
+  expect(calls).toEqual(["workload-succeeded", "exposure-preview", "exposure-failed"]);
+  await expect(page.locator(".liveDeploymentList li").filter({ hasText: "Deploy workload" })).toContainText("Running");
+  await expect(page.locator(".liveDeploymentList li").filter({ hasText: "Publish route" })).toContainText("Degraded");
+  await expect(page.getByText("apps.example.com/api", { exact: true })).toBeVisible();
+});
+
+test("unchanged public route skips the Exposure apply rollout", async ({ page }) => {
+  const state = fixture();
+  const api = state.services.find((item) => item.id === "api")! as ReturnType<typeof service> & { configuration: ReturnType<typeof service>["configuration"] & { public_route?: { hostname: string; path: string } } };
+  api.configuration.public_route = { hostname: "apps.example.com", path: "/" };
+  (state.topology.assignments.find((item) => item.service_key === "api")!.exposure as { mode: string }).mode = "public";
+  let exposureApplies = 0;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() === "POST" && path.endsWith("/deployments/preview")) {
+      const buildRecord = state.builds.find((item) => item.id === (route.request().postDataJSON() as { build_record_id: string }).build_record_id)!;
+      await json(route, preview(buildRecord, state.services.find((item) => item.id === buildRecord.service_id)!, state.topology.assignments.find((item) => item.service_key === buildRecord.service_id)!));
+      return;
+    }
+    if (route.request().method() === "POST" && path.endsWith("/deployments")) {
+      const buildRecord = state.builds.find((item) => item.id === (route.request().postDataJSON() as { build_record_id: string }).build_record_id)!;
+      const job = { ...deployment(buildRecord), status: "succeeded", rollout_state: "succeeded" };
+      state.deployments.push(job);
+      await json(route, job, 202);
+      return;
+    }
+    if (route.request().method() === "POST" && path.endsWith("/exposures/preview")) {
+      const request = route.request().postDataJSON() as { exposure: Record<string, unknown> };
+      await json(route, { desired: request.exposure, changes: ["unchanged"], eligible: true, decision_code: "EXPOSURE_READY", message: "Already configured", state_hash: hash("e"), resolved_at: "2026-08-08T08:00:00Z" });
+      return;
+    }
+    if (route.request().method() === "POST" && path.endsWith("/exposures")) exposureApplies++;
+    await respond(route, state);
+  });
+
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology&environment=env-prod");
+  await page.getByLabel("Select all placed applications").uncheck();
+  await page.getByLabel("Select api").check();
+  await page.getByRole("button", { name: "Review selected" }).click();
+  await page.getByRole("button", { name: "Deploy" }).click();
+  await expect(page).toHaveURL(/topologyMode=live/);
+  expect(exposureApplies).toBe(0);
+  expect(state.deployments).toHaveLength(1);
+});
+
+test("rollback is Cloud-gated, idempotent, and refresh restores the factual known-good endpoint", async ({ page }) => {
+  const state = fixture();
+  const snapshot = preview(state.builds.find((item) => item.id === "build-api")!, state.services[0], state.topology.assignments[0]).snapshot;
+  const first = { ...deployment(state.builds[1]), id: "dep-first", status: "succeeded", rollout_state: "succeeded", current_digest: digest("1"), rollback_eligible: false, rollback_blocked_reason: "no previous known-good deployment is available", snapshot, created_at: "2026-08-08T07:00:00Z" };
+  const current = { ...deployment(state.builds[1]), id: "dep-current", status: "succeeded", rollout_state: "succeeded", current_digest: digest("2"), previous_digest: digest("1"), rollback_eligible: true, snapshot, exposure_spec: { schema_version: "opsi.exposure_spec/v1", project_id: "proj-1", environment_id: "env-prod", runtime_id: "runtime-primary", service_key: "api", deployment_job_id: "dep-current", hostname: "apps.example.com", path: "/api", service_port: 8080, tls: { mode: "disabled" }, spec_hash: hash("f") }, created_at: "2026-08-08T08:00:00Z" };
+  state.deployments.push(first, current);
+  const keys: string[] = [];
+  let attempts = 0;
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() === "POST" && path.endsWith("/dep-current/rollback")) {
+      keys.push(route.request().headers()["idempotency-key"] ?? "");
+      if (attempts++ === 0) {
+        await route.fulfill({ body: JSON.stringify({ code: "AGENT_UNAVAILABLE", message: "Agent temporarily unavailable" }), contentType: "application/json", status: 503 });
+        return;
+      }
+      const queued = { ...current, id: "dep-rollback", status: "queued", rollout_state: "prepared", action: "rollback", base_deployment_id: current.id, rollback_eligible: false, rollback_blocked_reason: "rollback job cannot be rolled back", created_at: "2026-08-08T08:02:00Z" };
+      state.deployments.push(queued);
+      await json(route, queued, 202);
+      Object.assign(queued, { status: "rolled_back", rollout_state: "rolled_back", current_digest: digest("1") });
+      return;
+    }
+    await respond(route, state);
+  });
+
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology&topologyMode=live&environment=env-prod");
+  const firstCard = page.locator(".liveDeploymentList li").filter({ hasText: "dep-first" });
+  await expect(firstCard.getByRole("button", { name: "Rollback" })).toBeDisabled();
+  await expect(firstCard).toContainText("no previous known-good deployment is available");
+  const currentCard = page.locator(".liveDeploymentList li").filter({ hasText: "dep-current" });
+  await currentCard.getByRole("button", { name: "Rollback" }).click();
+  await expect(page.getByText(`current digest: ${digest("2")}`)).toBeVisible();
+  await expect(page.getByText(`previous known-good digest: ${digest("1")}`)).toBeVisible();
+  await page.getByLabel(/Type dep-current to confirm/).fill("dep-current");
+  expectHTTPFailure(page, { path: "/api/local/projects/proj-1/deployments/dep-current/rollback", status: 503, method: "POST" });
+  await page.getByRole("button", { name: "Confirm and submit" }).click();
+  await expect(page.locator(".errorBox")).toContainText("Agent temporarily unavailable");
+  await page.getByRole("button", { name: "Retry same attempt" }).click();
+  await page.reload();
+  expect(keys).toHaveLength(2);
+  expect(keys[0]).toBe(keys[1]);
+  const rollbackCard = page.locator(".liveDeploymentList li").filter({ hasText: "dep-rollback" });
+  await expect(rollbackCard).toContainText("Rollback");
+  await expect(rollbackCard).toContainText("Running");
+  await expect(rollbackCard).toContainText(digest("1"));
+  await expect(rollbackCard).toContainText("apps.example.com/api");
+});
+
 type State = ReturnType<typeof fixture>;
 
 async function respond(route: Route, state: State) {
@@ -91,6 +262,7 @@ async function respond(route: Route, state: State) {
   else if (path.endsWith("/nodes")) body = state.nodes;
   else if (path.endsWith("/services")) body = { services: state.services };
   else if (path.endsWith("/deployments")) body = { deployments: state.deployments };
+  else if (/\/deployments\/[^/]+$/.test(path)) body = state.deployments.find((item) => item.id === path.split("/").at(-1));
   else if (/\/deployments\/[^/]+\/events$/.test(path)) body = { events: [{ id: `event-${path.split("/").at(-2)}`, step: "waiting_ready", message_redacted: "Workload is ready", progress_percent: 100, created_at: "2026-08-08T08:00:00Z" }] };
   else if (path.endsWith("/bootstrap-sessions")) body = { sessions: [] };
   else if (path.endsWith("/audit")) body = { events: [] };

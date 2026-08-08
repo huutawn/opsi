@@ -7,6 +7,7 @@ import { ContextHeader } from "@/components/layout/context-header";
 import { Sidebar } from "@/components/navigation/sidebar";
 import { useConsoleState } from "@/hooks/use-console-state";
 import { LocalClient } from "@/lib/api/local-client";
+import { currentEnvironment } from "@/lib/presentation/infrastructure/model";
 
 export function AppShell() {
   const console = useConsoleState();
@@ -51,12 +52,14 @@ export function AppShell() {
   if (console.state.status === "permission") return <AuthGate message={console.state.message} />;
   if (!console.session) return <AuthGate message={console.state.message || "The local Opsi backend is unavailable."} />;
 
-  const environment = console.state.foundation.placement?.environments.find((item) => item.status === "active")?.name ?? "Environment not reported";
+  const environments = console.state.foundation.placement?.environments ?? [];
+  const environment = currentEnvironment(console.state.foundation.placement, console.route.environment ?? "");
+  const environmentName = environment?.name ?? (environments.length > 1 ? "Choose environment" : "Environment not reported");
   return <div className={`app ${collapsed ? "sidebarCollapsed" : ""}`}>
     <a className="skipLink" href="#main">Skip to content</a>
-    <Sidebar collapsed={collapsed} drawerRef={navigation} environment={environment} onBrowse={() => console.navigate({ projectID: "", view: "projects", tab: "" })} onClose={closeNavigation} onCollapse={() => setCollapsed((value) => !value)} onNavigate={console.navigate} onSelectProject={console.setProjectID} open={navigationOpen} orgID={console.session.org_id ?? ""} project={console.state.project} projects={console.state.projects} route={console.route} />
+    <Sidebar collapsed={collapsed} drawerRef={navigation} environment={environmentName} onBrowse={() => console.navigate({ projectID: "", view: "projects", tab: "" })} onClose={closeNavigation} onCollapse={() => setCollapsed((value) => !value)} onNavigate={console.navigate} onSelectProject={console.setProjectID} open={navigationOpen} orgID={console.session.org_id ?? ""} project={console.state.project} projects={console.state.projects} route={console.route} />
     <main className="main" id="main" ref={main} tabIndex={-1}>
-      <ContextHeader environment={environment} lastUpdated={latestUpdate(console)} menuButtonRef={menuButton} onMenu={() => setNavigationOpen(true)} onRefresh={() => void console.actions.load()} project={console.state.project} route={console.route} serviceScope={console.state.services.find((item) => item.id === console.route.service)?.name} session={console.session} />
+      <ContextHeader environment={environmentName} environmentID={environment?.id ?? ""} environments={environments} lastUpdated={latestUpdate(console)} menuButtonRef={menuButton} onEnvironment={(id) => console.navigate({ environment: id })} onMenu={() => setNavigationOpen(true)} onRefresh={() => void console.actions.load()} project={console.state.project} route={console.route} serviceScope={console.state.services.find((item) => item.id === console.route.service)?.name} session={console.session} />
       <ConsoleRouter console={console} />
     </main>
     <MutationDialog console={console} />

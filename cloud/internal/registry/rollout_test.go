@@ -64,6 +64,53 @@ func TestExposureRolloutSuccessReplayAndTerminalImmutability(t *testing.T) {
 	}
 }
 
+func TestExposureUnchangedDoesNotCreateDuplicateRollout(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "unchanged")
+	first, _, err := service.StartExposureRollout(projectID, "user-1", "route-first", "route-first", rolloutExposureRequest(t, base, "dep-route-first", "apps.example.com", "/api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeSuccessfulRollout(t, service, projectID, first, "known-route", strings.Repeat("b", 64), "4")
+	request := rolloutExposureRequest(t, base, "dep-route-duplicate", "apps.example.com", "/api")
+	preview, err := service.PreviewExposure(projectID, "user-1", request)
+	if err != nil || len(preview.Changes) != 1 || preview.Changes[0] != "unchanged" {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	before := len(service.deployments)
+	if _, _, err := service.StartExposureRollout(projectID, "user-1", "route-duplicate", "route-duplicate", request); apiCode(err) != "EXPOSURE_UNCHANGED" {
+		t.Fatalf("unchanged apply err=%v", err)
+	}
+	if len(service.deployments) != before {
+		t.Fatalf("unchanged route created a deployment: before=%d after=%d", before, len(service.deployments))
+	}
+}
+
+func TestExposureRolloutAllowsSameOriginLongestPrefixRoutes(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "same-origin")
+	web := rolloutExposureRequest(t, base, "dep-web-root", "apps.example.com", "/").Exposure
+	web.ServiceKey, web.SpecHash = "web", ""
+	web, err := web.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	webJob := base
+	webJob.ID, webJob.ServiceID, webJob.ExposureSpec = web.DeploymentJobID, "svc-web", &web
+	webJob.CreatedAt = base.CreatedAt.Add(1)
+	service.deployments[webJob.ID] = webJob
+
+	preview, err := service.PreviewExposure(projectID, "user-1", rolloutExposureRequest(t, base, "dep-api-prefix", "apps.example.com", "/api"))
+	if err != nil || !preview.Eligible {
+		t.Fatalf("same-origin longest-prefix preview=%+v err=%v", preview, err)
+	}
+}
+
+func TestFirstSuccessfulDeploymentHasNoRollbackTarget(t *testing.T) {
+	_, _, first := rolloutRegistryFixture(t, "first-rollback")
+	if first.RollbackEligible || first.RollbackBlockedReason == "" {
+		t.Fatalf("first deployment rollback authority=%+v", first)
+	}
+}
+
 func TestRolloutProgressResourceValidationByPhase(t *testing.T) {
 	service, projectID, base := rolloutRegistryFixture(t, "resource-phase")
 	request := rolloutExposureRequest(t, base, "dep-resource-phase", "api.example.com", "/resource-phase")

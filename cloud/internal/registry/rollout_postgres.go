@@ -62,7 +62,7 @@ func (s PostgresService) previewExposure(ctx context.Context, queryer rolloutQue
 			continue
 		}
 		var other exposurev1.ExposureSpec
-		if json.Unmarshal([]byte(raw), &other) == nil && other.Hostname == desired.Hostname && exposurev1.PathsConflict(other.Path, desired.Path) {
+		if json.Unmarshal([]byte(raw), &other) == nil && other.Hostname == desired.Hostname && exposurev1.ManagedPathsConflict(other.Path, desired.Path) {
 			preview.Eligible = false
 			preview.DecisionCode = "EXPOSURE_ROUTE_CONFLICT"
 			preview.Message = "hostname and path overlap another Opsi desired exposure"
@@ -116,6 +116,9 @@ func (s PostgresService) StartExposureRollout(projectID, actorUserID, key, reque
 	}
 	if !preview.Eligible {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: preview.DecisionCode, Message: preview.Message, RequestID: requestID}
+	}
+	if len(preview.Changes) == 1 && preview.Changes[0] == "unchanged" {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "EXPOSURE_UNCHANGED", Message: "exposure already matches the requested route", RequestID: requestID}
 	}
 	var collision int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployment_jobs WHERE id=$1`, preview.Desired.DeploymentJobID).Scan(&collision); err != nil {

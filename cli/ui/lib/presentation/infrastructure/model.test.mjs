@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, updateCanvasPlacement } from "./model.ts";
+import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, currentEnvironment, deploymentAssignmentFor, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, updateCanvasPlacement } from "./model.ts";
 
 const facts = {
   project_id: "p1",
@@ -26,6 +26,16 @@ test("canvas draft keeps applied fields, defaults new placements, and resets by 
   assert.deepEqual(canvasPlacement(null, placed, "api"), { runtime_id: "rt-1", environment_id: "env-1", replicas: 1, cpu_request_millicores: 100, memory_request_bytes: 134217728, exposure: { mode: "none" } });
   assert.deepEqual(canvasDraftIssues(canvasPlacement(null, placed, "api")), []);
   assert.deepEqual(canvasDraftIssues({ ...canvasPlacement(null, placed, "api"), replicas: -1 }), ["Replicas must be between 1 and 100."]);
+});
+
+test("deployment authority requires an explicit environment when more than one exists", () => {
+  const multiFacts = { ...facts, environments: [...facts.environments, { ...facts.environments[0], id: "env-2", name: "Staging" }] };
+  const multiPlan = { ...plan, assignments: [...plan.assignments, { ...plan.assignments[0], environment_id: "env-2", runtime_id: "rt-2" }] };
+  assert.equal(currentEnvironment(facts, "")?.id, "env-1");
+  assert.equal(currentEnvironment(multiFacts, ""), undefined);
+  assert.equal(currentEnvironment(multiFacts, "env-2")?.name, "Staging");
+  assert.equal(deploymentAssignmentFor(multiPlan, "api", "env-1")?.runtime_id, "rt-1");
+  assert.equal(deploymentAssignmentFor(multiPlan, "api", "env-2")?.runtime_id, "rt-2");
 });
 
 test("canvas edits resources and exposure, excludes unplaced assignments, and compiles stably", () => {

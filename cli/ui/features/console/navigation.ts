@@ -45,6 +45,7 @@ export type ConsoleRoute = {
   projectID: string;
   view: ConsoleView;
   tab: string;
+  environment?: string;
   service?: string;
   build?: string;
   deployment?: string;
@@ -92,6 +93,7 @@ export function parseRoute(search: string): ConsoleRoute {
     projectID: params.get("project") ?? "",
     view: valid ? requested ?? undefined : undefined,
     tab: params.get("tab") ?? "",
+    environment: params.get("environment") ?? "",
     service: params.get("service") ?? "",
     build: params.get("build") ?? "",
     deployment: params.get("deployment") ?? "",
@@ -118,14 +120,14 @@ export function routeHref(route: Partial<ConsoleRoute>) {
   if (normalized.projectID) params.set("project", normalized.projectID);
   params.set("view", normalized.view);
   if (normalized.tab) params.set("tab", normalized.tab);
-  for (const key of ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor", "runtime", "node", "session", "topology", "topologyMode", "incident", "level", "query", "window"] as const) {
+  for (const key of ["environment", "service", "build", "deployment", "status", "kind", "repository", "sha", "cursor", "runtime", "node", "session", "topology", "topologyMode", "incident", "level", "query", "window"] as const) {
     if (normalized[key]) params.set(key, normalized[key]);
   }
   return `/?${params}`;
 }
 
 function compactViewState(view: ConsoleView, route: Partial<ConsoleRoute>) {
-  const state: Partial<ConsoleRoute> = {};
+  const state: Partial<ConsoleRoute> = route.environment ? { environment: route.environment } : {};
   const keys = view === "delivery"
     ? ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor"] as const
     : view === "infrastructure"

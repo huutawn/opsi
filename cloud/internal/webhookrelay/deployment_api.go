@@ -269,8 +269,8 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 	if request.ExpectedDeploymentPolicyRevision != 0 && (policy.Revision != request.ExpectedDeploymentPolicyRevision || policy.PolicyHash != request.ExpectedDeploymentPolicyHash) {
 		return result, registry.APIError{Status: 409, Code: "POLICY_REVIEW_STALE", Message: "DeploymentPolicy changed after deployment review", NextAction: "review_again", RequestID: r.Header.Get("X-Request-ID")}
 	}
-	assignment, ok := deploymentAssignment(plan.Assignments, record.ServiceKey, request.EnvironmentID, decision.RuntimeID)
-	if !ok {
+	assignment, ok := deploymentAssignment(plan.Assignments, record.ServiceKey, request.EnvironmentID)
+	if !ok || assignment.RuntimeID != decision.RuntimeID {
 		return result, registry.APIError{Status: 409, Code: "WORKLOAD_TOPOLOGY_MISMATCH", Message: "service assignment is unavailable in the active TopologyPlan", RequestID: r.Header.Get("X-Request-ID")}
 	}
 	services, err := s.Registry.ListServices(projectID)
@@ -363,9 +363,9 @@ func validDeploymentIdempotencyKey(value string) bool {
 	return true
 }
 
-func deploymentAssignment(assignments []topologyv1.Assignment, serviceKey, environmentID, runtimeID string) (topologyv1.Assignment, bool) {
+func deploymentAssignment(assignments []topologyv1.Assignment, serviceKey, environmentID string) (topologyv1.Assignment, bool) {
 	for _, assignment := range assignments {
-		if assignment.ServiceKey == serviceKey && assignment.EnvironmentID == environmentID && assignment.RuntimeID == runtimeID {
+		if assignment.ServiceKey == serviceKey && assignment.EnvironmentID == environmentID {
 			return assignment, true
 		}
 	}

@@ -38,6 +38,16 @@ export function assignmentFor(plan: TopologyPlan | null, serviceKey: string): To
   return plan?.assignments.find((item) => item.service_key === serviceKey);
 }
 
+export function deploymentAssignmentFor(plan: TopologyPlan | null, serviceKey: string, environmentID: string): TopologyAssignment | undefined {
+  return plan?.assignments.find((item) => item.service_key === serviceKey && item.environment_id === environmentID);
+}
+
+export function currentEnvironment(facts: PlacementFacts | null | undefined, environmentID: string) {
+  if (!facts?.environments.length) return undefined;
+  if (environmentID) return facts.environments.find((item) => item.id === environmentID);
+  return facts.environments.length === 1 ? facts.environments[0] : undefined;
+}
+
 export function canvasPlacement(plan: TopologyPlan | null, draft: CanvasDraft, serviceKey: string): CanvasPlacement {
   if (Object.hasOwn(draft, serviceKey)) return draft[serviceKey];
   const assignment = assignmentFor(plan, serviceKey);

@@ -32,14 +32,18 @@ test("Build filters use existing Local API query fields and actions only navigat
   assert.doesNotMatch(builds, /deploymentApply|deploymentPreview/);
 });
 
-test("Topology review sends authority expectations and never authors WorkloadSpec", async () => {
+test("Topology review sends authority expectations and publishes Exposure only after workload success", async () => {
   const source = await readFile(files.review, "utf8");
   for (const field of ["expected_topology_revision", "expected_topology_hash", "expected_configuration_revision", "expected_configuration_state_hash", "expected_deployment_policy_revision", "expected_deployment_policy_hash"]) assert.match(source, new RegExp(field));
   assert.match(source, /Cloud compiles immutable WorkloadSpec/);
   assert.match(source, /deploymentPreview/);
   assert.match(source, /deploymentApply/);
+  assert.match(source, /waitForTerminalDeployment/);
+  assert.match(source, /exposurePreview/);
+  assert.match(source, /exposureApply/);
+  assert.ok(source.indexOf("waitForTerminalDeployment") < source.lastIndexOf("exposureApply"));
+  assert.match(source, /changes\[0\] === "unchanged"/);
   assert.doesNotMatch(source, /workload\s*:/);
-  assert.doesNotMatch(source, /exposureApply|\/exposures/);
 });
 
 test("deployment actions and exposure semantics are factual and Local-only", async () => {

@@ -67,6 +67,20 @@ func TestDeploymentIdempotencyKeyIsBoundedAndWhitespaceFree(t *testing.T) {
 	}
 }
 
+func TestDeploymentAssignmentUsesServiceAndEnvironmentAuthority(t *testing.T) {
+	assignments := []topologyv1.Assignment{
+		{ServiceKey: "api", EnvironmentID: "env-staging", RuntimeID: "runtime-staging"},
+		{ServiceKey: "api", EnvironmentID: "env-production", RuntimeID: "runtime-production"},
+	}
+	assignment, ok := deploymentAssignment(assignments, "api", "env-production")
+	if !ok || assignment.RuntimeID != "runtime-production" {
+		t.Fatalf("assignment=%+v ok=%v", assignment, ok)
+	}
+	if _, ok := deploymentAssignment(assignments, "api", ""); ok {
+		t.Fatal("missing environment selected an assignment")
+	}
+}
+
 func TestResolvedDeploymentCompilesCanonicalSnapshotAndRejectsStaleOrClientSpec(t *testing.T) {
 	server, projectID, service, plan, policy := deploymentResolutionFixture(t)
 	configuration, err := server.Registry.GetServiceConfiguration(projectID, service.ID)

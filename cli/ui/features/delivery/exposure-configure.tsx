@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { DeliveryStatus, short } from "@/features/delivery/shared";
 import type { DeliveryViewProps } from "@/features/delivery/shared";
 import { LocalClient } from "@/lib/api/local-client";
-import type { ExposurePreview, ExposureSpec } from "@/lib/contracts/registry";
+import { hashExposure, type ExposurePreview, type ExposureSpec } from "@/lib/contracts/registry";
 
 export function ExposureConfigure({ console, data }: DeliveryViewProps) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -57,10 +57,4 @@ export function ExposureConfigure({ console, data }: DeliveryViewProps) {
   }
 
   return <><button className="primary" disabled={!bases.length} onClick={open} type="button">Configure Exposure</button><dialog aria-labelledby="configure-exposure-title" className="deliveryDialog" ref={dialog}><form method="dialog"><div className="dialogHeading"><div><p className="eyebrow">Post-Deployment Mutation</p><h2 id="configure-exposure-title">Configure Exposure</h2><p>Exposure starts from a verified deployment and never fetches a secret value.</p></div><button aria-label="Close exposure configuration" type="submit">Close</button></div></form><div className="deploymentForm"><label>Verified Base Deployment<select value={base?.id ?? ""} onChange={(event) => { setBaseID(event.target.value); setPreview(null); }}>{bases.map((job) => <option key={job.id} value={job.id}>{job.id} · {short(job.current_digest, 18)}</option>)}</select></label><label>Service Port<input disabled value={base?.snapshot?.workload.container_port ?? ""} /></label><label>Hostname<input autoComplete="off" name="hostname" placeholder="api.example.com…" value={hostname} onChange={(event) => { setHostname(event.target.value); setPreview(null); }} /></label><label>Path<input autoComplete="off" name="path" placeholder="/api…" value={path} onChange={(event) => { setPath(event.target.value); setPreview(null); }} /></label><label>TLS<select value={tlsMode} onChange={(event) => { setTLSMode(event.target.value as "disabled" | "secret_ref"); setPreview(null); }}><option value="disabled">Disabled</option><option value="secret_ref">Opaque Secret Reference</option></select></label>{tlsMode === "secret_ref" ? <label>TLS Secret Reference<input autoComplete="off" name="tls_reference" placeholder="secret reference…" value={tlsReference} onChange={(event) => { setTLSReference(event.target.value); setPreview(null); }} /></label> : null}</div>{error ? <p className="inlineError" role="alert">{error}</p> : null}<div className="buttonRow"><button disabled={!base || !hostname || busy} onClick={() => void previewExposure()} type="button">{busy ? "Previewing…" : "Preview Decision & Diff"}</button></div>{preview ? <div className="previewResult"><DeliveryStatus label={preview.decision_code} status={preview.eligible ? "succeeded" : "failed"} /><p>{preview.message}</p><ul>{preview.changes.map((change) => <li key={change}>{change}</li>)}</ul><button className="primary" disabled={!preview.eligible || busy} onClick={apply} type="button">Review & Apply Exposure</button></div> : null}</dialog></>;
-}
-
-async function hashExposure(spec: Omit<ExposureSpec, "spec_hash">) {
-  const data = new TextEncoder().encode(JSON.stringify({ ...spec, spec_hash: "" }));
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
 }

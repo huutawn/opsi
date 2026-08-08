@@ -1880,7 +1880,7 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	job.KnownGoodHash = copy.KnownGoodHash
 	job.ReadinessEvidenceHash = copy.ReadinessEvidenceHash
 	job.RolloutVersion++
-	job.RollbackEligible = copy.RolloutState == deploymentv1.RolloutStateSucceeded && job.RolloutIntent.PreviousKnownGoodID != ""
+	setRollbackAvailability(&job)
 	s.deployments[deploymentID] = job
 	event := rolloutEvent(job, job.RolloutState, "Agent reported terminal rollout result", 100, requestID, now, job.RolloutStateHash)
 	event.EvidenceHash = job.ReadinessEvidenceHash

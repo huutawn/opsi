@@ -8,10 +8,10 @@ import { PlacementDialog } from "@/features/infrastructure/placement-dialog";
 import { useInfrastructureData } from "@/features/infrastructure/data";
 import { TopologyDesignCanvas } from "@/features/infrastructure/topology-canvas";
 import { DeploymentReview } from "@/features/infrastructure/deployment-review";
-import { deploymentStage } from "@/features/infrastructure/deployment-review-model";
+import { deploymentPhase, liveDeploymentHealth } from "@/features/infrastructure/deployment-review-model";
 import { LocalClient } from "@/lib/api/local-client";
 import type { TimelineEvent } from "@/lib/contracts/registry";
-import { bootstrapProgress, capacityLabel, serverLifecycle, topologyOnboarding, type CanvasDraft, type ServerLifecycle, type TopologyOnboardingState } from "@/lib/presentation/infrastructure/model";
+import { bootstrapProgress, capacityLabel, currentEnvironment, serverLifecycle, topologyOnboarding, type CanvasDraft, type ServerLifecycle, type TopologyOnboardingState } from "@/lib/presentation/infrastructure/model";
 
 export function InfrastructureView({ console }: { console: ConsoleController }) {
   const { data, source, error, load } = useInfrastructureData(console);
@@ -33,10 +33,11 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
   if (!console.state.project) return <Empty text="Select a project first." />;
   if (source === "loading" && !data.facts) return <Empty title="Loading infrastructure…" text="Reading factual topology and runtime inventory from Local API." />;
   if (!data.facts) return <Empty title="Infrastructure unavailable" text={error || "Local API did not return topology facts."} action={<button onClick={() => void load()} type="button">Retry</button>} />;
+  const environment = currentEnvironment(data.facts, console.route.environment ?? "");
 
   return <div className="infrastructurePage">
     {console.route.tab !== "topology" ? <div className="destinationToolbar"><p>{error || "Cloud topology facts remain visible when Agent runtime data is unavailable."}</p><button data-review-trigger={console.route.tab === "bootstrap" ? "bootstrap" : undefined} onClick={(event) => { if (console.route.tab === "bootstrap") { bootstrapTrigger.current = event.currentTarget; setBootstrapOpen(true); } else { placementTrigger.current = event.currentTarget; setPlacementOpen(true); } }} type="button">{console.route.tab === "bootstrap" ? "Add server" : "Plan placement"}</button></div> : null}
-    {console.route.tab === "topology" ? <TopologyTab bindings={data.bindings} builds={data.builds} console={console} error={error} facts={data.facts} key={projectID} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={(next) => console.navigate({ topologyMode: next })} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} onReload={load} policies={data.policies} repositories={data.repositories} topology={data.topology} /> : null}
+    {console.route.tab === "topology" ? <TopologyTab bindings={data.bindings} builds={data.builds} console={console} environment={environment} error={error} facts={data.facts} key={`${projectID}:${environment?.id ?? "unresolved"}`} mode={mode} onAddService={(trigger) => { serviceTrigger.current = trigger; setServiceOpen(true); }} onConnectServer={(trigger) => { bootstrapTrigger.current = trigger; setBootstrapOpen(true); }} onMode={(next) => console.navigate({ topologyMode: next })} onPlanPlacement={(trigger) => { placementTrigger.current = trigger; setPlacementOpen(true); }} onReload={load} policies={data.policies} repositories={data.repositories} topology={data.topology} /> : null}
     {console.route.tab === "runtimes" ? <RuntimesTab console={console} facts={data.facts} topology={data.topology} /> : null}
     {console.route.tab === "nodes" ? <NodesTab console={console} facts={data.facts} /> : null}
     {console.route.tab === "bootstrap" ? <BootstrapTab console={console} onReload={load} /> : null}
@@ -46,7 +47,7 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
   </div>;
 }
 
-function TopologyTab({ bindings, builds, console, error, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, onReload, policies, repositories, topology }: { bindings: ReturnType<typeof useInfrastructureData>["data"]["bindings"]; builds: ReturnType<typeof useInfrastructureData>["data"]["builds"]; console: ConsoleController; error: string; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void>; policies: ReturnType<typeof useInfrastructureData>["data"]["policies"]; repositories: ReturnType<typeof useInfrastructureData>["data"]["repositories"]; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
+function TopologyTab({ bindings, builds, console, environment, error, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, onReload, policies, repositories, topology }: { bindings: ReturnType<typeof useInfrastructureData>["data"]["bindings"]; builds: ReturnType<typeof useInfrastructureData>["data"]["builds"]; console: ConsoleController; environment?: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>["environments"][number]; error: string; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void>; policies: ReturnType<typeof useInfrastructureData>["data"]["policies"]; repositories: ReturnType<typeof useInfrastructureData>["data"]["repositories"]; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
   const [draft, setDraft] = useState<CanvasDraft>({});
   const lifecycle = serverLifecycle(facts, console.state.sessions);
   const onboarding = topologyOnboarding(facts, topology, console.state.sessions);
@@ -63,11 +64,11 @@ function TopologyTab({ bindings, builds, console, error, facts, mode, onAddServi
     <TopologyOnboarding action={act} state={onboarding} />
     <ServerLifecycleCard console={console} lifecycle={lifecycle} />
     {error ? <p className="truthCallout" role="alert">{error}</p> : null}
-    {topology ? <div hidden={mode !== "design"}><DeploymentReview builds={builds} console={console} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} /></div> : null}
+    {topology ? <div hidden={mode !== "design"}><DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "No current environment"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} /></div> : null}
     {mode === "design" ? <>
       {!topology ? <div className="truthCallout"><b>No topology plan</b><p>Infrastructure facts are shown without service placement edges. Service inventory is not used to fabricate assignments.</p></div> : null}
       <TopologyDesignCanvas bindings={bindings} builds={builds} console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} repositories={repositories} topology={topology} />
-    </> : <LiveTopology console={console} facts={facts} />}
+    </> : <LiveTopology console={console} environment={environment} facts={facts} />}
   </section>;
 }
 
@@ -112,12 +113,14 @@ function EventTimeline({ events }: { events: TimelineEvent[] }) {
   return <ol className="eventTimeline">{events.map((event) => <li key={event.id}><span aria-hidden="true" /><div><b>{event.step}</b><p>{event.message_redacted}</p><small>{event.created_at}</small></div></li>)}</ol>;
 }
 
-function LiveTopology({ console, facts }: { console: ConsoleController; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]> }) {
+function LiveTopology({ console, environment, facts }: { console: ConsoleController; environment?: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>["environments"][number]; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]> }) {
+  if (!environment) return <div className="truthCallout" role="alert"><b>Choose the current environment</b><p>Live deployment facts are blocked because this project has multiple environments and none is selected.</p></div>;
+  const runtimes = facts.runtimes.filter((runtime) => runtime.environment_id === environment.id);
   const connections = console.state.services.flatMap((service) => (service.configuration?.bindings ?? []).map((binding) => ({ source: service.name, target: binding.target_service_key, kind: binding.kind, route: binding.path || binding.env_prefix || "" })));
-  return <div className="liveTopology"><section><div className="sectionHeading"><div><h3>Runtime and Agent facts</h3><p>Only identities returned by Local API are shown.</p></div><span>{facts.runtimes.length} runtimes</span></div>{facts.runtimes.length ? <div className="liveRuntimeList">{facts.runtimes.map((runtime) => <article key={runtime.id}><div><strong>{runtime.name}</strong><StatusBadge value={runtime.status} /></div><p>{facts.environments.find((environment) => environment.id === runtime.environment_id)?.name || runtime.environment_id} · <code>{runtime.id}</code></p><dl><Fact label="Nodes" value={facts.nodes.filter((node) => node.runtime_id === runtime.id).map((node) => `${node.id} (${node.status})`).join(", ") || "None reported"} /><Fact label="Agents" value={facts.agents.filter((agent) => agent.runtime_id === runtime.id).map((agent) => `${agent.id} (${agent.status})`).join(", ") || "None reported"} /></dl></article>)}</div> : <p className="muted">No runtime facts reported.</p>}</section><section><div className="sectionHeading"><div><h3>Applied connections</h3><p>Factual service configuration only; this is not deployment state.</p></div><span>{connections.length} connections</span></div>{connections.length ? <ul className="compactList">{connections.map((connection, index) => <li key={`${connection.source}:${connection.target}:${index}`}><strong>{connection.source} → {connection.target}</strong><small>{connection.kind}{connection.route ? ` · ${connection.route}` : ""}</small></li>)}</ul> : <p className="muted">No applied connections reported.</p>}</section><LiveDeploymentBoard console={console} /></div>;
+  return <div className="liveTopology"><section><div className="sectionHeading"><div><p className="eyebrow">Current environment · {environment.name}</p><h3>Runtime and Agent facts</h3><p>Only identities returned by Local API for this environment are shown.</p></div><span>{runtimes.length} runtimes</span></div>{runtimes.length ? <div className="liveRuntimeList">{runtimes.map((runtime) => <article key={runtime.id}><div><strong>{runtime.name}</strong><StatusBadge value={runtime.status} /></div><p>{environment.name} · <code>{runtime.id}</code></p><dl><Fact label="Nodes" value={facts.nodes.filter((node) => node.runtime_id === runtime.id).map((node) => `${node.id} (${node.status})`).join(", ") || "None reported"} /><Fact label="Agents" value={facts.agents.filter((agent) => agent.runtime_id === runtime.id).map((agent) => `${agent.id} (${agent.status})`).join(", ") || "None reported"} /></dl></article>)}</div> : <p className="muted">No runtime facts reported in {environment.name}.</p>}</section><section><div className="sectionHeading"><div><h3>Applied connections</h3><p>Factual service configuration only; this is not deployment state.</p></div><span>{connections.length} connections</span></div>{connections.length ? <ul className="compactList">{connections.map((connection, index) => <li key={`${connection.source}:${connection.target}:${index}`}><strong>{connection.source} → {connection.target}</strong><small>{connection.kind}{connection.route ? ` · ${connection.route}` : ""}</small></li>)}</ul> : <p className="muted">No applied connections reported.</p>}</section><LiveDeploymentBoard console={console} environmentID={environment.id} environmentName={environment.name} /></div>;
 }
 
-function LiveDeploymentBoard({ console }: { console: ConsoleController }) {
+function LiveDeploymentBoard({ console, environmentID, environmentName }: { console: ConsoleController; environmentID: string; environmentName: string }) {
   const client = useMemo(() => new LocalClient(), []);
   const reload = useRef(console.actions.load);
   const projectID = console.state.project?.id ?? "";
@@ -132,16 +135,24 @@ function LiveDeploymentBoard({ console }: { console: ConsoleController }) {
       try {
         const response = await client.deployments(projectID);
         const next: Record<string, TimelineEvent[]> = {};
-        await Promise.all((response.deployments ?? []).map(async (job) => { const result = await client.deploymentEvents(projectID, job.id); next[job.id] = result.events ?? []; }));
+        await Promise.all((response.deployments ?? []).filter((job) => job.environment_id === environmentID).map(async (job) => { const result = await client.deploymentEvents(projectID, job.id); next[job.id] = result.events ?? []; }));
         if (!disposed) { setEvents(next); await reload.current(); }
       } catch { /* retain last Cloud state */ }
       if (!disposed) timer = window.setTimeout(poll, 4000);
     }
     void poll();
     return () => { disposed = true; window.clearTimeout(timer); };
-  }, [client, projectID]);
-  const deployments = console.state.deployments;
-  return <section><div className="sectionHeading"><div><h3>Deployment live state</h3><p>Durable DeploymentJobs and Cloud events are polled; refresh restores this list.</p></div><span>{deployments.length} jobs</span></div>{deployments.length ? <ul className="liveDeploymentList">{deployments.map((deployment) => { const latest = [...(events[deployment.id] ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at))[0]; return <li key={deployment.id}><span><strong>{deployment.service_id}</strong><code>{deployment.id}</code><small>{deployment.node_id || "node pending"} · {deployment.agent_id || "Agent pending"}</small><small>{latest?.message_redacted || "No event reported"}</small></span><StatusBadge label={deploymentStage(deployment)} value={deployment.rollout_state ?? deployment.status} /></li>; })}</ul> : <p className="muted">No DeploymentJob has been submitted.</p>}</section>;
+  }, [client, environmentID, projectID]);
+  const deployments = console.state.deployments.filter((deployment) => deployment.environment_id === environmentID).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return <section><div className="sectionHeading"><div><p className="eyebrow">Current environment · {environmentName}</p><h3>Deployment live state</h3><p>Workload, route, and rollback jobs are separate durable facts. Refresh restores every active phase.</p></div><span>{deployments.length} jobs</span></div>{deployments.length ? <ul className="liveDeploymentList">{deployments.map((deployment) => {
+    const service = console.state.services.find((item) => item.id === deployment.service_id);
+    const digest = deployment.current_digest || deployment.terminal_result?.current_digest || deployment.desired_digest || deployment.snapshot?.image.digest;
+    const revision = deployment.snapshot?.authority.service_configuration_revision;
+    const jobEvents = [...(events[deployment.id] ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const endpoint = deployment.exposure_spec ? `${deployment.exposure_spec.hostname}${deployment.exposure_spec.path}` : "Internal only";
+    const blocked = deployment.rollback_blocked_reason || "Cloud did not report a previous known-good deployment.";
+    return <li key={deployment.id}><div className="liveDeploymentHeading"><span><small>{deploymentPhase(deployment)}</small><strong>{service?.name || deployment.service_id}</strong><code>{deployment.id}</code></span><StatusBadge label={liveDeploymentHealth(deployment)} value={deployment.rollout_state ?? deployment.status} /></div><dl className="liveDeploymentFacts"><Fact label="Image digest" value={digest || "Not reported"} /><Fact label="Revision" value={revision === undefined ? "Not reported" : `configuration r${revision} · topology r${deployment.snapshot?.authority.topology_revision ?? "?"}`} /><Fact label="Endpoint" value={endpoint} /><Fact label="Route path" value={deployment.exposure_spec?.path || "Not public"} /></dl>{jobEvents.length ? <EventTimeline events={jobEvents.slice(0, 3)} /> : <p className="muted">No deployment event reported.</p>}<div className="liveDeploymentActions"><button disabled={!deployment.rollback_eligible || console.state.busy === `rollback-${deployment.id}`} onClick={() => console.actions.rollback(deployment.id)} type="button">{console.state.busy === `rollback-${deployment.id}` ? "Rolling back…" : "Rollback"}</button>{deployment.rollback_eligible ? <small>Restore {deployment.previous_digest || deployment.terminal_result?.previous_digest || "previous known-good digest"}</small> : <small>{blocked}</small>}</div></li>;
+  })}</ul> : <p className="muted">No DeploymentJob has been submitted in {environmentName}.</p>}</section>;
 }
 
 function RuntimesTab({ console, facts, topology }: { console: ConsoleController; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
