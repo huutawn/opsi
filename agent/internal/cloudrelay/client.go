@@ -94,11 +94,18 @@ type NodeLifecycleResult struct {
 	Verified               bool   `json:"verified"`
 }
 
+type NodeCapacity struct {
+	CPUCores    int `json:"cpu_cores,omitempty"`
+	MemoryMB    int `json:"memory_mb,omitempty"`
+	DiskTotalGB int `json:"disk_total_gb,omitempty"`
+}
+
 type Heartbeat struct {
 	Version      string         `json:"version"`
 	Capabilities map[string]any `json:"capabilities,omitempty"`
 	K3SStatus    string         `json:"k3s_status,omitempty"`
 	NodeReady    bool           `json:"node_ready"`
+	Capacity     NodeCapacity   `json:"capacity,omitempty"`
 }
 
 func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) (*JobLease, error) {

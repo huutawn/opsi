@@ -103,6 +103,7 @@ func (r Runner) sendHeartbeat(ctx context.Context) {
 		Version:      r.Version,
 		NodeReady:    health.NodeReady,
 		K3SStatus:    health.K3SStatus,
+		Capacity:     health.Capacity,
 		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil},
 	})
 	if err != nil {

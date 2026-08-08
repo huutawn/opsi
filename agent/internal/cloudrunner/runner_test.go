@@ -321,7 +321,7 @@ func TestRunnerRejectsCommandWithoutRolloutBeforeMutation(t *testing.T) {
 		PollInterval:      time.Millisecond,
 		LongPollWait:      time.Millisecond,
 		HeartbeatInterval: time.Hour,
-		HealthProbe:       staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady},
+		HealthProbe:       staticHealthProbe{NodeReady: true, K3SStatus: K3SStatusReady, Capacity: cloudrelay.NodeCapacity{CPUCores: 2, MemoryMB: 2048, DiskTotalGB: 40}},
 		ConnectionState:   connection,
 	}
 	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
@@ -333,7 +333,7 @@ func TestRunnerRejectsCommandWithoutRolloutBeforeMutation(t *testing.T) {
 	if client.heartbeats == 0 {
 		t.Fatal("heartbeat was not sent")
 	}
-	if !client.heartbeat.NodeReady || client.heartbeat.K3SStatus != K3SStatusReady || client.heartbeat.Capabilities["deploy"] != true {
+	if !client.heartbeat.NodeReady || client.heartbeat.K3SStatus != K3SStatusReady || client.heartbeat.Capacity.CPUCores != 2 || client.heartbeat.Capacity.MemoryMB != 2048 || client.heartbeat.Capabilities["deploy"] != true {
 		t.Fatalf("heartbeat = %+v", client.heartbeat)
 	}
 	if !connection.Connected() {
