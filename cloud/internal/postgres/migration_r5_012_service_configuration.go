@@ -29,6 +29,7 @@ func MigrateR5012ServiceConfiguration(ctx context.Context, db interface {
 				SELECT 1 FROM information_schema.columns
 				WHERE table_schema = current_schema() AND table_name = 'control_services' AND column_name = 'bindings'
 			) THEN
+				UPDATE control_services SET bindings = '[]'::jsonb WHERE bindings = 'null'::jsonb;
 				EXECUTE $sql$
 					SELECT COALESCE(sum(jsonb_array_length(COALESCE(bindings, '[]'::jsonb))), 0)
 					FROM control_services

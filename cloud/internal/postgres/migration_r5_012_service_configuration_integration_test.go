@@ -46,6 +46,7 @@ func TestR5012ServiceConfigurationMigrationPreservesBindingsUntilCountsMatch(t *
 	for _, statement := range []string{
 		`CREATE TABLE control_services (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, bindings JSONB NOT NULL DEFAULT '[]'::jsonb)`,
 		`INSERT INTO control_services(id,project_id,name,bindings) VALUES ('source','project-1','web','[{"service_id":"missing","env_prefix":"API"}]'::jsonb)`,
+		`INSERT INTO control_services(id,project_id,name,bindings) VALUES ('legacy-null','project-1','worker','null'::jsonb)`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
@@ -72,6 +73,12 @@ func TestR5012ServiceConfigurationMigrationPreservesBindingsUntilCountsMatch(t *
 	expected := serviceconfigurationv1.StateHash(serviceconfigurationv1.Draft{Bindings: []serviceconfigurationv1.Binding{{Kind: serviceconfigurationv1.BindingInternalHTTP, TargetServiceID: "missing", TargetServiceKey: "api", EnvPrefix: "API"}}})
 	if stateHash != expected {
 		t.Fatalf("state hash=%q want canonical SHA-256 %q configuration=%s", stateHash, expected, configuration)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT configuration_state_hash FROM control_services WHERE id='legacy-null'`).Scan(&stateHash); err != nil {
+		t.Fatal(err)
+	}
+	if expected := serviceconfigurationv1.StateHash(serviceconfigurationv1.Draft{}); stateHash != expected {
+		t.Fatalf("legacy null state hash=%q want empty configuration hash %q", stateHash, expected)
 	}
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='control_services' AND column_name='bindings')`).Scan(&bindingsColumn); err != nil || bindingsColumn {
 		t.Fatalf("bindings column exists=%v err=%v", bindingsColumn, err)
