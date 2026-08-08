@@ -7,7 +7,7 @@ const files = {
   builds: new URL("./builds-view.tsx", import.meta.url),
   deployments: new URL("./deployments-view.tsx", import.meta.url),
   detail: new URL("./deployment-detail.tsx", import.meta.url),
-  create: new URL("./deployment-create.tsx", import.meta.url),
+  review: new URL("../infrastructure/deployment-review.tsx", import.meta.url),
   exposure: new URL("./exposure-view.tsx", import.meta.url),
   source: new URL("./source-view.tsx", import.meta.url),
   client: new URL("../../lib/api/local-client.ts", import.meta.url),
@@ -32,13 +32,14 @@ test("Build filters use existing Local API query fields and actions only navigat
   assert.doesNotMatch(builds, /deploymentApply|deploymentPreview/);
 });
 
-test("manual deployment refuses hidden defaults and preview must be eligible before review", async () => {
-  const source = await readFile(files.create, "utf8");
-  for (const forbidden of ["8080", "replicas: 1", "100m", "128Mi"]) assert.doesNotMatch(source, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(source, /No port, replica, resource, termination, or readiness default is assumed/);
-  for (const label of ["Readiness Initial Delay Seconds", "Readiness Period Seconds", "Readiness Timeout Seconds", "Readiness Failure Threshold"]) assert.match(source, new RegExp(label));
-  assert.match(source, /!preview\.eligible/);
-  assert.match(source, /deploymentDiff/);
+test("Topology review sends authority expectations and never authors WorkloadSpec", async () => {
+  const source = await readFile(files.review, "utf8");
+  for (const field of ["expected_topology_revision", "expected_topology_hash", "expected_configuration_revision", "expected_configuration_state_hash", "expected_deployment_policy_revision", "expected_deployment_policy_hash"]) assert.match(source, new RegExp(field));
+  assert.match(source, /Cloud compiles immutable WorkloadSpec/);
+  assert.match(source, /deploymentPreview/);
+  assert.match(source, /deploymentApply/);
+  assert.doesNotMatch(source, /workload\s*:/);
+  assert.doesNotMatch(source, /exposureApply|\/exposures/);
 });
 
 test("deployment actions and exposure semantics are factual and Local-only", async () => {

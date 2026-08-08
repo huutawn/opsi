@@ -309,18 +309,20 @@ func (s WorkloadSpec) Hash() (string, error) {
 }
 
 type AuthoritySnapshot struct {
-	BuildRecord              buildrecordv1.Record `json:"build_record"`
-	TopologyPlanID           string               `json:"topology_plan_id"`
-	TopologyRevision         uint64               `json:"topology_revision"`
-	TopologyHash             string               `json:"topology_hash"`
-	DeploymentPolicyID       string               `json:"deployment_policy_id"`
-	DeploymentPolicyRevision uint64               `json:"deployment_policy_revision"`
-	DeploymentPolicyHash     string               `json:"deployment_policy_hash"`
-	RoutingDecisionHash      string               `json:"routing_decision_hash"`
-	EnvironmentID            string               `json:"environment_id"`
-	RuntimeID                string               `json:"runtime_id"`
-	NodeID                   string               `json:"node_id"`
-	AgentID                  string               `json:"agent_id"`
+	BuildRecord                   buildrecordv1.Record `json:"build_record"`
+	TopologyPlanID                string               `json:"topology_plan_id"`
+	TopologyRevision              uint64               `json:"topology_revision"`
+	TopologyHash                  string               `json:"topology_hash"`
+	ServiceConfigurationRevision  uint64               `json:"service_configuration_revision"`
+	ServiceConfigurationStateHash string               `json:"service_configuration_state_hash"`
+	DeploymentPolicyID            string               `json:"deployment_policy_id"`
+	DeploymentPolicyRevision      uint64               `json:"deployment_policy_revision"`
+	DeploymentPolicyHash          string               `json:"deployment_policy_hash"`
+	RoutingDecisionHash           string               `json:"routing_decision_hash"`
+	EnvironmentID                 string               `json:"environment_id"`
+	RuntimeID                     string               `json:"runtime_id"`
+	NodeID                        string               `json:"node_id"`
+	AgentID                       string               `json:"agent_id"`
 }
 
 type JobSnapshot struct {
@@ -338,11 +340,17 @@ type JobSnapshot struct {
 }
 
 type CreateRequest struct {
-	SchemaVersion  string       `json:"schema_version"`
-	BuildRecordID  string       `json:"build_record_id"`
-	EnvironmentID  string       `json:"environment_id"`
-	Workload       WorkloadSpec `json:"workload"`
-	IdempotencyKey string       `json:"-"`
+	SchemaVersion                    string        `json:"schema_version"`
+	BuildRecordID                    string        `json:"build_record_id"`
+	EnvironmentID                    string        `json:"environment_id"`
+	ExpectedTopologyRevision         uint64        `json:"expected_topology_revision,omitempty"`
+	ExpectedTopologyHash             string        `json:"expected_topology_hash,omitempty"`
+	ExpectedConfigurationRevision    uint64        `json:"expected_configuration_revision,omitempty"`
+	ExpectedConfigurationStateHash   string        `json:"expected_configuration_state_hash,omitempty"`
+	ExpectedDeploymentPolicyRevision uint64        `json:"expected_deployment_policy_revision,omitempty"`
+	ExpectedDeploymentPolicyHash     string        `json:"expected_deployment_policy_hash,omitempty"`
+	Workload                         *WorkloadSpec `json:"workload,omitempty"`
+	IdempotencyKey                   string        `json:"-"`
 }
 
 type Preview struct {

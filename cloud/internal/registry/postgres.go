@@ -1140,6 +1140,10 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 	if service.ID != snapshot.Authority.BuildRecord.ServiceID || service.Name != snapshot.Authority.BuildRecord.ServiceKey {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_SERVICE_BINDING_INVALID", Message: "service binding does not match the resolved target", RequestID: requestID}
 	}
+	configuration := normalizeStoredConfiguration(service.Configuration)
+	if configuration.Revision != snapshot.Authority.ServiceConfigurationRevision || configuration.StateHash != snapshot.Authority.ServiceConfigurationStateHash {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "SERVICE_CONFIGURATION_STALE", Message: "service configuration changed before job creation", NextAction: "review_again", RequestID: requestID}
+	}
 	node, agent, err := s.deployAgent(ctx, snapshot.ProjectID, snapshot.Authority.RuntimeID, requestID)
 	if err != nil {
 		return DeploymentJob{}, false, err
@@ -1156,7 +1160,7 @@ func (s PostgresService) StartImmutableDeployment(snapshot deploymentv1.JobSnaps
 		environmentID = snapshot.Preview.Namespace
 	}
 	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: environmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
-	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
+	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "configuration": snapshot.Authority.ServiceConfigurationStateHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return DeploymentJob{}, false, err

@@ -21,7 +21,6 @@ import (
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
-	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
 const (
@@ -181,8 +180,12 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 	if !ok || service.ID == "" {
 		return nil, false, registry.APIError{Status: 409, Code: "ROUTING_SERVICE_AUTHORITY_INVALID", Message: "canonical service or topology assignment is unavailable"}
 	}
-	workload := automaticWorkload(service, assignment)
-	if err := workload.Validate(); err != nil {
+	configuration, err := s.Registry.GetServiceConfiguration(record.ProjectID, service.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	workload, err := registry.CompileServiceRuntimeSpecs(service, assignment, plan.Assignments, configuration, services)
+	if err != nil {
 		return nil, false, registry.APIError{Status: 409, Code: "WORKLOAD_AUTHORITY_INVALID", Message: "canonical service workload is invalid"}
 	}
 	specHash, _ := workload.Hash()
@@ -190,7 +193,7 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 	if err != nil {
 		return nil, false, err
 	}
-	snapshot := deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: record.ProjectID, Image: image, Workload: workload, SpecHash: specHash, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: record, TopologyPlanID: plan.ID, TopologyRevision: plan.Revision, TopologyHash: plan.PlanHash, DeploymentPolicyID: policy.ID, DeploymentPolicyRevision: policy.Revision, DeploymentPolicyHash: policy.PolicyHash, RoutingDecisionHash: decision.DecisionHash, EnvironmentID: decision.EnvironmentID, RuntimeID: decision.RuntimeID, NodeID: decision.NodeID, AgentID: decision.AgentID}}
+	snapshot := deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: record.ProjectID, Image: image, Workload: workload, SpecHash: specHash, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: record, TopologyPlanID: plan.ID, TopologyRevision: plan.Revision, TopologyHash: plan.PlanHash, ServiceConfigurationRevision: configuration.Revision, ServiceConfigurationStateHash: configuration.StateHash, DeploymentPolicyID: policy.ID, DeploymentPolicyRevision: policy.Revision, DeploymentPolicyHash: policy.PolicyHash, RoutingDecisionHash: decision.DecisionHash, EnvironmentID: decision.EnvironmentID, RuntimeID: decision.RuntimeID, NodeID: decision.NodeID, AgentID: decision.AgentID}}
 	if record.Workload.EventName == "pull_request" {
 		prNumber, ok := pullRequestNumber(record.Workload.Ref)
 		if !ok || !policy.Draft.Preview.Enabled {
@@ -205,11 +208,7 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 		}
 		snapshot.Preview = &preview
 	}
-	targetEnvironment := decision.EnvironmentID
-	if snapshot.Preview != nil {
-		targetEnvironment = snapshot.Preview.Namespace
-	}
-	snapshot.PayloadHash = hashDeploymentPayload(record.ID, targetEnvironment, workload)
+	snapshot.PayloadHash = hashDeploymentPayload(snapshot)
 	keyPrefix := "main"
 	if snapshot.Preview != nil {
 		keyPrefix = "preview"
@@ -281,27 +280,6 @@ func quantityAtLeast(limit, required string, cpu bool) bool {
 	left, lok := parse(limit)
 	right, rok := parse(required)
 	return lok && rok && left >= right
-}
-
-func automaticWorkload(service registry.ServiceRecord, assignment topologyv1.Assignment) deploymentv1.WorkloadSpec {
-	requestCPU := strconv.FormatInt(assignment.CPURequestMillicores, 10) + "m"
-	requestMi := (assignment.MemoryRequestBytes + (1 << 20) - 1) / (1 << 20)
-	if requestMi < 1 {
-		requestMi = 1
-	}
-	requestMemory := strconv.FormatInt(requestMi, 10) + "Mi"
-	limitCPU, limitMemory := requestCPU, requestMemory
-	if value := service.ResourceLimits["cpu"]; value != "" {
-		limitCPU = value
-	}
-	if value := service.ResourceLimits["memory"]; value != "" {
-		limitMemory = value
-	}
-	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: service.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(service.ContainerPort), Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: requestCPU, Memory: requestMemory}, Limits: deploymentv1.ResourceValues{CPU: limitCPU, Memory: limitMemory}}, TerminationGracePeriodSecond: 30, Exposure: deploymentv1.ExposureIntent{Mode: assignment.Exposure.Mode}}
-	if service.HealthPath != "" {
-		workload.ReadinessProbe = &deploymentv1.Probe{Path: service.HealthPath, Port: int32(service.ContainerPort), InitialDelaySeconds: 1, PeriodSeconds: 5, TimeoutSeconds: 3, FailureThreshold: 3}
-	}
-	return workload
 }
 
 func (s *Server) previewAuthority(ctx context.Context, record buildrecordv1.Record, service registry.ServiceRecord, policy deploymentpolicyv1.PreviewPolicy, prNumber int) (deploymentv1.PreviewSpec, error) {

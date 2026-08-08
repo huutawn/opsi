@@ -57,6 +57,7 @@ export type ConsoleRoute = {
   node?: string;
   session?: string;
   topology?: string;
+  topologyMode?: string;
   incident?: string;
   level?: string;
   query?: string;
@@ -103,6 +104,7 @@ export function parseRoute(search: string): ConsoleRoute {
     node: params.get("node") ?? "",
     session: params.get("session") ?? "",
     topology: params.get("topology") ?? "",
+    topologyMode: params.get("topologyMode") ?? "",
     incident: params.get("incident") ?? "",
     level: params.get("level") ?? "",
     query: params.get("query") ?? "",
@@ -116,7 +118,7 @@ export function routeHref(route: Partial<ConsoleRoute>) {
   if (normalized.projectID) params.set("project", normalized.projectID);
   params.set("view", normalized.view);
   if (normalized.tab) params.set("tab", normalized.tab);
-  for (const key of ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor", "runtime", "node", "session", "topology", "incident", "level", "query", "window"] as const) {
+  for (const key of ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor", "runtime", "node", "session", "topology", "topologyMode", "incident", "level", "query", "window"] as const) {
     if (normalized[key]) params.set(key, normalized[key]);
   }
   return `/?${params}`;
@@ -127,7 +129,7 @@ function compactViewState(view: ConsoleView, route: Partial<ConsoleRoute>) {
   const keys = view === "delivery"
     ? ["service", "build", "deployment", "status", "kind", "repository", "sha", "cursor"] as const
     : view === "infrastructure"
-      ? ["runtime", "node", "session", "service", "topology"] as const
+      ? ["runtime", "node", "session", "service", "topology", "topologyMode"] as const
       : view === "observability"
         ? ["service", "incident", "status", "level", "query", "cursor", "window"] as const
         : view === "services"

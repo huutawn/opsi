@@ -69,12 +69,8 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 	if _, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "worker", CreatedBy: firstProject.CreatedBy}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_MISMATCH") {
 		t.Fatalf("service identity mismatch err=%v", err)
 	}
-	duplicateService, err := service.CreateService(firstProject.ID, ServiceDraft{Name: "api"}, "duplicate-api-service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: duplicateService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: firstProject.CreatedBy}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_ALREADY_BOUND") {
-		t.Fatalf("repository key uniqueness err=%v", err)
+	if _, err := service.CreateService(firstProject.ID, ServiceDraft{Name: "api"}, "duplicate-api-service"); err == nil {
+		t.Fatal("duplicate project service key passed database uniqueness constraint")
 	}
 	secondRepository := testGitHubRepository(12002, installation.InstallationID)
 	if _, err := service.UpsertGitHubRepository(secondRepository); err != nil {

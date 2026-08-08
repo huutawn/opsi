@@ -45,6 +45,19 @@ import type {
 type RequestOptions = RequestInit & { write?: boolean; idempotencyKey?: string };
 const responseLimit = 2 * 1024 * 1024;
 
+export type ResolvedDeploymentRequest = {
+  schema_version: "opsi.deployment_job/v1";
+  build_record_id: string;
+  environment_id: string;
+  expected_topology_revision?: number;
+  expected_topology_hash?: string;
+  expected_configuration_revision?: number;
+  expected_configuration_state_hash?: string;
+  expected_deployment_policy_revision?: number;
+  expected_deployment_policy_hash?: string;
+  workload?: WorkloadSpec;
+};
+
 export type LocalSessionStatus = {
   authenticated: boolean;
   cloud_connected: "ok" | "failed" | "unknown";
@@ -359,21 +372,21 @@ export class LocalClient {
     });
   }
 
-  deploymentPreview(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }) {
+  deploymentPreview(projectID: string, body: ResolvedDeploymentRequest) {
     return this.call<DeploymentPreview>(`/api/local/projects/${projectID}/deployments/preview`, {
       method: "POST",
       body: JSON.stringify(body),
     });
   }
 
-  deploymentDiff(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }) {
+  deploymentDiff(projectID: string, body: ResolvedDeploymentRequest) {
     return this.call<DeploymentPreview>(`/api/local/projects/${projectID}/deployments/diff`, {
       method: "POST",
       body: JSON.stringify(body),
     });
   }
 
-  deploymentApply(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }, idempotencyKey: string) {
+  deploymentApply(projectID: string, body: ResolvedDeploymentRequest, idempotencyKey: string) {
     return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments`, {
       method: "POST",
       write: true,

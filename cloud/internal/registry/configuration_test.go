@@ -12,11 +12,12 @@ func TestCompileServiceRuntimeGeneratesCanonicalInternalHTTPEnvironment(t *testi
 	source, target := configurationServices()
 	draft := ServiceConfigurationDraft{Bindings: []ServiceBinding{{Kind: ServiceBindingInternalHTTP, TargetServiceID: target.ID, TargetServiceKey: target.Name, EnvPrefix: "API"}}}
 	applied := ServiceConfiguration{ServiceConfigurationDraft: draft, Revision: 1, StateHash: serviceConfigurationHash(draft)}
-	compiled, err := CompileServiceRuntime(source, topologyv1.Assignment{EnvironmentID: source.EnvironmentID, RuntimeID: source.RuntimeID}, applied, []ServiceRecord{source, target})
+	assignments := []topologyv1.Assignment{{ServiceKey: source.Name, EnvironmentID: "env-topology", RuntimeID: "rt-topology"}, {ServiceKey: target.Name, EnvironmentID: "env-topology", RuntimeID: "rt-topology"}}
+	compiled, err := CompileServiceRuntime(source, assignments[0], assignments, applied, []ServiceRecord{source, target})
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := deploymentv1.StableDNSName("opsi", target.Name, source.RuntimeID) + "." + deploymentv1.StableDNSName("opsi", source.ProjectID, source.EnvironmentID) + ".svc.cluster.local"
+	host := deploymentv1.StableDNSName("opsi", target.Name, assignments[1].RuntimeID) + "." + deploymentv1.StableDNSName("opsi", source.ProjectID, assignments[0].EnvironmentID) + ".svc.cluster.local"
 	want := map[string]string{"API_HOST": host, "API_PORT": "8080", "API_URL": "http://" + host + ":8080"}
 	for _, item := range compiled.Environment {
 		if want[item.Name] != item.Value {
@@ -31,15 +32,29 @@ func TestCompileServiceRuntimeGeneratesCanonicalInternalHTTPEnvironment(t *testi
 
 func TestCompileServiceRuntimeSpecsProducesNextDeploymentAuthoritiesOnly(t *testing.T) {
 	source, target := configurationServices()
-	source.Configuration = appliedConfiguration(ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/"}})
-	applied := appliedConfiguration(ServiceConfigurationDraft{PublicRoute: source.Configuration.PublicRoute, Bindings: []ServiceBinding{{Kind: ServiceBindingBrowserHTTP, TargetServiceID: target.ID, TargetServiceKey: target.Name, EnvName: "API_BASE_URL", Path: "/api"}}})
-	target.Configuration = appliedConfiguration(ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/api"}})
-	workload, exposure, err := CompileServiceRuntimeSpecs(source, topologyv1.Assignment{EnvironmentID: source.EnvironmentID, RuntimeID: source.RuntimeID, Replicas: 1, CPURequestMillicores: 100, MemoryRequestBytes: 128 * 1024 * 1024}, applied, []ServiceRecord{source, target}, "deployment-next")
+	source.EnvironmentID, source.RuntimeID = "legacy-env", "legacy-runtime"
+	source.Replicas = 9
+	source.ResourceRequests = map[string]string{"cpu": "900m", "memory": "900Mi"}
+	assignment := topologyv1.Assignment{ServiceKey: source.Name, EnvironmentID: "env-topology", RuntimeID: "rt-topology", Replicas: 2, CPURequestMillicores: 100, MemoryRequestBytes: 128 * 1024 * 1024, Exposure: topologyv1.ExposureIntent{Mode: "none"}}
+	workload, err := CompileServiceRuntimeSpecs(source, assignment, []topologyv1.Assignment{assignment}, emptyServiceConfiguration(), []ServiceRecord{source, target})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workload.Environment[0].Value != "/api" || exposure == nil || exposure.Path != "/" || exposure.DeploymentJobID != "deployment-next" {
-		t.Fatalf("compiled authorities workload=%+v exposure=%+v", workload, exposure)
+	if workload.Replicas != 2 || workload.Resources.Requests.CPU != "100m" || workload.Resources.Limits.Memory != "128Mi" {
+		t.Fatalf("topology did not override legacy service resources: %+v", workload)
+	}
+	if workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.ReadinessProbe.Path != source.HealthPath || workload.LivenessProbe.Port != int32(source.ContainerPort) {
+		t.Fatalf("health probes were not compiled from the service boundary: %+v", workload)
+	}
+}
+
+func TestCompileServiceRuntimeRejectsCrossRuntimeInternalHTTP(t *testing.T) {
+	source, target := configurationServices()
+	draft := ServiceConfigurationDraft{Bindings: []ServiceBinding{{Kind: ServiceBindingInternalHTTP, TargetServiceID: target.ID, TargetServiceKey: target.Name, EnvPrefix: "API"}}}
+	assignments := []topologyv1.Assignment{{ServiceKey: source.Name, EnvironmentID: "env-1", RuntimeID: "rt-1"}, {ServiceKey: target.Name, EnvironmentID: "env-1", RuntimeID: "rt-2"}}
+	_, err := CompileServiceRuntime(source, assignments[0], assignments, appliedConfiguration(draft), []ServiceRecord{source, target})
+	if !hasAPIErrorCode(err, "MULTI_RUNTIME_NETWORKING_UNSUPPORTED") {
+		t.Fatalf("cross-runtime internal binding err=%v", err)
 	}
 }
 
@@ -48,7 +63,8 @@ func TestBrowserHTTPUsesSameOriginPathOnly(t *testing.T) {
 	target.Configuration = appliedConfiguration(ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/api"}})
 	draft := ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "APPS.EXAMPLE.COM", Path: "/"}, Bindings: []ServiceBinding{{Kind: ServiceBindingBrowserHTTP, TargetServiceID: target.ID, TargetServiceKey: target.Name, EnvName: "API_BASE_URL"}}}
 	applied := appliedConfiguration(draft)
-	compiled, err := CompileServiceRuntime(source, topologyv1.Assignment{EnvironmentID: source.EnvironmentID, RuntimeID: source.RuntimeID}, applied, []ServiceRecord{source, target})
+	assignment := topologyv1.Assignment{ServiceKey: source.Name, EnvironmentID: source.EnvironmentID, RuntimeID: source.RuntimeID}
+	compiled, err := CompileServiceRuntime(source, assignment, []topologyv1.Assignment{assignment}, applied, []ServiceRecord{source, target})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +142,8 @@ func TestServiceConfigurationDiffTracksGeneratedEnvironmentSemantically(t *testi
 }
 
 func configurationServices() (ServiceRecord, ServiceRecord) {
-	source := ServiceRecord{ID: "svc-web", ProjectID: "proj-1", EnvironmentID: "env-1", RuntimeID: "rt-1", Name: "web", ContainerPort: 3000, Configuration: emptyServiceConfiguration()}
-	target := ServiceRecord{ID: "svc-api", ProjectID: "proj-1", EnvironmentID: "env-1", RuntimeID: "rt-1", Name: "api", ContainerPort: 8080, Configuration: emptyServiceConfiguration()}
+	source := ServiceRecord{ID: "svc-web", ProjectID: "proj-1", EnvironmentID: "env-1", RuntimeID: "rt-1", Name: "web", ContainerPort: 3000, HealthPath: "/health", Configuration: emptyServiceConfiguration()}
+	target := ServiceRecord{ID: "svc-api", ProjectID: "proj-1", EnvironmentID: "env-1", RuntimeID: "rt-1", Name: "api", ContainerPort: 8080, HealthPath: "/health", Configuration: emptyServiceConfiguration()}
 	return source, target
 }
 

@@ -18,6 +18,7 @@ import (
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -412,14 +413,7 @@ type ServiceDraft struct {
 	ResourceLimits   map[string]string `json:"resource_limits"`
 }
 
-type ServiceBinding struct {
-	Kind             string `json:"kind"`
-	TargetServiceID  string `json:"target_service_id"`
-	TargetServiceKey string `json:"target_service_key"`
-	EnvPrefix        string `json:"env_prefix,omitempty"`
-	EnvName          string `json:"env_name,omitempty"`
-	Path             string `json:"path,omitempty"`
-}
+type ServiceBinding = serviceconfigurationv1.Binding
 
 const DeploymentIntentVersion = "2026-07-opsi-deployment-intent-v1"
 
@@ -1557,6 +1551,10 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	if service.ID != snapshot.Authority.BuildRecord.ServiceID || service.Name != snapshot.Authority.BuildRecord.ServiceKey {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_SERVICE_BINDING_INVALID", Message: "service binding does not match the resolved target", RequestID: requestID}
 	}
+	configuration := normalizeStoredConfiguration(service.Configuration)
+	if configuration.Revision != snapshot.Authority.ServiceConfigurationRevision || configuration.StateHash != snapshot.Authority.ServiceConfigurationStateHash {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "SERVICE_CONFIGURATION_STALE", Message: "service configuration changed before job creation", NextAction: "review_again", RequestID: requestID}
+	}
 	node, agent, err := s.deployAgentLocked(snapshot.ProjectID, snapshot.Authority.RuntimeID, requestID)
 	if err != nil {
 		return DeploymentJob{}, false, err
@@ -1573,7 +1571,7 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 		environmentID = snapshot.Preview.Namespace
 	}
 	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: environmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
-	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
+	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "configuration": snapshot.Authority.ServiceConfigurationStateHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
 	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.NodeID, job.AgentID)
 	var exposure *exposurev1.ExposureSpec
 	if snapshot.Preview != nil {
@@ -1609,6 +1607,7 @@ func validImmutableDeploymentAuthority(snapshot deploymentv1.JobSnapshot) bool {
 		record.ProjectID == snapshot.ProjectID && record.ServiceID != "" && record.ServiceKey != "" && record.ActiveBindingID != "" &&
 		record.Build.Status == "succeeded" && snapshot.Workload.ServiceKey == record.ServiceKey &&
 		authority.TopologyPlanID != "" && authority.TopologyRevision > 0 && len(authority.TopologyHash) == 64 &&
+		len(authority.ServiceConfigurationStateHash) == 64 &&
 		authority.DeploymentPolicyID != "" && authority.DeploymentPolicyRevision > 0 && len(authority.DeploymentPolicyHash) == 64 &&
 		len(authority.RoutingDecisionHash) == 64 &&
 		authority.EnvironmentID != "" && authority.RuntimeID != "" && authority.NodeID != "" && authority.AgentID != ""

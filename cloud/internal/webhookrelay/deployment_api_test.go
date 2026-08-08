@@ -2,6 +2,7 @@ package webhookrelay
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,8 +12,12 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
+	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
@@ -35,33 +40,18 @@ func TestDecodeStrictDeploymentJSONRejectsRawKubernetesAndUnknownFields(t *testi
 	}
 }
 
-func TestWorkloadMatchesTopologyRequiresExactRequestsAndExposure(t *testing.T) {
-	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: "api", Replicas: 2, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: 8080, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: "250m", Memory: "256Mi"}, Limits: deploymentv1.ResourceValues{CPU: "500m", Memory: "512Mi"}}, TerminationGracePeriodSecond: 30, Exposure: deploymentv1.ExposureIntent{Mode: "internal"}}
-	assignment := topologyv1.Assignment{ServiceKey: "api", EnvironmentID: "env", RuntimeID: "runtime", Replicas: 2, CPURequestMillicores: 250, MemoryRequestBytes: 256 * 1024 * 1024, Exposure: topologyv1.ExposureIntent{Mode: "internal"}}
-	if !workloadMatchesTopology(workload, assignment) {
-		t.Fatal("exact topology-compatible workload was rejected")
-	}
-	weaker := workload
-	weaker.Resources.Requests.CPU = "100m"
-	if workloadMatchesTopology(weaker, assignment) {
-		t.Fatal("weaker client CPU request was accepted")
-	}
-	public := assignment
-	public.Exposure.Mode = "public"
-	if workloadMatchesTopology(workload, public) {
-		t.Fatal("R5-010 accepted an external exposure assignment")
-	}
-}
-
 func TestDeploymentPayloadHashNormalizesEnvironmentOrder(t *testing.T) {
 	first := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: "api", Replicas: 1, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: 8080, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: "100m", Memory: "128Mi"}, Limits: deploymentv1.ResourceValues{CPU: "500m", Memory: "512Mi"}}, TerminationGracePeriodSecond: 30, Environment: []deploymentv1.EnvironmentVariable{{Name: "B", Value: "2"}, {Name: "A", Value: "1"}}, Exposure: deploymentv1.ExposureIntent{Mode: "internal"}}
 	second := first
 	second.Environment = []deploymentv1.EnvironmentVariable{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}}
-	if hashDeploymentPayload("br-1", "env-1", first) != hashDeploymentPayload("br-1", "env-1", second) {
+	snapshot := func(workload deploymentv1.WorkloadSpec) deploymentv1.JobSnapshot {
+		return deploymentv1.JobSnapshot{Workload: workload, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{ID: "br-1"}, EnvironmentID: "env-1", TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), ServiceConfigurationStateHash: strings.Repeat("2", 64), DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("3", 64), RoutingDecisionHash: strings.Repeat("4", 64)}}
+	}
+	if hashDeploymentPayload(snapshot(first)) != hashDeploymentPayload(snapshot(second)) {
 		t.Fatal("normalized replay payload hashes differ")
 	}
 	second.ContainerPort++
-	if hashDeploymentPayload("br-1", "env-1", first) == hashDeploymentPayload("br-1", "env-1", second) {
+	if hashDeploymentPayload(snapshot(first)) == hashDeploymentPayload(snapshot(second)) {
 		t.Fatal("conflicting replay payload hashes match")
 	}
 }
@@ -75,6 +65,136 @@ func TestDeploymentIdempotencyKeyIsBoundedAndWhitespaceFree(t *testing.T) {
 	if !validDeploymentIdempotencyKey("r5-010:api:immutable-001") {
 		t.Fatal("rejected valid bounded idempotency key")
 	}
+}
+
+func TestResolvedDeploymentCompilesCanonicalSnapshotAndRejectsStaleOrClientSpec(t *testing.T) {
+	server, projectID, service, plan, policy := deploymentResolutionFixture(t)
+	configuration, err := server.Registry.GetServiceConfiguration(projectID, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := deploymentv1.CreateRequest{SchemaVersion: deploymentv1.JobSchemaVersion, BuildRecordID: "br-resolved", EnvironmentID: plan.Assignments[0].EnvironmentID, ExpectedTopologyRevision: plan.Revision, ExpectedTopologyHash: plan.PlanHash, ExpectedConfigurationRevision: configuration.Revision, ExpectedConfigurationStateHash: configuration.StateHash}
+	preview, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Eligible || preview.Snapshot.Authority.ServiceConfigurationRevision != configuration.Revision || preview.Snapshot.Authority.ServiceConfigurationStateHash != configuration.StateHash {
+		t.Fatalf("configuration authority missing from snapshot: %+v", preview.Snapshot.Authority)
+	}
+	workload := preview.Snapshot.Workload
+	if workload.Replicas != plan.Assignments[0].Replicas || workload.Resources.Requests.CPU != "250m" || workload.Resources.Limits.Memory != "256Mi" || workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.ReadinessProbe.Path != service.HealthPath {
+		t.Fatalf("canonical workload=%+v", workload)
+	}
+	client := request
+	client.ExpectedTopologyRevision, client.ExpectedTopologyHash, client.ExpectedConfigurationStateHash = 0, "", ""
+	client.Workload = &workload
+	client.Workload.Replicas++
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", client); deploymentAPIErrorCode(err) != "WORKLOAD_CANONICAL_MISMATCH" {
+		t.Fatalf("client mismatch err=%v", err)
+	}
+	_, err = server.Registry.ApplyServiceConfiguration(projectID, service.ID, "owner", "config-change", registry.ServiceConfigurationApplyRequest{Draft: registry.ServiceConfigurationDraft{Environment: []deploymentv1.EnvironmentVariable{{Name: "LOG_LEVEL", Value: "debug"}}}, ExpectedRevision: configuration.Revision, ExpectedStateHash: configuration.StateHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", request); deploymentAPIErrorCode(err) != "CONFIGURATION_REVIEW_STALE" {
+		t.Fatalf("stale configuration err=%v", err)
+	}
+	request.ExpectedConfigurationRevision++
+	updated, _ := server.Registry.GetServiceConfiguration(projectID, service.ID)
+	request.ExpectedConfigurationStateHash = updated.StateHash
+	request.ExpectedDeploymentPolicyRevision, request.ExpectedDeploymentPolicyHash = policy.Revision, policy.PolicyHash
+	draft := policy.Draft
+	draft.AllowUnknownCapacity = true
+	if _, err := server.Policies.Apply(context.Background(), projectID, "owner", "policy-change", deploymentpolicyv1.ApplyRequest{PolicyID: policy.ID, Draft: draft, ExpectedRevision: policy.Revision, ExpectedStateHash: policy.StateHash}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", request); deploymentAPIErrorCode(err) != "POLICY_REVIEW_STALE" {
+		t.Fatalf("stale policy err=%v", err)
+	}
+}
+
+func TestResolvedDeploymentRejectsTopologyChangedAfterReview(t *testing.T) {
+	server, projectID, service, plan, policy := deploymentResolutionFixture(t)
+	configuration, err := server.Registry.GetServiceConfiguration(projectID, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := deploymentv1.CreateRequest{SchemaVersion: deploymentv1.JobSchemaVersion, BuildRecordID: "br-resolved", EnvironmentID: plan.Assignments[0].EnvironmentID, ExpectedTopologyRevision: plan.Revision, ExpectedTopologyHash: plan.PlanHash, ExpectedConfigurationRevision: configuration.Revision, ExpectedConfigurationStateHash: configuration.StateHash}
+	draft := topologyv1.Draft{SchemaVersion: topologyv1.SchemaVersion, ProjectID: projectID, Assignments: append([]topologyv1.Assignment(nil), plan.Assignments...)}
+	draft.Assignments[0].Replicas++
+	if _, err := server.Topology.Apply(context.Background(), projectID, "owner", "topology-change", topologyv1.ApplyRequest{Draft: draft, ExpectedRevision: plan.Revision, ExpectedStateHash: plan.StateHash, PolicyID: policy.ID}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", request); deploymentAPIErrorCode(err) != "TOPOLOGY_REVIEW_STALE" {
+		t.Fatalf("stale topology err=%v", err)
+	}
+}
+
+func deploymentResolutionFixture(t *testing.T) (*Server, string, registry.ServiceRecord, topologyv1.Plan, deploymentpolicyv1.Policy) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	store := registry.NewService()
+	project, err := store.CreateProject("org-1", "Resolved", "resolved", "owner", "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := store.UpsertNode(project.ID, "node-1", "server", registry.NodeHealthy, "203.0.113.20", "", "node-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.RegisterAgent(project.ID, node.ID, "sha256:agent", "hash", "v1", "agent-key", map[string]any{"deploy": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordAgentHeartbeat(project.ID, node.ID, registry.AgentHeartbeat{Version: "v1", NodeReady: true, K3SStatus: "ready", Capabilities: map[string]any{"deploy": true}}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := store.CreateService(project.ID, registry.ServiceDraft{Name: "api", Type: "application", SourceType: "git", RepoURL: "https://example.test/api.git", Branch: "main", GitSHA: strings.Repeat("a", 40), BuildContext: ".", Dockerfile: "Dockerfile", ManifestPath: "deploy/api.yaml", ContainerPort: 8080, HealthPath: "/healthz", Replicas: 9, ResourceRequests: map[string]string{"cpu": "900m", "memory": "900Mi"}}, "service-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := topology.Facts{
+		ProjectID:    project.ID,
+		Environments: []topology.EnvironmentFact{{ID: node.EnvironmentID, ProjectID: project.ID, Status: "active"}},
+		Runtimes:     []topology.RuntimeFact{{ID: node.RuntimeID, ProjectID: project.ID, EnvironmentID: node.EnvironmentID, Type: "k3s", Status: "ready"}},
+		Services:     []topology.ServiceFact{{ID: service.ID, ProjectID: project.ID, Key: service.Name}},
+		Nodes:        []topology.NodeFact{{ID: node.ID, ProjectID: project.ID, RuntimeID: node.RuntimeID, Status: "healthy", CPUCores: 2, MemoryMB: 2048, LastSeenAt: &now}},
+		Agents:       []topology.AgentFact{{ID: agent.ID, ProjectID: project.ID, RuntimeID: node.RuntimeID, NodeID: node.ID, Status: "active", Capabilities: map[string]any{"deploy": true}, LastSeenAt: &now}},
+	}
+	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: placementAPIFacts{facts}, Now: func() time.Time { return now }}
+	topologyDraft := topologyv1.Draft{SchemaVersion: topologyv1.SchemaVersion, ProjectID: project.ID, Assignments: []topologyv1.Assignment{{ServiceKey: service.Name, EnvironmentID: node.EnvironmentID, RuntimeID: node.RuntimeID, Replicas: 2, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20, Exposure: topologyv1.ExposureIntent{Mode: "none"}}}}
+	if validation, err := topologyService.Validate(ctx, project.ID, topologyDraft, true); err != nil || !validation.Valid {
+		t.Fatalf("topology validation=%+v err=%v", validation, err)
+	}
+	topologyResult, err := topologyService.Apply(ctx, project.ID, "owner", "topology-key", topologyv1.ApplyRequest{Draft: topologyDraft}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-resolved", ProjectID: project.ID, RepositoryID: 7, RepositoryOwnerID: 8, ActiveBindingID: "binding-1", ServiceID: service.ID, ServiceKey: service.Name, CreatedAt: now, Workload: buildrecordv1.WorkloadIdentity{RepositoryID: 7, RepositoryOwnerID: 8, Ref: "refs/heads/main", EventName: "push", WorkflowRef: "o/r/.github/workflows/cd.yml@refs/heads/main", RunID: 1, RunAttempt: 1}, Build: buildrecordv1.BuildMetadata{ConfigHash: strings.Repeat("a", 64), PlanHash: strings.Repeat("b", 64), Platform: "linux/amd64", OCIRepository: "ghcr.io/o/r/api", OCIDigest: "sha256:" + strings.Repeat("c", 64), Status: "succeeded"}}
+	recordStore := buildrecord.NewMemoryStore()
+	if _, _, err := recordStore.Create(ctx, "payload", record); err != nil {
+		t.Fatal(err)
+	}
+	binding := placementAPIBindings{buildrecord.Binding{ProjectID: project.ID, BindingID: record.ActiveBindingID, ServiceID: service.ID, ServiceKey: service.Name, RepositoryID: record.RepositoryID, RepositoryOwnerID: record.RepositoryOwnerID}}
+	policyService := deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: recordStore, Bindings: binding, Topology: topologyService, Now: func() time.Time { return now }}
+	policyResult, err := policyService.Apply(ctx, project.ID, "owner", "policy-key", deploymentpolicyv1.ApplyRequest{Draft: deploymentpolicyv1.Draft{SchemaVersion: deploymentpolicyv1.SchemaVersion, ProjectID: project.ID, RepositoryID: record.RepositoryID, ServiceKeys: []string{service.Name}, WorkflowRefs: []string{record.Workload.WorkflowRef}, AllowedEvents: []string{record.Workload.EventName}, AllowedGitRefs: []string{record.Workload.Ref}, EnvironmentID: node.EnvironmentID, AllowedRuntimeIDs: []string{node.RuntimeID}, AllowedOCIRepositories: []string{record.Build.OCIRepository}, AllowedPlatforms: []string{record.Build.Platform}, AllowedConfigHashes: []string{record.Build.ConfigHash}, AllowedBuildPlanHashes: []string{record.Build.PlanHash}, Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Config{})
+	server.Registry = store
+	server.BuildRecords = buildrecord.Service{Store: recordStore}
+	server.Topology = topologyService
+	server.Policies = policyService
+	return server, project.ID, service, topologyResult.Plan, policyResult.Policy
+}
+
+func deploymentAPIErrorCode(err error) string {
+	if value, ok := err.(registry.APIError); ok {
+		return value.Code
+	}
+	return ""
 }
 
 func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
@@ -102,7 +222,7 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: service.Name, Replicas: 1, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: 8080, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: "100m", Memory: "128Mi"}, Limits: deploymentv1.ResourceValues{CPU: "500m", Memory: "512Mi"}}, TerminationGracePeriodSecond: 30, Exposure: deploymentv1.ExposureIntent{Mode: "internal"}}
 	workloadHash, _ := workload.Hash()
 	image, _ := deploymentv1.NewImmutableImage("ghcr.io/example/api", "sha256:"+strings.Repeat("a", 64))
-	snapshot := deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: project.ID, Image: image, Workload: workload, SpecHash: workloadHash, PayloadHash: "base-payload", Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-1", ProjectID: project.ID, ServiceID: service.ID, ServiceKey: service.Name, ActiveBindingID: "binding-1", Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, TopologyPlanID: "topology-1", TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), DeploymentPolicyID: "policy-1", DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("2", 64), RoutingDecisionHash: strings.Repeat("3", 64), EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, NodeID: node.ID, AgentID: agent.ID}}
+	snapshot := deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: project.ID, Image: image, Workload: workload, SpecHash: workloadHash, PayloadHash: "base-payload", Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-1", ProjectID: project.ID, ServiceID: service.ID, ServiceKey: service.Name, ActiveBindingID: "binding-1", Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, TopologyPlanID: "topology-1", TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), ServiceConfigurationRevision: service.Configuration.Revision, ServiceConfigurationStateHash: service.Configuration.StateHash, DeploymentPolicyID: "policy-1", DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("2", 64), RoutingDecisionHash: strings.Repeat("3", 64), EnvironmentID: service.EnvironmentID, RuntimeID: service.RuntimeID, NodeID: node.ID, AgentID: agent.ID}}
 	baseJob, _, err := store.StartImmutableDeployment(snapshot, "owner", "base-key", "base-request")
 	if err != nil {
 		t.Fatal(err)

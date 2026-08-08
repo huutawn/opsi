@@ -9,38 +9,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
 const (
-	ServiceConfigurationSchemaVersion = "opsi.service_configuration/v1"
-	ServiceBindingInternalHTTP        = "internal_http"
-	ServiceBindingBrowserHTTP         = "browser_http"
+	ServiceConfigurationSchemaVersion = serviceconfigurationv1.SchemaVersion
+	ServiceBindingInternalHTTP        = serviceconfigurationv1.BindingInternalHTTP
+	ServiceBindingBrowserHTTP         = serviceconfigurationv1.BindingBrowserHTTP
 )
 
-type PublicRouteIntent struct {
-	Hostname string `json:"hostname"`
-	Path     string `json:"path"`
-}
-
-type ServiceConfigurationDraft struct {
-	SchemaVersion string                             `json:"schema_version"`
-	Environment   []deploymentv1.EnvironmentVariable `json:"environment,omitempty"`
-	PublicRoute   *PublicRouteIntent                 `json:"public_route,omitempty"`
-	Bindings      []ServiceBinding                   `json:"bindings,omitempty"`
-}
-
-type ServiceConfiguration struct {
-	ServiceConfigurationDraft
-	Revision  uint64     `json:"revision"`
-	StateHash string     `json:"state_hash"`
-	AppliedBy string     `json:"applied_by,omitempty"`
-	AppliedAt *time.Time `json:"applied_at,omitempty"`
-}
+type PublicRouteIntent = serviceconfigurationv1.PublicRouteIntent
+type ServiceConfigurationDraft = serviceconfigurationv1.ServiceConfigurationDraft
+type ServiceConfiguration = serviceconfigurationv1.Configuration
 
 type GeneratedEnvironment struct {
 	Name    string `json:"name"`
@@ -106,42 +90,11 @@ func emptyServiceConfiguration() ServiceConfiguration {
 }
 
 func normalizeServiceConfigurationDraft(draft ServiceConfigurationDraft) ServiceConfigurationDraft {
-	draft.SchemaVersion = ServiceConfigurationSchemaVersion
-	draft.Environment = append([]deploymentv1.EnvironmentVariable(nil), draft.Environment...)
-	draft.Bindings = append([]ServiceBinding(nil), draft.Bindings...)
-	sort.Slice(draft.Environment, func(i, j int) bool { return draft.Environment[i].Name < draft.Environment[j].Name })
-	if draft.PublicRoute != nil {
-		route := *draft.PublicRoute
-		if hostname, err := exposurev1.NormalizeHostname(route.Hostname); err == nil {
-			route.Hostname = hostname
-		}
-		if path, err := exposurev1.NormalizePath(route.Path); err == nil {
-			route.Path = path
-		}
-		draft.PublicRoute = &route
-	}
-	for i := range draft.Bindings {
-		binding := &draft.Bindings[i]
-		binding.EnvPrefix = strings.TrimSpace(binding.EnvPrefix)
-		binding.EnvName = strings.TrimSpace(binding.EnvName)
-		if binding.Kind == ServiceBindingBrowserHTTP && binding.Path == "" {
-			binding.Path = "/api"
-		}
-		if path, err := exposurev1.NormalizePath(binding.Path); err == nil && binding.Path != "" {
-			binding.Path = path
-		}
-	}
-	sort.Slice(draft.Bindings, func(i, j int) bool {
-		first, second := draft.Bindings[i], draft.Bindings[j]
-		return first.Kind+"\x00"+first.TargetServiceID+"\x00"+first.TargetServiceKey+"\x00"+first.EnvPrefix+"\x00"+first.EnvName+"\x00"+first.Path < second.Kind+"\x00"+second.TargetServiceID+"\x00"+second.TargetServiceKey+"\x00"+second.EnvPrefix+"\x00"+second.EnvName+"\x00"+second.Path
-	})
-	return draft
+	return serviceconfigurationv1.Normalize(draft)
 }
 
 func serviceConfigurationHash(draft ServiceConfigurationDraft) string {
-	data, _ := json.Marshal(normalizeServiceConfigurationDraft(draft))
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
+	return serviceconfigurationv1.StateHash(draft)
 }
 
 func validateServiceConfiguration(source ServiceRecord, draft ServiceConfigurationDraft, services []ServiceRecord) (ServiceConfigurationDraft, []GeneratedEnvironment, error) {
@@ -202,10 +155,7 @@ func validateServiceConfiguration(source ServiceRecord, draft ServiceConfigurati
 			if binding.EnvPrefix == "" {
 				return draft, nil, configurationError("ENV_PREFIX_REQUIRED", fmt.Sprintf("bindings[%d].env_prefix", index), "internal HTTP requires env_prefix")
 			}
-			namespace := deploymentv1.StableDNSName("opsi", source.ProjectID, source.EnvironmentID)
-			resource := deploymentv1.StableDNSName("opsi", target.Name, source.RuntimeID)
-			host := resource + "." + namespace + ".svc.cluster.local"
-			values = []deploymentv1.EnvironmentVariable{{Name: binding.EnvPrefix + "_HOST", Value: host}, {Name: binding.EnvPrefix + "_PORT", Value: strconv.Itoa(target.ContainerPort)}, {Name: binding.EnvPrefix + "_URL", Value: "http://" + host + ":" + strconv.Itoa(target.ContainerPort)}}
+			values = []deploymentv1.EnvironmentVariable{{Name: binding.EnvPrefix + "_HOST"}, {Name: binding.EnvPrefix + "_PORT", Value: strconv.Itoa(target.ContainerPort)}, {Name: binding.EnvPrefix + "_URL"}}
 		case ServiceBindingBrowserHTTP:
 			if draft.PublicRoute == nil || target.Configuration.PublicRoute == nil {
 				return draft, nil, configurationError("BROWSER_ROUTE_REQUIRED", fmt.Sprintf("bindings[%d]", index), "browser HTTP requires public routes on source and target")
@@ -244,7 +194,7 @@ func validateServiceConfiguration(source ServiceRecord, draft ServiceConfigurati
 	return draft, generated, nil
 }
 
-func CompileServiceRuntime(source ServiceRecord, assignment topologyv1.Assignment, applied ServiceConfiguration, services []ServiceRecord) (CompiledServiceRuntime, error) {
+func CompileServiceRuntime(source ServiceRecord, assignment topologyv1.Assignment, assignments []topologyv1.Assignment, applied ServiceConfiguration, services []ServiceRecord) (CompiledServiceRuntime, error) {
 	draft, generated, err := validateServiceConfiguration(source, applied.ServiceConfigurationDraft, services)
 	if err != nil {
 		return CompiledServiceRuntime{}, err
@@ -259,8 +209,15 @@ func CompileServiceRuntime(source ServiceRecord, assignment topologyv1.Assignmen
 		target := targets[binding.TargetServiceID]
 		value := item.Value
 		if binding.Kind == ServiceBindingInternalHTTP {
+			targetAssignment, ok := serviceAssignment(assignments, target.Name, assignment.EnvironmentID)
+			if !ok {
+				return CompiledServiceRuntime{}, configurationError("TARGET_ASSIGNMENT_MISSING", fmt.Sprintf("bindings[%d]", item.Binding), "internal HTTP target must have an assignment in the source environment")
+			}
+			if targetAssignment.RuntimeID != assignment.RuntimeID {
+				return CompiledServiceRuntime{}, configurationError("MULTI_RUNTIME_NETWORKING_UNSUPPORTED", fmt.Sprintf("bindings[%d]", item.Binding), "manual v1 internal HTTP requires source and target on the same runtime")
+			}
 			namespace := deploymentv1.StableDNSName("opsi", source.ProjectID, assignment.EnvironmentID)
-			resource := deploymentv1.StableDNSName("opsi", target.Name, assignment.RuntimeID)
+			resource := deploymentv1.StableDNSName("opsi", target.Name, targetAssignment.RuntimeID)
 			host := resource + "." + namespace + ".svc.cluster.local"
 			switch {
 			case strings.HasSuffix(item.Name, "_HOST"):
@@ -278,36 +235,39 @@ func CompileServiceRuntime(source ServiceRecord, assignment topologyv1.Assignmen
 	return CompiledServiceRuntime{Environment: environment, PublicRoute: draft.PublicRoute}, nil
 }
 
-// CompileServiceRuntimeSpecs prepares the next deployment authority without
-// creating a deployment job or contacting the cluster.
-func CompileServiceRuntimeSpecs(source ServiceRecord, assignment topologyv1.Assignment, applied ServiceConfiguration, services []ServiceRecord, deploymentJobID string) (deploymentv1.WorkloadSpec, *exposurev1.ExposureSpec, error) {
-	compiled, err := CompileServiceRuntime(source, assignment, applied, services)
+// CompileServiceRuntimeSpecs is the single source of truth for immutable workloads.
+func CompileServiceRuntimeSpecs(source ServiceRecord, assignment topologyv1.Assignment, assignments []topologyv1.Assignment, applied ServiceConfiguration, services []ServiceRecord) (deploymentv1.WorkloadSpec, error) {
+	compiled, err := CompileServiceRuntime(source, assignment, assignments, applied, services)
 	if err != nil {
-		return deploymentv1.WorkloadSpec{}, nil, err
+		return deploymentv1.WorkloadSpec{}, err
 	}
-	cpu := source.ResourceRequests["cpu"]
-	if cpu == "" {
-		cpu = strconv.FormatInt(assignment.CPURequestMillicores, 10) + "m"
+	if source.ContainerPort < 1 || source.ContainerPort > 65535 {
+		return deploymentv1.WorkloadSpec{}, configurationError("CONTAINER_PORT_MISSING", "container_port", "service must declare a valid container port")
 	}
-	memory := source.ResourceRequests["memory"]
-	if memory == "" {
-		memory = strconv.FormatInt((assignment.MemoryRequestBytes+1024*1024-1)/(1024*1024), 10) + "Mi"
+	if source.HealthPath == "" {
+		return deploymentv1.WorkloadSpec{}, configurationError("HEALTH_PATH_MISSING", "health_path", "service must declare a health path")
 	}
-	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: source.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(source.ContainerPort), Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}, Limits: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}}, TerminationGracePeriodSecond: 30, Environment: compiled.Environment, Exposure: deploymentv1.ExposureIntent{Mode: "none"}}
-	if compiled.PublicRoute != nil {
-		workload.Exposure.Mode = "internal"
+	if assignment.Exposure.Mode != "none" && assignment.Exposure.Mode != "internal" {
+		return deploymentv1.WorkloadSpec{}, configurationError("PUBLIC_EXPOSURE_UNSUPPORTED", "exposure.mode", "this deployment flow supports internal workloads only")
 	}
+	cpu := strconv.FormatInt(assignment.CPURequestMillicores, 10) + "m"
+	memory := strconv.FormatInt((assignment.MemoryRequestBytes+1024*1024-1)/(1024*1024), 10) + "Mi"
+	readiness := &deploymentv1.Probe{Path: source.HealthPath, Port: int32(source.ContainerPort), InitialDelaySeconds: 2, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 6}
+	liveness := *readiness
+	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: source.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(source.ContainerPort), ReadinessProbe: readiness, LivenessProbe: &liveness, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}, Limits: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}}, TerminationGracePeriodSecond: 30, Environment: compiled.Environment, Exposure: deploymentv1.ExposureIntent{Mode: assignment.Exposure.Mode}}
 	if err := workload.Validate(); err != nil {
-		return deploymentv1.WorkloadSpec{}, nil, err
+		return deploymentv1.WorkloadSpec{}, err
 	}
-	if compiled.PublicRoute == nil {
-		return workload, nil, nil
+	return workload, nil
+}
+
+func serviceAssignment(assignments []topologyv1.Assignment, serviceKey, environmentID string) (topologyv1.Assignment, bool) {
+	for _, assignment := range assignments {
+		if assignment.ServiceKey == serviceKey && assignment.EnvironmentID == environmentID {
+			return assignment, true
+		}
 	}
-	exposure, err := (exposurev1.ExposureSpec{SchemaVersion: exposurev1.SchemaVersion, ProjectID: source.ProjectID, EnvironmentID: assignment.EnvironmentID, RuntimeID: assignment.RuntimeID, ServiceKey: source.Name, DeploymentJobID: deploymentJobID, Hostname: compiled.PublicRoute.Hostname, Path: compiled.PublicRoute.Path, ServicePort: int32(source.ContainerPort), TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled}}).Canonicalize()
-	if err != nil {
-		return deploymentv1.WorkloadSpec{}, nil, err
-	}
-	return workload, &exposure, nil
+	return topologyv1.Assignment{}, false
 }
 
 func configurationError(code, field, message string) error {

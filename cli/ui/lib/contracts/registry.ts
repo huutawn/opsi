@@ -272,7 +272,7 @@ export type DeploymentJob = {
 	 snapshot?: {
 		project_id: string;
 		image: { repository: string; digest: string; reference: string };
-		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; deployment_policy_id: string; deployment_policy_revision: number; runtime_id: string; node_id: string; agent_id: string };
+		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; topology_hash?: string; service_configuration_revision?: number; service_configuration_state_hash?: string; deployment_policy_id: string; deployment_policy_revision: number; deployment_policy_hash?: string; runtime_id: string; node_id: string; agent_id: string };
 		workload: WorkloadSpec;
 		spec_hash: string;
 		preview?: PreviewSpec;
