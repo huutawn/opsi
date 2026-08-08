@@ -206,8 +206,9 @@ export class LocalClient {
     return this.call<Readiness>(`/api/local/projects/${projectID}/readiness`);
   }
 
-  nodes(projectID: string) {
-    return this.call<NodeRecord[]>(`/api/local/projects/${projectID}/nodes`);
+  async nodes(projectID: string) {
+    const response = await this.call<{ nodes: NodeRecord[] }>(`/api/local/projects/${projectID}/nodes`);
+    return response.nodes;
   }
 
   node(projectID: string, nodeID: string) {

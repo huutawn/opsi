@@ -184,7 +184,7 @@ async function respond(route: Route, state: ReturnType<typeof applicationState>)
   if (path === "/api/local/session") return fulfill(route, { authenticated: true, cloud_connected: "ok", agent_connected: "unavailable", org_id: "org-1", project_id: "proj-1" });
   if (path === "/api/local/projects") return fulfill(route, { projects: [{ id: "proj-1", org_id: "org-1", name: "Example", slug: "example", status: "ready" }] });
   if (path.endsWith("/readiness")) return fulfill(route, { project_id: "proj-1", status: "ready", can_deploy: false });
-  if (path.endsWith("/nodes")) return fulfill(route, []);
+  if (path.endsWith("/nodes")) return fulfill(route, { nodes: [] });
   if (path.endsWith("/services")) return fulfill(route, { services: state.services });
   if (path.endsWith("/deployments")) return fulfill(route, { deployments: [] });
   if (path.endsWith("/bootstrap-sessions")) return fulfill(route, { sessions: [] });

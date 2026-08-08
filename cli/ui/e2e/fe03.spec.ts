@@ -503,7 +503,7 @@ async function respondWithData(route: Route, data: ReturnType<typeof fixture>, p
   if (path === "/api/local/session") body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: projectID };
   else if (path === "/api/local/projects") body = { projects: data.projects };
   else if (path.endsWith("/readiness")) body = { project_id: projectID, status: "degraded", can_deploy: true };
-  else if (path.endsWith("/nodes")) body = data.nodes;
+  else if (path.endsWith("/nodes")) body = { nodes: data.nodes };
   else if (/\/nodes\/[^/]+$/.test(path)) body = { node: data.nodes.find((item) => path.endsWith(item.id)), open_bootstrap_events: data.bootstrapEvents, recent_deployment_jobs: data.deployments };
 	else if (/\/services\/[^/]+\/configuration\/(preview|validate|diff|apply)$/.test(path)) {
 		const serviceID = path.split("/").at(-3) ?? "";

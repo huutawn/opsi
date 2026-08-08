@@ -259,7 +259,7 @@ async function respond(route: Route, state: State) {
   if (path === "/api/local/session") body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: "proj-1" };
   else if (path === "/api/local/projects") body = { projects: state.projects };
   else if (path.endsWith("/readiness")) body = { project_id: "proj-1", status: "ready", can_deploy: true };
-  else if (path.endsWith("/nodes")) body = state.nodes;
+  else if (path.endsWith("/nodes")) body = { nodes: state.nodes };
   else if (path.endsWith("/services")) body = { services: state.services };
   else if (path.endsWith("/deployments")) body = { deployments: state.deployments };
   else if (/\/deployments\/[^/]+$/.test(path)) body = state.deployments.find((item) => item.id === path.split("/").at(-1));

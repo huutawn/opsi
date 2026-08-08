@@ -625,7 +625,7 @@ async function respond(route: Route, scenario: Scenario) {
   else if (path === "/api/local/session/project") body = { status: "selected", project_id: projectID };
   else if (path === "/api/local/projects") body = { projects: data.projects };
   else if (path.endsWith("/readiness")) body = data.readiness;
-  else if (path.endsWith("/nodes")) body = data.nodes;
+  else if (path.endsWith("/nodes")) body = { nodes: data.nodes };
   else if (path.endsWith("/services")) body = { services: data.services };
   else if (path.endsWith("/deployments")) body = { deployments: data.deployments };
   else if (/\/deployments\/[^/]+\/events$/.test(path)) body = { events: [] };

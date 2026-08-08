@@ -265,7 +265,7 @@ async function respond(route: Route, scenario: Scenario, requests: Array<{ path:
   if (path.endsWith("/session/token/rotate")) return json(route, { rotated: true, revoked_old: true });
   if (path.endsWith("/session/token/revoke")) return json(route, { authenticated: false, revoked: true });
   if (path.endsWith("/readiness")) return json(route, { project_id: projectID, status: "ready", can_deploy: true });
-  if (path.endsWith("/nodes")) return json(route, []);
+  if (path.endsWith("/nodes")) return json(route, { nodes: [] });
   if (path.endsWith("/services")) return json(route, { services: [{ id: "svc-web", name: "web", type: "application", status: "ready", source_type: "image", replicas: 2 }] });
   if (path.endsWith("/deployments")) return json(route, { deployments: [] });
   if (path.endsWith("/bootstrap-sessions")) return json(route, { sessions: [] });
