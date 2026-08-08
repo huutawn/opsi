@@ -223,7 +223,7 @@ code, .monoWrap { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, mono
 .longValue { overflow-wrap: anywhere; }
 .detailDrawer h3 { margin: 0 0 5px; font-size: 14px; }
 
-.nativeDialog { width: min(520px, calc(100vw - 28px)); max-width: 100%; border: 1px solid var(--line-strong); border-radius: 12px; padding: 24px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.nativeDialog { width: min(520px, calc(100vw - 28px)); max-width: 100%; margin: auto; border: 1px solid var(--line-strong); border-radius: 12px; padding: 24px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
 .nativeDialog::backdrop { background: rgb(32 33 31 / 40%); }
 .nativeDialog > form:first-child { position: absolute; top: 13px; right: 13px; }
 .nativeDialog h2 { margin: 0 0 7px; font-size: 22px; letter-spacing: -.03em; }

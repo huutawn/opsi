@@ -29,7 +29,8 @@ FROM personal_access_tokens p
 JOIN users u ON u.id = p.user_id
 JOIN project_memberships m ON m.user_id = p.user_id
 JOIN projects pr ON pr.id = m.project_id
-WHERE ($1 = '' OR m.project_id = $1)`, projectID)
+WHERE ($1 = '' OR m.project_id = $1)
+ORDER BY p.created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +53,8 @@ SELECT p.id, p.user_id, u.email, m.org_id, m.role, p.token_hash, p.expires_at, p
 FROM personal_access_tokens p
 JOIN users u ON u.id = p.user_id
 JOIN user_memberships m ON m.user_id = p.user_id
-WHERE m.org_id = $1 AND m.status = 'active'`, orgID)
+WHERE m.org_id = $1 AND m.status = 'active'
+ORDER BY p.created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}

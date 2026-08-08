@@ -40,6 +40,21 @@ func TestVerifyPATResolvesSingleProjectAndRejectsAmbiguousContext(t *testing.T) 
 	}
 }
 
+func TestVerifyPATScopedRequestStopsAtFirstValidCandidate(t *testing.T) {
+	hash, err := HashPAT("pat_live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []Candidate{
+		{ID: "newest", UserID: "u", ProjectID: "proj", Role: "Owner", Hash: hash, ExpiresAt: time.Now().Add(time.Hour)},
+		{ID: "older", UserID: "u", ProjectID: "proj", Role: "Owner", Hash: hash, ExpiresAt: time.Now().Add(time.Hour), Revoked: true},
+	}
+	result, err := (Service{Store: MemoryStore{Candidates: candidates}}).VerifyPAT(context.Background(), VerifyRequest{Token: "pat_live", ProjectID: "proj"})
+	if err != nil || result.TokenID != "newest" {
+		t.Fatalf("scoped verification result=%+v err=%v", result, err)
+	}
+}
+
 func TestVerifyOrgPATReturnsOrgMembershipRole(t *testing.T) {
 	hash, err := HashPAT("pat_live")
 	if err != nil {

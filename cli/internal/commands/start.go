@@ -456,6 +456,9 @@ func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.C
 	body.ProjectID = strings.TrimSpace(body.ProjectID)
 	state := newLocalSessionToken()
 	callback := "http://" + r.Host + "/api/local/session/callback"
+	if body.ProjectID != "" {
+		callback += "?project=" + url.QueryEscape(body.ProjectID)
+	}
 	payload, _ := json.Marshal(map[string]any{"local_callback": callback, "local_state": state, "project_id": body.ProjectID})
 	resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/browser/start", "", payload)
 	if err != nil {
@@ -492,6 +495,7 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	code, state := r.URL.Query().Get("code"), r.URL.Query().Get("state")
+	projectID := strings.TrimSpace(r.URL.Query().Get("project"))
 	flow.mu.Lock()
 	expiresAt, ok := flow.states[state]
 	if ok {
@@ -503,7 +507,7 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	if authError := browserAuthErrorCode(r.URL.Query().Get("error")); authError != "" {
-		http.Redirect(w, r, "/?auth_error="+url.QueryEscape(authError), http.StatusFound)
+		http.Redirect(w, r, localBrowserAuthRedirect(projectID, "auth_error", authError), http.StatusFound)
 		return
 	}
 	if code == "" {
@@ -535,7 +539,15 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	flow.setSession(out.Session)
-	http.Redirect(w, r, "/?auth=ok", http.StatusFound)
+	http.Redirect(w, r, localBrowserAuthRedirect(out.Session.ProjectID, "auth", "ok"), http.StatusFound)
+}
+
+func localBrowserAuthRedirect(projectID, key, value string) string {
+	query := url.Values{key: []string{value}}
+	if projectID != "" {
+		query.Set("project", projectID)
+	}
+	return "/?" + query.Encode()
 }
 
 func browserAuthErrorCode(code string) string {

@@ -24,6 +24,39 @@ func requirePostgresTestDSN(t *testing.T, name string) string {
 	return dsn
 }
 
+func TestPostgresCreateProjectGrantsCreatorOwnerMembership(t *testing.T) {
+	db, err := sql.Open("pgx", requirePostgresTestDSN(t, "project owner membership"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := postgres.Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	orgID, userID := "org-owner-"+suffix, "user-owner-"+suffix
+	if _, err := db.ExecContext(ctx, `INSERT INTO users(id,email) VALUES($1,$2)`, userID, userID+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO organizations(id,name,slug) VALUES($1,$2,$3)`, orgID, "Owner Membership", orgID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM organizations WHERE id=$1`, orgID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+	service := PostgresService{DB: db, Now: func() time.Time { return time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC) }}
+	project, err := service.CreateProject(orgID, "Owner Membership", "owner-membership-"+suffix, userID, "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var role string
+	if err := db.QueryRowContext(ctx, `SELECT role FROM project_memberships WHERE project_id=$1 AND user_id=$2`, project.ID, userID).Scan(&role); err != nil || role != "owner" {
+		t.Fatalf("creator membership role=%q err=%v", role, err)
+	}
+}
+
 func TestPostgresBootstrapCheckpointMigrationUpgrade(t *testing.T) {
 	dsn := requirePostgresTestDSN(t, "bootstrap checkpoint migration upgrade")
 	db, err := sql.Open("pgx", dsn)

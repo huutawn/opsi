@@ -57,6 +57,9 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		)`,
 		`ALTER TABLE project_memberships DROP CONSTRAINT IF EXISTS project_memberships_role_check`,
 		`ALTER TABLE project_memberships ADD CONSTRAINT project_memberships_role_check CHECK (role IN ('owner','admin','developer','viewer','support','Owner','Developer','Viewer'))`,
+		`INSERT INTO project_memberships(project_id,user_id,role,created_at)
+		 SELECT id,created_by,'owner',created_at FROM projects WHERE created_by IS NOT NULL
+		 ON CONFLICT (project_id,user_id) DO NOTHING`,
 		`CREATE TABLE IF NOT EXISTS environments (
 			id TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

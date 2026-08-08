@@ -70,6 +70,11 @@ func CreateProjectInTx(ctx context.Context, tx *sql.Tx, orgID, name, slug, creat
 	if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id, org_id, name, slug, status, created_by, created_at, updated_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8)`, project.ID, project.OrgID, project.Name, project.Slug, project.Status, project.CreatedBy, project.CreatedAt, project.UpdatedAt); err != nil {
 		return Project{}, err
 	}
+	if project.CreatedBy != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_memberships(project_id,user_id,role,created_at) VALUES($1,$2,'owner',$3)`, project.ID, project.CreatedBy, now); err != nil {
+			return Project{}, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO environments(id, org_id, project_id, name, type, status, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, env.ID, env.OrgID, env.ProjectID, env.Name, env.Type, env.Status, env.CreatedAt, env.UpdatedAt); err != nil {
 		return Project{}, err
 	}

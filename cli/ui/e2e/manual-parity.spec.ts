@@ -29,6 +29,13 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await page.getByLabel("Switch project").click();
   await page.getByRole("link", { name: "Browse all projects", exact: true }).click();
   await page.getByRole("button", { name: "New project", exact: true }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create project" });
+  const dialogBox = await createDialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(dialogBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(Math.abs(dialogBox!.x + dialogBox!.width / 2 - viewport!.width / 2)).toBeLessThan(2);
+  expect(Math.abs(dialogBox!.y + dialogBox!.height / 2 - viewport!.height / 2)).toBeLessThan(2);
   await page.getByLabel("Name").fill("Created Project");
   await page.getByLabel("Slug").fill("created");
   await page.getByRole("button", { name: "Review project" }).click();

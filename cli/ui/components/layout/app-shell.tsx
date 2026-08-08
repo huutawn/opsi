@@ -128,7 +128,7 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
     const query = params.toString();
     window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
   }, []);
-  async function signIn() { setBusy(true); setError(""); try { const next = await client.startLogin(); window.location.assign(next.auth_url); } catch (cause) { setBusy(false); setError((cause as Error).message || "Opsi sign-in is unavailable."); } }
+  async function signIn() { setBusy(true); setError(""); try { const projectID = new URLSearchParams(window.location.search).get("project") || undefined; const next = await client.startLogin(projectID); window.location.assign(next.auth_url); } catch (cause) { setBusy(false); setError((cause as Error).message || "Opsi sign-in is unavailable."); } }
   return <main className="authGate"><section className="authGateCard" aria-labelledby="authGateTitle"><div className="authMark" aria-hidden="true">O</div><p className="eyebrow">Opsi</p><h1 id="authGateTitle">{checking ? "Checking your session" : "Sign in to Opsi"}</h1><p className="authGateText">{checking ? "Opsi is checking the local keychain and Cloud connection." : "Continue with the GitHub account linked to your Opsi workspace."}</p>{error ? <div className="authGateError" role="alert"><b>Sign-in failed.</b> {error} Start a new sign-in when ready.</div> : null}{!error && message ? <p className="authGateHint">{message}</p> : null}{!checking ? <button className="primary authGateButton" disabled={busy} onClick={() => void signIn()} type="button">{busy ? "Opening GitHub…" : "Continue with GitHub"}</button> : null}<p className="authGatePrivacy">The resulting PAT stays in your OS keychain.</p></section></main>;
 }
 
