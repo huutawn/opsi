@@ -127,6 +127,51 @@ func TestResolvedDeploymentCompilesCanonicalSnapshotAndRejectsStaleOrClientSpec(
 	}
 }
 
+func TestR5017Run2PublicTopologyWithValidRouteCompilesInternalWorkload(t *testing.T) {
+	server, projectID, service, plan, policy := deploymentResolutionFixture(t)
+	configuration, err := server.Registry.GetServiceConfiguration(projectID, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := topologyv1.Draft{SchemaVersion: topologyv1.SchemaVersion, ProjectID: projectID, Assignments: append([]topologyv1.Assignment(nil), plan.Assignments...)}
+	draft.Assignments[0].Exposure.Mode = "public"
+	topologyResult, err := server.Topology.Apply(context.Background(), projectID, "owner", "public-topology", topologyv1.ApplyRequest{Draft: draft, ExpectedRevision: plan.Revision, ExpectedStateHash: plan.StateHash, PolicyID: policy.ID}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := deploymentv1.CreateRequest{SchemaVersion: deploymentv1.JobSchemaVersion, BuildRecordID: "br-resolved", EnvironmentID: draft.Assignments[0].EnvironmentID, ExpectedTopologyRevision: topologyResult.Plan.Revision, ExpectedTopologyHash: topologyResult.Plan.PlanHash, ExpectedConfigurationRevision: configuration.Revision, ExpectedConfigurationStateHash: configuration.StateHash}
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", request); deploymentAPIErrorCode(err) != "PUBLIC_ROUTE_REQUIRED" {
+		t.Fatalf("public preview without route err=%v", err)
+	}
+	configured, err := server.Registry.ApplyServiceConfiguration(projectID, service.ID, "owner", "public-route", registry.ServiceConfigurationApplyRequest{Draft: registry.ServiceConfigurationDraft{PublicRoute: &registry.PublicRouteIntent{Hostname: "apps.example.com", Path: "/api"}}, ExpectedRevision: configuration.Revision, ExpectedStateHash: configuration.StateHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ExpectedConfigurationRevision = configured.Configuration.Revision
+	request.ExpectedConfigurationStateHash = configured.Configuration.StateHash
+	preview, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", request)
+	if deploymentAPIErrorCode(err) == "PUBLIC_EXPOSURE_UNSUPPORTED" {
+		t.Fatalf("Run 2 regression: valid public topology was rejected: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Eligible || preview.Snapshot.Workload.Exposure.Mode != "internal" || topologyResult.Plan.Assignments[0].Exposure.Mode != "public" || configured.Configuration.PublicRoute == nil || configured.Configuration.PublicRoute.Hostname != "apps.example.com" || configured.Configuration.PublicRoute.Path != "/api" {
+		t.Fatalf("preview=%+v topology=%+v configuration=%+v", preview, topologyResult.Plan.Assignments[0], configured.Configuration)
+	}
+	legacy := request
+	legacy.Workload = &preview.Snapshot.Workload
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", legacy); err != nil {
+		t.Fatalf("canonical internal legacy workload rejected: %v", err)
+	}
+	publicWorkload := preview.Snapshot.Workload
+	publicWorkload.Exposure.Mode = "public"
+	legacy.Workload = &publicWorkload
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", legacy); deploymentAPIErrorCode(err) != "WORKLOAD_SPEC_INVALID" {
+		t.Fatalf("legacy public workload err=%v", err)
+	}
+}
+
 func TestResolvedDeploymentRejectsTopologyChangedAfterReview(t *testing.T) {
 	server, projectID, service, plan, policy := deploymentResolutionFixture(t)
 	configuration, err := server.Registry.GetServiceConfiguration(projectID, service.ID)

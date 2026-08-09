@@ -247,14 +247,21 @@ func CompileServiceRuntimeSpecs(source ServiceRecord, assignment topologyv1.Assi
 	if source.HealthPath == "" {
 		return deploymentv1.WorkloadSpec{}, configurationError("HEALTH_PATH_MISSING", "health_path", "service must declare a health path")
 	}
-	if assignment.Exposure.Mode != "none" && assignment.Exposure.Mode != "internal" {
+	workloadExposure := assignment.Exposure.Mode
+	if workloadExposure == "public" {
+		if compiled.PublicRoute == nil {
+			return deploymentv1.WorkloadSpec{}, configurationError("PUBLIC_ROUTE_REQUIRED", "public_route", "public topology exposure requires an applied public route")
+		}
+		workloadExposure = "internal"
+	}
+	if workloadExposure != "none" && workloadExposure != "internal" {
 		return deploymentv1.WorkloadSpec{}, configurationError("PUBLIC_EXPOSURE_UNSUPPORTED", "exposure.mode", "this deployment flow supports internal workloads only")
 	}
 	cpu := strconv.FormatInt(assignment.CPURequestMillicores, 10) + "m"
 	memory := strconv.FormatInt((assignment.MemoryRequestBytes+1024*1024-1)/(1024*1024), 10) + "Mi"
 	readiness := &deploymentv1.Probe{Path: source.HealthPath, Port: int32(source.ContainerPort), InitialDelaySeconds: 2, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 6}
 	liveness := *readiness
-	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: source.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(source.ContainerPort), ReadinessProbe: readiness, LivenessProbe: &liveness, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}, Limits: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}}, TerminationGracePeriodSecond: 30, Environment: compiled.Environment, Exposure: deploymentv1.ExposureIntent{Mode: assignment.Exposure.Mode}}
+	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: source.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(source.ContainerPort), ReadinessProbe: readiness, LivenessProbe: &liveness, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}, Limits: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}}, TerminationGracePeriodSecond: 30, Environment: compiled.Environment, Exposure: deploymentv1.ExposureIntent{Mode: workloadExposure}}
 	if err := workload.Validate(); err != nil {
 		return deploymentv1.WorkloadSpec{}, err
 	}

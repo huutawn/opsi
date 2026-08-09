@@ -48,6 +48,43 @@ func TestCompileServiceRuntimeSpecsProducesNextDeploymentAuthoritiesOnly(t *test
 	}
 }
 
+func TestCompileServiceRuntimeSpecsMapsTopologyExposureToCanonicalWorkload(t *testing.T) {
+	source, target := configurationServices()
+	for _, test := range []struct {
+		topology string
+		workload string
+		draft    ServiceConfigurationDraft
+	}{
+		{topology: "none", workload: "none"},
+		{topology: "internal", workload: "internal"},
+		{topology: "public", workload: "internal", draft: ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/api"}}},
+	} {
+		t.Run(test.topology, func(t *testing.T) {
+			assignment := topologyv1.Assignment{ServiceKey: source.Name, EnvironmentID: "env-1", RuntimeID: "rt-1", Replicas: 1, CPURequestMillicores: 100, MemoryRequestBytes: 128 << 20, Exposure: topologyv1.ExposureIntent{Mode: test.topology}}
+			workload, err := CompileServiceRuntimeSpecs(source, assignment, []topologyv1.Assignment{assignment}, appliedConfiguration(test.draft), []ServiceRecord{source, target})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if workload.Exposure.Mode != test.workload {
+				t.Fatalf("topology exposure %q compiled workload exposure %q", test.topology, workload.Exposure.Mode)
+			}
+		})
+	}
+}
+
+func TestCompileServiceRuntimeSpecsPublicFailsClosedWithoutValidRoute(t *testing.T) {
+	source, target := configurationServices()
+	assignment := topologyv1.Assignment{ServiceKey: source.Name, EnvironmentID: "env-1", RuntimeID: "rt-1", Replicas: 1, CPURequestMillicores: 100, MemoryRequestBytes: 128 << 20, Exposure: topologyv1.ExposureIntent{Mode: "public"}}
+	if _, err := CompileServiceRuntimeSpecs(source, assignment, []topologyv1.Assignment{assignment}, emptyServiceConfiguration(), []ServiceRecord{source, target}); !hasAPIErrorCode(err, "PUBLIC_ROUTE_REQUIRED") {
+		t.Fatalf("missing route err=%v", err)
+	}
+	for _, route := range []*PublicRouteIntent{{Hostname: "https://apps.example.com", Path: "/"}, {Hostname: "apps.example.com", Path: "api"}} {
+		if _, err := CompileServiceRuntimeSpecs(source, assignment, []topologyv1.Assignment{assignment}, appliedConfiguration(ServiceConfigurationDraft{PublicRoute: route}), []ServiceRecord{source, target}); !hasAPIErrorCode(err, "PUBLIC_ROUTE_INVALID") {
+			t.Fatalf("invalid route %+v err=%v", route, err)
+		}
+	}
+}
+
 func TestCompileServiceRuntimeRejectsCrossRuntimeInternalHTTP(t *testing.T) {
 	source, target := configurationServices()
 	draft := ServiceConfigurationDraft{Bindings: []ServiceBinding{{Kind: ServiceBindingInternalHTTP, TargetServiceID: target.ID, TargetServiceKey: target.Name, EnvPrefix: "API"}}}

@@ -9,6 +9,7 @@ test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Topology reviews canonical multi-service deployments, retries only missing jobs, and restores Live from Cloud", async ({ page }) => {
   const state = fixture();
+  (state.topology.assignments.find((item) => item.service_key === "api")!.exposure as { mode: string }).mode = "internal";
   const submissions: Array<{ service: string; key: string; body: Record<string, unknown> }> = [];
   const exposurePosts: string[] = [];
   let workerFailures = 1;
@@ -156,12 +157,49 @@ test("public deployment waits for workload success and keeps route failure as a 
   await page.getByLabel("Select all placed applications").uncheck();
   await page.getByLabel("Select api").check();
   await page.getByRole("button", { name: "Review selected" }).click();
+  const review = page.locator(".deploymentReviewRow").filter({ hasText: "api" });
+  await expect(review).toContainText("Publish route");
+  await expect(review).toContainText("apps.example.com/api");
   await page.getByRole("button", { name: "Deploy" }).click();
   await expect(page).toHaveURL(/topologyMode=live/);
   expect(calls).toEqual(["workload-succeeded", "exposure-preview", "exposure-failed"]);
   await expect(page.locator(".liveDeploymentList li").filter({ hasText: "Deploy workload" })).toContainText("Running");
   await expect(page.locator(".liveDeploymentList li").filter({ hasText: "Publish route" })).toContainText("Degraded");
   await expect(page.getByText("apps.example.com/api", { exact: true })).toBeVisible();
+});
+
+test("public deployment failure never starts Exposure", async ({ page }) => {
+  const state = fixture();
+  const api = state.services.find((item) => item.id === "api")! as ReturnType<typeof service> & { configuration: ReturnType<typeof service>["configuration"] & { public_route?: { hostname: string; path: string } } };
+  api.configuration.public_route = { hostname: "apps.example.com", path: "/api" };
+  (state.topology.assignments.find((item) => item.service_key === "api")!.exposure as { mode: string }).mode = "public";
+  const calls: string[] = [];
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() === "POST" && path.endsWith("/deployments/preview")) {
+      const buildRecord = state.builds.find((item) => item.id === (route.request().postDataJSON() as { build_record_id: string }).build_record_id)!;
+      const serviceRecord = state.services.find((item) => item.id === buildRecord.service_id)!;
+      const assignment = state.topology.assignments.find((item) => item.service_key === serviceRecord.name)!;
+      await json(route, preview(buildRecord, serviceRecord, assignment));
+      return;
+    }
+    if (route.request().method() === "POST" && path.endsWith("/deployments")) {
+      calls.push("workload-failed");
+      const buildRecord = state.builds.find((item) => item.id === (route.request().postDataJSON() as { build_record_id: string }).build_record_id)!;
+      await json(route, { ...deployment(buildRecord), status: "failed", rollout_state: "failed", failure_code: "WORKLOAD_FAILED", failure_message_redacted: "Workload rollout failed" }, 202);
+      return;
+    }
+    if (route.request().method() === "POST" && path.includes("/exposures")) calls.push("exposure-started");
+    await respond(route, state);
+  });
+
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology&environment=env-prod");
+  await page.getByLabel("Select all placed applications").uncheck();
+  await page.getByLabel("Select api").check();
+  await page.getByRole("button", { name: "Review selected" }).click();
+  await page.getByRole("button", { name: "Deploy" }).click();
+  await expect(page.getByText("Workload did not succeed; route was not published.")).toBeVisible();
+  expect(calls).toEqual(["workload-failed"]);
 });
 
 test("unchanged public route skips the Exposure apply rollout", async ({ page }) => {
@@ -306,7 +344,8 @@ function build(serviceID: string, character: string) {
 
 function preview(buildRecord: ReturnType<typeof build>, serviceRecord: ReturnType<typeof service>, assignment: ReturnType<typeof fixture>["topology"]["assignments"][number]) {
   const probe = { path: serviceRecord.health_path, port: serviceRecord.container_port, initial_delay_seconds: 2, period_seconds: 5, timeout_seconds: 2, failure_threshold: 6 };
-  return { schema_version: "opsi.deployment_job/v1", snapshot: { project_id: "proj-1", image: { repository: buildRecord.build.oci_repository, digest: buildRecord.build.oci_digest, reference: `${buildRecord.build.oci_repository}@${buildRecord.build.oci_digest}` }, authority: { build_record: buildRecord, topology_plan_id: "topology-1", topology_revision: 4, topology_hash: hash("5"), service_configuration_revision: 1, service_configuration_state_hash: serviceRecord.configuration.state_hash, deployment_policy_id: "policy-1", deployment_policy_revision: 2, deployment_policy_hash: hash("7"), runtime_id: assignment.runtime_id, node_id: "node-primary", agent_id: "agent-primary" }, workload: { schema_version: "opsi.workload_spec/v1", service_key: serviceRecord.name, replicas: assignment.replicas, application_container_name: "app", container_port: serviceRecord.container_port, readiness_probe: probe, liveness_probe: probe, resources: { requests: { cpu: "250m", memory: "256Mi" }, limits: { cpu: "250m", memory: "256Mi" } }, termination_grace_period_seconds: 30, environment: serviceRecord.configuration.environment, exposure: { mode: "none" } }, spec_hash: hash("c") }, changes: ["workload_spec", "image_digest"], eligible: true, decision_code: "ELIGIBLE", message: "Eligible", resolved_at: "2026-08-08T07:45:00Z" };
+  const workloadExposure = assignment.exposure.mode === "none" ? "none" : "internal";
+  return { schema_version: "opsi.deployment_job/v1", snapshot: { project_id: "proj-1", image: { repository: buildRecord.build.oci_repository, digest: buildRecord.build.oci_digest, reference: `${buildRecord.build.oci_repository}@${buildRecord.build.oci_digest}` }, authority: { build_record: buildRecord, topology_plan_id: "topology-1", topology_revision: 4, topology_hash: hash("5"), service_configuration_revision: 1, service_configuration_state_hash: serviceRecord.configuration.state_hash, deployment_policy_id: "policy-1", deployment_policy_revision: 2, deployment_policy_hash: hash("7"), runtime_id: assignment.runtime_id, node_id: "node-primary", agent_id: "agent-primary" }, workload: { schema_version: "opsi.workload_spec/v1", service_key: serviceRecord.name, replicas: assignment.replicas, application_container_name: "app", container_port: serviceRecord.container_port, readiness_probe: probe, liveness_probe: probe, resources: { requests: { cpu: "250m", memory: "256Mi" }, limits: { cpu: "250m", memory: "256Mi" } }, termination_grace_period_seconds: 30, environment: serviceRecord.configuration.environment, exposure: { mode: workloadExposure } }, spec_hash: hash("c") }, changes: ["workload_spec", "image_digest"], eligible: true, decision_code: "ELIGIBLE", message: "Eligible", resolved_at: "2026-08-08T07:45:00Z" };
 }
 
 function deployment(buildRecord: ReturnType<typeof build>) {
