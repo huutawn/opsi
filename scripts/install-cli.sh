@@ -14,9 +14,51 @@ case "$os/$arch" in
   *) die "unsupported OS or architecture";;
 esac
 
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+select_latest_beta() {
+  awk '
+    /"tag_name"[[:space:]]*:/ {
+      tag=$0
+      sub(/^.*"tag_name"[[:space:]]*:[[:space:]]*"/, "", tag)
+      sub(/".*$/, "", tag)
+      prerelease=0
+    }
+    /"prerelease"[[:space:]]*:[[:space:]]*true/ { prerelease=1 }
+    /"published_at"[[:space:]]*:/ {
+      published=$0
+      sub(/^.*"published_at"[[:space:]]*:[[:space:]]*"/, "", published)
+      sub(/".*$/, "", published)
+      if (prerelease && tag ~ /^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$/ && published > latest) {
+        latest=published
+        selected=tag
+      }
+    }
+    END { print selected }
+  '
+}
+
 version=${OPSI_VERSION:-}
-[ -n "$version" ] || die "OPSI_VERSION is required"
-case "$version" in *..*|*/*|*' '*|*'	'*) die "invalid version";; esac
+if [ -z "$version" ]; then
+  if [ "${OPSI_INSTALLER_SELF_TEST:-0}" = 1 ]; then
+    version=$(printf '%s\n' \
+      '[{"tag_name":"v0.1.0-beta.1","prerelease":true,"published_at":"2026-08-01T00:00:00Z"},' \
+      '{"tag_name":"agent-test","prerelease":true,"published_at":"2026-08-09T00:00:00Z"},' \
+      '{"tag_name":"v0.1.0-beta.2","prerelease":true,"published_at":"2026-08-08T00:00:00Z"}]' \
+      | select_latest_beta)
+    [ "$version" = "v0.1.0-beta.2" ] || die "latest beta resolver self-test failed"
+  else
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      'https://api.github.com/repos/huutawn/opsi/releases?per_page=100' \
+      -o "$tmp/releases.json"
+    version=$(select_latest_beta <"$tmp/releases.json")
+    [ -n "$version" ] || die "no published beta release found"
+  fi
+fi
+case "$version" in ""|.*|-*|*..*|*[!0-9A-Za-z._-]*) die "invalid version";; esac
 default_base=https://github.com/huutawn/opsi/releases/download/$version
 base=${OPSI_RELEASE_BASE_URL:-$default_base}
 case "$base" in https://*) ;; *) die "release URL must use HTTPS";; esac
@@ -38,15 +80,13 @@ verify_checksum() {
 }
 
 if [ "${OPSI_INSTALLER_SELF_TEST:-0}" = 1 ]; then
-	tmp=$(mktemp -d)
-	trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-	mkdir -p "$tmp/bundle/opsi-ui"
-	printf '#!/bin/sh\nexit 0\n' >"$tmp/bundle/opsi"
-	printf '<!doctype html><title>Opsi</title>\n' >"$tmp/bundle/opsi-ui/index.html"
-	chmod 0755 "$tmp/bundle/opsi"
-	archive="opsi-$version-$os-$arch.tar.gz"
-	tar -C "$tmp/bundle" -czf "$tmp/$archive" opsi opsi-ui
-	(cd "$tmp" && (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") >checksums.txt)
+  mkdir -p "$tmp/bundle/opsi-ui"
+  printf '#!/bin/sh\nexit 0\n' >"$tmp/bundle/opsi"
+  printf '<!doctype html><title>Opsi</title>\n' >"$tmp/bundle/opsi-ui/index.html"
+  chmod 0755 "$tmp/bundle/opsi"
+  archive="opsi-$version-$os-$arch.tar.gz"
+  tar -C "$tmp/bundle" -czf "$tmp/$archive" opsi opsi-ui
+  (cd "$tmp" && (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") >checksums.txt)
   verify_checksum "$tmp/$archive" "$tmp/checksums.txt"
   sed 's/^[0-9a-fA-F]*/0000000000000000000000000000000000000000000000000000000000000000/' "$tmp/checksums.txt" >"$tmp/bad.txt"
   if (verify_checksum "$tmp/$archive" "$tmp/bad.txt" 2>/dev/null); then die "checksum self-test failed"; fi
@@ -55,8 +95,6 @@ if [ "${OPSI_INSTALLER_SELF_TEST:-0}" = 1 ]; then
   exit 0
 fi
 
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 archive="opsi-$version-$os-$arch.tar.gz"
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$base/$archive" -o "$tmp/$archive"
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$base/checksums.txt" -o "$tmp/checksums.txt"

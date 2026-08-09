@@ -29,7 +29,7 @@ export function ContextHeader({ environment, environmentID, environments, lastUp
     <div className="headerActions">
       {project && environments.length > 1 ? <label className="environmentPicker"><span>Environment</span><select aria-label="Current environment" onChange={(event) => onEnvironment(event.target.value)} value={environmentID}><option value="">Choose…</option>{environments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
       {session.cloud_connected !== "ok" ? <span className="sourceWarning">Cloud unavailable</span> : null}
-      {project && session.agent_connected !== "ok" ? <span className="sourceWarning">Agent unavailable</span> : null}
+      {project && session.agent_connected !== "ok" ? <span className="sourceWarning">{session.agent_connected === "not connected" ? "Agent not connected" : "Agent unavailable"}</span> : null}
       <ConnectionPopover session={session} />
       <button aria-label="Refresh current data" className="iconButton" onClick={onRefresh} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M16 6V2m0 0h-4m4 0-3 3a6 6 0 1 0 2 8" /></svg></button>
       <details className="accountMenu"><summary aria-label="Account menu">Account</summary><div><button onClick={() => void logout()} type="button">Sign out</button></div></details>

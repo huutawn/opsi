@@ -56,12 +56,13 @@ func newStartCommand(configPath *string, factory func() (keychain.Store, error))
 }
 
 func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer, factory func() (keychain.Store, error)) error {
-	cfg, err := config.LoadSelected(configPath)
-	if err != nil {
-		return err
-	}
-	if err := requireSelectedAgentAddress(configPath); err != nil {
-		return err
+	cfg := config.Default()
+	if configPath != "" {
+		loaded, err := config.Load(configPath)
+		if err != nil {
+			return err
+		}
+		cfg = loaded
 	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -113,6 +114,9 @@ func (r agentConfigResolver) snapshot() (config.Config, error) {
 	}
 	loaded, err := config.Load(r.configPath)
 	if err != nil {
+		return config.Config{}, agentConfigReloadError{}
+	}
+	if strings.TrimSpace(r.startup.AgentAddr) != "" && strings.TrimSpace(loaded.AgentAddr) == "" {
 		return config.Config{}, agentConfigReloadError{}
 	}
 	snapshot := r.startup
@@ -625,13 +629,16 @@ func logoutLocalSession(w http.ResponseWriter, r *http.Request, cfg config.Confi
 }
 
 func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) string {
-	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
-	defer cancel()
-	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
 	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
 	if err != nil {
 		return "failed"
 	}
+	if strings.TrimSpace(agentCfg.AgentAddr) == "" {
+		return "not connected"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	defer cancel()
+	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
 	if _, err := agentclient.New(agentCfg).Status(ctx); err != nil {
 		return "failed"
 	}

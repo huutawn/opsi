@@ -19,7 +19,7 @@ DEV_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/dev-contro
 STAGING_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml
 STAGING_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env.example -f deploy/staging-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build build-cli-release verify-cli-release agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -117,12 +117,22 @@ verify-cli-release: build-cli-release
 	prefix=$$(mktemp -d); port=19780; pid=; \
 	trap 'test -z "$$pid" || kill "$$pid" 2>/dev/null || :; rm -rf "$$prefix"' EXIT HUP INT TERM; \
 	tar -C "$$prefix" -xzf "dist/cli/opsi-$(VERSION)-$$os-$$arch.tar.gz"; \
-	printf '%s\n' 'cloud_url: "http://127.0.0.1:1"' 'agent_addr: "127.0.0.1:1"' >"$$prefix/config.yaml"; \
-	"$$prefix/opsi" --config "$$prefix/config.yaml" start --addr "127.0.0.1:$$port" >"$$prefix/start.log" 2>&1 & pid=$$!; \
+	version_json=$$(HOME="$$prefix/home" "$$prefix/opsi" version --json); \
+	printf '%s\n' "$$version_json" | grep -q '"version":"$(VERSION)"'; \
+	printf '%s\n' "$$version_json" | grep -q '"revision":"$(GIT_COMMIT)"'; \
+	HOME="$$prefix/home" "$$prefix/opsi" start --addr "127.0.0.1:$$port" >"$$prefix/start.log" 2>&1 & pid=$$!; \
 	for attempt in 1 2 3 4 5 6 7 8 9 10; do curl --fail --silent "http://127.0.0.1:$$port/health" >/dev/null && break; sleep 1; done; \
 	curl --fail --silent "http://127.0.0.1:$$port/health" | grep -q '"status":"ok"'; \
 	curl --fail --silent "http://127.0.0.1:$$port/" | grep -q '<title>Opsi'; \
+	curl --fail --silent "http://127.0.0.1:$$port/api/local/settings" | grep -q '"cloud_authority":"https://opsidev.site"'; \
+	curl --fail --silent "http://127.0.0.1:$$port/api/local/session" | grep -q '"agent_connected":"not connected"'; \
 	test -f "$$prefix/opsi-ui/index.html"
+
+verify-cli-installer:
+	@OPSI_INSTALLER_SELF_TEST=1 OPSI_INSTALL_DIR=/tmp/opsi-installer-self-test ./scripts/install-cli.sh
+
+verify-cli-clean-install: build-cli-release
+	@./scripts/verify-clean-cli-install.sh "$(VERSION)" "$(GIT_COMMIT)" dist/cli
 
 agent-release:
 	$(RUN) env GOCACHE="$(GOCACHE)" GOTOOLCHAIN="$(GOTOOLCHAIN)" ./scripts/build-agent-release.sh "$(AGENT_COMMIT)" "$(AGENT_RELEASE_DIR)"

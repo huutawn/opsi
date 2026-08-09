@@ -24,24 +24,14 @@ arm64). The installer verifies the release archive with SHA-256 and installs
 the CLI plus local web UI to `~/.local/bin` by default.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/huutawn/opsi/main/scripts/install-cli.sh \
-  | OPSI_VERSION=r5-014-3bdc586 sh
+curl -fsSL https://raw.githubusercontent.com/huutawn/opsi/main/scripts/install-cli.sh | sh
+opsi start
 ```
 
-Create a CLI configuration. The default Cloud endpoint is the deployed
-`https://opsidev.site`; replace `agent_addr` after connecting an Opsi Agent.
-
-```sh
-mkdir -p "$HOME/.config/opsi"
-printf '%s\n' \
-  'agent_addr: 127.0.0.1:9443' \
-  'cloud_url: https://opsidev.site' \
-  > "$HOME/.config/opsi/config.yaml"
-
-opsi --config "$HOME/.config/opsi/config.yaml" start
-```
-
-Open `http://127.0.0.1:9780`. Cloud operations require a PAT stored in the OS
+The installer selects the latest published beta unless `OPSI_VERSION` pins an
+exact release. Open `http://127.0.0.1:9780`; the Local UI uses the Hosted Beta
+Cloud at `https://opsidev.site` by default and reports an unconfigured Agent as
+not connected. Cloud operations require a PAT stored in the OS
 keychain with `opsi login --pat-file PATH`. See the
 [CLI installation runbook](docs/runbooks/install_cli.md) for release, PATH,
 configuration, and self-hosting details.
@@ -86,12 +76,13 @@ credentials are not exposed to browser code.
 
 ## Status
 
-Opsi is under active development and is not yet production-ready. The current
-source includes the canonical immutable deployment path and broad local/source
-test coverage, while some live Agent, browser, DNS/TLS, disaster-recovery, and
-production acceptance gates remain open.
+Opsi `v0.1.0-beta.1` is a public beta, not a production-ready release. The
+currently supported scope is one VPS running single-node K3s, with Web/API
+workloads, deployment, exposure, and known-good rollback.
 
-- Deployed development Cloud: `https://opsidev.site`
+- Hosted Beta Cloud: `https://opsidev.site`
+- Known exclusions: DNS/TLS automation, multi-VPS topology, managed databases,
+  and any production SLA.
 - Current implementation truth: [docs/current_state.md](docs/current_state.md)
 - Capability evidence: [docs/status_matrix.md](docs/status_matrix.md)
 - Production roadmap: [docs/opsi_roadmap_v5_production.md](docs/opsi_roadmap_v5_production.md)

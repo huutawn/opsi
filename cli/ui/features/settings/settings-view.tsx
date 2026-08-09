@@ -59,5 +59,5 @@ export function SettingsView({ console }: { console: ConsoleController }) {
 }
 
 function Fact({ label, value, status, mono = false }: { label: string; value: string; status?: string; mono?: boolean }) { return <div><dt>{label}</dt><dd>{status ? <StatusBadge label={value} value={status} /> : mono ? <code>{value}</code> : value}</dd></div>; }
-function connectionLabel(value?: string) { return value === "ok" ? "Connected" : value === "failed" ? "Unavailable" : "Unknown"; }
+function connectionLabel(value?: string) { return value === "ok" ? "Connected" : value === "failed" ? "Unavailable" : value === "not connected" ? "Not connected" : "Unknown"; }
 function connectionStatus(value?: string) { return value === "ok" ? "healthy" : value === "failed" ? "unavailable" : "unknown"; }

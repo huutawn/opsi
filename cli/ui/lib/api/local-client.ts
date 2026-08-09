@@ -61,7 +61,7 @@ export type ResolvedDeploymentRequest = {
 export type LocalSessionStatus = {
   authenticated: boolean;
   cloud_connected: "ok" | "failed" | "unknown";
-  agent_connected: "ok" | "failed" | "unknown";
+  agent_connected: "ok" | "failed" | "unknown" | "not connected";
   token_status?: string;
   local_session?: string;
   org_id?: string;

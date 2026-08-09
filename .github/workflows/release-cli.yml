@@ -3,7 +3,7 @@ name: release-cli
 on:
   push:
     tags:
-      - 'r5-014-*'
+      - 'v*'
 
 permissions:
   contents: write
@@ -47,7 +47,18 @@ jobs:
             rm -rf "$bundle"
           done
           (cd release-cli && sha256sum opsi-*.tar.gz > checksums.txt)
-      - name: Publish prerelease
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" release-cli/* --prerelease --title "${{ github.ref_name }}" --notes "Local API/UI manual parity prerelease; Agent-live acceptance deferred to R5-017; revision ${{ github.sha }}"
+        run: |
+          prerelease=
+          case "${{ github.ref_name }}" in *-beta.*) prerelease=--prerelease;; esac
+          gh release create "${{ github.ref_name }}" release-cli/* $prerelease \
+            --title "${{ github.ref_name }}" \
+            --notes "R5-017 manual E2E passed twice.
+
+          Supported beta scope: single VPS / single-node K3s, Web/API deployment, exposure, and rollback.
+
+          Known exclusions: DNS/TLS automation, multi-VPS, managed databases, and production SLA.
+
+          Revision: ${{ github.sha }}"

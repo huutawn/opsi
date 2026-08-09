@@ -103,6 +103,56 @@ func TestRunStartKeepsSessionAndReconnectsAfterConfigSave(t *testing.T) {
 	}
 }
 
+func TestRunStartWithoutConfigUsesHostedCloudAndReportsAgentNotConnected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	outReader, outWriter := io.Pipe()
+	runErr := make(chan error, 1)
+	go func() { runErr <- runStart(ctx, "127.0.0.1:0", "", "", outWriter, nil) }()
+	line, err := bufio.NewReader(outReader).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	localURL := strings.TrimSpace(strings.TrimPrefix(line, "Local Web UI listening on "))
+
+	res, err := http.Get(localURL + "/api/local/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings struct {
+		CloudAuthority  string `json:"cloud_authority"`
+		AgentConfigured bool   `json:"agent_configured"`
+		ConfigSelected  bool   `json:"config_selected"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&settings); err != nil {
+		res.Body.Close()
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if settings.CloudAuthority != "https://opsidev.site" || settings.AgentConfigured || settings.ConfigSelected {
+		t.Fatalf("settings=%+v", settings)
+	}
+
+	res, err = http.Get(localURL + "/api/local/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session struct {
+		AgentConnected string `json:"agent_connected"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&session); err != nil {
+		res.Body.Close()
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if session.AgentConnected != "not connected" {
+		t.Fatalf("agent connection=%q", session.AgentConnected)
+	}
+	if err := cancelAndWait(cancel, runErr); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func cancelAndWait(cancel context.CancelFunc, runErr <-chan error) error {
 	cancel()
 	select {

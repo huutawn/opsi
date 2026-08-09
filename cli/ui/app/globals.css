@@ -82,7 +82,7 @@ code, .monoWrap { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, mono
 .environmentPicker select { min-height: 34px; max-width: 170px; border: 1px solid var(--line-strong); border-radius: 6px; padding: 5px 8px; background: var(--surface); color: var(--ink); font-size: 11px; letter-spacing: 0; text-transform: none; }
 @media (max-width: 640px) { .environmentPicker span { display: none; } }
 .sourceWarning { border-radius: 999px; padding: 5px 9px; background: var(--warn-bg); color: var(--warn); font-size: 11px; font-weight: 700; }
-.iconButton { display: inline-grid; width: 40px; min-width: 40px; min-height: 40px; place-items: center; padding: 8px; border-color: transparent; background: transparent; }
+.iconButton { display: inline-grid; width: 44px; min-width: 44px; min-height: 44px; place-items: center; padding: 8px; border-color: transparent; background: transparent; }
 .iconButton:hover:not(:disabled) { background: var(--surface-muted); }
 .iconButton svg { width: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
 .accountMenu { position: relative; }
