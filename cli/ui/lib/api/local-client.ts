@@ -12,6 +12,12 @@ import type {
   Project,
   Readiness,
   ServiceRecord,
+  ServiceConfiguration,
+  ServiceConfigurationDraft,
+  ServiceConfigurationPreview,
+  ServiceConfigurationValidation,
+  ServiceConfigurationDiff,
+  ServiceConfigurationApplyResult,
   SecretResult,
   IncidentResult,
   IncidentListResult,
@@ -39,10 +45,23 @@ import type {
 type RequestOptions = RequestInit & { write?: boolean; idempotencyKey?: string };
 const responseLimit = 2 * 1024 * 1024;
 
+export type ResolvedDeploymentRequest = {
+  schema_version: "opsi.deployment_job/v1";
+  build_record_id: string;
+  environment_id: string;
+  expected_topology_revision?: number;
+  expected_topology_hash?: string;
+  expected_configuration_revision?: number;
+  expected_configuration_state_hash?: string;
+  expected_deployment_policy_revision?: number;
+  expected_deployment_policy_hash?: string;
+  workload?: WorkloadSpec;
+};
+
 export type LocalSessionStatus = {
   authenticated: boolean;
   cloud_connected: "ok" | "failed" | "unknown";
-  agent_connected: "ok" | "failed" | "unknown";
+  agent_connected: "ok" | "failed" | "unknown" | "not connected";
   token_status?: string;
   local_session?: string;
   org_id?: string;
@@ -187,8 +206,9 @@ export class LocalClient {
     return this.call<Readiness>(`/api/local/projects/${projectID}/readiness`);
   }
 
-  nodes(projectID: string) {
-    return this.call<NodeRecord[]>(`/api/local/projects/${projectID}/nodes`);
+  async nodes(projectID: string) {
+    const response = await this.call<{ nodes: NodeRecord[] }>(`/api/local/projects/${projectID}/nodes`);
+    return response.nodes;
   }
 
   node(projectID: string, nodeID: string) {
@@ -233,6 +253,12 @@ export class LocalClient {
   services(projectID: string) {
     return this.call<{ services: ServiceRecord[] }>(`/api/local/projects/${projectID}/services`);
   }
+
+  serviceConfiguration(projectID: string, serviceID: string) { return this.call<ServiceConfiguration>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration`); }
+  serviceConfigurationPreview(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationPreview>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/preview`, { method: "POST", body: JSON.stringify(draft) }); }
+  serviceConfigurationValidate(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationValidation>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/validate`, { method: "POST", body: JSON.stringify(draft) }); }
+  serviceConfigurationDiff(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationDiff>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/diff`, { method: "POST", body: JSON.stringify(draft) }); }
+  serviceConfigurationApply(projectID: string, serviceID: string, body: { draft: ServiceConfigurationDraft; expected_revision: number; expected_state_hash: string }, idempotencyKey: string) { return this.call<ServiceConfigurationApplyResult>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/apply`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
 
   buildRecords(projectID: string, filters: { serviceKey?: string; repositoryID?: string; sha?: string; status?: string; cursor?: string } = {}) {
     const query = new URLSearchParams({ limit: "50" });
@@ -347,21 +373,21 @@ export class LocalClient {
     });
   }
 
-  deploymentPreview(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }) {
+  deploymentPreview(projectID: string, body: ResolvedDeploymentRequest) {
     return this.call<DeploymentPreview>(`/api/local/projects/${projectID}/deployments/preview`, {
       method: "POST",
       body: JSON.stringify(body),
     });
   }
 
-  deploymentDiff(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }) {
+  deploymentDiff(projectID: string, body: ResolvedDeploymentRequest) {
     return this.call<DeploymentPreview>(`/api/local/projects/${projectID}/deployments/diff`, {
       method: "POST",
       body: JSON.stringify(body),
     });
   }
 
-  deploymentApply(projectID: string, body: { schema_version: string; build_record_id: string; environment_id: string; workload: WorkloadSpec }, idempotencyKey: string) {
+  deploymentApply(projectID: string, body: ResolvedDeploymentRequest, idempotencyKey: string) {
     return this.call<DeploymentJob>(`/api/local/projects/${projectID}/deployments`, {
       method: "POST",
       write: true,

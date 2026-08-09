@@ -56,6 +56,10 @@ func TestGitHubInventoryMigrationCreatesSchemaAndPreservesP08Data(t *testing.T) 
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM projects WHERE id='legacy-project' AND created_by='legacy-user'`).Scan(&legacyProjects); err != nil || legacyProjects != 1 {
 		t.Fatalf("legacy project count=%d err=%v", legacyProjects, err)
 	}
+	var ownerMemberships int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM project_memberships WHERE project_id='legacy-project' AND user_id='legacy-user' AND role='owner'`).Scan(&ownerMemberships); err != nil || ownerMemberships != 1 {
+		t.Fatalf("legacy owner membership count=%d err=%v", ownerMemberships, err)
+	}
 	var tables int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name IN ('github_installations','github_repositories','github_installation_project_links','github_repository_claims','github_service_bindings','github_webhook_deliveries')`).Scan(&tables); err != nil {
 		t.Fatal(err)

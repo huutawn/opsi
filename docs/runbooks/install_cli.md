@@ -5,9 +5,16 @@ HTTPS, verifies SHA-256, and installs the `opsi` binary with adjacent
 `opsi-ui` static assets. It does not require root or a repository checkout.
 
 ```sh
-OPSI_VERSION=r5-014-<short-sha> \
-OPSI_INSTALL_DIR="$HOME/.local/bin" \
-  ./scripts/install-cli.sh
+curl -fsSL https://raw.githubusercontent.com/huutawn/opsi/main/scripts/install-cli.sh | sh
+opsi start
+```
+
+Without `OPSI_VERSION`, the installer resolves the latest published beta.
+Exact pins remain supported:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/huutawn/opsi/main/scripts/install-cli.sh \
+  | OPSI_VERSION=v0.1.0-beta.1 sh
 ```
 
 The supported targets are Linux and macOS on amd64 and arm64. Existing files,
@@ -30,3 +37,13 @@ curl --fail http://127.0.0.1:9780/health
 
 The browser entry point is served from the installed `opsi-ui/index.html`.
 `OPSI_UI_DIR` remains an explicit development override only.
+
+The Local UI uses the Hosted Beta Cloud at `https://opsidev.site` unless an
+explicit YAML config selects a self-hosted `cloud_url`. No Agent address is
+invented: before `opsi server connect` or an explicit `agent_addr`, the Local
+UI starts normally and reports the Agent as not connected.
+
+The `v0.1.0-beta.1` support boundary is a single VPS with single-node K3s,
+Web/API workloads, deployment, exposure, and rollback. DNS/TLS automation,
+multi-VPS, managed databases, production hardening, and production SLA are
+excluded from this beta.

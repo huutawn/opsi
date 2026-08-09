@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
+	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
-	actionv1 "github.com/opsi-dev/opsi/contracts/go/actionv1"
 )
 
 type BuildRecord = buildrecordv1.Record
@@ -157,6 +157,79 @@ type Service struct {
 	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
 	Status    string `json:"status"`
+}
+
+type ServiceBinding struct {
+	Kind             string `json:"kind"`
+	TargetServiceID  string `json:"target_service_id"`
+	TargetServiceKey string `json:"target_service_key"`
+	EnvPrefix        string `json:"env_prefix,omitempty"`
+	EnvName          string `json:"env_name,omitempty"`
+	Path             string `json:"path,omitempty"`
+}
+
+type PublicRouteIntent struct {
+	Hostname string `json:"hostname"`
+	Path     string `json:"path"`
+}
+
+type ServiceConfigurationDraft struct {
+	SchemaVersion string                             `json:"schema_version"`
+	Environment   []deploymentv1.EnvironmentVariable `json:"environment,omitempty"`
+	PublicRoute   *PublicRouteIntent                 `json:"public_route,omitempty"`
+	Bindings      []ServiceBinding                   `json:"bindings,omitempty"`
+}
+
+type ServiceConfiguration struct {
+	ServiceConfigurationDraft
+	Revision  uint64     `json:"revision"`
+	StateHash string     `json:"state_hash"`
+	AppliedBy string     `json:"applied_by,omitempty"`
+	AppliedAt *time.Time `json:"applied_at,omitempty"`
+}
+
+type GeneratedEnvironment struct {
+	Name    string `json:"name"`
+	Value   string `json:"value"`
+	Binding int    `json:"binding"`
+}
+
+type ServiceConfigurationPreview struct {
+	Configuration        ServiceConfigurationDraft `json:"configuration"`
+	GeneratedEnvironment []GeneratedEnvironment    `json:"generated_environment,omitempty"`
+	CurrentRevision      uint64                    `json:"current_revision"`
+	CurrentStateHash     string                    `json:"current_state_hash"`
+	DraftStateHash       string                    `json:"draft_state_hash"`
+}
+
+type ServiceConfigurationValidation struct {
+	Valid  bool `json:"valid"`
+	Issues []struct {
+		Code    string `json:"code"`
+		Field   string `json:"field,omitempty"`
+		Message string `json:"message"`
+	} `json:"issues,omitempty"`
+}
+
+type ServiceConfigurationDiff struct {
+	Changes []struct {
+		Kind   string `json:"kind"`
+		Action string `json:"action"`
+		Name   string `json:"name,omitempty"`
+		Before string `json:"before,omitempty"`
+		After  string `json:"after,omitempty"`
+	} `json:"changes"`
+}
+
+type ServiceConfigurationApplyRequest struct {
+	Draft             ServiceConfigurationDraft `json:"draft"`
+	ExpectedRevision  uint64                    `json:"expected_revision"`
+	ExpectedStateHash string                    `json:"expected_state_hash"`
+}
+
+type ServiceConfigurationApplyResult struct {
+	Configuration ServiceConfiguration `json:"configuration"`
+	Reused        bool                 `json:"reused"`
 }
 
 type Node struct {

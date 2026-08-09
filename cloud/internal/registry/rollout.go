@@ -49,7 +49,7 @@ func (s *Service) previewExposureLocked(projectID string, request deploymentv1.E
 		if other.ServiceKey == desired.ServiceKey && other.EnvironmentID == desired.EnvironmentID && other.RuntimeID == desired.RuntimeID {
 			continue
 		}
-		if other.Hostname == desired.Hostname && exposurev1.PathsConflict(other.Path, desired.Path) {
+		if other.Hostname == desired.Hostname && exposurev1.ManagedPathsConflict(other.Path, desired.Path) {
 			preview.Eligible = false
 			preview.DecisionCode = "EXPOSURE_ROUTE_CONFLICT"
 			preview.Message = "hostname and path overlap another Opsi desired exposure"
@@ -84,6 +84,9 @@ func (s *Service) StartExposureRollout(projectID, actorUserID, key, requestID st
 	}
 	if !preview.Eligible {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: preview.DecisionCode, Message: preview.Message, RequestID: requestID}
+	}
+	if len(preview.Changes) == 1 && preview.Changes[0] == "unchanged" {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "EXPOSURE_UNCHANGED", Message: "exposure already matches the requested route", RequestID: requestID}
 	}
 	base := s.deployments[request.BaseDeploymentJobID]
 	if _, exists := s.deployments[preview.Desired.DeploymentJobID]; exists {
@@ -120,6 +123,19 @@ func buildRolloutIntent(base DeploymentJob, exposure *exposurev1.ExposureSpec, p
 
 func rolloutDeploymentJob(base DeploymentJob, intent deploymentv1.RolloutIntent, exposure *exposurev1.ExposureSpec, actor, key, payloadHash string, now time.Time) DeploymentJob {
 	return DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: intent.Desired.DeploymentJobID, OrgID: base.OrgID, ProjectID: base.ProjectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceID: base.ServiceID, Status: deploymentv1.StateQueued, Action: intent.Operation, IdempotencyKey: key, RequestedBy: actor, AgentID: base.AgentID, NodeID: base.NodeID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: base.Snapshot, SpecHash: base.SpecHash, PayloadHash: payloadHash, IntentHash: intent.IntentHash, BaseDeploymentID: base.ID, RolloutIntent: &intent, RolloutState: deploymentv1.RolloutStatePrepared, DesiredDigest: intent.Desired.Image.Digest, PreviousDigest: intent.PreviousDigest, ExposureSpec: exposure, KnownGoodID: intent.PreviousKnownGoodID, KnownGoodHash: intent.PreviousKnownGoodHash, CreatedAt: now, UpdatedAt: now}
+}
+
+func setRollbackAvailability(job *DeploymentJob) {
+	job.RollbackEligible = job.RolloutState == deploymentv1.RolloutStateSucceeded && job.RolloutIntent != nil && job.RolloutIntent.PreviousKnownGoodID != ""
+	if job.RollbackEligible {
+		job.RollbackBlockedReason = ""
+	} else if job.RollbackBlockedReason == "" {
+		if job.RolloutState == deploymentv1.RolloutStateSucceeded {
+			job.RollbackBlockedReason = "no previous known-good deployment is available"
+		} else {
+			job.RollbackBlockedReason = "deployment is not a successful rollback source"
+		}
+	}
 }
 
 func exposureForDeployment(current *exposurev1.ExposureSpec, deploymentID string) (*exposurev1.ExposureSpec, error) {

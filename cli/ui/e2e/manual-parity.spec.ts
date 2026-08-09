@@ -24,11 +24,18 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByRole("link", { name: /Parity Project/ })).toBeVisible();
   await expect(page.locator(".projectRow [role=status]")).toHaveCount(0);
   await page.getByRole("link", { name: /Parity Project/ }).click();
-  await expect(page.getByRole("heading", { name: "Parity Project" })).toBeVisible();
+  await expect(page.locator(".breadcrumb")).toContainText("Parity Project");
 
   await page.getByLabel("Switch project").click();
   await page.getByRole("link", { name: "Browse all projects", exact: true }).click();
   await page.getByRole("button", { name: "New project", exact: true }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create project" });
+  const dialogBox = await createDialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(dialogBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(Math.abs(dialogBox!.x + dialogBox!.width / 2 - viewport!.width / 2)).toBeLessThan(2);
+  expect(Math.abs(dialogBox!.y + dialogBox!.height / 2 - viewport!.height / 2)).toBeLessThan(2);
   await page.getByLabel("Name").fill("Created Project");
   await page.getByLabel("Slug").fill("created");
   await page.getByRole("button", { name: "Review project" }).click();
@@ -38,13 +45,10 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await page.getByRole("button", { name: "Confirm and submit" }).click();
   await expect(page.getByText(/Project proj-2 created by the Local backend/)).toBeVisible();
   await page.getByRole("button", { name: "Close" }).click();
-  const createdProject = page.locator(".projectRow").filter({ hasText: "Created Project" });
-  await expect(createdProject).toBeVisible();
-  await expect(page.locator(".projectRow [role=status]")).toHaveCount(0);
-  await createdProject.click();
-  await expect(page.getByRole("heading", { name: "Created Project" })).toBeVisible();
+  await expect(page).toHaveURL(/project=proj-2&view=infrastructure&tab=topology/);
+  await expect(page.locator(".breadcrumb")).toContainText("Created Project");
 
-  await page.getByRole("link", { name: "Infrastructure", exact: true }).click();
+  await page.getByRole("link", { name: "Topology", exact: true }).click();
   await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Runtimes" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Primary/ })).toBeVisible();
@@ -59,9 +63,10 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByRole("heading", { name: "Repository Ownership & Service Bindings" })).toBeVisible();
   await expect(page.getByText("opsi-test/api", { exact: true }).first()).toBeVisible();
 
-  await page.getByRole("link", { name: "Infrastructure", exact: true }).click();
+  await page.getByRole("link", { name: "Topology", exact: true }).click();
   await page.getByRole("tab", { name: "Topology", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Factual topology" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Topology", exact: true })).toBeVisible();
+  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
 
   await page.getByRole("link", { name: "Delivery", exact: true }).click();
   await page.getByRole("tab", { name: "Builds", exact: true }).click();
@@ -113,7 +118,7 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await page.waitForLoadState("networkidle");
   await fetch(`${controlURL}?agent=down`);
   await page.reload();
-  await page.getByRole("link", { name: "Infrastructure", exact: true }).click();
+  await page.getByRole("link", { name: "Topology", exact: true }).click();
   await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
   await expect(page.getByText(/Cloud topology facts remain visible/)).toBeVisible();
   await expect(page.getByRole("button", { name: /Primary/ })).toBeVisible();

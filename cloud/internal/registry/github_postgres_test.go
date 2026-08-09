@@ -14,7 +14,7 @@ import (
 )
 
 func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T) {
-	db, service, firstProject, secondProject, firstService, secondService := newGitHubPostgresFixture(t)
+	db, service, firstProject, secondProject, firstService, _ := newGitHubPostgresFixture(t)
 	installation := testGitHubInstallation(11001)
 	storedInstallation, err := service.UpsertGitHubInstallation(installation)
 	if err != nil {
@@ -66,8 +66,11 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 	if err != nil || resolved.BindingID != binding.ID || resolved.ProjectID != firstProject.ID || resolved.RepositoryOwnerID != uint64(repository.OwnerID) {
 		t.Fatalf("resolved build binding=%+v err=%v", resolved, err)
 	}
-	if _, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: secondService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: firstProject.CreatedBy}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_ALREADY_BOUND") {
-		t.Fatalf("repository key uniqueness err=%v", err)
+	if _, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "worker", CreatedBy: firstProject.CreatedBy}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_MISMATCH") {
+		t.Fatalf("service identity mismatch err=%v", err)
+	}
+	if _, err := service.CreateService(firstProject.ID, ServiceDraft{Name: "api"}, "duplicate-api-service"); err == nil {
+		t.Fatal("duplicate project service key passed database uniqueness constraint")
 	}
 	secondRepository := testGitHubRepository(12002, installation.InstallationID)
 	if _, err := service.UpsertGitHubRepository(secondRepository); err != nil {
@@ -76,7 +79,7 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 	if _, err := service.ClaimGitHubRepository(firstProject.ID, secondRepository.RepositoryID, firstProject.CreatedBy); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: secondRepository.RepositoryID, ServiceKey: "worker", CreatedBy: firstProject.CreatedBy}); !hasGitHubCode(err, "GITHUB_SERVICE_ALREADY_BOUND") {
+	if _, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: secondRepository.RepositoryID, ServiceKey: "api", CreatedBy: firstProject.CreatedBy}); !hasGitHubCode(err, "GITHUB_SERVICE_ALREADY_BOUND") {
 		t.Fatalf("service uniqueness err=%v", err)
 	}
 	if _, err := db.ExecContext(context.Background(), `UPDATE github_service_bindings SET config_path='/absolute' WHERE id=$1`, binding.ID); err == nil {

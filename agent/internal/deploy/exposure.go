@@ -102,7 +102,7 @@ func renderExposure(ctx context.Context, command deploymentv1.AgentCommand, spec
 	if !serviceObjectHasExactPort(workload.Service, canonical.ServicePort) {
 		return RenderedExposure{}, exposureError(CodeBackendServicePort, canonical, "redeploy the authoritative workload with the requested service port")
 	}
-	ingressName := stableDNSName("opsi-ingress", canonical.ServiceKey, canonical.RuntimeID)
+	ingressName := deploymentv1.StableDNSName("opsi-ingress", canonical.ServiceKey, canonical.RuntimeID)
 	labels := cloneStringMap(workload.Selector)
 	labels["app.kubernetes.io/name"] = ingressName
 	labels["opsi.dev/exposure"] = ingressName

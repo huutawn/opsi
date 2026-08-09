@@ -146,7 +146,7 @@ func (s *manualParityCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(r.URL.Path, "/readiness"):
 		writeManualJSON(w, map[string]any{"project_id": manualProjectID(r.URL.Path), "status": "ready", "can_deploy": true, "next_action": "Review a BuildRecord deployment."})
 	case strings.HasSuffix(r.URL.Path, "/nodes") && r.Method == http.MethodGet:
-		writeManualJSON(w, []map[string]any{{"id": "node-1", "name": "agent-node", "role": "server", "status": "healthy", "cpu_cores": 4, "memory_mb": 8192, "agent_id": "agent-1", "agent_version": "test", "last_seen_at": time.Now().UTC()}})
+		writeManualJSON(w, map[string]any{"nodes": []map[string]any{{"id": "node-1", "name": "agent-node", "role": "server", "status": "healthy", "cpu_cores": 4, "memory_mb": 8192, "agent_id": "agent-1", "agent_version": "test", "last_seen_at": time.Now().UTC()}}})
 	case strings.Contains(r.URL.Path, "/nodes/node-1/") && r.Method == http.MethodPost:
 		action := filepath.Base(r.URL.Path)
 		writeManualJSON(w, map[string]any{"id": "node-1", "name": "agent-node", "role": "server", "status": action})

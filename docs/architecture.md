@@ -229,6 +229,12 @@ with hostname/path conflict detection. Readiness, last-known-good digest,
 automatic rollback, post-check, and restart reconciliation complete the
 deployment transaction.
 
+Topology exposure is deployment intent, not an extension of `WorkloadSpec`.
+Cloud compiles `none` to workload `none`, and both `internal` and `public` to
+workload `internal`. A public topology assignment remains factual together with
+its applied service `public_route`; only after the workload succeeds does the
+separate Exposure preview/apply phase publish that hostname and path.
+
 Agent never receives Git source, Docker build input, arbitrary manifests, or a
 caller-selected runtime target for deployment.
 

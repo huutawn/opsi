@@ -105,6 +105,9 @@ func (s Service) VerifyPAT(ctx context.Context, req VerifyRequest) (VerifyResult
 		if !candidate.ExpiresAt.IsZero() && !now.Before(candidate.ExpiresAt) {
 			return VerifyResult{}, ErrExpired
 		}
+		if req.ProjectID != "" {
+			return VerifyResult{TokenID: candidate.ID, UserID: candidate.UserID, Email: candidate.Email, OrgID: candidate.OrgID, ProjectID: candidate.ProjectID, Role: normalizeRole(candidate.Role), ExpiresAt: candidate.ExpiresAt, Revoked: candidate.Revoked}, nil
+		}
 		matchedProjects[candidate.ProjectID] = struct{}{}
 		if len(matchedProjects) > 1 {
 			return VerifyResult{}, ErrProjectChoice

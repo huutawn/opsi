@@ -91,6 +91,17 @@ func TestTopologyAndPolicyCLIUsePATStrictFilesConfirmationAndIdempotency(t *test
 	}
 }
 
+func TestServiceConfigurationReviewRoutesAreNonMutating(t *testing.T) {
+	for _, suffix := range []string{"preview", "validate", "diff"} {
+		if !isPlacementPreview("/api/local/projects/p1/services/svc-1/configuration/" + suffix) {
+			t.Fatalf("configuration %s must not require mutation headers", suffix)
+		}
+	}
+	if isPlacementPreview("/api/local/projects/p1/services/svc-1/configuration/apply") {
+		t.Fatal("configuration apply must remain a protected mutation")
+	}
+}
+
 func TestLocalPlacementProxyPreservesHashesAndMutationHeaders(t *testing.T) {
 	const pat = "local-placement-pat"
 	cloudPaths := []string{}
@@ -102,11 +113,16 @@ func TestLocalPlacementProxyPreservesHashesAndMutationHeaders(t *testing.T) {
 		cloudPaths = append(cloudPaths, r.URL.Path)
 		cloudKeys = append(cloudKeys, r.Header.Get("Idempotency-Key"))
 		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/topology/plan") {
-			io.WriteString(w, `{"plan_hash":"same-hash","state_hash":""}`)
-			return
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/topology/plan"):
+			io.WriteString(w, `{"draft":{"schema_version":"opsi.topology_plan/v1","project_id":"p1","assignments":[]},"plan_hash":"same-hash","state_hash":""}`)
+		case strings.HasSuffix(r.URL.Path, "/topology/validate"):
+			io.WriteString(w, `{"schema_version":"opsi.topology_plan/v1","project_id":"p1","plan_hash":"same-hash","valid":true,"runtimes":[],"issues":[]}`)
+		case strings.HasSuffix(r.URL.Path, "/topology/diff"):
+			io.WriteString(w, `{"project_id":"p1","current_revision":0,"proposed_hash":"same-hash","changes":[]}`)
+		default:
+			io.WriteString(w, `{"plan":{"id":"topo-1","revision":1,"plan_hash":"same-hash","state_hash":"state-hash"},"reused":false}`)
 		}
-		io.WriteString(w, `{"plan":{"id":"topo-1","revision":1,"plan_hash":"same-hash","state_hash":"state-hash"},"reused":false}`)
 	}))
 	defer cloud.Close()
 	store := keychain.NewFakeStore()
@@ -124,6 +140,16 @@ func TestLocalPlacementProxyPreservesHashesAndMutationHeaders(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != 200 || preview["plan_hash"] != "same-hash" {
 		t.Fatalf("preview=%v status=%d", preview, response.StatusCode)
+	}
+	for _, suffix := range []string{"validate", "diff"} {
+		response, err = http.Post(server.URL+"/api/local/projects/p1/topology/"+suffix, "application/json", strings.NewReader(previewBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s status=%d", suffix, response.StatusCode)
+		}
 	}
 	sessionResponse, err := http.Get(server.URL + "/api/local/session")
 	if err != nil {
@@ -148,7 +174,7 @@ func TestLocalPlacementProxyPreservesHashesAndMutationHeaders(t *testing.T) {
 	if mutation.StatusCode != 200 || !strings.Contains(string(body), "same-hash") {
 		t.Fatalf("status=%d body=%s", mutation.StatusCode, body)
 	}
-	if strings.Join(cloudPaths, ",") != "/api/projects/p1/topology/plan,/api/projects/p1/topology/apply" || cloudKeys[1] != "local-topology-key" {
+	if strings.Join(cloudPaths, ",") != "/api/projects/p1/topology/plan,/api/projects/p1/topology/validate,/api/projects/p1/topology/diff,/api/projects/p1/topology/apply" || cloudKeys[3] != "local-topology-key" {
 		t.Fatalf("paths=%v keys=%v", cloudPaths, cloudKeys)
 	}
 }

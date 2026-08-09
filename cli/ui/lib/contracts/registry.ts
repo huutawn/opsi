@@ -53,7 +53,43 @@ export type ServiceRecord = {
   health_path?: string;
   replicas?: number;
   namespace?: string;
+  configuration?: ServiceConfiguration;
 };
+
+export type EnvironmentVariable = { name: string; value: string };
+
+export type ServiceBinding = {
+  kind: "internal_http" | "browser_http";
+  target_service_id: string;
+  target_service_key: string;
+  env_prefix?: string;
+  env_name?: string;
+  path?: string;
+};
+
+export type PublicRouteIntent = { hostname: string; path: string };
+
+export type ServiceConfigurationDraft = {
+  schema_version?: "opsi.service_configuration/v1";
+  environment?: EnvironmentVariable[];
+  public_route?: PublicRouteIntent;
+  bindings?: ServiceBinding[];
+};
+
+export type ServiceConfiguration = ServiceConfigurationDraft & {
+  schema_version: "opsi.service_configuration/v1";
+  revision: number;
+  state_hash: string;
+  applied_by?: string;
+  applied_at?: string;
+};
+
+export type GeneratedEnvironment = { name: string; value: string; binding: number };
+export type ServiceConfigurationPreview = { configuration: ServiceConfigurationDraft; generated_environment?: GeneratedEnvironment[]; current_revision: number; current_state_hash: string; draft_state_hash: string };
+export type ServiceConfigurationValidation = { valid: boolean; issues?: { code: string; field?: string; message: string }[] };
+export type ServiceConfigurationChange = { kind: "connection" | "generated_environment" | "public_route" | "user_environment"; action: string; name?: string; before?: string; after?: string };
+export type ServiceConfigurationDiff = { changes: ServiceConfigurationChange[] };
+export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
 
 export type GitHubInstallation = {
   installation_id: number;
@@ -177,6 +213,7 @@ export type DeploymentJob = {
 	 runtime_id?: string;
 	 service_id: string;
 	 status: string;
+	 action?: string;
 	 spec_hash?: string;
 	 attempt_count?: number;
 	 max_attempts?: number;
@@ -236,7 +273,7 @@ export type DeploymentJob = {
 	 snapshot?: {
 		project_id: string;
 		image: { repository: string; digest: string; reference: string };
-		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; deployment_policy_id: string; deployment_policy_revision: number; runtime_id: string; node_id: string; agent_id: string };
+		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; topology_hash?: string; service_configuration_revision?: number; service_configuration_state_hash?: string; deployment_policy_id: string; deployment_policy_revision: number; deployment_policy_hash?: string; runtime_id: string; node_id: string; agent_id: string };
 		workload: WorkloadSpec;
 		spec_hash: string;
 		preview?: PreviewSpec;
@@ -257,6 +294,12 @@ export type ExposureSpec = {
 	metadata?: { display_name?: string; rationale?: string };
 	spec_hash: string;
 };
+
+export async function hashExposure(spec: Omit<ExposureSpec, "spec_hash">) {
+	const data = new TextEncoder().encode(JSON.stringify({ ...spec, spec_hash: "" }));
+	const digest = await crypto.subtle.digest("SHA-256", data);
+	return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+}
 
 export type ExposureMutationRequest = {
 	schema_version: "opsi.exposure_mutation/v1";
@@ -575,6 +618,7 @@ export type ConsoleState = {
   deployments: DeploymentJob[];
   sessions: BootstrapSession[];
   bootstrapEvents: TimelineEvent[];
+  bootstrapEventsSessionID: string;
   deploymentEvents: TimelineEvent[];
   audit: AuditEvent[];
   support: SupportSummary | null;

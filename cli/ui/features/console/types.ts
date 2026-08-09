@@ -1,6 +1,6 @@
 import type { FormEvent } from "react";
 import type { LocalSessionStatus } from "@/lib/api/local-client";
-import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
+import type { BootstrapSession, ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
 import type { ConsoleRoute } from "@/features/console/navigation";
 import type { FoundationState } from "@/lib/presentation/project";
 import type { ProjectSummaryEntry } from "@/lib/presentation/project";
@@ -37,13 +37,13 @@ export type ConsoleController = {
   submitReview: (credential?: string) => Promise<void>;
   state: ConsoleState & FoundationState;
   actions: {
-    addServer: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+    addServer: (event: FormEvent<HTMLFormElement>, onCreated?: () => void | Promise<void>) => Promise<void>;
     createProject: (event: FormEvent<HTMLFormElement>) => Promise<void>;
-    createService: (event: FormEvent<HTMLFormElement>) => Promise<void>;
     diagnostics: (nodeID: string) => Promise<void>;
     load: () => Promise<void>;
     loadBootstrapEvents: (sessionID: string) => Promise<void>;
-    retryBootstrap: (sessionID: string) => void;
+    refreshBootstrap: (sessionID: string) => Promise<BootstrapSession | undefined>;
+    retryBootstrap: (sessionID: string, onRetried?: () => void | Promise<void>) => void;
     loadDeploymentEvents: (deploymentID: string) => Promise<void>;
     incidentList: (event: FormEvent<HTMLFormElement>) => Promise<void>;
     incidentGet: (event: FormEvent<HTMLFormElement>) => Promise<void>;

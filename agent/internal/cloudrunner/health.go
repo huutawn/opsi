@@ -7,9 +7,12 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 )
 
 const (
@@ -28,6 +31,7 @@ const (
 type RuntimeHealth struct {
 	NodeReady bool
 	K3SStatus string
+	Capacity  cloudrelay.NodeCapacity
 }
 
 type HealthProbe interface {
@@ -145,6 +149,7 @@ func (p KubernetesHealthProbe) Probe(ctx context.Context) (RuntimeHealth, error)
 	var result struct {
 		Items []struct {
 			Status struct {
+				Capacity   map[string]string `json:"capacity"`
 				Conditions []struct {
 					Type   string `json:"type"`
 					Status string `json:"status"`
@@ -155,6 +160,7 @@ func (p KubernetesHealthProbe) Probe(ctx context.Context) (RuntimeHealth, error)
 	if err := json.Unmarshal(nodes, &result); err != nil || len(result.Items) == 0 {
 		return RuntimeHealth{}, errors.New("kubernetes node response is malformed")
 	}
+	capacity := cloudrelay.NodeCapacity{}
 	for _, item := range result.Items {
 		ready := false
 		for _, condition := range item.Status.Conditions {
@@ -166,6 +172,44 @@ func (p KubernetesHealthProbe) Probe(ctx context.Context) (RuntimeHealth, error)
 		if !ready {
 			return RuntimeHealth{K3SStatus: K3SStatusNotReady}, nil
 		}
+		capacity.CPUCores += cpuCores(item.Status.Capacity["cpu"])
+		capacity.MemoryMB += binaryQuantity(item.Status.Capacity["memory"], 1024)
+		capacity.DiskTotalGB += binaryQuantity(item.Status.Capacity["ephemeral-storage"], 1024*1024)
 	}
-	return RuntimeHealth{NodeReady: true, K3SStatus: K3SStatusReady}, nil
+	return RuntimeHealth{NodeReady: true, K3SStatus: K3SStatusReady, Capacity: capacity}, nil
+}
+
+func cpuCores(value string) int {
+	value = strings.TrimSpace(value)
+	if strings.HasSuffix(value, "m") {
+		millicores, err := strconv.ParseUint(strings.TrimSuffix(value, "m"), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return int(millicores / 1000)
+	}
+	cores, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return int(cores)
+}
+
+func binaryQuantity(value string, kibPerUnit uint64) int {
+	value = strings.TrimSpace(value)
+	for _, quantity := range []struct {
+		suffix     string
+		multiplier uint64
+	}{{"Ki", 1}, {"Mi", 1024}, {"Gi", 1024 * 1024}, {"Ti", 1024 * 1024 * 1024}} {
+		suffix, multiplier := quantity.suffix, quantity.multiplier
+		if !strings.HasSuffix(value, suffix) {
+			continue
+		}
+		amount, err := strconv.ParseUint(strings.TrimSuffix(value, suffix), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return int(amount * multiplier / kibPerUnit)
+	}
+	return 0
 }

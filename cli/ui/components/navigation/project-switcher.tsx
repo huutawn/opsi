@@ -34,7 +34,7 @@ export function ProjectSwitcher({ environment, orgID, project, projects, onBrows
     </summary>
     <div className="switcherMenu">
       <p>Projects</p>
-      {projects.map((item) => <a aria-current={project?.id === item.id ? "page" : undefined} href={routeHref({ projectID: item.id, view: "overview" })} key={item.id} onClick={(event) => choose(event, item.id)}><span>{item.name}</span><small>{item.slug}</small></a>)}
+      {projects.map((item) => <a aria-current={project?.id === item.id ? "page" : undefined} href={routeHref({ projectID: item.id })} key={item.id} onClick={(event) => choose(event, item.id)}><span>{item.name}</span><small>{item.slug}</small></a>)}
       <a href={routeHref({ view: "projects" })} onClick={(event) => choose(event)}>Browse all projects</a>
     </div>
   </details>;

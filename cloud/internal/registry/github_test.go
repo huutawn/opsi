@@ -151,10 +151,17 @@ func TestGitHubBindingValidationAndUniqueness(t *testing.T) {
 			t.Fatalf("config path %q err=%v", configPath, err)
 		}
 	}
+	if _, err := service.CreateGitHubServiceBinding(project.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "worker", CreatedBy: "user-1"}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_MISMATCH") {
+		t.Fatalf("service identity mismatch err=%v", err)
+	}
 	if _, err := service.CreateGitHubServiceBinding(project.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", ConfigPath: "services/api/opsi.yaml", CreatedBy: "user-1"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CreateGitHubServiceBinding(project.ID, GitHubServiceBindingDraft{ServiceID: secondService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: "user-1"}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_ALREADY_BOUND") {
+	duplicateService, err := service.CreateService(project.ID, ServiceDraft{Name: "api"}, "duplicate-api-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateGitHubServiceBinding(project.ID, GitHubServiceBindingDraft{ServiceID: duplicateService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: "user-1"}); !hasGitHubCode(err, "GITHUB_SERVICE_KEY_ALREADY_BOUND") {
 		t.Fatalf("duplicate repository key err=%v", err)
 	}
 	secondBinding, err := service.CreateGitHubServiceBinding(project.ID, GitHubServiceBindingDraft{ServiceID: secondService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "worker", ConfigPath: "services/worker/opsi.yaml", CreatedBy: "user-1"})

@@ -174,6 +174,15 @@ func TestNormalizePathAndConflictMatrix(t *testing.T) {
 	}
 }
 
+func TestManagedPathsConflictAllowsLongestPrefixRouting(t *testing.T) {
+	if ManagedPathsConflict("/", "/api") {
+		t.Fatal("managed / and /api must coexist")
+	}
+	if !ManagedPathsConflict("/api", "/api") {
+		t.Fatal("exact managed route duplicate must conflict")
+	}
+}
+
 func hasCode(err error, code string) bool {
 	var validation *ValidationError
 	return errors.As(err, &validation) && validation.Code == code

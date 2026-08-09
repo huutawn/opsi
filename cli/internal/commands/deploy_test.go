@@ -55,6 +55,13 @@ func TestDeployHelpDoesNotAdvertiseIngress(t *testing.T) {
 	}
 }
 
+func TestLegacyDeploymentSpecRejectsPublicExposure(t *testing.T) {
+	flags := deploymentSpecFlags{projectID: "proj-1", buildRecordID: "br-1", environmentID: "env-1", serviceKey: "api", replicas: 1, containerPort: 8080, cpuRequest: "100m", memoryRequest: "128Mi", cpuLimit: "500m", memoryLimit: "512Mi", termination: 30, exposure: "public"}
+	if _, err := flags.request(); err == nil || !strings.Contains(err.Error(), "must be none or internal") {
+		t.Fatalf("public WorkloadSpec err=%v", err)
+	}
+}
+
 func TestDeployApplyUsesCanonicalCloudImmutableEndpoint(t *testing.T) {
 	var received map[string]any
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

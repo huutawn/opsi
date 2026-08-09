@@ -255,6 +255,7 @@ export function serviceRows(input: {
       service,
       telemetry,
       deployment,
+      placement: assignment ? `${environment?.name ?? assignment.environment_id} / ${runtime?.name ?? assignment.runtime_id}` : "Unplaced",
       runtime: runtime?.name,
       environment: environment?.name,
       ready,

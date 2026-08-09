@@ -204,11 +204,20 @@ func (s WorkloadSpec) Validate() error {
 	if s.Exposure.Mode != "none" && s.Exposure.Mode != "internal" {
 		return errors.New("R5-010 exposure mode must be none or internal")
 	}
-	if len(s.Environment) > 64 || len(s.SecretReferences) > 32 {
+	if err := ValidateEnvironment(s.Environment, s.SecretReferences); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateEnvironment applies the WorkloadSpec environment limits without
+// requiring callers to construct a synthetic workload.
+func ValidateEnvironment(environment []EnvironmentVariable, secretReferences []SecretReference) error {
+	if len(environment) > 64 || len(secretReferences) > 32 {
 		return errors.New("environment or secret reference count exceeds the bound")
 	}
 	seen := map[string]struct{}{}
-	for _, item := range s.Environment {
+	for _, item := range environment {
 		if !envNamePattern.MatchString(item.Name) || len(item.Value) > 4096 || strings.ContainsRune(item.Value, '\x00') {
 			return errors.New("environment entry is invalid")
 		}
@@ -220,7 +229,7 @@ func (s WorkloadSpec) Validate() error {
 		}
 		seen[item.Name] = struct{}{}
 	}
-	for _, item := range s.SecretReferences {
+	for _, item := range secretReferences {
 		if !envNamePattern.MatchString(item.EnvName) || !validOpaqueID(item.SecretID) {
 			return errors.New("secret reference is invalid")
 		}
@@ -300,18 +309,20 @@ func (s WorkloadSpec) Hash() (string, error) {
 }
 
 type AuthoritySnapshot struct {
-	BuildRecord              buildrecordv1.Record `json:"build_record"`
-	TopologyPlanID           string               `json:"topology_plan_id"`
-	TopologyRevision         uint64               `json:"topology_revision"`
-	TopologyHash             string               `json:"topology_hash"`
-	DeploymentPolicyID       string               `json:"deployment_policy_id"`
-	DeploymentPolicyRevision uint64               `json:"deployment_policy_revision"`
-	DeploymentPolicyHash     string               `json:"deployment_policy_hash"`
-	RoutingDecisionHash      string               `json:"routing_decision_hash"`
-	EnvironmentID            string               `json:"environment_id"`
-	RuntimeID                string               `json:"runtime_id"`
-	NodeID                   string               `json:"node_id"`
-	AgentID                  string               `json:"agent_id"`
+	BuildRecord                   buildrecordv1.Record `json:"build_record"`
+	TopologyPlanID                string               `json:"topology_plan_id"`
+	TopologyRevision              uint64               `json:"topology_revision"`
+	TopologyHash                  string               `json:"topology_hash"`
+	ServiceConfigurationRevision  uint64               `json:"service_configuration_revision"`
+	ServiceConfigurationStateHash string               `json:"service_configuration_state_hash"`
+	DeploymentPolicyID            string               `json:"deployment_policy_id"`
+	DeploymentPolicyRevision      uint64               `json:"deployment_policy_revision"`
+	DeploymentPolicyHash          string               `json:"deployment_policy_hash"`
+	RoutingDecisionHash           string               `json:"routing_decision_hash"`
+	EnvironmentID                 string               `json:"environment_id"`
+	RuntimeID                     string               `json:"runtime_id"`
+	NodeID                        string               `json:"node_id"`
+	AgentID                       string               `json:"agent_id"`
 }
 
 type JobSnapshot struct {
@@ -329,11 +340,17 @@ type JobSnapshot struct {
 }
 
 type CreateRequest struct {
-	SchemaVersion  string       `json:"schema_version"`
-	BuildRecordID  string       `json:"build_record_id"`
-	EnvironmentID  string       `json:"environment_id"`
-	Workload       WorkloadSpec `json:"workload"`
-	IdempotencyKey string       `json:"-"`
+	SchemaVersion                    string        `json:"schema_version"`
+	BuildRecordID                    string        `json:"build_record_id"`
+	EnvironmentID                    string        `json:"environment_id"`
+	ExpectedTopologyRevision         uint64        `json:"expected_topology_revision,omitempty"`
+	ExpectedTopologyHash             string        `json:"expected_topology_hash,omitempty"`
+	ExpectedConfigurationRevision    uint64        `json:"expected_configuration_revision,omitempty"`
+	ExpectedConfigurationStateHash   string        `json:"expected_configuration_state_hash,omitempty"`
+	ExpectedDeploymentPolicyRevision uint64        `json:"expected_deployment_policy_revision,omitempty"`
+	ExpectedDeploymentPolicyHash     string        `json:"expected_deployment_policy_hash,omitempty"`
+	Workload                         *WorkloadSpec `json:"workload,omitempty"`
+	IdempotencyKey                   string        `json:"-"`
 }
 
 type Preview struct {

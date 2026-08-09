@@ -77,6 +77,36 @@ func (c *Client) ListServices(ctx context.Context, projectID string) ([]Service,
 	return response.Services, err
 }
 
+func (c *Client) GetServiceConfiguration(ctx context.Context, projectID, serviceID string) (ServiceConfiguration, error) {
+	var response ServiceConfiguration
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "services", serviceID, "configuration"}, nil, "", &response)
+	return response, err
+}
+
+func (c *Client) PreviewServiceConfiguration(ctx context.Context, projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationPreview, error) {
+	var response ServiceConfigurationPreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "services", serviceID, "configuration", "preview"}, draft, "", &response)
+	return response, err
+}
+
+func (c *Client) ValidateServiceConfiguration(ctx context.Context, projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationValidation, error) {
+	var response ServiceConfigurationValidation
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "services", serviceID, "configuration", "validate"}, draft, "", &response)
+	return response, err
+}
+
+func (c *Client) DiffServiceConfiguration(ctx context.Context, projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationDiff, error) {
+	var response ServiceConfigurationDiff
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "services", serviceID, "configuration", "diff"}, draft, "", &response)
+	return response, err
+}
+
+func (c *Client) ApplyServiceConfiguration(ctx context.Context, projectID, serviceID, key string, request ServiceConfigurationApplyRequest) (ServiceConfigurationApplyResult, error) {
+	var response ServiceConfigurationApplyResult
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "services", serviceID, "configuration", "apply"}, request, key, &response)
+	return response, err
+}
+
 func (c *Client) RegisterActionDevice(ctx context.Context, projectID, displayName, idempotencyKey string, publicKey []byte) (ActionDevice, error) {
 	var response ActionDevice
 	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "action-devices"}, map[string]any{"display_name": displayName, "public_key": publicKey, "idempotency_key": idempotencyKey}, idempotencyKey, &response)
@@ -84,13 +114,17 @@ func (c *Client) RegisterActionDevice(ctx context.Context, projectID, displayNam
 }
 
 func (c *Client) ListActionDevices(ctx context.Context, projectID string) ([]ActionDevice, error) {
-	var response struct{ Devices []ActionDevice `json:"devices"` }
+	var response struct {
+		Devices []ActionDevice `json:"devices"`
+	}
 	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "action-devices"}, nil, "", &response)
 	return response.Devices, err
 }
 
 func (c *Client) RevokeActionDevice(ctx context.Context, projectID, deviceID string) (ActionDevice, error) {
-	var response struct{ Device ActionDevice `json:"device"` }
+	var response struct {
+		Device ActionDevice `json:"device"`
+	}
 	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "action-devices", deviceID, "revoke"}, nil, "revoke:"+deviceID, &response)
 	return response.Device, err
 }

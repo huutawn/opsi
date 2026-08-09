@@ -39,6 +39,16 @@ func TestValidateRejectsPartialClientCert(t *testing.T) {
 	}
 }
 
+func TestDefaultUsesHostedBetaCloudWithoutInventingAgentAddress(t *testing.T) {
+	cfg := Default()
+	if cfg.CloudURL != "https://opsidev.site" || cfg.AgentAddr != "" {
+		t.Fatalf("default config=%+v", cfg)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadRequiresSelectedConfigAndCloudURL(t *testing.T) {
 	if _, err := Load(""); err == nil {
 		t.Fatal("missing selected config was accepted")

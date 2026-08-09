@@ -1,72 +1,119 @@
-import type { PlacementFacts, TopologyAssignment, TopologyPlan } from "../../contracts/registry.ts";
+import type { BootstrapSession, PlacementFacts, TopologyAssignment, TopologyDraft, TopologyPlan } from "../../contracts/registry.ts";
 
-export type TopologyKind = "environment" | "runtime" | "node" | "agent" | "service";
-export type TopologyNode = { id: string; kind: TopologyKind; label: string; status: string; detail: string };
-export type TopologyEdge = { from: string; to: string; relation: string };
-export type TopologyGraph = { nodes: TopologyNode[]; edges: TopologyEdge[]; unresolved: Array<{ id: string; label: string; reason: string }> };
-export type PositionedNode = TopologyNode & { x: number; y: number };
+export type CanvasPlacement = {
+  runtime_id: string | null;
+  environment_id?: string;
+  replicas?: number;
+  cpu_request_millicores?: number;
+  memory_request_bytes?: number;
+  exposure?: TopologyAssignment["exposure"];
+  rationale?: TopologyAssignment["rationale"];
+};
+export type CanvasDraft = Record<string, CanvasPlacement>;
+export type CanvasDraftStatus = "unchanged" | "edited" | "moved" | "new placement" | "pending removal";
+export type TopologyOnboardingState = {
+  kind: "connect" | "bootstrap" | "retry" | "application" | "placement" | "inspect";
+  title: string;
+  description: string;
+  action: "Connect server" | "Inspect progress" | "Retry bootstrap" | "Add application" | "Plan placement" | "Inspect topology";
+  progress?: ReturnType<typeof bootstrapProgress>;
+  sessionID?: string;
+};
+export type ServerLifecycle = {
+  status: "Connecting" | "Bootstrapping" | "Ready" | "Offline" | "Failed" | "Unknown";
+  runtime?: PlacementFacts["runtimes"][number];
+  node?: PlacementFacts["nodes"][number];
+  agent?: PlacementFacts["agents"][number];
+  session?: BootstrapSession;
+};
 
-export function buildTopologyGraph(facts: PlacementFacts, plan: TopologyPlan | null): TopologyGraph {
-  const nodes: TopologyNode[] = [];
-  const edges: TopologyEdge[] = [];
-  const unresolved: TopologyGraph["unresolved"] = [];
-  const environmentIDs = new Set(facts.environments.map((item) => item.id));
-  const runtimeIDs = new Set(facts.runtimes.map((item) => item.id));
-  const nodeIDs = new Set(facts.nodes.map((item) => item.id));
-  const serviceKeys = new Set(facts.services.map((item) => item.key));
-
-  for (const environment of facts.environments) {
-    nodes.push({ id: graphID("environment", environment.id), kind: "environment", label: environment.name, status: environment.status, detail: environment.type });
-  }
-  for (const runtime of facts.runtimes) {
-    nodes.push({ id: graphID("runtime", runtime.id), kind: "runtime", label: runtime.name, status: runtime.status, detail: runtime.type });
-    if (environmentIDs.has(runtime.environment_id)) edges.push({ from: graphID("environment", runtime.environment_id), to: graphID("runtime", runtime.id), relation: "runtime.environment_id" });
-    else unresolved.push({ id: runtime.id, label: runtime.name, reason: `Environment ${runtime.environment_id || "identity"} is missing.` });
-  }
-  for (const node of facts.nodes) {
-    nodes.push({ id: graphID("node", node.id), kind: "node", label: node.id, status: node.status, detail: capacityLabel(node.cpu_cores, node.memory_mb) });
-    if (runtimeIDs.has(node.runtime_id)) edges.push({ from: graphID("runtime", node.runtime_id), to: graphID("node", node.id), relation: "node.runtime_id" });
-    else unresolved.push({ id: node.id, label: node.id, reason: `Runtime ${node.runtime_id || "identity"} is missing.` });
-  }
-  for (const agent of facts.agents) {
-    nodes.push({ id: graphID("agent", agent.id), kind: "agent", label: agent.id, status: agent.status, detail: agent.last_seen_at || "Heartbeat not reported" });
-    if (!runtimeIDs.has(agent.runtime_id)) unresolved.push({ id: agent.id, label: agent.id, reason: `Runtime ${agent.runtime_id || "identity"} is missing.` });
-    else edges.push({ from: graphID("runtime", agent.runtime_id), to: graphID("agent", agent.id), relation: "agent.runtime_id" });
-    if (nodeIDs.has(agent.node_id)) edges.push({ from: graphID("node", agent.node_id), to: graphID("agent", agent.id), relation: "agent.node_id" });
-    else unresolved.push({ id: agent.id, label: agent.id, reason: `Node ${agent.node_id || "identity"} is missing.` });
-  }
-  for (const service of facts.services) {
-    nodes.push({ id: graphID("service", service.key), kind: "service", label: service.key, status: assignmentFor(plan, service.key) ? "assigned" : "unassigned", detail: service.id });
-  }
-  for (const assignment of plan?.assignments ?? []) {
-    if (!serviceKeys.has(assignment.service_key)) {
-      unresolved.push({ id: assignment.service_key, label: assignment.service_key, reason: "Assignment service key does not exactly match service inventory." });
-      continue;
-    }
-    if (!runtimeIDs.has(assignment.runtime_id)) {
-      unresolved.push({ id: assignment.service_key, label: assignment.service_key, reason: `Assigned runtime ${assignment.runtime_id} is missing.` });
-      continue;
-    }
-    edges.push({ from: graphID("runtime", assignment.runtime_id), to: graphID("service", assignment.service_key), relation: "TopologyPlan.assignments" });
-  }
-  return { nodes, edges, unresolved };
-}
-
-export function layoutTopology(nodes: TopologyNode[]): PositionedNode[] {
-  const columns: TopologyKind[][] = [["environment"], ["runtime"], ["node"], ["agent"], ["service"]];
-  const xByKind = new Map<TopologyKind, number>();
-  columns.forEach((kinds, index) => kinds.forEach((kind) => xByKind.set(kind, 24 + index * 210)));
-  const counters = new Map<number, number>();
-  return [...nodes].sort((a, b) => (xByKind.get(a.kind) ?? 0) - (xByKind.get(b.kind) ?? 0) || a.label.localeCompare(b.label)).map((node) => {
-    const x = xByKind.get(node.kind) ?? 32;
-    const row = counters.get(x) ?? 0;
-    counters.set(x, row + 1);
-    return { ...node, x, y: 28 + row * 108 };
-  });
-}
+const activeBootstrapStatuses = new Set(["created", "pending", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
+const connectingBootstrapStatuses = new Set(["created", "pending", "retry_wait", "connecting"]);
+const usableNodeStatuses = new Set(["healthy", "ready", "active"]);
+const defaultCPURequestMillicores = 100;
+const defaultMemoryRequestBytes = 128 * 1024 * 1024;
+export const bootstrapPollInterval = 4_000;
 
 export function assignmentFor(plan: TopologyPlan | null, serviceKey: string): TopologyAssignment | undefined {
   return plan?.assignments.find((item) => item.service_key === serviceKey);
+}
+
+export function deploymentAssignmentFor(plan: TopologyPlan | null, serviceKey: string, environmentID: string): TopologyAssignment | undefined {
+  return plan?.assignments.find((item) => item.service_key === serviceKey && item.environment_id === environmentID);
+}
+
+export function currentEnvironment(facts: PlacementFacts | null | undefined, environmentID: string) {
+  if (!facts?.environments.length) return undefined;
+  if (environmentID) return facts.environments.find((item) => item.id === environmentID);
+  return facts.environments.length === 1 ? facts.environments[0] : undefined;
+}
+
+export function canvasPlacement(plan: TopologyPlan | null, draft: CanvasDraft, serviceKey: string): CanvasPlacement {
+  if (Object.hasOwn(draft, serviceKey)) return draft[serviceKey];
+  const assignment = assignmentFor(plan, serviceKey);
+  return assignment ? { ...assignment } : { runtime_id: null };
+}
+
+export function moveCanvasPlacement(plan: TopologyPlan | null, draft: CanvasDraft, serviceKey: string, runtime?: PlacementFacts["runtimes"][number]): CanvasDraft {
+  const current = canvasPlacement(plan, draft, serviceKey);
+  return updateCanvasPlacement(plan, draft, serviceKey, runtime ? {
+    runtime_id: runtime.id,
+    environment_id: runtime.environment_id,
+    replicas: current.replicas ?? 1,
+    cpu_request_millicores: current.cpu_request_millicores ?? defaultCPURequestMillicores,
+    memory_request_bytes: current.memory_request_bytes ?? defaultMemoryRequestBytes,
+    exposure: current.exposure ?? { mode: "none" },
+  } : { runtime_id: null });
+}
+
+export function updateCanvasPlacement(plan: TopologyPlan | null, draft: CanvasDraft, serviceKey: string, patch: Partial<CanvasPlacement>): CanvasDraft {
+  const next = { ...canvasPlacement(plan, draft, serviceKey), ...patch };
+  const updated = { ...draft };
+  if (placementMatches(next, assignmentFor(plan, serviceKey))) delete updated[serviceKey];
+  else updated[serviceKey] = next;
+  return updated;
+}
+
+export function compileCanvasDraft(projectID: string, plan: TopologyPlan | null, draft: CanvasDraft): TopologyDraft {
+  const assignments = new Map((plan?.assignments ?? []).map((assignment) => [assignment.service_key, assignment]));
+  for (const [serviceKey, placement] of Object.entries(draft)) {
+    if (!placement.runtime_id) {
+      assignments.delete(serviceKey);
+      continue;
+    }
+    const rationale = placement.rationale?.summary ? { rationale: { summary: placement.rationale.summary } } : {};
+    assignments.set(serviceKey, {
+      service_key: serviceKey,
+      environment_id: placement.environment_id ?? "",
+      runtime_id: placement.runtime_id,
+      replicas: finiteInteger(placement.replicas),
+      cpu_request_millicores: finiteInteger(placement.cpu_request_millicores),
+      memory_request_bytes: finiteInteger(placement.memory_request_bytes),
+      exposure: { mode: placement.exposure?.mode ?? "none" },
+      ...rationale,
+    });
+  }
+  return { schema_version: "opsi.topology_plan/v1", project_id: projectID, assignments: [...assignments.values()].sort((a, b) => a.service_key < b.service_key ? -1 : a.service_key > b.service_key ? 1 : 0) };
+}
+
+export function canvasDraftStatus(plan: TopologyPlan | null, draft: CanvasDraft, serviceKey: string): CanvasDraftStatus {
+  const applied = assignmentFor(plan, serviceKey)?.runtime_id ?? null;
+  const target = canvasPlacement(plan, draft, serviceKey).runtime_id;
+  if (Object.hasOwn(draft, serviceKey) && applied === target) return "edited";
+  if (applied === target) return "unchanged";
+  if (!applied) return "new placement";
+  if (!target) return "pending removal";
+  return "moved";
+}
+
+export function canvasDraftIssues(placement: CanvasPlacement): string[] {
+  if (!placement.runtime_id) return [];
+  const issues: string[] = [];
+  if (!validInteger(placement.replicas, 100)) issues.push("Replicas must be between 1 and 100.");
+  if (!validInteger(placement.cpu_request_millicores, 1_000_000)) issues.push("CPU request must be between 1 and 1,000,000 millicores.");
+  if (!validInteger(placement.memory_request_bytes, 2 ** 50)) issues.push("Memory request must be between 1 byte and 1 PiB.");
+  if (!placement.exposure) issues.push("Exposure is missing.");
+  return issues;
 }
 
 export function capacityLabel(cpu?: number, memoryMiB?: number) {
@@ -81,6 +128,72 @@ export function bootstrapProgress(checkpoint?: { next_step_index: number; last_c
   return { label: checkpoint.last_completed_step || `Checkpoint ${bounded}`, percent: bounded * 25 };
 }
 
-export function graphID(kind: TopologyKind, id: string) {
-  return `${kind}:${id}`;
+export function latestActiveBootstrap(sessions: BootstrapSession[]) {
+  return latestBootstrap(sessions.filter((session) => activeBootstrapStatuses.has(session.status)));
+}
+
+export function terminalBootstrap(session?: BootstrapSession) {
+  return !session || !activeBootstrapStatuses.has(session.status);
+}
+
+export function serverLifecycle(facts: PlacementFacts, sessions: BootstrapSession[]): ServerLifecycle {
+  const active = latestActiveBootstrap(sessions);
+  const latest = latestBootstrap(sessions);
+  for (const runtime of facts.runtimes) {
+    const match = readyServer(facts.nodes.filter((node) => node.runtime_id === runtime.id), facts.agents.filter((agent) => agent.runtime_id === runtime.id));
+    if (match) return { status: "Ready", runtime, ...match, session: active ? undefined : latest };
+  }
+  if (active) return { status: connectingBootstrapStatuses.has(active.status) ? "Connecting" : "Bootstrapping", session: active };
+  const runtime = facts.runtimes[0];
+  const node = facts.nodes.find((item) => item.runtime_id === runtime?.id) ?? facts.nodes[0];
+  const agent = facts.agents.find((item) => item.runtime_id === runtime?.id && (!node || item.node_id === node.id)) ?? facts.agents[0];
+  if (latest && ["failed", "dead_letter"].includes(latest.status)) return { status: "Failed", runtime, node, agent, session: latest };
+  if (runtime || node || agent) return { status: "Offline", runtime, node, agent, session: latest };
+  return { status: "Unknown", session: latest };
+}
+
+export function serverStatus(nodes: PlacementFacts["nodes"], agents: PlacementFacts["agents"]): "Ready" | "Offline" | "Unknown" {
+  if (readyServer(nodes, agents)) return "Ready";
+  return nodes.length || agents.length ? "Offline" : "Unknown";
+}
+
+export function topologyOnboarding(facts: PlacementFacts, plan: TopologyPlan | null, sessions: BootstrapSession[]): TopologyOnboardingState {
+  const lifecycle = serverLifecycle(facts, sessions);
+  if (lifecycle.status === "Connecting" || lifecycle.status === "Bootstrapping") return { kind: "bootstrap", title: "Server connection in progress", description: `Bootstrap ${lifecycle.session?.id} is ${lifecycle.session?.status}.`, action: "Inspect progress", progress: bootstrapProgress(lifecycle.session?.checkpoint), sessionID: lifecycle.session?.id };
+  if (lifecycle.status === "Failed") return { kind: "retry", title: "Server bootstrap failed", description: lifecycle.session?.last_failure_message_redacted || lifecycle.session?.last_failure_code || "The latest bootstrap session failed.", action: "Retry bootstrap", sessionID: lifecycle.session?.id };
+  if (lifecycle.status === "Unknown" && !lifecycle.session) return { kind: "connect", title: "Connect the first server", description: "No server facts are reported for this project.", action: "Connect server" };
+  if (lifecycle.status !== "Ready") return { kind: "inspect", title: `Server status is ${lifecycle.status.toLowerCase()}`, description: "Runtime, node, and active Agent facts do not currently establish a ready server.", action: "Inspect topology" };
+  if (facts.services.length === 0) return { kind: "application", title: "Add the first application", description: "A server is ready, but the service catalog is empty.", action: "Add application" };
+  const unassigned = facts.services.filter((service) => !plan?.assignments.some((assignment) => assignment.service_key === service.key));
+  if (unassigned.length) return { kind: "placement", title: "Place unassigned services", description: `${unassigned.map((service) => service.key).join(", ")} ${unassigned.length === 1 ? "needs" : "need"} a runtime assignment.`, action: "Plan placement" };
+  return { kind: "inspect", title: "Topology is ready to inspect", description: `TopologyPlan r${plan?.revision ?? 0} assigns every reported service.`, action: "Inspect topology" };
+}
+
+function latestBootstrap(sessions: BootstrapSession[]) {
+  return [...sessions].sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+}
+
+function readyServer(nodes: PlacementFacts["nodes"], agents: PlacementFacts["agents"]) {
+  const agent = agents.find((item) => item.status === "active" && nodes.some((node) => usableNodeStatuses.has(node.status) && node.id === item.node_id && node.runtime_id === item.runtime_id));
+  const node = agent && nodes.find((item) => item.id === agent.node_id);
+  return agent && node ? { agent, node } : undefined;
+}
+
+function placementMatches(placement: CanvasPlacement, assignment?: TopologyAssignment) {
+  if (!assignment) return !placement.runtime_id;
+  return placement.runtime_id === assignment.runtime_id
+    && placement.environment_id === assignment.environment_id
+    && placement.replicas === assignment.replicas
+    && placement.cpu_request_millicores === assignment.cpu_request_millicores
+    && placement.memory_request_bytes === assignment.memory_request_bytes
+    && placement.exposure?.mode === assignment.exposure.mode
+    && (placement.rationale?.summary ?? "") === (assignment.rationale?.summary ?? "");
+}
+
+function finiteInteger(value?: number) {
+  return Number.isSafeInteger(value) ? value as number : 0;
+}
+
+function validInteger(value: number | undefined, max: number) {
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= max;
 }

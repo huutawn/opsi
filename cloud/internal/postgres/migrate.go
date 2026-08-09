@@ -57,6 +57,9 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		)`,
 		`ALTER TABLE project_memberships DROP CONSTRAINT IF EXISTS project_memberships_role_check`,
 		`ALTER TABLE project_memberships ADD CONSTRAINT project_memberships_role_check CHECK (role IN ('owner','admin','developer','viewer','support','Owner','Developer','Viewer'))`,
+		`INSERT INTO project_memberships(project_id,user_id,role,created_at)
+		 SELECT id,created_by,'owner',created_at FROM projects WHERE created_by IS NOT NULL
+		 ON CONFLICT (project_id,user_id) DO NOTHING`,
 		`CREATE TABLE IF NOT EXISTS environments (
 			id TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -246,7 +249,6 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			ports JSONB NOT NULL DEFAULT '[]'::jsonb,
 			health_check JSONB NOT NULL DEFAULT '{}'::jsonb,
 			resources JSONB NOT NULL DEFAULT '{}'::jsonb,
-			bindings JSONB NOT NULL DEFAULT '[]'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			UNIQUE (project_id, name)
@@ -262,7 +264,6 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE control_services ADD COLUMN IF NOT EXISTS health_path TEXT`,
 		`ALTER TABLE control_services ADD COLUMN IF NOT EXISTS replicas_desired INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE control_services ADD COLUMN IF NOT EXISTS resources JSONB NOT NULL DEFAULT '{}'::jsonb`,
-		`ALTER TABLE control_services ADD COLUMN IF NOT EXISTS bindings JSONB NOT NULL DEFAULT '[]'::jsonb`,
 		`CREATE INDEX IF NOT EXISTS control_services_project_status_idx ON control_services(project_id, status)`,
 		`CREATE TABLE IF NOT EXISTS deployment_jobs (
 			id TEXT PRIMARY KEY,
@@ -581,5 +582,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateR5010Deployment(ctx, db); err != nil {
 		return err
 	}
-	return MigrateR5011Rollout(ctx, db)
+	if err := MigrateR5011Rollout(ctx, db); err != nil {
+		return err
+	}
+	return MigrateR5012ServiceConfiguration(ctx, db)
 }

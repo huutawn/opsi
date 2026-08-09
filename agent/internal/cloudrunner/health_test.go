@@ -14,10 +14,10 @@ import (
 func TestKubernetesHealthProbeReady(t *testing.T) {
 	runner := &scriptedHealthRunner{responses: []healthCommandResponse{
 		{output: []byte("ok\n")},
-		{output: []byte(`{"items":[{"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}`)},
+		{output: []byte(`{"items":[{"status":{"capacity":{"cpu":"2","memory":"2013372Ki","ephemeral-storage":"41260332Ki"},"conditions":[{"type":"Ready","status":"True"}]}}]}`)},
 	}}
 	health := ProbeRuntime(context.Background(), KubernetesHealthProbe{KubectlPath: "/usr/local/bin/kubectl", Runner: runner})
-	if !health.NodeReady || health.K3SStatus != K3SStatusReady {
+	if !health.NodeReady || health.K3SStatus != K3SStatusReady || health.Capacity.CPUCores != 2 || health.Capacity.MemoryMB != 1966 || health.Capacity.DiskTotalGB != 39 {
 		t.Fatalf("health = %+v", health)
 	}
 	want := [][]string{
@@ -26,6 +26,19 @@ func TestKubernetesHealthProbeReady(t *testing.T) {
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestCapacityQuantityParsingFailsClosed(t *testing.T) {
+	for input, want := range map[string]int{"2": 2, "2000m": 2, "1500m": 1, "invalid": 0} {
+		if got := cpuCores(input); got != want {
+			t.Fatalf("cpuCores(%q)=%d want %d", input, got, want)
+		}
+	}
+	for input, want := range map[string]int{"2048Mi": 2048, "2Gi": 2048, "invalid": 0} {
+		if got := binaryQuantity(input, 1024); got != want {
+			t.Fatalf("binaryQuantity(%q)=%d want %d", input, got, want)
+		}
 	}
 }
 

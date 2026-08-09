@@ -580,6 +580,9 @@ func TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	if base.RollbackEligible || base.RollbackBlockedReason == "" {
+		t.Fatalf("first deployment has invalid rollback authority: %+v", base)
+	}
 
 	request := rolloutExposureRequest(t, base, "dep-pg-exposure-"+suffix, "pg.example.com", "/")
 	job, reused, err := service.StartExposureRollout(project.ID, userID, "exposure-key", "create", request)
@@ -630,6 +633,22 @@ func TestPostgresExposureRolloutSurvivesRestartAndSerializesConcurrentApply(t *t
 	persisted, err := restarted.GetDeployment(project.ID, job.ID)
 	if err != nil || persisted.TerminalResult == nil || persisted.RolloutIntent == nil || persisted.ExposureSpec == nil || persisted.RolloutStateHash != strings.Repeat("6", 64) {
 		t.Fatalf("restart persisted=%+v err=%v", persisted, err)
+	}
+	unchanged := rolloutExposureRequest(t, base, "dep-pg-unchanged-"+suffix, "pg.example.com", "/")
+	preview, err := restarted.PreviewExposure(project.ID, userID, unchanged)
+	if err != nil || len(preview.Changes) != 1 || preview.Changes[0] != "unchanged" {
+		t.Fatalf("unchanged preview=%+v err=%v", preview, err)
+	}
+	var beforeUnchanged int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployment_jobs WHERE project_id=$1`, project.ID).Scan(&beforeUnchanged); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := restarted.StartExposureRollout(project.ID, userID, "exposure-unchanged", "unchanged", unchanged); apiCode(err) != "EXPOSURE_UNCHANGED" {
+		t.Fatalf("unchanged apply err=%v", err)
+	}
+	var afterUnchanged int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployment_jobs WHERE project_id=$1`, project.ID).Scan(&afterUnchanged); err != nil || afterUnchanged != beforeUnchanged {
+		t.Fatalf("unchanged rollout count=%d/%d err=%v", beforeUnchanged, afterUnchanged, err)
 	}
 	terminalEvents, _ := restarted.DeploymentEvents(project.ID, job.ID)
 	if _, err := restarted.CompleteDeployment(project.ID, job.NodeID, job.ID, "result-replay", result); err != nil {
@@ -851,5 +870,5 @@ func postgresImmutableSnapshot(t *testing.T, service PostgresService, projectID,
 	if err != nil {
 		t.Fatal(err)
 	}
-	return record, deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: spec, SpecHash: specHash, PayloadHash: "payload-" + suffix, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + suffix, ProjectID: projectID, ServiceID: record.ID, ServiceKey: record.Name, ActiveBindingID: "binding-" + suffix, Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, TopologyPlanID: "topology-" + suffix, TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), DeploymentPolicyID: "policy-" + suffix, DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("2", 64), RoutingDecisionHash: strings.Repeat("3", 64), EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID, NodeID: node.ID, AgentID: agent.ID}}
+	return record, deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: spec, SpecHash: specHash, PayloadHash: "payload-" + suffix, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: buildrecordv1.Record{SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + suffix, ProjectID: projectID, ServiceID: record.ID, ServiceKey: record.Name, ActiveBindingID: "binding-" + suffix, Build: buildrecordv1.BuildMetadata{OCIRepository: image.Repository, OCIDigest: image.Digest, Status: "succeeded"}}, TopologyPlanID: "topology-" + suffix, TopologyRevision: 1, TopologyHash: strings.Repeat("1", 64), ServiceConfigurationRevision: record.Configuration.Revision, ServiceConfigurationStateHash: record.Configuration.StateHash, DeploymentPolicyID: "policy-" + suffix, DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("2", 64), RoutingDecisionHash: strings.Repeat("3", 64), EnvironmentID: record.EnvironmentID, RuntimeID: record.RuntimeID, NodeID: node.ID, AgentID: agent.ID}}
 }

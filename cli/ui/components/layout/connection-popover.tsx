@@ -10,5 +10,5 @@ export function ConnectionPopover({ session }: { session: LocalSessionStatus }) 
 
 function Connection({ label, value }: { label: string; value: string }) {
   const ok = value === "ok";
-  return <div className="connectionRow"><span><i className={ok ? "healthy" : "degraded"} aria-hidden="true" />{label}</span><strong>{ok ? "Connected" : value === "failed" ? "Unavailable" : "Unknown"}</strong></div>;
+  return <div className="connectionRow"><span><i className={ok ? "healthy" : "degraded"} aria-hidden="true" />{label}</span><strong>{ok ? "Connected" : value === "failed" ? "Unavailable" : value === "not connected" ? "Not connected" : "Unknown"}</strong></div>;
 }

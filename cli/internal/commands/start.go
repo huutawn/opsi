@@ -56,12 +56,13 @@ func newStartCommand(configPath *string, factory func() (keychain.Store, error))
 }
 
 func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer, factory func() (keychain.Store, error)) error {
-	cfg, err := config.LoadSelected(configPath)
-	if err != nil {
-		return err
-	}
-	if err := requireSelectedAgentAddress(configPath); err != nil {
-		return err
+	cfg := config.Default()
+	if configPath != "" {
+		loaded, err := config.Load(configPath)
+		if err != nil {
+			return err
+		}
+		cfg = loaded
 	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -113,6 +114,9 @@ func (r agentConfigResolver) snapshot() (config.Config, error) {
 	}
 	loaded, err := config.Load(r.configPath)
 	if err != nil {
+		return config.Config{}, agentConfigReloadError{}
+	}
+	if strings.TrimSpace(r.startup.AgentAddr) != "" && strings.TrimSpace(loaded.AgentAddr) == "" {
 		return config.Config{}, agentConfigReloadError{}
 	}
 	snapshot := r.startup
@@ -456,6 +460,9 @@ func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.C
 	body.ProjectID = strings.TrimSpace(body.ProjectID)
 	state := newLocalSessionToken()
 	callback := "http://" + r.Host + "/api/local/session/callback"
+	if body.ProjectID != "" {
+		callback += "?project=" + url.QueryEscape(body.ProjectID)
+	}
 	payload, _ := json.Marshal(map[string]any{"local_callback": callback, "local_state": state, "project_id": body.ProjectID})
 	resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/browser/start", "", payload)
 	if err != nil {
@@ -492,6 +499,7 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	code, state := r.URL.Query().Get("code"), r.URL.Query().Get("state")
+	projectID := strings.TrimSpace(r.URL.Query().Get("project"))
 	flow.mu.Lock()
 	expiresAt, ok := flow.states[state]
 	if ok {
@@ -503,7 +511,7 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	if authError := browserAuthErrorCode(r.URL.Query().Get("error")); authError != "" {
-		http.Redirect(w, r, "/?auth_error="+url.QueryEscape(authError), http.StatusFound)
+		http.Redirect(w, r, localBrowserAuthRedirect(projectID, "auth_error", authError), http.StatusFound)
 		return
 	}
 	if code == "" {
@@ -535,7 +543,15 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	flow.setSession(out.Session)
-	http.Redirect(w, r, "/?auth=ok", http.StatusFound)
+	http.Redirect(w, r, localBrowserAuthRedirect(out.Session.ProjectID, "auth", "ok"), http.StatusFound)
+}
+
+func localBrowserAuthRedirect(projectID, key, value string) string {
+	query := url.Values{key: []string{value}}
+	if projectID != "" {
+		query.Set("project", projectID)
+	}
+	return "/?" + query.Encode()
 }
 
 func browserAuthErrorCode(code string) string {
@@ -613,13 +629,16 @@ func logoutLocalSession(w http.ResponseWriter, r *http.Request, cfg config.Confi
 }
 
 func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) string {
-	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
-	defer cancel()
-	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
 	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
 	if err != nil {
 		return "failed"
 	}
+	if strings.TrimSpace(agentCfg.AgentAddr) == "" {
+		return "not connected"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	defer cancel()
+	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
 	if _, err := agentclient.New(agentCfg).Status(ctx); err != nil {
 		return "failed"
 	}

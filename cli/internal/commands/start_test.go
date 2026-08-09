@@ -103,6 +103,56 @@ func TestRunStartKeepsSessionAndReconnectsAfterConfigSave(t *testing.T) {
 	}
 }
 
+func TestRunStartWithoutConfigUsesHostedCloudAndReportsAgentNotConnected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	outReader, outWriter := io.Pipe()
+	runErr := make(chan error, 1)
+	go func() { runErr <- runStart(ctx, "127.0.0.1:0", "", "", outWriter, nil) }()
+	line, err := bufio.NewReader(outReader).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	localURL := strings.TrimSpace(strings.TrimPrefix(line, "Local Web UI listening on "))
+
+	res, err := http.Get(localURL + "/api/local/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings struct {
+		CloudAuthority  string `json:"cloud_authority"`
+		AgentConfigured bool   `json:"agent_configured"`
+		ConfigSelected  bool   `json:"config_selected"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&settings); err != nil {
+		res.Body.Close()
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if settings.CloudAuthority != "https://opsidev.site" || settings.AgentConfigured || settings.ConfigSelected {
+		t.Fatalf("settings=%+v", settings)
+	}
+
+	res, err = http.Get(localURL + "/api/local/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session struct {
+		AgentConnected string `json:"agent_connected"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&session); err != nil {
+		res.Body.Close()
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if session.AgentConnected != "not connected" {
+		t.Fatalf("agent connection=%q", session.AgentConnected)
+	}
+	if err := cancelAndWait(cancel, runErr); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func cancelAndWait(cancel context.CancelFunc, runErr <-chan error) error {
 	cancel()
 	select {
@@ -1676,24 +1726,27 @@ func TestLocalProxySanitizesCloudAuthFailures(t *testing.T) {
 
 func TestLocalBrowserLoginRedeemsToKeychainWithoutBrowserPAT(t *testing.T) {
 	store := keychain.NewFakeStore()
-	var localState string
+	var localCallback, localState string
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/auth/browser/start":
 			var req struct {
-				LocalState string `json:"local_state"`
-				ProjectID  string `json:"project_id"`
+				LocalCallback string `json:"local_callback"`
+				LocalState    string `json:"local_state"`
+				ProjectID     string `json:"project_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatal(err)
 			}
+			localCallback = req.LocalCallback
 			localState = req.LocalState
-			if req.ProjectID != "" {
-				t.Fatalf("browser login unexpectedly required project %q", req.ProjectID)
+			callback, err := url.Parse(req.LocalCallback)
+			if err != nil || req.ProjectID != "proj-target" || callback.Query().Get("project") != "proj-target" {
+				t.Fatalf("browser login project=%q callback=%q err=%v", req.ProjectID, req.LocalCallback, err)
 			}
 			_, _ = w.Write([]byte(`{"auth_url":"https://cloud.example.test/login","status":"pending"}`))
 		case "/v1/auth/browser/redeem":
-			_, _ = w.Write([]byte(`{"token":"pat_secret_should_stay_local","session":{"user_id":"u","org_id":"org","project_id":"proj","role":"owner"}}`))
+			_, _ = w.Write([]byte(`{"token":"pat_secret_should_stay_local","session":{"user_id":"u","org_id":"org","project_id":"proj-target","role":"owner"}}`))
 		default:
 			t.Fatalf("unexpected Cloud path %s", r.URL.Path)
 		}
@@ -1704,24 +1757,32 @@ func TestLocalBrowserLoginRedeemsToKeychainWithoutBrowserPAT(t *testing.T) {
 	}))
 	defer server.Close()
 
-	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{}`))
+	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{"project_id":"proj-target"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(res.Body)
 	_ = res.Body.Close()
-	if strings.Contains(string(body), "pat_secret") || localState == "" {
-		t.Fatalf("login start leaked token or missed state: body=%s state=%q", body, localState)
+	if strings.Contains(string(body), "pat_secret") || localCallback == "" || localState == "" {
+		t.Fatalf("login start leaked token or missed callback state: body=%s callback=%q state=%q", body, localCallback, localState)
 	}
 
 	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	res, err = client.Get(server.URL + "/api/local/session/callback?code=grant-1&state=" + url.QueryEscape(localState))
+	callback, err := url.Parse(localCallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := callback.Query()
+	query.Set("code", "grant-1")
+	query.Set("state", localState)
+	callback.RawQuery = query.Encode()
+	res, err = client.Get(callback.String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = res.Body.Close()
-	if res.StatusCode != http.StatusFound {
-		t.Fatalf("callback status = %d", res.StatusCode)
+	if res.StatusCode != http.StatusFound || res.Header.Get("Location") != "/?auth=ok&project=proj-target" {
+		t.Fatalf("callback status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
 	}
 	got, err := store.GetPAT()
 	if err != nil {
@@ -1733,35 +1794,45 @@ func TestLocalBrowserLoginRedeemsToKeychainWithoutBrowserPAT(t *testing.T) {
 }
 
 func TestLocalBrowserLoginReturnsSanitizedFailureToUI(t *testing.T) {
-	var localState string
+	var localCallback, localState string
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			LocalState string `json:"local_state"`
+			LocalCallback string `json:"local_callback"`
+			LocalState    string `json:"local_state"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
+		localCallback = req.LocalCallback
 		localState = req.LocalState
 		_, _ = w.Write([]byte(`{"auth_url":"https://cloud.example.test/login","status":"pending"}`))
 	}))
 	defer cloud.Close()
 	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, nil))
 	defer server.Close()
-	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{}`))
+	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{"project_id":"proj-target"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = res.Body.Close()
 	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	res, err = client.Get(server.URL + "/api/local/session/callback?error=GITHUB_ACCOUNT_UNLINKED&state=" + url.QueryEscape(localState))
+	callback, err := url.Parse(localCallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := callback.Query()
+	query.Set("error", "GITHUB_ACCOUNT_UNLINKED")
+	query.Set("state", localState)
+	callback.RawQuery = query.Encode()
+	res, err = client.Get(callback.String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = res.Body.Close()
-	if res.StatusCode != http.StatusFound || res.Header.Get("Location") != "/?auth_error=GITHUB_ACCOUNT_UNLINKED" {
+	if res.StatusCode != http.StatusFound || res.Header.Get("Location") != "/?auth_error=GITHUB_ACCOUNT_UNLINKED&project=proj-target" {
 		t.Fatalf("status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
 	}
-	res, err = client.Get(server.URL + "/api/local/session/callback?error=GITHUB_ACCOUNT_UNLINKED&state=" + url.QueryEscape(localState))
+	res, err = client.Get(callback.String())
 	if err != nil {
 		t.Fatal(err)
 	}

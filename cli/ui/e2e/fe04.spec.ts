@@ -96,10 +96,12 @@ test("Security operations use explicit targets and protected results clear at ev
   await page.getByRole("button", { name: "Review reveal" }).click();
   await page.getByRole("button", { name: "Confirm and submit" }).click();
   await expect(page.locator("pre", { hasText: "SECRET_CANARY" })).toBeVisible();
-  await mockLocalAPI(page, "signed-out");
+  await mockLocalAPI(page, "signed-out", requests);
   await page.getByRole("button", { name: "Refresh current data" }).evaluate((button: HTMLButtonElement) => button.click());
   await expect(page.getByRole("heading", { name: "Sign in to Opsi" })).toBeVisible();
   await expect(page.locator("pre", { hasText: "SECRET_CANARY" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Continue with GitHub" }).click();
+  await expect.poll(() => requests.find((item) => item.path.endsWith("/session/login/start"))?.body.project_id).toBe("proj-1");
 
   await mockLocalAPI(page, "default", requests);
   await page.goto("/?project=proj-1&view=security&tab=secrets");
@@ -252,13 +254,18 @@ async function respond(route: Route, scenario: Scenario, requests: Array<{ path:
   const projectID = path.match(/projects\/([^/]+)/)?.[1] ?? "proj-1";
   if (scenario === "delivery-loading" && path.endsWith("/build-records")) await new Promise((resolve) => setTimeout(resolve, 900));
   if (path === "/api/local/session") return json(route, { authenticated: scenario !== "signed-out", cloud_connected: scenario === "cloud-down" ? "failed" : "ok", agent_connected: scenario === "agent-down" ? "failed" : "ok", org_id: "org-1", project_id: projectID, token_status: scenario === "signed-out" ? "invalid" : "valid" });
+  if (path.endsWith("/session/login/start")) {
+    const body = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
+    requests.push({ path, body });
+    return json(route, { auth_url: "/?oauth_fixture=1", status: "pending" });
+  }
   if (path === "/api/local/settings") return json(route, { version: "0.8.0", revision: "fe04-fixture", go_version: "go1.26.4", cloud_authority: "github", cloud_configured: true, agent_configured: scenario !== "agent-down", agent_tls_pinned: true, config_selected: true, ui_assets: "opsi-ui", backend_gaps: [{ capability: "organization listing", status: "unsupported", roadmap: "R5-017" }, { capability: "secret metadata/listing", status: "unsupported", roadmap: "backend contract" }] });
   if (path === "/api/local/projects") return json(route, { projects: [{ id: "proj-1", org_id: "org-1", name: "Checkout Platform", slug: "checkout", status: "ready" }, { id: "proj-2", org_id: "org-1", name: "Payments", slug: "payments", status: "ready" }] });
   if (path.endsWith("/session/project")) return json(route, { status: "selected", project_id: projectID });
   if (path.endsWith("/session/token/rotate")) return json(route, { rotated: true, revoked_old: true });
   if (path.endsWith("/session/token/revoke")) return json(route, { authenticated: false, revoked: true });
   if (path.endsWith("/readiness")) return json(route, { project_id: projectID, status: "ready", can_deploy: true });
-  if (path.endsWith("/nodes")) return json(route, []);
+  if (path.endsWith("/nodes")) return json(route, { nodes: [] });
   if (path.endsWith("/services")) return json(route, { services: [{ id: "svc-web", name: "web", type: "application", status: "ready", source_type: "image", replicas: 2 }] });
   if (path.endsWith("/deployments")) return json(route, { deployments: [] });
   if (path.endsWith("/bootstrap-sessions")) return json(route, { sessions: [] });

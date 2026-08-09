@@ -4,8 +4,10 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
 import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
+import { deploymentPollInterval, terminalDeployment } from "@/features/delivery/polling-model";
 import { deriveProjectSummary, emptyFoundation, normalizeStatus, PROJECT_SUMMARY_TTL_MS, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
-import type { ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
+import type { BootstrapSession, ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
+import { terminalBootstrap } from "@/lib/presentation/infrastructure/model";
 import { clearProjectPatch, createRequestLimiter, loadFoundation, loadProject, loadProjectSummary, reconnect, secretBody, workspacePatch, type RequestRunner } from "@/hooks/console-state-support";
 
 export function useConsoleState() {
@@ -32,6 +34,7 @@ export function useConsoleState() {
     deployments: [],
     sessions: [],
     bootstrapEvents: [],
+    bootstrapEventsSessionID: "",
     deploymentEvents: [],
     audit: [],
     support: null,
@@ -287,7 +290,7 @@ export function useConsoleState() {
       }
       return;
     }
-    if (next.view !== route.view || next.tab !== route.tab) {
+    if (next.view !== route.view || next.tab !== route.tab || next.environment !== route.environment) {
       clearSensitive();
       setReview(null);
       patch({ serviceDetail: next.view === "services" ? state.serviceDetail : null });
@@ -308,7 +311,7 @@ export function useConsoleState() {
     else await load("", operation);
   }
 
-  async function selectProject(id: string, destination = normalizeRoute({ projectID: id, view: "overview" }), replace = false) {
+  async function selectProject(id: string, destination = normalizeRoute({ projectID: id }), replace = false) {
     if (!id) return;
     clearSensitive();
     const operation = ++generation.current;
@@ -355,7 +358,7 @@ export function useConsoleState() {
         try {
           const created = await client.createProject(orgID, { name, slug }, key);
           formElement.reset();
-          await load("", generation.current);
+          await selectProject(created.id);
           return `Project ${created.id} created by the Local backend.`;
         } finally {
           patch({ busy: "" });
@@ -364,7 +367,7 @@ export function useConsoleState() {
     );
   }
 
-  async function addServer(event: FormEvent<HTMLFormElement>) {
+  async function addServer(event: FormEvent<HTMLFormElement>, onCreated?: () => void | Promise<void>) {
     event.preventDefault();
     if (!currentProject) return;
     const formElement = event.currentTarget;
@@ -390,34 +393,10 @@ export function useConsoleState() {
         try {
           const created = await client.createBootstrap(currentProject.id, request, key);
           const events = await client.bootstrapEvents(currentProject.id, created.id);
-          if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events });
+          if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events, bootstrapEventsSessionID: created.id });
           await load(currentProject.id, operation);
+          await onCreated?.();
           return `Bootstrap ${created.id} accepted with status ${created.status}.`;
-        } finally {
-          patch({ busy: "" });
-        }
-      },
-    );
-  }
-
-  async function createService(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!currentProject) return;
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    const body = {
-      name: form.get("name"), type: form.get("type"), source_type: "image",
-      container_port: Number(form.get("container_port") || 0), health_path: form.get("health_path"), replicas: Number(form.get("replicas") || 1),
-    };
-    reviewMutation(
-      { project: currentProject.name, targetType: "service", targetID: String(body.name ?? ""), operation: "create catalog entry", diff: [`type: ${String(body.type ?? "")}`, `port: ${body.container_port || "unset"}`, `replicas: ${body.replicas}`], risk: "Creates service identity only. Source binding and immutable BuildRecords remain separate." },
-      async (key) => {
-        patch({ busy: "service" });
-        try {
-          const created = await client.createService(currentProject.id, body, key);
-          formElement.reset();
-          await load(currentProject.id);
-          return `Service ${created.id} created with status ${created.status}.`;
         } finally {
           patch({ busy: "" });
         }
@@ -450,16 +429,32 @@ export function useConsoleState() {
 
   async function loadBootstrapEvents(sessionID: string) {
     if (!currentProject) return;
-    patch({ bootstrapEvents: await client.bootstrapEvents(currentProject.id, sessionID) });
+    const operation = generation.current;
+    const events = await client.bootstrapEvents(currentProject.id, sessionID);
+    if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events, bootstrapEventsSessionID: sessionID });
   }
 
-  function retryBootstrap(sessionID: string) {
+  async function refreshBootstrap(sessionID: string): Promise<BootstrapSession | undefined> {
+    if (!currentProject) return;
+    const project = currentProject;
+    const operation = generation.current;
+    const [sessions, events] = await Promise.all([client.bootstrapSessions(project.id), client.bootstrapEvents(project.id, sessionID)]);
+    if (!isCurrent(operation, project.id)) return;
+    const records = sessions.sessions ?? [];
+    patch({ sessions: records, bootstrapEvents: events, bootstrapEventsSessionID: sessionID });
+    const updated = records.find((session) => session.id === sessionID);
+    if (terminalBootstrap(updated)) await load(project.id, operation);
+    return updated;
+  }
+
+  function retryBootstrap(sessionID: string, onRetried?: () => void | Promise<void>) {
     if (!currentProject) return;
     reviewMutation(
       { project: currentProject.name, targetType: "bootstrap session", targetID: sessionID, operation: "retry", diff: ["resume the same durable checkpoint"], risk: "Retries only a retryable/dead-letter bootstrap session." },
       async (key) => {
         const updated = await client.retryBootstrap(currentProject.id, sessionID, key);
         await load(currentProject.id);
+        await onRetried?.();
         return `Bootstrap ${sessionID} returned status ${updated.status}.`;
       },
     );
@@ -473,15 +468,24 @@ export function useConsoleState() {
 
   function rollback(deploymentID: string) {
     if (!currentProject) return;
+    const source = state.deployments.find((deployment) => deployment.id === deploymentID);
+    if (!source?.rollback_eligible) return;
+    const currentDigest = source.current_digest || source.terminal_result?.current_digest || source.desired_digest || source.snapshot?.image.digest || "not reported";
+    const previousDigest = source.previous_digest || source.terminal_result?.previous_digest || "not reported";
     reviewMutation(
-      { project: currentProject.name, targetType: "deployment", targetID: deploymentID, operation: "rollback", diff: ["restore the exact previous Agent known-good snapshot"], risk: "Destructive runtime mutation; availability can change.", confirmation: deploymentID },
+      { project: currentProject.name, targetType: "deployment", targetID: deploymentID, operation: "rollback", diff: [`current digest: ${currentDigest}`, `previous known-good digest: ${previousDigest}`], risk: "Destructive runtime mutation; availability can change.", confirmation: deploymentID },
       async (key) => {
         patch({ busy: `rollback-${deploymentID}` });
         try {
-          const job = await client.rollback(currentProject.id, deploymentID, key);
+          let job = await client.rollback(currentProject.id, deploymentID, key);
+          for (let attempt = 0; attempt < 120 && !terminalDeployment(job); attempt++) {
+            await new Promise((resolve) => window.setTimeout(resolve, deploymentPollInterval));
+            job = await client.deployment(currentProject.id, job.id);
+          }
+          if (!terminalDeployment(job)) throw new Error(`Rollback ${job.id} did not reach a terminal state within 10 minutes.`);
           await loadDeploymentEvents(job.id);
           await load(currentProject.id);
-          return `Rollback job ${job.id} accepted with status ${job.status}.`;
+          return `Rollback job ${job.id} finished with state ${job.rollout_state || job.status}.`;
         } finally {
           patch({ busy: "" });
         }
@@ -603,10 +607,10 @@ export function useConsoleState() {
     actions: {
       addServer,
       createProject,
-      createService,
       diagnostics,
       load: refreshCurrentData,
       loadBootstrapEvents,
+      refreshBootstrap,
       retryBootstrap,
       loadDeploymentEvents,
       hideSensitive: clearSensitive,

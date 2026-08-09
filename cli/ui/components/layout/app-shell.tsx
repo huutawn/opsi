@@ -7,6 +7,7 @@ import { ContextHeader } from "@/components/layout/context-header";
 import { Sidebar } from "@/components/navigation/sidebar";
 import { useConsoleState } from "@/hooks/use-console-state";
 import { LocalClient } from "@/lib/api/local-client";
+import { currentEnvironment } from "@/lib/presentation/infrastructure/model";
 
 export function AppShell() {
   const console = useConsoleState();
@@ -51,12 +52,14 @@ export function AppShell() {
   if (console.state.status === "permission") return <AuthGate message={console.state.message} />;
   if (!console.session) return <AuthGate message={console.state.message || "The local Opsi backend is unavailable."} />;
 
-  const environment = console.state.foundation.placement?.environments.find((item) => item.status === "active")?.name ?? "Environment not reported";
+  const environments = console.state.foundation.placement?.environments ?? [];
+  const environment = currentEnvironment(console.state.foundation.placement, console.route.environment ?? "");
+  const environmentName = environment?.name ?? (environments.length > 1 ? "Choose environment" : "Environment not reported");
   return <div className={`app ${collapsed ? "sidebarCollapsed" : ""}`}>
     <a className="skipLink" href="#main">Skip to content</a>
-    <Sidebar collapsed={collapsed} drawerRef={navigation} environment={environment} onBrowse={() => console.navigate({ projectID: "", view: "projects", tab: "" })} onClose={closeNavigation} onCollapse={() => setCollapsed((value) => !value)} onNavigate={console.navigate} onSelectProject={console.setProjectID} open={navigationOpen} orgID={console.session.org_id ?? ""} project={console.state.project} projects={console.state.projects} route={console.route} />
+    <Sidebar collapsed={collapsed} drawerRef={navigation} environment={environmentName} onBrowse={() => console.navigate({ projectID: "", view: "projects", tab: "" })} onClose={closeNavigation} onCollapse={() => setCollapsed((value) => !value)} onNavigate={console.navigate} onSelectProject={console.setProjectID} open={navigationOpen} orgID={console.session.org_id ?? ""} project={console.state.project} projects={console.state.projects} route={console.route} />
     <main className="main" id="main" ref={main} tabIndex={-1}>
-      <ContextHeader environment={environment} lastUpdated={latestUpdate(console)} menuButtonRef={menuButton} onMenu={() => setNavigationOpen(true)} onRefresh={() => void console.actions.load()} project={console.state.project} route={console.route} serviceScope={console.state.services.find((item) => item.id === console.route.service)?.name} session={console.session} />
+      <ContextHeader environment={environmentName} environmentID={environment?.id ?? ""} environments={environments} lastUpdated={latestUpdate(console)} menuButtonRef={menuButton} onEnvironment={(id) => console.navigate({ environment: id })} onMenu={() => setNavigationOpen(true)} onRefresh={() => void console.actions.load()} project={console.state.project} route={console.route} serviceScope={console.state.services.find((item) => item.id === console.route.service)?.name} session={console.session} />
       <ConsoleRouter console={console} />
     </main>
     <MutationDialog console={console} />
@@ -125,7 +128,7 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
     const query = params.toString();
     window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
   }, []);
-  async function signIn() { setBusy(true); setError(""); try { const next = await client.startLogin(); window.location.assign(next.auth_url); } catch (cause) { setBusy(false); setError((cause as Error).message || "Opsi sign-in is unavailable."); } }
+  async function signIn() { setBusy(true); setError(""); try { const projectID = new URLSearchParams(window.location.search).get("project") || undefined; const next = await client.startLogin(projectID); window.location.assign(next.auth_url); } catch (cause) { setBusy(false); setError((cause as Error).message || "Opsi sign-in is unavailable."); } }
   return <main className="authGate"><section className="authGateCard" aria-labelledby="authGateTitle"><div className="authMark" aria-hidden="true">O</div><p className="eyebrow">Opsi</p><h1 id="authGateTitle">{checking ? "Checking your session" : "Sign in to Opsi"}</h1><p className="authGateText">{checking ? "Opsi is checking the local keychain and Cloud connection." : "Continue with the GitHub account linked to your Opsi workspace."}</p>{error ? <div className="authGateError" role="alert"><b>Sign-in failed.</b> {error} Start a new sign-in when ready.</div> : null}{!error && message ? <p className="authGateHint">{message}</p> : null}{!checking ? <button className="primary authGateButton" disabled={busy} onClick={() => void signIn()} type="button">{busy ? "Opening GitHub…" : "Continue with GitHub"}</button> : null}<p className="authGatePrivacy">The resulting PAT stays in your OS keychain.</p></section></main>;
 }
 

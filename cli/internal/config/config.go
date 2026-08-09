@@ -27,7 +27,7 @@ type TLSConfig struct {
 }
 
 func Default() Config {
-	return Config{AgentAddr: "127.0.0.1:9443", CloudURL: "http://127.0.0.1:9800"}
+	return Config{CloudURL: "https://opsidev.site"}
 }
 
 func Load(path string) (Config, error) {
@@ -49,7 +49,7 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// LoadSelected rejects the implicit loopback defaults for networked commands.
+// LoadSelected requires an explicit config and Cloud authority for networked commands.
 func LoadSelected(path string) (Config, error) {
 	if strings.TrimSpace(path) == "" {
 		return Config{}, errors.New("selected CLI config is required; use --config")
@@ -62,9 +62,6 @@ func LoadSelected(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	if cfg.AgentAddr == "" {
-		cfg.AgentAddr = Default().AgentAddr
-	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -72,16 +69,13 @@ func LoadSelected(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	if c.AgentAddr == "" {
-		return errors.New("agent_addr is required")
-	}
 	if c.CloudURL == "" {
 		return errors.New("cloud_url is required")
 	}
 	if (c.TLS.ClientCertPath == "") != (c.TLS.ClientKeyPath == "") {
 		return errors.New("tls.client_cert_path and tls.client_key_path must be configured together")
 	}
-	if !isLoopbackAddress(c.AgentAddr) {
+	if c.AgentAddr != "" && !isLoopbackAddress(c.AgentAddr) {
 		if c.TLS.PinnedServerCertSHA256 == "" {
 			return errors.New("non-loopback agent_addr requires tls.pinned_server_cert_sha256")
 		}

@@ -15,8 +15,10 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -362,33 +364,33 @@ type BootstrapEvent struct {
 }
 
 type ServiceRecord struct {
-	ID               string            `json:"id"`
-	OrgID            string            `json:"org_id"`
-	ProjectID        string            `json:"project_id"`
-	EnvironmentID    string            `json:"environment_id"`
-	RuntimeID        string            `json:"runtime_id"`
-	Name             string            `json:"name"`
-	Type             string            `json:"type"`
-	Status           string            `json:"status"`
-	SourceType       string            `json:"source_type"`
-	RepoURL          string            `json:"repo_url,omitempty"`
-	Image            string            `json:"image,omitempty"`
-	Branch           string            `json:"branch,omitempty"`
-	GitSHA           string            `json:"git_sha,omitempty"`
-	BuildMethod      string            `json:"build_method,omitempty"`
-	BuildContext     string            `json:"build_context,omitempty"`
-	Dockerfile       string            `json:"dockerfile,omitempty"`
-	ManifestPath     string            `json:"manifest_path,omitempty"`
-	WatchPaths       []string          `json:"watch_paths,omitempty"`
-	ContainerPort    int               `json:"container_port,omitempty"`
-	HealthPath       string            `json:"health_path,omitempty"`
-	Replicas         int               `json:"replicas,omitempty"`
-	ResourceRequests map[string]string `json:"resource_requests,omitempty"`
-	ResourceLimits   map[string]string `json:"resource_limits,omitempty"`
-	Bindings         []ServiceBinding  `json:"bindings,omitempty"`
-	Namespace        string            `json:"namespace"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	ID               string               `json:"id"`
+	OrgID            string               `json:"org_id"`
+	ProjectID        string               `json:"project_id"`
+	EnvironmentID    string               `json:"environment_id"`
+	RuntimeID        string               `json:"runtime_id"`
+	Name             string               `json:"name"`
+	Type             string               `json:"type"`
+	Status           string               `json:"status"`
+	SourceType       string               `json:"source_type"`
+	RepoURL          string               `json:"repo_url,omitempty"`
+	Image            string               `json:"image,omitempty"`
+	Branch           string               `json:"branch,omitempty"`
+	GitSHA           string               `json:"git_sha,omitempty"`
+	BuildMethod      string               `json:"build_method,omitempty"`
+	BuildContext     string               `json:"build_context,omitempty"`
+	Dockerfile       string               `json:"dockerfile,omitempty"`
+	ManifestPath     string               `json:"manifest_path,omitempty"`
+	WatchPaths       []string             `json:"watch_paths,omitempty"`
+	ContainerPort    int                  `json:"container_port,omitempty"`
+	HealthPath       string               `json:"health_path,omitempty"`
+	Replicas         int                  `json:"replicas,omitempty"`
+	ResourceRequests map[string]string    `json:"resource_requests,omitempty"`
+	ResourceLimits   map[string]string    `json:"resource_limits,omitempty"`
+	Configuration    ServiceConfiguration `json:"configuration"`
+	Namespace        string               `json:"namespace"`
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
 type ServiceDraft struct {
@@ -409,16 +411,9 @@ type ServiceDraft struct {
 	Replicas         int               `json:"replicas"`
 	ResourceRequests map[string]string `json:"resource_requests"`
 	ResourceLimits   map[string]string `json:"resource_limits"`
-	Bindings         []ServiceBinding  `json:"bindings"`
 }
 
-type ServiceBinding struct {
-	ServiceID       string   `json:"service_id"`
-	Alias           string   `json:"alias,omitempty"`
-	EnvPrefix       string   `json:"env_prefix,omitempty"`
-	ExposeAsDefault bool     `json:"expose_as_default,omitempty"`
-	EnvKeys         []string `json:"env_keys,omitempty"`
-}
+type ServiceBinding = serviceconfigurationv1.Binding
 
 const DeploymentIntentVersion = "2026-07-opsi-deployment-intent-v1"
 
@@ -669,6 +664,11 @@ type API interface {
 	BootstrapEvents(projectID, sessionID string) ([]BootstrapEvent, error)
 	CreateService(projectID string, draft ServiceDraft, key string) (ServiceRecord, error)
 	ListServices(projectID string) ([]ServiceRecord, error)
+	GetServiceConfiguration(projectID, serviceID string) (ServiceConfiguration, error)
+	PreviewServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationPreview, error)
+	ValidateServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationValidation, error)
+	DiffServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationDiff, error)
+	ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request ServiceConfigurationApplyRequest) (ServiceConfigurationApplyResult, error)
 	RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error)
 	LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error)
 	CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error)
@@ -1501,7 +1501,7 @@ func (s *Service) CreateService(projectID string, draft ServiceDraft, key string
 	if draft.Replicas == 0 {
 		draft.Replicas = 1
 	}
-	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, BuildContext: draft.BuildContext, Dockerfile: draft.Dockerfile, ManifestPath: draft.ManifestPath, WatchPaths: draft.WatchPaths, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, ResourceRequests: cloneStringMap(draft.ResourceRequests), ResourceLimits: cloneStringMap(draft.ResourceLimits), Bindings: cloneServiceBindings(draft.Bindings), Namespace: "default", CreatedAt: now, UpdatedAt: now}
+	record := ServiceRecord{ID: newID("svc"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, Name: draft.Name, Type: draft.Type, Status: "draft", SourceType: draft.SourceType, RepoURL: draft.RepoURL, Image: draft.Image, Branch: draft.Branch, GitSHA: draft.GitSHA, BuildMethod: draft.BuildMethod, BuildContext: draft.BuildContext, Dockerfile: draft.Dockerfile, ManifestPath: draft.ManifestPath, WatchPaths: draft.WatchPaths, ContainerPort: draft.ContainerPort, HealthPath: draft.HealthPath, Replicas: draft.Replicas, ResourceRequests: cloneStringMap(draft.ResourceRequests), ResourceLimits: cloneStringMap(draft.ResourceLimits), Configuration: emptyServiceConfiguration(), Namespace: "default", CreatedAt: now, UpdatedAt: now}
 	if record.Name == "" {
 		record.Name = record.ID
 	}
@@ -1529,7 +1529,7 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 		existing.Reused = true
 		return existing, true, nil
 	}
-	if snapshot.SchemaVersion != deploymentv1.JobSchemaVersion || snapshot.ProjectID == "" || snapshot.Authority.BuildRecord.ProjectID != snapshot.ProjectID {
+	if !validImmutableDeploymentAuthority(snapshot) {
 		return DeploymentJob{}, false, APIError{Status: 400, Code: "DEPLOYMENT_SNAPSHOT_INVALID", Message: "deployment authority snapshot is invalid", RequestID: requestID}
 	}
 	if err := snapshot.Image.Validate(); err != nil {
@@ -1548,8 +1548,12 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	if !ok || service.ProjectID != snapshot.ProjectID || service.Name == "" {
 		return DeploymentJob{}, false, ErrNotFound
 	}
-	if service.ID != snapshot.Authority.BuildRecord.ServiceID || service.EnvironmentID != snapshot.Authority.EnvironmentID || service.RuntimeID != snapshot.Authority.RuntimeID {
+	if service.ID != snapshot.Authority.BuildRecord.ServiceID || service.Name != snapshot.Authority.BuildRecord.ServiceKey {
 		return DeploymentJob{}, false, APIError{Status: 409, Code: "DEPLOYMENT_SERVICE_BINDING_INVALID", Message: "service binding does not match the resolved target", RequestID: requestID}
+	}
+	configuration := normalizeStoredConfiguration(service.Configuration)
+	if configuration.Revision != snapshot.Authority.ServiceConfigurationRevision || configuration.StateHash != snapshot.Authority.ServiceConfigurationStateHash {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "SERVICE_CONFIGURATION_STALE", Message: "service configuration changed before job creation", NextAction: "review_again", RequestID: requestID}
 	}
 	node, agent, err := s.deployAgentLocked(snapshot.ProjectID, snapshot.Authority.RuntimeID, requestID)
 	if err != nil {
@@ -1567,7 +1571,7 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 		environmentID = snapshot.Preview.Namespace
 	}
 	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: newID("dep"), OrgID: service.OrgID, ProjectID: snapshot.ProjectID, EnvironmentID: environmentID, RuntimeID: snapshot.Authority.RuntimeID, ServiceID: service.ID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationApply, IdempotencyKey: key, RequestedBy: requestedBy, AgentID: agent.ID, NodeID: node.ID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: snapshot.SpecHash, PayloadHash: snapshot.PayloadHash, CreatedAt: now, UpdatedAt: now}
-	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
+	job.DeploymentPlanHash = hashJSON(map[string]any{"topology": snapshot.Authority.TopologyHash, "configuration": snapshot.Authority.ServiceConfigurationStateHash, "policy": snapshot.Authority.DeploymentPolicyHash, "routing": snapshot.Authority.RoutingDecisionHash, "spec": snapshot.SpecHash, "image": snapshot.Image.Reference})
 	previousID, previousHash, previousDigest := s.latestKnownGoodLocked(job.ProjectID, job.EnvironmentID, job.RuntimeID, job.ServiceID, job.NodeID, job.AgentID)
 	var exposure *exposurev1.ExposureSpec
 	if snapshot.Preview != nil {
@@ -1592,6 +1596,21 @@ func (s *Service) StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, re
 	s.deployEvents[job.ID] = []DeploymentEvent{rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable BuildRecord rollout prepared", 0, requestID, now, "")}
 	s.idempotency["deploy:v1:"+snapshot.ProjectID+":"+key] = job
 	return job, false, nil
+}
+
+func validImmutableDeploymentAuthority(snapshot deploymentv1.JobSnapshot) bool {
+	authority := snapshot.Authority
+	record := authority.BuildRecord
+	return snapshot.SchemaVersion == deploymentv1.JobSchemaVersion &&
+		snapshot.ProjectID != "" && snapshot.PayloadHash != "" &&
+		record.SchemaVersion == buildrecordv1.SchemaVersion && record.ID != "" &&
+		record.ProjectID == snapshot.ProjectID && record.ServiceID != "" && record.ServiceKey != "" && record.ActiveBindingID != "" &&
+		record.Build.Status == "succeeded" && snapshot.Workload.ServiceKey == record.ServiceKey &&
+		authority.TopologyPlanID != "" && authority.TopologyRevision > 0 && len(authority.TopologyHash) == 64 &&
+		len(authority.ServiceConfigurationStateHash) == 64 &&
+		authority.DeploymentPolicyID != "" && authority.DeploymentPolicyRevision > 0 && len(authority.DeploymentPolicyHash) == 64 &&
+		len(authority.RoutingDecisionHash) == 64 &&
+		authority.EnvironmentID != "" && authority.RuntimeID != "" && authority.NodeID != "" && authority.AgentID != ""
 }
 
 func (s *Service) ReplayImmutableDeployment(projectID, key, payloadHash string) (DeploymentJob, bool, error) {
@@ -1861,7 +1880,7 @@ func (s *Service) CompleteDeployment(projectID, nodeID, deploymentID, requestID 
 	job.KnownGoodHash = copy.KnownGoodHash
 	job.ReadinessEvidenceHash = copy.ReadinessEvidenceHash
 	job.RolloutVersion++
-	job.RollbackEligible = copy.RolloutState == deploymentv1.RolloutStateSucceeded && job.RolloutIntent.PreviousKnownGoodID != ""
+	setRollbackAvailability(&job)
 	s.deployments[deploymentID] = job
 	event := rolloutEvent(job, job.RolloutState, "Agent reported terminal rollout result", 100, requestID, now, job.RolloutStateHash)
 	event.EvidenceHash = job.ReadinessEvidenceHash
@@ -2237,18 +2256,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for key, value := range in {
 		out[key] = value
-	}
-	return out
-}
-
-func cloneServiceBindings(in []ServiceBinding) []ServiceBinding {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]ServiceBinding, 0, len(in))
-	for _, binding := range in {
-		binding.EnvKeys = append([]string(nil), binding.EnvKeys...)
-		out = append(out, binding)
 	}
 	return out
 }

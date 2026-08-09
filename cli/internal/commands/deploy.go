@@ -272,7 +272,7 @@ func (f deploymentSpecFlags) request() (cloudclient.DeploymentCreateRequest, err
 	if err := spec.Validate(); err != nil {
 		return cloudclient.DeploymentCreateRequest{}, err
 	}
-	return cloudclient.DeploymentCreateRequest{SchemaVersion: deploymentv1.JobSchemaVersion, BuildRecordID: f.buildRecordID, EnvironmentID: f.environmentID, Workload: spec}, nil
+	return cloudclient.DeploymentCreateRequest{SchemaVersion: deploymentv1.JobSchemaVersion, BuildRecordID: f.buildRecordID, EnvironmentID: f.environmentID, Workload: &spec}, nil
 }
 
 func parseDeploymentPairs(values []string) ([]deploymentv1.EnvironmentVariable, error) {
