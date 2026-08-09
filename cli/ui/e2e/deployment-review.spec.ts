@@ -278,7 +278,10 @@ test("rollback is Cloud-gated, idempotent, and refresh restores the factual know
   expectHTTPFailure(page, { path: "/api/local/projects/proj-1/deployments/dep-current/rollback", status: 503, method: "POST" });
   await page.getByRole("button", { name: "Confirm and submit" }).click();
   await expect(page.locator(".errorBox")).toContainText("Agent temporarily unavailable");
-  await page.getByRole("button", { name: "Retry same attempt" }).click();
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/dep-current/rollback") && response.status() === 202),
+    page.getByRole("button", { name: "Retry same attempt" }).click(),
+  ]);
   await page.reload();
   expect(keys).toHaveLength(2);
   expect(keys[0]).toBe(keys[1]);
