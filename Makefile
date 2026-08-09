@@ -181,9 +181,9 @@ source-hygiene: verify-source-package-policy verify-bootstrap-worker-release ver
 	@if ! rg -n 'IsFactualTerminalRollout\(record\)' agent/internal/cloudrunner/result.go >/dev/null || ! rg -n 'FailurePhase == deploymentv1\.FailurePhasePreMutation' agent/internal/cloudrunner/result.go >/dev/null || ! rg -n 'if !terminal' agent/internal/cloudrunner/runner.go >/dev/null; then echo "Agent factual terminal and explicit failure phase guard is missing"; exit 1; fi
 	@if ! rg -n 'result\.FailurePhase == deploymentv1\.FailurePhasePreMutation' cloud/internal/registry/rollout.go >/dev/null || ! rg -n 'RolloutMutationObserved\(job\.RolloutState\)' cloud/internal/registry/rollout.go >/dev/null; then echo "Cloud failure phase and observed progress validation is missing"; exit 1; fi
 	@if rg -ni 'password|sshpass|SSHPASS|accept-new|StrictHostKeyChecking=accept-new|auth_method.?[=:].?password|ssh_password' scripts/e2e/verify-k3s.sh; then echo "retired E2E SSH transport found"; exit 1; fi
-	@if rg -n 'OPSI_E2E_SERVICE_REPO|OPSI_E2E_SERVICE_SHA|OPSI_E2E_BAD_SERVICE_SHA' scripts/e2e/verify-k3s.sh README.md agent/README.md docs/architecture.md docs/security_story.md docs/architecture_decisions/ADR-004-trusted-artifact-cd.md docs/architecture_decisions/ADR-006-immutable-manual-deployment.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "retired E2E source input found"; exit 1; fi
-	@if rg -ni 'Agent currently (clones|builds)|current Agent.*(clone|build).*Git|Git deployment and user-provided manifest application exist|user manifests may contain their own resources|generic GitHub (push )?relay remains (active|current)|generic GitHub webhook relay is (active|current)' README.md agent/README.md docs/architecture.md docs/security_story.md docs/architecture_decisions/ADR-004-trusted-artifact-cd.md docs/architecture_decisions/ADR-006-immutable-manual-deployment.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "stale active delivery claim found"; exit 1; fi
-	@if rg -ni 'BuildRecord.*(direct|directly).*(Engine\.Deploy|ProductionAdapter\.Deploy)|BuildRecord.*directly reaches Engine\.Deploy' README.md agent/README.md docs/architecture.md docs/security_story.md docs/architecture_decisions/ADR-004-trusted-artifact-cd.md docs/architecture_decisions/ADR-006-immutable-manual-deployment.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "stale direct BuildRecord-to-Engine claim found"; exit 1; fi
+	@if rg -n 'OPSI_E2E_SERVICE_REPO|OPSI_E2E_SERVICE_SHA|OPSI_E2E_BAD_SERVICE_SHA' scripts/e2e/verify-k3s.sh README.md agent/README.md docs/architecture.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "retired E2E source input found"; exit 1; fi
+	@if rg -ni 'Agent currently (clones|builds)|current Agent.*(clone|build).*Git|Git deployment and user-provided manifest application exist|user manifests may contain their own resources|generic GitHub (push )?relay remains (active|current)|generic GitHub webhook relay is (active|current)' README.md agent/README.md docs/architecture.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "stale active delivery claim found"; exit 1; fi
+	@if rg -ni 'BuildRecord.*(direct|directly).*(Engine\.Deploy|ProductionAdapter\.Deploy)|BuildRecord.*directly reaches Engine\.Deploy' README.md agent/README.md docs/architecture.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "stale direct BuildRecord-to-Engine claim found"; exit 1; fi
 	@for token in rolled_back desired_digest 'current_digest' 'previous_digest' 'healthy A.*broken B.*restored A'; do rg -n "$$token" scripts/e2e/verify-k3s.sh >/dev/null || { echo "E2E rollback restoration gate missing: $$token"; exit 1; }; done
 	@if ! rg -n 'select_fresh_incident "\$$service_id" "\$$bad_deployment_started_at"' scripts/e2e/verify-k3s.sh >/dev/null || ! rg -n 'incident\.get\("created_at_unix", 0\)' scripts/e2e/verify-k3s.sh >/dev/null || ! rg -n 'created_at >= minimum_created_at' scripts/e2e/verify-k3s.sh >/dev/null; then echo "E2E incident selection is missing the freshness boundary"; exit 1; fi
 	@test ! -e .github/workflows/e2e-k3s.yml || { echo "retired GitHub-hosted K3s workflow restored"; exit 1; }
@@ -205,14 +205,13 @@ e2e-dry-run:
 
 release: build
 	$(RUN) rm -rf release
-	$(RUN) mkdir -p release/config.examples release/docs
+	$(RUN) mkdir -p release/config.examples
 	$(RUN) cp bin/opsi release/opsi
 	$(RUN) cp bin/opsi-agent release/opsi-agent
 	$(RUN) cp bin/opsi-cloud release/opsi-cloud
 	$(RUN) cp bin/opsi-bootstrap-worker release/opsi-bootstrap-worker
 	$(RUN) cp agent/config.example.yaml release/config.examples/agent.config.example.yaml
 	$(RUN) cp cloud/config.example.json release/config.examples/cloud.config.example.json
-	$(RUN) cp docs/demo_runbook.md release/docs/demo_runbook.md
 	cd release && $(RUN) sha256sum opsi opsi-agent opsi-cloud opsi-bootstrap-worker > checksums.txt
 	$(RUN) ./scripts/source-package.sh check-release release
 

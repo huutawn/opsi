@@ -24,7 +24,6 @@ REQUIRED_RELEASE_PATHS=(
   checksums.txt
   config.examples/agent.config.example.yaml
   config.examples/cloud.config.example.json
-  docs/demo_runbook.md
 )
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opsi-source-package.XXXXXX")"
 TEMP_ARCHIVE=""

@@ -60,6 +60,9 @@ test("capacity and progress stay truthful", () => {
 test("topology onboarding follows factual project state", () => {
   const withoutServer = { ...facts, runtimes: [], nodes: [], agents: [], services: [] };
   assert.equal(topologyOnboarding(withoutServer, null, []).action, "Connect server");
+  assert.deepEqual(topologyOnboarding(withoutServer, null, [{ id: "boot-waiting", status: "waiting", role: "first_server", created_at: "now" }]), {
+    kind: "bootstrap", title: "Waiting for connection", description: "Bootstrap boot-waiting is waiting.", action: "Inspect progress", progress: { label: "Not reported", percent: null }, sessionID: "boot-waiting",
+  });
   assert.deepEqual(topologyOnboarding(withoutServer, null, [{ id: "boot-1", status: "installing", role: "first_server", checkpoint: { plan_version: "v1", next_step_index: 2, last_completed_step: "preflight" }, created_at: "now" }]), {
     kind: "bootstrap", title: "Server connection in progress", description: "Bootstrap boot-1 is installing.", action: "Inspect progress", progress: { label: "preflight", percent: 50 }, sessionID: "boot-1",
   });
@@ -75,6 +78,10 @@ test("server lifecycle requires a usable node and active Agent", () => {
   assert.equal(serverStatus(wrongNode.nodes, wrongNode.agents), "Offline");
   assert.equal(serverLifecycle(wrongNode, []).status, "Offline");
   assert.equal(topologyOnboarding({ ...facts, agents: [{ ...facts.agents[0], status: "offline" }] }, null, []).action, "Inspect topology");
+  const withoutServer = { ...facts, runtimes: [], nodes: [], agents: [], services: [] };
+  assert.equal(serverLifecycle(withoutServer, [{ id: "boot-waiting", status: "waiting", role: "first_server", created_at: "1" }]).status, "Waiting");
+  assert.equal(serverLifecycle(withoutServer, [{ id: "boot-validating", status: "validating", role: "first_server", created_at: "2" }]).status, "Connecting");
+  assert.equal(serverLifecycle(withoutServer, [{ id: "boot-installing", status: "installing_k3s", role: "first_server", created_at: "3" }]).status, "Bootstrapping");
 });
 
 test("ready facts win over stale bootstrap and failed sessions retry", () => {

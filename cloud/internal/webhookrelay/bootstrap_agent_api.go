@@ -2,7 +2,10 @@ package webhookrelay
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -25,16 +28,16 @@ type bootstrapWorkerLeaseRequest struct {
 }
 
 func (s *Server) handleBootstrapWorker(w http.ResponseWriter, r *http.Request) {
-	if s.Config.BootstrapWorkerToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Bootstrap-Worker-Token")), []byte(s.Config.BootstrapWorkerToken)) != 1 {
-		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "BOOTSTRAP_WORKER_AUTH_REQUIRED", Message: "bootstrap worker token is required", RequestID: r.Header.Get("X-Request-ID")})
-		return
-	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	sessionRoute := len(parts) >= 3 && parts[1] == "bootstrap" && parts[2] == "sessions" && (parts[0] == "internal" || parts[0] == "v1")
 	if r.Method == http.MethodPost && len(parts) == 4 && parts[0] == "internal" && parts[1] == "bootstrap" && parts[2] == "sessions" && parts[3] == "lease" {
+		if !s.requireBootstrapWorkerToken(w, r) {
+			return
+		}
 		s.handleBootstrapWorkerLease(w, r)
 		return
 	}
-	if r.Method == http.MethodGet && len(parts) == 5 && parts[0] == "internal" && parts[1] == "bootstrap" && parts[2] == "sessions" && parts[4] == "status" {
+	if r.Method == http.MethodGet && len(parts) == 5 && sessionRoute && parts[4] == "status" {
 		s.handleBootstrapWorkerStatus(w, r, parts[3])
 		return
 	}
@@ -42,7 +45,7 @@ func (s *Server) handleBootstrapWorker(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if len(parts) == 5 && parts[0] == "internal" && parts[1] == "bootstrap" && parts[2] == "sessions" {
+	if len(parts) == 5 && sessionRoute {
 		if parts[4] == "lease-heartbeat" {
 			s.handleBootstrapLeaseHeartbeat(w, r, parts[3])
 			return
@@ -57,6 +60,14 @@ func (s *Server) handleBootstrapWorker(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.NotFound(w, r)
+}
+
+func (s *Server) requireBootstrapWorkerToken(w http.ResponseWriter, r *http.Request) bool {
+	if s.Config.BootstrapWorkerToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Bootstrap-Worker-Token")), []byte(s.Config.BootstrapWorkerToken)) == 1 {
+		return true
+	}
+	writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "BOOTSTRAP_WORKER_AUTH_REQUIRED", Message: "bootstrap worker token is required", RequestID: r.Header.Get("X-Request-ID")})
+	return false
 }
 
 func (s *Server) handleBootstrapWorkerLease(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +87,7 @@ func (s *Server) handleBootstrapWorkerLease(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.cleanupRecoveredBootstrapSecrets(summary)
-	lease, found, err := s.Registry.LeaseNextBootstrapSession(req.WorkerID, now, bootstrapLeaseDuration)
+	lease, found, err := s.Registry.LeaseNextBootstrapSession(req.WorkerID, "", now, bootstrapLeaseDuration)
 	if err != nil {
 		writeRegistryFailure(w, r, err)
 		return
@@ -85,15 +96,19 @@ func (s *Server) handleBootstrapWorkerLease(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	session := lease.Session
-	credential, ok := s.credentials.GetForBootstrapLease(session.ID)
+	credential, ok := s.credentials.GetForBootstrapLease(lease.Session.ID)
 	if !ok {
 		s.failLeasedBootstrap(w, r, lease, "BOOTSTRAP_CREDENTIAL_UNAVAILABLE", "bootstrap credential is unavailable", false)
 		return
 	}
 	defer clearBootstrapCredential(&credential)
+	s.writeBootstrapLease(w, r, lease, credential)
+}
+
+func (s *Server) writeBootstrapLease(w http.ResponseWriter, r *http.Request, lease registry.BootstrapSessionLease, credential BootstrapCredential) {
+	session := lease.Session
 	registrationToken := newSecret("areg")
-	ttl := session.ExpiresAt.Sub(now)
+	ttl := session.ExpiresAt.Sub(s.clock())
 	if ttl <= 0 {
 		ttl = time.Minute
 	}
@@ -103,16 +118,149 @@ func (s *Server) handleBootstrapWorkerLease(w http.ResponseWriter, r *http.Reque
 		s.failLeasedBootstrap(w, r, lease, "AGENT_REGISTRATION_TOKEN_UNAVAILABLE", "agent registration token is unavailable", true)
 		return
 	}
-	s.Registry.Audit(session.OrgID, session.ProjectID, "", "BOOTSTRAP_LEASE_ACQUIRED", "bootstrap_session", session.ID, "success", map[string]any{"worker_id": req.WorkerID, "node_id": session.NodeID, "lease_expires_at": lease.LeaseExpiresAt})
+	s.Registry.Audit(session.OrgID, session.ProjectID, "", "BOOTSTRAP_LEASE_ACQUIRED", "bootstrap_session", session.ID, "success", map[string]any{"worker_id": session.LeaseOwner, "node_id": session.NodeID, "lease_expires_at": lease.LeaseExpiresAt})
+	bundle := map[string]any{
+		"session_id": session.ID, "project_id": session.ProjectID, "node_id": session.NodeID,
+		"public_host": session.PublicHost, "ssh_port": session.SSHPort, "role": session.Role,
+		"agent_registration_token": reg.Token, "agent_registration_expires": reg.ExpiresAt,
+		"checkpoint": session.Checkpoint,
+		"ssh":        map[string]any{"auth_method": credential.AuthMethod, "username": credential.Username, "private_key": string(credential.PrivateKey), "password": string(credential.Password)},
+	}
+	if credential.AuthMethod == "command" {
+		bundle["install"] = s.bootstrapInstall
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"bundle": map[string]any{
-			"session_id": session.ID, "project_id": session.ProjectID, "node_id": session.NodeID,
-			"public_host": session.PublicHost, "ssh_port": session.SSHPort, "role": session.Role,
-			"agent_registration_token": reg.Token, "agent_registration_expires": reg.ExpiresAt,
-			"ssh": map[string]any{"auth_method": credential.AuthMethod, "username": credential.Username, "private_key": string(credential.PrivateKey), "password": string(credential.Password)},
-		},
+		"bundle":      bundle,
 		"lease_token": lease.LeaseToken, "lease_expires_at": lease.LeaseExpiresAt,
 	})
+}
+
+func (s *Server) handleBootstrapCommandClaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.bootstrapRunnerPath == "" {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "BOOTSTRAP_COMMAND_UNAVAILABLE", Message: "bootstrap command runner is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	var req bootstrapWorkerLeaseRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.WorkerID = strings.TrimSpace(req.WorkerID)
+	if err := registry.ValidateBootstrapWorkerID(req.WorkerID); err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	authorization := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authorization, "Bootstrap ") {
+		s.writeBootstrapClaimDenied(w, r)
+		return
+	}
+	token := strings.TrimPrefix(authorization, "Bootstrap ")
+	sessionID, _, ok := strings.Cut(token, ".")
+	if !ok || sessionID == "" || token == "" || strings.ContainsAny(token, " \t\r\n") {
+		s.writeBootstrapClaimDenied(w, r)
+		return
+	}
+	credential, ok := s.credentials.GetForBootstrapLease(sessionID)
+	if !ok {
+		s.writeBootstrapClaimDenied(w, r)
+		return
+	}
+	defer clearBootstrapCredential(&credential)
+	if credential.AuthMethod != "command" || subtle.ConstantTimeCompare([]byte(token), credential.Token) != 1 {
+		s.writeBootstrapClaimDenied(w, r)
+		return
+	}
+	now := s.clock()
+	summary, err := s.Registry.RecoverExpiredBootstrapLeases(now)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	s.cleanupRecoveredBootstrapSecrets(summary)
+	lease, found, err := s.Registry.LeaseNextBootstrapSession(req.WorkerID, sessionID, now, bootstrapLeaseDuration)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if !found {
+		s.writeBootstrapClaimDenied(w, r)
+		return
+	}
+	s.credentials.Delete(sessionID)
+	credential.Token = nil
+	s.writeBootstrapLease(w, r, lease, credential)
+}
+
+func (s *Server) writeBootstrapClaimDenied(w http.ResponseWriter, r *http.Request) {
+	writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "BOOTSTRAP_COMMAND_INVALID", Message: "bootstrap command token is invalid, expired, or already used", RequestID: r.Header.Get("X-Request-ID")})
+}
+
+func (s *Server) handleBootstrapInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	baseURL, err := s.bootstrapBaseURL(r)
+	if err != nil || s.bootstrapRunnerPath == "" {
+		writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "BOOTSTRAP_COMMAND_UNAVAILABLE", Message: "bootstrap command runner is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	_, _ = fmt.Fprintf(w, `#!/bin/sh
+set -eu
+: "${OPSI_BOOTSTRAP_TOKEN:?OPSI_BOOTSTRAP_TOKEN is required}"
+runner="$(mktemp)"
+trap 'rm -f "$runner"' EXIT HUP INT TERM
+curl -fsSL '%s/v1/bootstrap/runner/linux-amd64' -o "$runner"
+printf '%%s  %%s\n' '%s' "$runner" | sha256sum -c -
+chmod 700 "$runner"
+"$runner" --claim-url '%s/v1/bootstrap/claim'
+`, baseURL, s.bootstrapRunnerSHA256, baseURL)
+}
+
+func (s *Server) handleBootstrapRunner(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.bootstrapRunnerPath == "" {
+		http.NotFound(w, r)
+		return
+	}
+	file, err := os.Open(s.bootstrapRunnerPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("ETag", `"`+s.bootstrapRunnerSHA256+`"`)
+	http.ServeContent(w, r, "opsi-bootstrap-worker", info.ModTime(), file)
+}
+
+func (s *Server) bootstrapBaseURL(r *http.Request) (string, error) {
+	raw := strings.TrimRight(s.Config.PublicBaseURL, "/")
+	if raw == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		raw = scheme + "://" + r.Host
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || strings.ContainsAny(raw, "'\r\n") {
+		return "", fmt.Errorf("invalid bootstrap public base URL")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func (s *Server) failLeasedBootstrap(w http.ResponseWriter, r *http.Request, lease registry.BootstrapSessionLease, code, message string, retryable bool) {

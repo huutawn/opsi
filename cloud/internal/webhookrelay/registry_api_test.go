@@ -1528,7 +1528,7 @@ func TestBootstrapManualRetryOwnerAdminIdempotencyAndPreconditions(t *testing.T)
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	lease, ok, err := server.Registry.LeaseNextBootstrapSession("worker-1", now, time.Minute)
+	lease, ok, err := server.Registry.LeaseNextBootstrapSession("worker-1", "", now, time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
 	}

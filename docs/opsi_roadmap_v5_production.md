@@ -1,8 +1,8 @@
 # Opsi Roadmap v5.1 — Production, Manual-first CLI/UI, Generic MCP sau cùng
 
 Ngày cập nhật: 2026-07-16
-Trạng thái: roadmap thực thi canonical duy nhất; thay thế
-`docs/opsi_roadmap_v4.md` và bản nháp v5 gồm 37 prompt.
+Trạng thái: roadmap thực thi canonical duy nhất; thay thế roadmap v4 đã nghỉ
+và bản nháp v5 gồm 37 prompt.
 
 Tài liệu này quy định thứ tự thực thi. Trạng thái triển khai và bằng chứng vẫn
 thuộc `docs/current_state.md` và `docs/status_matrix.md`; nội dung roadmap không
@@ -91,7 +91,7 @@ VPS control-plane hiện tại do operator chỉ định không được dùng l
 6. Viết runbook rotate GitHub App key/client secret/webhook secret, PostgreSQL password, Worker token, bootstrap key, alert token, SMTP credential và PAT nếu có.
 7. Nếu operator chưa rotate, kết quả phải là `PARTIAL / OPERATOR_REQUIRED`.
 
-**Read/modify scope:** `.gitignore`, `Makefile`, `scripts/source-package.sh`, hygiene tests, `.agents/*`, `docs/security_story.md`, `docs/current_state.md`, `docs/status_matrix.md`, thêm `docs/runbooks/credential-incident.md`.
+**Read/modify scope:** `.gitignore`, `Makefile`, `scripts/source-package.sh`, hygiene tests, `.agents/*`, `docs/current_state.md`, `docs/status_matrix.md`, thêm `docs/runbooks/credential-incident.md`.
 
 **Avoid:** nội dung runtime secret, business code Agent/CLI/Cloud/UI, GitHub API, SSH VPS, Git history rewrite.
 
@@ -321,8 +321,8 @@ server-time heartbeat validation, immutable PostgreSQL revisions, audit/RBAC,
 CLI and Local API/UI parity, disposable PostgreSQL restart/concurrency proof,
 real loopback CLI flow, and headless Local UI wizard preview/apply passed.
 Routing remains preflight-only: no `DeploymentJob`, Agent command, K3s change,
-workload, SSH, or VPS mutation was performed. Authority boundaries are recorded
-in `docs/architecture_decisions/ADR-005-manual-placement-policy-boundary.md`.
+workload, SSH, or VPS mutation was performed. Authority boundaries remain in
+the deployment policy contracts and current architecture documentation.
 
 ### R5-010 — Digest-only Agent deployment và Opsi workload renderer
 
@@ -523,8 +523,8 @@ with a fresh replay-protected OIDC token. No live GitHub/Agent retest was run.
 ### R5-013 — Hoàn thiện toàn bộ manual CLI
 
 Current implementation checkpoint: the source-derived matrix is
-`docs/manual_cli_capability_matrix.md`; factual gaps are recorded in
-`bugs/BUG-R5-013-CLI-GAPS-001.md`. R5-012 source handling is
+`docs/manual_cli_capability_matrix.md`; factual gaps remain in that matrix and
+`docs/current_state.md`. R5-012 source handling is
 `R5_012_SOURCE_FIXED / LIVE_RETEST_PENDING`.
 
 **Mục tiêu:** CLI là canonical manual interface đầy đủ, không chỉ tập hợp các lệnh rời rạc.

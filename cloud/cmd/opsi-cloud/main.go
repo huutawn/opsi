@@ -16,6 +16,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
@@ -26,6 +27,8 @@ import (
 )
 
 var version = "dev"
+
+const bootstrapRunnerPath = "/usr/local/bin/opsi-bootstrap-worker"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -82,6 +85,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookrelay.GitHubAppClient, stderr io.Writer) error {
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	relay := webhookrelay.NewServer(cfg)
+	if cfg.BootstrapWorkerConfig != "" {
+		install, err := bootstrapworker.LoadInstallConfig(cfg.BootstrapWorkerConfig)
+		if err != nil {
+			return fmt.Errorf("load bootstrap install config: %w", err)
+		}
+		if err := relay.SetBootstrapRunner(install, bootstrapRunnerPath); err != nil {
+			return fmt.Errorf("configure bootstrap command runner: %w", err)
+		}
+	}
 	if githubAppClient != nil {
 		relay.SetGitHubAppClient(githubAppClient)
 		logger.Info("GitHub App signer loaded", "app_id", cfg.GitHubApp.AppID)

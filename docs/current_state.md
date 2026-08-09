@@ -200,10 +200,8 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
 | Last updated | 2026-08-05 |
-| Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
-| Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
 ## Corrective Prompt 07 checkpoint
 
@@ -956,8 +954,8 @@ R5-009 adds `opsi.topology_plan/v1` and `opsi.deployment_policy/v1` without
 changing the R5-008 OIDC verifier or static workload-admission policy.
 `DeploymentPolicy` is evaluated only for an already accepted `BuildRecord` and
 cannot override issuer, JWKS, audience, signature, claim/body binding,
-repository ownership, or active service binding checks. ADR-005 records this
-authority boundary.
+repository ownership, or active service binding checks. This bounded authority
+is enforced by the deployment policy contracts and tests.
 
 Topology and policy state use immutable PostgreSQL revisions with mutable heads,
 expected revision/state-hash concurrency, project/operation/key/payload-bound

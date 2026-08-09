@@ -290,7 +290,7 @@ func (s *Service) FinishBootstrapSessionForLease(projectID, sessionID, workerID,
 	}
 	clearBootstrapLease(&session)
 	session.UpdatedAt = now
-	if result.Retryable && session.AttemptCount < effectiveBootstrapMaxAttempts(session.MaxAttempts) && now.Before(session.ExpiresAt) {
+	if session.AuthMethod != "command" && result.Retryable && session.AttemptCount < effectiveBootstrapMaxAttempts(session.MaxAttempts) && now.Before(session.ExpiresAt) {
 		next := now.Add(bootstrapRetryDelay(session.AttemptCount))
 		session.Status = BootstrapRetryWait
 		session.NextAttemptAt = &next
@@ -329,6 +329,11 @@ func (s *Service) ManualRetryBootstrapSession(projectID, sessionID, idempotencyK
 		return BootstrapManualRetryResult{}, APIError{Status: 409, Code: "BOOTSTRAP_SESSION_EXPIRED", Message: "expired bootstrap session cannot be retried"}
 	}
 	session.Status = BootstrapPending
+	message := "bootstrap session manually returned to pending"
+	if session.AuthMethod == "command" {
+		session.Status = BootstrapWaiting
+		message = "bootstrap session waiting for a new bootstrap command connection"
+	}
 	session.AttemptCount = 0
 	session.NextAttemptAt = nil
 	session.DeadLetteredAt = nil
@@ -337,7 +342,7 @@ func (s *Service) ManualRetryBootstrapSession(projectID, sessionID, idempotencyK
 	session.UpdatedAt = now
 	s.bootstraps[sessionID] = session
 	s.idempotency[scope] = session
-	s.appendBootstrapDurabilityEventLocked(session, "info", "BOOTSTRAP_MANUAL_RETRY_REQUESTED", "bootstrap session manually returned to pending", now)
+	s.appendBootstrapDurabilityEventLocked(session, "info", "BOOTSTRAP_MANUAL_RETRY_REQUESTED", message, now)
 	s.refreshProjectLocked(projectID)
 	return BootstrapManualRetryResult{Session: session, Applied: true}, nil
 }

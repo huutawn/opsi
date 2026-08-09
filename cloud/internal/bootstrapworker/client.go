@@ -20,6 +20,38 @@ type httpCloudClient struct {
 	cfg    Config
 }
 
+func (h httpCloudClient) Claim(ctx context.Context, endpoint, token string) (Lease, error) {
+	body, _ := json.Marshal(map[string]string{"worker_id": h.cfg.WorkerID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return Lease{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bootstrap "+token)
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return Lease{}, fmt.Errorf("claim bootstrap session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Lease{}, cloudResponseError(resp.StatusCode, "claim bootstrap session", safeBody(resp.Body))
+	}
+	var lease Lease
+	if err := json.NewDecoder(resp.Body).Decode(&lease); err != nil {
+		return Lease{}, fmt.Errorf("invalid bootstrap claim protocol response: %w", err)
+	}
+	return lease, nil
+}
+
+func bootstrapCloudURL(claimURL string) (string, error) {
+	u, err := url.Parse(claimURL)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "/v1/bootstrap/claim" || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("bootstrap claim URL is invalid")
+	}
+	u.Path = ""
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
 func (h httpCloudClient) LeaseNext(ctx context.Context) (Lease, bool, error) {
 	body, _ := json.Marshal(map[string]string{"worker_id": h.cfg.WorkerID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(h.cfg.CloudURL, "/")+"/internal/bootstrap/sessions/lease", bytes.NewReader(body))
@@ -55,7 +87,7 @@ func (h httpCloudClient) Checkpoint(ctx context.Context, lease Lease, checkpoint
 		ProjectID string `json:"project_id"`
 		registry.BootstrapCheckpoint
 	}{ProjectID: lease.Bundle.ProjectID, BootstrapCheckpoint: checkpoint})
-	endpoint := strings.TrimRight(h.cfg.CloudURL, "/") + "/internal/bootstrap/sessions/" + url.PathEscape(lease.Bundle.SessionID) + "/checkpoint"
+	endpoint := h.sessionEndpoint(lease.Bundle.SessionID, "checkpoint")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return registry.BootstrapCheckpoint{}, err
@@ -100,7 +132,7 @@ func (h httpCloudClient) postState(ctx context.Context, lease Lease, action stri
 	state.ProjectID = lease.Bundle.ProjectID
 	state.Message = registry.RedactString(state.Message)
 	body, _ := json.Marshal(state)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(h.cfg.CloudURL, "/")+"/internal/bootstrap/sessions/"+url.PathEscape(lease.Bundle.SessionID)+"/"+action, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.sessionEndpoint(lease.Bundle.SessionID, action), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -120,7 +152,7 @@ func (h httpCloudClient) postState(ctx context.Context, lease Lease, action stri
 
 func (h httpCloudClient) HeartbeatLease(ctx context.Context, lease Lease) (time.Time, error) {
 	body, _ := json.Marshal(map[string]string{"project_id": lease.Bundle.ProjectID})
-	endpoint := strings.TrimRight(h.cfg.CloudURL, "/") + "/internal/bootstrap/sessions/" + url.PathEscape(lease.Bundle.SessionID) + "/lease-heartbeat"
+	endpoint := h.sessionEndpoint(lease.Bundle.SessionID, "lease-heartbeat")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return time.Time{}, err
@@ -168,7 +200,7 @@ func (h httpCloudClient) WaitForHeartbeat(ctx context.Context, lease Lease) erro
 }
 
 func (h httpCloudClient) bootstrapStatus(ctx context.Context, lease Lease) (string, error) {
-	endpoint := strings.TrimRight(h.cfg.CloudURL, "/") + "/internal/bootstrap/sessions/" + url.PathEscape(lease.Bundle.SessionID) + "/status?project_id=" + url.QueryEscape(lease.Bundle.ProjectID)
+	endpoint := h.sessionEndpoint(lease.Bundle.SessionID, "status") + "?project_id=" + url.QueryEscape(lease.Bundle.ProjectID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
@@ -190,6 +222,14 @@ func (h httpCloudClient) bootstrapStatus(ctx context.Context, lease Lease) (stri
 		return "", err
 	}
 	return out.Status, nil
+}
+
+func (h httpCloudClient) sessionEndpoint(sessionID, action string) string {
+	prefix := "/internal/bootstrap/sessions/"
+	if h.cfg.claimed {
+		prefix = "/v1/bootstrap/sessions/"
+	}
+	return strings.TrimRight(h.cfg.CloudURL, "/") + prefix + url.PathEscape(sessionID) + "/" + action
 }
 
 func setLeaseHeaders(req *http.Request, cfg Config, lease Lease) {

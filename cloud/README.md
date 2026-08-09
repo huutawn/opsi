@@ -11,7 +11,7 @@ Opsi Cloud is the durable control-plane and identity boundary. It does not run w
 - **GitHub installation claim:** PAT-authenticated Owner/Admin starts a purpose-bound OAuth flow for one project and numeric installation ID. The callback compares GitHub `/user` with the prelinked Opsi identity, proves installation visibility through `/user/installations`, syncs visible repositories, and returns only a 90-second one-time local grant. Setup/query `installation_id`, account login, and repository full name are not proof.
 - **OTP:** PAT-authenticated `/v1/otp/request` and `/v1/otp/verify`; the recipient email is derived from the verified PAT identity, with salted hashes, five-minute expiry, one-time use, rate limiting, SMTP or file outbox.
 - **Agent auth:** one-time registration token exchange, then a scoped bearer credential stored as a bcrypt hash. Production also requires an HMAC timestamp/signature on Agent requests.
-- **Bootstrap worker auth:** shared worker token plus worker ID and per-lease token for internal bootstrap endpoints.
+- **Bootstrap worker auth:** the daemon pool uses its shared worker token only to lease arbitrary SSH sessions. A reviewed command session uses an expiring one-time `Bootstrap` token to claim that exact session; all later checkpoint, heartbeat, progress, and finish calls use the existing worker ID and per-lease token.
 - **Internal alert auth:** dedicated internal token.
 
 There is no password login and no public self-sign-up endpoint.
@@ -34,12 +34,12 @@ remain in memory. The flow has not yet been exercised against a real GitHub App.
 - GitHub Actions OIDC BuildRecord submission is the only build handoff. Immutable deployment creation resolves the accepted BuildRecord and active topology/policy/routing snapshot before persisting a durable job; Agents receive only the resulting immutable command through the existing PollJob transport.
 - Historical relay/deployment tables remain for restore and read compatibility. Runtime code does not enqueue, claim, or lease legacy relay jobs.
 - Numeric GitHub installation, account, repository, and owner IDs are authoritative. Installations and repositories are statused rather than physically deleted. One active repository claim belongs to one project; a repository may bind multiple services in that project through distinct service keys, while each service has at most one active GitHub binding. Bindings never target Agent, Node, runtime, or VPS identity.
-- Bootstrap session credential handoff. PostgreSQL mode encrypts SSH credentials and one-time Agent registration tokens with AES-GCM using `bootstrap_secret_key`.
+- Bootstrap session credential handoff. PostgreSQL mode encrypts SSH credentials, command claim tokens, and one-time Agent registration tokens with AES-GCM using `bootstrap_secret_key`.
 - Health and Prometheus metrics endpoints.
 
 ## Bootstrap Worker
 
-`opsi-bootstrap-worker` is a separate daemon built from the same module. It leases one pending bootstrap session, retrieves the short-lived SSH credential and Agent registration token, builds deterministic `first-server-v2`, verifies its SHA-256 fingerprint, and resumes from the durable Cloud checkpoint. The stable remote step IDs remain `preflight`, `install_k3s`, `install_agent`, and `register_agent`; Agent heartbeat verification follows after all four are acknowledged. Metadata for `first-server-v1` remains readable, but an unfinished v1 checkpoint fails with `BOOTSTRAP_PLAN_MISMATCH`; the operator must create a new bootstrap session.
+`opsi-bootstrap-worker` is built from the same module and keeps one authoritative `first-server-v2` execution path. The daemon leases SSH sessions from the worker pool; the default Connect Server command downloads the checksum-pinned Linux amd64 worker and claims only its reviewed session from the target VPS. Both modes use the same plan, durable checkpoint, lease, Agent registration, and heartbeat contracts. The stable step IDs remain `preflight`, `install_k3s`, `install_agent`, and `register_agent`. Metadata for `first-server-v1` remains readable, but an unfinished v1 checkpoint fails with `BOOTSTRAP_PLAN_MISMATCH`; the operator must create a new bootstrap session.
 
 Step execution is at-least-once: a remote step runs, Cloud durably acknowledges the next-step checkpoint, and only then may the worker continue. K3s uses an operator-pinned version and verified installer checksum. Agent artifacts are staged under `/opt/opsi/agent/releases/<sha256>`, activated atomically through `current`, and rolled back through `previous` when the new service is unhealthy. A root-owned registration identity marker prevents a completed registration script from POSTing again after checkpoint acknowledgement loss.
 
@@ -50,7 +50,7 @@ The worker has two Cloud URLs:
 - `cloud_url`: internal worker-to-Cloud control URL, such as `http://cloud:9800` inside Docker Compose.
 - `agent_cloud_url`: URL reachable from the target VPS and later used by the installed Agent. For a remote VPS this must be a public/private-routable HTTPS URL, not a Docker service name or `127.0.0.1`.
 
-Password and unencrypted SSH private-key authentication are supported. SSH never falls back to insecure host-key acceptance. Operators must provide a trusted regular `known_hosts` file; production also requires it to be non-empty and requires HTTPS for K3s, Agent artifact, Cloud, and Agent-facing URLs. K3s version and both installer/artifact SHA-256 values must be explicitly pinned; the worker does not discover latest versions.
+The default command flow requires no SSH credential or `known_hosts` input and must run as root on a Linux amd64 target. Advanced password and unencrypted SSH private-key authentication remain supported. SSH never falls back to insecure host-key acceptance. Operators using SSH must provide a trusted regular `known_hosts` file; production also requires it to be non-empty and requires HTTPS for K3s, Agent artifact, Cloud, and Agent-facing URLs. K3s version and both installer/artifact SHA-256 values must be explicitly pinned; the worker does not discover latest versions.
 
 ## Build and test
 

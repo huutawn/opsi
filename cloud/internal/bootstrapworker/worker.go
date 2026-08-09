@@ -2,6 +2,8 @@ package bootstrapworker
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +55,17 @@ type Config struct {
 	StagingCrashBarrier           StagingCrashBarrierConfig `json:"staging_crash_barrier"`
 	stagingCrashBarrierConfigured bool                      `json:"-"`
 	Now                           func() time.Time          `json:"-"`
+	claimed                       bool
+}
+
+type InstallConfig struct {
+	AgentCloudURL      string `json:"agent_cloud_url"`
+	K3sVersion         string `json:"k3s_version"`
+	K3sInstallerURL    string `json:"k3s_installer_url"`
+	K3sInstallerSHA256 string `json:"k3s_installer_sha256"`
+	AgentInstallURL    string `json:"agent_install_url"`
+	AgentInstallSHA256 string `json:"agent_install_sha256"`
+	Production         bool   `json:"production"`
 }
 
 type fileConfig struct {
@@ -84,6 +97,7 @@ type Bundle struct {
 	AgentRegistrationToken   string                       `json:"agent_registration_token"`
 	AgentRegistrationExpires time.Time                    `json:"agent_registration_expires"`
 	Checkpoint               registry.BootstrapCheckpoint `json:"checkpoint"`
+	Install                  InstallConfig                `json:"install,omitempty"`
 	SSH                      struct {
 		AuthMethod string `json:"auth_method"`
 		Username   string `json:"username"`
@@ -161,6 +175,42 @@ func LoadConfig(path string) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func LoadInstallConfig(path string) (InstallConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return InstallConfig{}, fmt.Errorf("read config: %w", err)
+	}
+	if len(data) > 1024*1024 {
+		return InstallConfig{}, errors.New("config file exceeds 1 MiB")
+	}
+	var raw fileConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return InstallConfig{}, fmt.Errorf("parse config: %w", err)
+	}
+	cfg := Config{AgentCloudURL: raw.AgentCloudURL, K3sVersion: strings.TrimSpace(raw.K3sVersion), K3sInstallerURL: raw.K3sInstallerURL, K3sInstallerSHA256: raw.K3sInstallerSHA256, AgentInstallURL: raw.AgentInstallURL, AgentInstallSHA256: raw.AgentInstallSHA256, Production: raw.Production}
+	if cfg.AgentCloudURL == "" {
+		cfg.AgentCloudURL = raw.CloudURL
+	}
+	if err := validateRemoteInstallConfig(cfg); err != nil {
+		return InstallConfig{}, err
+	}
+	return cfg.InstallConfig(), nil
+}
+
+func (c Config) InstallConfig() InstallConfig {
+	return InstallConfig{AgentCloudURL: c.AgentCloudURL, K3sVersion: c.K3sVersion, K3sInstallerURL: c.K3sInstallerURL, K3sInstallerSHA256: c.K3sInstallerSHA256, AgentInstallURL: c.AgentInstallURL, AgentInstallSHA256: c.AgentInstallSHA256, Production: c.Production}
+}
+
+func (c InstallConfig) apply(cfg *Config) {
+	cfg.AgentCloudURL = c.AgentCloudURL
+	cfg.K3sVersion = c.K3sVersion
+	cfg.K3sInstallerURL = c.K3sInstallerURL
+	cfg.K3sInstallerSHA256 = c.K3sInstallerSHA256
+	cfg.AgentInstallURL = c.AgentInstallURL
+	cfg.AgentInstallSHA256 = c.AgentInstallSHA256
+	cfg.Production = c.Production
 }
 
 func (c Config) Validate() error {
@@ -263,6 +313,51 @@ func (c Config) Validate() error {
 
 func Run(ctx context.Context, cfg Config) error {
 	return NewWorker(cfg).Run(ctx)
+}
+
+func RunClaimed(ctx context.Context, claimURL, token string, logger *slog.Logger) error {
+	cloudURL, err := bootstrapCloudURL(claimURL)
+	if err != nil {
+		return err
+	}
+	workerID := newTargetWorkerID()
+	cfg := Config{CloudURL: cloudURL, WorkerID: workerID, Executor: LocalExecutor{}, Logger: logger, claimed: true}
+	client := httpCloudClient{client: http.DefaultClient, cfg: cfg}
+	lease, err := client.Claim(ctx, claimURL, token)
+	if err != nil {
+		return err
+	}
+	lease.Bundle.Install.apply(&cfg)
+	if err := validateClaimedConfig(cfg); err != nil {
+		return err
+	}
+	worker := NewWorker(cfg)
+	return worker.processLease(ctx, lease)
+}
+
+func validateClaimedConfig(cfg Config) error {
+	if cfg.CloudURL == "" {
+		return errors.New("cloud_url is required")
+	}
+	u, err := parseHTTPURL(cfg.CloudURL)
+	if err != nil {
+		return fmt.Errorf("cloud_url: %w", err)
+	}
+	if cfg.Production && u.Scheme != "https" {
+		return errors.New("production requires https cloud_url")
+	}
+	if err := registry.ValidateBootstrapWorkerID(cfg.WorkerID); err != nil {
+		return err
+	}
+	return validateRemoteInstallConfig(cfg)
+}
+
+func newTargetWorkerID() string {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return fmt.Sprintf("target-%d", time.Now().UTC().UnixNano())
+	}
+	return "target-" + hex.EncodeToString(value[:])
 }
 
 type CloudClient interface {
@@ -440,7 +535,11 @@ func (w Worker) processLease(parent context.Context, lease Lease) error {
 
 	if checkpoint.NextStepIndex < len(plan.Steps) {
 		target := RemoteTarget{Host: bundle.PublicHost, Port: bundle.SSHPort, Username: bundle.SSH.Username, Password: bundle.SSH.Password, PrivateKey: bundle.SSH.PrivateKey}
-		if err := w.client.Progress(ctx, lease, "connecting", "connecting to target over SSH"); err != nil {
+		message := "connecting to target over SSH"
+		if bundle.SSH.AuthMethod == "command" {
+			message = "bootstrap command connected from target"
+		}
+		if err := w.client.Progress(ctx, lease, "connecting", message); err != nil {
 			if isFatalCloudError(err) || isLeaseLossError(err) {
 				return err
 			}

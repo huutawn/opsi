@@ -48,16 +48,8 @@ separate trusted human channel; Agent deterministic policy remains authoritative
 
 ## Required Files To Read
 
-Before repair work, read:
-
-- `docs/opsi_srs.md`
-- `docs/architecture.md`
-- `docs/current_state.md`
-- `docs/status_matrix.md`
-- `docs/opsi_roadmap_v3/12_EXECUTION_BACKLOG.md`
-- the relevant roadmap v3 phase document;
-- `docs/architecture_decisions/ADR-003-user-owned-ai-action-boundary.md`
-- `.agents/current.md`
+Before repair work, read `docs/architecture.md`, `docs/current_state.md`,
+`docs/status_matrix.md`, the relevant roadmap document, and `.agents/current.md`.
 
 ## Review Checklist
 

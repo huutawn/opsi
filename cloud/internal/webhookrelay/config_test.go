@@ -42,6 +42,7 @@ var cloudEnvNames = append([]string{
 	"OPSI_CLOUD_ALERTS_OUTBOX_PATH",
 	"OPSI_CLOUD_ALERTS_INTERNAL_TOKEN",
 	"OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN",
+	"OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG",
 	"OPSI_CLOUD_BOOTSTRAP_SECRET_KEY",
 	"OPSI_CLOUD_GITHUB_APP_CLIENT_ID",
 	"OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET",
@@ -535,6 +536,7 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 		"OPSI_CLOUD_ALERTS_OUTBOX_PATH":       "/tmp/alerts.log",
 		"OPSI_CLOUD_ALERTS_INTERNAL_TOKEN":    "alert-token",
 		"OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN":   "worker-token",
+		"OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG":  "/etc/opsi/bootstrap-worker.json",
 		"OPSI_CLOUD_BOOTSTRAP_SECRET_KEY":     "bootstrap-key",
 		"OPSI_CLOUD_GITHUB_APP_CLIENT_ID":     "client-id",
 		"OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET": "client-secret",
@@ -549,7 +551,7 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 	}
 	if cfg.TTL != Duration(90*time.Minute) || cfg.DatabaseURL != values["OPSI_CLOUD_DATABASE_URL"] ||
 		cfg.GitHubApp.ClientID != "client-id" || cfg.GitHubApp.ClientSecret != "client-secret" ||
-		cfg.GitHubApp.CallbackURL != values["OPSI_CLOUD_GITHUB_APP_CALLBACK_URL"] {
+		cfg.GitHubApp.CallbackURL != values["OPSI_CLOUD_GITHUB_APP_CALLBACK_URL"] || cfg.BootstrapWorkerConfig != values["OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG"] {
 		t.Fatalf("environment-only config mismatch: %#v", cfg)
 	}
 }

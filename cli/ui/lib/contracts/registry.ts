@@ -478,6 +478,8 @@ export type BootstrapSession = {
   status: string;
   public_host?: string;
   role: string;
+  auth_method?: string;
+  bootstrap_command?: string;
   attempt_count?: number;
   max_attempts?: number;
   last_failure_code?: string;
@@ -617,6 +619,8 @@ export type ConsoleState = {
   services: ServiceRecord[];
   deployments: DeploymentJob[];
   sessions: BootstrapSession[];
+  bootstrapCommand: string;
+  bootstrapCommandSessionID: string;
   bootstrapEvents: TimelineEvent[];
   bootstrapEventsSessionID: string;
   deploymentEvents: TimelineEvent[];

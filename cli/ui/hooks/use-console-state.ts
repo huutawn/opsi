@@ -33,6 +33,8 @@ export function useConsoleState() {
     services: [],
     deployments: [],
     sessions: [],
+    bootstrapCommand: "",
+    bootstrapCommandSessionID: "",
     bootstrapEvents: [],
     bootstrapEventsSessionID: "",
     deploymentEvents: [],
@@ -378,20 +380,22 @@ export function useConsoleState() {
     const body: Record<string, unknown> = {
       role,
       public_host: host,
-      ssh_port: Number(form.get("ssh_port")),
-      ssh_username: String(form.get("ssh_username") ?? ""),
+      ssh_port: authMethod === "command" ? 0 : Number(form.get("ssh_port")),
+      ssh_username: authMethod === "command" ? "" : String(form.get("ssh_username") ?? ""),
       auth_method: authMethod,
     };
     formElement.reset();
+    const command = authMethod === "command";
     reviewMutation(
-      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, `auth: ${authMethod}`, `ssh port: ${String(body.ssh_port || "not reported")}`], risk: "Starts the canonical bootstrap worker flow. The one-time credential is requested only at final confirmation.", credential: { label: authMethod === "private_key" ? "SSH private key" : "SSH password", inputLabel: authMethod === "private_key" ? "One-time SSH private key" : "One-time SSH password" } },
+      { project: currentProject.name, targetType: "server", targetID: host, operation: "bootstrap", diff: [`role: ${role}`, command ? "connection: one-time bootstrap command" : `connection: SSH ${authMethod}`, ...(command ? [] : [`ssh port: ${String(body.ssh_port || "not reported")}`])], risk: command ? "Issues one expiring, session-scoped bootstrap command." : "Starts the canonical bootstrap worker flow over SSH. The one-time credential is requested only at final confirmation.", credential: command ? undefined : { label: authMethod === "private_key" ? "SSH private key" : "SSH password", inputLabel: authMethod === "private_key" ? "One-time SSH private key" : "One-time SSH password" } },
       async (key, credential) => {
-        if (!credential) throw new Error("Enter the one-time credential again to submit this reviewed attempt.");
+        if (!command && !credential) throw new Error("Enter the one-time credential again to submit this reviewed attempt.");
         const operation = generation.current;
-        const request = { ...body, [authMethod === "private_key" ? "ssh_private_key" : "ssh_password"]: credential };
+        const request = command ? body : { ...body, [authMethod === "private_key" ? "ssh_private_key" : "ssh_password"]: credential };
         patch({ busy: "server" });
         try {
           const created = await client.createBootstrap(currentProject.id, request, key);
+          if (created.bootstrap_command) patch({ bootstrapCommand: created.bootstrap_command, bootstrapCommandSessionID: created.id });
           const events = await client.bootstrapEvents(currentProject.id, created.id);
           if (isCurrent(operation, currentProject.id)) patch({ bootstrapEvents: events, bootstrapEventsSessionID: created.id });
           await load(currentProject.id, operation);
@@ -453,6 +457,7 @@ export function useConsoleState() {
       { project: currentProject.name, targetType: "bootstrap session", targetID: sessionID, operation: "retry", diff: ["resume the same durable checkpoint"], risk: "Retries only a retryable/dead-letter bootstrap session." },
       async (key) => {
         const updated = await client.retryBootstrap(currentProject.id, sessionID, key);
+        if (updated.bootstrap_command) patch({ bootstrapCommand: updated.bootstrap_command, bootstrapCommandSessionID: updated.id });
         await load(currentProject.id);
         await onRetried?.();
         return `Bootstrap ${sessionID} returned status ${updated.status}.`;

@@ -3,6 +3,7 @@ package webhookrelay
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -471,17 +472,33 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			return
 		}
 		defer clearBootstrapCredential(&credential)
-		value, err := s.Registry.CreateBootstrapSession(projectID, req.Role, req.PublicHost, req.SSHUsername, credential.AuthMethod, principal.UserID, r.Header.Get("Idempotency-Key"), req.SSHPort)
+		if credential.AuthMethod == "command" {
+			if _, err := s.bootstrapBaseURL(r); err != nil || s.bootstrapRunnerPath == "" {
+				writeRegistryError(w, registry.APIError{Status: http.StatusServiceUnavailable, Code: "BOOTSTRAP_COMMAND_UNAVAILABLE", Message: "bootstrap command runner is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+				return
+			}
+		}
+		value, err := s.Registry.CreateBootstrapSession(projectID, req.Role, req.PublicHost, credential.Username, credential.AuthMethod, principal.UserID, r.Header.Get("Idempotency-Key"), req.SSHPort)
 		if err == nil {
 			s.observer.Inc("bootstrap_sessions_total")
 			ttl := time.Until(value.ExpiresAt)
 			if ttl <= 0 {
 				ttl = 30 * time.Minute
 			}
+			if credential.AuthMethod == "command" {
+				stored, ok := s.credentials.GetForBootstrapLease(value.ID)
+				if ok && stored.AuthMethod == "command" && len(stored.Token) != 0 {
+					credential.Token = append(credential.Token[:0], stored.Token...)
+				} else {
+					credential.Token = []byte(value.ID + "." + newSecret("btok"))
+				}
+				clearBootstrapCredential(&stored)
+				value.BootstrapCommand, err = s.bootstrapCommand(r, string(credential.Token))
+			}
 			registrationToken := newSecret("areg")
 			s.credentials.Put(value.ID, credential, ttl)
 			s.registrations.Put(value.ID, value.OrgID, projectID, value.NodeID, registrationToken, ttl)
-			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "BOOTSTRAP_SESSION_CREATED", "bootstrap_session", value.ID, "success", map[string]any{"role": value.Role})
+			s.Registry.Audit(value.OrgID, projectID, principal.UserID, "BOOTSTRAP_SESSION_CREATED", "bootstrap_session", value.ID, "success", map[string]any{"role": value.Role, "auth_method": value.AuthMethod})
 		}
 		writeRegistryResult(w, r, value, err, http.StatusCreated)
 		return
@@ -509,6 +526,20 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		if current.Status != registry.BootstrapDeadLetter {
 			result, retryErr := s.Registry.ManualRetryBootstrapSession(projectID, parts[3], r.Header.Get("Idempotency-Key"), s.clock())
 			if retryErr == nil && !result.Applied {
+				if current.AuthMethod == "command" {
+					credential, ok := s.credentials.GetForBootstrapLease(result.Session.ID)
+					if !ok || credential.AuthMethod != "command" || len(credential.Token) == 0 {
+						clearBootstrapCredential(&credential)
+						writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_RETRY_CREDENTIAL_UNAVAILABLE", Message: "bootstrap command token is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+						return
+					}
+					result.Session.BootstrapCommand, retryErr = s.bootstrapCommand(r, string(credential.Token))
+					clearBootstrapCredential(&credential)
+					if retryErr != nil {
+						writeRegistryFailure(w, r, retryErr)
+						return
+					}
+				}
 				writeJSON(w, http.StatusAccepted, result.Session)
 				return
 			}
@@ -519,11 +550,13 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 			writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_NOT_DEAD_LETTER", Message: "bootstrap session is not dead-lettered", RequestID: r.Header.Get("X-Request-ID")})
 			return
 		}
-		credential, ok := s.credentials.GetForBootstrapLease(parts[3])
-		clearBootstrapCredential(&credential)
-		if !ok {
-			writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_RETRY_CREDENTIAL_UNAVAILABLE", Message: "bootstrap credential is unavailable", RequestID: r.Header.Get("X-Request-ID")})
-			return
+		if current.AuthMethod != "command" {
+			credential, ok := s.credentials.GetForBootstrapLease(parts[3])
+			clearBootstrapCredential(&credential)
+			if !ok {
+				writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_RETRY_CREDENTIAL_UNAVAILABLE", Message: "bootstrap credential is unavailable", RequestID: r.Header.Get("X-Request-ID")})
+				return
+			}
 		}
 		result, err := s.Registry.ManualRetryBootstrapSession(projectID, parts[3], r.Header.Get("Idempotency-Key"), s.clock())
 		if err != nil {
@@ -532,6 +565,25 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		}
 		if result.Applied {
 			s.Registry.Audit(result.Session.OrgID, projectID, principal.UserID, "BOOTSTRAP_MANUAL_RETRY_REQUESTED", "bootstrap_session", result.Session.ID, "success", map[string]any{"previous_attempt_count": current.AttemptCount, "attempt_count": 0, "manual_retry_generation": r.Header.Get("Idempotency-Key")})
+		}
+		if current.AuthMethod == "command" {
+			credential, ok := s.credentials.GetForBootstrapLease(result.Session.ID)
+			if result.Applied || !ok || credential.AuthMethod != "command" || len(credential.Token) == 0 {
+				clearBootstrapCredential(&credential)
+				credential = BootstrapCredential{AuthMethod: "command", Username: "root", Token: []byte(result.Session.ID + "." + newSecret("btok"))}
+				ttl := result.Session.ExpiresAt.Sub(s.clock())
+				if ttl <= 0 {
+					writeRegistryError(w, registry.APIError{Status: http.StatusConflict, Code: "BOOTSTRAP_SESSION_EXPIRED", Message: "expired bootstrap session cannot be retried", RequestID: r.Header.Get("X-Request-ID")})
+					return
+				}
+				s.credentials.Put(result.Session.ID, credential, ttl)
+			}
+			result.Session.BootstrapCommand, err = s.bootstrapCommand(r, string(credential.Token))
+			clearBootstrapCredential(&credential)
+			if err != nil {
+				writeRegistryFailure(w, r, err)
+				return
+			}
 		}
 		writeJSON(w, http.StatusAccepted, result.Session)
 		return
@@ -720,6 +772,12 @@ func bootstrapCredential(method, username, privateKey, password, k3sToken string
 	if k3sToken != "" {
 		return BootstrapCredential{}, errors.New("k3s token is control-plane only")
 	}
+	if method == "command" {
+		if username != "" || privateKey != "" || password != "" {
+			return BootstrapCredential{}, errors.New("command auth does not accept SSH credentials")
+		}
+		return BootstrapCredential{AuthMethod: method, Username: "root"}, nil
+	}
 	if username == "" {
 		return BootstrapCredential{}, errors.New("ssh_username is required")
 	}
@@ -743,8 +801,16 @@ func bootstrapCredential(method, username, privateKey, password, k3sToken string
 		}
 		return BootstrapCredential{AuthMethod: method, Username: username, Password: []byte(password)}, nil
 	default:
-		return BootstrapCredential{}, errors.New("auth_method must be private_key or password")
+		return BootstrapCredential{}, errors.New("auth_method must be command, private_key, or password")
 	}
+}
+
+func (s *Server) bootstrapCommand(r *http.Request, token string) (string, error) {
+	baseURL, err := s.bootstrapBaseURL(r)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("curl -fsSL '%s/v1/bootstrap/install' | OPSI_BOOTSTRAP_TOKEN='%s' sh", baseURL, token), nil
 }
 
 func clearBootstrapCredential(credential *BootstrapCredential) {

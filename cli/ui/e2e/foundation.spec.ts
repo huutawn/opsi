@@ -550,6 +550,49 @@ test("bootstrap credential leaves the DOM before the request resolves", async ({
   await expect(trigger).toBeFocused();
 });
 
+test("Connect Server defaults to a one-time command and refresh restores waiting facts", async ({ page }) => {
+  const command = "curl -fsSL 'https://cloud.example/v1/bootstrap/install' | OPSI_BOOTSTRAP_TOKEN='boot-command.btok-secret' sh";
+  const submitted: Record<string, unknown>[] = [];
+  let created = false;
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { (window as unknown as { copiedCommand: string }).copiedCommand = value; } } });
+  });
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/local/projects/proj-1/bootstrap-sessions" && route.request().method() === "POST") {
+      submitted.push(route.request().postDataJSON());
+      created = true;
+      await route.fulfill({ body: JSON.stringify({ id: "boot-command", status: "waiting", role: "first_server", auth_method: "command", public_host: "203.0.113.10", bootstrap_command: command, created_at: "2026-08-09T10:00:00Z" }), contentType: "application/json", status: 201 });
+      return;
+    }
+    if (path.endsWith("/bootstrap-sessions") && route.request().method() === "GET") {
+      const sessions = created ? [{ id: "boot-command", status: "waiting", role: "first_server", auth_method: "command", public_host: "203.0.113.10", created_at: "2026-08-09T10:00:00Z" }] : [];
+      await route.fulfill({ body: JSON.stringify({ sessions }), contentType: "application/json", status: 200 });
+      return;
+    }
+    await respond(route, "empty");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=bootstrap");
+  await page.getByRole("button", { name: "Connect Server" }).click();
+  const setup = page.getByRole("dialog", { name: "Connect Server" });
+  await expect(setup.getByLabel("Run bootstrap command")).toBeChecked();
+  await expect(setup.getByLabel("SSH port")).toHaveCount(0);
+  await setup.getByLabel("Server IP or hostname").fill("203.0.113.10");
+  await setup.getByRole("button", { name: "Review connection" }).click();
+  await page.getByRole("button", { name: "Confirm and submit" }).click();
+  await expect(page.getByText(/Bootstrap boot-command accepted with status waiting/)).toBeVisible();
+  expect(submitted).toEqual([{ role: "first_server", public_host: "203.0.113.10", ssh_port: 0, ssh_username: "", auth_method: "command" }]);
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByText(command, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Copy command" }).click();
+  await expect(page.getByRole("button", { name: "Copied" })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { copiedCommand: string }).copiedCommand)).toBe(command);
+  await page.reload();
+  await expect(page.getByText("waiting", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/This browser only shows the command when it is issued/)).toBeVisible();
+  await expect(page.getByText("btok-secret", { exact: false })).toHaveCount(0);
+});
+
 test("bootstrap failure requires a new credential and lifecycle exits clear it", async ({ page }) => {
   const bodies: Record<string, unknown>[] = [];
   await page.route("**/api/local/**", async (route) => {
@@ -684,15 +727,16 @@ function build(projectID: string, serviceKey: string, status: string, createdAt:
 
 async function openBootstrapReview(page: Page) {
   await page.goto("/?project=proj-1&view=infrastructure&tab=bootstrap");
-  const trigger = page.getByRole("button", { name: "Add server" });
+  const trigger = page.getByRole("button", { name: "Connect Server" });
   await trigger.click();
-  const setup = page.getByRole("dialog", { name: "Add server" });
+  const setup = page.getByRole("dialog", { name: "Connect Server" });
   await setup.getByLabel("Role").selectOption("worker");
-  await setup.getByLabel("SSH host or IP").fill("203.0.113.10");
+  await setup.getByLabel("Server IP or hostname").fill("203.0.113.10");
+  await setup.getByText("Advanced: Bootstrap over SSH").click();
+  await setup.getByRole("radio", { name: /^SSH password/ }).check();
   await setup.getByLabel("SSH port").fill("22");
   await setup.getByLabel("SSH username").fill("opsi");
-  await setup.getByLabel("Authentication").selectOption("password");
-  await setup.getByRole("button", { name: "Review bootstrap request" }).click();
+  await setup.getByRole("button", { name: "Review connection" }).click();
   const review = page.getByRole("dialog", { name: "bootstrap server" });
   await expect(review).toBeVisible();
   expect(await page.evaluate(() => document.activeElement?.closest("dialog") !== null)).toBe(true);

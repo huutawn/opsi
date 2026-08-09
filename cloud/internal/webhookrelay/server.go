@@ -1,24 +1,24 @@
 package webhookrelay
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/actiondevice"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
@@ -60,6 +60,9 @@ type Server struct {
 	random                  io.Reader
 	actionDeviceMu          sync.Mutex
 	actionDevices           actiondevice.Store
+	bootstrapInstall        bootstrapworker.InstallConfig
+	bootstrapRunnerPath     string
+	bootstrapRunnerSHA256   string
 }
 
 func NewServer(cfg Config) *Server {
@@ -124,6 +127,22 @@ func (s *Server) SetHealthCheck(check func(context.Context) error) {
 	s.healthCheck = check
 }
 
+func (s *Server) SetBootstrapRunner(install bootstrapworker.InstallConfig, path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+	s.bootstrapInstall = install
+	s.bootstrapRunnerPath = path
+	s.bootstrapRunnerSHA256 = hex.EncodeToString(hash.Sum(nil))
+	return nil
+}
+
 func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
 	s.githubAppClient = client
 }
@@ -157,9 +176,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/register", s.handleAgentRegister)
+	mux.HandleFunc("/v1/bootstrap/install", s.handleBootstrapInstall)
+	mux.HandleFunc("/v1/bootstrap/runner/linux-amd64", s.handleBootstrapRunner)
+	mux.HandleFunc("/v1/bootstrap/claim", s.handleBootstrapCommandClaim)
+	mux.HandleFunc("/v1/bootstrap/sessions/{session_id}/checkpoint", s.handleBootstrapWorkerCheckpoint)
+	mux.HandleFunc("/v1/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	mux.HandleFunc("/v1/agent/projects/{project_id}/action-devices/{device_id}", s.handleAgentActionDevice)
-	mux.HandleFunc("/internal/bootstrap/sessions/lease", s.handleBootstrapWorkerLeaseWithCheckpoint)
+	mux.HandleFunc("/internal/bootstrap/sessions/lease", s.handleBootstrapWorker)
 	mux.HandleFunc("/internal/bootstrap/sessions/{session_id}/checkpoint", s.handleBootstrapWorkerCheckpoint)
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/internal/alerts", s.handleInternalAlerts)
@@ -170,76 +194,7 @@ func (s *Server) Handler() http.Handler {
 	return s.observer.Wrap(mux)
 }
 
-type capturedHTTPResponse struct {
-	header http.Header
-	body   bytes.Buffer
-	status int
-}
-
-func (r *capturedHTTPResponse) Header() http.Header {
-	if r.header == nil {
-		r.header = make(http.Header)
-	}
-	return r.header
-}
-
-func (r *capturedHTTPResponse) WriteHeader(status int) { r.status = status }
-
-func (r *capturedHTTPResponse) Write(data []byte) (int, error) {
-	if r.status == 0 {
-		r.status = http.StatusOK
-	}
-	return r.body.Write(data)
-}
-
-func (s *Server) handleBootstrapWorkerLeaseWithCheckpoint(w http.ResponseWriter, r *http.Request) {
-	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeRegistryFailure(w, r, err)
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewReader(requestBody))
-	var leaseRequest struct {
-		WorkerID string `json:"worker_id"`
-	}
-	_ = json.Unmarshal(requestBody, &leaseRequest)
-	captured := &capturedHTTPResponse{}
-	s.handleBootstrapWorker(captured, r)
-	if captured.status != http.StatusOK {
-		for key, values := range captured.Header() {
-			w.Header()[key] = append([]string(nil), values...)
-		}
-		w.WriteHeader(captured.status)
-		_, _ = w.Write(captured.body.Bytes())
-		return
-	}
-	var response map[string]any
-	if err := json.Unmarshal(captured.body.Bytes(), &response); err != nil {
-		writeRegistryFailure(w, r, err)
-		return
-	}
-	bundle, ok := response["bundle"].(map[string]any)
-	if !ok {
-		writeRegistryFailure(w, r, fmt.Errorf("bootstrap lease response is missing bundle"))
-		return
-	}
-	sessionID, _ := bundle["session_id"].(string)
-	projectID, _ := bundle["project_id"].(string)
-	leaseToken, _ := response["lease_token"].(string)
-	session, err := s.Registry.GetBootstrapSessionForLease(projectID, sessionID, strings.TrimSpace(leaseRequest.WorkerID), leaseToken, s.clock())
-	if err != nil {
-		writeRegistryFailure(w, r, err)
-		return
-	}
-	bundle["checkpoint"] = session.Checkpoint
-	writeJSON(w, http.StatusOK, response)
-}
-
 func (s *Server) handleBootstrapWorkerCheckpoint(w http.ResponseWriter, r *http.Request) {
-	if s.Config.BootstrapWorkerToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Bootstrap-Worker-Token")), []byte(s.Config.BootstrapWorkerToken)) != 1 {
-		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "BOOTSTRAP_WORKER_AUTH_REQUIRED", Message: "bootstrap worker token is required", RequestID: r.Header.Get("X-Request-ID")})
-		return
-	}
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return

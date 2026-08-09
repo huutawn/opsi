@@ -282,7 +282,7 @@ test("Topology onboarding exposes the factual next action for every state", asyn
     await expect(page.locator(".topologyOnboarding")).toHaveAttribute("data-state", state);
     const button = page.getByRole("button", { name: action, exact: true });
     await expect(button).toBeVisible();
-    if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Add server" })).toBeVisible(); await page.getByRole("button", { name: "Close add server dialog" }).click(); }
+    if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Connect Server" })).toBeVisible(); await page.getByRole("button", { name: "Close connect server dialog" }).click(); }
     if (next === "bootstrap") { await expect(page.locator(".topologyOnboarding").getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=topology/); await expect(page.getByRole("heading", { name: "203.0.113.10" })).toBeFocused(); }
     if (next === "failed") { await button.click(); await expect(page.getByRole("dialog", { name: /retry bootstrap session/i })).toBeVisible(); await page.getByRole("button", { name: "Confirm and submit" }).click(); await expect(page.getByText(/Bootstrap boot-failed returned status pending/)).toBeVisible(); await page.getByRole("button", { name: "Close" }).click(); }
     if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add application" })).toBeVisible(); await page.getByRole("button", { name: "Close application wizard" }).click(); }

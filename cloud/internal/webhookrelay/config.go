@@ -29,6 +29,7 @@ type Config struct {
 	SMTP                   SMTPConfig        `json:"smtp"`
 	Alerts                 AlertConfig       `json:"alerts"`
 	BootstrapWorkerToken   string            `json:"bootstrap_worker_token"`
+	BootstrapWorkerConfig  string            `json:"bootstrap_worker_config"`
 	BootstrapSecretKey     string            `json:"bootstrap_secret_key"`
 	RequireAgentSignatures bool              `json:"require_agent_signatures"`
 	GitHubApp              GitHubAppConfig   `json:"github_app"`
@@ -155,6 +156,7 @@ func applyEnvOverrides(cfg *Config) error {
 	if err := applyStringOrFileEnv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN", "OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE", &cfg.BootstrapWorkerToken); err != nil {
 		return err
 	}
+	applyStringEnv("OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG", &cfg.BootstrapWorkerConfig)
 	if err := applyStringOrFileEnv("OPSI_CLOUD_BOOTSTRAP_SECRET_KEY", "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY_FILE", &cfg.BootstrapSecretKey); err != nil {
 		return err
 	}
@@ -352,6 +354,7 @@ func validateConfig(cfg *Config) error {
 			"database_url":                cfg.DatabaseURL,
 			"public_base_url":             cfg.PublicBaseURL,
 			"bootstrap_worker_token":      cfg.BootstrapWorkerToken,
+			"bootstrap_worker_config":     cfg.BootstrapWorkerConfig,
 			"bootstrap_secret_key":        cfg.BootstrapSecretKey,
 			"alerts.internal_token":       cfg.Alerts.InternalToken,
 			"smtp.host":                   cfg.SMTP.Host,

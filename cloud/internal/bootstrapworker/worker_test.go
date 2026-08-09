@@ -172,6 +172,21 @@ func TestLoadConfigReadsBootstrapWorkerTokenFile(t *testing.T) {
 	}
 }
 
+func TestLoadInstallConfigDoesNotRequireWorkerOrSSHSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.json")
+	data := `{"cloud_url":"http://cloud:9800","agent_cloud_url":"https://cloud.example","production":true,"k3s_version":"v1.32.5+k3s1","k3s_installer_url":"https://get.k3s.io","k3s_installer_sha256":"` + strings.Repeat("b", 64) + `","agent_install_url":"https://downloads.example/opsi-agent","agent_install_sha256":"` + strings.Repeat("a", 64) + `"}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	install, err := LoadInstallConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if install.AgentCloudURL != "https://cloud.example" || install.K3sVersion != "v1.32.5+k3s1" || !install.Production {
+		t.Fatalf("install=%+v", install)
+	}
+}
+
 func TestLoadConfigRejectsInlineAndFileWorkerTokens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "worker.json")
 	if err := os.WriteFile(path, []byte(`{"bootstrap_worker_token":"inline","bootstrap_worker_token_file":"/run/secrets/token"}`), 0o600); err != nil {

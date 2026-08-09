@@ -20,15 +20,15 @@ export type TopologyOnboardingState = {
   sessionID?: string;
 };
 export type ServerLifecycle = {
-  status: "Connecting" | "Bootstrapping" | "Ready" | "Offline" | "Failed" | "Unknown";
+  status: "Waiting" | "Connecting" | "Bootstrapping" | "Ready" | "Offline" | "Failed" | "Unknown";
   runtime?: PlacementFacts["runtimes"][number];
   node?: PlacementFacts["nodes"][number];
   agent?: PlacementFacts["agents"][number];
   session?: BootstrapSession;
 };
 
-const activeBootstrapStatuses = new Set(["created", "pending", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
-const connectingBootstrapStatuses = new Set(["created", "pending", "retry_wait", "connecting"]);
+const activeBootstrapStatuses = new Set(["created", "pending", "waiting", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
+const connectingBootstrapStatuses = new Set(["created", "pending", "retry_wait", "validating", "connecting"]);
 const usableNodeStatuses = new Set(["healthy", "ready", "active"]);
 const defaultCPURequestMillicores = 100;
 const defaultMemoryRequestBytes = 128 * 1024 * 1024;
@@ -143,7 +143,7 @@ export function serverLifecycle(facts: PlacementFacts, sessions: BootstrapSessio
     const match = readyServer(facts.nodes.filter((node) => node.runtime_id === runtime.id), facts.agents.filter((agent) => agent.runtime_id === runtime.id));
     if (match) return { status: "Ready", runtime, ...match, session: active ? undefined : latest };
   }
-  if (active) return { status: connectingBootstrapStatuses.has(active.status) ? "Connecting" : "Bootstrapping", session: active };
+  if (active) return { status: active.status === "waiting" ? "Waiting" : connectingBootstrapStatuses.has(active.status) ? "Connecting" : "Bootstrapping", session: active };
   const runtime = facts.runtimes[0];
   const node = facts.nodes.find((item) => item.runtime_id === runtime?.id) ?? facts.nodes[0];
   const agent = facts.agents.find((item) => item.runtime_id === runtime?.id && (!node || item.node_id === node.id)) ?? facts.agents[0];
@@ -159,7 +159,7 @@ export function serverStatus(nodes: PlacementFacts["nodes"], agents: PlacementFa
 
 export function topologyOnboarding(facts: PlacementFacts, plan: TopologyPlan | null, sessions: BootstrapSession[]): TopologyOnboardingState {
   const lifecycle = serverLifecycle(facts, sessions);
-  if (lifecycle.status === "Connecting" || lifecycle.status === "Bootstrapping") return { kind: "bootstrap", title: "Server connection in progress", description: `Bootstrap ${lifecycle.session?.id} is ${lifecycle.session?.status}.`, action: "Inspect progress", progress: bootstrapProgress(lifecycle.session?.checkpoint), sessionID: lifecycle.session?.id };
+  if (lifecycle.status === "Waiting" || lifecycle.status === "Connecting" || lifecycle.status === "Bootstrapping") return { kind: "bootstrap", title: lifecycle.status === "Waiting" ? "Waiting for connection" : "Server connection in progress", description: `Bootstrap ${lifecycle.session?.id} is ${lifecycle.session?.status}.`, action: "Inspect progress", progress: bootstrapProgress(lifecycle.session?.checkpoint), sessionID: lifecycle.session?.id };
   if (lifecycle.status === "Failed") return { kind: "retry", title: "Server bootstrap failed", description: lifecycle.session?.last_failure_message_redacted || lifecycle.session?.last_failure_code || "The latest bootstrap session failed.", action: "Retry bootstrap", sessionID: lifecycle.session?.id };
   if (lifecycle.status === "Unknown" && !lifecycle.session) return { kind: "connect", title: "Connect the first server", description: "No server facts are reported for this project.", action: "Connect server" };
   if (lifecycle.status !== "Ready") return { kind: "inspect", title: `Server status is ${lifecycle.status.toLowerCase()}`, description: "Runtime, node, and active Agent facts do not currently establish a ready server.", action: "Inspect topology" };

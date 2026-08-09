@@ -257,7 +257,7 @@ func (s PostgresService) FinishBootstrapSessionForLease(projectID, sessionID, wo
 		if failureMessage == "" {
 			failureMessage = "bootstrap attempt failed"
 		}
-		if result.Retryable && session.AttemptCount < effectiveBootstrapMaxAttempts(session.MaxAttempts) && now.Before(session.ExpiresAt) {
+		if session.AuthMethod != "command" && result.Retryable && session.AttemptCount < effectiveBootstrapMaxAttempts(session.MaxAttempts) && now.Before(session.ExpiresAt) {
 			status = BootstrapRetryWait
 			nextAttemptAt = now.Add(bootstrapRetryDelay(session.AttemptCount))
 			level, step, eventMessage = "warn", "BOOTSTRAP_RETRY_SCHEDULED", failureMessage
@@ -333,20 +333,24 @@ func (s PostgresService) ManualRetryBootstrapSession(projectID, sessionID, idemp
 	if !now.Before(session.ExpiresAt) {
 		return BootstrapManualRetryResult{}, APIError{Status: 409, Code: "BOOTSTRAP_SESSION_EXPIRED", Message: "expired bootstrap session cannot be retried"}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE bootstrap_sessions SET status='pending', attempt_count=0, next_attempt_at=NULL, dead_lettered_at=NULL, finished_at=NULL, lease_owner=NULL, lease_token_hash=NULL, lease_expires_at=NULL, lease_heartbeat_at=NULL, leased_at=NULL, updated_at=$1 WHERE id=$2`, now, sessionID); err != nil {
+	retryStatus, eventMessage := BootstrapPending, "bootstrap session manually returned to pending"
+	if session.AuthMethod == "command" {
+		retryStatus, eventMessage = BootstrapWaiting, "bootstrap session waiting for a new bootstrap command connection"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE bootstrap_sessions SET status=$1, attempt_count=0, next_attempt_at=NULL, dead_lettered_at=NULL, finished_at=NULL, lease_owner=NULL, lease_token_hash=NULL, lease_expires_at=NULL, lease_heartbeat_at=NULL, leased_at=NULL, updated_at=$2 WHERE id=$3`, retryStatus, now, sessionID); err != nil {
 		return BootstrapManualRetryResult{}, err
 	}
 	if err := insertIdempotency(ctx, tx, scope, idempotencyKey, "bootstrap_session", sessionID); err != nil {
 		return BootstrapManualRetryResult{}, err
 	}
-	session.Status = BootstrapPending
+	session.Status = retryStatus
 	session.AttemptCount = 0
 	session.NextAttemptAt = nil
 	session.DeadLetteredAt = nil
 	session.FinishedAt = nil
 	session.UpdatedAt = now
 	clearBootstrapLease(&session)
-	if err := insertBootstrapEvent(ctx, tx, session, "info", "BOOTSTRAP_MANUAL_RETRY_REQUESTED", "bootstrap session manually returned to pending", now); err != nil {
+	if err := insertBootstrapEvent(ctx, tx, session, "info", "BOOTSTRAP_MANUAL_RETRY_REQUESTED", eventMessage, now); err != nil {
 		return BootstrapManualRetryResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
