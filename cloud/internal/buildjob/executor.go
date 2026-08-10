@@ -97,11 +97,12 @@ type RunnerIdentity struct {
 }
 
 type RunnerLease struct {
-	Token     string    `json:"lease_token"`
-	ExpiresAt time.Time `json:"expires_at"`
-	JobID     string    `json:"build_job_id"`
-	AttemptID string    `json:"attempt_id"`
-	RunID     uint64    `json:"run_id"`
+	Token      string    `json:"lease_token"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	JobID      string    `json:"build_job_id"`
+	AttemptID  string    `json:"attempt_id"`
+	RunID      uint64    `json:"run_id"`
+	RunAttempt uint32    `json:"run_attempt"`
 }
 
 type BuildSpec struct {
@@ -115,6 +116,29 @@ type BuildSpec struct {
 	BuildContext          string `json:"build_context"`
 	ResolvedBuildStrategy string `json:"resolved_build_strategy"`
 	DockerfilePath        string `json:"dockerfile_path"`
+}
+
+func (s BuildSpec) Validate() error {
+	if !validOpaqueID(s.BuildJobID) || !validRepositoryFullName(s.Repository) || s.RepositoryID <= 0 || s.RepositoryOwnerID <= 0 || s.GitHubInstallationID <= 0 || !validSHA40(s.ResolvedCommitSHA) || !canonicalRepositoryPath(s.ApplicationRoot, true) || !canonicalRepositoryPath(s.BuildContext, true) || s.ResolvedBuildStrategy != StrategyDockerfile || !canonicalRepositoryPath(s.DockerfilePath, false) {
+		return Error{Code: "BUILD_SPEC_INVALID", Status: 409, Message: "Build Spec is invalid.", Cause: "build_spec"}
+	}
+	return nil
+}
+
+type RunnerAccess struct {
+	JobID      string
+	AttemptID  string
+	RunID      uint64
+	RunAttempt uint32
+	LeaseHash  []byte
+}
+
+type SourceGrant struct {
+	BuildJobID           string `json:"build_job_id"`
+	Repository           string `json:"repository"`
+	RepositoryID         int64  `json:"repository_id"`
+	GitHubInstallationID int64  `json:"github_installation_id"`
+	ResolvedCommitSHA    string `json:"resolved_commit_sha"`
 }
 
 func (s Service) Dispatch(ctx context.Context, projectID, applicationID, jobID string) (DispatchAttempt, error) {
@@ -173,7 +197,7 @@ func (s Service) Claim(ctx context.Context, jobID, attemptID string, identity Ru
 	if err := s.Store.ClaimDispatch(ctx, jobID, attemptID, identity, hash, expiresAt, now); err != nil {
 		return RunnerLease{}, err
 	}
-	return RunnerLease{Token: token, ExpiresAt: expiresAt, JobID: jobID, AttemptID: attemptID, RunID: identity.RunID}, nil
+	return RunnerLease{Token: token, ExpiresAt: expiresAt, JobID: jobID, AttemptID: attemptID, RunID: identity.RunID, RunAttempt: identity.RunAttempt}, nil
 }
 
 func (s Service) BuildSpec(ctx context.Context, jobID, token string) (BuildSpec, error) {
@@ -181,7 +205,39 @@ func (s Service) BuildSpec(ctx context.Context, jobID, token string) (BuildSpec,
 		return BuildSpec{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
 	}
 	hash := sha256.Sum256([]byte(token))
-	return s.Store.GetBuildSpec(ctx, jobID, hash[:], s.clock())
+	job, err := s.Store.GetRunnerJob(ctx, RunnerAccess{JobID: jobID, LeaseHash: hash[:]}, s.clock())
+	if err != nil {
+		return BuildSpec{}, err
+	}
+	return buildSpec(job), nil
+}
+
+func (s Service) SourceGrant(ctx context.Context, jobID, attemptID string, runID uint64, runAttempt uint32, token string) (SourceGrant, error) {
+	if s.Store == nil || s.Sources == nil || !validOpaqueID(jobID) || !validOpaqueID(attemptID) || runID == 0 || runAttempt == 0 || token == "" || len(token) > 256 {
+		return SourceGrant{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
+	}
+	hash := sha256.Sum256([]byte(token))
+	job, err := s.Store.GetRunnerJob(ctx, RunnerAccess{JobID: jobID, AttemptID: attemptID, RunID: runID, RunAttempt: runAttempt, LeaseHash: hash[:]}, s.clock())
+	if err != nil {
+		return SourceGrant{}, err
+	}
+	current, err := s.Sources.ResolveBuildJobSource(ctx, job.ProjectID, job.ApplicationID)
+	if err != nil {
+		return SourceGrant{}, Error{Code: "SOURCE_ACCESS_DENIED", Status: 403, Message: "Source access is unavailable for this BuildJob.", Cause: "source_authority"}
+	}
+	if !sourceMatchesSnapshot(current, job) {
+		return SourceGrant{}, Error{Code: "SOURCE_BINDING_MISMATCH", Status: 409, Message: "The current source binding does not match the immutable BuildJob snapshot.", Cause: "source_binding"}
+	}
+	return SourceGrant{BuildJobID: job.ID, Repository: job.Source.RepositoryFullName, RepositoryID: job.Source.RepositoryID, GitHubInstallationID: job.Source.InstallationID, ResolvedCommitSHA: job.Source.ResolvedCommitSHA}, nil
+}
+
+func sourceMatchesSnapshot(source ApplicationSource, job Job) bool {
+	return source.ProjectID == job.ProjectID && source.ApplicationID == job.ApplicationID && source.EnvironmentID == job.EnvironmentID &&
+		source.BindingID == job.Source.BindingID && source.BindingUpdatedAt.Equal(job.Source.BindingUpdatedAt) &&
+		source.InstallationID == job.Source.InstallationID && source.RepositoryID == job.Source.RepositoryID && source.RepositoryOwnerID == job.Source.RepositoryOwnerID &&
+		source.RepositoryFullName == job.Source.RepositoryFullName && source.SelectedRef == job.Source.SelectedRef &&
+		source.ApplicationRoot == job.Source.ApplicationRoot && source.BuildContext == job.Source.BuildContext &&
+		source.BuildStrategy == job.RequestedBuildStrategy && (source.DockerfilePath == job.DockerfilePath || source.DockerfilePath == "" && job.RequestedBuildStrategy == StrategyAuto)
 }
 
 func validateDispatchableJob(job Job) error {

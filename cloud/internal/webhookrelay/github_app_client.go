@@ -435,12 +435,36 @@ func (c *GitHubAppClient) fetchInstallationToken(ctx context.Context, installati
 }
 
 func (c *GitHubAppClient) requestInstallationToken(ctx context.Context, installationID int64) (installationToken, error) {
+	return c.requestInstallationTokenWithBody(ctx, installationID, "{}", false)
+}
+
+var errGitHubRepositoryTokenDenied = errors.New("github repository token denied")
+
+func (c *GitHubAppClient) RepositoryReadToken(ctx context.Context, installationID, repositoryID int64) (string, time.Time, error) {
+	if installationID <= 0 || repositoryID <= 0 {
+		return "", time.Time{}, errGitHubRepositoryTokenDenied
+	}
+	body, err := json.Marshal(struct {
+		RepositoryIDs []int64           `json:"repository_ids"`
+		Permissions   map[string]string `json:"permissions"`
+	}{RepositoryIDs: []int64{repositoryID}, Permissions: map[string]string{"contents": "read"}})
+	if err != nil {
+		return "", time.Time{}, errors.New("repository token request unavailable")
+	}
+	token, err := c.requestInstallationTokenWithBody(ctx, installationID, string(body), true)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return token.Token, token.ExpiresAt, nil
+}
+
+func (c *GitHubAppClient) requestInstallationTokenWithBody(ctx context.Context, installationID int64, requestBody string, repositoryScoped bool) (installationToken, error) {
 	jwt, err := c.appJWT()
 	if err != nil {
 		return installationToken{}, fmt.Errorf("request installation token for installation %d: JWT creation failed", installationID)
 	}
 	endpoint := githubInstallationTokenBaseURL + strconv.FormatInt(installationID, 10) + "/access_tokens"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader("{}"))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(requestBody))
 	if err != nil {
 		return installationToken{}, fmt.Errorf("request installation token for installation %d: request creation failed", installationID)
 	}
@@ -456,6 +480,9 @@ func (c *GitHubAppClient) requestInstallationToken(ctx context.Context, installa
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		if repositoryScoped && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound) {
+			return installationToken{}, errGitHubRepositoryTokenDenied
+		}
 		return installationToken{}, fmt.Errorf("request installation token for installation %d: HTTP status %d", installationID, response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, githubResponseMaxBytes+1))

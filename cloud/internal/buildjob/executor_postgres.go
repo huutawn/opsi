@@ -111,42 +111,42 @@ func (s PostgresStore) ClaimDispatch(ctx context.Context, jobID, attemptID strin
 	return nil
 }
 
-func (s PostgresStore) GetBuildSpec(ctx context.Context, jobID string, leaseHash []byte, now time.Time) (BuildSpec, error) {
+func (s PostgresStore) GetRunnerJob(ctx context.Context, access RunnerAccess, now time.Time) (Job, error) {
 	if s.DB == nil {
-		return BuildSpec{}, unavailable()
+		return Job{}, unavailable()
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return BuildSpec{}, unavailable()
+		return Job{}, unavailable()
 	}
 	defer tx.Rollback()
-	attempt, err := scanAttempt(tx.QueryRowContext(ctx, `SELECT `+selectAttemptColumns+` FROM build_executor_attempts WHERE lease_token_hash=$1 FOR UPDATE`, leaseHash))
+	attempt, err := scanAttempt(tx.QueryRowContext(ctx, `SELECT `+selectAttemptColumns+` FROM build_executor_attempts WHERE lease_token_hash=$1 FOR UPDATE`, access.LeaseHash))
 	if errors.Is(err, sql.ErrNoRows) {
-		return BuildSpec{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
+		return Job{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
 	}
 	if err != nil {
-		return BuildSpec{}, unavailable()
+		return Job{}, unavailable()
 	}
-	if attempt.BuildJobID != jobID {
-		return BuildSpec{}, Error{Code: "RUNNER_LEASE_SCOPE_MISMATCH", Status: 403, Message: "Runner lease cannot access this BuildJob.", Cause: "runner_lease_scope"}
+	if attempt.BuildJobID != access.JobID || access.AttemptID != "" && attempt.AttemptID != access.AttemptID || access.RunID != 0 && attempt.RunID != access.RunID || access.RunAttempt != 0 && attempt.RunAttempt != access.RunAttempt {
+		return Job{}, Error{Code: "RUNNER_LEASE_SCOPE_MISMATCH", Status: 403, Message: "Runner lease cannot access this BuildJob attempt.", Cause: "runner_lease_scope"}
 	}
 	if attempt.LeaseExpiresAt.IsZero() || !now.Before(attempt.LeaseExpiresAt) {
-		return BuildSpec{}, Error{Code: "RUNNER_LEASE_EXPIRED", Status: 401, Message: "Runner lease has expired.", Cause: "runner_lease"}
+		return Job{}, Error{Code: "RUNNER_LEASE_EXPIRED", Status: 401, Message: "Runner lease has expired.", Cause: "runner_lease"}
 	}
 	if attempt.LastState != DispatchStateClaimed {
-		return BuildSpec{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this dispatch attempt.", Cause: "runner_lease"}
+		return Job{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this dispatch attempt.", Cause: "runner_lease"}
 	}
-	job, err := scanJob(tx.QueryRowContext(ctx, selectJobColumns+` WHERE id=$1 FOR UPDATE`, jobID))
+	job, err := scanJob(tx.QueryRowContext(ctx, selectJobColumns+` WHERE id=$1 FOR UPDATE`, access.JobID))
 	if errors.Is(err, sql.ErrNoRows) || err == nil && job.Status != StatusRunning {
-		return BuildSpec{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this BuildJob.", Cause: "build_job_status"}
+		return Job{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this BuildJob.", Cause: "build_job_status"}
 	}
 	if err != nil {
-		return BuildSpec{}, unavailable()
+		return Job{}, unavailable()
 	}
 	if err := tx.Commit(); err != nil {
-		return BuildSpec{}, unavailable()
+		return Job{}, unavailable()
 	}
-	return buildSpec(job), nil
+	return job, nil
 }
 
 const selectAttemptColumns = `provider,attempt_id,build_job_id,workflow_path,workflow_ref,executor_ref,COALESCE(github_run_id,0),COALESCE(github_run_attempt,0),COALESCE(github_run_url,''),dispatched_at,claimed_at,completed_at,last_state,COALESCE(failure_code,''),lease_expires_at,lease_token_hash`

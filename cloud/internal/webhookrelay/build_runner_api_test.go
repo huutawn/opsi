@@ -26,6 +26,12 @@ type runnerAPIVerifier struct {
 	err      error
 }
 
+type runnerAPISource struct{ source buildjob.ApplicationSource }
+
+func (s runnerAPISource) ResolveBuildJobSource(context.Context, string, string) (buildjob.ApplicationSource, error) {
+	return s.source, nil
+}
+
 func (v runnerAPIVerifier) Verify(context.Context, string) (githuboidc.VerifiedIdentity, error) {
 	return v.identity, v.err
 }
@@ -38,7 +44,18 @@ func TestBuildRunnerClaimAndBuildSpecAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := NewServer(Config{BuildExecutor: config})
-	server.BuildJobs = buildjob.Service{Store: store, Executor: config, Dispatcher: runnerAPIDispatcher{}, Now: func() time.Time { return time.Unix(200, 0).UTC() }}
+	server.BuildJobs = buildjob.Service{Store: store, Sources: runnerAPISource{source: runnerAPISourceForJob(job)}, Executor: config, Dispatcher: runnerAPIDispatcher{}, Now: func() time.Time { return time.Unix(200, 0).UTC() }}
+	githubNow := time.Unix(200, 0).UTC()
+	server.githubAppClient, _ = newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var body struct {
+			RepositoryIDs []int64           `json:"repository_ids"`
+			Permissions   map[string]string `json:"permissions"`
+		}
+		if json.NewDecoder(request.Body).Decode(&body) != nil || len(body.RepositoryIDs) != 1 || body.RepositoryIDs[0] != job.Source.RepositoryID || len(body.Permissions) != 1 || body.Permissions["contents"] != "read" {
+			t.Fatalf("source token request=%+v", body)
+		}
+		return githubAppResponse(http.StatusCreated, `{"token":"source-installation-token","expires_at":"`+githubNow.Add(time.Hour).Format(time.RFC3339)+`"}`), nil
+	}), githubNow)
 	attempt, err := server.BuildJobs.Dispatch(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +80,22 @@ func TestBuildRunnerClaimAndBuildSpecAPI(t *testing.T) {
 	var spec buildjob.BuildSpec
 	if specResponse.Code != http.StatusOK || json.Unmarshal(specResponse.Body.Bytes(), &spec) != nil || spec.BuildJobID != job.ID || spec.Repository != job.Source.RepositoryFullName || spec.ResolvedCommitSHA != job.Source.ResolvedCommitSHA {
 		t.Fatalf("spec status=%d body=%s", specResponse.Code, specResponse.Body.String())
+	}
+
+	sourceBody, _ := json.Marshal(map[string]any{"build_job_id": job.ID, "attempt_id": attempt.AttemptID, "github_run_id": uint64(99), "github_run_attempt": uint32(1)})
+	sourceRequest := httptest.NewRequest(http.MethodPost, "/v1/build-runner/source-access", bytes.NewReader(sourceBody))
+	sourceRequest.Header.Set("Authorization", "Bearer "+lease.Token)
+	sourceResponse := httptest.NewRecorder()
+	handler.ServeHTTP(sourceResponse, sourceRequest)
+	var sourceAccess struct {
+		BuildJobID        string    `json:"build_job_id"`
+		Repository        string    `json:"repository"`
+		ResolvedCommitSHA string    `json:"resolved_commit_sha"`
+		AccessToken       string    `json:"access_token"`
+		ExpiresAt         time.Time `json:"expires_at"`
+	}
+	if sourceResponse.Code != http.StatusOK || json.Unmarshal(sourceResponse.Body.Bytes(), &sourceAccess) != nil || sourceAccess.BuildJobID != job.ID || sourceAccess.Repository != job.Source.RepositoryFullName || sourceAccess.ResolvedCommitSHA != job.Source.ResolvedCommitSHA || sourceAccess.AccessToken != "source-installation-token" || !sourceAccess.ExpiresAt.Equal(githubNow.Add(time.Hour)) || sourceResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("source access status=%d body=%s", sourceResponse.Code, sourceResponse.Body.String())
 	}
 }
 
@@ -92,4 +125,8 @@ func TestBuildRunnerOIDCErrorsDoNotReflectCredentials(t *testing.T) {
 func runnerAPIJob(id string) buildjob.Job {
 	now := time.Unix(100, 0).UTC()
 	return buildjob.Job{ID: id, ProjectID: "project-1", EnvironmentID: "environment-1", ApplicationID: "application-1", Source: buildjob.SourceSnapshot{BindingID: "binding-1", BindingUpdatedAt: time.Unix(50, 0).UTC(), InstallationID: 10, RepositoryID: 20, RepositoryOwnerID: 30, RepositoryFullName: "user/source", SelectedRef: "main", ResolvedCommitSHA: strings.Repeat("a", 40), ApplicationRoot: ".", BuildContext: "."}, RequestedBuildStrategy: buildjob.StrategyDockerfile, ResolvedBuildStrategy: buildjob.StrategyDockerfile, DockerfilePath: "Dockerfile", Status: buildjob.StatusReady, CreatedBy: "user-1", IdempotencyKey: id + "-key", CreatedAt: now, UpdatedAt: now}
+}
+
+func runnerAPISourceForJob(job buildjob.Job) buildjob.ApplicationSource {
+	return buildjob.ApplicationSource{ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, ApplicationID: job.ApplicationID, BindingID: job.Source.BindingID, BindingUpdatedAt: job.Source.BindingUpdatedAt, InstallationID: job.Source.InstallationID, RepositoryID: job.Source.RepositoryID, RepositoryOwnerID: job.Source.RepositoryOwnerID, RepositoryFullName: job.Source.RepositoryFullName, SelectedRef: job.Source.SelectedRef, ApplicationRoot: job.Source.ApplicationRoot, BuildContext: job.Source.BuildContext, BuildStrategy: job.RequestedBuildStrategy, DockerfilePath: job.DockerfilePath}
 }

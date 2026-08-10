@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
@@ -40,7 +41,7 @@ func (s *Server) handleBuildRunnerClaim(w http.ResponseWriter, r *http.Request) 
 		AttemptID  string `json:"attempt_id"`
 		OIDCToken  string `json:"oidc_token"`
 	}
-	if !decodeStrictRunnerJSON(w, r, &request) {
+	if !decodeStrictRunnerJSON(w, r, &request, buildjob.Error{Code: "RUNNER_CLAIM_INVALID", Status: 400, Message: "Runner claim is invalid.", Cause: "request"}) {
 		return
 	}
 	if request.OIDCToken == "" {
@@ -65,6 +66,51 @@ func (s *Server) handleBuildRunnerClaim(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, lease)
 }
 
+func (s *Server) handleBuildRunnerSourceAccess(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		BuildJobID string `json:"build_job_id"`
+		AttemptID  string `json:"attempt_id"`
+		RunID      uint64 `json:"github_run_id"`
+		RunAttempt uint32 `json:"github_run_attempt"`
+	}
+	invalidRequest := buildjob.Error{Code: "SOURCE_ACCESS_REQUEST_INVALID", Status: 400, Message: "Source access request is invalid.", Cause: "request"}
+	if !decodeStrictRunnerJSON(w, r, &request, invalidRequest) {
+		return
+	}
+	if request.BuildJobID == "" || request.AttemptID == "" || request.RunID == 0 || request.RunAttempt == 0 {
+		writeBuildJobFailure(w, r, invalidRequest)
+		return
+	}
+	grant, err := s.BuildJobs.SourceGrant(r.Context(), request.BuildJobID, request.AttemptID, request.RunID, request.RunAttempt, bearerToken(r))
+	if err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	if s.githubAppClient == nil {
+		writeBuildJobFailure(w, r, buildjob.Error{Code: "SOURCE_TOKEN_UNAVAILABLE", Status: 503, Message: "Source credential is unavailable.", Cause: "github_installation_token"})
+		return
+	}
+	token, expiresAt, err := s.githubAppClient.RepositoryReadToken(r.Context(), grant.GitHubInstallationID, grant.RepositoryID)
+	if err != nil {
+		failure := buildjob.Error{Code: "SOURCE_TOKEN_UNAVAILABLE", Status: 503, Message: "Source credential is unavailable.", Cause: "github_installation_token"}
+		if errors.Is(err, errGitHubRepositoryTokenDenied) {
+			failure = buildjob.Error{Code: "SOURCE_ACCESS_DENIED", Status: 403, Message: "Source access is denied for this BuildJob.", Cause: "github_repository"}
+		}
+		writeBuildJobFailure(w, r, failure)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, struct {
+		buildjob.SourceGrant
+		AccessToken string    `json:"access_token"`
+		ExpiresAt   time.Time `json:"expires_at"`
+	}{SourceGrant: grant, AccessToken: token, ExpiresAt: expiresAt})
+}
+
 func (s *Server) handleBuildRunnerBuildSpec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -83,15 +129,15 @@ func (s *Server) handleBuildRunnerBuildSpec(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, spec)
 }
 
-func decodeStrictRunnerJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+func decodeStrictRunnerJSON(w http.ResponseWriter, r *http.Request, target any, invalidRequest buildjob.Error) bool {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 96<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		writeBuildJobFailure(w, r, buildjob.Error{Code: "RUNNER_CLAIM_INVALID", Status: 400, Message: "Runner claim is invalid.", Cause: "request"})
+		writeBuildJobFailure(w, r, invalidRequest)
 		return false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeBuildJobFailure(w, r, buildjob.Error{Code: "RUNNER_CLAIM_INVALID", Status: 400, Message: "Runner claim must contain one JSON object.", Cause: "request"})
+		writeBuildJobFailure(w, r, invalidRequest)
 		return false
 	}
 	return true

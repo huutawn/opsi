@@ -62,14 +62,14 @@ func TestPostgresBuildExecutorAtomicClaimAndScopedLease(t *testing.T) {
 	if err != nil || stored.Status != StatusRunning {
 		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
-	spec, err := store.GetBuildSpec(context.Background(), job.ID, hash[:], now.Add(time.Minute))
-	if err != nil || spec.BuildJobID != job.ID || spec.ResolvedCommitSHA != job.Source.ResolvedCommitSHA {
-		t.Fatalf("spec=%+v err=%v", spec, err)
+	runnerJob, err := store.GetRunnerJob(context.Background(), RunnerAccess{JobID: job.ID, AttemptID: attempt.AttemptID, RunID: identity.RunID, RunAttempt: identity.RunAttempt, LeaseHash: hash[:]}, now.Add(time.Minute))
+	if err != nil || runnerJob.ID != job.ID || runnerJob.Source.ResolvedCommitSHA != job.Source.ResolvedCommitSHA {
+		t.Fatalf("job=%+v err=%v", runnerJob, err)
 	}
-	if _, err := store.GetBuildSpec(context.Background(), "another-job", hash[:], now.Add(time.Minute)); Code(err) != "RUNNER_LEASE_SCOPE_MISMATCH" {
+	if _, err := store.GetRunnerJob(context.Background(), RunnerAccess{JobID: "another-job", LeaseHash: hash[:]}, now.Add(time.Minute)); Code(err) != "RUNNER_LEASE_SCOPE_MISMATCH" {
 		t.Fatalf("scope err=%v", err)
 	}
-	if _, err := store.GetBuildSpec(context.Background(), job.ID, hash[:], now.Add(10*time.Minute)); Code(err) != "RUNNER_LEASE_EXPIRED" {
+	if _, err := store.GetRunnerJob(context.Background(), RunnerAccess{JobID: job.ID, LeaseHash: hash[:]}, now.Add(10*time.Minute)); Code(err) != "RUNNER_LEASE_EXPIRED" {
 		t.Fatalf("expiry err=%v", err)
 	}
 	var storedHash []byte

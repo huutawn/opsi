@@ -493,3 +493,28 @@ func TestInstallationTokenRequestBodyIsCanonicalEmptyObject(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRepositoryReadTokenIsExactAndNotCached(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	requests := 0
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		var body struct {
+			RepositoryIDs []int64           `json:"repository_ids"`
+			Permissions   map[string]string `json:"permissions"`
+		}
+		if json.NewDecoder(request.Body).Decode(&body) != nil || len(body.RepositoryIDs) != 1 || body.RepositoryIDs[0] != 77 || len(body.Permissions) != 1 || body.Permissions["contents"] != "read" {
+			t.Fatalf("body=%+v", body)
+		}
+		return githubAppResponse(http.StatusCreated, `{"token":"source-token","expires_at":"`+now.Add(time.Hour).Format(time.RFC3339)+`"}`), nil
+	}), now)
+	for range 2 {
+		token, expiresAt, err := client.RepositoryReadToken(t.Context(), 42, 77)
+		if err != nil || token != "source-token" || !expiresAt.Equal(now.Add(time.Hour)) {
+			t.Fatalf("token=%q expires=%s err=%v", token, expiresAt, err)
+		}
+	}
+	if requests != 2 {
+		t.Fatalf("repository-scoped source tokens must not be cached: requests=%d", requests)
+	}
+}

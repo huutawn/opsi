@@ -26,7 +26,7 @@ func TestBuildExecutorDispatchClaimLeaseAndReplayContract(t *testing.T) {
 	if _, _, err := store.Create(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	service := Service{Store: store, Executor: executorTestConfig(), Dispatcher: testDispatcher{}, Now: func() time.Time { return now }}
+	service := Service{Store: store, Sources: testSources{source: executorTestSource(job)}, Executor: executorTestConfig(), Dispatcher: testDispatcher{}, Now: func() time.Time { return now }}
 	attempt, err := service.Dispatch(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
 	if err != nil || attempt.LastState != DispatchStateDispatched || attempt.RunID != 0 {
 		t.Fatalf("attempt=%+v err=%v", attempt, err)
@@ -81,6 +81,26 @@ func TestBuildExecutorDispatchClaimLeaseAndReplayContract(t *testing.T) {
 	if err != nil || spec.BuildJobID != job.ID || spec.ResolvedCommitSHA != job.Source.ResolvedCommitSHA || spec.Repository != job.Source.RepositoryFullName {
 		t.Fatalf("spec=%+v err=%v", spec, err)
 	}
+	grant, err := service.SourceGrant(context.Background(), job.ID, attempt.AttemptID, identity.RunID, identity.RunAttempt, lease.Token)
+	if err != nil || grant.RepositoryID != job.Source.RepositoryID || grant.ResolvedCommitSHA != job.Source.ResolvedCommitSHA {
+		t.Fatalf("grant=%+v err=%v", grant, err)
+	}
+	if _, err := service.SourceGrant(context.Background(), job.ID, "attempt-wrong", identity.RunID, identity.RunAttempt, lease.Token); Code(err) != "RUNNER_LEASE_SCOPE_MISMATCH" {
+		t.Fatalf("attempt scope err=%v", err)
+	}
+	if _, err := service.SourceGrant(context.Background(), job.ID, attempt.AttemptID, identity.RunID+1, identity.RunAttempt, lease.Token); Code(err) != "RUNNER_LEASE_SCOPE_MISMATCH" {
+		t.Fatalf("run scope err=%v", err)
+	}
+	if _, err := service.SourceGrant(context.Background(), job.ID, attempt.AttemptID, identity.RunID, identity.RunAttempt+1, lease.Token); Code(err) != "RUNNER_LEASE_SCOPE_MISMATCH" {
+		t.Fatalf("run attempt scope err=%v", err)
+	}
+	changedSource := executorTestSource(job)
+	changedSource.BindingUpdatedAt = changedSource.BindingUpdatedAt.Add(time.Second)
+	service.Sources = testSources{source: changedSource}
+	if _, err := service.SourceGrant(context.Background(), job.ID, attempt.AttemptID, identity.RunID, identity.RunAttempt, lease.Token); Code(err) != "SOURCE_BINDING_MISMATCH" {
+		t.Fatalf("binding mismatch err=%v", err)
+	}
+	service.Sources = testSources{source: executorTestSource(job)}
 	other := executorTestJob("job-2")
 	other.IdempotencyKey = "job-2-key"
 	if _, _, err := store.Create(context.Background(), other); err != nil {
@@ -200,4 +220,8 @@ func executorTestIdentity(runID uint64) RunnerIdentity {
 func executorTestJob(id string) Job {
 	now := time.Unix(100, 0).UTC()
 	return Job{ID: id, ProjectID: "project-1", EnvironmentID: "environment-1", ApplicationID: "application-1", Source: SourceSnapshot{BindingID: "binding-1", BindingUpdatedAt: time.Unix(50, 0).UTC(), InstallationID: 10, RepositoryID: 20, RepositoryOwnerID: 30, RepositoryFullName: "user/source", SelectedRef: "main", ResolvedCommitSHA: strings.Repeat("a", 40), ApplicationRoot: ".", BuildContext: "."}, RequestedBuildStrategy: StrategyDockerfile, ResolvedBuildStrategy: StrategyDockerfile, DockerfilePath: "Dockerfile", Status: StatusReady, CreatedBy: "user-1", IdempotencyKey: id + "-key", CreatedAt: now, UpdatedAt: now}
+}
+
+func executorTestSource(job Job) ApplicationSource {
+	return ApplicationSource{ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, ApplicationID: job.ApplicationID, BindingID: job.Source.BindingID, BindingUpdatedAt: job.Source.BindingUpdatedAt, InstallationID: job.Source.InstallationID, RepositoryID: job.Source.RepositoryID, RepositoryOwnerID: job.Source.RepositoryOwnerID, RepositoryFullName: job.Source.RepositoryFullName, SelectedRef: job.Source.SelectedRef, ApplicationRoot: job.Source.ApplicationRoot, BuildContext: job.Source.BuildContext, BuildStrategy: job.RequestedBuildStrategy, DockerfilePath: job.DockerfilePath}
 }

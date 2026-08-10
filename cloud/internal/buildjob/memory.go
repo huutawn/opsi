@@ -99,29 +99,29 @@ func (s *MemoryStore) ClaimDispatch(_ context.Context, jobID, attemptID string, 
 	return nil
 }
 
-func (s *MemoryStore) GetBuildSpec(_ context.Context, jobID string, leaseHash []byte, now time.Time) (BuildSpec, error) {
+func (s *MemoryStore) GetRunnerJob(_ context.Context, access RunnerAccess, now time.Time) (Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, attempt := range s.attempts {
-		if !bytes.Equal(attempt.LeaseHash, leaseHash) {
+		if !bytes.Equal(attempt.LeaseHash, access.LeaseHash) {
 			continue
 		}
-		if attempt.BuildJobID != jobID {
-			return BuildSpec{}, Error{Code: "RUNNER_LEASE_SCOPE_MISMATCH", Status: 403, Message: "Runner lease cannot access this BuildJob.", Cause: "runner_lease_scope"}
+		if attempt.BuildJobID != access.JobID || access.AttemptID != "" && attempt.AttemptID != access.AttemptID || access.RunID != 0 && attempt.RunID != access.RunID || access.RunAttempt != 0 && attempt.RunAttempt != access.RunAttempt {
+			return Job{}, Error{Code: "RUNNER_LEASE_SCOPE_MISMATCH", Status: 403, Message: "Runner lease cannot access this BuildJob attempt.", Cause: "runner_lease_scope"}
 		}
 		if attempt.LeaseExpiresAt.IsZero() || !now.Before(attempt.LeaseExpiresAt) {
-			return BuildSpec{}, Error{Code: "RUNNER_LEASE_EXPIRED", Status: 401, Message: "Runner lease has expired.", Cause: "runner_lease"}
+			return Job{}, Error{Code: "RUNNER_LEASE_EXPIRED", Status: 401, Message: "Runner lease has expired.", Cause: "runner_lease"}
 		}
 		if attempt.LastState != DispatchStateClaimed {
-			return BuildSpec{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this dispatch attempt.", Cause: "runner_lease"}
+			return Job{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this dispatch attempt.", Cause: "runner_lease"}
 		}
-		job, ok := s.byID[jobID]
+		job, ok := s.byID[access.JobID]
 		if !ok || job.Status != StatusRunning {
-			return BuildSpec{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this BuildJob.", Cause: "build_job_status"}
+			return Job{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this BuildJob.", Cause: "build_job_status"}
 		}
-		return buildSpec(job), nil
+		return job, nil
 	}
-	return BuildSpec{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
+	return Job{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
 }
 
 func (s *MemoryStore) Create(_ context.Context, job Job) (Job, bool, error) {

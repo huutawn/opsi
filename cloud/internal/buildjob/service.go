@@ -102,7 +102,7 @@ type Store interface {
 	CompleteDispatch(context.Context, string, DispatchFacts, time.Time) (DispatchAttempt, error)
 	RejectDispatch(context.Context, string, string, time.Time) error
 	ClaimDispatch(context.Context, string, string, RunnerIdentity, []byte, time.Time, time.Time) error
-	GetBuildSpec(context.Context, string, []byte, time.Time) (BuildSpec, error)
+	GetRunnerJob(context.Context, RunnerAccess, time.Time) (Job, error)
 }
 
 type Service struct {

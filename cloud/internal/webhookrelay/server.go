@@ -192,6 +192,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs/{build_job_id}", s.handleBuildJobAPI)
 	mux.HandleFunc("/v1/build-runner/claim", s.handleBuildRunnerClaim)
 	mux.HandleFunc("/v1/build-runner/build-spec", s.handleBuildRunnerBuildSpec)
+	mux.HandleFunc("/v1/build-runner/source-access", s.handleBuildRunnerSourceAccess)
 	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
 	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
