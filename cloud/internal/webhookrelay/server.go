@@ -43,7 +43,11 @@ type Server struct {
 	OIDC         interface {
 		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
 	}
+	RunnerOIDC interface {
+		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
+	}
 	oidcInitError           error
+	runnerOIDCInitError     error
 	credentials             CredentialVault
 	registrations           RegistrationVault
 	limits                  RateLimiter
@@ -75,10 +79,14 @@ func NewServer(cfg Config) *Server {
 		oidcConfig = githuboidc.DefaultConfig()
 	}
 	verifier, verifierErr := githuboidc.New(oidcConfig)
+	runnerOIDCConfig := githuboidc.DefaultConfig()
+	runnerOIDCConfig.Enabled = true
+	runnerOIDCConfig.Audience = buildjob.RunnerOIDCAudience
+	runnerVerifier, runnerVerifierErr := githuboidc.NewIdentityVerifier(runnerOIDCConfig)
 	registryService := registry.NewService()
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
-	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService}
+	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor}
 	server := &Server{
 		Config:                  cfg,
 		OTP:                     service,
@@ -89,7 +97,9 @@ func NewServer(cfg Config) *Server {
 		Topology:                topologyService,
 		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
 		OIDC:                    verifier,
+		RunnerOIDC:              runnerVerifier,
 		oidcInitError:           verifierErr,
+		runnerOIDCInitError:     runnerVerifierErr,
 		credentials:             NewCredentialStore(),
 		registrations:           NewRegistrationTokenStore(),
 		limits:                  newRateLimiter(),
@@ -150,6 +160,7 @@ func (s *Server) SetBootstrapRunner(install bootstrapworker.InstallConfig, path 
 func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
 	s.githubAppClient = client
 	s.BuildJobs.Repository = client
+	s.BuildJobs.Dispatcher = client
 }
 
 func (s *Server) SetActionDeviceStore(store actiondevice.Store) {
@@ -177,7 +188,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/projects/{project_id}/github/bindings", s.handleGitHubBindingsAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/github/bindings/{binding_id}", s.handleGitHubBindingAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs", s.handleBuildJobsAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs/{build_job_id}/dispatch", s.handleBuildJobDispatchAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs/{build_job_id}", s.handleBuildJobAPI)
+	mux.HandleFunc("/v1/build-runner/claim", s.handleBuildRunnerClaim)
+	mux.HandleFunc("/v1/build-runner/build-spec", s.handleBuildRunnerBuildSpec)
 	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
 	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)

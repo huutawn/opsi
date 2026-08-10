@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -97,14 +98,22 @@ type Store interface {
 	Get(context.Context, string, string, string) (Job, error)
 	GetByIdempotency(context.Context, string, string, string) (Job, bool, error)
 	List(context.Context, string, string, string, int) ([]Job, error)
+	ReserveDispatch(context.Context, string, string, DispatchAttempt) error
+	CompleteDispatch(context.Context, string, DispatchFacts, time.Time) (DispatchAttempt, error)
+	RejectDispatch(context.Context, string, string, time.Time) error
+	ClaimDispatch(context.Context, string, string, RunnerIdentity, []byte, time.Time, time.Time) error
+	GetBuildSpec(context.Context, string, []byte, time.Time) (BuildSpec, error)
 }
 
 type Service struct {
 	Store      Store
 	Sources    SourceAuthority
 	Repository RepositoryAuthority
+	Executor   ExecutorConfig
+	Dispatcher Dispatcher
 	Now        func() time.Time
 	NewID      func() (string, error)
+	Random     io.Reader
 }
 
 func (s Service) Create(ctx context.Context, projectID, applicationID, createdBy, idempotencyKey string) (Job, bool, error) {

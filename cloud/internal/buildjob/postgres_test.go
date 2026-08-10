@@ -2,6 +2,7 @@ package buildjob
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -14,6 +15,68 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	cloudpostgres "github.com/opsi-dev/opsi/cloud/internal/postgres"
 )
+
+func TestPostgresBuildExecutorAtomicClaimAndScopedLease(t *testing.T) {
+	db := newBuildJobPostgres(t)
+	store := PostgresStore{DB: db}
+	job := postgresBuildJob("job-executor", "executor-key")
+	if _, _, err := store.Create(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(200, 0).UTC()
+	attempt := DispatchAttempt{Provider: ExecutorProviderGitHubActions, AttemptID: "attempt-1", BuildJobID: job.ID, Workflow: executorTestConfig().Workflow, WorkflowRef: executorTestConfig().WorkflowRef(), ExecutorRef: executorTestConfig().Ref, DispatchedAt: now, LastState: DispatchStateDispatching}
+	if err := store.ReserveDispatch(context.Background(), job.ProjectID, job.ApplicationID, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteDispatch(context.Background(), attempt.AttemptID, DispatchFacts{}, now); err != nil {
+		t.Fatal(err)
+	}
+	token := "postgres-runner-lease"
+	hash := sha256.Sum256([]byte(token))
+	identity := executorTestIdentity(99)
+	var wait sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errs <- store.ClaimDispatch(context.Background(), job.ID, attempt.AttemptID, identity, hash[:], now.Add(10*time.Minute), now)
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	winners := 0
+	for err := range errs {
+		if err == nil {
+			winners++
+			continue
+		}
+		if Code(err) != "RUNNER_CLAIM_CONSUMED" {
+			t.Fatalf("claim err=%v", err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("winners=%d", winners)
+	}
+	stored, err := store.Get(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
+	if err != nil || stored.Status != StatusRunning {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	spec, err := store.GetBuildSpec(context.Background(), job.ID, hash[:], now.Add(time.Minute))
+	if err != nil || spec.BuildJobID != job.ID || spec.ResolvedCommitSHA != job.Source.ResolvedCommitSHA {
+		t.Fatalf("spec=%+v err=%v", spec, err)
+	}
+	if _, err := store.GetBuildSpec(context.Background(), "another-job", hash[:], now.Add(time.Minute)); Code(err) != "RUNNER_LEASE_SCOPE_MISMATCH" {
+		t.Fatalf("scope err=%v", err)
+	}
+	if _, err := store.GetBuildSpec(context.Background(), job.ID, hash[:], now.Add(10*time.Minute)); Code(err) != "RUNNER_LEASE_EXPIRED" {
+		t.Fatalf("expiry err=%v", err)
+	}
+	var storedHash []byte
+	if err := db.QueryRow(`SELECT lease_token_hash FROM build_executor_attempts WHERE attempt_id=$1`, attempt.AttemptID).Scan(&storedHash); err != nil || string(storedHash) == token || len(storedHash) != sha256.Size {
+		t.Fatalf("stored hash len=%d err=%v", len(storedHash), err)
+	}
+}
 
 func TestPostgresBuildJobIdempotencyImmutabilityAndQueryableSchema(t *testing.T) {
 	db := newBuildJobPostgres(t)

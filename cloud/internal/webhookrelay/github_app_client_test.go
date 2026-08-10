@@ -82,6 +82,57 @@ func githubAppResponse(status int, body string) *http.Response {
 	}
 }
 
+func TestGitHubExecutorDispatchUsesAppAuthorityAndMinimalInputs(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	requests := 0
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		switch requests {
+		case 1:
+			if request.Method != http.MethodGet || request.URL.Path != "/repos/opsi/executor/installation" || !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") {
+				t.Fatalf("installation request=%s %s", request.Method, request.URL.Path)
+			}
+			return githubAppResponse(http.StatusOK, `{"id":555}`), nil
+		case 2:
+			if request.Method != http.MethodPost || request.URL.Path != "/app/installations/555/access_tokens" {
+				t.Fatalf("token request=%s %s", request.Method, request.URL.Path)
+			}
+			return githubAppResponse(http.StatusCreated, `{"token":"executor-installation-token","expires_at":"`+now.Add(time.Hour).Format(time.RFC3339)+`"}`), nil
+		case 3:
+			if request.Method != http.MethodPost || request.URL.Path != "/repos/opsi/executor/actions/workflows/.github/workflows/opsi-build-executor.yml/dispatches" || request.Header.Get("Authorization") != "Bearer executor-installation-token" {
+				t.Fatalf("dispatch request=%s %s", request.Method, request.URL.Path)
+			}
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload struct {
+				Ref    string            `json:"ref"`
+				Inputs map[string]string `json:"inputs"`
+			}
+			if json.Unmarshal(body, &payload) != nil || payload.Ref != "main" || len(payload.Inputs) != 2 || payload.Inputs["build_job_id"] != "job-1" || payload.Inputs["attempt_id"] != "attempt-1" {
+				t.Fatalf("payload=%s", body)
+			}
+			for _, forbidden := range []string{"executor-installation-token", "private_key", "registry", "password", "cloud_pat", "source_token"} {
+				if strings.Contains(strings.ToLower(string(body)), forbidden) {
+					t.Fatalf("dispatch input leaked %q: %s", forbidden, body)
+				}
+			}
+			return githubAppResponse(http.StatusNoContent, ""), nil
+		default:
+			t.Fatalf("unexpected request %d", requests)
+			return nil, nil
+		}
+	}), now)
+	config := buildjob.ExecutorConfig{Owner: "opsi", Repository: "executor", Workflow: ".github/workflows/opsi-build-executor.yml", Ref: "refs/heads/main"}
+	if _, err := client.DispatchWorkflow(context.Background(), config, "job-1", "attempt-1"); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
+
 func TestGitHubBuildSourceResolutionUsesExactCommitAndTransientToken(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	sha := strings.Repeat("a", 40)

@@ -1,0 +1,85 @@
+name: Opsi Build Executor
+run-name: opsi-build-${{ inputs.attempt_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_job_id:
+        description: Canonical Cloud BuildJob ID
+        required: true
+        type: string
+      attempt_id:
+        description: Opaque Cloud dispatch attempt ID
+        required: true
+        type: string
+
+permissions:
+  contents: none
+  id-token: write
+
+jobs:
+  handshake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Claim BuildJob and fetch canonical spec
+        env:
+          OPSI_CLOUD_URL: ${{ vars.OPSI_CLOUD_URL }}
+          BUILD_JOB_ID: ${{ inputs.build_job_id }}
+          ATTEMPT_ID: ${{ inputs.attempt_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$OPSI_CLOUD_URL"
+          OPSI_CLOUD_URL="${OPSI_CLOUD_URL%/}"
+          case "$OPSI_CLOUD_URL" in https://*) ;; *) echo "OPSI_CLOUD_URL must use HTTPS" >&2; exit 1;; esac
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "$work_dir"' EXIT
+          curl_args=(--fail-with-body --silent --show-error --connect-timeout 10 --max-time 30)
+
+          curl "${curl_args[@]}" \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=opsi-build" \
+            -o "$work_dir/oidc.json"
+
+          OIDC_FILE="$work_dir/oidc.json" CLAIM_FILE="$work_dir/claim.json" BUILD_JOB_ID="$BUILD_JOB_ID" ATTEMPT_ID="$ATTEMPT_ID" python3 - <<'PY'
+          import json, os
+          with open(os.environ["OIDC_FILE"], encoding="utf-8") as source:
+              token = json.load(source)["value"]
+          with open(os.environ["CLAIM_FILE"], "w", encoding="utf-8") as target:
+              json.dump({"build_job_id": os.environ["BUILD_JOB_ID"], "attempt_id": os.environ["ATTEMPT_ID"], "oidc_token": token}, target)
+          PY
+
+          curl "${curl_args[@]}" \
+            -H "Content-Type: application/json" \
+            --data-binary "@$work_dir/claim.json" \
+            "$OPSI_CLOUD_URL/v1/build-runner/claim" \
+            -o "$work_dir/lease.json"
+
+          LEASE_FILE="$work_dir/lease.json" HEADER_FILE="$work_dir/headers" BUILD_JOB_ID="$BUILD_JOB_ID" ATTEMPT_ID="$ATTEMPT_ID" python3 - <<'PY'
+          import json, os
+          with open(os.environ["LEASE_FILE"], encoding="utf-8") as source:
+              lease = json.load(source)
+          assert lease["build_job_id"] == os.environ["BUILD_JOB_ID"]
+          assert lease["attempt_id"] == os.environ["ATTEMPT_ID"]
+          with open(os.environ["HEADER_FILE"], "w", encoding="utf-8") as target:
+              target.write("Authorization: Bearer " + lease["lease_token"] + "\n")
+          PY
+
+          curl "${curl_args[@]}" \
+            -H "@$work_dir/headers" \
+            "$OPSI_CLOUD_URL/v1/build-runner/build-spec?build_job_id=$BUILD_JOB_ID" \
+            -o "$work_dir/build-spec.json"
+
+          SPEC_FILE="$work_dir/build-spec.json" BUILD_JOB_ID="$BUILD_JOB_ID" python3 - <<'PY'
+          import json, os, re
+          with open(os.environ["SPEC_FILE"], encoding="utf-8") as source:
+              spec = json.load(source)
+          assert spec["build_job_id"] == os.environ["BUILD_JOB_ID"]
+          assert spec["resolved_build_strategy"] == "dockerfile"
+          assert re.fullmatch(r"[0-9a-f]{40}", spec["resolved_commit_sha"])
+          assert spec["repository"] and spec["dockerfile_path"]
+          PY
+
+          echo "Opsi build runner handshake succeeded for $BUILD_JOB_ID"

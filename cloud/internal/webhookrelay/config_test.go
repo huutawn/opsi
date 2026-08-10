@@ -556,6 +556,20 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 	}
 }
 
+func TestBuildExecutorEnvironmentOverrides(t *testing.T) {
+	t.Setenv("OPSI_BUILD_EXECUTOR_OWNER", "opsi")
+	t.Setenv("OPSI_BUILD_EXECUTOR_REPOSITORY", "executor")
+	t.Setenv("OPSI_BUILD_EXECUTOR_WORKFLOW", ".github/workflows/opsi-build-executor.yml")
+	t.Setenv("OPSI_BUILD_EXECUTOR_REF", "refs/heads/main")
+	config := Config{}
+	if err := applyEnvOverrides(&config); err != nil {
+		t.Fatal(err)
+	}
+	if !config.BuildExecutor.Available() || config.BuildExecutor.RepositoryFullName() != "opsi/executor" || config.BuildExecutor.WorkflowRef() != "opsi/executor/.github/workflows/opsi-build-executor.yml@refs/heads/main" {
+		t.Fatalf("build executor=%+v", config.BuildExecutor)
+	}
+}
+
 func TestLoadConfigDevelopmentAllowsEmptyGitHubCredentials(t *testing.T) {
 	clearCloudEnv(t)
 	t.Setenv("OPSI_CLOUD_GITHUB_APP_CLIENT_ID", "")

@@ -81,6 +81,10 @@ func DefaultConfig() Config {
 }
 
 func (c Config) Validate(production bool) error {
+	return c.validate(production, true)
+}
+
+func (c Config) validate(production, requireWorkloads bool) error {
 	if c.Issuer != GitHubIssuer || c.JWKSURL != GitHubJWKS {
 		return errors.New("GitHub OIDC issuer and JWKS URL must be the pinned production endpoints")
 	}
@@ -114,7 +118,7 @@ func (c Config) Validate(production bool) error {
 	if production && !c.Enabled {
 		return errors.New("production requires GitHub OIDC to be enabled")
 	}
-	if c.Enabled && len(c.Workloads) == 0 {
+	if requireWorkloads && c.Enabled && len(c.Workloads) == 0 {
 		return errors.New("enabled GitHub OIDC requires at least one allowed workload")
 	}
 	for i, policy := range c.Workloads {
@@ -160,6 +164,13 @@ type Verifier struct {
 
 func New(config Config) (*Verifier, error) {
 	if err := config.Validate(false); err != nil {
+		return nil, err
+	}
+	return newVerifier(config, &http.Client{Timeout: time.Duration(config.HTTPTimeout), CheckRedirect: noRedirect}, time.Now), nil
+}
+
+func NewIdentityVerifier(config Config) (*Verifier, error) {
+	if err := config.validate(false, false); err != nil {
 		return nil, err
 	}
 	return newVerifier(config, &http.Client{Timeout: time.Duration(config.HTTPTimeout), CheckRedirect: noRedirect}, time.Now), nil
