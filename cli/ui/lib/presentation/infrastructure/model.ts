@@ -11,6 +11,36 @@ export type CanvasPlacement = {
 };
 export type CanvasDraft = Record<string, CanvasPlacement>;
 export type CanvasDraftStatus = "unchanged" | "edited" | "moved" | "new placement" | "pending removal";
+export type TopologyResourceKind = "server" | "application" | "managed-service" | "external-resource" | "unsupported";
+export type TopologyResourcePresentation = {
+  kind: TopologyResourceKind;
+  sourceKind: string;
+  supported: boolean;
+  kindLabel: string;
+  name: string;
+  status: string;
+  badge: string;
+  tone: "ready" | "warning" | "failed" | "neutral";
+  state: "factual" | "draft" | "unsupported";
+  context: string;
+  ariaLabel: string;
+  notice?: string;
+  draftState?: CanvasDraftStatus;
+  facts: Array<{ label: string; value: string }>;
+  capabilities: { acceptsPlacement: boolean; connectable: boolean; movable: boolean };
+};
+export type TopologyResourcePresentationInput = {
+  kind: string;
+  name: string;
+  status: string;
+  context: string;
+  ariaDetail?: string;
+  notice?: string;
+  badge?: string;
+  tone?: TopologyResourcePresentation["tone"];
+  draftState?: CanvasDraftStatus;
+  facts?: TopologyResourcePresentation["facts"];
+};
 export type TopologyOnboardingState = {
   kind: "connect" | "bootstrap" | "retry" | "application" | "placement" | "inspect";
   title: string;
@@ -33,6 +63,51 @@ const usableNodeStatuses = new Set(["healthy", "ready", "active"]);
 const defaultCPURequestMillicores = 100;
 const defaultMemoryRequestBytes = 128 * 1024 * 1024;
 export const bootstrapPollInterval = 4_000;
+
+const topologyResourceKinds = {
+  server: { kindLabel: "Server", supported: true, capabilities: { acceptsPlacement: true, connectable: false, movable: false } },
+  application: { kindLabel: "Application", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: true } },
+  "managed-service": { kindLabel: "Managed service", supported: false, capabilities: { acceptsPlacement: false, connectable: false, movable: false } },
+  "external-resource": { kindLabel: "External resource", supported: false, capabilities: { acceptsPlacement: false, connectable: false, movable: false } },
+} as const;
+
+export function topologyResourcePresentation(input: TopologyResourcePresentationInput): TopologyResourcePresentation {
+  const definition = topologyResourceKinds[input.kind as keyof typeof topologyResourceKinds];
+  if (!definition?.supported) {
+    return {
+      kind: definition ? input.kind as TopologyResourceKind : "unsupported",
+      sourceKind: input.kind,
+      supported: false,
+      kindLabel: definition?.kindLabel ?? "Unsupported resource",
+      name: input.name,
+      status: "Unsupported",
+      badge: "Unsupported",
+      tone: "neutral",
+      state: "unsupported",
+      context: `No factual ${input.kind} presentation is backed by the topology domain.`,
+      ariaLabel: `Unsupported resource ${input.name}, kind ${input.kind}`,
+      facts: [],
+      capabilities: definition?.capabilities ?? { acceptsPlacement: false, connectable: false, movable: false },
+    };
+  }
+  return {
+    kind: input.kind as "server" | "application",
+    sourceKind: input.kind,
+    supported: true,
+    kindLabel: definition.kindLabel,
+    name: input.name,
+    status: input.status,
+    badge: input.badge ?? input.status,
+    tone: input.tone ?? "neutral",
+    state: input.draftState && input.draftState !== "unchanged" ? "draft" : "factual",
+    context: input.context,
+    ariaLabel: `${definition.kindLabel} ${input.name}, ${input.status}${input.ariaDetail ? `, ${input.ariaDetail}` : ""}`,
+    notice: input.notice,
+    draftState: input.draftState,
+    facts: input.facts ?? [],
+    capabilities: definition.capabilities,
+  };
+}
 
 export function assignmentFor(plan: TopologyPlan | null, serviceKey: string): TopologyAssignment | undefined {
   return plan?.assignments.find((item) => item.service_key === serviceKey);

@@ -5,24 +5,22 @@ import { applyNodeChanges, Background, Handle, Position, ReactFlow, type Connect
 import type { ConsoleController } from "@/features/console/types";
 import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
 import type { BuildRecord, GitHubBinding, GitHubRepository, PlacementFacts, ServiceBinding, ServiceConfigurationDiff, ServiceConfigurationDraft, ServiceConfigurationPreview, ServiceConfigurationValidation, ServiceRecord, TopologyDiff, TopologyPlan, TopologyPreview, TopologyValidation } from "@/lib/contracts/registry";
-import { assignmentFor, canvasDraftIssues, canvasDraftStatus, canvasPlacement, compileCanvasDraft, moveCanvasPlacement, serverStatus, updateCanvasPlacement, type CanvasDraft, type CanvasDraftStatus, type CanvasPlacement } from "@/lib/presentation/infrastructure/model";
+import { assignmentFor, canvasDraftIssues, canvasDraftStatus, canvasPlacement, compileCanvasDraft, currentEnvironment, moveCanvasPlacement, serverStatus, topologyResourcePresentation, updateCanvasPlacement, type CanvasDraft, type CanvasPlacement, type TopologyResourcePresentation } from "@/lib/presentation/infrastructure/model";
 
 type SelectData = { onSelect: () => void };
-type ServerData = SelectData & { agent: string; cpu: string; label: string; memory: string; runtimeID: string; status: "Ready" | "Offline" | "Unknown" };
-type ApplicationData = SelectData & { assignment: "Assigned" | "Unplaced"; draftStatus: CanvasDraftStatus; issues: number; runtime: string; serviceKey: string };
+type ResourceData = SelectData & { canvasTarget?: string; presentation: TopologyResourcePresentation; serviceKey?: string };
 type UnplacedData = SelectData & { count: number };
-type ServerFlowNode = Node<ServerData, "server">;
-type ApplicationFlowNode = Node<ApplicationData, "application">;
+type ResourceFlowNode = Node<ResourceData, "resource">;
 type UnplacedFlowNode = Node<UnplacedData, "unplaced">;
-type CanvasNode = ServerFlowNode | ApplicationFlowNode | UnplacedFlowNode;
+type CanvasNode = ResourceFlowNode | UnplacedFlowNode;
 type DraftReview = { preview: TopologyPreview; validation: TopologyValidation; diff: TopologyDiff; idempotencyKey: string; topologyRevision: number; topologyStateHash: string };
 type ConfigurationReview = { serviceID: string; preview: ServiceConfigurationPreview; validation: ServiceConfigurationValidation; diff: ServiceConfigurationDiff; idempotencyKey: string };
 type ConfigurationDrafts = Record<string, ServiceConfigurationDraft>;
 type SelectedConnection = { sourceID: string; key: string };
 
-const nodeTypes = { server: ServerNode, application: ApplicationNode, unplaced: UnplacedGroup } satisfies NodeTypes;
+const nodeTypes = { resource: TopologyResourceNode, unplaced: UnplacedGroup } satisfies NodeTypes;
 const groupWidth = 292;
-const appHeight = 98;
+const appHeight = 126;
 
 export function TopologyDesignCanvas({ bindings, builds, console, draft, facts, onDraft, onReload, repositories, topology }: { bindings: GitHubBinding[]; builds: BuildRecord[]; console: ConsoleController; draft: CanvasDraft; facts: PlacementFacts; onDraft: (draft: CanvasDraft) => void; onReload: () => Promise<void>; repositories: GitHubRepository[]; topology: TopologyPlan | null }) {
   const client = useMemo(() => new LocalClient(), []);
@@ -35,6 +33,9 @@ export function TopologyDesignCanvas({ bindings, builds, console, draft, facts, 
   const projectID = console.state.project?.id ?? "";
   const selectedID = resolveSelection(console.route.topology, facts);
   const changeCount = Object.keys(draft).length;
+  const configurationChangeCount = Object.keys(configurationDrafts).length;
+  const unpublishedCount = changeCount + configurationChangeCount;
+  const environment = currentEnvironment(facts, console.route.environment ?? "");
   const select = (id: string) => {
 		setSelectedConnection(null);
     console.navigate({ topology: id });
@@ -43,7 +44,7 @@ export function TopologyDesignCanvas({ bindings, builds, console, draft, facts, 
   const placements = new Map(facts.services.map((service) => [service.key, canvasPlacement(topology, draft, service.key)]));
   const nodes = buildNodes(console, facts, topology, draft, placements, selectedID, select);
 	const edges = buildConnectionEdges(console.state.services, configurationDrafts);
-  const canvasKey = `${topology?.revision ?? 0}:${topology?.state_hash ?? "none"}:${nodes.map((node) => `${node.id}:${node.parentId ?? "root"}:${node.type === "server" ? node.data.status : node.type === "application" ? `${node.data.draftStatus}:${node.data.issues}` : node.data.count}`).join("|")}`;
+  const canvasKey = `${topology?.revision ?? 0}:${topology?.state_hash ?? "none"}:${nodes.map((node) => node.type === "resource" ? `${node.id}:${node.parentId ?? "root"}:${node.data.presentation.status}:${node.data.presentation.draftState ?? "factual"}` : `${node.id}:${node.data.count}`).join("|")}`;
   const selectedService = selectedID.startsWith("service:") ? facts.services.find((service) => service.key === selectedID.slice(8)) : undefined;
   const selectedRuntime = selectedID.startsWith("runtime:") ? facts.runtimes.find((runtime) => runtime.id === selectedID.slice(8)) : undefined;
 
@@ -187,22 +188,52 @@ export function TopologyDesignCanvas({ bindings, builds, console, draft, facts, 
     }
   }
 
-  return <>
-    <div className="draftToolbar" aria-live="polite">
-      <strong>{changeCount} unpublished {changeCount === 1 ? "change" : "changes"}</strong>
-      <span>{review ? review.validation.valid ? "Cloud validated" : "Cloud validation failed" : "Local draft"}</span>
-      <button aria-expanded={Boolean(review)} disabled={!changeCount || Boolean(busy)} onClick={() => void reviewDraft()} type="button">{busy === "review" ? "Reviewing…" : "Review draft"}</button>
-      <button disabled={!changeCount || Boolean(busy)} onClick={reset} type="button">Reset changes</button>
-    </div>
-    {review ? <DraftReviewPanel busy={busy === "apply"} onApply={() => void applyTopology()} review={review} /> : null}
-    {message ? <p className={message.includes("applied") ? "notice" : "placementError"} role="status">{message}</p> : null}
-    <div className="designWorkspace">
-      <div className="topologyFlow" aria-label="Editable topology placement canvas">
-		<CanvasFlow edges={edges} key={canvasKey} nodes={nodes} onConnect={connectApplications} onEdgeSelect={selectConnection} onMove={move} onRemoveEdge={(edge) => { const source = serviceForNode(console.state.services, edge.source); if (source) removeConnection(source.id, String(edge.data?.connectionKey ?? "")); }} />
+  return <section className="topologyDesigner" aria-labelledby="topology-design-heading">
+    <header className="designContextBar">
+      <div>
+        <p className="eyebrow">Topology workspace</p>
+        <h3 id="topology-design-heading">Design</h3>
+        <p>Place applications, edit resource intent, and review the canonical draft before Cloud writes.</p>
       </div>
+      <dl className="designContextFacts">
+        <InspectorFact label="Project" value={console.state.project?.name ?? "No project"} />
+        <InspectorFact label="Environment" value={environment?.name ?? "No environment"} />
+        <InspectorFact label="Applied revision" value={topology ? `r${topology.revision}` : "No TopologyPlan"} />
+        <InspectorFact label="State hash" value={topology?.state_hash ?? "Not available"} />
+      </dl>
+    </header>
+    <div className="designActionBar" aria-live="polite">
+      <div className="designChangeState" data-state={review ? review.validation.valid ? "valid" : "invalid" : unpublishedCount ? "draft" : "clean"}>
+        <i aria-hidden="true" />
+        <span>
+          <strong>{unpublishedCount} unpublished {unpublishedCount === 1 ? "change" : "changes"}</strong>
+          <small>{review ? review.validation.valid ? "Cloud validation passed" : "Cloud validation failed" : changeCount ? "Local topology draft; no backend write" : configurationChangeCount ? "Service configuration draft; review in the inspector" : "Matches the applied topology"}{configurationChangeCount ? ` · ${configurationChangeCount} service configuration ${configurationChangeCount === 1 ? "draft" : "drafts"}` : ""}</small>
+        </span>
+      </div>
+      <div className="designActions">
+        <button disabled={!changeCount || Boolean(busy)} onClick={reset} type="button">Reset changes</button>
+        <button aria-expanded={Boolean(review)} disabled={!changeCount || Boolean(busy)} onClick={() => void reviewDraft()} type="button">{busy === "review" ? "Reviewing…" : "Review draft"}</button>
+        <button className="primary" disabled={!review?.validation.valid || Boolean(busy)} onClick={() => void applyTopology()} type="button">{busy === "apply" ? "Applying…" : "Apply topology"}</button>
+      </div>
+    </div>
+    {message ? <p className={message.includes("applied") ? "notice designMessage" : "placementError designMessage"} role="status">{message}</p> : null}
+    {review ? <details className="designReviewDisclosure" open>
+      <summary><span>Cloud review</span><strong>{review.validation.valid ? "Ready to apply" : "Action required"}</strong><small>Revision {review.diff.current_revision} · {review.diff.changes.length} semantic {review.diff.changes.length === 1 ? "change" : "changes"}</small></summary>
+      <DraftReviewPanel review={review} />
+    </details> : null}
+    <div className="designWorkspace">
+      <section className="canvasStage" aria-labelledby="topology-canvas-heading">
+        <header className="canvasStageHeader">
+          <div><p className="eyebrow">Placement canvas</p><h4 id="topology-canvas-heading">Application topology</h4></div>
+          <div className="canvasLegend" aria-label="Canvas legend"><span><i data-kind="server" />Server</span><span><i data-kind="application" />Application</span><span><i data-kind="draft" />Draft change</span></div>
+        </header>
+        <div className="topologyFlow" aria-label="Editable topology placement canvas">
+		  <CanvasFlow edges={edges} key={canvasKey} nodes={nodes} onConnect={connectApplications} onEdgeSelect={selectConnection} onMove={move} onRemoveEdge={(edge) => { const source = serviceForNode(console.state.services, edge.source); if (source) removeConnection(source.id, String(edge.data?.connectionKey ?? "")); }} />
+        </div>
+      </section>
 		<TopologyInspector bindings={bindings} builds={builds} busy={busy} configurationDrafts={configurationDrafts} configurationReview={configurationReview} console={console} draft={draft} facts={facts} onApplyConfiguration={applyConfiguration} onConfiguration={changeConfiguration} onDraft={changeDraft} onRemoveConnection={removeConnection} onReviewConfiguration={reviewConfiguration} repositories={repositories} selectedConnection={selectedConnection} selectedRuntime={selectedRuntime} selectedService={selectedService} topology={topology} />
     </div>
-  </>;
+  </section>;
 }
 
 function CanvasFlow({ edges, nodes: initialNodes, onConnect, onEdgeSelect, onMove, onRemoveEdge }: { edges: Edge[]; nodes: CanvasNode[]; onConnect: (connection: Connection) => void; onEdgeSelect: (edge: Edge) => void; onMove: (serviceKey: string, runtimeID?: string) => void; onRemoveEdge: (edge: Edge) => void }) {
@@ -212,21 +243,21 @@ function CanvasFlow({ edges, nodes: initialNodes, onConnect, onEdgeSelect, onMov
   const renderedNodes = nodes.map((node) => ({ ...node, selected: selected.get(node.id) } as CanvasNode));
   function changed(changes: NodeChange<CanvasNode>[]) { setNodes((current) => applyNodeChanges(changes, current)); }
   function dragStopped(event: MouseEvent | TouchEvent, node: CanvasNode) {
-    if (node.type !== "application") return;
+    if (node.type !== "resource" || !node.data.presentation.capabilities.movable || !node.data.serviceKey) return;
     const point = "changedTouches" in event ? event.changedTouches[0] : event;
     const targetID = [...document.querySelectorAll<HTMLElement>("[data-canvas-target]")].find((element) => { const box = element.getBoundingClientRect(); return point.clientX >= box.left && point.clientX <= box.right && point.clientY >= box.top && point.clientY <= box.bottom; })?.dataset.canvasTarget;
-    const groups = instance.current?.getIntersectingNodes(node, true).filter((item) => item.type === "server" || item.type === "unplaced") ?? [];
+    const groups = instance.current?.getIntersectingNodes(node, true).filter((item) => item.type === "unplaced" || item.type === "resource" && item.data.presentation.capabilities.acceptsPlacement) ?? [];
     const target = targetID ? initialNodes.find((item) => item.id === targetID) : groups.find((item) => item.id !== node.parentId) ?? groups[0];
     setNodes(initialNodes);
-    if (target?.type === "server") onMove(node.data.serviceKey, target.id.slice(8));
+    if (target?.type === "resource" && target.data.presentation.capabilities.acceptsPlacement) onMove(node.data.serviceKey, target.id.slice(8));
     else if (target?.type === "unplaced") onMove(node.data.serviceKey);
   }
 	return <ReactFlow<CanvasNode> defaultEdgeOptions={{ selectable: true }} edges={edges} fitView fitViewOptions={{ padding: 0.08 }} maxZoom={1.25} minZoom={0.65} nodeTypes={nodeTypes} nodes={renderedNodes} nodesConnectable onConnect={onConnect} onEdgeClick={(_, edge) => onEdgeSelect(edge)} onEdgesDelete={(removed) => removed.forEach(onRemoveEdge)} onInit={(flow) => { instance.current = flow; }} onNodeDragStop={dragStopped} onNodesChange={changed} panOnDrag={[1, 2]} selectionOnDrag>
-    <Background color="#d9d5ca" gap={22} size={1} />
+    <Background color="var(--opsi-outline-variant)" gap={24} size={1} />
   </ReactFlow>;
 }
 
-function DraftReviewPanel({ busy, onApply, review }: { busy: boolean; onApply: () => void; review: DraftReview }) {
+function DraftReviewPanel({ review }: { review: DraftReview }) {
   return <section className="draftReview" aria-labelledby="draft-review-heading">
     <h3 id="draft-review-heading">Cloud topology review</h3>
     <p>{review.validation.valid ? "Cloud validation passed. The reviewed canonical draft is eligible to apply." : "Cloud validation failed. Apply remains disabled until the draft is reviewed as valid."}</p>
@@ -236,7 +267,6 @@ function DraftReviewPanel({ busy, onApply, review }: { busy: boolean; onApply: (
     <h4>Validation issues</h4>
     {review.validation.issues.length ? <ul className="draftIssues">{review.validation.issues.map((issue, index) => <li key={`${issue.code}:${index}`}><strong>{issue.code}</strong> · {issueScope(issue)}{issue.message}</li>)}</ul> : <p>No service-level validation issues.</p>}
     <div className="reviewGrid">{review.validation.runtimes.map((runtime) => <div key={runtime.runtime_id}><b>{runtime.runtime_id} · {runtime.eligible ? "eligible" : "ineligible"}</b><p>Requested {runtime.capacity.requested_cpu_millicores}m / {mib(runtime.capacity.requested_memory_bytes)} MiB<br />Available {capacityCPU(runtime.capacity.available_cpu_millicores, runtime.capacity.unknown_capacity)} / {capacityMemory(runtime.capacity.available_memory_bytes, runtime.capacity.unknown_capacity)}</p>{runtime.issues.length ? <ul className="draftIssues">{runtime.issues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.code}: {issue.message}</li>)}</ul> : <small>No runtime issues.</small>}</div>)}</div>
-    <div className="dialogActions"><span>{review.validation.valid ? "Validated by Cloud" : "Resolve validation issues and review again"}</span><button disabled={!review.validation.valid || busy} onClick={onApply} type="button">{busy ? "Applying…" : "Apply topology"}</button></div>
   </section>;
 }
 
@@ -248,24 +278,61 @@ function buildNodes(console: ConsoleController, facts: PlacementFacts, topology:
   groupServices.set("unplaced", facts.services.filter((service) => { const runtimeID = placements.get(service.key)?.runtime_id; return !runtimeID || !runtimeIDs.has(runtimeID); }));
   for (const runtime of facts.runtimes) groupServices.set(runtime.id, facts.services.filter((service) => placements.get(service.key)?.runtime_id === runtime.id));
   const maxItems = Math.max(1, ...groupServices.values().map((services) => services.length));
-  const groupHeight = Math.max(260, 142 + maxItems * appHeight);
+  const groupHeight = Math.max(300, 150 + maxItems * appHeight);
   groups.push({ id: "unplaced", type: "unplaced", position: { x: 24, y: 24 }, data: { count: groupServices.get("unplaced")?.length ?? 0, onSelect: () => select("unplaced") }, draggable: false, focusable: false, selected: selectedID === "unplaced", style: { width: groupWidth, height: groupHeight }, zIndex: 0 });
   facts.runtimes.forEach((runtime, index) => {
     const factualNodes = facts.nodes.filter((node) => node.runtime_id === runtime.id);
     const agents = facts.agents.filter((agent) => agent.runtime_id === runtime.id);
+    const assigned = groupServices.get(runtime.id) ?? [];
+    const requestedCPU = assigned.reduce((sum, service) => sum + (placements.get(service.key)?.cpu_request_millicores ?? 0), 0);
+    const requestedMemory = assigned.reduce((sum, service) => sum + (placements.get(service.key)?.memory_request_bytes ?? 0), 0);
     const node = factualNodes[0];
     const agent = agents.find((item) => item.status === "active") ?? agents[0];
     const record = console.state.nodes.find((item) => item.id === node?.id);
     const status = serverStatus(factualNodes, agents);
     const id = `runtime:${runtime.id}`;
-    groups.push({ id, type: "server", position: { x: 24 + (index + 1) * (groupWidth + 28), y: 24 }, data: { agent: agent?.status ?? "Not reported", cpu: node?.cpu_cores === undefined ? "Not reported" : `${node.cpu_cores} cores`, label: runtime.name || record?.public_host || runtime.id, memory: node?.memory_mb === undefined ? "Not reported" : `${node.memory_mb} MiB`, onSelect: () => select(id), runtimeID: runtime.id, status }, draggable: false, focusable: false, selected: selectedID === id, style: { width: groupWidth, height: groupHeight }, zIndex: 0 });
+    const presentation = topologyResourcePresentation({
+      kind: "server",
+      name: runtime.name || record?.public_host || runtime.id,
+      status,
+      context: `${assigned.length} placed ${assigned.length === 1 ? "application" : "applications"}`,
+      ariaDetail: `Agent ${agent?.status ?? "Not reported"}`,
+      tone: status === "Ready" ? "ready" : status === "Offline" ? "failed" : "neutral",
+      facts: [
+        { label: "CPU capacity", value: node?.cpu_cores === undefined ? "Not reported" : `${node.cpu_cores} cores` },
+        { label: "CPU intent", value: `${requestedCPU}m requested` },
+        { label: "RAM capacity", value: node?.memory_mb === undefined ? "Not reported" : `${node.memory_mb} MiB` },
+        { label: "RAM intent", value: `${mib(requestedMemory)} MiB requested` },
+        { label: "Agent state", value: agent?.status ?? "Not reported" },
+      ],
+    });
+    groups.push({ id, type: "resource", position: { x: 24 + (index + 1) * (groupWidth + 28), y: 24 }, data: { canvasTarget: id, onSelect: () => select(id), presentation }, draggable: false, focusable: false, selected: selectedID === id, style: { width: groupWidth, height: groupHeight }, zIndex: 0 });
   });
   for (const [parent, services] of groupServices) services.forEach((service, index) => {
     const placement = placements.get(service.key) ?? { runtime_id: null };
     const runtime = facts.runtimes.find((item) => item.id === placement.runtime_id);
     const status = canvasDraftStatus(topology, draft, service.key);
     const id = `service:${service.key}`;
-    applications.push({ id, type: "application", parentId: parent === "unplaced" ? "unplaced" : `runtime:${parent}`, position: { x: 20, y: 124 + index * appHeight }, data: { assignment: placement.runtime_id ? "Assigned" : "Unplaced", draftStatus: status, issues: canvasDraftIssues(placement).length, onSelect: () => select(id), runtime: runtime?.name || runtime?.id || (placement.runtime_id ? `${placement.runtime_id} not reported` : "No runtime"), serviceKey: service.key }, draggable: true, focusable: false, selected: selectedID === id, style: { width: groupWidth - 40, height: 78 }, zIndex: 1 });
+    const assignment = placement.runtime_id ? "Assigned" : "Unplaced";
+    const issues = canvasDraftIssues(placement).length;
+    const presentation = topologyResourcePresentation({
+      kind: "application",
+      name: service.key,
+      status: assignment,
+      badge: status,
+      context: `${assignment} · ${runtime?.name || runtime?.id || (placement.runtime_id ? `${placement.runtime_id} not reported` : "No runtime")}`,
+      ariaDetail: status,
+      draftState: status,
+      notice: issues ? `${issues} missing ${issues === 1 ? "field" : "fields"}` : undefined,
+      tone: status === "pending removal" ? "failed" : status === "unchanged" ? "neutral" : "warning",
+      facts: [
+        { label: "Replicas", value: placement.replicas === undefined ? "Not set" : String(placement.replicas) },
+        { label: "CPU", value: placement.cpu_request_millicores === undefined ? "Not set" : `${placement.cpu_request_millicores}m` },
+        { label: "Memory", value: placement.memory_request_bytes === undefined ? "Not set" : `${mib(placement.memory_request_bytes)} MiB` },
+        { label: "Exposure", value: placement.exposure?.mode ?? "none" },
+      ],
+    });
+    applications.push({ id, type: "resource", parentId: parent === "unplaced" ? "unplaced" : `runtime:${parent}`, position: { x: 20, y: 136 + index * appHeight }, data: { onSelect: () => select(id), presentation, serviceKey: service.key }, draggable: presentation.capabilities.movable, focusable: false, selected: selectedID === id, style: { width: groupWidth - 40, height: issues ? 112 : 108 }, zIndex: 1 });
   });
   return [...groups, ...applications];
 }
@@ -287,7 +354,7 @@ function TopologyInspector({ bindings, builds, busy, configurationDrafts, config
     const binding = bindings.find((item) => item.status === "active" && item.project_id === facts.project_id && item.service_id === selectedService.id && item.service_key === selectedService.key);
     const repository = repositories.find((item) => item.repository_id === binding?.repository_id);
     const build = builds.filter((item) => item.project_id === facts.project_id && item.service_id === selectedService.id && item.service_key === selectedService.key && (!binding || item.active_binding_id === binding.id)).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
-    return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><p className="canvasPath">{environment?.name ?? (placement.runtime_id ? "Unknown environment" : "Unplaced")} / {runtime?.name ?? placement.runtime_id ?? "Unplaced"} / {selectedService.key}</p><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedService.key}</h3><p><span className={`draftState ${status.replace(" ", "-")}`}>{status}</span></p><dl><InspectorFact label="Live assignment" value={runtimeLabel(facts, live?.runtime_id)} /><InspectorFact label="Draft assignment" value={runtimeLabel(facts, placement.runtime_id)} /><InspectorFact label="Repository" value={repository?.full_name ?? service?.repo_url ?? "Not reported"} /><InspectorFact label="Branch" value={service?.branch || "Not reported"} /><InspectorFact label="Project path" value={service?.build_context || "Not reported"} /><InspectorFact label="Dockerfile" value={service?.dockerfile || "Not reported"} /><InspectorFact label="Source binding" value={binding ? "GitHub bound" : "Not bound"} /><InspectorFact label="Latest BuildRecord" value={build ? `${build.id} · ${build.build.status} · ${build.workload.sha}` : "No accepted build yet"} /></dl><form className="form" onSubmit={(event) => event.preventDefault()}><label>Replicas<input className="field" disabled={!placement.runtime_id} max="100" min="1" onChange={(event) => edit({ replicas: numberValue(event) })} required step="1" type="number" value={placement.replicas ?? ""} /></label><label>CPU request (millicores)<input className="field" disabled={!placement.runtime_id} max="1000000" min="1" onChange={(event) => edit({ cpu_request_millicores: numberValue(event) })} required step="1" type="number" value={placement.cpu_request_millicores ?? ""} /></label><label>Memory (MiB)<input className="field" disabled={!placement.runtime_id} max="1073741824" min="1" onChange={(event) => edit({ memory_request_bytes: mibValue(event) })} required step="1" type="number" value={placement.memory_request_bytes === undefined ? "" : Math.round(placement.memory_request_bytes / 1024 / 1024)} /></label><label>Exposure<select className="select" disabled={!placement.runtime_id} onChange={(event) => edit({ exposure: { mode: event.target.value as "none" | "internal" | "public" } })} value={placement.exposure?.mode ?? "none"}><option value="none">None</option><option value="internal">Internal</option><option value="public">Public</option></select></label></form><h4>Draft validation issues</h4>{issues.length ? <ul className="draftIssues">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : <p>{placement.runtime_id ? "No local boundary issues. Review with Cloud before applying." : "Place this service on a runtime before editing resources."}</p>}{service ? <ServiceRuntimeInspector busy={busy} draft={configurationDraft(service, configurationDrafts)} onApply={() => void onApplyConfiguration(service)} onChange={(next) => onConfiguration(service, next)} onReview={() => void onReviewConfiguration(service)} review={configurationReview?.serviceID === service.id ? configurationReview : null} /> : null}</aside>;
+    return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">{environment?.name ?? (placement.runtime_id ? "Unknown environment" : "Unplaced")} / {runtime?.name ?? placement.runtime_id ?? "Unplaced"}</p><span className="canvasNodeKind">Selected application</span><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedService.key}</h3></div><span className={`draftState ${status.replace(" ", "-")}`}>{status}</span></div><section className="inspectorSection"><h4>Placement intent</h4><dl><InspectorFact label="Applied placement" value={runtimeLabel(facts, live?.runtime_id)} /><InspectorFact label="Draft placement" value={runtimeLabel(facts, placement.runtime_id)} /></dl><form className="form resourceIntentForm" onSubmit={(event) => event.preventDefault()}><label>Replicas<input className="field" disabled={!placement.runtime_id} max="100" min="1" onChange={(event) => edit({ replicas: numberValue(event) })} required step="1" type="number" value={placement.replicas ?? ""} /></label><label>CPU request (millicores)<input className="field" disabled={!placement.runtime_id} max="1000000" min="1" onChange={(event) => edit({ cpu_request_millicores: numberValue(event) })} required step="1" type="number" value={placement.cpu_request_millicores ?? ""} /></label><label>Memory (MiB)<input className="field" disabled={!placement.runtime_id} max="1073741824" min="1" onChange={(event) => edit({ memory_request_bytes: mibValue(event) })} required step="1" type="number" value={placement.memory_request_bytes === undefined ? "" : Math.round(placement.memory_request_bytes / 1024 / 1024)} /></label><label>Exposure<select className="select" disabled={!placement.runtime_id} onChange={(event) => edit({ exposure: { mode: event.target.value as "none" | "internal" | "public" } })} value={placement.exposure?.mode ?? "none"}><option value="none">None</option><option value="internal">Internal</option><option value="public">Public</option></select></label></form></section><section className="inspectorSection"><h4>Validation issues</h4>{issues.length ? <ul className="draftIssues">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : <p>{placement.runtime_id ? "No local boundary issues. Review with Cloud before applying." : "Place this application on a server before editing resources."}</p>}</section><section className="inspectorSection"><h4>Source</h4><dl><InspectorFact label="Repository" value={repository?.full_name ?? service?.repo_url ?? "Not reported"} /><InspectorFact label="Branch" value={service?.branch || "Not reported"} /><InspectorFact label="Project path" value={service?.build_context || "Not reported"} /><InspectorFact label="Dockerfile" value={service?.dockerfile || "Not reported"} /><InspectorFact label="Source binding" value={binding ? "GitHub bound" : "Not bound"} /><InspectorFact label="Latest BuildRecord" value={build ? `${build.id} · ${build.build.status} · ${build.workload.sha}` : "No accepted build yet"} /></dl></section>{service ? <ServiceRuntimeInspector busy={busy} draft={configurationDraft(service, configurationDrafts)} onApply={() => void onApplyConfiguration(service)} onChange={(next) => onConfiguration(service, next)} onReview={() => void onReviewConfiguration(service)} review={configurationReview?.serviceID === service.id ? configurationReview : null} /> : null}</aside>;
   }
   if (selectedRuntime) {
     const nodes = facts.nodes.filter((node) => node.runtime_id === selectedRuntime.id);
@@ -296,21 +363,28 @@ function TopologyInspector({ bindings, builds, busy, configurationDrafts, config
     const agent = agents.find((item) => item.status === "active") ?? agents[0];
     const record = console.state.nodes.find((item) => item.id === node?.id);
     const environment = facts.environments.find((item) => item.id === selectedRuntime.environment_id);
-    return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><p className="canvasPath">{environment?.name ?? selectedRuntime.environment_id} / {selectedRuntime.name}</p><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedRuntime.name || record?.public_host || selectedRuntime.id}</h3><dl><InspectorFact label="Status" value={serverStatus(nodes, agents)} /><InspectorFact label="Runtime" value={selectedRuntime.id} /><InspectorFact label="Node" value={node?.id ?? "Not reported"} /><InspectorFact label="CPU" value={node?.cpu_cores === undefined ? "Not reported" : `${node.cpu_cores} cores`} /><InspectorFact label="RAM" value={node?.memory_mb === undefined ? "Not reported" : `${node.memory_mb} MiB`} /><InspectorFact label="Agent" value={agent ? `${agent.id} · ${agent.status}` : "Not reported"} /></dl></aside>;
+    return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">{environment?.name ?? selectedRuntime.environment_id}</p><span className="canvasNodeKind">Selected server</span><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedRuntime.name || record?.public_host || selectedRuntime.id}</h3></div><span className={`reportedState ${serverStatus(nodes, agents).toLowerCase()}`}>{serverStatus(nodes, agents)}</span></div><section className="inspectorSection"><h4>Reported capacity and state</h4><dl><InspectorFact label="Runtime" value={selectedRuntime.id} /><InspectorFact label="Node" value={node?.id ?? "Not reported"} /><InspectorFact label="CPU capacity" value={node?.cpu_cores === undefined ? "Not reported" : `${node.cpu_cores} cores`} /><InspectorFact label="RAM capacity" value={node?.memory_mb === undefined ? "Not reported" : `${node.memory_mb} MiB`} /><InspectorFact label="Agent state" value={agent ? `${agent.id} · ${agent.status}` : "Not reported"} /></dl></section></aside>;
   }
-  return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><p className="canvasPath">Unplaced</p><h3 id="topology-inspector-heading" tabIndex={-1}>Unplaced applications</h3><p>{facts.services.filter((service) => { const runtimeID = canvasPlacement(topology, draft, service.key).runtime_id; return !runtimeID || !facts.runtimes.some((runtime) => runtime.id === runtimeID); }).length} applications have no reported draft target.</p></aside>;
+  return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">Design / Unplaced</p><span className="canvasNodeKind">Selected area</span><h3 id="topology-inspector-heading" tabIndex={-1}>Unplaced applications</h3></div></div><section className="inspectorSection"><p>{facts.services.filter((service) => { const runtimeID = canvasPlacement(topology, draft, service.key).runtime_id; return !runtimeID || !facts.runtimes.some((runtime) => runtime.id === runtimeID); }).length} applications have no draft server target. Drag an application into a reported server to create placement intent.</p></section></aside>;
 }
 
-function ServerNode({ data, selected }: NodeProps<ServerFlowNode>) {
-  return <div aria-label={`Server ${data.label}, ${data.status}, Agent ${data.agent}`} aria-pressed={selected} className="canvasServerNode" data-canvas-target={`runtime:${data.runtimeID}`} data-status={data.status.toLowerCase()} onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}><span className="canvasNodeKind">Server</span><strong>{data.label}</strong><span className="canvasStatus">{data.status}</span><dl><InspectorFact label="CPU" value={data.cpu} /><InspectorFact label="RAM" value={data.memory} /><InspectorFact label="Agent" value={data.agent} /></dl></div>;
-}
-
-function ApplicationNode({ data, selected }: NodeProps<ApplicationFlowNode>) {
-	return <div aria-label={`Application ${data.serviceKey}, ${data.assignment}, ${data.draftStatus}`} aria-pressed={selected} className="canvasApplicationNode" data-draft={data.draftStatus.replace(" ", "-")} onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}><Handle aria-label={`Connect into ${data.serviceKey}`} position={Position.Left} type="target" /><span className="canvasNodeKind">Application</span><strong>{data.serviceKey}</strong><span>{data.assignment} · {data.runtime}</span><small>{data.draftStatus}{data.issues ? ` · ${data.issues} missing fields` : ""}</small><Handle aria-label={`Connect from ${data.serviceKey}`} position={Position.Right} type="source" /></div>;
+function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
+  const resource = data.presentation;
+  const connectable = resource.capabilities.connectable && data.serviceKey;
+  return <div aria-label={resource.ariaLabel} aria-pressed={selected} className="topologyResourceNode" data-canvas-target={data.canvasTarget} data-draft-state={resource.draftState?.replace(" ", "-")} data-resource-kind={resource.kind} data-resource-state={resource.state} data-status-tone={resource.tone} onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}>
+    {connectable ? <Handle aria-label={`Connect into ${data.serviceKey}`} position={Position.Left} type="target" /> : null}
+    <div className="resourceNodeHeading"><span className="resourceKind">{resource.kindLabel}</span><span className="resourceBadge"><i aria-hidden="true" />{resource.badge}</span></div>
+    <strong>{resource.name}</strong>
+    <small className="resourceContext">{resource.context}</small>
+    <dl className="resourceFacts">{resource.facts.map((fact) => <InspectorFact key={fact.label} label={fact.label} value={fact.value} />)}</dl>
+    {resource.notice ? <small className="resourceNotice">{resource.notice}</small> : null}
+    {!resource.supported ? <small className="resourceUnsupported">Factual rendering unavailable</small> : null}
+    {connectable ? <Handle aria-label={`Connect from ${data.serviceKey}`} position={Position.Right} type="source" /> : null}
+  </div>;
 }
 
 function UnplacedGroup({ data, selected }: NodeProps<UnplacedFlowNode>) {
-  return <div aria-label={`Unplaced applications, ${data.count} applications`} aria-pressed={selected} className="canvasUnplacedGroup" data-canvas-target="unplaced" onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}><span className="canvasNodeKind">Unplaced</span><strong>Waiting for assignment</strong><small>{data.count} applications · drop here to remove placement</small></div>;
+  return <div aria-label={`Unplaced applications, ${data.count} applications`} aria-pressed={selected} className="canvasUnplacedGroup" data-canvas-target="unplaced" onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}><div className="canvasNodeHeading"><span className="canvasNodeKind">Unplaced</span><span className="unplacedCount">{data.count}</span></div><strong>Application queue</strong><small>Drag into a server to place. Drop here to remove a draft placement.</small></div>;
 }
 
 function ServiceRuntimeInspector({ busy, draft, onApply, onChange, onReview, review }: { busy: "" | "review" | "apply"; draft: ServiceConfigurationDraft; onApply: () => void; onChange: (draft: ServiceConfigurationDraft) => void; onReview: () => void; review: ConfigurationReview | null }) {
@@ -347,7 +421,7 @@ function buildConnectionEdges(services: ServiceRecord[], drafts: ConfigurationDr
 			const target = services.find((service) => service.id === binding?.target_service_id);
 			if (!binding || !target) continue;
 			const status = !before ? "pending add" : !after ? "pending removal" : JSON.stringify(before) === JSON.stringify(after) ? "applied" : "pending change";
-			edges.push({ id: `connection:${source.id}:${key}`, source: `service:${source.name}`, target: `service:${target.name}`, label: `${binding.kind === "internal_http" ? "Internal" : "Browser"} · ${status}`, data: { connectionKey: key, status }, animated: status === "pending add" || status === "pending change", style: { stroke: status === "pending removal" ? "#b42318" : status === "applied" ? "#47675a" : "#b56b17", strokeDasharray: status === "pending removal" ? "6 5" : undefined, strokeWidth: 2 }, labelStyle: { fill: "#433c31", fontSize: 11, fontWeight: 700 } });
+			edges.push({ id: `connection:${source.id}:${key}`, source: `service:${source.name}`, target: `service:${target.name}`, label: `${binding.kind === "internal_http" ? "Internal" : "Browser"} · ${status}`, data: { connectionKey: key, status }, animated: status === "pending add" || status === "pending change", style: { stroke: status === "pending removal" ? "var(--opsi-error)" : status === "applied" ? "var(--opsi-ready)" : "var(--opsi-warning)", strokeDasharray: status === "pending removal" ? "6 5" : undefined, strokeWidth: 2 }, labelStyle: { fill: "var(--opsi-on-surface)", fontSize: 11, fontWeight: 700 } });
 		}
 	}
 	return edges;

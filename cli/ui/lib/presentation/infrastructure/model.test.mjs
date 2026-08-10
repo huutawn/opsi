@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, currentEnvironment, deploymentAssignmentFor, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, updateCanvasPlacement } from "./model.ts";
+import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, currentEnvironment, deploymentAssignmentFor, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, topologyResourcePresentation, updateCanvasPlacement } from "./model.ts";
 
 const facts = {
   project_id: "p1",
@@ -49,6 +49,27 @@ test("canvas edits resources and exposure, excludes unplaced assignments, and co
   assert.deepEqual(compiled.assignments[0], { service_key: "api", environment_id: "env-1", runtime_id: "rt-1", replicas: 3, cpu_request_millicores: 350, memory_request_bytes: 536870912, exposure: { mode: "public" } });
   assert.equal(JSON.stringify(compiled).includes("position"), false);
   assert.deepEqual(compileCanvasDraft("p1", null, { z: draft.reports, a: { ...draft.reports } }).assignments.map((assignment) => assignment.service_key), ["a", "z"]);
+});
+
+test("topology resource presentation supports factual kinds and fails future kinds closed", () => {
+  const application = topologyResourcePresentation({ kind: "application", name: "api", status: "Assigned", badge: "moved", context: "Assigned · Primary", ariaDetail: "moved", draftState: "moved", facts: [{ label: "CPU", value: "100m" }] });
+  assert.equal(application.supported, true);
+  assert.equal(application.state, "draft");
+  assert.equal(application.ariaLabel, "Application api, Assigned, moved");
+  assert.deepEqual(application.capabilities, { acceptsPlacement: false, connectable: true, movable: true });
+
+  const managed = topologyResourcePresentation({ kind: "managed-service", name: "orders-db", status: "Ready", context: "provider fact" });
+  assert.equal(managed.kind, "managed-service");
+  assert.equal(managed.state, "unsupported");
+  assert.equal(managed.supported, false);
+  assert.deepEqual(managed.facts, []);
+
+  const unknown = topologyResourcePresentation({ kind: "quantum-cache", name: "future", status: "Ready", context: "untrusted presentation input" });
+  assert.equal(unknown.kind, "unsupported");
+  assert.equal(unknown.state, "unsupported");
+  assert.equal(unknown.status, "Unsupported");
+  assert.match(unknown.context, /No factual quantum-cache presentation/);
+  assert.deepEqual(unknown.capabilities, { acceptsPlacement: false, connectable: false, movable: false });
 });
 
 test("capacity and progress stay truthful", () => {

@@ -61,14 +61,13 @@ function TopologyTab({ bindings, builds, console, environment, error, facts, mod
   }
   return <section aria-labelledby="topology-heading">
     <div className="sectionHeading topologyHeading"><div><h2 id="topology-heading" tabIndex={-1}>Topology</h2><p>{mode === "design" ? "TopologyPlan assignments and services still waiting for placement." : "Runtime, node, Agent, and deployment facts reported by existing sources."}</p></div><div className="topologyControls"><span className="sourceTag">{mode === "design" ? topology ? `TopologyPlan r${topology.revision}` : "No TopologyPlan" : "Live facts"}</span><div aria-label="Topology view" className="topologyMode" role="group"><button aria-pressed={mode === "design"} onClick={() => onMode("design")} type="button">Design</button><button aria-pressed={mode === "live"} onClick={() => onMode("live")} type="button">Live</button></div></div></div>
-    <TopologyOnboarding action={act} state={onboarding} />
-    <ServerLifecycleCard console={console} lifecycle={lifecycle} />
-    {error ? <p className="truthCallout" role="alert">{error}</p> : null}
-    {topology ? <div hidden={mode !== "design"}><DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "No current environment"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} /></div> : null}
     {mode === "design" ? <>
+      {error ? <p className="truthCallout" role="alert">{error}</p> : null}
       {!topology ? <div className="truthCallout"><b>No topology plan</b><p>Infrastructure facts are shown without service placement edges. Service inventory is not used to fabricate assignments.</p></div> : null}
       <TopologyDesignCanvas bindings={bindings} builds={builds} console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} repositories={repositories} topology={topology} />
-    </> : <LiveTopology console={console} environment={environment} facts={facts} />}
+      <div className="designSupportingFacts"><TopologyOnboarding action={act} state={onboarding} /><ServerLifecycleCard console={console} lifecycle={lifecycle} /></div>
+    </> : <><TopologyOnboarding action={act} state={onboarding} /><ServerLifecycleCard console={console} lifecycle={lifecycle} />{error ? <p className="truthCallout" role="alert">{error}</p> : null}<LiveTopology console={console} environment={environment} facts={facts} /></>}
+    {topology ? <div className="designDeploymentReview" hidden={mode !== "design"}><DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "No current environment"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} /></div> : null}
   </section>;
 }
 
