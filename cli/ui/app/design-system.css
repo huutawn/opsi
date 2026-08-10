@@ -451,46 +451,12 @@ legend {
   color: var(--opsi-on-surface);
 }
 
-.sidebar,
-.sidebar.collapsed {
-  border-color: var(--opsi-outline-variant);
-  background: var(--opsi-surface-low);
-}
-
-.brand > span {
-  border: var(--opsi-border);
-  border-radius: var(--opsi-radius);
-  background: var(--opsi-live-bg);
-  color: var(--opsi-secondary);
-}
-
-.projectSwitcher summary,
-.switcherMenu,
 .connectionMenu,
 .accountMenu > div {
   border-color: var(--opsi-outline-variant);
   border-radius: var(--opsi-radius);
   background: var(--opsi-surface-container);
   color: var(--opsi-on-surface);
-}
-
-.navSection a,
-.sidebarFooter a {
-  border-radius: var(--opsi-radius);
-  color: var(--opsi-on-surface-variant);
-}
-
-.navSection a:hover,
-.sidebarFooter a:hover,
-.navSection a.active,
-.sidebarFooter a.active {
-  background: var(--opsi-live-bg);
-  color: var(--opsi-on-surface);
-  box-shadow: inset 3px 0 var(--opsi-primary);
-}
-
-.contextHeader {
-  background: rgb(19 19 21 / 94%);
 }
 
 .sourceWarning {

@@ -25,10 +25,9 @@ test("workspace, grouped navigation, restoration, and back-forward behavior", as
   for (const destination of ["Topology", "Overview", "Services", "Delivery", "Observability", "Security"]) await expect(page.getByRole("link", { name: destination, exact: true })).toBeVisible();
   await expect(page.locator(".navSection a").first()).toHaveText("Topology");
   await expect(page.locator(".navSection a")).toHaveCount(6);
-  await page.getByRole("button", { name: "Collapse sidebar" }).click();
-  await expect(page.getByRole("button", { name: "Expand sidebar" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("Current environment")).toHaveValue("env-1");
+  await expect(page.getByRole("link", { name: "Topology", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.getByLabel("Switch project")).toBeVisible();
-  await page.getByRole("button", { name: "Expand sidebar" }).click();
 
   await page.getByRole("link", { name: "Observability", exact: true }).click();
   await page.getByRole("tab", { name: "Health", exact: true }).focus();
@@ -46,6 +45,37 @@ test("workspace, grouped navigation, restoration, and back-forward behavior", as
   await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.goForward();
   await expect(page.getByRole("tab", { name: "Secrets", exact: true })).toHaveAttribute("aria-selected", "true");
+});
+
+test("factual shell preserves environment and deep-link state through refresh and keyboard project switching", async ({ page }) => {
+  await mockLocalAPI(page, "healthy");
+  await page.goto("/?project=proj-1&view=observability&tab=logs&environment=env-1&query=timeout&window=1h");
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Logs");
+  await expect(page.getByLabel("Current environment")).toHaveValue("env-1");
+  await expect(page.getByRole("link", { name: "Observability", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("link", { name: "Delivery", exact: true })).toHaveAttribute("href", /environment=env-1/);
+
+  const deepLink = page.url();
+  await page.getByRole("button", { name: "Refresh current data" }).click();
+  await expect(page).toHaveURL(deepLink);
+  await page.reload();
+  await expect(page).toHaveURL(deepLink);
+  await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+
+  const switcher = page.getByLabel("Switch project");
+  await switcher.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".projectSwitcher")).toHaveAttribute("open", "");
+  await page.getByRole("link", { name: /Payments/ }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/project=proj-2&view=infrastructure&tab=topology/);
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Payments/Production/Topology");
+
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology&environment=env-1&topology=topo-1&topologyMode=live");
+  await page.reload();
+  await expect(page).toHaveURL(/topology=topo-1/);
+  await expect(page).toHaveURL(/topologyMode=live/);
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Topology");
 });
 
 test("truthful project summaries cover required factual fixtures", async ({ page }) => {
@@ -515,7 +545,7 @@ test("tabs, activity outcomes, service drawer, mobile drawer, and target sizes f
   }
   await page.keyboard.press("Escape");
   await expect(menu).toBeFocused();
-  const undersized = await page.locator(".iconButton:visible, .projectSwitcher summary:visible, .sidebar a:visible, .accountMenu summary:visible").evaluateAll((elements) => elements.filter((element) => { const box = element.getBoundingClientRect(); return box.width < 40 || box.height < 40; }).map((element) => ({ tag: element.tagName, label: element.getAttribute("aria-label") || element.textContent, box: element.getBoundingClientRect().toJSON() })));
+  const undersized = await page.locator(".iconButton:visible, .projectSwitcher summary:visible, .environmentPicker select:visible, .sidebar a:visible, .accountMenu summary:visible").evaluateAll((elements) => elements.filter((element) => { const box = element.getBoundingClientRect(); return box.width < 40 || box.height < 40; }).map((element) => ({ tag: element.tagName, label: element.getAttribute("aria-label") || element.textContent, box: element.getBoundingClientRect().toJSON() })));
   expect(undersized).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

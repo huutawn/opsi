@@ -11,7 +11,7 @@ export function Surface({ children, title }: { children: ReactNode; title: strin
 }
 
 export function Empty({ action, text, title = "No data yet" }: { action?: ReactNode; text: string; title?: string }) {
-  return <div className="empty" role="status"><strong>{title}</strong><p>{text}</p>{action}</div>;
+  return <div className="empty stateShell" role="status"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16v10H4zM8 11h8" /></svg><strong>{title}</strong><p>{text}</p>{action}</div>;
 }
 
 export function StatusBadge({ label, value }: { label?: string; value: string | PresentationStatus }) {
@@ -30,16 +30,5 @@ export function PageHeader({ action, eyebrow, title, description }: { action?: R
 }
 
 export function StatePanel({ title, text, retry }: { title: string; text: string; retry?: () => void }) {
-  return (
-    <Surface title={title}>
-      <div className="empty">
-        <p>{text}</p>
-        {retry ? (
-          <button onClick={retry} type="button">
-            Retry
-          </button>
-        ) : null}
-      </div>
-    </Surface>
-  );
+  return <section className="statePanel stateShell" role={retry ? "alert" : "status"}><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M12 8v5m0 3h.01" /></svg><h2>{title}</h2><p>{text}</p>{retry ? <button onClick={retry} type="button">Retry</button> : null}</section>;
 }
