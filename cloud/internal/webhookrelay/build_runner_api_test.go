@@ -3,6 +3,8 @@ package webhookrelay
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -36,15 +38,34 @@ func (v runnerAPIVerifier) Verify(context.Context, string) (githuboidc.VerifiedI
 	return v.identity, v.err
 }
 
+type runnerAPIStore struct {
+	*buildjob.MemoryStore
+	completion buildjob.CompletionResult
+}
+
+func (s *runnerAPIStore) CompleteRunner(_ context.Context, completion buildjob.Completion, _ buildjob.RegistryConfig, _ buildjob.ExecutorConfig) (buildjob.CompletionResult, error) {
+	if s.completion.BuildRecordID != "" {
+		if s.completion.Digest != completion.Result.Digest {
+			return buildjob.CompletionResult{}, buildjob.Error{Code: "BUILD_RESULT_CONFLICT", Status: http.StatusConflict, Message: "BuildJob already completed with a different digest.", Cause: "build_result"}
+		}
+		result := s.completion
+		result.Reused = true
+		return result, nil
+	}
+	s.completion = buildjob.CompletionResult{BuildRecordID: "br-runner-api", Digest: completion.Result.Digest, BuildJobState: buildjob.StatusSucceeded}
+	return s.completion, nil
+}
+
 func TestBuildRunnerClaimAndBuildSpecAPI(t *testing.T) {
 	config := buildjob.ExecutorConfig{Owner: "opsi", Repository: "executor", Workflow: ".github/workflows/opsi-build-executor.yml", Ref: "refs/heads/main"}
-	store := buildjob.NewMemoryStore()
+	registryConfig := buildjob.RegistryConfig{Host: "ghcr.io", Namespace: "opsi", RepositoryPrefix: "builds", Visibility: "private"}
+	store := &runnerAPIStore{MemoryStore: buildjob.NewMemoryStore()}
 	job := runnerAPIJob("job-1")
 	if _, _, err := store.Create(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	server := NewServer(Config{BuildExecutor: config})
-	server.BuildJobs = buildjob.Service{Store: store, Sources: runnerAPISource{source: runnerAPISourceForJob(job)}, Executor: config, Dispatcher: runnerAPIDispatcher{}, Now: func() time.Time { return time.Unix(200, 0).UTC() }}
+	server := NewServer(Config{BuildExecutor: config, BuildRegistry: registryConfig})
+	server.BuildJobs = buildjob.Service{Store: store, Sources: runnerAPISource{source: runnerAPISourceForJob(job)}, Executor: config, Registry: registryConfig, Dispatcher: runnerAPIDispatcher{}, Now: func() time.Time { return time.Unix(200, 0).UTC() }}
 	githubNow := time.Unix(200, 0).UTC()
 	server.githubAppClient, _ = newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		var body struct {
@@ -96,6 +117,28 @@ func TestBuildRunnerClaimAndBuildSpecAPI(t *testing.T) {
 	}
 	if sourceResponse.Code != http.StatusOK || json.Unmarshal(sourceResponse.Body.Bytes(), &sourceAccess) != nil || sourceAccess.BuildJobID != job.ID || sourceAccess.Repository != job.Source.RepositoryFullName || sourceAccess.ResolvedCommitSHA != job.Source.ResolvedCommitSHA || sourceAccess.AccessToken != "source-installation-token" || !sourceAccess.ExpiresAt.Equal(githubNow.Add(time.Hour)) || sourceResponse.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("source access status=%d body=%s", sourceResponse.Code, sourceResponse.Body.String())
+	}
+
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":2},"layers":[]}`)
+	digestHash := sha256.Sum256(manifest)
+	digest := "sha256:" + hex.EncodeToString(digestHash[:])
+	descriptor := buildjob.ImageDescriptor{Digest: digest, MediaType: "application/vnd.oci.image.manifest.v1+json", Size: int64(len(manifest))}
+	result := buildjob.RunnerResult{BuildJobID: job.ID, AttemptID: attempt.AttemptID, RegistryReference: registryConfig.Target(job.ApplicationID, job.ID).DigestReference(digest), Digest: digest, Executor: buildjob.ExecutorResult{Platform: "linux/amd64", BuildKitVersion: "v0.32.2", BuildxVersion: "v0.36.1", BuilderIdentity: "moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8", StartedAt: time.Unix(201, 0).UTC(), CompletedAt: time.Unix(202, 0).UTC(), BuildDescriptor: descriptor, Remote: buildjob.RemoteRegistryEvidence{Descriptor: descriptor, Platform: "linux/amd64", Manifest: manifest, Private: true}}}
+	resultBody, _ := json.Marshal(result)
+	resultRequest := httptest.NewRequest(http.MethodPost, "/v1/build-runner/result", bytes.NewReader(resultBody))
+	resultRequest.Header.Set("Authorization", "Bearer "+lease.Token)
+	resultResponse := httptest.NewRecorder()
+	handler.ServeHTTP(resultResponse, resultRequest)
+	var completion buildjob.CompletionResult
+	if resultResponse.Code != http.StatusOK || json.Unmarshal(resultResponse.Body.Bytes(), &completion) != nil || completion.BuildRecordID == "" || completion.Digest != digest || completion.BuildJobState != buildjob.StatusSucceeded {
+		t.Fatalf("result status=%d body=%s", resultResponse.Code, resultResponse.Body.String())
+	}
+	resultRequest = httptest.NewRequest(http.MethodPost, "/v1/build-runner/result", bytes.NewReader(resultBody))
+	resultRequest.Header.Set("Authorization", "Bearer "+lease.Token)
+	resultResponse = httptest.NewRecorder()
+	handler.ServeHTTP(resultResponse, resultRequest)
+	if resultResponse.Code != http.StatusOK || json.Unmarshal(resultResponse.Body.Bytes(), &completion) != nil || !completion.Reused {
+		t.Fatalf("replay status=%d body=%s", resultResponse.Code, resultResponse.Body.String())
 	}
 }
 

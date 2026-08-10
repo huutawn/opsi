@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,6 +16,134 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	cloudpostgres "github.com/opsi-dev/opsi/cloud/internal/postgres"
 )
+
+func TestPostgresBuildCompletionFinalizesOneAcceptedRecord(t *testing.T) {
+	db := newBuildJobPostgres(t)
+	job, attempt, token, now := postgresRunningBuild(t, db, "job-finalize")
+	service := Service{Store: PostgresStore{DB: db}, Executor: executorTestConfig(), Registry: executorTestRegistry(), Now: func() time.Time { return now.Add(time.Minute) }}
+	result := postgresRunnerResult(t, job, attempt)
+
+	const callers = 8
+	var wait sync.WaitGroup
+	responses := make(chan CompletionResult, callers)
+	errs := make(chan error, callers)
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			response, err := service.Complete(context.Background(), result, token)
+			responses <- response
+			errs <- err
+		}()
+	}
+	wait.Wait()
+	close(responses)
+	close(errs)
+	reused := 0
+	var recordID string
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for response := range responses {
+		if response.Reused {
+			reused++
+		}
+		if recordID == "" {
+			recordID = response.BuildRecordID
+		}
+		if response.BuildRecordID != recordID || response.Digest != result.Digest || response.BuildJobState != StatusSucceeded {
+			t.Fatalf("response=%+v", response)
+		}
+	}
+	if reused != callers-1 {
+		t.Fatalf("reused=%d", reused)
+	}
+	stored, err := PostgresStore{DB: db}.Get(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
+	if err != nil || stored.Status != StatusSucceeded || stored.BuildRecordID != recordID || stored.CompletedAt == nil {
+		t.Fatalf("job=%+v err=%v", stored, err)
+	}
+	var buildRecordDigest, buildJobID, repository string
+	if err := db.QueryRow(`SELECT oci_digest,build_job_id,oci_repository FROM build_records WHERE id=$1`, recordID).Scan(&buildRecordDigest, &buildJobID, &repository); err != nil {
+		t.Fatal(err)
+	}
+	if result.Executor.BuildDescriptor.Digest != result.Executor.Remote.Descriptor.Digest || result.Digest != buildRecordDigest || buildJobID != job.ID || repository != executorTestRegistry().Target(job.ApplicationID, job.ID).Repository {
+		t.Fatalf("buildkit=%s remote=%s record=%s build_job=%s repository=%s", result.Executor.BuildDescriptor.Digest, result.Executor.Remote.Descriptor.Digest, buildRecordDigest, buildJobID, repository)
+	}
+	t.Logf("buildkit_digest=%s remote_digest=%s build_record_digest=%s build_record_id=%s build_job_state=%s", result.Executor.BuildDescriptor.Digest, result.Executor.Remote.Descriptor.Digest, buildRecordDigest, recordID, stored.Status)
+	var persisted string
+	if err := db.QueryRow(`SELECT row_to_json(j)::text || row_to_json(r)::text || COALESCE((SELECT string_agg(metadata_redacted::text,'') FROM cloud_audit_events WHERE resource_id=r.id),'') FROM build_jobs j JOIN build_records r ON r.id=j.build_record_id WHERE j.id=$1`, job.ID).Scan(&persisted); err != nil || strings.Contains(persisted, token) || queryCount(t, db, `SELECT count(*) FROM cloud_audit_events WHERE action='BUILD_RECORD_FINALIZED' AND resource_id=$1`, recordID) != 1 {
+		t.Fatalf("credential persisted=%v audit_count_invalid=%v err=%v", strings.Contains(persisted, token), queryCount(t, db, `SELECT count(*) FROM cloud_audit_events WHERE action='BUILD_RECORD_FINALIZED' AND resource_id=$1`, recordID) != 1, err)
+	}
+	conflict := result
+	conflict.Executor.Remote.Manifest = []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":2},"layers":[]}`)
+	conflictSum := sha256.Sum256(conflict.Executor.Remote.Manifest)
+	conflict.Digest = "sha256:" + fmt.Sprintf("%x", conflictSum[:])
+	conflict.RegistryReference = executorTestRegistry().Target(job.ApplicationID, job.ID).DigestReference(conflict.Digest)
+	conflict.Executor.BuildDescriptor.Digest = conflict.Digest
+	conflict.Executor.Remote.Descriptor.Digest = conflict.Digest
+	if _, err := service.Complete(context.Background(), conflict, token); Code(err) != "BUILD_RESULT_CONFLICT" {
+		t.Fatalf("conflict err=%v", err)
+	}
+	if count := queryCount(t, db, `SELECT count(*) FROM build_records WHERE build_job_id=$1`, job.ID); count != 1 {
+		t.Fatalf("records=%d", count)
+	}
+}
+
+func TestPostgresBuildCompletionCancellationRace(t *testing.T) {
+	for iteration := range 12 {
+		db := newBuildJobPostgres(t)
+		job, attempt, token, now := postgresRunningBuild(t, db, fmt.Sprintf("job-race-%d", iteration))
+		service := Service{Store: PostgresStore{DB: db}, Executor: executorTestConfig(), Registry: executorTestRegistry(), Now: func() time.Time { return now.Add(time.Minute) }}
+		start := make(chan struct{})
+		completionErr := make(chan error, 1)
+		cancelErr := make(chan error, 1)
+		go func() {
+			<-start
+			_, err := service.Complete(context.Background(), postgresRunnerResult(t, job, attempt), token)
+			completionErr <- err
+		}()
+		go func() {
+			<-start
+			_, err := db.Exec(`UPDATE build_jobs SET status='cancelled',updated_at=$2 WHERE id=$1 AND status='running'`, job.ID, now.Add(time.Minute))
+			cancelErr <- err
+		}()
+		close(start)
+		completeResult := <-completionErr
+		cancelResult := <-cancelErr
+		stored, err := PostgresStore{DB: db}.Get(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records := queryCount(t, db, `SELECT count(*) FROM build_records WHERE build_job_id=$1`, job.ID)
+		switch stored.Status {
+		case StatusSucceeded:
+			if completeResult != nil || cancelResult == nil || records != 1 || stored.BuildRecordID == "" {
+				t.Fatalf("winner=completion job=%+v complete=%v cancel=%v records=%d", stored, completeResult, cancelResult, records)
+			}
+		case StatusCancelled:
+			if Code(completeResult) != "RUNNER_LEASE_REVOKED" || cancelResult != nil || records != 0 || stored.BuildRecordID != "" {
+				t.Fatalf("winner=cancellation job=%+v complete=%v cancel=%v records=%d", stored, completeResult, cancelResult, records)
+			}
+		default:
+			t.Fatalf("nonterminal race result=%+v", stored)
+		}
+	}
+}
+
+func TestPostgresBuildRunnerFailureDoesNotCreateRecord(t *testing.T) {
+	db := newBuildJobPostgres(t)
+	job, attempt, token, now := postgresRunningBuild(t, db, "job-failed")
+	service := Service{Store: PostgresStore{DB: db}, Now: func() time.Time { return now.Add(time.Minute) }}
+	if err := service.Fail(context.Background(), RunnerFailure{BuildJobID: job.ID, AttemptID: attempt.AttemptID, Code: "REGISTRY_PUSH_FAILED"}, token); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := PostgresStore{DB: db}.Get(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
+	if err != nil || stored.Status != StatusFailed || stored.FailureCode != "REGISTRY_PUSH_FAILED" || queryCount(t, db, `SELECT count(*) FROM build_records WHERE build_job_id=$1`, job.ID) != 0 {
+		t.Fatalf("job=%+v err=%v", stored, err)
+	}
+}
 
 func TestPostgresBuildExecutorAtomicClaimAndScopedLease(t *testing.T) {
 	db := newBuildJobPostgres(t)
@@ -190,12 +319,77 @@ func newBuildJobPostgres(t *testing.T) *sql.DB {
 		`INSERT INTO users(id,email) VALUES('user-1','user@example.test')`,
 		`INSERT INTO organizations(id,name,slug) VALUES('org-1','Org','org')`,
 		`INSERT INTO projects(id,org_id,name,slug,status,created_by) VALUES('project-1','org-1','Project','project','ready','user-1')`,
+		`INSERT INTO environments(id,org_id,project_id,name,type) VALUES('environment-1','org-1','project-1','dev','dev')`,
+		`INSERT INTO runtimes(id,org_id,project_id,environment_id,name) VALUES('runtime-1','org-1','project-1','environment-1','runtime')`,
+		`INSERT INTO control_services(id,org_id,project_id,environment_id,runtime_id,name,type,status,source_type,namespace) VALUES('application-1','org-1','project-1','environment-1','runtime-1','api','backend','ready','git','opsi')`,
+		`INSERT INTO github_installations(installation_id,account_id,account_login,account_type,status,suspended,created_at,updated_at) VALUES(10,30,'owner','Organization','active',false,now(),now())`,
+		`INSERT INTO github_repositories(repository_id,installation_id,owner_id,owner_login,name,full_name,private,archived,disabled,default_branch,status,created_at,updated_at) VALUES(20,10,30,'owner','repository','owner/repository',true,false,false,'main','active',now(),now())`,
+		`INSERT INTO github_repository_claims(repository_id,installation_id,project_id,claimed_by,status,claimed_at) VALUES(20,10,'project-1','user-1','active',now())`,
+		`INSERT INTO github_service_bindings(id,project_id,service_id,repository_id,installation_id,service_key,config_path,selected_ref,application_root,build_context,build_strategy,dockerfile_path,status,created_by,created_at,updated_at) VALUES('binding-1','project-1','application-1',20,10,'api','.opsi/opsi-cd.yaml','main','apps/api','.','auto','apps/api/Dockerfile','active','user-1',to_timestamp(50),to_timestamp(50))`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return db
+}
+
+func postgresRunningBuild(t *testing.T, db *sql.DB, id string) (Job, DispatchAttempt, string, time.Time) {
+	t.Helper()
+	store := PostgresStore{DB: db}
+	job := postgresBuildJob(id, id+"-key")
+	if _, _, err := store.Create(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(200, 0).UTC()
+	attempt := DispatchAttempt{Provider: ExecutorProviderGitHubActions, AttemptID: id + "-attempt", BuildJobID: job.ID, Workflow: executorTestConfig().Workflow, WorkflowRef: executorTestConfig().WorkflowRef(), ExecutorRef: executorTestConfig().Ref, DispatchedAt: now, LastState: DispatchStateDispatching}
+	if err := store.ReserveDispatch(context.Background(), job.ProjectID, job.ApplicationID, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteDispatch(context.Background(), attempt.AttemptID, DispatchFacts{}, now); err != nil {
+		t.Fatal(err)
+	}
+	token := "lease-" + id
+	hash := sha256.Sum256([]byte(token))
+	identity := executorTestIdentity(uint64(1000 + len(id)))
+	if err := store.ClaimDispatch(context.Background(), job.ID, attempt.AttemptID, identity, hash[:], now.Add(10*time.Minute), now); err != nil {
+		t.Fatal(err)
+	}
+	attempt.RunID = identity.RunID
+	attempt.RunAttempt = identity.RunAttempt
+	return job, attempt, token, now
+}
+
+func postgresRunnerResult(t *testing.T, job Job, attempt DispatchAttempt) RunnerResult {
+	t.Helper()
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":2},"layers":[]}`)
+	if path := os.Getenv("OPSI_TEST_REGISTRY_MANIFEST_FILE"); path != "" {
+		var err error
+		manifest, err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sum := sha256.Sum256(manifest)
+	digest := "sha256:" + fmt.Sprintf("%x", sum[:])
+	var document struct {
+		MediaType string `json:"mediaType"`
+	}
+	if json.Unmarshal(manifest, &document) != nil || document.MediaType == "" {
+		t.Fatal("registry manifest is invalid")
+	}
+	descriptor := ImageDescriptor{Digest: digest, MediaType: document.MediaType, Size: int64(len(manifest))}
+	target := executorTestRegistry().Target(job.ApplicationID, job.ID)
+	return RunnerResult{BuildJobID: job.ID, AttemptID: attempt.AttemptID, RegistryReference: target.DigestReference(digest), Digest: digest, Executor: ExecutorResult{Platform: "linux/amd64", BuildKitVersion: "v0.32.2", BuildxVersion: "v0.36.1", BuilderIdentity: "moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8", StartedAt: time.Unix(210, 0).UTC(), CompletedAt: time.Unix(220, 0).UTC(), BuildDescriptor: descriptor, Remote: RemoteRegistryEvidence{Descriptor: descriptor, Platform: "linux/amd64", Manifest: manifest, Private: true}}}
+}
+
+func queryCount(t *testing.T, db *sql.DB, query string, args ...any) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(query, args...).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 func postgresBuildJob(id, key string) Job {

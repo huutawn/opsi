@@ -36,6 +36,7 @@ type Config struct {
 	GitHubApp              GitHubAppConfig         `json:"github_app"`
 	GitHubOIDC             githuboidc.Config       `json:"github_oidc"`
 	BuildExecutor          buildjob.ExecutorConfig `json:"build_executor"`
+	BuildRegistry          buildjob.RegistryConfig `json:"build_registry"`
 	Placement              PlacementConfig         `json:"placement"`
 }
 
@@ -202,6 +203,10 @@ func applyEnvOverrides(cfg *Config) error {
 	applyStringEnv("OPSI_BUILD_EXECUTOR_REPOSITORY", &cfg.BuildExecutor.Repository)
 	applyStringEnv("OPSI_BUILD_EXECUTOR_WORKFLOW", &cfg.BuildExecutor.Workflow)
 	applyStringEnv("OPSI_BUILD_EXECUTOR_REF", &cfg.BuildExecutor.Ref)
+	applyStringEnv("OPSI_BUILD_REGISTRY_HOST", &cfg.BuildRegistry.Host)
+	applyStringEnv("OPSI_BUILD_REGISTRY_NAMESPACE", &cfg.BuildRegistry.Namespace)
+	applyStringEnv("OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX", &cfg.BuildRegistry.RepositoryPrefix)
+	applyStringEnv("OPSI_BUILD_REGISTRY_VISIBILITY", &cfg.BuildRegistry.Visibility)
 	return nil
 }
 
@@ -376,6 +381,9 @@ func validateConfig(cfg *Config) error {
 			"build_executor.repository":   cfg.BuildExecutor.Repository,
 			"build_executor.workflow":     cfg.BuildExecutor.Workflow,
 			"build_executor.ref":          cfg.BuildExecutor.Ref,
+			"build_registry.host":         cfg.BuildRegistry.Host,
+			"build_registry.namespace":    cfg.BuildRegistry.Namespace,
+			"build_registry.prefix":       cfg.BuildRegistry.RepositoryPrefix,
 		} {
 			if isProductionPlaceholder(value) {
 				return fmt.Errorf("production %s must not use a placeholder", name)
@@ -404,6 +412,14 @@ func validateConfig(cfg *Config) error {
 		if !cfg.GitHubApp.InstallationEnabled() {
 			return fmt.Errorf("build_executor requires GitHub App installation credentials")
 		}
+		if err := cfg.BuildRegistry.Validate(); err != nil {
+			return fmt.Errorf("build_registry: %w", err)
+		}
+		if cfg.BuildRegistry.Host != "ghcr.io" || cfg.BuildRegistry.Visibility != "private" {
+			return fmt.Errorf("build_registry must use private ghcr.io publication")
+		}
+	} else if !cfg.BuildRegistry.Empty() {
+		return fmt.Errorf("build_registry requires build_executor")
 	}
 	if cfg.Production {
 		expectedAudience := cfg.PublicBaseURL + buildRecordPath

@@ -561,12 +561,19 @@ func TestBuildExecutorEnvironmentOverrides(t *testing.T) {
 	t.Setenv("OPSI_BUILD_EXECUTOR_REPOSITORY", "executor")
 	t.Setenv("OPSI_BUILD_EXECUTOR_WORKFLOW", ".github/workflows/opsi-build-executor.yml")
 	t.Setenv("OPSI_BUILD_EXECUTOR_REF", "refs/heads/main")
+	t.Setenv("OPSI_BUILD_REGISTRY_HOST", "ghcr.io")
+	t.Setenv("OPSI_BUILD_REGISTRY_NAMESPACE", "opsi")
+	t.Setenv("OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX", "builds")
+	t.Setenv("OPSI_BUILD_REGISTRY_VISIBILITY", "private")
 	config := Config{}
 	if err := applyEnvOverrides(&config); err != nil {
 		t.Fatal(err)
 	}
 	if !config.BuildExecutor.Available() || config.BuildExecutor.RepositoryFullName() != "opsi/executor" || config.BuildExecutor.WorkflowRef() != "opsi/executor/.github/workflows/opsi-build-executor.yml@refs/heads/main" {
 		t.Fatalf("build executor=%+v", config.BuildExecutor)
+	}
+	if err := config.BuildRegistry.Validate(); err != nil || config.BuildRegistry.Host != "ghcr.io" || config.BuildRegistry.Visibility != "private" {
+		t.Fatalf("build registry=%+v err=%v", config.BuildRegistry, err)
 	}
 }
 

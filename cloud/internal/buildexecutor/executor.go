@@ -22,11 +22,21 @@ func Execute(ctx context.Context, request Request, log io.Writer) (result Result
 	if err != nil {
 		return result, err
 	}
-	output, err := Build(ctx, request.Spec, sourceDir, request.Workspace, request.OutputDir, log)
+	var output BuildOutput
+	if request.Publisher != nil {
+		output, err = Publish(ctx, request.Spec, sourceDir, request.Workspace, request.OutputDir, request.Publisher, log)
+	} else {
+		output, err = Build(ctx, request.Spec, sourceDir, request.Workspace, request.OutputDir, log)
+	}
 	if err != nil {
 		return result, err
 	}
 	result.ImageDigest = output.ImageDigest
+	result.BuildDescriptor = output.Descriptor
+	result.Remote = output.Remote
+	if output.Remote.Descriptor.Digest != "" {
+		result.RegistryReference = request.Spec.Publication.DigestReference(output.ImageDigest)
+	}
 	result.OCIArtifactPath = output.OCIArtifactPath
 	result.OCIArtifactSHA256 = output.OCIArtifactSHA256
 	result.BuildMetadataPath = output.MetadataPath

@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,13 +24,58 @@ const (
 	DispatchStateDispatched  = "dispatched"
 	DispatchStateRejected    = "dispatch_rejected"
 	DispatchStateClaimed     = "claimed"
+	DispatchStateSucceeded   = "succeeded"
+	DispatchStateFailed      = "failed"
 )
+
+var ociDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type ExecutorConfig struct {
 	Owner      string `json:"owner"`
 	Repository string `json:"repository"`
 	Workflow   string `json:"workflow"`
 	Ref        string `json:"ref"`
+}
+
+type RegistryConfig struct {
+	Host             string `json:"host"`
+	Namespace        string `json:"namespace"`
+	RepositoryPrefix string `json:"repository_prefix"`
+	Visibility       string `json:"visibility"`
+}
+
+type PublicationTarget struct {
+	Host       string `json:"host"`
+	Repository string `json:"repository"`
+	Tag        string `json:"tag"`
+}
+
+func (c RegistryConfig) Empty() bool {
+	return c.Host == "" && c.Namespace == "" && c.RepositoryPrefix == "" && c.Visibility == ""
+}
+
+func (c RegistryConfig) Validate() error {
+	if !validOCIHost(c.Host) || !validOCIPath(c.Namespace) || !validOCIPath(c.RepositoryPrefix) || c.Visibility != "private" {
+		return invalid("REGISTRY_CONFIG_INVALID", "Build registry configuration is invalid.", "registry_config")
+	}
+	return nil
+}
+
+func (c RegistryConfig) Target(applicationID, jobID string) PublicationTarget {
+	applicationHash := sha256.Sum256([]byte(applicationID))
+	jobHash := sha256.Sum256([]byte(jobID))
+	repository := c.Host + "/" + c.Namespace + "/" + c.RepositoryPrefix + "/app-" + hex.EncodeToString(applicationHash[:12])
+	return PublicationTarget{Host: c.Host, Repository: repository, Tag: "job-" + hex.EncodeToString(jobHash[:12])}
+}
+
+func (t PublicationTarget) TagReference() string                 { return t.Repository + ":" + t.Tag }
+func (t PublicationTarget) DigestReference(digest string) string { return t.Repository + "@" + digest }
+func (t PublicationTarget) Empty() bool                          { return t.Host == "" && t.Repository == "" && t.Tag == "" }
+func (t PublicationTarget) Validate() error {
+	if !validOCIHost(t.Host) || !strings.HasPrefix(t.Repository, t.Host+"/") || !validOCIPath(strings.TrimPrefix(t.Repository, t.Host+"/")) || !validOCITag(t.Tag) {
+		return invalid("REGISTRY_TARGET_INVALID", "Build registry target is invalid.", "registry_target")
+	}
+	return nil
 }
 
 func (c ExecutorConfig) Available() bool {
@@ -106,23 +153,75 @@ type RunnerLease struct {
 }
 
 type BuildSpec struct {
-	BuildJobID            string `json:"build_job_id"`
-	Repository            string `json:"repository"`
-	RepositoryID          int64  `json:"repository_id"`
-	RepositoryOwnerID     int64  `json:"repository_owner_id"`
-	GitHubInstallationID  int64  `json:"github_installation_id"`
-	ResolvedCommitSHA     string `json:"resolved_commit_sha"`
-	ApplicationRoot       string `json:"application_root"`
-	BuildContext          string `json:"build_context"`
-	ResolvedBuildStrategy string `json:"resolved_build_strategy"`
-	DockerfilePath        string `json:"dockerfile_path"`
+	BuildJobID            string            `json:"build_job_id"`
+	Repository            string            `json:"repository"`
+	RepositoryID          int64             `json:"repository_id"`
+	RepositoryOwnerID     int64             `json:"repository_owner_id"`
+	GitHubInstallationID  int64             `json:"github_installation_id"`
+	ResolvedCommitSHA     string            `json:"resolved_commit_sha"`
+	ApplicationRoot       string            `json:"application_root"`
+	BuildContext          string            `json:"build_context"`
+	ResolvedBuildStrategy string            `json:"resolved_build_strategy"`
+	DockerfilePath        string            `json:"dockerfile_path"`
+	Publication           PublicationTarget `json:"publication"`
 }
 
 func (s BuildSpec) Validate() error {
-	if !validOpaqueID(s.BuildJobID) || !validRepositoryFullName(s.Repository) || s.RepositoryID <= 0 || s.RepositoryOwnerID <= 0 || s.GitHubInstallationID <= 0 || !validSHA40(s.ResolvedCommitSHA) || !canonicalRepositoryPath(s.ApplicationRoot, true) || !canonicalRepositoryPath(s.BuildContext, true) || s.ResolvedBuildStrategy != StrategyDockerfile || !canonicalRepositoryPath(s.DockerfilePath, false) {
+	if !validOpaqueID(s.BuildJobID) || !validRepositoryFullName(s.Repository) || s.RepositoryID <= 0 || s.RepositoryOwnerID <= 0 || s.GitHubInstallationID <= 0 || !validSHA40(s.ResolvedCommitSHA) || !canonicalRepositoryPath(s.ApplicationRoot, true) || !canonicalRepositoryPath(s.BuildContext, true) || s.ResolvedBuildStrategy != StrategyDockerfile || !canonicalRepositoryPath(s.DockerfilePath, false) || !s.Publication.Empty() && s.Publication.Validate() != nil {
 		return Error{Code: "BUILD_SPEC_INVALID", Status: 409, Message: "Build Spec is invalid.", Cause: "build_spec"}
 	}
 	return nil
+}
+
+type ImageDescriptor struct {
+	Digest    string `json:"digest"`
+	MediaType string `json:"media_type"`
+	Size      int64  `json:"size,omitempty"`
+}
+
+type RemoteRegistryEvidence struct {
+	Descriptor ImageDescriptor `json:"descriptor"`
+	Platform   string          `json:"platform"`
+	Manifest   []byte          `json:"manifest"`
+	Private    bool            `json:"private"`
+}
+
+type ExecutorResult struct {
+	Platform        string                 `json:"platform"`
+	BuildKitVersion string                 `json:"buildkit_version"`
+	BuildxVersion   string                 `json:"buildx_version"`
+	BuilderIdentity string                 `json:"builder_identity"`
+	StartedAt       time.Time              `json:"started_at"`
+	CompletedAt     time.Time              `json:"completed_at"`
+	BuildDescriptor ImageDescriptor        `json:"build_descriptor"`
+	Remote          RemoteRegistryEvidence `json:"remote"`
+}
+
+type RunnerResult struct {
+	BuildJobID        string         `json:"build_job_id"`
+	AttemptID         string         `json:"attempt_id"`
+	RegistryReference string         `json:"registry_reference"`
+	Digest            string         `json:"digest"`
+	Executor          ExecutorResult `json:"executor"`
+}
+
+type RunnerFailure struct {
+	BuildJobID string `json:"build_job_id"`
+	AttemptID  string `json:"attempt_id"`
+	Code       string `json:"failure_code"`
+}
+
+type Completion struct {
+	Result    RunnerResult
+	LeaseHash []byte
+	Now       time.Time
+}
+
+type CompletionResult struct {
+	BuildRecordID string `json:"build_record_id"`
+	Digest        string `json:"digest"`
+	BuildJobState string `json:"build_job_state"`
+	Reused        bool   `json:"reused"`
 }
 
 type RunnerAccess struct {
@@ -201,7 +300,7 @@ func (s Service) Claim(ctx context.Context, jobID, attemptID string, identity Ru
 }
 
 func (s Service) BuildSpec(ctx context.Context, jobID, token string) (BuildSpec, error) {
-	if s.Store == nil || !validOpaqueID(jobID) || token == "" || len(token) > 256 {
+	if s.Store == nil || !validOpaqueID(jobID) || token == "" || len(token) > 256 || s.Registry.Validate() != nil {
 		return BuildSpec{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
 	}
 	hash := sha256.Sum256([]byte(token))
@@ -209,7 +308,7 @@ func (s Service) BuildSpec(ctx context.Context, jobID, token string) (BuildSpec,
 	if err != nil {
 		return BuildSpec{}, err
 	}
-	return buildSpec(job), nil
+	return buildSpec(job, s.Registry), nil
 }
 
 func (s Service) SourceGrant(ctx context.Context, jobID, attemptID string, runID uint64, runAttempt uint32, token string) (SourceGrant, error) {
@@ -253,8 +352,92 @@ func validateDispatchableJob(job Job) error {
 	return nil
 }
 
-func buildSpec(job Job) BuildSpec {
-	return BuildSpec{BuildJobID: job.ID, Repository: job.Source.RepositoryFullName, RepositoryID: job.Source.RepositoryID, RepositoryOwnerID: job.Source.RepositoryOwnerID, GitHubInstallationID: job.Source.InstallationID, ResolvedCommitSHA: job.Source.ResolvedCommitSHA, ApplicationRoot: job.Source.ApplicationRoot, BuildContext: job.Source.BuildContext, ResolvedBuildStrategy: job.ResolvedBuildStrategy, DockerfilePath: job.DockerfilePath}
+func buildSpec(job Job, registry RegistryConfig) BuildSpec {
+	return BuildSpec{BuildJobID: job.ID, Repository: job.Source.RepositoryFullName, RepositoryID: job.Source.RepositoryID, RepositoryOwnerID: job.Source.RepositoryOwnerID, GitHubInstallationID: job.Source.InstallationID, ResolvedCommitSHA: job.Source.ResolvedCommitSHA, ApplicationRoot: job.Source.ApplicationRoot, BuildContext: job.Source.BuildContext, ResolvedBuildStrategy: job.ResolvedBuildStrategy, DockerfilePath: job.DockerfilePath, Publication: registry.Target(job.ApplicationID, job.ID)}
+}
+
+func (s Service) Complete(ctx context.Context, result RunnerResult, token string) (CompletionResult, error) {
+	if s.Store == nil || token == "" || len(token) > 256 || s.Registry.Validate() != nil || s.Executor.Validate() != nil {
+		return CompletionResult{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
+	}
+	if err := validateRunnerResult(result); err != nil {
+		return CompletionResult{}, err
+	}
+	hash := sha256.Sum256([]byte(token))
+	return s.Store.CompleteRunner(ctx, Completion{Result: result, LeaseHash: hash[:], Now: s.clock()}, s.Registry, s.Executor)
+}
+
+func (s Service) Fail(ctx context.Context, failure RunnerFailure, token string) error {
+	if s.Store == nil || token == "" || len(token) > 256 || !validOpaqueID(failure.BuildJobID) || !validOpaqueID(failure.AttemptID) || !validRunnerFailure(failure.Code) {
+		return Error{Code: "RUNNER_FAILURE_INVALID", Status: 400, Message: "Runner failure is invalid.", Cause: "runner_failure"}
+	}
+	hash := sha256.Sum256([]byte(token))
+	return s.Store.FailRunner(ctx, failure, hash[:], s.clock())
+}
+
+func validateRunnerResult(result RunnerResult) error {
+	if !validOpaqueID(result.BuildJobID) || !validOpaqueID(result.AttemptID) || !ociDigestPattern.MatchString(result.Digest) || result.RegistryReference == "" || result.Executor.Platform != "linux/amd64" || result.Executor.BuildKitVersion == "" || result.Executor.BuildxVersion == "" || result.Executor.BuilderIdentity == "" || result.Executor.StartedAt.IsZero() || result.Executor.CompletedAt.Before(result.Executor.StartedAt) || !result.Executor.Remote.Private {
+		return invalid("RUNNER_RESULT_INVALID", "Runner result is invalid.", "runner_result")
+	}
+	local := result.Executor.BuildDescriptor
+	remote := result.Executor.Remote.Descriptor
+	if local.Digest != result.Digest || remote.Digest != result.Digest || !ociDigestPattern.MatchString(local.Digest) || local.MediaType == "" || remote.MediaType == "" || local.MediaType != remote.MediaType || local.Size > 0 && remote.Size != local.Size || result.Executor.Remote.Platform != result.Executor.Platform || len(result.Executor.Remote.Manifest) == 0 || len(result.Executor.Remote.Manifest) > 4<<20 {
+		return Error{Code: "REGISTRY_DIGEST_MISMATCH", Status: 409, Message: "Registry result does not match BuildKit output.", Cause: "registry_digest"}
+	}
+	sum := sha256.Sum256(result.Executor.Remote.Manifest)
+	if "sha256:"+hex.EncodeToString(sum[:]) != remote.Digest {
+		return Error{Code: "REGISTRY_DIGEST_MISMATCH", Status: 409, Message: "Remote registry manifest digest does not match the result.", Cause: "registry_digest"}
+	}
+	var manifest struct {
+		MediaType string `json:"mediaType"`
+	}
+	if json.Unmarshal(result.Executor.Remote.Manifest, &manifest) != nil || manifest.MediaType != remote.MediaType {
+		return invalid("RUNNER_RESULT_INVALID", "Remote registry descriptor is invalid.", "registry_descriptor")
+	}
+	return nil
+}
+
+func validRunnerFailure(code string) bool {
+	switch code {
+	case "USER_BUILD_FAILED", "REGISTRY_AUTH_FAILED", "REGISTRY_PUSH_FAILED", "REGISTRY_DIGEST_MISMATCH", "REGISTRY_ARTIFACT_NOT_FOUND", "EXECUTOR_INFRASTRUCTURE_FAILED":
+		return true
+	default:
+		return false
+	}
+}
+
+func validOCIHost(value string) bool {
+	if value == "" || value != strings.ToLower(value) || strings.ContainsAny(value, "/@ ") {
+		return false
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) > 2 || len(parts) == 2 {
+		if _, err := strconv.ParseUint(parts[1], 10, 16); err != nil {
+			return false
+		}
+	}
+	for _, part := range strings.Split(parts[0], ".") {
+		if part == "" || strings.Trim(part, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" || strings.HasPrefix(part, "-") || strings.HasSuffix(part, "-") {
+			return false
+		}
+	}
+	return true
+}
+
+func validOCIPath(value string) bool {
+	if value == "" || value != strings.ToLower(value) || len(value) > 200 {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || strings.Trim(segment, "abcdefghijklmnopqrstuvwxyz0123456789._-") != "" || strings.HasPrefix(segment, ".") || strings.HasPrefix(segment, "-") || strings.HasSuffix(segment, ".") || strings.HasSuffix(segment, "-") {
+			return false
+		}
+	}
+	return true
+}
+
+func validOCITag(value string) bool {
+	return value != "" && len(value) <= 128 && strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") == "" && value[0] != '.' && value[0] != '-'
 }
 
 func uintString(value uint64) string { return strconv.FormatUint(value, 10) }

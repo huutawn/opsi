@@ -55,23 +55,26 @@ func (s secret) destroy() {
 }
 
 type Result struct {
-	BuildJobID        string    `json:"build_job_id"`
-	AttemptID         string    `json:"attempt_id"`
-	ResolvedCommitSHA string    `json:"resolved_commit_sha"`
-	Strategy          string    `json:"strategy"`
-	DockerfilePath    string    `json:"dockerfile_path"`
-	BuildContext      string    `json:"build_context"`
-	Platform          string    `json:"platform"`
-	BuildKitVersion   string    `json:"buildkit_version"`
-	BuildxVersion     string    `json:"buildx_version"`
-	ImageDigest       string    `json:"image_digest,omitempty"`
-	OCIArtifactPath   string    `json:"oci_artifact_path,omitempty"`
-	OCIArtifactSHA256 string    `json:"oci_artifact_sha256,omitempty"`
-	BuildMetadataPath string    `json:"build_metadata_path,omitempty"`
-	StartedAt         time.Time `json:"started_at"`
-	CompletedAt       time.Time `json:"completed_at"`
-	Status            string    `json:"status"`
-	FailureCode       string    `json:"failure_code,omitempty"`
+	BuildJobID        string                          `json:"build_job_id"`
+	AttemptID         string                          `json:"attempt_id"`
+	ResolvedCommitSHA string                          `json:"resolved_commit_sha"`
+	Strategy          string                          `json:"strategy"`
+	DockerfilePath    string                          `json:"dockerfile_path"`
+	BuildContext      string                          `json:"build_context"`
+	Platform          string                          `json:"platform"`
+	BuildKitVersion   string                          `json:"buildkit_version"`
+	BuildxVersion     string                          `json:"buildx_version"`
+	ImageDigest       string                          `json:"image_digest,omitempty"`
+	RegistryReference string                          `json:"registry_reference,omitempty"`
+	BuildDescriptor   buildjob.ImageDescriptor        `json:"build_descriptor,omitempty"`
+	Remote            buildjob.RemoteRegistryEvidence `json:"remote,omitempty"`
+	OCIArtifactPath   string                          `json:"oci_artifact_path,omitempty"`
+	OCIArtifactSHA256 string                          `json:"oci_artifact_sha256,omitempty"`
+	BuildMetadataPath string                          `json:"build_metadata_path,omitempty"`
+	StartedAt         time.Time                       `json:"started_at"`
+	CompletedAt       time.Time                       `json:"completed_at"`
+	Status            string                          `json:"status"`
+	FailureCode       string                          `json:"failure_code,omitempty"`
 }
 
 type Request struct {
@@ -81,4 +84,5 @@ type Request struct {
 	Credential []byte
 	Workspace  string
 	OutputDir  string
+	Publisher  RegistryPublisher
 }

@@ -74,11 +74,11 @@ func TestMaterializeRejectsUnsupportedGitFeatures(t *testing.T) {
 
 func TestBuildFailureTaxonomy(t *testing.T) {
 	tests := map[string]string{
-		"dockerfile parse error on line 1":                           "DOCKERFILE_PARSE_FAILED",
-		"process \"/bin/sh -c false\" did not complete successfully": "BUILD_COMMAND_FAILED",
-		"rpc error: unavailable":                                     "BUILDKIT_EXECUTION_FAILED",
-		"failed to load LLB: network.host is not allowed":            "BUILD_ENTITLEMENT_DENIED",
-		"failed to load LLB: security.insecure is not allowed":       "BUILD_ENTITLEMENT_DENIED",
+		"dockerfile parse error on line 1":                           "USER_BUILD_FAILED",
+		"process \"/bin/sh -c false\" did not complete successfully": "USER_BUILD_FAILED",
+		"rpc error: unavailable":                                     "EXECUTOR_INFRASTRUCTURE_FAILED",
+		"failed to load LLB: network.host is not allowed":            "USER_BUILD_FAILED",
+		"failed to load LLB: security.insecure is not allowed":       "USER_BUILD_FAILED",
 	}
 	for output, want := range tests {
 		var typed Error
@@ -89,7 +89,7 @@ func TestBuildFailureTaxonomy(t *testing.T) {
 }
 
 func TestCanonicalBuildArgumentsDoNotGrantPrivileges(t *testing.T) {
-	args := canonicalBuildArgs("/source/Dockerfile", "/output/metadata.json", "/output/image.oci.tar", "/source")
+	args := canonicalBuildArgs("/source/Dockerfile", "/output/metadata.json", "type=oci,dest=/output/image.oci.tar", "/source")
 	want := "buildx build --builder opsi --progress=plain --platform linux/amd64 --file /source/Dockerfile --metadata-file /output/metadata.json --provenance=false --output type=oci,dest=/output/image.oci.tar /source"
 	if got := strings.Join(args, " "); got != want {
 		t.Fatalf("args=%q want=%q", got, want)
@@ -99,6 +99,14 @@ func TestCanonicalBuildArgumentsDoNotGrantPrivileges(t *testing.T) {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("canonical build arguments contain %q: %s", forbidden, joined)
 		}
+	}
+}
+
+func TestCanonicalRegistryBuildArgumentsPushOnlyOpsiTarget(t *testing.T) {
+	args := canonicalBuildArgs("/source/Dockerfile", "/output/metadata.json", "type=registry,name=ghcr.io/opsi/builds/app-abc:job-def,push=true", "/source")
+	want := "buildx build --builder opsi --progress=plain --platform linux/amd64 --file /source/Dockerfile --metadata-file /output/metadata.json --provenance=false --output type=registry,name=ghcr.io/opsi/builds/app-abc:job-def,push=true /source"
+	if got := strings.Join(args, " "); got != want || strings.Contains(got, "--load") || strings.Contains(got, "latest") {
+		t.Fatalf("args=%q want=%q", got, want)
 	}
 }
 
@@ -117,12 +125,16 @@ func TestCanonicalExecutorWorkflowPinsRestrictedBuilder(t *testing.T) {
 		"image=" + BuildKitImage,
 		"network=bridge",
 		"buildkitd-flags: " + BuildKitDaemonFlag,
+		"contents: read",
+		"id-token: write",
+		"packages: write",
+		"GITHUB_TOKEN: ${{ github.token }}",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("workflow missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"docker/setup-buildx-action@v4", "security.insecure", "--allow ", "--allow=", "--ssh", "--secret", "docker build ", "driver: docker\n", "push: true"} {
+	for _, forbidden := range []string{"docker/setup-buildx-action@v4", "security.insecure", "--allow ", "--allow=", "--ssh", "--secret", "docker build ", "driver: docker\n", "push: true", "contents: write", "actions: write", "pull-requests: write", "administration: write", ":latest"} {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("workflow contains forbidden %q", forbidden)
 		}
@@ -165,6 +177,30 @@ func TestBuildEnvironmentDoesNotForwardRunnerCredentials(t *testing.T) {
 		if strings.Contains(environment, secret) {
 			t.Fatalf("BuildKit environment contains %q: %s", secret, environment)
 		}
+	}
+}
+
+func TestGHCRPublisherUsesPasswordStdinAndCanonicalHost(t *testing.T) {
+	directory := t.TempDir()
+	argsPath := filepath.Join(directory, "args")
+	script := filepath.Join(directory, "docker")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGS_FILE\"\n/bin/cat >/dev/null\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	t.Setenv("ARGS_FILE", argsPath)
+	credential := []byte("ghcr-token-must-use-stdin")
+	publisher := GHCRRegistryPublisher{Username: "opsi-bot", Credential: credential}
+	target := buildjob.PublicationTarget{Host: "ghcr.io", Repository: "ghcr.io/opsi/builds/app-test", Tag: "job-test"}
+	if err := publisher.Prepare(context.Background(), target, directory, commandEnv(map[string]string{"ARGS_FILE": argsPath})); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil || string(args) != "login\nghcr.io\n--username\nopsi-bot\n--password-stdin\n" || bytes.Contains(args, credential) {
+		t.Fatalf("args=%q err=%v", args, err)
+	}
+	if err := publisher.Prepare(context.Background(), buildjob.PublicationTarget{Host: "registry.example", Repository: "registry.example/opsi/builds/app-test", Tag: "job-test"}, directory, commandEnv(nil)); err == nil {
+		t.Fatal("GHCR publisher accepted an external registry host")
 	}
 }
 

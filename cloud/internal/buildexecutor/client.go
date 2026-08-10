@@ -48,6 +48,33 @@ func (c Client) SourceAccess(ctx context.Context, jobID, attemptID string, runID
 	return access, nil
 }
 
+func (c Client) Complete(ctx context.Context, result Result) (buildjob.CompletionResult, error) {
+	request := buildjob.RunnerResult{
+		BuildJobID: result.BuildJobID, AttemptID: result.AttemptID, RegistryReference: result.RegistryReference, Digest: result.ImageDigest,
+		Executor: buildjob.ExecutorResult{Platform: result.Platform, BuildKitVersion: result.BuildKitVersion, BuildxVersion: result.BuildxVersion, BuilderIdentity: BuildKitImage, StartedAt: result.StartedAt, CompletedAt: result.CompletedAt, BuildDescriptor: result.BuildDescriptor, Remote: result.Remote},
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return buildjob.CompletionResult{}, Error{Code: "EXECUTOR_INFRASTRUCTURE_FAILED", Phase: "completion", Message: "runner result cannot be encoded"}
+	}
+	var response buildjob.CompletionResult
+	if err := c.do(ctx, http.MethodPost, strings.TrimSuffix(c.BaseURL, "/")+"/v1/build-runner/result", body, &response); err != nil {
+		return buildjob.CompletionResult{}, err
+	}
+	return response, nil
+}
+
+func (c Client) Fail(ctx context.Context, jobID, attemptID, code string) error {
+	body, err := json.Marshal(buildjob.RunnerFailure{BuildJobID: jobID, AttemptID: attemptID, Code: code})
+	if err != nil {
+		return Error{Code: "EXECUTOR_INFRASTRUCTURE_FAILED", Phase: "completion", Message: "runner failure cannot be encoded"}
+	}
+	var response struct {
+		Status string `json:"status"`
+	}
+	return c.do(ctx, http.MethodPost, strings.TrimSuffix(c.BaseURL, "/")+"/v1/build-runner/failure", body, &response)
+}
+
 func (c Client) do(ctx context.Context, method, endpoint string, body []byte, target any) error {
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {

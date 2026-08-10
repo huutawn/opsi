@@ -17,6 +17,8 @@ import (
 
 type BuildOutput struct {
 	ImageDigest       string
+	Descriptor        buildjob.ImageDescriptor
+	Remote            buildjob.RemoteRegistryEvidence
 	OCIArtifactPath   string
 	OCIArtifactSHA256 string
 	MetadataPath      string
@@ -25,6 +27,33 @@ type BuildOutput struct {
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func Build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, outputDir string, log io.Writer) (BuildOutput, error) {
+	ociPath := filepath.Join(outputDir, "image.oci.tar")
+	return build(ctx, spec, sourceDir, workspace, outputDir, "type=oci,dest="+ociPath, ociPath, log)
+}
+
+func Publish(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, outputDir string, publisher RegistryPublisher, log io.Writer) (BuildOutput, error) {
+	if publisher == nil {
+		return BuildOutput{}, Error{Code: "EXECUTOR_INFRASTRUCTURE_FAILED", Phase: "infrastructure", Message: "registry publisher is unavailable"}
+	}
+	dockerConfig := filepath.Join(workspace, "docker-config")
+	env := dockerEnv(dockerConfig)
+	if err := publisher.Prepare(ctx, spec.Publication, workspace, env); err != nil {
+		return BuildOutput{}, err
+	}
+	defer publisher.Cleanup(ctx, spec.Publication, workspace, env)
+	output, err := build(ctx, spec, sourceDir, workspace, outputDir, "type=registry,name="+spec.Publication.TagReference()+",push=true", "", log)
+	if err != nil {
+		return BuildOutput{}, err
+	}
+	remote, err := publisher.Verify(ctx, spec.Publication, output.Descriptor, workspace, env)
+	if err != nil {
+		return BuildOutput{}, err
+	}
+	output.Remote = remote
+	return output, nil
+}
+
+func build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, outputDir, exporter, ociPath string, log io.Writer) (BuildOutput, error) {
 	if err := spec.Validate(); err != nil {
 		return BuildOutput{}, Error{Code: "BUILD_SPEC_INVALID", Phase: "contract", Message: "canonical Build Spec is invalid"}
 	}
@@ -68,8 +97,7 @@ func Build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, o
 		return BuildOutput{}, err
 	}
 	metadataPath := filepath.Join(outputDir, "buildkit-metadata.json")
-	ociPath := filepath.Join(outputDir, "image.oci.tar")
-	args := canonicalBuildArgs(dockerfilePath, metadataPath, ociPath, contextPath)
+	args := canonicalBuildArgs(dockerfilePath, metadataPath, exporter, contextPath)
 	logFile, err := os.CreateTemp(workspace, "buildkit-log-*")
 	if err != nil {
 		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "BuildKit log cannot be created"}
@@ -89,22 +117,27 @@ func Build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, o
 	if runErr != nil {
 		return BuildOutput{}, classifyBuildFailure(readTail(logPath, 1<<20))
 	}
-	digest, err := imageDigest(metadataPath)
+	descriptor, err := imageDescriptor(metadataPath)
 	if err != nil {
-		return BuildOutput{}, Error{Code: "BUILDKIT_EXECUTION_FAILED", Phase: "build", Message: "BuildKit metadata does not contain a valid image digest"}
+		return BuildOutput{}, Error{Code: "EXECUTOR_INFRASTRUCTURE_FAILED", Phase: "infrastructure", Message: "BuildKit metadata does not contain a valid image descriptor"}
 	}
-	artifactHash, err := fileSHA256(ociPath)
-	if err != nil {
-		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "OCI artifact cannot be hashed"}
+	output := BuildOutput{ImageDigest: descriptor.Digest, Descriptor: descriptor, MetadataPath: metadataPath}
+	if ociPath != "" {
+		artifactHash, err := fileSHA256(ociPath)
+		if err != nil {
+			return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "OCI artifact cannot be hashed"}
+		}
+		output.OCIArtifactPath = ociPath
+		output.OCIArtifactSHA256 = artifactHash
 	}
-	return BuildOutput{ImageDigest: digest, OCIArtifactPath: ociPath, OCIArtifactSHA256: artifactHash, MetadataPath: metadataPath}, nil
+	return output, nil
 }
 
-func canonicalBuildArgs(dockerfilePath, metadataPath, ociPath, contextPath string) []string {
+func canonicalBuildArgs(dockerfilePath, metadataPath, exporter, contextPath string) []string {
 	return []string{
 		"buildx", "build", "--builder", BuilderName, "--progress=plain", "--platform", Platform,
 		"--file", dockerfilePath, "--metadata-file", metadataPath, "--provenance=false",
-		"--output", "type=oci,dest=" + ociPath, contextPath,
+		"--output", exporter, contextPath,
 	}
 }
 
@@ -160,7 +193,7 @@ func readTail(path string, limit int64) string {
 func verifyToolchain(ctx context.Context, directory string, env []string) error {
 	buildx, err := run(ctx, directory, env, "docker", "buildx", "version")
 	if err != nil {
-		return Error{Code: "BUILDKIT_UNAVAILABLE", Phase: "infrastructure", Message: "Docker Buildx is unavailable"}
+		return Error{Code: "EXECUTOR_INFRASTRUCTURE_FAILED", Phase: "infrastructure", Message: "Docker Buildx is unavailable"}
 	}
 	fields := strings.Fields(string(buildx))
 	if len(fields) < 2 || fields[1] != BuildxVersion {
@@ -168,7 +201,7 @@ func verifyToolchain(ctx context.Context, directory string, env []string) error 
 	}
 	inspect, err := run(ctx, directory, env, "docker", "buildx", "inspect", BuilderName, "--bootstrap")
 	if err != nil {
-		return Error{Code: "BUILDKIT_UNAVAILABLE", Phase: "infrastructure", Message: "BuildKit builder is unavailable"}
+		return Error{Code: "EXECUTOR_INFRASTRUCTURE_FAILED", Phase: "infrastructure", Message: "BuildKit builder is unavailable"}
 	}
 	inspection := string(inspect)
 	for _, expected := range []string{"Driver:", "docker-container", "image=\"" + BuildKitImage + "\"", "network=\"bridge\"", "BuildKit daemon flags: " + BuildKitDaemonFlag, "BuildKit version:", BuildKitVersion} {
@@ -178,7 +211,7 @@ func verifyToolchain(ctx context.Context, directory string, env []string) error 
 	}
 	container, err := run(ctx, directory, env, "docker", "inspect", "buildx_buildkit_"+BuilderName+"0")
 	if err != nil {
-		return Error{Code: "BUILDKIT_UNAVAILABLE", Phase: "infrastructure", Message: "BuildKit container is unavailable"}
+		return Error{Code: "EXECUTOR_INFRASTRUCTURE_FAILED", Phase: "infrastructure", Message: "BuildKit container is unavailable"}
 	}
 	var identity []struct {
 		Config struct {
@@ -209,42 +242,38 @@ func classifyBuildFailure(output string) error {
 	lower := strings.ToLower(output)
 	switch {
 	case strings.Contains(lower, "network.host is not allowed") || strings.Contains(lower, "security.insecure is not allowed") || strings.Contains(lower, "device is not allowed"):
-		return Error{Code: "BUILD_ENTITLEMENT_DENIED", Phase: "build", Message: "Dockerfile requested an entitlement not granted by Opsi"}
+		return Error{Code: "USER_BUILD_FAILED", Phase: "build", Message: "Dockerfile requested an entitlement not granted by Opsi"}
 	case strings.Contains(lower, "dockerfile parse error") || strings.Contains(lower, "failed to parse dockerfile"):
-		return Error{Code: "DOCKERFILE_PARSE_FAILED", Phase: "build", Message: "Dockerfile parsing failed"}
+		return Error{Code: "USER_BUILD_FAILED", Phase: "build", Message: "Dockerfile parsing failed"}
 	case strings.Contains(lower, "did not complete successfully") || strings.Contains(lower, "process \""):
-		return Error{Code: "BUILD_COMMAND_FAILED", Phase: "build", Message: "Dockerfile build command failed"}
+		return Error{Code: "USER_BUILD_FAILED", Phase: "build", Message: "Dockerfile build command failed"}
+	case strings.Contains(lower, "unauthorized") || strings.Contains(lower, "denied") || strings.Contains(lower, "insufficient_scope"):
+		return Error{Code: "REGISTRY_AUTH_FAILED", Phase: "publication", Message: "Registry authentication failed"}
+	case strings.Contains(lower, "failed to push") || strings.Contains(lower, "error pushing"):
+		return Error{Code: "REGISTRY_PUSH_FAILED", Phase: "publication", Message: "Registry publication failed"}
 	default:
-		return Error{Code: "BUILDKIT_EXECUTION_FAILED", Phase: "build", Message: "BuildKit execution failed"}
+		return Error{Code: "EXECUTOR_INFRASTRUCTURE_FAILED", Phase: "infrastructure", Message: "BuildKit execution failed"}
 	}
 }
 
-func imageDigest(path string) (string, error) {
+func imageDescriptor(path string) (buildjob.ImageDescriptor, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return buildjob.ImageDescriptor{}, err
 	}
 	var metadata map[string]json.RawMessage
 	if err := json.Unmarshal(data, &metadata); err != nil {
-		return "", err
+		return buildjob.ImageDescriptor{}, err
 	}
-	for _, key := range []string{"containerimage.digest", "containerimage.descriptor"} {
-		value := metadata[key]
-		if key == "containerimage.descriptor" {
-			var descriptor struct {
-				Digest string `json:"digest"`
-			}
-			if json.Unmarshal(value, &descriptor) == nil && digestPattern.MatchString(descriptor.Digest) {
-				return descriptor.Digest, nil
-			}
-			continue
-		}
-		var digest string
-		if json.Unmarshal(value, &digest) == nil && digestPattern.MatchString(digest) {
-			return digest, nil
-		}
+	var descriptor struct {
+		Digest    string `json:"digest"`
+		MediaType string `json:"mediaType"`
+		Size      int64  `json:"size"`
 	}
-	return "", os.ErrInvalid
+	if json.Unmarshal(metadata["containerimage.descriptor"], &descriptor) == nil && digestPattern.MatchString(descriptor.Digest) && descriptor.MediaType != "" {
+		return buildjob.ImageDescriptor{Digest: descriptor.Digest, MediaType: descriptor.MediaType, Size: descriptor.Size}, nil
+	}
+	return buildjob.ImageDescriptor{}, os.ErrInvalid
 }
 
 func fileSHA256(path string) (string, error) {

@@ -16,6 +16,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  packages: write
 
 jobs:
   build:
@@ -57,6 +58,8 @@ jobs:
       - name: Claim BuildJob and run canonical executor
         env:
           OPSI_CLOUD_URL: ${{ vars.OPSI_CLOUD_URL }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
           BUILD_JOB_ID: ${{ inputs.build_job_id }}
           ATTEMPT_ID: ${{ inputs.attempt_id }}
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}

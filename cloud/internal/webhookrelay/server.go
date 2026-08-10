@@ -86,7 +86,7 @@ func NewServer(cfg Config) *Server {
 	registryService := registry.NewService()
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
-	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor}
+	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor, Registry: cfg.BuildRegistry}
 	server := &Server{
 		Config:                  cfg,
 		OTP:                     service,
@@ -193,6 +193,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/build-runner/claim", s.handleBuildRunnerClaim)
 	mux.HandleFunc("/v1/build-runner/build-spec", s.handleBuildRunnerBuildSpec)
 	mux.HandleFunc("/v1/build-runner/source-access", s.handleBuildRunnerSourceAccess)
+	mux.HandleFunc("/v1/build-runner/result", s.handleBuildRunnerResult)
+	mux.HandleFunc("/v1/build-runner/failure", s.handleBuildRunnerFailure)
 	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
 	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)

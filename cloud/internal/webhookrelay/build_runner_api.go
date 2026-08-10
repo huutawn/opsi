@@ -129,8 +129,49 @@ func (s *Server) handleBuildRunnerBuildSpec(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, spec)
 }
 
+func (s *Server) handleBuildRunnerResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request buildjob.RunnerResult
+	invalid := buildjob.Error{Code: "RUNNER_RESULT_INVALID", Status: 400, Message: "Runner result is invalid.", Cause: "request"}
+	if !decodeStrictRunnerJSONLimit(w, r, &request, invalid, 5<<20) {
+		return
+	}
+	result, err := s.BuildJobs.Complete(r.Context(), request, bearerToken(r))
+	if err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleBuildRunnerFailure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request buildjob.RunnerFailure
+	invalid := buildjob.Error{Code: "RUNNER_FAILURE_INVALID", Status: 400, Message: "Runner failure is invalid.", Cause: "request"}
+	if !decodeStrictRunnerJSON(w, r, &request, invalid) {
+		return
+	}
+	if err := s.BuildJobs.Fail(r.Context(), request, bearerToken(r)); err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]string{"status": buildjob.StatusFailed})
+}
+
 func decodeStrictRunnerJSON(w http.ResponseWriter, r *http.Request, target any, invalidRequest buildjob.Error) bool {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 96<<10))
+	return decodeStrictRunnerJSONLimit(w, r, target, invalidRequest, 96<<10)
+}
+
+func decodeStrictRunnerJSONLimit(w http.ResponseWriter, r *http.Request, target any, invalidRequest buildjob.Error, limit int64) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		writeBuildJobFailure(w, r, invalidRequest)

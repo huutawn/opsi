@@ -78,6 +78,8 @@ type Job struct {
 	FailureCode            string         `json:"failure_code,omitempty"`
 	FailureMessageRedacted string         `json:"failure_message_redacted,omitempty"`
 	FailureCause           string         `json:"failure_cause,omitempty"`
+	BuildRecordID          string         `json:"build_record_id,omitempty"`
+	CompletedAt            *time.Time     `json:"completed_at,omitempty"`
 	CreatedBy              string         `json:"created_by"`
 	CreatedAt              time.Time      `json:"created_at"`
 	UpdatedAt              time.Time      `json:"updated_at"`
@@ -103,6 +105,8 @@ type Store interface {
 	RejectDispatch(context.Context, string, string, time.Time) error
 	ClaimDispatch(context.Context, string, string, RunnerIdentity, []byte, time.Time, time.Time) error
 	GetRunnerJob(context.Context, RunnerAccess, time.Time) (Job, error)
+	CompleteRunner(context.Context, Completion, RegistryConfig, ExecutorConfig) (CompletionResult, error)
+	FailRunner(context.Context, RunnerFailure, []byte, time.Time) error
 }
 
 type Service struct {
@@ -110,6 +114,7 @@ type Service struct {
 	Sources    SourceAuthority
 	Repository RepositoryAuthority
 	Executor   ExecutorConfig
+	Registry   RegistryConfig
 	Dispatcher Dispatcher
 	Now        func() time.Time
 	NewID      func() (string, error)

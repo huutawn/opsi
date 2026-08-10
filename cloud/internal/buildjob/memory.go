@@ -124,6 +124,37 @@ func (s *MemoryStore) GetRunnerJob(_ context.Context, access RunnerAccess, now t
 	return Job{}, Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
 }
 
+func (s *MemoryStore) CompleteRunner(_ context.Context, completion Completion, registry RegistryConfig, _ ExecutorConfig) (CompletionResult, error) {
+	return CompletionResult{}, unavailable()
+}
+
+func (s *MemoryStore) FailRunner(_ context.Context, failure RunnerFailure, leaseHash []byte, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, attempt := range s.attempts {
+		if !bytes.Equal(attempt.LeaseHash, leaseHash) {
+			continue
+		}
+		job := s.byID[failure.BuildJobID]
+		if attempt.BuildJobID != failure.BuildJobID || attempt.AttemptID != failure.AttemptID || !now.Before(attempt.LeaseExpiresAt) || attempt.LastState != DispatchStateClaimed || job.Status != StatusRunning {
+			return Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this BuildJob.", Cause: "build_job_status"}
+		}
+		job.Status = StatusFailed
+		job.FailureCode = failure.Code
+		job.FailureMessageRedacted = runnerFailureMessage(failure.Code)
+		job.FailureCause = "executor"
+		job.CompletedAt = &now
+		job.UpdatedAt = now
+		s.byID[job.ID] = job
+		attempt.LastState = DispatchStateFailed
+		attempt.FailureCode = failure.Code
+		attempt.CompletedAt = &now
+		s.attempts[id] = attempt
+		return nil
+	}
+	return Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
+}
+
 func (s *MemoryStore) Create(_ context.Context, job Job) (Job, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

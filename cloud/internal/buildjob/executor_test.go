@@ -26,7 +26,7 @@ func TestBuildExecutorDispatchClaimLeaseAndReplayContract(t *testing.T) {
 	if _, _, err := store.Create(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	service := Service{Store: store, Sources: testSources{source: executorTestSource(job)}, Executor: executorTestConfig(), Dispatcher: testDispatcher{}, Now: func() time.Time { return now }}
+	service := Service{Store: store, Sources: testSources{source: executorTestSource(job)}, Executor: executorTestConfig(), Registry: executorTestRegistry(), Dispatcher: testDispatcher{}, Now: func() time.Time { return now }}
 	attempt, err := service.Dispatch(context.Background(), job.ProjectID, job.ApplicationID, job.ID)
 	if err != nil || attempt.LastState != DispatchStateDispatched || attempt.RunID != 0 {
 		t.Fatalf("attempt=%+v err=%v", attempt, err)
@@ -210,6 +210,21 @@ func TestBuildExecutorDispatchFailureDoesNotBecomeBuildFailure(t *testing.T) {
 
 func executorTestConfig() ExecutorConfig {
 	return ExecutorConfig{Owner: "opsi", Repository: "executor", Workflow: ".github/workflows/opsi-build-executor.yml", Ref: "refs/heads/main"}
+}
+
+func executorTestRegistry() RegistryConfig {
+	return RegistryConfig{Host: "ghcr.io", Namespace: "opsi", RepositoryPrefix: "builds", Visibility: "private"}
+}
+
+func TestRegistryTargetIsCanonicalAndUserNamespaceIndependent(t *testing.T) {
+	config := executorTestRegistry()
+	target := config.Target("Application/User Input", "bj-123")
+	if err := target.Validate(); err != nil || target.Host != "ghcr.io" || !strings.HasPrefix(target.Repository, "ghcr.io/opsi/builds/app-") || !strings.HasPrefix(target.Tag, "job-") || strings.Contains(target.Repository, "Application") || strings.Contains(target.Repository, "User") {
+		t.Fatalf("target=%+v err=%v", target, err)
+	}
+	if target != config.Target("Application/User Input", "bj-123") || target == config.Target("other", "bj-123") || target == config.Target("Application/User Input", "bj-other") {
+		t.Fatalf("target is not deterministic and scoped: %+v", target)
+	}
 }
 
 func executorTestIdentity(runID uint64) RunnerIdentity {

@@ -98,12 +98,12 @@ func (s PostgresStore) List(ctx context.Context, projectID, applicationID, statu
 	return jobs, nil
 }
 
-const selectJobColumns = `SELECT id,project_id,environment_id,application_id,source_binding_id,source_binding_updated_at,github_installation_id,repository_id,repository_owner_id,repository_full_name,selected_ref,resolved_commit_sha,application_root,build_context,requested_build_strategy,resolved_build_strategy,COALESCE(dockerfile_path,''),status,COALESCE(failure_code,''),COALESCE(failure_message_redacted,''),COALESCE(failure_cause,''),created_by,idempotency_key,created_at,updated_at FROM build_jobs`
+const selectJobColumns = `SELECT id,project_id,environment_id,application_id,source_binding_id,source_binding_updated_at,github_installation_id,repository_id,repository_owner_id,repository_full_name,selected_ref,resolved_commit_sha,application_root,build_context,requested_build_strategy,resolved_build_strategy,COALESCE(dockerfile_path,''),status,COALESCE(failure_code,''),COALESCE(failure_message_redacted,''),COALESCE(failure_cause,''),COALESCE(build_record_id,''),completed_at,created_by,idempotency_key,created_at,updated_at FROM build_jobs`
 
 type scanner interface{ Scan(...any) error }
 
 func scanJob(row scanner) (Job, error) {
 	var job Job
-	err := row.Scan(&job.ID, &job.ProjectID, &job.EnvironmentID, &job.ApplicationID, &job.Source.BindingID, &job.Source.BindingUpdatedAt, &job.Source.InstallationID, &job.Source.RepositoryID, &job.Source.RepositoryOwnerID, &job.Source.RepositoryFullName, &job.Source.SelectedRef, &job.Source.ResolvedCommitSHA, &job.Source.ApplicationRoot, &job.Source.BuildContext, &job.RequestedBuildStrategy, &job.ResolvedBuildStrategy, &job.DockerfilePath, &job.Status, &job.FailureCode, &job.FailureMessageRedacted, &job.FailureCause, &job.CreatedBy, &job.IdempotencyKey, &job.CreatedAt, &job.UpdatedAt)
+	err := row.Scan(&job.ID, &job.ProjectID, &job.EnvironmentID, &job.ApplicationID, &job.Source.BindingID, &job.Source.BindingUpdatedAt, &job.Source.InstallationID, &job.Source.RepositoryID, &job.Source.RepositoryOwnerID, &job.Source.RepositoryFullName, &job.Source.SelectedRef, &job.Source.ResolvedCommitSHA, &job.Source.ApplicationRoot, &job.Source.BuildContext, &job.RequestedBuildStrategy, &job.ResolvedBuildStrategy, &job.DockerfilePath, &job.Status, &job.FailureCode, &job.FailureMessageRedacted, &job.FailureCause, &job.BuildRecordID, &job.CompletedAt, &job.CreatedBy, &job.IdempotencyKey, &job.CreatedAt, &job.UpdatedAt)
 	return job, err
 }

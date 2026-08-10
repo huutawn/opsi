@@ -27,6 +27,7 @@ jobs:
           cache: npm
           cache-dependency-path: cli/ui/package-lock.json
       - run: npm install --global npm@$(cat .npm-version)
+      - run: sudo apt-get update && sudo apt-get install --yes ripgrep
       - run: make clean
       - run: make verify
       - run: make build
