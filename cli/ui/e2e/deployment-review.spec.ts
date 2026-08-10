@@ -165,7 +165,7 @@ test("public deployment waits for workload success and keeps route failure as a 
   expect(calls).toEqual(["workload-succeeded", "exposure-preview", "exposure-failed"]);
   await expect(page.locator(".liveDeploymentList li").filter({ hasText: "Deploy workload" })).toContainText("Running");
   await expect(page.locator(".liveDeploymentList li").filter({ hasText: "Publish route" })).toContainText("Degraded");
-  await expect(page.getByText("apps.example.com/api", { exact: true })).toBeVisible();
+  await expect(page.locator(".liveDeploymentList").getByText("apps.example.com/api", { exact: true })).toBeVisible();
 });
 
 test("public deployment failure never starts Exposure", async ({ page }) => {

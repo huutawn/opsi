@@ -59,6 +59,11 @@ export type ServerLifecycle = {
 
 const activeBootstrapStatuses = new Set(["created", "pending", "waiting", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
 const connectingBootstrapStatuses = new Set(["created", "pending", "retry_wait", "validating", "connecting"]);
+const failedBootstrapStatuses = new Set(["failed", "dead_letter"]);
+const offlineRuntimeStatuses = new Set(["offline", "failed", "unavailable", "degraded"]);
+const offlineNodeStatuses = new Set(["offline", "failed", "unavailable", "unhealthy", "degraded", "stale", "not_ready"]);
+const offlineAgentStatuses = new Set(["offline", "failed", "unavailable", "disconnected", "stale"]);
+const usableRuntimeStatuses = new Set(["healthy", "ready", "active"]);
 const usableNodeStatuses = new Set(["healthy", "ready", "active"]);
 const defaultCPURequestMillicores = 100;
 const defaultMemoryRequestBytes = 128 * 1024 * 1024;
@@ -211,25 +216,35 @@ export function terminalBootstrap(session?: BootstrapSession) {
   return !session || !activeBootstrapStatuses.has(session.status);
 }
 
+export function bootstrapLifecycleStatus(status: string): "Waiting" | "Connecting" | "Bootstrapping" | "Failed" | "Unknown" {
+  if (status === "waiting") return "Waiting";
+  if (connectingBootstrapStatuses.has(status)) return "Connecting";
+  if (activeBootstrapStatuses.has(status)) return "Bootstrapping";
+  if (failedBootstrapStatuses.has(status)) return "Failed";
+  return "Unknown";
+}
+
 export function serverLifecycle(facts: PlacementFacts, sessions: BootstrapSession[]): ServerLifecycle {
   const active = latestActiveBootstrap(sessions);
   const latest = latestBootstrap(sessions);
   for (const runtime of facts.runtimes) {
     const match = readyServer(facts.nodes.filter((node) => node.runtime_id === runtime.id), facts.agents.filter((agent) => agent.runtime_id === runtime.id));
-    if (match) return { status: "Ready", runtime, ...match, session: active ? undefined : latest };
+    if (usableRuntimeStatuses.has(runtime.status) && match) return { status: "Ready", runtime, ...match, session: active ? undefined : latest };
   }
-  if (active) return { status: active.status === "waiting" ? "Waiting" : connectingBootstrapStatuses.has(active.status) ? "Connecting" : "Bootstrapping", session: active };
+  if (active) return { status: bootstrapLifecycleStatus(active.status) as "Waiting" | "Connecting" | "Bootstrapping", session: active };
   const runtime = facts.runtimes[0];
-  const node = facts.nodes.find((item) => item.runtime_id === runtime?.id) ?? facts.nodes[0];
-  const agent = facts.agents.find((item) => item.runtime_id === runtime?.id && (!node || item.node_id === node.id)) ?? facts.agents[0];
-  if (latest && ["failed", "dead_letter"].includes(latest.status)) return { status: "Failed", runtime, node, agent, session: latest };
-  if (runtime || node || agent) return { status: "Offline", runtime, node, agent, session: latest };
+  const agent = facts.agents.find((item) => item.runtime_id === runtime?.id) ?? facts.agents[0];
+  const node = facts.nodes.find((item) => item.id === agent?.node_id && item.runtime_id === agent.runtime_id) ?? facts.nodes.find((item) => item.runtime_id === runtime?.id) ?? facts.nodes[0];
+  if (latest && failedBootstrapStatuses.has(latest.status)) return { status: "Failed", runtime, node, agent, session: latest };
+  if (serverStatus(node ? [node] : [], agent ? [agent] : [], runtime?.status) === "Offline") return { status: "Offline", runtime, node, agent, session: latest };
   return { status: "Unknown", session: latest };
 }
 
-export function serverStatus(nodes: PlacementFacts["nodes"], agents: PlacementFacts["agents"]): "Ready" | "Offline" | "Unknown" {
-  if (readyServer(nodes, agents)) return "Ready";
-  return nodes.length || agents.length ? "Offline" : "Unknown";
+export function serverStatus(nodes: PlacementFacts["nodes"], agents: PlacementFacts["agents"], runtimeStatus?: string): "Ready" | "Offline" | "Unknown" {
+  if ((!runtimeStatus || usableRuntimeStatuses.has(runtimeStatus)) && readyServer(nodes, agents)) return "Ready";
+  if (runtimeStatus && offlineRuntimeStatuses.has(runtimeStatus)) return "Offline";
+  if (nodes.some((node) => offlineNodeStatuses.has(node.status)) || agents.some((agent) => offlineAgentStatuses.has(agent.status))) return "Offline";
+  return "Unknown";
 }
 
 export function topologyOnboarding(facts: PlacementFacts, plan: TopologyPlan | null, sessions: BootstrapSession[]): TopologyOnboardingState {

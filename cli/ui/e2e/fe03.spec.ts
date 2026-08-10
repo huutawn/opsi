@@ -28,9 +28,13 @@ test("Design renders applied placement, unplaced applications, factual servers, 
   await expect(page.getByRole("heading", { name: "api", exact: true })).toBeFocused();
   await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Live", exact: true }).click();
-  await expect(page.locator(".liveRuntimeList").getByText("agent-primary", { exact: false })).toBeVisible();
-  await expect(page.getByText("node-primary (healthy)", { exact: true })).toBeVisible();
-  await expect(page.getByText("dep-1", { exact: true })).toBeVisible();
+  const liveCanvas = page.getByLabel("Read-only factual topology canvas");
+  const liveServer = liveCanvas.locator('.topologyResourceNode[data-resource-mode="live"][data-resource-kind="server"]').filter({ hasText: "Primary runtime" });
+  await expect(liveServer).toContainText("Primary runtime");
+  await expect(liveServer).toContainText("Ready");
+  await expect(liveServer).toContainText("agent-primary · active");
+  await expect(liveServer).toContainText("node-primary · healthy");
+  await expect(page.locator(".liveDeploymentList").getByText("dep-1", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Design", exact: true }).click();
   await expect(page.getByRole("link", { name: "Support", exact: true })).toHaveCount(0);
   await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
@@ -304,7 +308,7 @@ test("Topology onboarding exposes the factual next action for every state", asyn
     if (next === "failed") { await button.click(); await expect(page.getByRole("dialog", { name: /retry bootstrap session/i })).toBeVisible(); await page.getByRole("button", { name: "Confirm and submit" }).click(); await expect(page.getByText(/Bootstrap boot-failed returned status pending/)).toBeVisible(); await page.getByRole("button", { name: "Close" }).click(); }
     if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add application" })).toBeVisible(); await page.getByRole("button", { name: "Close application wizard" }).click(); }
     if (next === "placement") { await button.click(); await expect(page.getByRole("dialog", { name: "Plan placement" })).toBeVisible(); await page.getByRole("button", { name: "Close placement dialog" }).click(); }
-    if (next === "review") { await page.getByRole("button", { name: "Live", exact: true }).click(); await button.click(); await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true"); }
+    if (next === "review") { await button.click(); await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true"); }
   }
 });
 

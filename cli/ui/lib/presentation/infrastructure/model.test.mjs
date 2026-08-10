@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, currentEnvironment, deploymentAssignmentFor, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, topologyResourcePresentation, updateCanvasPlacement } from "./model.ts";
+import { bootstrapLifecycleStatus, bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, currentEnvironment, deploymentAssignmentFor, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, topologyResourcePresentation, updateCanvasPlacement } from "./model.ts";
 
 const facts = {
   project_id: "p1",
@@ -103,6 +103,12 @@ test("server lifecycle requires a usable node and active Agent", () => {
   assert.equal(serverLifecycle(withoutServer, [{ id: "boot-waiting", status: "waiting", role: "first_server", created_at: "1" }]).status, "Waiting");
   assert.equal(serverLifecycle(withoutServer, [{ id: "boot-validating", status: "validating", role: "first_server", created_at: "2" }]).status, "Connecting");
   assert.equal(serverLifecycle(withoutServer, [{ id: "boot-installing", status: "installing_k3s", role: "first_server", created_at: "3" }]).status, "Bootstrapping");
+  assert.equal(serverLifecycle({ ...facts, runtimes: [{ ...facts.runtimes[0], status: "mystery" }], nodes: [{ ...facts.nodes[0], status: "mystery" }], agents: [{ ...facts.agents[0], status: "mystery" }] }, []).status, "Unknown");
+  assert.equal(bootstrapLifecycleStatus("waiting"), "Waiting");
+  assert.equal(bootstrapLifecycleStatus("connecting"), "Connecting");
+  assert.equal(bootstrapLifecycleStatus("installing_agent"), "Bootstrapping");
+  assert.equal(bootstrapLifecycleStatus("dead_letter"), "Failed");
+  assert.equal(bootstrapLifecycleStatus("succeeded"), "Unknown");
 });
 
 test("ready facts win over stale bootstrap and failed sessions retry", () => {

@@ -569,6 +569,7 @@ test("bootstrap credential leaves the DOM before the request resolves", async ({
   const input = page.getByLabel("One-time SSH password");
   await input.fill(secret);
   await page.getByRole("button", { name: "Confirm and submit" }).click();
+  await expect.poll(() => submitted.length).toBe(1);
   await expect(input).toHaveCount(0);
   await expect(page.getByText(secret, { exact: false })).toHaveCount(0);
   expect(await page.locator("body").textContent()).not.toContain(secret);
@@ -608,7 +609,7 @@ test("Connect Server defaults to a one-time command and refresh restores waiting
   await expect(setup.getByLabel("Run bootstrap command")).toBeChecked();
   await expect(setup.getByLabel("SSH port")).toHaveCount(0);
   await setup.getByLabel("Server IP or hostname").fill("203.0.113.10");
-  await setup.getByRole("button", { name: "Review connection" }).click();
+  await setup.getByRole("button", { name: "Generate bootstrap command" }).click();
   await page.getByRole("button", { name: "Confirm and submit" }).click();
   await expect(page.getByText(/Bootstrap boot-command accepted with status waiting/)).toBeVisible();
   expect(submitted).toEqual([{ role: "first_server", public_host: "203.0.113.10", ssh_port: 0, ssh_username: "", auth_method: "command" }]);
@@ -766,7 +767,7 @@ async function openBootstrapReview(page: Page) {
   await setup.getByRole("radio", { name: /^SSH password/ }).check();
   await setup.getByLabel("SSH port").fill("22");
   await setup.getByLabel("SSH username").fill("opsi");
-  await setup.getByRole("button", { name: "Review connection" }).click();
+  await setup.getByRole("button", { name: "Generate bootstrap command" }).click();
   const review = page.getByRole("dialog", { name: "bootstrap server" });
   await expect(review).toBeVisible();
   expect(await page.evaluate(() => document.activeElement?.closest("dialog") !== null)).toBe(true);
