@@ -6,7 +6,54 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 )
+
+func TestResolveBuildJobSourceRequiresExactApplicationAndAvailableGitHubAuthority(t *testing.T) {
+	service, project, _, application, otherApplication := newGitHubMemoryFixture(t)
+	installation := testGitHubInstallation(101)
+	repository := testGitHubRepository(201, installation.InstallationID)
+	if _, err := service.UpsertGitHubInstallation(installation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpsertGitHubRepository(repository); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ClaimGitHubInstallation(project.ID, installation.InstallationID, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ClaimGitHubRepository(project.ID, repository.RepositoryID, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := service.CreateGitHubServiceBinding(project.ID, GitHubServiceBindingDraft{ServiceID: application.ID, RepositoryID: repository.RepositoryID, ServiceKey: application.Name, GitHubSource: GitHubSource{SelectedRef: "main", ApplicationRoot: "apps/api", BuildContext: ".", BuildStrategy: BuildStrategyAuto}, CreatedBy: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := service.ResolveBuildJobSource(context.Background(), project.ID, application.ID)
+	if err != nil || source.BindingID != binding.ID || source.ApplicationID != application.ID || source.RepositoryFullName != repository.FullName || source.ApplicationRoot != "apps/api" || source.BuildContext != "." {
+		t.Fatalf("source=%+v err=%v", source, err)
+	}
+	if _, err := service.ResolveBuildJobSource(context.Background(), project.ID, otherApplication.ID); buildjob.Code(err) != "BUILD_SOURCE_INVALID_SCOPE" {
+		t.Fatalf("cross-application err=%v", err)
+	}
+	if err := service.MarkGitHubInstallationStatus(installation.InstallationID, GitHubInstallationSuspended, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ResolveBuildJobSource(context.Background(), project.ID, application.ID); buildjob.Code(err) != "GITHUB_INSTALLATION_UNAVAILABLE" {
+		t.Fatalf("suspended installation err=%v", err)
+	}
+	if err := service.MarkGitHubInstallationStatus(installation.InstallationID, GitHubInstallationActive, false); err != nil {
+		t.Fatal(err)
+	}
+	repository.Archived = true
+	if _, err := service.UpsertGitHubRepository(repository); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ResolveBuildJobSource(context.Background(), project.ID, application.ID); buildjob.Code(err) != "GITHUB_REPOSITORY_UNAVAILABLE" {
+		t.Fatalf("archived repository err=%v", err)
+	}
+}
 
 func TestGitHubInventoryClaimAndBindingParityBehavior(t *testing.T) {
 	service, firstProject, secondProject, firstService, secondService := newGitHubMemoryFixture(t)

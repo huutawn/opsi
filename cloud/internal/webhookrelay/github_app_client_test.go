@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 )
 
 type githubAppRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -77,6 +79,53 @@ func githubAppResponse(status int, body string) *http.Response {
 		StatusCode: status,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestGitHubBuildSourceResolutionUsesExactCommitAndTransientToken(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	sha := strings.Repeat("a", 40)
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Header.Get("Authorization") != "Bearer transient-installation-token" {
+			t.Fatalf("unexpected authorization header")
+		}
+		switch request.URL.EscapedPath() {
+		case "/repos/owner/repository/commits/main":
+			return githubAppResponse(http.StatusOK, `{"sha":"`+sha+`"}`), nil
+		case "/repos/owner/repository/contents/apps/api/Dockerfile":
+			if request.URL.Query().Get("ref") != sha {
+				t.Fatalf("file lookup did not use exact SHA: %s", request.URL.RawQuery)
+			}
+			return githubAppResponse(http.StatusOK, `{"type":"file","path":"apps/api/Dockerfile"}`), nil
+		default:
+			return githubAppResponse(http.StatusNotFound, `{}`), nil
+		}
+	}), now)
+	client.tokens[99] = installationToken{Token: "transient-installation-token", ExpiresAt: now.Add(time.Hour)}
+
+	resolved, err := client.ResolveCommit(context.Background(), 99, "owner/repository", "main")
+	if err != nil || resolved != sha {
+		t.Fatalf("resolved=%q err=%v", resolved, err)
+	}
+	exists, err := client.RepositoryFileExists(context.Background(), 99, "owner/repository", resolved, "apps/api/Dockerfile")
+	if err != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
+	}
+	exists, err = client.RepositoryFileExists(context.Background(), 99, "owner/repository", resolved, "Dockerfile")
+	if err != nil || exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
+	}
+}
+
+func TestGitHubBuildSourceResolutionFailsClosedWithoutCredentialLeak(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transient-installation-token")
+	}), now)
+	client.tokens[99] = installationToken{Token: "transient-installation-token", ExpiresAt: now.Add(time.Hour)}
+	_, err := client.ResolveCommit(context.Background(), 99, "owner/repository", "main")
+	if buildjob.Code(err) != "GITHUB_REPOSITORY_UNAVAILABLE" || strings.Contains(err.Error(), "transient-installation-token") {
+		t.Fatalf("err=%v", err)
 	}
 }
 

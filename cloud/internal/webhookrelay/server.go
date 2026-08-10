@@ -19,6 +19,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/actiondevice"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
@@ -35,6 +36,7 @@ type Server struct {
 	Auth         *auth.Service
 	HTTPClient   *http.Client
 	Registry     registry.API
+	BuildJobs    buildjob.Service
 	BuildRecords buildrecord.Service
 	Topology     topology.Service
 	Policies     deploymentpolicy.Service
@@ -76,11 +78,13 @@ func NewServer(cfg Config) *Server {
 	registryService := registry.NewService()
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
+	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService}
 	server := &Server{
 		Config:                  cfg,
 		OTP:                     service,
 		HTTPClient:              newGitHubHTTPClient(),
 		Registry:                registryService,
+		BuildJobs:               buildJobService,
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
 		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
@@ -145,6 +149,7 @@ func (s *Server) SetBootstrapRunner(install bootstrapworker.InstallConfig, path 
 
 func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
 	s.githubAppClient = client
+	s.BuildJobs.Repository = client
 }
 
 func (s *Server) SetActionDeviceStore(store actiondevice.Store) {
@@ -171,6 +176,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/projects/{project_id}/github/repositories/{repository_id}/claim", s.handleGitHubRepositoryClaimAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/github/bindings", s.handleGitHubBindingsAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/github/bindings/{binding_id}", s.handleGitHubBindingAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs", s.handleBuildJobsAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs/{build_job_id}", s.handleBuildJobAPI)
 	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
 	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)

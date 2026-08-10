@@ -17,6 +17,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
@@ -112,6 +113,8 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
 		postgresRegistry := registry.PostgresService{DB: db}
 		relay.Registry = postgresRegistry
+		relay.BuildJobs.Store = buildjob.PostgresStore{DB: db}
+		relay.BuildJobs.Sources = postgresRegistry
 		relay.BuildRecords.Store = buildrecord.PostgresStore{DB: db}
 		relay.BuildRecords.Bindings = postgresRegistry
 		relay.Topology = topology.Service{Store: topology.PostgresStore{DB: db}, Facts: postgresRegistry, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
