@@ -102,6 +102,7 @@ test("Security operations use explicit targets and protected results clear at ev
   await expect(page.locator("pre", { hasText: "SECRET_CANARY" })).toHaveCount(0);
   await page.getByRole("button", { name: "Continue with GitHub" }).click();
   await expect.poll(() => requests.find((item) => item.path.endsWith("/session/login/start"))?.body.project_id).toBe("proj-1");
+  await expect(page).toHaveURL(/oauth_fixture=1/);
 
   await mockLocalAPI(page, "default", requests);
   await page.goto("/?project=proj-1&view=security&tab=secrets");

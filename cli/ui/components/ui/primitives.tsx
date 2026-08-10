@@ -17,7 +17,12 @@ export function Empty({ action, text, title = "No data yet" }: { action?: ReactN
 export function StatusBadge({ label, value }: { label?: string; value: string | PresentationStatus }) {
   const normalized = normalizeStatus(value);
   const text = label ?? (String(value) === normalized ? statusLabel(normalized) : String(value).replaceAll("_", " "));
-  return <span className={`status ${normalized}`}><i aria-hidden="true" />{text}</span>;
+  return <span className={`status ${normalized}`} data-status={normalized}><StatusIcon status={normalized} />{text}</span>;
+}
+
+function StatusIcon({ status }: { status: PresentationStatus }) {
+  const path = status === "healthy" ? "m4 8 3 3 5-6" : status === "failed" ? "M5 5l6 6m0-6-6 6" : status === "degraded" ? "M8 4v5m0 3h.01" : status === "in_progress" ? "M8 3a5 5 0 1 1-4.33 2.5M3 3v3h3" : "M8 4v4m0 3h.01";
+  return <svg aria-hidden="true" className="statusIcon" viewBox="0 0 16 16"><path d={path} /></svg>;
 }
 
 export function PageHeader({ action, eyebrow, title, description }: { action?: ReactNode; eyebrow?: string; title: string; description?: string }) {
