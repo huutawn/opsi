@@ -35,7 +35,7 @@ test("available repository is claimed and creates one factual unplaced GitHub-bo
   await reviewApplication(page);
   const review = page.getByRole("dialog", { name: "create application" });
   await expect(review.getByText("Claim repository example/web for this project", { exact: true })).toBeVisible();
-  await expect(review.getByText(/Create application identity web: git https:\/\/github.com\/example\/web#main, context apps\/web, Dockerfile deploy\/Dockerfile, port 8080, health \/healthz/)).toBeVisible();
+  await expect(review.getByText(/Create application identity web: git https:\/\/github.com\/example\/web#main, context \., Dockerfile apps\/web\/Dockerfile, port 8080, health \/healthz/)).toBeVisible();
   await expect(review.getByText("Create GitHub service binding: repository 101, service web, config .opsi/opsi-cd.yaml", { exact: true })).toBeVisible();
   await review.getByRole("button", { name: "Confirm and submit" }).click();
   await expect(review).toHaveCount(0);
@@ -46,13 +46,13 @@ test("available repository is claimed and creates one factual unplaced GitHub-bo
   await expect(inspector.getByText("example/web", { exact: true })).toBeVisible();
   await expect(inspector.getByText("main", { exact: true })).toBeVisible();
   await expect(inspector.getByText("apps/web", { exact: true })).toBeVisible();
-  await expect(inspector.getByText("deploy/Dockerfile", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("apps/web/Dockerfile", { exact: true })).toBeVisible();
   await expect(inspector.getByText("No accepted build yet", { exact: true })).toBeVisible();
   expect(state.repositoryClaimCount).toBe(1);
   expect(state.services).toHaveLength(1);
   expect(state.bindings).toHaveLength(1);
-  expect(state.serviceBodies[0]).toMatchObject({ name: "web", type: "application", source_type: "git", repo_url: "https://github.com/example/web", branch: "main", build_context: "apps/web", dockerfile: "deploy/Dockerfile", container_port: 8080, health_path: "/healthz" });
-  expect(state.bindingBodies[0]).toEqual({ service_id: "svc-web", repository_id: 101, service_key: "web", config_path: ".opsi/opsi-cd.yaml" });
+  expect(state.serviceBodies[0]).toMatchObject({ name: "web", type: "application", source_type: "git", repo_url: "https://github.com/example/web", branch: "main", build_context: ".", dockerfile: "apps/web/Dockerfile", container_port: 8080, health_path: "/healthz" });
+  expect(state.bindingBodies[0]).toEqual({ service_id: "svc-web", repository_id: 101, service_key: "web", config_path: ".opsi/opsi-cd.yaml", selected_ref: "main", application_root: "apps/web", build_context: ".", build_strategy: "dockerfile", dockerfile_path: "apps/web/Dockerfile" });
   expect(new Set(state.mutationKeys).size).toBe(1);
   expect(state.unexpectedWrites).toEqual([]);
 });
@@ -120,8 +120,9 @@ async function reviewApplication(page: Page) {
   await openWizard(page);
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Service key").fill("web");
-  await page.getByLabel("Project path / build context").fill("apps/web");
-  await page.getByLabel("Dockerfile path").fill("deploy/Dockerfile");
+  await page.getByLabel("Application root").fill("apps/web");
+  await page.getByLabel("Build context").fill(".");
+  await page.getByLabel("Dockerfile path").fill("apps/web/Dockerfile");
   await page.getByLabel("Container port").fill("8080");
   await page.getByLabel("Health path").fill("/healthz");
   await page.getByRole("button", { name: "Review application" }).click();

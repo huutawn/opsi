@@ -79,18 +79,19 @@ type GitHubRepositoryClaim struct {
 }
 
 type GitHubServiceBinding struct {
-	ID             string     `json:"id"`
-	ProjectID      string     `json:"project_id"`
-	ServiceID      string     `json:"service_id"`
-	RepositoryID   int64      `json:"repository_id"`
-	InstallationID int64      `json:"installation_id"`
-	ServiceKey     string     `json:"service_key"`
-	ConfigPath     string     `json:"config_path"`
-	Status         string     `json:"status"`
-	CreatedBy      string     `json:"created_by"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	RemovedAt      *time.Time `json:"removed_at,omitempty"`
+	ID             string `json:"id"`
+	ProjectID      string `json:"project_id"`
+	ServiceID      string `json:"service_id"`
+	RepositoryID   int64  `json:"repository_id"`
+	InstallationID int64  `json:"installation_id"`
+	ServiceKey     string `json:"service_key"`
+	ConfigPath     string `json:"config_path"`
+	GitHubSource
+	Status    string     `json:"status"`
+	CreatedBy string     `json:"created_by"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	RemovedAt *time.Time `json:"removed_at,omitempty"`
 }
 
 type GitHubServiceBindingDraft struct {
@@ -98,7 +99,8 @@ type GitHubServiceBindingDraft struct {
 	RepositoryID int64  `json:"repository_id"`
 	ServiceKey   string `json:"service_key"`
 	ConfigPath   string `json:"config_path"`
-	CreatedBy    string `json:"-"`
+	GitHubSource
+	CreatedBy string `json:"-"`
 }
 
 type GitHubWebhookMutation struct {
@@ -523,7 +525,7 @@ func (s *Service) ReleaseGitHubRepository(projectID string, repositoryID int64, 
 }
 
 func (s *Service) CreateGitHubServiceBinding(projectID string, draft GitHubServiceBindingDraft) (GitHubServiceBinding, error) {
-	if err := normalizeGitHubBindingDraft(&draft); err != nil {
+	if err := validateGitHubBindingIdentity(draft); err != nil {
 		return GitHubServiceBinding{}, err
 	}
 	s.mu.Lock()
@@ -546,6 +548,9 @@ func (s *Service) CreateGitHubServiceBinding(projectID string, draft GitHubServi
 	if err != nil {
 		return GitHubServiceBinding{}, err
 	}
+	if err := normalizeGitHubBindingDraft(&draft, repository, service); err != nil {
+		return GitHubServiceBinding{}, err
+	}
 	claim, ok := s.githubRepositoryClaims[draft.RepositoryID]
 	if !ok || claim.Status != GitHubLinkActive || claim.ProjectID != projectID {
 		return GitHubServiceBinding{}, githubConflict("GITHUB_REPOSITORY_NOT_CLAIMED", "repository must be claimed by the project")
@@ -555,7 +560,7 @@ func (s *Service) CreateGitHubServiceBinding(projectID string, draft GitHubServi
 			continue
 		}
 		if binding.ServiceID == draft.ServiceID {
-			if binding.RepositoryID == draft.RepositoryID && binding.ServiceKey == draft.ServiceKey && binding.ConfigPath == draft.ConfigPath {
+			if binding.RepositoryID == draft.RepositoryID && binding.ServiceKey == draft.ServiceKey && binding.ConfigPath == draft.ConfigPath && binding.GitHubSource == draft.GitHubSource {
 				return binding, nil
 			}
 			return GitHubServiceBinding{}, githubConflict("GITHUB_SERVICE_ALREADY_BOUND", "service already has an active GitHub binding")
@@ -565,7 +570,7 @@ func (s *Service) CreateGitHubServiceBinding(projectID string, draft GitHubServi
 		}
 	}
 	now := s.clock()
-	binding := GitHubServiceBinding{ID: newID("ghbind"), ProjectID: projectID, ServiceID: service.ID, RepositoryID: repository.RepositoryID, InstallationID: installation.InstallationID, ServiceKey: draft.ServiceKey, ConfigPath: draft.ConfigPath, Status: GitHubLinkActive, CreatedBy: draft.CreatedBy, CreatedAt: now, UpdatedAt: now}
+	binding := GitHubServiceBinding{ID: newID("ghbind"), ProjectID: projectID, ServiceID: service.ID, RepositoryID: repository.RepositoryID, InstallationID: installation.InstallationID, ServiceKey: draft.ServiceKey, ConfigPath: draft.ConfigPath, GitHubSource: draft.GitHubSource, Status: GitHubLinkActive, CreatedBy: draft.CreatedBy, CreatedAt: now, UpdatedAt: now}
 	s.githubServiceBindings[binding.ID] = binding
 	s.appendGitHubAuditLocked(project, draft.CreatedBy, "github.service_binding.created", "github_service_binding", binding.ID, map[string]any{"installation_id": installation.InstallationID, "repository_id": repository.RepositoryID, "service_id": service.ID, "service_key": binding.ServiceKey}, now)
 	return binding, nil
@@ -704,19 +709,6 @@ func validateGitHubInstallation(installation GitHubInstallation) error {
 func validateGitHubRepository(repository GitHubRepository) error {
 	if repository.RepositoryID <= 0 || repository.InstallationID <= 0 || repository.OwnerID <= 0 || !validGitHubMetadata(repository.OwnerLogin, true) || !validGitHubMetadata(repository.Name, true) || !validGitHubMetadata(repository.FullName, true) || !validGitHubMetadata(repository.DefaultBranch, false) || !validGitHubRepositoryStatus(repository.Status) {
 		return githubInvalid("GITHUB_REPOSITORY_INVALID", "GitHub repository metadata is invalid")
-	}
-	return nil
-}
-
-func normalizeGitHubBindingDraft(draft *GitHubServiceBindingDraft) error {
-	if draft.CreatedBy == "" || draft.ServiceID == "" || draft.RepositoryID <= 0 || !validGitHubServiceKey(draft.ServiceKey) {
-		return githubInvalid("GITHUB_BINDING_INVALID", "service, repository, creator, and valid service_key are required")
-	}
-	if draft.ConfigPath == "" {
-		draft.ConfigPath = DefaultGitHubConfigPath
-	}
-	if !validGitHubConfigPath(draft.ConfigPath) {
-		return githubInvalid("GITHUB_CONFIG_PATH_INVALID", "config_path must be a safe relative slash-separated path")
 	}
 	return nil
 }

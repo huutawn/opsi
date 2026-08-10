@@ -585,5 +585,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateR5011Rollout(ctx, db); err != nil {
 		return err
 	}
+	if err := MigrateP05AApplicationSource(ctx, db); err != nil {
+		return err
+	}
 	return MigrateR5012ServiceConfiguration(ctx, db)
 }

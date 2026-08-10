@@ -17,7 +17,7 @@ const (
 	githubRepositorySelect   = `SELECT repository_id, installation_id, owner_id, owner_login, name, full_name, private, archived, disabled, default_branch, status, created_at, updated_at FROM github_repositories`
 	githubLinkSelect         = `SELECT installation_id, project_id, claimed_by, status, claimed_at, revoked_at FROM github_installation_project_links`
 	githubClaimSelect        = `SELECT repository_id, installation_id, project_id, claimed_by, status, claimed_at, released_at FROM github_repository_claims`
-	githubBindingSelect      = `SELECT id, project_id, service_id, repository_id, installation_id, service_key, config_path, status, created_by, created_at, updated_at, removed_at FROM github_service_bindings`
+	githubBindingSelect      = `SELECT id, project_id, service_id, repository_id, installation_id, service_key, config_path, selected_ref, application_root, build_context, build_strategy, COALESCE(dockerfile_path,''), status, created_by, created_at, updated_at, removed_at FROM github_service_bindings`
 )
 
 type githubDBTX interface {
@@ -567,7 +567,7 @@ func (s PostgresService) ReleaseGitHubRepository(projectID string, repositoryID 
 }
 
 func (s PostgresService) CreateGitHubServiceBinding(projectID string, draft GitHubServiceBindingDraft) (GitHubServiceBinding, error) {
-	if err := normalizeGitHubBindingDraft(&draft); err != nil {
+	if err := validateGitHubBindingIdentity(draft); err != nil {
 		return GitHubServiceBinding{}, err
 	}
 	ctx := context.Background()
@@ -580,8 +580,9 @@ func (s PostgresService) CreateGitHubServiceBinding(projectID string, draft GitH
 	if err != nil {
 		return GitHubServiceBinding{}, githubPostgresError(err)
 	}
-	var serviceProject, serviceStatus, serviceName string
-	err = tx.QueryRowContext(ctx, `SELECT project_id,status,name FROM control_services WHERE id=$1 FOR UPDATE`, draft.ServiceID).Scan(&serviceProject, &serviceStatus, &serviceName)
+	var serviceProject, serviceStatus string
+	service := ServiceRecord{ID: draft.ServiceID}
+	err = tx.QueryRowContext(ctx, `SELECT project_id,status,name,COALESCE(branch,''),COALESCE(build_method,''),COALESCE(build_context,''),COALESCE(dockerfile,'') FROM control_services WHERE id=$1 FOR UPDATE`, draft.ServiceID).Scan(&serviceProject, &serviceStatus, &service.Name, &service.Branch, &service.BuildMethod, &service.BuildContext, &service.Dockerfile)
 	if errors.Is(err, sql.ErrNoRows) || err == nil && serviceProject != projectID {
 		return GitHubServiceBinding{}, ErrNotFound
 	}
@@ -591,12 +592,15 @@ func (s PostgresService) CreateGitHubServiceBinding(projectID string, draft GitH
 	if serviceStatus == "deleted" {
 		return GitHubServiceBinding{}, githubConflict("GITHUB_SERVICE_UNAVAILABLE", "service is deleted")
 	}
-	if draft.ServiceKey != serviceName {
+	if draft.ServiceKey != service.Name {
 		return GitHubServiceBinding{}, githubConflict("GITHUB_SERVICE_KEY_MISMATCH", "service_key must match the service identity")
 	}
 	repository, installation, err := claimableGitHubRepositoryTx(ctx, tx, projectID, draft.RepositoryID)
 	if err != nil {
 		return GitHubServiceBinding{}, githubPostgresError(err)
+	}
+	if err := normalizeGitHubBindingDraft(&draft, repository, service); err != nil {
+		return GitHubServiceBinding{}, err
 	}
 	claim, err := scanGitHubClaim(tx.QueryRowContext(ctx, githubClaimSelect+` WHERE repository_id=$1`, draft.RepositoryID))
 	if errors.Is(err, sql.ErrNoRows) || err == nil && (claim.ProjectID != projectID || claim.Status != GitHubLinkActive) {
@@ -607,7 +611,7 @@ func (s PostgresService) CreateGitHubServiceBinding(projectID string, draft GitH
 	}
 	existing, err := scanGitHubBinding(tx.QueryRowContext(ctx, githubBindingSelect+` WHERE service_id=$1 AND status='active'`, draft.ServiceID))
 	if err == nil {
-		if existing.RepositoryID == draft.RepositoryID && existing.ServiceKey == draft.ServiceKey && existing.ConfigPath == draft.ConfigPath {
+		if existing.RepositoryID == draft.RepositoryID && existing.ServiceKey == draft.ServiceKey && existing.ConfigPath == draft.ConfigPath && existing.GitHubSource == draft.GitHubSource {
 			if err := tx.Commit(); err != nil {
 				return GitHubServiceBinding{}, githubPostgresError(err)
 			}
@@ -624,8 +628,8 @@ func (s PostgresService) CreateGitHubServiceBinding(projectID string, draft GitH
 		return GitHubServiceBinding{}, githubPostgresError(err)
 	}
 	now := s.clock()
-	binding := GitHubServiceBinding{ID: newID("ghbind"), ProjectID: projectID, ServiceID: draft.ServiceID, RepositoryID: repository.RepositoryID, InstallationID: installation.InstallationID, ServiceKey: draft.ServiceKey, ConfigPath: draft.ConfigPath, Status: GitHubLinkActive, CreatedBy: draft.CreatedBy, CreatedAt: now, UpdatedAt: now}
-	_, err = tx.ExecContext(ctx, `INSERT INTO github_service_bindings(id,project_id,service_id,repository_id,installation_id,service_key,config_path,status,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10)`, binding.ID, binding.ProjectID, binding.ServiceID, binding.RepositoryID, binding.InstallationID, binding.ServiceKey, binding.ConfigPath, binding.CreatedBy, binding.CreatedAt, binding.UpdatedAt)
+	binding := GitHubServiceBinding{ID: newID("ghbind"), ProjectID: projectID, ServiceID: draft.ServiceID, RepositoryID: repository.RepositoryID, InstallationID: installation.InstallationID, ServiceKey: draft.ServiceKey, ConfigPath: draft.ConfigPath, GitHubSource: draft.GitHubSource, Status: GitHubLinkActive, CreatedBy: draft.CreatedBy, CreatedAt: now, UpdatedAt: now}
+	_, err = tx.ExecContext(ctx, `INSERT INTO github_service_bindings(id,project_id,service_id,repository_id,installation_id,service_key,config_path,selected_ref,application_root,build_context,build_strategy,dockerfile_path,status,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),'active',$13,$14,$15)`, binding.ID, binding.ProjectID, binding.ServiceID, binding.RepositoryID, binding.InstallationID, binding.ServiceKey, binding.ConfigPath, binding.SelectedRef, binding.ApplicationRoot, binding.BuildContext, binding.BuildStrategy, binding.DockerfilePath, binding.CreatedBy, binding.CreatedAt, binding.UpdatedAt)
 	if err != nil {
 		return GitHubServiceBinding{}, githubPostgresError(err)
 	}
@@ -636,6 +640,55 @@ func (s PostgresService) CreateGitHubServiceBinding(projectID string, draft GitH
 		return GitHubServiceBinding{}, githubPostgresError(err)
 	}
 	return binding, nil
+}
+
+func (s PostgresService) GetGitHubServiceBinding(projectID, bindingID string) (GitHubServiceBinding, error) {
+	binding, err := scanGitHubBinding(s.DB.QueryRowContext(context.Background(), githubBindingSelect+` WHERE id=$1 AND project_id=$2`, bindingID, projectID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return GitHubServiceBinding{}, ErrNotFound
+	}
+	return binding, githubPostgresError(err)
+}
+
+func (s PostgresService) UpdateGitHubServiceBinding(projectID, bindingID, userID string, source GitHubSource) (GitHubServiceBinding, error) {
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return GitHubServiceBinding{}, githubPostgresError(err)
+	}
+	defer tx.Rollback()
+	project, err := githubProject(ctx, tx, projectID)
+	if err != nil {
+		return GitHubServiceBinding{}, githubPostgresError(err)
+	}
+	binding, err := scanGitHubBinding(tx.QueryRowContext(ctx, githubBindingSelect+` WHERE id=$1 AND project_id=$2 AND status='active' FOR UPDATE`, bindingID, projectID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return GitHubServiceBinding{}, ErrNotFound
+	}
+	if err != nil {
+		return GitHubServiceBinding{}, githubPostgresError(err)
+	}
+	var defaultBranch string
+	if err := tx.QueryRowContext(ctx, `SELECT default_branch FROM github_repositories WHERE repository_id=$1 AND installation_id=$2`, binding.RepositoryID, binding.InstallationID).Scan(&defaultBranch); errors.Is(err, sql.ErrNoRows) {
+		return GitHubServiceBinding{}, ErrNotFound
+	} else if err != nil {
+		return GitHubServiceBinding{}, githubPostgresError(err)
+	}
+	if err := normalizeGitHubSource(&source, defaultBranch); err != nil {
+		return GitHubServiceBinding{}, err
+	}
+	if binding.GitHubSource == source {
+		return binding, githubPostgresError(tx.Commit())
+	}
+	binding.GitHubSource = source
+	binding.UpdatedAt = s.clock()
+	if _, err := tx.ExecContext(ctx, `UPDATE github_service_bindings SET selected_ref=$2,application_root=$3,build_context=$4,build_strategy=$5,dockerfile_path=NULLIF($6,''),updated_at=$7 WHERE id=$1`, binding.ID, binding.SelectedRef, binding.ApplicationRoot, binding.BuildContext, binding.BuildStrategy, binding.DockerfilePath, binding.UpdatedAt); err != nil {
+		return GitHubServiceBinding{}, githubPostgresError(err)
+	}
+	if err := insertGitHubAuditTx(ctx, tx, project, userID, "github.service_binding.source_updated", "github_service_binding", binding.ID, map[string]any{"installation_id": binding.InstallationID, "repository_id": binding.RepositoryID, "service_id": binding.ServiceID, "service_key": binding.ServiceKey}, binding.UpdatedAt); err != nil {
+		return GitHubServiceBinding{}, githubPostgresError(err)
+	}
+	return binding, githubPostgresError(tx.Commit())
 }
 
 func (s PostgresService) RemoveGitHubServiceBinding(projectID, bindingID, userID string) error {
@@ -778,7 +831,7 @@ func scanGitHubClaim(row rowScanner) (GitHubRepositoryClaim, error) {
 func scanGitHubBinding(row rowScanner) (GitHubServiceBinding, error) {
 	var binding GitHubServiceBinding
 	var removedAt sql.NullTime
-	err := row.Scan(&binding.ID, &binding.ProjectID, &binding.ServiceID, &binding.RepositoryID, &binding.InstallationID, &binding.ServiceKey, &binding.ConfigPath, &binding.Status, &binding.CreatedBy, &binding.CreatedAt, &binding.UpdatedAt, &removedAt)
+	err := row.Scan(&binding.ID, &binding.ProjectID, &binding.ServiceID, &binding.RepositoryID, &binding.InstallationID, &binding.ServiceKey, &binding.ConfigPath, &binding.SelectedRef, &binding.ApplicationRoot, &binding.BuildContext, &binding.BuildStrategy, &binding.DockerfilePath, &binding.Status, &binding.CreatedBy, &binding.CreatedAt, &binding.UpdatedAt, &removedAt)
 	binding.RemovedAt = nullTimePtr(removedAt)
 	return binding, err
 }

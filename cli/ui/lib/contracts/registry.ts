@@ -120,6 +120,11 @@ export type GitHubBinding = {
   installation_id: number;
   service_key: string;
   config_path: string;
+  selected_ref: string;
+  application_root: string;
+  build_context: string;
+  build_strategy: "auto" | "dockerfile" | "buildpack";
+  dockerfile_path?: string;
   status: string;
 };
 

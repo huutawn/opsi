@@ -690,6 +690,8 @@ type API interface {
 	ClaimGitHubRepository(projectID string, repositoryID int64, userID string) (GitHubRepositoryClaim, error)
 	ReleaseGitHubRepository(projectID string, repositoryID int64, userID string) error
 	CreateGitHubServiceBinding(projectID string, draft GitHubServiceBindingDraft) (GitHubServiceBinding, error)
+	GetGitHubServiceBinding(projectID, bindingID string) (GitHubServiceBinding, error)
+	UpdateGitHubServiceBinding(projectID, bindingID, userID string, source GitHubSource) (GitHubServiceBinding, error)
 	RemoveGitHubServiceBinding(projectID, bindingID, userID string) error
 	ListGitHubServiceBindings(projectID string) ([]GitHubServiceBinding, error)
 	ResolveBuildBinding(ctx context.Context, repositoryID uint64, serviceKey string) (buildrecord.Binding, error)

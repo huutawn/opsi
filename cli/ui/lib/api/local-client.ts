@@ -329,9 +329,18 @@ export class LocalClient {
     return this.call<{ bindings: GitHubBinding[] }>(`/api/local/projects/${projectID}/github/bindings`);
   }
 
-  createGitHubBinding(projectID: string, body: { service_id: string; repository_id: number; service_key: string; config_path: string }, idempotencyKey?: string) {
+  createGitHubBinding(projectID: string, body: { service_id: string; repository_id: number; service_key: string; config_path: string; selected_ref?: string; application_root?: string; build_context?: string; build_strategy?: "auto" | "dockerfile" | "buildpack"; dockerfile_path?: string }, idempotencyKey?: string) {
     return this.call<GitHubBinding>(`/api/local/projects/${projectID}/github/bindings`, {
       method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify(body),
+    });
+  }
+
+  updateGitHubBinding(projectID: string, bindingID: string, body: Pick<GitHubBinding, "selected_ref" | "application_root" | "build_context" | "build_strategy" | "dockerfile_path">, idempotencyKey?: string) {
+    return this.call<GitHubBinding>(`/api/local/projects/${projectID}/github/bindings/${encodeURIComponent(bindingID)}`, {
+      method: "PUT",
       write: true,
       idempotencyKey,
       body: JSON.stringify(body),

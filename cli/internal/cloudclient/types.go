@@ -349,14 +349,19 @@ type GitHubRepository struct {
 }
 
 type GitHubBinding struct {
-	ID             string `json:"id"`
-	ProjectID      string `json:"project_id"`
-	ServiceID      string `json:"service_id"`
-	RepositoryID   int64  `json:"repository_id"`
-	InstallationID int64  `json:"installation_id"`
-	ServiceKey     string `json:"service_key"`
-	ConfigPath     string `json:"config_path"`
-	Status         string `json:"status"`
+	ID              string `json:"id"`
+	ProjectID       string `json:"project_id"`
+	ServiceID       string `json:"service_id"`
+	RepositoryID    int64  `json:"repository_id"`
+	InstallationID  int64  `json:"installation_id"`
+	ServiceKey      string `json:"service_key"`
+	ConfigPath      string `json:"config_path"`
+	SelectedRef     string `json:"selected_ref"`
+	ApplicationRoot string `json:"application_root"`
+	BuildContext    string `json:"build_context"`
+	BuildStrategy   string `json:"build_strategy"`
+	DockerfilePath  string `json:"dockerfile_path,omitempty"`
+	Status          string `json:"status"`
 }
 
 type RepositoryClaim struct {

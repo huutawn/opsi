@@ -58,11 +58,19 @@ func TestGitHubInventoryClaimAndBindingParityBehavior(t *testing.T) {
 		t.Fatalf("cross-project service err=%v", err)
 	}
 	binding, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: "user-1"})
-	if err != nil || binding.ConfigPath != DefaultGitHubConfigPath {
+	if err != nil || binding.ConfigPath != DefaultGitHubConfigPath || binding.SelectedRef != "main" || binding.ApplicationRoot != "." || binding.BuildContext != "." || binding.BuildStrategy != BuildStrategyDockerfile || binding.DockerfilePath != "Dockerfile" {
 		t.Fatalf("binding=%+v err=%v", binding, err)
 	}
 	if repeated, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: "user-1"}); err != nil || repeated.ID != binding.ID {
 		t.Fatalf("idempotent binding=%+v err=%v", repeated, err)
+	}
+	updated, err := service.UpdateGitHubServiceBinding(firstProject.ID, binding.ID, "user-1", GitHubSource{SelectedRef: "release", ApplicationRoot: "apps/api", BuildContext: ".", BuildStrategy: BuildStrategyAuto})
+	if err != nil || updated.ID != binding.ID || updated.ApplicationRoot != "apps/api" || updated.DockerfilePath != "" {
+		t.Fatalf("updated binding=%+v err=%v", updated, err)
+	}
+	read, err := service.GetGitHubServiceBinding(firstProject.ID, binding.ID)
+	if err != nil || read != updated {
+		t.Fatalf("read binding=%+v err=%v", read, err)
 	}
 	if err := service.ReleaseGitHubRepository(firstProject.ID, repository.RepositoryID, "user-1"); !hasGitHubCode(err, "GITHUB_REPOSITORY_HAS_ACTIVE_BINDINGS") {
 		t.Fatalf("release with binding err=%v", err)
@@ -117,6 +125,36 @@ func TestGitHubInventoryClaimAndBindingParityBehavior(t *testing.T) {
 	for _, action := range []string{"github.installation.claimed", "github.repository.claimed", "github.repository.released", "github.service_binding.created", "github.service_binding.removed"} {
 		if !hasGitHubAuditAction(audits, action) {
 			t.Fatalf("missing audit action %s: %+v", action, audits)
+		}
+	}
+}
+
+func TestGitHubSourcePathContract(t *testing.T) {
+	valid := []GitHubSource{
+		{},
+		{ApplicationRoot: "apps/api", BuildContext: ".", BuildStrategy: BuildStrategyAuto},
+		{ApplicationRoot: "apps/api", BuildContext: "apps", BuildStrategy: BuildStrategyBuildpack},
+		{ApplicationRoot: "apps/api", BuildContext: ".", BuildStrategy: BuildStrategyDockerfile, DockerfilePath: "apps/api/Dockerfile"},
+	}
+	for _, source := range valid {
+		if err := normalizeGitHubSource(&source, "main"); err != nil {
+			t.Fatalf("valid source %+v: %v", source, err)
+		}
+	}
+	invalid := []struct {
+		source GitHubSource
+		code   string
+	}{
+		{GitHubSource{ApplicationRoot: "apps/api", BuildContext: "packages"}, "GITHUB_SOURCE_PATH_RELATION_INVALID"},
+		{GitHubSource{ApplicationRoot: "../api"}, "GITHUB_APPLICATION_ROOT_INVALID"},
+		{GitHubSource{ApplicationRoot: "/apps/api"}, "GITHUB_APPLICATION_ROOT_INVALID"},
+		{GitHubSource{ApplicationRoot: `apps\api`}, "GITHUB_APPLICATION_ROOT_INVALID"},
+		{GitHubSource{BuildStrategy: BuildStrategyDockerfile}, "GITHUB_DOCKERFILE_PATH_REQUIRED"},
+	}
+	for _, test := range invalid {
+		source := test.source
+		if err := normalizeGitHubSource(&source, "main"); !hasGitHubCode(err, test.code) {
+			t.Fatalf("invalid source %+v err=%v", test.source, err)
 		}
 	}
 }

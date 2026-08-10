@@ -118,20 +118,41 @@ func (s *Server) handleGitHubBindingsAPI(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleGitHubBindingAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 	projectID := r.PathValue("project_id")
 	principal, ok := s.authorizeGitHubProject(w, r, projectID)
-	if !ok || !s.requireRole(w, r, principal, projectID, "github_service_binding", r.PathValue("binding_id"), "owner", "admin") {
+	if !ok {
 		return
 	}
-	if err := s.Registry.RemoveGitHubServiceBinding(projectID, r.PathValue("binding_id"), principal.UserID); err != nil {
-		writeRegistryFailure(w, r, err)
-		return
+	bindingID := r.PathValue("binding_id")
+	switch r.Method {
+	case http.MethodGet:
+		if !s.requireRole(w, r, principal, projectID, "github_service_binding", bindingID, "owner", "admin", "developer", "viewer", "support") {
+			return
+		}
+		binding, err := s.Registry.GetGitHubServiceBinding(projectID, bindingID)
+		writeRegistryResult(w, r, binding, err, http.StatusOK)
+	case http.MethodPut:
+		if !s.requireRole(w, r, principal, projectID, "github_service_binding", bindingID, "owner", "admin") {
+			return
+		}
+		var source registry.GitHubSource
+		if !decodeJSON(w, r, &source) {
+			return
+		}
+		binding, err := s.Registry.UpdateGitHubServiceBinding(projectID, bindingID, principal.UserID, source)
+		writeRegistryResult(w, r, binding, err, http.StatusOK)
+	case http.MethodDelete:
+		if !s.requireRole(w, r, principal, projectID, "github_service_binding", bindingID, "owner", "admin") {
+			return
+		}
+		if err := s.Registry.RemoveGitHubServiceBinding(projectID, bindingID, principal.UserID); err != nil {
+			writeRegistryFailure(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"removed": true})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"removed": true})
 }
 
 func (s *Server) authorizeGitHubProject(w http.ResponseWriter, r *http.Request, projectID string) (auth.VerifyResult, bool) {
