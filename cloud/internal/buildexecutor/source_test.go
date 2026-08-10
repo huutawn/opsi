@@ -77,11 +77,54 @@ func TestBuildFailureTaxonomy(t *testing.T) {
 		"dockerfile parse error on line 1":                           "DOCKERFILE_PARSE_FAILED",
 		"process \"/bin/sh -c false\" did not complete successfully": "BUILD_COMMAND_FAILED",
 		"rpc error: unavailable":                                     "BUILDKIT_EXECUTION_FAILED",
+		"failed to load LLB: network.host is not allowed":            "BUILD_ENTITLEMENT_DENIED",
+		"failed to load LLB: security.insecure is not allowed":       "BUILD_ENTITLEMENT_DENIED",
 	}
 	for output, want := range tests {
 		var typed Error
 		if !errors.As(classifyBuildFailure(output), &typed) || typed.Code != want {
 			t.Fatalf("output=%q code=%s want=%s", output, typed.Code, want)
+		}
+	}
+}
+
+func TestCanonicalBuildArgumentsDoNotGrantPrivileges(t *testing.T) {
+	args := canonicalBuildArgs("/source/Dockerfile", "/output/metadata.json", "/output/image.oci.tar", "/source")
+	want := "buildx build --builder opsi --progress=plain --platform linux/amd64 --file /source/Dockerfile --metadata-file /output/metadata.json --provenance=false --output type=oci,dest=/output/image.oci.tar /source"
+	if got := strings.Join(args, " "); got != want {
+		t.Fatalf("args=%q want=%q", got, want)
+	}
+	joined := " " + strings.Join(args, " ") + " "
+	for _, forbidden := range []string{" --allow ", " --allow=", " --ssh ", " --ssh=", " --secret ", " --secret=", " --network host ", " --network=host ", " --push ", " --load "} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("canonical build arguments contain %q: %s", forbidden, joined)
+		}
+	}
+}
+
+func TestCanonicalExecutorWorkflowPinsRestrictedBuilder(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "opsi-build-executor.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(data)
+	for _, required := range []string{
+		"# docker/setup-buildx-action v4.2.0",
+		"docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+		"version: v0.36.1",
+		"name: opsi",
+		"driver: docker-container",
+		"image=" + BuildKitImage,
+		"network=bridge",
+		"buildkitd-flags: " + BuildKitDaemonFlag,
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("workflow missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"docker/setup-buildx-action@v4", "security.insecure", "--allow ", "--allow=", "--ssh", "--secret", "docker build ", "driver: docker\n", "push: true"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("workflow contains forbidden %q", forbidden)
 		}
 	}
 }
@@ -122,6 +165,17 @@ func TestBuildEnvironmentDoesNotForwardRunnerCredentials(t *testing.T) {
 		if strings.Contains(environment, secret) {
 			t.Fatalf("BuildKit environment contains %q: %s", secret, environment)
 		}
+	}
+}
+
+func TestBuildRejectsDockerConfigOutsideWorkspace(t *testing.T) {
+	source := t.TempDir()
+	writeRepositoryFile(t, source, "Dockerfile", "FROM scratch\n")
+	t.Setenv("DOCKER_CONFIG", filepath.Join(t.TempDir(), "docker-config"))
+	_, err := Build(context.Background(), testSpec(strings.Repeat("a", 40), ".", "Dockerfile"), source, t.TempDir(), filepath.Join(t.TempDir(), "output"), nil)
+	var typed Error
+	if !errors.As(err, &typed) || typed.Code != "RUNNER_ENVIRONMENT_INVALID" || typed.Phase != "infrastructure" {
+		t.Fatalf("err=%v", err)
 	}
 }
 

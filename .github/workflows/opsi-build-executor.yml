@@ -14,19 +14,53 @@ on:
         type: string
 
 permissions:
-  contents: none
+  contents: read
   id-token: write
 
 jobs:
-  handshake:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
+    env:
+      DOCKER_CONFIG: ${{ runner.temp }}/opsi-build-work/docker-config
+      OPSI_EXECUTOR_WORKSPACE: ${{ runner.temp }}/opsi-build-work
+      OPSI_EXECUTOR_OUTPUT: ${{ runner.temp }}/opsi-build-output
     steps:
-      - name: Claim BuildJob and fetch canonical spec
+      - name: Check out immutable executor source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up pinned Go toolchain
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: cloud/go.mod
+          cache: false
+      - name: Build executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/opsi-bin" "$DOCKER_CONFIG" "$OPSI_EXECUTOR_WORKSPACE" "$OPSI_EXECUTOR_OUTPUT"
+          go build -C cloud -trimpath -o "$RUNNER_TEMP/opsi-bin/opsi-build-executor" ./cmd/opsi-build-executor
+      - name: Set up deterministic Buildx
+        # docker/setup-buildx-action v4.2.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+        with:
+          version: v0.36.1
+          name: opsi
+          driver: docker-container
+          driver-opts: |
+            image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+            network=bridge
+          buildkitd-flags: --allow-insecure-entitlement=network.host
+          platforms: linux/amd64
+      - name: Claim BuildJob and run canonical executor
         env:
           OPSI_CLOUD_URL: ${{ vars.OPSI_CLOUD_URL }}
           BUILD_JOB_ID: ${{ inputs.build_job_id }}
           ATTEMPT_ID: ${{ inputs.attempt_id }}
+          GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
@@ -34,16 +68,16 @@ jobs:
           test -n "$OPSI_CLOUD_URL"
           OPSI_CLOUD_URL="${OPSI_CLOUD_URL%/}"
           case "$OPSI_CLOUD_URL" in https://*) ;; *) echo "OPSI_CLOUD_URL must use HTTPS" >&2; exit 1;; esac
-          work_dir="$(mktemp -d)"
-          trap 'rm -rf "$work_dir"' EXIT
+          claim_dir="$(mktemp -d)"
+          trap 'rm -rf "$claim_dir"' EXIT
           curl_args=(--fail-with-body --silent --show-error --connect-timeout 10 --max-time 30)
 
           curl "${curl_args[@]}" \
             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=opsi-build" \
-            -o "$work_dir/oidc.json"
+            -o "$claim_dir/oidc.json"
 
-          OIDC_FILE="$work_dir/oidc.json" CLAIM_FILE="$work_dir/claim.json" BUILD_JOB_ID="$BUILD_JOB_ID" ATTEMPT_ID="$ATTEMPT_ID" python3 - <<'PY'
+          OIDC_FILE="$claim_dir/oidc.json" CLAIM_FILE="$claim_dir/claim.json" BUILD_JOB_ID="$BUILD_JOB_ID" ATTEMPT_ID="$ATTEMPT_ID" python3 - <<'PY'
           import json, os
           with open(os.environ["OIDC_FILE"], encoding="utf-8") as source:
               token = json.load(source)["value"]
@@ -53,33 +87,25 @@ jobs:
 
           curl "${curl_args[@]}" \
             -H "Content-Type: application/json" \
-            --data-binary "@$work_dir/claim.json" \
+            --data-binary "@$claim_dir/claim.json" \
             "$OPSI_CLOUD_URL/v1/build-runner/claim" \
-            -o "$work_dir/lease.json"
+            -o "$claim_dir/lease.json"
 
-          LEASE_FILE="$work_dir/lease.json" HEADER_FILE="$work_dir/headers" BUILD_JOB_ID="$BUILD_JOB_ID" ATTEMPT_ID="$ATTEMPT_ID" python3 - <<'PY'
+          lease="$(LEASE_FILE="$claim_dir/lease.json" BUILD_JOB_ID="$BUILD_JOB_ID" ATTEMPT_ID="$ATTEMPT_ID" python3 - <<'PY'
           import json, os
           with open(os.environ["LEASE_FILE"], encoding="utf-8") as source:
-              lease = json.load(source)
-          assert lease["build_job_id"] == os.environ["BUILD_JOB_ID"]
-          assert lease["attempt_id"] == os.environ["ATTEMPT_ID"]
-          with open(os.environ["HEADER_FILE"], "w", encoding="utf-8") as target:
-              target.write("Authorization: Bearer " + lease["lease_token"] + "\n")
+              value = json.load(source)
+          assert value["build_job_id"] == os.environ["BUILD_JOB_ID"]
+          assert value["attempt_id"] == os.environ["ATTEMPT_ID"]
+          print(value["lease_token"], end="")
           PY
+          )"
 
-          curl "${curl_args[@]}" \
-            -H "@$work_dir/headers" \
-            "$OPSI_CLOUD_URL/v1/build-runner/build-spec?build_job_id=$BUILD_JOB_ID" \
-            -o "$work_dir/build-spec.json"
-
-          SPEC_FILE="$work_dir/build-spec.json" BUILD_JOB_ID="$BUILD_JOB_ID" python3 - <<'PY'
-          import json, os, re
-          with open(os.environ["SPEC_FILE"], encoding="utf-8") as source:
-              spec = json.load(source)
-          assert spec["build_job_id"] == os.environ["BUILD_JOB_ID"]
-          assert spec["resolved_build_strategy"] == "dockerfile"
-          assert re.fullmatch(r"[0-9a-f]{40}", spec["resolved_commit_sha"])
-          assert spec["repository"] and spec["dockerfile_path"]
-          PY
-
-          echo "Opsi build runner handshake succeeded for $BUILD_JOB_ID"
+          OPSI_RUNNER_LEASE="$lease" "$RUNNER_TEMP/opsi-bin/opsi-build-executor" \
+            --cloud-url "$OPSI_CLOUD_URL" \
+            --build-job-id "$BUILD_JOB_ID" \
+            --attempt-id "$ATTEMPT_ID" \
+            --github-run-id "$GITHUB_RUN_ID_VALUE" \
+            --github-run-attempt "$GITHUB_RUN_ATTEMPT_VALUE" \
+            --workspace "$OPSI_EXECUTOR_WORKSPACE" \
+            --output-dir "$OPSI_EXECUTOR_OUTPUT"

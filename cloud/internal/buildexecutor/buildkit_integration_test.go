@@ -4,7 +4,9 @@ package buildexecutor
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -32,7 +34,7 @@ func TestBuildKitOCIForRootMonorepoAndNestedContext(t *testing.T) {
 			sha := commitRepository(t, repository, fixture.name)
 			spec := testSpec(sha, fixture.buildContext, fixture.dockerfile)
 			spec.ApplicationRoot = fixture.applicationRoot
-			workspace := t.TempDir()
+			workspace := integrationWorkspace(t)
 			outputDir := filepath.Join(t.TempDir(), "output")
 			result, err := Execute(context.Background(), Request{Spec: spec, AttemptID: "attempt-1", RemoteURL: repository, Credential: []byte("fixture-source-token"), Workspace: workspace, OutputDir: outputDir}, testLogWriter{t})
 			if err != nil {
@@ -45,6 +47,70 @@ func TestBuildKitOCIForRootMonorepoAndNestedContext(t *testing.T) {
 			t.Logf("fixture=%s image_digest=%s oci_sha256=%s", fixture.name, result.ImageDigest, result.OCIArtifactSHA256)
 		})
 	}
+}
+
+func TestBuildKitExactCommitAndCredentialCleanup(t *testing.T) {
+	repository := newGitRepository(t)
+	writeRepositoryFile(t, repository, "Dockerfile", "FROM scratch\nCOPY marker /marker\n")
+	writeRepositoryFile(t, repository, "marker", "commit-a")
+	commitA := commitRepository(t, repository, "commit A")
+	writeRepositoryFile(t, repository, "marker", "commit-b")
+	_ = commitRepository(t, repository, "commit B")
+	workspace := integrationWorkspace(t)
+	token := []byte("integration-source-token-must-not-leak")
+	result, err := Execute(context.Background(), Request{Spec: testSpec(commitA, ".", "Dockerfile"), AttemptID: "attempt-exact", RemoteURL: repository, Credential: token, Workspace: workspace, OutputDir: filepath.Join(t.TempDir(), "output")}, testLogWriter{t})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, readErr := os.ReadFile(filepath.Join(workspace, "source", "marker"))
+	if readErr != nil || string(marker) != "commit-a" || result.ResolvedCommitSHA != commitA {
+		t.Fatalf("marker=%q result_sha=%s err=%v", marker, result.ResolvedCommitSHA, readErr)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "source", ".git")); !os.IsNotExist(err) {
+		t.Fatalf(".git remains: %v", err)
+	}
+	if found, err := treeContains(workspace, []byte("integration-source-token-must-not-leak")); err != nil || found || !bytes.Equal(token, make([]byte, len(token))) {
+		t.Fatalf("credential found=%v destroyed=%v err=%v", found, bytes.Equal(token, make([]byte, len(token))), err)
+	}
+	verifyOCITar(t, result.OCIArtifactPath)
+	t.Logf("exact_commit=%s image_digest=%s credential_cleanup=pass", commitA, result.ImageDigest)
+}
+
+func TestBuildKitRejectsUngrantedEntitlements(t *testing.T) {
+	for _, fixture := range []struct {
+		name       string
+		dockerfile string
+	}{
+		{name: "network.host", dockerfile: "FROM alpine:3.22\nRUN --network=host true\n"},
+		{name: "security.insecure", dockerfile: "FROM alpine:3.22\nRUN --security=insecure true\n"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			repository := newGitRepository(t)
+			writeRepositoryFile(t, repository, "Dockerfile", fixture.dockerfile)
+			sha := commitRepository(t, repository, fixture.name)
+			result, err := Execute(context.Background(), Request{Spec: testSpec(sha, ".", "Dockerfile"), AttemptID: "attempt-entitlement", RemoteURL: repository, Credential: []byte("fixture-source-token"), Workspace: integrationWorkspace(t), OutputDir: filepath.Join(t.TempDir(), "output")}, testLogWriter{t})
+			var typed Error
+			if !errors.As(err, &typed) || typed.Code != "BUILD_ENTITLEMENT_DENIED" || typed.Phase != "build" || result.Status != "failed" || result.FailureCode != "BUILD_ENTITLEMENT_DENIED" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			t.Logf("fixture=%s expected=BUILD FAILED code=%s phase=%s", fixture.name, typed.Code, typed.Phase)
+		})
+	}
+}
+
+func integrationWorkspace(t *testing.T) string {
+	t.Helper()
+	dockerConfig := os.Getenv("DOCKER_CONFIG")
+	if dockerConfig == "" || filepath.Base(dockerConfig) != "docker-config" {
+		t.Fatal("DOCKER_CONFIG must be the canonical workspace/docker-config path")
+	}
+	workspace := filepath.Dir(dockerConfig)
+	for _, name := range []string{"source", "git-home"} {
+		if err := os.RemoveAll(filepath.Join(workspace, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return workspace
 }
 
 type testLogWriter struct{ t *testing.T }

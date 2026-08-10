@@ -57,7 +57,10 @@ func Build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, o
 		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "executor output directory cannot be created"}
 	}
 	dockerConfig := filepath.Join(workspace, "docker-config")
-	if err := os.Mkdir(dockerConfig, 0o700); err != nil && !os.IsExist(err) {
+	if configured := os.Getenv("DOCKER_CONFIG"); configured != "" && filepath.Clean(configured) != filepath.Clean(dockerConfig) {
+		return BuildOutput{}, Error{Code: "RUNNER_ENVIRONMENT_INVALID", Phase: "infrastructure", Message: "Docker configuration is outside the executor workspace"}
+	}
+	if err := os.MkdirAll(dockerConfig, 0o700); err != nil {
 		return BuildOutput{}, Error{Code: "RUNNER_ENVIRONMENT_INVALID", Phase: "infrastructure", Message: "isolated Docker configuration cannot be created"}
 	}
 	env := dockerEnv(dockerConfig)
@@ -66,11 +69,7 @@ func Build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, o
 	}
 	metadataPath := filepath.Join(outputDir, "buildkit-metadata.json")
 	ociPath := filepath.Join(outputDir, "image.oci.tar")
-	args := []string{
-		"buildx", "build", "--builder", "default", "--progress=plain", "--platform", Platform,
-		"--file", dockerfilePath, "--metadata-file", metadataPath, "--provenance=false",
-		"--output", "type=oci,dest=" + ociPath, contextPath,
-	}
+	args := canonicalBuildArgs(dockerfilePath, metadataPath, ociPath, contextPath)
 	logFile, err := os.CreateTemp(workspace, "buildkit-log-*")
 	if err != nil {
 		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "BuildKit log cannot be created"}
@@ -99,6 +98,14 @@ func Build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, o
 		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "OCI artifact cannot be hashed"}
 	}
 	return BuildOutput{ImageDigest: digest, OCIArtifactPath: ociPath, OCIArtifactSHA256: artifactHash, MetadataPath: metadataPath}, nil
+}
+
+func canonicalBuildArgs(dockerfilePath, metadataPath, ociPath, contextPath string) []string {
+	return []string{
+		"buildx", "build", "--builder", BuilderName, "--progress=plain", "--platform", Platform,
+		"--file", dockerfilePath, "--metadata-file", metadataPath, "--provenance=false",
+		"--output", "type=oci,dest=" + ociPath, contextPath,
+	}
 }
 
 func sourcePath(root, relative string) (string, error) {
@@ -156,15 +163,34 @@ func verifyToolchain(ctx context.Context, directory string, env []string) error 
 		return Error{Code: "BUILDKIT_UNAVAILABLE", Phase: "infrastructure", Message: "Docker Buildx is unavailable"}
 	}
 	fields := strings.Fields(string(buildx))
-	if len(fields) < 2 || strings.TrimPrefix(fields[1], "v") != BuildxVersion {
+	if len(fields) < 2 || fields[1] != BuildxVersion {
 		return Error{Code: "RUNNER_ENVIRONMENT_INVALID", Phase: "infrastructure", Message: "Docker Buildx version does not match the executor pin"}
 	}
-	inspect, err := run(ctx, directory, env, "docker", "buildx", "inspect", "default", "--bootstrap")
+	inspect, err := run(ctx, directory, env, "docker", "buildx", "inspect", BuilderName, "--bootstrap")
 	if err != nil {
 		return Error{Code: "BUILDKIT_UNAVAILABLE", Phase: "infrastructure", Message: "BuildKit builder is unavailable"}
 	}
-	if !strings.Contains(string(inspect), "BuildKit version: "+BuildKitVersion) {
-		return Error{Code: "RUNNER_ENVIRONMENT_INVALID", Phase: "infrastructure", Message: "BuildKit version does not match the executor pin"}
+	inspection := string(inspect)
+	for _, expected := range []string{"Driver:", "docker-container", "image=\"" + BuildKitImage + "\"", "network=\"bridge\"", "BuildKit daemon flags: " + BuildKitDaemonFlag, "BuildKit version:", BuildKitVersion} {
+		if !strings.Contains(inspection, expected) {
+			return Error{Code: "RUNNER_ENVIRONMENT_INVALID", Phase: "infrastructure", Message: "BuildKit builder does not match the executor pin"}
+		}
+	}
+	container, err := run(ctx, directory, env, "docker", "inspect", "buildx_buildkit_"+BuilderName+"0")
+	if err != nil {
+		return Error{Code: "BUILDKIT_UNAVAILABLE", Phase: "infrastructure", Message: "BuildKit container is unavailable"}
+	}
+	var identity []struct {
+		Config struct {
+			Image string
+			Cmd   []string
+		}
+		HostConfig struct {
+			NetworkMode string
+		}
+	}
+	if json.Unmarshal(container, &identity) != nil || len(identity) != 1 || identity[0].Config.Image != BuildKitImage || identity[0].HostConfig.NetworkMode != "bridge" || len(identity[0].Config.Cmd) != 1 || identity[0].Config.Cmd[0] != BuildKitDaemonFlag {
+		return Error{Code: "RUNNER_ENVIRONMENT_INVALID", Phase: "infrastructure", Message: "BuildKit container identity does not match the executor pin"}
 	}
 	return nil
 }
@@ -182,6 +208,8 @@ func dockerEnv(dockerConfig string) []string {
 func classifyBuildFailure(output string) error {
 	lower := strings.ToLower(output)
 	switch {
+	case strings.Contains(lower, "network.host is not allowed") || strings.Contains(lower, "security.insecure is not allowed") || strings.Contains(lower, "device is not allowed"):
+		return Error{Code: "BUILD_ENTITLEMENT_DENIED", Phase: "build", Message: "Dockerfile requested an entitlement not granted by Opsi"}
 	case strings.Contains(lower, "dockerfile parse error") || strings.Contains(lower, "failed to parse dockerfile"):
 		return Error{Code: "DOCKERFILE_PARSE_FAILED", Phase: "build", Message: "Dockerfile parsing failed"}
 	case strings.Contains(lower, "did not complete successfully") || strings.Contains(lower, "process \""):

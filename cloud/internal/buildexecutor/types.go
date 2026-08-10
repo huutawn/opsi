@@ -8,9 +8,12 @@ import (
 )
 
 const (
-	Platform        = "linux/amd64"
-	BuildxVersion   = "0.35.0"
-	BuildKitVersion = "v0.31.2"
+	Platform           = "linux/amd64"
+	BuilderName        = "opsi"
+	BuildxVersion      = "v0.36.1"
+	BuildKitVersion    = "v0.32.2"
+	BuildKitImage      = "moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
+	BuildKitDaemonFlag = "--allow-insecure-entitlement=network.host"
 )
 
 type Error struct {
