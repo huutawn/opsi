@@ -88,6 +88,37 @@ func TestBuildFailureTaxonomy(t *testing.T) {
 	}
 }
 
+func TestBuildpackFailureTaxonomy(t *testing.T) {
+	tests := map[string]string{
+		"ERROR: No buildpack groups passed detection.": "BUILDPACK_DETECTION_FAILED",
+		"ERROR: failed to detect: buildpack failed":    "BUILDPACK_DETECTION_FAILED",
+		"ERROR: failed to build application":           "BUILDPACK_BUILD_FAILED",
+		"[builder] failed to compile application":      "BUILDPACK_BUILD_FAILED",
+		"run image not found":                          "BUILDPACK_RUN_IMAGE_UNAVAILABLE",
+		"failed to fetch run image":                    "BUILDPACK_RUN_IMAGE_UNAVAILABLE",
+		"builder image unavailable":                    "BUILDPACK_BUILDER_UNAVAILABLE",
+		"failed to fetch builder image":                "BUILDPACK_BUILDER_UNAVAILABLE",
+	}
+	for output, want := range tests {
+		var typed Error
+		if !errors.As(classifyBuildpackFailure(output), &typed) || typed.Code != want {
+			t.Fatalf("output=%q code=%s want=%s", output, typed.Code, want)
+		}
+	}
+}
+
+func TestBuildpackRejectsSharedMonorepoBeforeExecution(t *testing.T) {
+	spec := testSpec(strings.Repeat("a", 40), ".", "Dockerfile")
+	spec.ResolvedBuildStrategy = buildjob.StrategyBuildpack
+	spec.DockerfilePath = ""
+	spec.ApplicationRoot = "apps/api"
+	_, err := Buildpack(context.Background(), spec, t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "output"), nil, nil)
+	var typed Error
+	if !errors.As(err, &typed) || typed.Code != "BUILDPACK_MONOREPO_UNSUPPORTED" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestCanonicalBuildArgumentsDoNotGrantPrivileges(t *testing.T) {
 	args := canonicalBuildArgs("/source/Dockerfile", "/output/metadata.json", "type=oci,dest=/output/image.oci.tar", "/source")
 	want := "buildx build --builder opsi --progress=plain --platform linux/amd64 --file /source/Dockerfile --metadata-file /output/metadata.json --provenance=false --output type=oci,dest=/output/image.oci.tar /source"
@@ -147,6 +178,9 @@ func TestCanonicalExecutorWorkflowPinsRestrictedBuilder(t *testing.T) {
 		"id-token: write",
 		"packages: write",
 		"GITHUB_TOKEN: ${{ github.token }}",
+		"- name: Install pinned pack CLI",
+		"pack-v" + PackVersion + "-linux.tgz",
+		PackArchiveSHA256,
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("workflow missing %q", required)
@@ -156,6 +190,9 @@ func TestCanonicalExecutorWorkflowPinsRestrictedBuilder(t *testing.T) {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("workflow contains forbidden %q", forbidden)
 		}
+	}
+	if strings.Contains(workflow, "ubuntu-latest") {
+		t.Fatal("executor runner image must be pinned")
 	}
 }
 

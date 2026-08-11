@@ -200,7 +200,7 @@ func (s PostgresStore) CompleteRunner(ctx context.Context, completion Completion
 	if attempt.LastState != DispatchStateClaimed || job.Status != StatusRunning {
 		return CompletionResult{}, Error{Code: "RUNNER_LEASE_REVOKED", Status: 409, Message: "Runner lease is no longer valid for this BuildJob.", Cause: "build_job_status"}
 	}
-	if job.ResolvedBuildStrategy != StrategyDockerfile || job.DockerfilePath == "" {
+	if result.Executor.Strategy != job.ResolvedBuildStrategy || job.ResolvedBuildStrategy == StrategyDockerfile && job.DockerfilePath == "" || job.ResolvedBuildStrategy == StrategyBuildpack && job.DockerfilePath != "" || job.ResolvedBuildStrategy != StrategyDockerfile && job.ResolvedBuildStrategy != StrategyBuildpack {
 		return CompletionResult{}, Error{Code: "BUILD_STRATEGY_MISMATCH", Status: 409, Message: "BuildJob strategy cannot accept this result.", Cause: "build_strategy"}
 	}
 	target := registry.Target(job.ApplicationID, job.ID)
@@ -224,14 +224,18 @@ func (s PostgresStore) CompleteRunner(ctx context.Context, completion Completion
 	if err != nil {
 		return CompletionResult{}, unavailable()
 	}
+	builderMetadata, err := json.Marshal(record.Build.Builder)
+	if err != nil {
+		return CompletionResult{}, unavailable()
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO build_records(
 		id,schema_version,project_id,repository_id,repository_owner_id,active_binding_id,service_id,service_key,
 		issuer,subject,ref,sha,event_name,workflow,workflow_ref,run_id,run_attempt,
-		config_hash,platform,oci_repository,oci_digest,build_job_id,build_strategy,builder_identity,builder_version,media_type,build_status,payload_hash,created_at
-	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`,
+		config_hash,platform,oci_repository,oci_digest,build_job_id,build_strategy,builder_identity,builder_version,builder_metadata,media_type,build_status,payload_hash,created_at
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,
 		record.ID, record.SchemaVersion, record.ProjectID, record.RepositoryID, record.RepositoryOwnerID, record.ActiveBindingID, record.ServiceID, record.ServiceKey,
 		record.Workload.Issuer, record.Workload.Subject, record.Workload.Ref, record.Workload.SHA, record.Workload.EventName, record.Workload.Workflow, record.Workload.WorkflowRef, record.Workload.RunID, record.Workload.RunAttempt,
-		record.Build.ConfigHash, record.Build.Platform, record.Build.OCIRepository, record.Build.OCIDigest, record.Build.BuildJobID, record.Build.BuildStrategy, record.Build.BuilderIdentity, record.Build.BuilderVersion, record.Build.MediaType, record.Build.Status, payloadHash, record.CreatedAt)
+		record.Build.ConfigHash, record.Build.Platform, record.Build.OCIRepository, record.Build.OCIDigest, record.Build.BuildJobID, record.Build.BuildStrategy, record.Build.BuilderIdentity, record.Build.BuilderVersion, builderMetadata, record.Build.MediaType, record.Build.Status, payloadHash, record.CreatedAt)
 	if err != nil {
 		return CompletionResult{}, unavailable()
 	}
@@ -302,11 +306,15 @@ func runnerBuildRecord(job Job, attempt DispatchAttempt, serviceKey string, resu
 		Commit, Strategy, Dockerfile, Context, Repository string
 	}{job.Source.ResolvedCommitSHA, job.ResolvedBuildStrategy, job.DockerfilePath, job.Source.BuildContext, target.Repository})
 	configHash := sha256.Sum256(config)
+	builderVersion := result.Executor.BuildKitVersion + "/buildx-" + result.Executor.BuildxVersion
+	if job.ResolvedBuildStrategy == StrategyBuildpack {
+		builderVersion = "pack-" + result.Executor.Builder.PackVersion + "/lifecycle-" + result.Executor.Builder.LifecycleVersion
+	}
 	return buildrecordv1.Record{
 		SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + hex.EncodeToString(idHash[:16]), ProjectID: job.ProjectID,
 		RepositoryID: uint64(job.Source.RepositoryID), RepositoryOwnerID: uint64(job.Source.RepositoryOwnerID), ActiveBindingID: job.Source.BindingID, ServiceID: job.ApplicationID, ServiceKey: serviceKey, CreatedAt: now,
 		Workload: buildrecordv1.WorkloadIdentity{Issuer: "https://token.actions.githubusercontent.com", Subject: "repo:" + executor.RepositoryFullName() + ":ref:" + executor.Ref, RepositoryID: uint64(job.Source.RepositoryID), RepositoryOwnerID: uint64(job.Source.RepositoryOwnerID), Ref: executor.Ref, SHA: job.Source.ResolvedCommitSHA, EventName: "workflow_dispatch", Workflow: attempt.Workflow, WorkflowRef: attempt.WorkflowRef, RunID: attempt.RunID, RunAttempt: attempt.RunAttempt},
-		Build:    buildrecordv1.BuildMetadata{ConfigHash: hex.EncodeToString(configHash[:]), Platform: result.Executor.Platform, OCIRepository: target.Repository, OCIDigest: result.Digest, BuildJobID: job.ID, BuildStrategy: job.ResolvedBuildStrategy, BuilderIdentity: result.Executor.BuilderIdentity, BuilderVersion: result.Executor.BuildKitVersion + "/buildx-" + result.Executor.BuildxVersion, MediaType: result.Executor.Remote.Descriptor.MediaType, Status: "succeeded"},
+		Build:    buildrecordv1.BuildMetadata{ConfigHash: hex.EncodeToString(configHash[:]), Platform: result.Executor.Platform, OCIRepository: target.Repository, OCIDigest: result.Digest, BuildJobID: job.ID, BuildStrategy: job.ResolvedBuildStrategy, BuilderIdentity: result.Executor.BuilderIdentity, BuilderVersion: builderVersion, Builder: result.Executor.Builder, MediaType: result.Executor.Remote.Descriptor.MediaType, Status: "succeeded"},
 	}
 }
 
@@ -325,6 +333,18 @@ func runnerFailureMessage(code string) string {
 	switch code {
 	case "USER_BUILD_FAILED":
 		return "Dockerfile build failed."
+	case "BUILDPACK_DETECTION_FAILED":
+		return "Buildpacks could not detect a deterministic build plan."
+	case "BUILDPACK_BUILD_FAILED":
+		return "Buildpacks build failed."
+	case "BUILDPACK_RUN_IMAGE_UNAVAILABLE":
+		return "Pinned Buildpacks run image is unavailable."
+	case "BUILDPACK_BUILDER_UNAVAILABLE":
+		return "Pinned Buildpacks builder is unavailable."
+	case "BUILDPACK_MONOREPO_UNSUPPORTED":
+		return "Buildpacks shared monorepo layout is unsupported."
+	case "BUILDPACK_RESULT_INVALID":
+		return "Buildpacks result metadata is invalid."
 	case "REGISTRY_AUTH_FAILED":
 		return "Registry authentication failed."
 	case "REGISTRY_PUSH_FAILED":

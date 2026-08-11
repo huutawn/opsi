@@ -19,7 +19,7 @@ DEV_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/dev-contro
 STAGING_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml
 STAGING_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env.example -f deploy/staging-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres verify-buildpacks-e2e build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -55,6 +55,9 @@ verify-postgres:
 		port="$$(docker port "$$container" 5432/tcp | awk -F: '{print $$2}')"; dsn="postgres://opsi:opsi@127.0.0.1:$$port/opsi?sslmode=disable"; \
 	fi; \
 	cd cloud; OPSI_TEST_DATABASE_URL="$$dsn" OPSI_REQUIRE_POSTGRES_TESTS=1 GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test -tags postgresintegration -p 1 ./internal/postgres ./internal/actiondevice ./internal/buildjob ./internal/registry ./internal/adminbootstrap ./internal/webhookrelay -run 'Test(Postgres|R5012)' -count=1
+
+verify-buildpacks-e2e:
+	$(RUN) ./scripts/e2e/verify-buildpacks.sh
 
 verify-dr:
 	$(RUN) ./scripts/verify-dr.sh

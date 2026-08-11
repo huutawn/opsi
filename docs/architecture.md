@@ -203,6 +203,22 @@ ref, event, run ID/attempt, workflow identity, image repository/digest, and
 optional provenance digest. Cloud compares request-body values with verified
 claims and fails closed on mismatch.
 
+The canonical trusted build executor resolves `dockerfile` to the pinned
+BuildKit adapter and `buildpack` to `pack` with the digest-pinned Paketo Ubuntu
+24.04 builder and run image. `auto` selects a canonical Dockerfile when exactly
+one exists; otherwise it selects Buildpacks. A failed Dockerfile build never
+falls back to Buildpacks. Both adapters reuse the same immutable source
+materialization, registry target, remote digest verification, BuildRecord
+finalization, lease, and failure callback.
+
+Buildpacks operate on `application_root`. Supported layouts are a standalone
+root (`application_root=build_context=.`) and a nested independent app where
+both paths name the same directory. A shared monorepo that needs files outside
+the application root fails with `BUILDPACK_MONOREPO_UNSUPPORTED`; Opsi does not
+truncate or silently build an incomplete workspace. CNB-selected buildpacks and
+processes are recorded as factual BuildRecord metadata only. They do not set
+deployment ports, health paths, or ServiceConfiguration.
+
 Routing is:
 
 ```text

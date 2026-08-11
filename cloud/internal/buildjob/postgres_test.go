@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +16,59 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	cloudpostgres "github.com/opsi-dev/opsi/cloud/internal/postgres"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
+
+func TestPostgresBuildpackEvidenceFinalizesRecords(t *testing.T) {
+	evidenceDir := os.Getenv("OPSI_BUILDPACK_EVIDENCE_DIR")
+	registryHost := os.Getenv("OPSI_TEST_REGISTRY_HOST")
+	if evidenceDir == "" || registryHost == "" {
+		t.Skip("Buildpacks evidence environment is not configured")
+	}
+	db := newBuildJobPostgres(t)
+	registry := RegistryConfig{Host: registryHost, Namespace: "opsi", RepositoryPrefix: "buildpacks", Visibility: "private"}
+	for index, runtime := range []string{"node", "go", "java", "python"} {
+		data, err := os.ReadFile(filepath.Join(evidenceDir, runtime+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var evidence struct {
+			Runtime           string       `json:"runtime"`
+			ResolvedCommitSHA string       `json:"resolved_commit_sha"`
+			ApplicationRoot   string       `json:"application_root"`
+			Result            RunnerResult `json:"result"`
+		}
+		if json.Unmarshal(data, &evidence) != nil || evidence.Runtime != runtime || !validSHA40(evidence.ResolvedCommitSHA) {
+			t.Fatalf("invalid %s evidence", runtime)
+		}
+		job := postgresBuildJob(evidence.Result.BuildJobID, evidence.Result.BuildJobID+"-key")
+		job.Source.ResolvedCommitSHA = evidence.ResolvedCommitSHA
+		job.Source.ApplicationRoot = evidence.ApplicationRoot
+		job.Source.BuildContext = evidence.ApplicationRoot
+		job.RequestedBuildStrategy = StrategyAuto
+		job.ResolvedBuildStrategy = StrategyBuildpack
+		job.DockerfilePath = ""
+		job, attempt, token, now := postgresRunningJob(t, db, job, uint64(2000+index))
+		if evidence.Result.AttemptID != attempt.AttemptID {
+			t.Fatalf("attempt=%s evidence=%s", attempt.AttemptID, evidence.Result.AttemptID)
+		}
+		service := Service{Store: PostgresStore{DB: db}, Executor: executorTestConfig(), Registry: registry, Now: func() time.Time { return now.Add(time.Minute) }}
+		completion, err := service.Complete(context.Background(), evidence.Result, token)
+		if err != nil || completion.Digest != evidence.Result.Digest || completion.BuildJobState != StatusSucceeded || completion.BuildRecordID == "" {
+			t.Fatalf("runtime=%s completion=%+v err=%v", runtime, completion, err)
+		}
+		var digest, strategy, sha string
+		var builderJSON []byte
+		if err := db.QueryRow(`SELECT oci_digest,build_strategy,sha,builder_metadata FROM build_records WHERE id=$1`, completion.BuildRecordID).Scan(&digest, &strategy, &sha, &builderJSON); err != nil {
+			t.Fatal(err)
+		}
+		var builder buildrecordv1.BuilderMetadata
+		if json.Unmarshal(builderJSON, &builder) != nil || digest != evidence.Result.Digest || strategy != StrategyBuildpack || sha != evidence.ResolvedCommitSHA || builder.PackVersion == "" || builder.BuilderImageDigest == "" || builder.RunImageDigest == "" || builder.LifecycleVersion == "" || len(builder.Buildpacks) == 0 || len(builder.Processes) == 0 {
+			t.Fatalf("runtime=%s digest=%s strategy=%s sha=%s builder=%+v", runtime, digest, strategy, sha, builder)
+		}
+		t.Logf("runtime=%s build_record_id=%s commit=%s image_digest=%s pack=%s builder=%s lifecycle=%s", runtime, completion.BuildRecordID, sha, digest, builder.PackVersion, builder.BuilderImageDigest, builder.LifecycleVersion)
+	}
+}
 
 func TestPostgresBuildCompletionFinalizesOneAcceptedRecord(t *testing.T) {
 	db := newBuildJobPostgres(t)
@@ -336,22 +389,27 @@ func newBuildJobPostgres(t *testing.T) *sql.DB {
 
 func postgresRunningBuild(t *testing.T, db *sql.DB, id string) (Job, DispatchAttempt, string, time.Time) {
 	t.Helper()
-	store := PostgresStore{DB: db}
 	job := postgresBuildJob(id, id+"-key")
+	return postgresRunningJob(t, db, job, uint64(1000+len(id)))
+}
+
+func postgresRunningJob(t *testing.T, db *sql.DB, job Job, runID uint64) (Job, DispatchAttempt, string, time.Time) {
+	t.Helper()
+	store := PostgresStore{DB: db}
 	if _, _, err := store.Create(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Unix(200, 0).UTC()
-	attempt := DispatchAttempt{Provider: ExecutorProviderGitHubActions, AttemptID: id + "-attempt", BuildJobID: job.ID, Workflow: executorTestConfig().Workflow, WorkflowRef: executorTestConfig().WorkflowRef(), ExecutorRef: executorTestConfig().Ref, DispatchedAt: now, LastState: DispatchStateDispatching}
+	attempt := DispatchAttempt{Provider: ExecutorProviderGitHubActions, AttemptID: job.ID + "-attempt", BuildJobID: job.ID, Workflow: executorTestConfig().Workflow, WorkflowRef: executorTestConfig().WorkflowRef(), ExecutorRef: executorTestConfig().Ref, DispatchedAt: now, LastState: DispatchStateDispatching}
 	if err := store.ReserveDispatch(context.Background(), job.ProjectID, job.ApplicationID, attempt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CompleteDispatch(context.Background(), attempt.AttemptID, DispatchFacts{}, now); err != nil {
 		t.Fatal(err)
 	}
-	token := "lease-" + id
+	token := "lease-" + job.ID
 	hash := sha256.Sum256([]byte(token))
-	identity := executorTestIdentity(uint64(1000 + len(id)))
+	identity := executorTestIdentity(runID)
 	if err := store.ClaimDispatch(context.Background(), job.ID, attempt.AttemptID, identity, hash[:], now.Add(10*time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +438,7 @@ func postgresRunnerResult(t *testing.T, job Job, attempt DispatchAttempt) Runner
 	}
 	descriptor := ImageDescriptor{Digest: digest, MediaType: document.MediaType, Size: int64(len(manifest))}
 	target := executorTestRegistry().Target(job.ApplicationID, job.ID)
-	return RunnerResult{BuildJobID: job.ID, AttemptID: attempt.AttemptID, RegistryReference: target.DigestReference(digest), Digest: digest, Executor: ExecutorResult{Platform: "linux/amd64", BuildKitVersion: "v0.32.2", BuildxVersion: "v0.36.1", BuilderIdentity: "moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8", StartedAt: time.Unix(210, 0).UTC(), CompletedAt: time.Unix(220, 0).UTC(), BuildDescriptor: descriptor, Remote: RemoteRegistryEvidence{Descriptor: descriptor, Platform: "linux/amd64", Manifest: manifest, Private: true}}}
+	return RunnerResult{BuildJobID: job.ID, AttemptID: attempt.AttemptID, RegistryReference: target.DigestReference(digest), Digest: digest, Executor: ExecutorResult{Strategy: StrategyDockerfile, Platform: "linux/amd64", BuildKitVersion: "v0.32.2", BuildxVersion: "v0.36.1", BuilderIdentity: "moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8", StartedAt: time.Unix(210, 0).UTC(), CompletedAt: time.Unix(220, 0).UTC(), BuildDescriptor: descriptor, Remote: RemoteRegistryEvidence{Descriptor: descriptor, Platform: "linux/amd64", Manifest: manifest, Private: true}}}
 }
 
 func queryCount(t *testing.T, db *sql.DB, query string, args ...any) int {

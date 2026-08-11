@@ -94,15 +94,29 @@ func TestGHCRPrivateSmoke(t *testing.T) {
 	t.Logf("ghcr_reference=%s buildkit_digest=%s remote_digest=%s private=%v", result.RegistryReference, result.BuildDescriptor.Digest, result.Remote.Descriptor.Digest, result.Remote.Private)
 }
 
-type distributionPublisher struct{ APIBase string }
+type distributionPublisher struct {
+	APIBase            string
+	Username, Password string
+}
 
-func (distributionPublisher) Prepare(context.Context, buildjob.PublicationTarget, string, []string) error {
+func (p distributionPublisher) Prepare(ctx context.Context, target buildjob.PublicationTarget, workspace string, env []string) error {
+	if p.Username == "" {
+		return nil
+	}
+	command := execCommandContext(ctx, "docker", "login", target.Host, "--username", p.Username, "--password-stdin")
+	command.Dir = workspace
+	command.Env = env
+	command.Stdin = strings.NewReader(p.Password)
+	if _, err := command.CombinedOutput(); err != nil {
+		return Error{Code: "REGISTRY_AUTH_FAILED", Phase: "publication", Message: "test registry authentication failed"}
+	}
 	return nil
 }
 
 func (p distributionPublisher) Verify(ctx context.Context, target buildjob.PublicationTarget, local buildjob.ImageDescriptor, _ string, _ []string) (buildjob.RemoteRegistryEvidence, error) {
 	repository := strings.TrimPrefix(target.Repository, target.Host+"/")
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(p.APIBase, "/")+"/v2/"+repository+"/manifests/"+local.Digest, nil)
+	setDistributionAuth(request, p.Username, p.Password)
 	request.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil || response.StatusCode != http.StatusOK {
@@ -130,6 +144,7 @@ func (p distributionPublisher) Verify(ctx context.Context, target buildjob.Publi
 			return buildjob.RemoteRegistryEvidence{}, Error{Code: "REGISTRY_DIGEST_MISMATCH", Phase: "verification", Message: "local registry manifest platform is unavailable"}
 		}
 		configRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(p.APIBase, "/")+"/v2/"+repository+"/blobs/"+manifest.Config.Digest, nil)
+		setDistributionAuth(configRequest, p.Username, p.Password)
 		configResponse, configErr := http.DefaultClient.Do(configRequest)
 		if configErr != nil || configResponse.StatusCode != http.StatusOK {
 			return buildjob.RemoteRegistryEvidence{}, Error{Code: "REGISTRY_ARTIFACT_NOT_FOUND", Phase: "verification", Message: "local registry image config was not found"}
@@ -147,9 +162,13 @@ func (p distributionPublisher) Verify(ctx context.Context, target buildjob.Publi
 	return buildjob.RemoteRegistryEvidence{Descriptor: buildjob.ImageDescriptor{Digest: digest, MediaType: mediaType, Size: int64(len(raw))}, Platform: platform, Manifest: raw, Private: true}, nil
 }
 
-func (distributionPublisher) Cleanup(context.Context, buildjob.PublicationTarget, string, []string) {}
+func (p distributionPublisher) Cleanup(ctx context.Context, target buildjob.PublicationTarget, workspace string, env []string) {
+	if p.Username != "" {
+		_, _ = run(ctx, workspace, env, "docker", "logout", target.Host)
+	}
+}
 
-func distributionContains(ctx context.Context, apiBase string, target buildjob.PublicationTarget, manifest, secret []byte) (bool, error) {
+func distributionContains(ctx context.Context, apiBase string, target buildjob.PublicationTarget, manifest, secret []byte, credentials ...string) (bool, error) {
 	var document struct {
 		Config struct {
 			Digest string `json:"digest"`
@@ -171,6 +190,9 @@ func distributionContains(ctx context.Context, apiBase string, target buildjob.P
 	}
 	for _, child := range document.Manifests {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(apiBase, "/")+"/v2/"+repository+"/manifests/"+child.Digest, nil)
+		if len(credentials) == 2 {
+			setDistributionAuth(request, credentials[0], credentials[1])
+		}
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			return false, err
@@ -180,7 +202,7 @@ func distributionContains(ctx context.Context, apiBase string, target buildjob.P
 		if readErr != nil {
 			return false, readErr
 		}
-		if found, err := distributionContains(ctx, apiBase, target, data, secret); err != nil || found {
+		if found, err := distributionContains(ctx, apiBase, target, data, secret, credentials...); err != nil || found {
 			return found, err
 		}
 	}
@@ -189,6 +211,9 @@ func distributionContains(ctx context.Context, apiBase string, target buildjob.P
 			continue
 		}
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(apiBase, "/")+"/v2/"+repository+"/blobs/"+digest, nil)
+		if len(credentials) == 2 {
+			setDistributionAuth(request, credentials[0], credentials[1])
+		}
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			return false, err
@@ -203,6 +228,12 @@ func distributionContains(ctx context.Context, apiBase string, target buildjob.P
 		}
 	}
 	return false, nil
+}
+
+func setDistributionAuth(request *http.Request, username, password string) {
+	if username != "" {
+		request.SetBasicAuth(username, password)
+	}
 }
 
 func TestBuildKitOCIForRootMonorepoAndNestedContext(t *testing.T) {

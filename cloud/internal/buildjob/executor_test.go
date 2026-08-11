@@ -162,7 +162,7 @@ func TestBuildExecutorClaimFailsClosedForTrustMismatchCancellationAndWrongJob(t 
 	}
 }
 
-func TestBuildExecutorRejectsRunMismatchAndNonDockerfile(t *testing.T) {
+func TestBuildExecutorRejectsRunMismatchAndDispatchesBuildpack(t *testing.T) {
 	store := NewMemoryStore()
 	job := executorTestJob("job-1")
 	_, _, _ = store.Create(context.Background(), job)
@@ -177,11 +177,11 @@ func TestBuildExecutorRejectsRunMismatchAndNonDockerfile(t *testing.T) {
 
 	buildpackStore := NewMemoryStore()
 	buildpack := executorTestJob("job-buildpack")
-	buildpack.ResolvedBuildStrategy = StrategyBuildpackRequired
+	buildpack.ResolvedBuildStrategy = StrategyBuildpack
 	buildpack.DockerfilePath = ""
 	_, _, _ = buildpackStore.Create(context.Background(), buildpack)
 	service.Store = buildpackStore
-	if _, err := service.Dispatch(context.Background(), buildpack.ProjectID, buildpack.ApplicationID, buildpack.ID); Code(err) != "BUILD_STRATEGY_NOT_DISPATCHABLE" {
+	if _, err := service.Dispatch(context.Background(), buildpack.ProjectID, buildpack.ApplicationID, buildpack.ID); err != nil {
 		t.Fatalf("buildpack dispatch err=%v", err)
 	}
 }

@@ -603,5 +603,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateP05B2B2RegistryBuildRecord(ctx, db); err != nil {
 		return err
 	}
+	if err := MigrateP05CBuildpacks(ctx, db); err != nil {
+		return err
+	}
 	return MigrateR5012ServiceConfiguration(ctx, db)
 }

@@ -51,7 +51,7 @@ func (c Client) SourceAccess(ctx context.Context, jobID, attemptID string, runID
 func (c Client) Complete(ctx context.Context, result Result) (buildjob.CompletionResult, error) {
 	request := buildjob.RunnerResult{
 		BuildJobID: result.BuildJobID, AttemptID: result.AttemptID, RegistryReference: result.RegistryReference, Digest: result.ImageDigest,
-		Executor: buildjob.ExecutorResult{Platform: result.Platform, BuildKitVersion: result.BuildKitVersion, BuildxVersion: result.BuildxVersion, BuilderIdentity: BuildKitImage, StartedAt: result.StartedAt, CompletedAt: result.CompletedAt, BuildDescriptor: result.BuildDescriptor, Remote: result.Remote},
+		Executor: buildjob.ExecutorResult{Strategy: result.Strategy, Platform: result.Platform, BuildKitVersion: result.BuildKitVersion, BuildxVersion: result.BuildxVersion, BuilderIdentity: result.BuilderIdentity, Builder: result.Builder, StartedAt: result.StartedAt, CompletedAt: result.CompletedAt, BuildDescriptor: result.BuildDescriptor, Remote: result.Remote},
 	}
 	body, err := json.Marshal(request)
 	if err != nil {

@@ -23,7 +23,7 @@ func MigrateP05B1BuildJobs(ctx context.Context, db *sql.DB) error {
 			application_root TEXT NOT NULL,
 			build_context TEXT NOT NULL,
 			requested_build_strategy TEXT NOT NULL CHECK (requested_build_strategy IN ('auto','dockerfile','buildpack')),
-			resolved_build_strategy TEXT NOT NULL CHECK (resolved_build_strategy IN ('dockerfile','buildpack_required')),
+			resolved_build_strategy TEXT NOT NULL CHECK (resolved_build_strategy IN ('dockerfile','buildpack')),
 			dockerfile_path TEXT,
 			status TEXT NOT NULL CHECK (status IN ('pending','ready','running','succeeded','failed','cancelled')),
 			failure_code TEXT,

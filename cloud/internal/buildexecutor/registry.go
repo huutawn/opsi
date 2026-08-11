@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -126,6 +127,25 @@ func platformFromManifest(raw []byte) string {
 		}
 	}
 	return ""
+}
+
+func pushImage(ctx context.Context, target buildjob.PublicationTarget, workspace string, env []string, log io.Writer) (buildjob.ImageDescriptor, error) {
+	output, err := run(ctx, workspace, env, "docker", "push", target.TagReference())
+	if log != nil {
+		_, _ = log.Write(output)
+	}
+	if err != nil {
+		return buildjob.ImageDescriptor{}, Error{Code: "REGISTRY_PUSH_FAILED", Phase: "publication", Message: "Registry publication failed"}
+	}
+	raw, err := run(ctx, workspace, env, "docker", "buildx", "imagetools", "inspect", "--raw", target.TagReference())
+	if err != nil {
+		return buildjob.ImageDescriptor{}, Error{Code: "REGISTRY_ARTIFACT_NOT_FOUND", Phase: "verification", Message: "Published registry artifact was not found"}
+	}
+	descriptor, err := manifestDescriptor(raw)
+	if err != nil {
+		return buildjob.ImageDescriptor{}, Error{Code: "BUILDPACK_RESULT_INVALID", Phase: "verification", Message: "Published Buildpacks descriptor is invalid"}
+	}
+	return descriptor, nil
 }
 
 var execCommandContext = exec.CommandContext

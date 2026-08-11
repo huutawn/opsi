@@ -20,10 +20,9 @@ const (
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
 
-	StrategyAuto              = "auto"
-	StrategyDockerfile        = "dockerfile"
-	StrategyBuildpack         = "buildpack"
-	StrategyBuildpackRequired = "buildpack_required"
+	StrategyAuto       = "auto"
+	StrategyDockerfile = "dockerfile"
+	StrategyBuildpack  = "buildpack"
 )
 
 type Error struct {
@@ -195,8 +194,7 @@ func (s Service) List(ctx context.Context, projectID, applicationID, status stri
 
 func resolveStrategy(ctx context.Context, repository RepositoryAuthority, source ApplicationSource, sha string) (string, string, *Error, error) {
 	if source.BuildStrategy == StrategyBuildpack {
-		failure := Error{Code: "BUILD_STRATEGY_NOT_IMPLEMENTED", Status: 422, Message: "Buildpack execution is not implemented.", Cause: "build_strategy"}
-		return StrategyBuildpackRequired, "", &failure, nil
+		return StrategyBuildpack, "", nil, nil
 	}
 	if source.DockerfilePath != "" {
 		exists, err := repository.RepositoryFileExists(ctx, source.InstallationID, source.RepositoryFullName, sha, source.DockerfilePath)
@@ -230,8 +228,7 @@ func resolveStrategy(ctx context.Context, repository RepositoryAuthority, source
 	if len(found) == 1 {
 		return StrategyDockerfile, found[0], nil, nil
 	}
-	failure := Error{Code: "BUILDPACK_REQUIRED", Status: 422, Message: "No canonical Dockerfile exists at the resolved commit.", Cause: "dockerfile_missing"}
-	return StrategyBuildpackRequired, "", &failure, nil
+	return StrategyBuildpack, "", nil, nil
 }
 
 func validateSource(source ApplicationSource, projectID, applicationID string) error {

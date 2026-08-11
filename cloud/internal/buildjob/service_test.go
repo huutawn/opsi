@@ -40,15 +40,15 @@ func (r *testRepository) RepositoryFileExists(_ context.Context, _ int64, _ stri
 
 func TestBuildJobDockerfileResolution(t *testing.T) {
 	tests := []struct {
-		name, root, buildContext, strategy, explicit, expectedPath, expectedStatus, expectedFailure string
-		files                                                                                       map[string]bool
+		name, root, buildContext, strategy, explicit, expectedPath, expectedStrategy, expectedStatus, expectedFailure string
+		files                                                                                                         map[string]bool
 	}{
-		{name: "root repository Dockerfile", root: ".", buildContext: ".", strategy: StrategyAuto, files: map[string]bool{"Dockerfile": true}, expectedPath: "Dockerfile", expectedStatus: StatusReady},
-		{name: "monorepo application root", root: "apps/api", buildContext: "apps/api", strategy: StrategyAuto, files: map[string]bool{"apps/api/Dockerfile": true}, expectedPath: "apps/api/Dockerfile", expectedStatus: StatusReady},
-		{name: "repository build context with nested application", root: "apps/api", buildContext: ".", strategy: StrategyAuto, files: map[string]bool{"apps/api/Dockerfile": true}, expectedPath: "apps/api/Dockerfile", expectedStatus: StatusReady},
-		{name: "explicit Dockerfile", root: "apps/api", buildContext: ".", strategy: StrategyDockerfile, explicit: "containers/api.Dockerfile", files: map[string]bool{"containers/api.Dockerfile": true}, expectedPath: "containers/api.Dockerfile", expectedStatus: StatusReady},
-		{name: "auto requires buildpack", root: "apps/api", buildContext: ".", strategy: StrategyAuto, files: map[string]bool{}, expectedStatus: StatusFailed, expectedFailure: "BUILDPACK_REQUIRED"},
-		{name: "explicit buildpack is factual", root: "apps/api", buildContext: ".", strategy: StrategyBuildpack, files: map[string]bool{}, expectedStatus: StatusFailed, expectedFailure: "BUILD_STRATEGY_NOT_IMPLEMENTED"},
+		{name: "root repository Dockerfile", root: ".", buildContext: ".", strategy: StrategyAuto, files: map[string]bool{"Dockerfile": true}, expectedPath: "Dockerfile", expectedStrategy: StrategyDockerfile, expectedStatus: StatusReady},
+		{name: "monorepo application root", root: "apps/api", buildContext: "apps/api", strategy: StrategyAuto, files: map[string]bool{"apps/api/Dockerfile": true}, expectedPath: "apps/api/Dockerfile", expectedStrategy: StrategyDockerfile, expectedStatus: StatusReady},
+		{name: "repository build context with nested application", root: "apps/api", buildContext: ".", strategy: StrategyAuto, files: map[string]bool{"apps/api/Dockerfile": true}, expectedPath: "apps/api/Dockerfile", expectedStrategy: StrategyDockerfile, expectedStatus: StatusReady},
+		{name: "explicit Dockerfile", root: "apps/api", buildContext: ".", strategy: StrategyDockerfile, explicit: "containers/api.Dockerfile", files: map[string]bool{"containers/api.Dockerfile": true}, expectedPath: "containers/api.Dockerfile", expectedStrategy: StrategyDockerfile, expectedStatus: StatusReady},
+		{name: "auto selects buildpack", root: "apps/api", buildContext: "apps/api", strategy: StrategyAuto, files: map[string]bool{}, expectedStrategy: StrategyBuildpack, expectedStatus: StatusReady},
+		{name: "explicit buildpack overrides Dockerfile", root: "apps/api", buildContext: "apps/api", strategy: StrategyBuildpack, files: map[string]bool{"apps/api/Dockerfile": true}, expectedStrategy: StrategyBuildpack, expectedStatus: StatusReady},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -58,7 +58,7 @@ func TestBuildJobDockerfileResolution(t *testing.T) {
 			if err != nil || reused {
 				t.Fatalf("job=%+v reused=%v err=%v", job, reused, err)
 			}
-			if job.Source.ResolvedCommitSHA != repository.sha || job.DockerfilePath != test.expectedPath || job.Status != test.expectedStatus || job.FailureCode != test.expectedFailure {
+			if job.Source.ResolvedCommitSHA != repository.sha || job.ResolvedBuildStrategy != test.expectedStrategy || job.DockerfilePath != test.expectedPath || job.Status != test.expectedStatus || job.FailureCode != test.expectedFailure {
 				t.Fatalf("unexpected job: %+v", job)
 			}
 			if job.Status == StatusFailed && (job.FailureMessageRedacted == "" || job.FailureCause == "") {

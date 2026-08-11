@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
 
 const (
@@ -167,7 +169,8 @@ type BuildSpec struct {
 }
 
 func (s BuildSpec) Validate() error {
-	if !validOpaqueID(s.BuildJobID) || !validRepositoryFullName(s.Repository) || s.RepositoryID <= 0 || s.RepositoryOwnerID <= 0 || s.GitHubInstallationID <= 0 || !validSHA40(s.ResolvedCommitSHA) || !canonicalRepositoryPath(s.ApplicationRoot, true) || !canonicalRepositoryPath(s.BuildContext, true) || s.ResolvedBuildStrategy != StrategyDockerfile || !canonicalRepositoryPath(s.DockerfilePath, false) || !s.Publication.Empty() && s.Publication.Validate() != nil {
+	strategyValid := s.ResolvedBuildStrategy == StrategyDockerfile && canonicalRepositoryPath(s.DockerfilePath, false) || s.ResolvedBuildStrategy == StrategyBuildpack && s.DockerfilePath == ""
+	if !validOpaqueID(s.BuildJobID) || !validRepositoryFullName(s.Repository) || s.RepositoryID <= 0 || s.RepositoryOwnerID <= 0 || s.GitHubInstallationID <= 0 || !validSHA40(s.ResolvedCommitSHA) || !canonicalRepositoryPath(s.ApplicationRoot, true) || !canonicalRepositoryPath(s.BuildContext, true) || !strategyValid || !s.Publication.Empty() && s.Publication.Validate() != nil {
 		return Error{Code: "BUILD_SPEC_INVALID", Status: 409, Message: "Build Spec is invalid.", Cause: "build_spec"}
 	}
 	return nil
@@ -187,14 +190,16 @@ type RemoteRegistryEvidence struct {
 }
 
 type ExecutorResult struct {
-	Platform        string                 `json:"platform"`
-	BuildKitVersion string                 `json:"buildkit_version"`
-	BuildxVersion   string                 `json:"buildx_version"`
-	BuilderIdentity string                 `json:"builder_identity"`
-	StartedAt       time.Time              `json:"started_at"`
-	CompletedAt     time.Time              `json:"completed_at"`
-	BuildDescriptor ImageDescriptor        `json:"build_descriptor"`
-	Remote          RemoteRegistryEvidence `json:"remote"`
+	Strategy        string                        `json:"strategy"`
+	Platform        string                        `json:"platform"`
+	BuildKitVersion string                        `json:"buildkit_version"`
+	BuildxVersion   string                        `json:"buildx_version"`
+	BuilderIdentity string                        `json:"builder_identity"`
+	Builder         buildrecordv1.BuilderMetadata `json:"builder,omitempty"`
+	StartedAt       time.Time                     `json:"started_at"`
+	CompletedAt     time.Time                     `json:"completed_at"`
+	BuildDescriptor ImageDescriptor               `json:"build_descriptor"`
+	Remote          RemoteRegistryEvidence        `json:"remote"`
 }
 
 type RunnerResult struct {
@@ -343,10 +348,11 @@ func validateDispatchableJob(job Job) error {
 	if job.Status != StatusReady {
 		return Error{Code: "BUILD_JOB_NOT_READY", Status: 409, Message: "BuildJob is not ready for dispatch.", Cause: "build_job_status"}
 	}
-	if job.ResolvedBuildStrategy != StrategyDockerfile || job.DockerfilePath == "" {
-		return Error{Code: "BUILD_STRATEGY_NOT_DISPATCHABLE", Status: 409, Message: "Only resolved Dockerfile BuildJobs can be dispatched.", Cause: "build_strategy"}
+	strategyValid := job.ResolvedBuildStrategy == StrategyDockerfile && canonicalRepositoryPath(job.DockerfilePath, false) || job.ResolvedBuildStrategy == StrategyBuildpack && job.DockerfilePath == ""
+	if !strategyValid {
+		return Error{Code: "BUILD_STRATEGY_NOT_DISPATCHABLE", Status: 409, Message: "BuildJob strategy is not dispatchable.", Cause: "build_strategy"}
 	}
-	if !validOpaqueID(job.ProjectID) || !validOpaqueID(job.ApplicationID) || !validOpaqueID(job.EnvironmentID) || !validOpaqueID(job.Source.BindingID) || job.Source.BindingUpdatedAt.IsZero() || job.Source.InstallationID <= 0 || job.Source.RepositoryID <= 0 || job.Source.RepositoryOwnerID <= 0 || !validRepositoryFullName(job.Source.RepositoryFullName) || !validSHA40(job.Source.ResolvedCommitSHA) || !canonicalRepositoryPath(job.Source.ApplicationRoot, true) || !canonicalRepositoryPath(job.Source.BuildContext, true) || !canonicalRepositoryPath(job.DockerfilePath, false) {
+	if !validOpaqueID(job.ProjectID) || !validOpaqueID(job.ApplicationID) || !validOpaqueID(job.EnvironmentID) || !validOpaqueID(job.Source.BindingID) || job.Source.BindingUpdatedAt.IsZero() || job.Source.InstallationID <= 0 || job.Source.RepositoryID <= 0 || job.Source.RepositoryOwnerID <= 0 || !validRepositoryFullName(job.Source.RepositoryFullName) || !validSHA40(job.Source.ResolvedCommitSHA) || !canonicalRepositoryPath(job.Source.ApplicationRoot, true) || !canonicalRepositoryPath(job.Source.BuildContext, true) {
 		return Error{Code: "BUILD_JOB_SNAPSHOT_INVALID", Status: 409, Message: "BuildJob immutable snapshot is invalid.", Cause: "build_job_snapshot"}
 	}
 	return nil
@@ -376,13 +382,16 @@ func (s Service) Fail(ctx context.Context, failure RunnerFailure, token string) 
 }
 
 func validateRunnerResult(result RunnerResult) error {
-	if !validOpaqueID(result.BuildJobID) || !validOpaqueID(result.AttemptID) || !ociDigestPattern.MatchString(result.Digest) || result.RegistryReference == "" || result.Executor.Platform != "linux/amd64" || result.Executor.BuildKitVersion == "" || result.Executor.BuildxVersion == "" || result.Executor.BuilderIdentity == "" || result.Executor.StartedAt.IsZero() || result.Executor.CompletedAt.Before(result.Executor.StartedAt) || !result.Executor.Remote.Private {
+	if !validOpaqueID(result.BuildJobID) || !validOpaqueID(result.AttemptID) || !ociDigestPattern.MatchString(result.Digest) || result.RegistryReference == "" || result.Executor.Platform != "linux/amd64" || result.Executor.Strategy != StrategyDockerfile && result.Executor.Strategy != StrategyBuildpack || result.Executor.BuilderIdentity == "" || result.Executor.StartedAt.IsZero() || result.Executor.CompletedAt.Before(result.Executor.StartedAt) || !result.Executor.Remote.Private {
 		return invalid("RUNNER_RESULT_INVALID", "Runner result is invalid.", "runner_result")
+	}
+	if result.Executor.Strategy == StrategyDockerfile && (result.Executor.BuildKitVersion == "" || result.Executor.BuildxVersion == "") || result.Executor.Strategy == StrategyBuildpack && !validBuildpackMetadata(result.Executor.Builder) {
+		return invalid("RUNNER_RESULT_INVALID", "Runner builder metadata is invalid.", "runner_result")
 	}
 	local := result.Executor.BuildDescriptor
 	remote := result.Executor.Remote.Descriptor
 	if local.Digest != result.Digest || remote.Digest != result.Digest || !ociDigestPattern.MatchString(local.Digest) || local.MediaType == "" || remote.MediaType == "" || local.MediaType != remote.MediaType || local.Size > 0 && remote.Size != local.Size || result.Executor.Remote.Platform != result.Executor.Platform || len(result.Executor.Remote.Manifest) == 0 || len(result.Executor.Remote.Manifest) > 4<<20 {
-		return Error{Code: "REGISTRY_DIGEST_MISMATCH", Status: 409, Message: "Registry result does not match BuildKit output.", Cause: "registry_digest"}
+		return Error{Code: "REGISTRY_DIGEST_MISMATCH", Status: 409, Message: "Registry result does not match build output.", Cause: "registry_digest"}
 	}
 	sum := sha256.Sum256(result.Executor.Remote.Manifest)
 	if "sha256:"+hex.EncodeToString(sum[:]) != remote.Digest {
@@ -397,9 +406,14 @@ func validateRunnerResult(result RunnerResult) error {
 	return nil
 }
 
+func validBuildpackMetadata(metadata buildrecordv1.BuilderMetadata) bool {
+	return metadata.PackVersion != "" && metadata.BuilderImage != "" && ociDigestPattern.MatchString(metadata.BuilderImageDigest) && metadata.RunImage != "" && ociDigestPattern.MatchString(metadata.RunImageDigest) && metadata.LifecycleVersion != "" && len(metadata.Buildpacks) > 0
+}
+
 func validRunnerFailure(code string) bool {
 	switch code {
-	case "USER_BUILD_FAILED", "REGISTRY_AUTH_FAILED", "REGISTRY_PUSH_FAILED", "REGISTRY_DIGEST_MISMATCH", "REGISTRY_ARTIFACT_NOT_FOUND", "EXECUTOR_INFRASTRUCTURE_FAILED":
+	case "USER_BUILD_FAILED", "REGISTRY_AUTH_FAILED", "REGISTRY_PUSH_FAILED", "REGISTRY_DIGEST_MISMATCH", "REGISTRY_ARTIFACT_NOT_FOUND", "EXECUTOR_INFRASTRUCTURE_FAILED",
+		"BUILDPACK_DETECTION_FAILED", "BUILDPACK_BUILD_FAILED", "BUILDPACK_RUN_IMAGE_UNAVAILABLE", "BUILDPACK_BUILDER_UNAVAILABLE", "BUILDPACK_MONOREPO_UNSUPPORTED", "BUILDPACK_RESULT_INVALID":
 		return true
 	default:
 		return false

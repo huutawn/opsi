@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
 
 type BuildOutput struct {
@@ -22,6 +23,7 @@ type BuildOutput struct {
 	OCIArtifactPath   string
 	OCIArtifactSHA256 string
 	MetadataPath      string
+	Builder           buildrecordv1.BuilderMetadata
 }
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)

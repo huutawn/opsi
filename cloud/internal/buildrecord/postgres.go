@@ -3,6 +3,7 @@ package buildrecord
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -20,15 +21,19 @@ func (s PostgresStore) Create(ctx context.Context, payloadHash string, record bu
 		return buildrecordv1.Record{}, false, unavailable()
 	}
 	defer tx.Rollback()
+	builderMetadata, err := json.Marshal(record.Build.Builder)
+	if err != nil {
+		return buildrecordv1.Record{}, false, unavailable()
+	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO build_records(
 		id,schema_version,project_id,repository_id,repository_owner_id,active_binding_id,service_id,service_key,
 		issuer,subject,ref,sha,event_name,workflow,workflow_ref,job_workflow_ref,run_id,run_attempt,
-		config_hash,plan_hash,platform,oci_repository,oci_digest,provenance_digest,build_job_id,build_strategy,builder_identity,builder_version,media_type,build_status,payload_hash,created_at
-	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,''),$17,$18,$19,NULLIF($20,''),$21,$22,$23,NULLIF($24,''),NULLIF($25,''),NULLIF($26,''),NULLIF($27,''),NULLIF($28,''),NULLIF($29,''),$30,$31,$32)
+		config_hash,plan_hash,platform,oci_repository,oci_digest,provenance_digest,build_job_id,build_strategy,builder_identity,builder_version,builder_metadata,media_type,build_status,payload_hash,created_at
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,''),$17,$18,$19,NULLIF($20,''),$21,$22,$23,NULLIF($24,''),NULLIF($25,''),NULLIF($26,''),NULLIF($27,''),NULLIF($28,''),$29,NULLIF($30,''),$31,$32,$33)
 	ON CONFLICT (repository_id,run_id,run_attempt,service_key) DO NOTHING`,
 		record.ID, record.SchemaVersion, record.ProjectID, record.RepositoryID, record.RepositoryOwnerID, record.ActiveBindingID, record.ServiceID, record.ServiceKey,
 		record.Workload.Issuer, record.Workload.Subject, record.Workload.Ref, record.Workload.SHA, record.Workload.EventName, record.Workload.Workflow, record.Workload.WorkflowRef, record.Workload.JobWorkflowRef, record.Workload.RunID, record.Workload.RunAttempt,
-		record.Build.ConfigHash, record.Build.PlanHash, record.Build.Platform, record.Build.OCIRepository, record.Build.OCIDigest, record.Build.ProvenanceDigest, record.Build.BuildJobID, record.Build.BuildStrategy, record.Build.BuilderIdentity, record.Build.BuilderVersion, record.Build.MediaType, record.Build.Status, payloadHash, record.CreatedAt)
+		record.Build.ConfigHash, record.Build.PlanHash, record.Build.Platform, record.Build.OCIRepository, record.Build.OCIDigest, record.Build.ProvenanceDigest, record.Build.BuildJobID, record.Build.BuildStrategy, record.Build.BuilderIdentity, record.Build.BuilderVersion, builderMetadata, record.Build.MediaType, record.Build.Status, payloadHash, record.CreatedAt)
 	if err != nil {
 		return buildrecordv1.Record{}, false, unavailable()
 	}
@@ -122,14 +127,18 @@ func (s PostgresStore) Get(ctx context.Context, projectID, recordID string) (bui
 	return record, nil
 }
 
-const selectRecordColumns = `SELECT id,schema_version,project_id,repository_id,repository_owner_id,active_binding_id,service_id,service_key,issuer,subject,ref,sha,event_name,workflow,workflow_ref,COALESCE(job_workflow_ref,''),run_id,run_attempt,config_hash,COALESCE(plan_hash,''),platform,oci_repository,oci_digest,COALESCE(provenance_digest,''),COALESCE(build_job_id,''),COALESCE(build_strategy,''),COALESCE(builder_identity,''),COALESCE(builder_version,''),COALESCE(media_type,''),build_status,payload_hash,created_at FROM build_records`
+const selectRecordColumns = `SELECT id,schema_version,project_id,repository_id,repository_owner_id,active_binding_id,service_id,service_key,issuer,subject,ref,sha,event_name,workflow,workflow_ref,COALESCE(job_workflow_ref,''),run_id,run_attempt,config_hash,COALESCE(plan_hash,''),platform,oci_repository,oci_digest,COALESCE(provenance_digest,''),COALESCE(build_job_id,''),COALESCE(build_strategy,''),COALESCE(builder_identity,''),COALESCE(builder_version,''),builder_metadata,COALESCE(media_type,''),build_status,payload_hash,created_at FROM build_records`
 
 type scanner interface{ Scan(...any) error }
 
 func scanRecord(row scanner) (buildrecordv1.Record, string, error) {
 	var record buildrecordv1.Record
 	var payloadHash string
-	err := row.Scan(&record.ID, &record.SchemaVersion, &record.ProjectID, &record.RepositoryID, &record.RepositoryOwnerID, &record.ActiveBindingID, &record.ServiceID, &record.ServiceKey, &record.Workload.Issuer, &record.Workload.Subject, &record.Workload.Ref, &record.Workload.SHA, &record.Workload.EventName, &record.Workload.Workflow, &record.Workload.WorkflowRef, &record.Workload.JobWorkflowRef, &record.Workload.RunID, &record.Workload.RunAttempt, &record.Build.ConfigHash, &record.Build.PlanHash, &record.Build.Platform, &record.Build.OCIRepository, &record.Build.OCIDigest, &record.Build.ProvenanceDigest, &record.Build.BuildJobID, &record.Build.BuildStrategy, &record.Build.BuilderIdentity, &record.Build.BuilderVersion, &record.Build.MediaType, &record.Build.Status, &payloadHash, &record.CreatedAt)
+	var builderMetadata []byte
+	err := row.Scan(&record.ID, &record.SchemaVersion, &record.ProjectID, &record.RepositoryID, &record.RepositoryOwnerID, &record.ActiveBindingID, &record.ServiceID, &record.ServiceKey, &record.Workload.Issuer, &record.Workload.Subject, &record.Workload.Ref, &record.Workload.SHA, &record.Workload.EventName, &record.Workload.Workflow, &record.Workload.WorkflowRef, &record.Workload.JobWorkflowRef, &record.Workload.RunID, &record.Workload.RunAttempt, &record.Build.ConfigHash, &record.Build.PlanHash, &record.Build.Platform, &record.Build.OCIRepository, &record.Build.OCIDigest, &record.Build.ProvenanceDigest, &record.Build.BuildJobID, &record.Build.BuildStrategy, &record.Build.BuilderIdentity, &record.Build.BuilderVersion, &builderMetadata, &record.Build.MediaType, &record.Build.Status, &payloadHash, &record.CreatedAt)
+	if err == nil {
+		err = json.Unmarshal(builderMetadata, &record.Build.Builder)
+	}
 	record.Workload.RepositoryID = record.RepositoryID
 	record.Workload.RepositoryOwnerID = record.RepositoryOwnerID
 	return record, payloadHash, err

@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Initialize executor paths
@@ -53,6 +53,18 @@ jobs:
         run: |
           set -euo pipefail
           go build -C cloud -trimpath -o "$RUNNER_TEMP/opsi-bin/opsi-build-executor" ./cmd/opsi-build-executor
+      - name: Install pinned pack CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/pack-v0.40.9-linux.tgz"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://github.com/buildpacks/pack/releases/download/v0.40.9/pack-v0.40.9-linux.tgz \
+            -o "$archive"
+          echo "dc0ee1e931cf8a106d7555a01a214864f9acb60b77adf15d69b74df4404758e9  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP/opsi-bin" pack
+          "$RUNNER_TEMP/opsi-bin/pack" version
+          echo "$RUNNER_TEMP/opsi-bin" >> "$GITHUB_PATH"
       - name: Set up deterministic Buildx
         # docker/setup-buildx-action v4.2.0
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c

@@ -5,15 +5,23 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
 
 const (
-	Platform           = "linux/amd64"
-	BuilderName        = "opsi"
-	BuildxVersion      = "v0.36.1"
-	BuildKitVersion    = "v0.32.2"
-	BuildKitImage      = "moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
-	BuildKitDaemonFlag = "--allow-insecure-entitlement=network.host"
+	Platform                  = "linux/amd64"
+	BuilderName               = "opsi"
+	BuildxVersion             = "v0.36.1"
+	BuildKitVersion           = "v0.32.2"
+	BuildKitImage             = "moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
+	BuildKitDaemonFlag        = "--allow-insecure-entitlement=network.host"
+	PackVersion               = "0.40.9"
+	PackArchiveSHA256         = "dc0ee1e931cf8a106d7555a01a214864f9acb60b77adf15d69b74df4404758e9"
+	BuildpackBuilder          = "paketobuildpacks/ubuntu-noble-builder:0.0.167@sha256:cebbe41ca97c166e10f4fc6076724df39c4e247f8ee9c81b852a9219b7a993c0"
+	BuildpackBuilderDigest    = "sha256:cebbe41ca97c166e10f4fc6076724df39c4e247f8ee9c81b852a9219b7a993c0"
+	BuildpackRunImage         = "paketobuildpacks/ubuntu-noble-run:0.0.112@sha256:a9433b9e0b786dc2f90a433464cf7c11ede0877e30e4155a66abe35001a56d20"
+	BuildpackRunImageDigest   = "sha256:a9433b9e0b786dc2f90a433464cf7c11ede0877e30e4155a66abe35001a56d20"
+	BuildpackLifecycleVersion = "0.21.15"
 )
 
 type Error struct {
@@ -64,6 +72,8 @@ type Result struct {
 	Platform          string                          `json:"platform"`
 	BuildKitVersion   string                          `json:"buildkit_version"`
 	BuildxVersion     string                          `json:"buildx_version"`
+	BuilderIdentity   string                          `json:"builder_identity"`
+	Builder           buildrecordv1.BuilderMetadata   `json:"builder,omitempty"`
 	ImageDigest       string                          `json:"image_digest,omitempty"`
 	RegistryReference string                          `json:"registry_reference,omitempty"`
 	BuildDescriptor   buildjob.ImageDescriptor        `json:"build_descriptor,omitempty"`
