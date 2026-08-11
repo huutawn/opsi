@@ -31,16 +31,17 @@ import (
 )
 
 type Server struct {
-	Config       Config
-	OTP          *otp.Service
-	Auth         *auth.Service
-	HTTPClient   *http.Client
-	Registry     registry.API
-	BuildJobs    buildjob.Service
-	BuildRecords buildrecord.Service
-	Topology     topology.Service
-	Policies     deploymentpolicy.Service
-	OIDC         interface {
+	Config                  Config
+	OTP                     *otp.Service
+	Auth                    *auth.Service
+	HTTPClient              *http.Client
+	Registry                registry.API
+	BuildJobs               buildjob.Service
+	BuildRecords            buildrecord.Service
+	RegistryPullCredentials RegistryPullCredentialProvider
+	Topology                topology.Service
+	Policies                deploymentpolicy.Service
+	OIDC                    interface {
 		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
 	}
 	RunnerOIDC interface {
@@ -115,6 +116,9 @@ func NewServer(cfg Config) *Server {
 		registryService.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
 	}
 	server.githubReplay = newGitHubReplayStore(githubReplayMaxEntries, githubReplayTTL, server.clock)
+	if cfg.BuildRegistry.Visibility == "private" {
+		server.RegistryPullCredentials = NewGHCRRegistryPullCredentialProvider(cfg.BuildRegistry, nil, cfg.RegistryPull)
+	}
 	return server
 }
 
@@ -370,6 +374,7 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if ok {
+		s.resolveRegistryPullCredential(r.Context(), lease.Command)
 		if lease.Command != nil && lease.Deployment.AttemptCount == 1 {
 			if err := s.validateLeasedDeploymentAuthority(r.Context(), lease.Deployment); err != nil {
 				_, _ = s.Registry.CompleteDeployment(projectID, nodeID, lease.Deployment.ID, r.Header.Get("X-Request-ID"), registry.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: "failed", LeaseToken: lease.LeaseToken, SpecHash: lease.Deployment.SpecHash, ApplicationImage: lease.Command.Image.Reference, FailureCode: "DEPLOYMENT_AUTHORITY_REVOKED", FailureMessageRedacted: "deployment authority changed before first Agent lease"})

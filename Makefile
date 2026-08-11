@@ -54,7 +54,7 @@ verify-postgres:
 		for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do docker exec "$$container" pg_isready -U opsi -d opsi >/dev/null 2>&1 && break; test "$$attempt" -eq 12 || sleep 1; done; \
 		port="$$(docker port "$$container" 5432/tcp | awk -F: '{print $$2}')"; dsn="postgres://opsi:opsi@127.0.0.1:$$port/opsi?sslmode=disable"; \
 	fi; \
-	cd cloud; OPSI_TEST_DATABASE_URL="$$dsn" OPSI_REQUIRE_POSTGRES_TESTS=1 GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test -tags postgresintegration -p 1 ./internal/postgres ./internal/actiondevice ./internal/buildjob ./internal/registry ./internal/adminbootstrap -run 'Test(Postgres|R5012)' -count=1
+	cd cloud; OPSI_TEST_DATABASE_URL="$$dsn" OPSI_REQUIRE_POSTGRES_TESTS=1 GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test -tags postgresintegration -p 1 ./internal/postgres ./internal/actiondevice ./internal/buildjob ./internal/registry ./internal/adminbootstrap ./internal/webhookrelay -run 'Test(Postgres|R5012)' -count=1
 
 verify-dr:
 	$(RUN) ./scripts/verify-dr.sh
@@ -71,6 +71,9 @@ verify-e2e-k3s-selfcheck:
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/e2e/second_factor_handoff_test.py
 	$(RUN) ./scripts/e2e/verify-k3s.sh --self-test
 	@if rg -n 'OPSI_E2E_APPROVE_MITIGATION|incidents/.*/analyze|incidents/.*/actions/.*/approve|recommended_actions|action_hash' scripts/e2e/verify-k3s.sh; then echo "stale incident RCA/approval E2E dependency found"; exit 1; fi
+
+verify-private-registry-e2e:
+	$(RUN) ./scripts/e2e/verify-private-registry.sh
 
 verify-e2e-node-lifecycle-preflight:
 	$(RUN) ./scripts/e2e/verify-node-lifecycle.sh --preflight

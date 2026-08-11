@@ -107,23 +107,57 @@ type SecretReference struct {
 	SecretID string `json:"secret_id"`
 }
 
+type RegistryPullCredentialReference struct {
+	Provider     string `json:"provider"`
+	CredentialID string `json:"credential_id"`
+	Registry     string `json:"registry"`
+}
+
+func (r RegistryPullCredentialReference) Validate() error {
+	if !validOpaqueID(r.Provider) || !validOpaqueID(r.CredentialID) ||
+		r.Registry == "" || r.Registry != strings.ToLower(r.Registry) || strings.ContainsAny(r.Registry, "/@ \t\r\n") {
+		return errors.New("registry pull credential reference is invalid")
+	}
+	return nil
+}
+
+// RegistryPullCredential is transient Cloud-to-Agent transport data. It is
+// never part of WorkloadSpec, RuntimeSnapshot, or deployment authority.
+type RegistryPullCredential struct {
+	Reference RegistryPullCredentialReference `json:"reference"`
+	Username  string                          `json:"username"`
+	Password  string                          `json:"password"`
+}
+
+func (c RegistryPullCredential) Validate() error {
+	if err := c.Reference.Validate(); err != nil {
+		return err
+	}
+	if c.Username == "" || len(c.Username) > 256 || c.Password == "" || len(c.Password) > 16*1024 ||
+		strings.ContainsRune(c.Username, '\x00') || strings.ContainsRune(c.Password, '\x00') {
+		return errors.New("registry pull credential is invalid")
+	}
+	return nil
+}
+
 type ExposureIntent struct {
 	Mode string `json:"mode"`
 }
 
 type WorkloadSpec struct {
-	SchemaVersion                string                `json:"schema_version"`
-	ServiceKey                   string                `json:"service_key"`
-	Replicas                     int32                 `json:"replicas"`
-	ApplicationContainerName     string                `json:"application_container_name"`
-	ContainerPort                int32                 `json:"container_port"`
-	ReadinessProbe               *Probe                `json:"readiness_probe,omitempty"`
-	LivenessProbe                *Probe                `json:"liveness_probe,omitempty"`
-	Resources                    Resources             `json:"resources"`
-	TerminationGracePeriodSecond int64                 `json:"termination_grace_period_seconds"`
-	SecretReferences             []SecretReference     `json:"secret_references,omitempty"`
-	Environment                  []EnvironmentVariable `json:"environment,omitempty"`
-	Exposure                     ExposureIntent        `json:"exposure"`
+	SchemaVersion                string                           `json:"schema_version"`
+	ServiceKey                   string                           `json:"service_key"`
+	Replicas                     int32                            `json:"replicas"`
+	ApplicationContainerName     string                           `json:"application_container_name"`
+	ContainerPort                int32                            `json:"container_port"`
+	ReadinessProbe               *Probe                           `json:"readiness_probe,omitempty"`
+	LivenessProbe                *Probe                           `json:"liveness_probe,omitempty"`
+	Resources                    Resources                        `json:"resources"`
+	TerminationGracePeriodSecond int64                            `json:"termination_grace_period_seconds"`
+	SecretReferences             []SecretReference                `json:"secret_references,omitempty"`
+	Environment                  []EnvironmentVariable            `json:"environment,omitempty"`
+	RegistryPullCredential       *RegistryPullCredentialReference `json:"registry_pull_credential,omitempty"`
+	Exposure                     ExposureIntent                   `json:"exposure"`
 }
 
 // PreviewSpec is Cloud-issued authority for an isolated same-repository PR.
@@ -206,6 +240,11 @@ func (s WorkloadSpec) Validate() error {
 	}
 	if err := ValidateEnvironment(s.Environment, s.SecretReferences); err != nil {
 		return err
+	}
+	if s.RegistryPullCredential != nil {
+		if err := s.RegistryPullCredential.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -377,20 +416,21 @@ type Event struct {
 }
 
 type AgentCommand struct {
-	SchemaVersion string         `json:"schema_version"`
-	JobID         string         `json:"job_id"`
-	ProjectID     string         `json:"project_id"`
-	EnvironmentID string         `json:"environment_id"`
-	RuntimeID     string         `json:"runtime_id"`
-	NodeID        string         `json:"node_id"`
-	AgentID       string         `json:"agent_id"`
-	LeaseToken    string         `json:"lease_token"`
-	Attempt       int32          `json:"attempt"`
-	Image         ImmutableImage `json:"image"`
-	Workload      WorkloadSpec   `json:"workload"`
-	SpecHash      string         `json:"spec_hash"`
-	Rollout       *RolloutIntent `json:"rollout,omitempty"`
-	Preview       *PreviewSpec   `json:"preview,omitempty"`
+	SchemaVersion          string                  `json:"schema_version"`
+	JobID                  string                  `json:"job_id"`
+	ProjectID              string                  `json:"project_id"`
+	EnvironmentID          string                  `json:"environment_id"`
+	RuntimeID              string                  `json:"runtime_id"`
+	NodeID                 string                  `json:"node_id"`
+	AgentID                string                  `json:"agent_id"`
+	LeaseToken             string                  `json:"lease_token"`
+	Attempt                int32                   `json:"attempt"`
+	Image                  ImmutableImage          `json:"image"`
+	Workload               WorkloadSpec            `json:"workload"`
+	SpecHash               string                  `json:"spec_hash"`
+	Rollout                *RolloutIntent          `json:"rollout,omitempty"`
+	Preview                *PreviewSpec            `json:"preview,omitempty"`
+	RegistryPullCredential *RegistryPullCredential `json:"registry_pull_credential,omitempty"`
 }
 
 type Progress struct {

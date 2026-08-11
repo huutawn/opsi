@@ -338,6 +338,7 @@ export type WorkloadSpec = {
 	termination_grace_period_seconds: number;
 	environment?: Array<{ name: string; value: string }>;
 	secret_references?: Array<{ env_name: string; secret_id: string }>;
+	registry_pull_credential?: { provider: string; credential_id: string; registry: string };
 	exposure: { mode: "none" | "internal" };
 };
 

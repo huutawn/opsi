@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"io"
 	"time"
+
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 type encryptedPostgresStore struct {
@@ -31,6 +33,14 @@ func NewPostgresRegistrationVault(db *sql.DB, key string) (RegistrationVault, er
 		return nil, err
 	}
 	return postgresRegistrationVault{encryptedPostgresStore: store}, nil
+}
+
+func NewPostgresRegistryPullCredentialVault(db *sql.DB, key string) (RegistryPullCredentialVault, error) {
+	store, err := newEncryptedPostgresStore(db, key)
+	if err != nil {
+		return nil, err
+	}
+	return postgresRegistryPullCredentialVault{encryptedPostgresStore: store}, nil
 }
 
 func newEncryptedPostgresStore(db *sql.DB, key string) (encryptedPostgresStore, error) {
@@ -108,6 +118,37 @@ func (s postgresCredentialVault) Len() int {
 
 type postgresRegistrationVault struct {
 	encryptedPostgresStore
+}
+
+type postgresRegistryPullCredentialVault struct {
+	encryptedPostgresStore
+}
+
+func (s postgresRegistryPullCredentialVault) Put(ctx context.Context, id string, credential deploymentv1.RegistryPullCredential) error {
+	ciphertext, nonce, err := s.seal(credential)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO registry_pull_credentials(id, ciphertext, nonce, updated_at)
+		VALUES($1,$2,$3,now())
+		ON CONFLICT(id) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, nonce = EXCLUDED.nonce, updated_at = now()`, id, ciphertext, nonce)
+	return err
+}
+
+func (s postgresRegistryPullCredentialVault) Get(ctx context.Context, id string) (deploymentv1.RegistryPullCredential, bool, error) {
+	var ciphertext, nonce []byte
+	err := s.db.QueryRowContext(ctx, `SELECT ciphertext, nonce FROM registry_pull_credentials WHERE id = $1`, id).Scan(&ciphertext, &nonce)
+	if err == sql.ErrNoRows {
+		return deploymentv1.RegistryPullCredential{}, false, nil
+	}
+	if err != nil {
+		return deploymentv1.RegistryPullCredential{}, false, err
+	}
+	var credential deploymentv1.RegistryPullCredential
+	if err := s.open(ciphertext, nonce, &credential); err != nil {
+		return deploymentv1.RegistryPullCredential{}, false, err
+	}
+	return credential, true, nil
 }
 
 func (s postgresRegistrationVault) Put(sessionID, orgID, projectID, nodeID, token string, ttl time.Duration) {

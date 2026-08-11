@@ -134,6 +134,13 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 				return fmt.Errorf("configure registration vault: %w", err)
 			}
 			relay.SetSecurityStores(credentials, registrations, webhookrelay.NewPostgresRateLimiter(db))
+			if cfg.BuildRegistry.Visibility == "private" {
+				pullVault, err := webhookrelay.NewPostgresRegistryPullCredentialVault(db, cfg.BootstrapSecretKey)
+				if err != nil {
+					return fmt.Errorf("configure registry pull credential vault: %w", err)
+				}
+				relay.RegistryPullCredentials = webhookrelay.NewGHCRRegistryPullCredentialProvider(cfg.BuildRegistry, pullVault, cfg.RegistryPull)
+			}
 		}
 	}
 	if err := configureGitHubAppEventSink(relay, cfg); err != nil {

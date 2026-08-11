@@ -27,6 +27,10 @@ type DeployEngine interface {
 	ReconcilePending(context.Context, deploy.ProgressFunc) ([]deploymentv1.RolloutRecord, error)
 }
 
+type RegistryPullSecretEnsurer interface {
+	Ensure(context.Context, deploymentv1.AgentCommand) error
+}
+
 type ConnectionState struct {
 	connected atomic.Bool
 }
@@ -42,17 +46,18 @@ func (s *ConnectionState) Connected() bool {
 }
 
 type Runner struct {
-	Client            CloudClient
-	Engine            DeployEngine
-	NodeLifecycle     NodeLifecycleExecutor
-	NodeID            string
-	Version           string
-	PollInterval      time.Duration
-	LongPollWait      time.Duration
-	HeartbeatInterval time.Duration
-	HealthProbe       HealthProbe
-	ConnectionState   *ConnectionState
-	Logger            *slog.Logger
+	Client              CloudClient
+	Engine              DeployEngine
+	RegistryPullSecrets RegistryPullSecretEnsurer
+	NodeLifecycle       NodeLifecycleExecutor
+	NodeID              string
+	Version             string
+	PollInterval        time.Duration
+	LongPollWait        time.Duration
+	HeartbeatInterval   time.Duration
+	HealthProbe         HealthProbe
+	ConnectionState     *ConnectionState
+	Logger              *slog.Logger
 }
 
 type NodeLifecycleExecutor interface {
@@ -200,6 +205,15 @@ func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentL
 	intent, err := RolloutIntentFromLease(lease, r.NodeID)
 	if err != nil {
 		return deploymentFailure(lease, "ROLLOUT_COMMAND_INVALID", err.Error()), true
+	}
+	if lease.Command.Workload.RegistryPullCredential != nil {
+		if r.RegistryPullSecrets == nil {
+			return deploymentFailure(lease, deploymentv1.RolloutCodeRegistryCredentialUnavailable, "registry pull secret delivery is unavailable"), true
+		}
+		if err := r.RegistryPullSecrets.Ensure(ctx, *lease.Command); err != nil {
+			failure := rolloutFailure(err, deploymentv1.RolloutCodeRegistryCredentialUnavailable)
+			return deploymentFailure(lease, failure.Code, failure.Message), true
+		}
 	}
 	var progressMu sync.Mutex
 	var latest *deploymentv1.Progress

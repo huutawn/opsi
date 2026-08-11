@@ -204,6 +204,12 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			consumed_at TIMESTAMPTZ
 		)`,
 		`CREATE INDEX IF NOT EXISTS bootstrap_credentials_expires_idx ON bootstrap_credentials(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS registry_pull_credentials (
+			id TEXT PRIMARY KEY,
+			ciphertext BYTEA NOT NULL,
+			nonce BYTEA NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_registration_tokens (
 			session_id TEXT PRIMARY KEY REFERENCES bootstrap_sessions(id) ON DELETE CASCADE,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

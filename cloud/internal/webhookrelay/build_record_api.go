@@ -188,11 +188,12 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 	if err != nil {
 		return nil, false, registry.APIError{Status: 409, Code: "WORKLOAD_AUTHORITY_INVALID", Message: "canonical service workload is invalid"}
 	}
-	specHash, _ := workload.Hash()
 	image, err := deploymentv1.NewImmutableImage(record.Build.OCIRepository, record.Build.OCIDigest)
 	if err != nil {
 		return nil, false, err
 	}
+	s.associateRegistryPullCredential(image, &workload)
+	specHash, _ := workload.Hash()
 	snapshot := deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: record.ProjectID, Image: image, Workload: workload, SpecHash: specHash, Authority: deploymentv1.AuthoritySnapshot{BuildRecord: record, TopologyPlanID: plan.ID, TopologyRevision: plan.Revision, TopologyHash: plan.PlanHash, ServiceConfigurationRevision: configuration.Revision, ServiceConfigurationStateHash: configuration.StateHash, DeploymentPolicyID: policy.ID, DeploymentPolicyRevision: policy.Revision, DeploymentPolicyHash: policy.PolicyHash, RoutingDecisionHash: decision.DecisionHash, EnvironmentID: decision.EnvironmentID, RuntimeID: decision.RuntimeID, NodeID: decision.NodeID, AgentID: decision.AgentID}}
 	if record.Workload.EventName == "pull_request" {
 		prNumber, ok := pullRequestNumber(record.Workload.Ref)

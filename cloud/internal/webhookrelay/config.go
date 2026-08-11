@@ -37,7 +37,13 @@ type Config struct {
 	GitHubOIDC             githuboidc.Config       `json:"github_oidc"`
 	BuildExecutor          buildjob.ExecutorConfig `json:"build_executor"`
 	BuildRegistry          buildjob.RegistryConfig `json:"build_registry"`
+	RegistryPull           RegistryPullConfig      `json:"registry_pull"`
 	Placement              PlacementConfig         `json:"placement"`
+}
+
+type RegistryPullConfig struct {
+	UsernameFile string `json:"username_file,omitempty"`
+	TokenFile    string `json:"token_file,omitempty"`
 }
 
 type PlacementConfig struct {
@@ -207,6 +213,8 @@ func applyEnvOverrides(cfg *Config) error {
 	applyStringEnv("OPSI_BUILD_REGISTRY_NAMESPACE", &cfg.BuildRegistry.Namespace)
 	applyStringEnv("OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX", &cfg.BuildRegistry.RepositoryPrefix)
 	applyStringEnv("OPSI_BUILD_REGISTRY_VISIBILITY", &cfg.BuildRegistry.Visibility)
+	applyStringEnv("OPSI_CLOUD_GHCR_PULL_USERNAME_FILE", &cfg.RegistryPull.UsernameFile)
+	applyStringEnv("OPSI_CLOUD_GHCR_PULL_TOKEN_FILE", &cfg.RegistryPull.TokenFile)
 	return nil
 }
 
@@ -420,6 +428,9 @@ func validateConfig(cfg *Config) error {
 		}
 	} else if !cfg.BuildRegistry.Empty() {
 		return fmt.Errorf("build_registry requires build_executor")
+	}
+	if (cfg.RegistryPull.UsernameFile == "") != (cfg.RegistryPull.TokenFile == "") {
+		return fmt.Errorf("registry_pull username_file and token_file must be configured together")
 	}
 	if cfg.Production {
 		expectedAudience := cfg.PublicBaseURL + buildRecordPath
