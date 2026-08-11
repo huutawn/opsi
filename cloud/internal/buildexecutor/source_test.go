@@ -116,7 +116,25 @@ func TestCanonicalExecutorWorkflowPinsRestrictedBuilder(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflow := string(data)
+	inJobEnv := false
+	for _, line := range strings.Split(workflow, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(line, "    env:") {
+			inJobEnv = true
+		} else if inJobEnv && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(line, "      ") {
+			inJobEnv = false
+		}
+		if inJobEnv && strings.Contains(line, "${{ runner.") {
+			t.Fatalf("job-level env uses unavailable runner context: %q", line)
+		}
+	}
 	for _, required := range []string{
+		"- name: Initialize executor paths",
+		"workspace=\"$RUNNER_TEMP/opsi-build-work\"",
+		"docker_config=\"$workspace/docker-config\"",
+		"output=\"$RUNNER_TEMP/opsi-build-output\"",
+		"bin=\"$RUNNER_TEMP/opsi-bin\"",
+		`} >> "$GITHUB_ENV"`,
 		"# docker/setup-buildx-action v4.2.0",
 		"docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
 		"version: v0.36.1",

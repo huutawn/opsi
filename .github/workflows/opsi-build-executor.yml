@@ -22,11 +22,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      DOCKER_CONFIG: ${{ runner.temp }}/opsi-build-work/docker-config
-      OPSI_EXECUTOR_WORKSPACE: ${{ runner.temp }}/opsi-build-work
-      OPSI_EXECUTOR_OUTPUT: ${{ runner.temp }}/opsi-build-output
     steps:
+      - name: Initialize executor paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          workspace="$RUNNER_TEMP/opsi-build-work"
+          docker_config="$workspace/docker-config"
+          output="$RUNNER_TEMP/opsi-build-output"
+          bin="$RUNNER_TEMP/opsi-bin"
+          mkdir -p "$workspace" "$docker_config" "$output" "$bin"
+          {
+            printf 'DOCKER_CONFIG=%s\n' "$docker_config"
+            printf 'OPSI_EXECUTOR_WORKSPACE=%s\n' "$workspace"
+            printf 'OPSI_EXECUTOR_OUTPUT=%s\n' "$output"
+          } >> "$GITHUB_ENV"
       - name: Check out immutable executor source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -41,7 +52,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/opsi-bin" "$DOCKER_CONFIG" "$OPSI_EXECUTOR_WORKSPACE" "$OPSI_EXECUTOR_OUTPUT"
           go build -C cloud -trimpath -o "$RUNNER_TEMP/opsi-bin/opsi-build-executor" ./cmd/opsi-build-executor
       - name: Set up deterministic Buildx
         # docker/setup-buildx-action v4.2.0
