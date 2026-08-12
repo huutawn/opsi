@@ -360,6 +360,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentNodeLifecycleResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/managed-resources/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentManagedResourceResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -389,6 +393,16 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
+		return
+	}
+	managed, ok, err := s.Resources.LeaseManaged(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "managed_resource", "action": managed.Action, "lease_token": managed.LeaseToken, "spec": managed.Spec})
 		return
 	}
 	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)
@@ -425,6 +439,33 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAgentManagedResourceResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 6 {
+		http.NotFound(w, r)
+		return
+	}
+	var result resource.ManagedResult
+	if !decodeResourceJSON(w, r, &result) {
+		return
+	}
+	value, err := s.Resources.CompleteManaged(r.Context(), projectID, parts[len(parts)-2], result)
+	if err != nil {
+		writeResourceResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"resource": value})
 }
 
 func (s *Server) recoverAutomaticDeliveries(ctx context.Context, projectID string) {

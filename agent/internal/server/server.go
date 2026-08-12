@@ -562,6 +562,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			Engine:              engine,
 			RegistryPullSecrets: deploy.KubernetesRegistryPullSecretEnsurer{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			NodeLifecycle:       nodelifecycle.Service{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			ManagedResources:    svcatalog.ManagedResourceReconciler{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			PollInterval:        pollInterval,
 			LongPollWait:        longPollWait,
 			HeartbeatInterval:   heartbeatInterval,
@@ -839,7 +840,7 @@ func mapServiceCatalogError(err error) error {
 	}
 	message := err.Error()
 	switch {
-	case strings.Contains(message, "required") || strings.Contains(message, "unknown") || strings.Contains(message, "not implemented") || strings.Contains(message, "must be"):
+	case strings.Contains(message, "required") || strings.Contains(message, "unknown") || strings.Contains(message, "not implemented") || strings.Contains(message, "must be") || strings.Contains(message, "Cloud-owned"):
 		return status.Error(codes.InvalidArgument, message)
 	default:
 		return status.Error(codes.Internal, message)

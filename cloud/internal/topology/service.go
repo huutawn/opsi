@@ -215,6 +215,7 @@ func validate(ctx context.Context, s Service, facts Facts, current topologyv1.Pl
 	environments := map[string]EnvironmentFact{}
 	runtimes := map[string]RuntimeFact{}
 	services := map[string]ServiceFact{}
+	resources := map[string]ResourceIdentity{}
 	for _, value := range facts.Environments {
 		environments[value.ID] = value
 	}
@@ -224,13 +225,20 @@ func validate(ctx context.Context, s Service, facts Facts, current topologyv1.Pl
 	for _, value := range facts.Services {
 		services[value.Key] = value
 	}
+	for _, value := range facts.Resources {
+		resources[value.ID] = value
+	}
 	requested := requestedByRuntime(draft.Assignments)
 	assigned := requestedByRuntime(current.Assignments)
 	assignmentOverride := scopedAssignmentOverrides(draft.Assignments, override)
 	seenRuntime := map[string]bool{}
 	for _, assignment := range draft.Assignments {
-		if _, ok := services[assignment.ServiceKey]; !ok {
+		resource, resourceOK := resources[assignment.ServiceKey]
+		if _, ok := services[assignment.ServiceKey]; !ok && !resourceOK {
 			addIssue(&result, "TOPOLOGY_SERVICE_NOT_FOUND", "service is not active in this project", assignment.ServiceKey, assignment.RuntimeID)
+		}
+		if resourceOK && (resource.Kind != "managed_service" || resource.EnvironmentID != assignment.EnvironmentID || resource.ProjectID != draft.ProjectID) {
+			addIssue(&result, "MANAGED_RESOURCE_ASSIGNMENT_INVALID", "managed resource assignment does not match its canonical scope", assignment.ServiceKey, assignment.RuntimeID)
 		}
 		runtime, ok := runtimes[assignment.RuntimeID]
 		if !ok || runtime.ProjectID != draft.ProjectID {

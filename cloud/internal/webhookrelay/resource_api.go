@@ -26,10 +26,14 @@ func resourceIdentities(ctx context.Context, source resourceTopologySource, proj
 	out := make([]topologyv1.ResourceIdentity, 0, len(values))
 	for _, value := range values {
 		runtimeID := ""
-		if value.Managed != nil {
-			runtimeID = value.Managed.Placement.RuntimeID
+		if value.Runtime != nil {
+			runtimeID = value.Runtime.Spec.Assignment.RuntimeID
 		}
-		out = append(out, topologyv1.ResourceIdentity{ID: value.ID, ProjectID: value.ProjectID, EnvironmentID: value.EnvironmentID, Name: value.Name, Kind: string(value.Kind), Type: string(value.Type), Lifecycle: string(value.Lifecycle), RuntimeID: runtimeID})
+		identity := topologyv1.ResourceIdentity{ID: value.ID, ProjectID: value.ProjectID, EnvironmentID: value.EnvironmentID, Name: value.Name, Kind: string(value.Kind), Type: string(value.Type), Lifecycle: string(value.Lifecycle), RuntimeID: runtimeID}
+		if value.Managed != nil {
+			identity.Version, identity.Replicas, identity.CPUMillicores, identity.MemoryBytes = value.Managed.Version, value.Managed.Replicas, value.Managed.CPUMillicores, value.Managed.MemoryBytes
+		}
+		out = append(out, identity)
 	}
 	return out, nil
 }

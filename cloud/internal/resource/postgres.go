@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
@@ -72,7 +73,8 @@ func (s PostgresStore) List(ctx context.Context, projectID, environmentID string
 func (s PostgresStore) Update(ctx context.Context, value resourcev1.Resource) (resourcev1.Resource, error) {
 	managed, _ := json.Marshal(value.Managed)
 	external, _ := json.Marshal(value.External)
-	result, err := s.DB.ExecContext(ctx, `UPDATE resources SET lifecycle=$1,managed_spec=$2::jsonb,external_spec=$3::jsonb,updated_at=$4 WHERE project_id=$5 AND id=$6`, value.Lifecycle, string(managed), string(external), value.UpdatedAt, value.ProjectID, value.ID)
+	runtime, _ := json.Marshal(value.Runtime)
+	result, err := s.DB.ExecContext(ctx, `UPDATE resources SET lifecycle=$1,managed_spec=$2::jsonb,external_spec=$3::jsonb,runtime_state=$4::jsonb,updated_at=$5 WHERE project_id=$6 AND id=$7`, value.Lifecycle, string(managed), string(external), string(runtime), value.UpdatedAt, value.ProjectID, value.ID)
 	if err != nil {
 		return resourcev1.Resource{}, err
 	}
@@ -80,6 +82,56 @@ func (s PostgresStore) Update(ctx context.Context, value resourcev1.Resource) (r
 		return resourcev1.Resource{}, ErrNotFound
 	}
 	return value, nil
+}
+
+func (s PostgresStore) ClaimManaged(ctx context.Context, projectID, nodeID, token string, now, expires time.Time) (resourcev1.Resource, bool, error) {
+	row := s.DB.QueryRowContext(ctx, `WITH candidate AS (
+		SELECT id FROM resources
+		WHERE project_id=$1 AND runtime_state<>'null'::jsonb AND runtime_state#>>'{spec,assignment,node_id}'=$2
+		AND lifecycle IN ('planned','provisioning','deleting')
+		AND (managed_lease_token IS NULL OR managed_lease_expires_at<=$3)
+		ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
+	) UPDATE resources r SET managed_lease_token=$4,managed_lease_expires_at=$5,lifecycle=CASE WHEN r.lifecycle='deleting' THEN r.lifecycle ELSE 'provisioning' END,updated_at=$3
+	FROM candidate c WHERE r.id=c.id RETURNING `+resourceReturning, projectID, nodeID, now, token, expires)
+	value, err := scanResource(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return resourcev1.Resource{}, false, nil
+	}
+	return value, err == nil, err
+}
+
+func (s PostgresStore) UpdateClaimed(ctx context.Context, value resourcev1.Resource, token string) (resourcev1.Resource, error) {
+	managed, _ := json.Marshal(value.Managed)
+	external, _ := json.Marshal(value.External)
+	runtime, _ := json.Marshal(value.Runtime)
+	row := s.DB.QueryRowContext(ctx, `UPDATE resources SET lifecycle=$1,managed_spec=$2::jsonb,external_spec=$3::jsonb,runtime_state=$4::jsonb,managed_lease_token=NULL,managed_lease_expires_at=NULL,updated_at=$5 WHERE project_id=$6 AND id=$7 AND managed_lease_token=$8 RETURNING `+resourceReturning, value.Lifecycle, string(managed), string(external), string(runtime), value.UpdatedAt, value.ProjectID, value.ID, token)
+	updated, err := scanResource(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return resourcev1.Resource{}, invalid("MANAGED_RESOURCE_APPLY_FAILED", "managed resource lease is invalid")
+	}
+	return updated, err
+}
+
+func (s PostgresStore) Delete(ctx context.Context, projectID, resourceID string) error {
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM resources WHERE project_id=$1 AND id=$2`, projectID, resourceID)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s PostgresStore) DeleteClaimed(ctx context.Context, projectID, resourceID, token string) error {
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM resources WHERE project_id=$1 AND id=$2 AND managed_lease_token=$3`, projectID, resourceID, token)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return invalid("MANAGED_RESOURCE_DELETE_FAILED", "managed resource delete lease is invalid")
+	}
+	return nil
 }
 
 func (s PostgresStore) CreateBinding(ctx context.Context, value resourcev1.Binding, key, payload string) (resourcev1.Binding, bool, error) {
@@ -159,7 +211,8 @@ func (s PostgresStore) ListBindings(ctx context.Context, projectID, environmentI
 	return out, rows.Err()
 }
 
-const resourceColumns = `SELECT id,project_id,environment_id,name,kind,provider,type,lifecycle,managed_spec::text,external_spec::text,COALESCE(internal_name,''),COALESCE(created_by,''),created_at,updated_at FROM resources`
+const resourceReturning = `id,project_id,environment_id,name,kind,provider,type,lifecycle,managed_spec::text,external_spec::text,runtime_state::text,COALESCE(managed_lease_token,''),managed_lease_expires_at,COALESCE(internal_name,''),COALESCE(created_by,''),created_at,updated_at`
+const resourceColumns = `SELECT ` + resourceReturning + ` FROM resources`
 const bindingColumns = `SELECT id,project_id,environment_id,source_kind,source_id,target_kind,target_id,protocol,logical_name,runtime_references::text,created_at,updated_at FROM resource_bindings`
 
 type queryer interface {
@@ -177,8 +230,10 @@ func getResource(ctx context.Context, db queryer, projectID, resourceID string) 
 
 func scanResource(row scanner) (resourcev1.Resource, error) {
 	var value resourcev1.Resource
-	var managed, external string
-	err := row.Scan(&value.ID, &value.ProjectID, &value.EnvironmentID, &value.Name, &value.Kind, &value.Provider, &value.Type, &value.Lifecycle, &managed, &external, &value.InternalName, &value.CreatedBy, &value.CreatedAt, &value.UpdatedAt)
+	var managed, external, runtime string
+	var leaseToken string
+	var leaseExpiresAt sql.NullTime
+	err := row.Scan(&value.ID, &value.ProjectID, &value.EnvironmentID, &value.Name, &value.Kind, &value.Provider, &value.Type, &value.Lifecycle, &managed, &external, &runtime, &leaseToken, &leaseExpiresAt, &value.InternalName, &value.CreatedBy, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		return value, err
 	}
@@ -193,6 +248,16 @@ func scanResource(row scanner) (resourcev1.Resource, error) {
 		value.External = &resourcev1.ExternalSpec{}
 		if err := json.Unmarshal([]byte(external), value.External); err != nil {
 			return resourcev1.Resource{}, err
+		}
+	}
+	if runtime != "null" {
+		value.Runtime = &resourcev1.ManagedResourceRuntime{}
+		if err := json.Unmarshal([]byte(runtime), value.Runtime); err != nil {
+			return resourcev1.Resource{}, err
+		}
+		value.Runtime.LeaseToken = leaseToken
+		if leaseExpiresAt.Valid {
+			value.Runtime.LeaseExpiresAt = leaseExpiresAt.Time
 		}
 	}
 	return value, nil

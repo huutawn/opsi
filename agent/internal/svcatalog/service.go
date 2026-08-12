@@ -29,29 +29,7 @@ type DeleteRequest struct {
 }
 
 func (m Manager) CreateManaged(ctx context.Context, req CreateManagedRequest) (*ManagedService, error) {
-	if m.Store == nil {
-		return nil, fmt.Errorf("service catalog store is required")
-	}
-	if m.Applier == nil {
-		return nil, fmt.Errorf("manifest applier is required")
-	}
-	rendered, err := RenderManaged(RenderRequest{
-		ProjectID: req.ProjectID,
-		Name:      req.Name,
-		Type:      req.Type,
-		Namespace: req.Namespace,
-		Overrides: req.Overrides,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := m.Applier.Apply(ctx, rendered.Service.Namespace, rendered.YAML); err != nil {
-		return nil, err
-	}
-	if err := m.Store.UpsertManagedService(ctx, rendered.Service); err != nil {
-		return nil, err
-	}
-	return &rendered.Service, nil
+	return nil, fmt.Errorf("managed service creation is Cloud-owned; use Resource and Topology APIs")
 }
 
 func (m Manager) probe(ctx context.Context, host, port string) error {

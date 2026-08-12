@@ -16,11 +16,23 @@ func managedDefinition(resourceType Type, display string, port int, protocol Pro
 	}
 }
 
+const (
+	NATSVersion = "2.11.8-alpine"
+	NATSImage   = "docker.io/library/nats@sha256:9e5633ac7584fc4e80d34be3ff7e15aa3fabec79a5573c2d9abefcf1f7761d9a"
+)
+
 func Definitions() []ResourceTypeDefinition {
 	return []ResourceTypeDefinition{
 		managedDefinition(TypePostgres, "PostgreSQL", 5432, ProtocolPostgres, true, true, []string{"user", "password", "database"}, []string{"HOST", "PORT", "USER", "PASSWORD", "DATABASE", "URL"}),
 		managedDefinition(TypeRedis, "Redis / Valkey-compatible", 6379, ProtocolRedis, true, false, []string{"password"}, []string{"HOST", "PORT", "URL"}),
-		managedDefinition(TypeNATS, "NATS", 4222, ProtocolNATS, false, false, []string{"credentials"}, []string{"HOST", "PORT", "URL"}),
+		func() ResourceTypeDefinition {
+			definition := managedDefinition(TypeNATS, "NATS", 4222, ProtocolNATS, false, false, nil, []string{"HOST", "PORT", "URL"})
+			definition.Provisioning = ProvisioningCapability{Implemented: true, Profiles: []ProvisioningProfile{{Name: "single-node-experimental", Versions: []SupportedVersion{{Version: NATSVersion, Image: NATSImage}}}}}
+			for index := range definition.GeneratedValues {
+				definition.GeneratedValues[index].Sensitivity = ValueNonSecret
+			}
+			return definition
+		}(),
 		managedDefinition(TypeRabbitMQ, "RabbitMQ", 5672, ProtocolAMQP, true, false, []string{"user", "password"}, []string{"HOST", "PORT", "URL"}),
 	}
 }

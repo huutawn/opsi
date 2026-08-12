@@ -62,7 +62,7 @@ test("topology resource presentation supports factual kinds and fails future kin
   assert.equal(managed.kind, "managed-service");
   assert.equal(managed.state, "factual");
   assert.equal(managed.supported, true);
-  assert.deepEqual(managed.capabilities, { acceptsPlacement: false, connectable: true, movable: false });
+  assert.deepEqual(managed.capabilities, { acceptsPlacement: false, connectable: true, movable: true });
   assert.deepEqual(managed.facts, []);
 
   const unknown = topologyResourcePresentation({ kind: "quantum-cache", name: "future", status: "Ready", context: "untrusted presentation input" });

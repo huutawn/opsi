@@ -44,6 +44,10 @@ type Store interface {
 	Get(context.Context, string, string) (resourcev1.Resource, error)
 	List(context.Context, string, string) ([]resourcev1.Resource, error)
 	Update(context.Context, resourcev1.Resource) (resourcev1.Resource, error)
+	ClaimManaged(context.Context, string, string, string, time.Time, time.Time) (resourcev1.Resource, bool, error)
+	UpdateClaimed(context.Context, resourcev1.Resource, string) (resourcev1.Resource, error)
+	Delete(context.Context, string, string) error
+	DeleteClaimed(context.Context, string, string, string) error
 	CreateBinding(context.Context, resourcev1.Binding, string, string) (resourcev1.Binding, bool, error)
 	ListBindings(context.Context, string, string) ([]resourcev1.Binding, error)
 }
@@ -86,7 +90,7 @@ func (s Service) Create(ctx context.Context, projectID, actor, key string, reque
 	if value.Kind == resourcev1.KindManagedService {
 		value.Provider = "opsi"
 		value.Lifecycle = resourcev1.LifecycleUnplaced
-		value.InternalName = value.ID + "." + value.EnvironmentID + ".internal"
+		value.InternalName = internalHost(value.ProjectID, value.EnvironmentID, value.ID)
 	} else {
 		value.Lifecycle = resourcev1.LifecycleConfigured
 	}
@@ -121,19 +125,17 @@ func (s Service) Update(ctx context.Context, projectID, resourceID string, reque
 		if err := validateManaged(*request.Managed); err != nil {
 			return resourcev1.Resource{}, err
 		}
-		if request.Managed.Placement.RuntimeID != "" {
-			ok, scopeErr := s.Scopes.RuntimeBelongs(ctx, projectID, current.EnvironmentID, request.Managed.Placement.RuntimeID)
-			if scopeErr != nil {
-				return resourcev1.Resource{}, scopeErr
+		current.Managed = cloneManaged(request.Managed)
+		if current.Runtime != nil {
+			spec, compileErr := compileManaged(current, current.Runtime.Spec.Assignment, current.Runtime.Spec.TopologyRevision, current.Runtime.Spec.TopologyHash)
+			if compileErr != nil {
+				return resourcev1.Resource{}, compileErr
 			}
-			if !ok {
-				return resourcev1.Resource{}, invalid("RESOURCE_PLACEMENT_INVALID", "runtime is not available in the resource environment")
-			}
+			current.Runtime = &resourcev1.ManagedResourceRuntime{Spec: spec}
 			current.Lifecycle = resourcev1.LifecyclePlanned
 		} else {
 			current.Lifecycle = resourcev1.LifecycleUnplaced
 		}
-		current.Managed = cloneManaged(request.Managed)
 	case resourcev1.KindExternalResource:
 		if request.External == nil || request.Managed != nil {
 			return resourcev1.Resource{}, invalid("RESOURCE_SPEC_INVALID", "external resource update must preserve kind")
@@ -217,9 +219,6 @@ func validateCreate(request resourcev1.CreateRequest) error {
 		if request.Managed == nil || request.External != nil || request.Type != request.Managed.Type {
 			return invalid("RESOURCE_SPEC_INVALID", "managed resource requires one matching managed spec")
 		}
-		if request.Managed.Placement.RuntimeID != "" {
-			return invalid("RESOURCE_PLACEMENT_INVALID", "resource creation must start unplaced")
-		}
 		return validateManaged(*request.Managed)
 	case resourcev1.KindExternalResource:
 		if request.External == nil || request.Managed != nil || strings.TrimSpace(string(request.Type)) == "" || strings.TrimSpace(request.Provider) == "" {
@@ -259,7 +258,7 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 			return invalid("RESOURCE_SECRET_REFERENCE_INVALID", "credential must use an opaque secret reference")
 		}
 	}
-	if len(spec.CredentialRefs) == 0 {
+	if len(definition.CredentialKeys) > 0 && len(spec.CredentialRefs) == 0 {
 		return invalid("RESOURCE_SECRET_REFERENCE_INVALID", "managed credentials require an opaque secret reference")
 	}
 	for _, value := range definition.GeneratedValues {
@@ -286,7 +285,7 @@ func validateExternal(spec resourcev1.ExternalSpec) error {
 	return nil
 }
 
-func runtimeRefs(target resourcev1.Resource) []resourcev1.RuntimeConnectionReference {
+func legacyRuntimeRefs(target resourcev1.Resource) []resourcev1.RuntimeConnectionReference {
 	if target.Kind == resourcev1.KindExternalResource {
 		refs := []resourcev1.RuntimeConnectionReference{{Name: "HOST", Sensitivity: resourcev1.ValueNonSecret, Value: target.External.Endpoint}}
 		if target.External.Port > 0 {
@@ -306,6 +305,12 @@ func runtimeRefs(target resourcev1.Resource) []resourcev1.RuntimeConnectionRefer
 			ref.Value = target.InternalName
 		case "PORT":
 			ref.Value = strconv.Itoa(definition.DefaultPort)
+		case "URL":
+			if value.Sensitivity == resourcev1.ValueNonSecret {
+				ref.Value = string(definition.Protocols[0]) + "://" + target.InternalName + ":" + strconv.Itoa(definition.DefaultPort)
+			} else {
+				ref.SecretRef = credentialRef(target.Managed.CredentialRefs, value.Name)
+			}
 		default:
 			ref.SecretRef = credentialRef(target.Managed.CredentialRefs, value.Name)
 		}

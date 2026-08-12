@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -187,6 +188,15 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 	workload, err := registry.CompileServiceRuntimeSpecs(service, assignment, plan.Assignments, configuration, services)
 	if err != nil {
 		return nil, false, registry.APIError{Status: 409, Code: "WORKLOAD_AUTHORITY_INVALID", Message: "canonical service workload is invalid"}
+	}
+	managedEnvironment, err := s.Resources.ApplicationEnvironment(ctx, record.ProjectID, decision.EnvironmentID, service.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	workload.Environment = append(workload.Environment, managedEnvironment...)
+	sort.Slice(workload.Environment, func(i, j int) bool { return workload.Environment[i].Name < workload.Environment[j].Name })
+	if err := deploymentv1.ValidateEnvironment(workload.Environment, nil); err != nil {
+		return nil, false, registry.APIError{Status: 409, Code: "MANAGED_RESOURCE_SPEC_INVALID", Message: err.Error()}
 	}
 	image, err := deploymentv1.NewImmutableImage(record.Build.OCIRepository, record.Build.OCIDigest)
 	if err != nil {

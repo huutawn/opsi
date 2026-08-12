@@ -32,6 +32,9 @@ func MigrateP07AResources(ctx context.Context, db interface {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS resources_id_project_environment_uidx ON resources(id,project_id,environment_id)`,
 		`CREATE INDEX IF NOT EXISTS resources_project_environment_idx ON resources(project_id,environment_id,created_at)`,
+		`ALTER TABLE resources ADD COLUMN IF NOT EXISTS runtime_state JSONB NOT NULL DEFAULT 'null'::jsonb`,
+		`ALTER TABLE resources ADD COLUMN IF NOT EXISTS managed_lease_token TEXT`,
+		`ALTER TABLE resources ADD COLUMN IF NOT EXISTS managed_lease_expires_at TIMESTAMPTZ`,
 		`CREATE TABLE IF NOT EXISTS resource_bindings (
 			id TEXT PRIMARY KEY,
 			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

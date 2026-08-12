@@ -66,6 +66,10 @@ type ResourceIdentity struct {
 	Type          string `json:"type"`
 	Lifecycle     string `json:"lifecycle"`
 	RuntimeID     string `json:"runtime_id,omitempty"`
+	Version       string `json:"version,omitempty"`
+	Replicas      int32  `json:"replicas,omitempty"`
+	CPUMillicores int64  `json:"cpu_millicores,omitempty"`
+	MemoryBytes   int64  `json:"memory_bytes,omitempty"`
 }
 
 type PlacementFacts struct {

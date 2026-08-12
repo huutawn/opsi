@@ -2,7 +2,14 @@
 // resource contracts. It describes authority only; it does not provision.
 package resourcev1
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"strings"
+	"time"
+)
 
 const SchemaVersion = "opsi.resource/v1"
 
@@ -92,6 +99,22 @@ type ResourceTypeDefinition struct {
 	CredentialKeys  []string                   `json:"credential_keys"`
 	GeneratedValues []GeneratedValueDefinition `json:"generated_values"`
 	Storage         StorageCapability          `json:"storage"`
+	Provisioning    ProvisioningCapability     `json:"provisioning"`
+}
+
+type ProvisioningCapability struct {
+	Implemented bool                  `json:"implemented"`
+	Profiles    []ProvisioningProfile `json:"profiles"`
+}
+
+type ProvisioningProfile struct {
+	Name     string             `json:"name"`
+	Versions []SupportedVersion `json:"versions"`
+}
+
+type SupportedVersion struct {
+	Version string `json:"version"`
+	Image   string `json:"image"`
 }
 
 type StorageRequest struct {
@@ -116,10 +139,110 @@ type ManagedSpec struct {
 	CPUMillicores    int64             `json:"cpu_millicores"`
 	MemoryBytes      int64             `json:"memory_bytes"`
 	Storage          StorageRequest    `json:"storage"`
-	Placement        Placement         `json:"placement"`
 	ServiceConfig    map[string]string `json:"service_config,omitempty"`
 	CredentialRefs   []SecretReference `json:"credential_refs,omitempty"`
 	ConnectionPolicy ExposurePolicy    `json:"connection_policy"`
+}
+
+const ManagedResourceSpecSchemaVersion = "opsi.managed_resource_spec/v1"
+
+const (
+	FailureProvisioningUnsupported = "MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED"
+	FailureUnplaced                = "MANAGED_RESOURCE_UNPLACED"
+	FailureAssignmentInvalid       = "MANAGED_RESOURCE_ASSIGNMENT_INVALID"
+	FailureSpecInvalid             = "MANAGED_RESOURCE_SPEC_INVALID"
+	FailureImageUnavailable        = "MANAGED_RESOURCE_IMAGE_UNAVAILABLE"
+	FailureApplyFailed             = "MANAGED_RESOURCE_APPLY_FAILED"
+	FailureReadinessFailed         = "MANAGED_RESOURCE_READINESS_FAILED"
+	FailureRuntimeMismatch         = "MANAGED_RESOURCE_RUNTIME_MISMATCH"
+	FailureDeleteFailed            = "MANAGED_RESOURCE_DELETE_FAILED"
+)
+
+type ManagedResourceAssignment struct {
+	RuntimeID string `json:"runtime_id"`
+	NodeID    string `json:"node_id"`
+	AgentID   string `json:"agent_id"`
+}
+
+type ManagedResourcePort struct {
+	Name     string   `json:"name"`
+	Port     int32    `json:"port"`
+	Protocol Protocol `json:"protocol"`
+}
+
+type ManagedResourceConnection struct {
+	ServiceName string   `json:"service_name"`
+	Host        string   `json:"host"`
+	Port        int32    `json:"port"`
+	Protocol    Protocol `json:"protocol"`
+	URL         string   `json:"url"`
+}
+
+// ManagedResourceSpec is the immutable Cloud-compiled runtime authority sent to an Agent.
+type ManagedResourceSpec struct {
+	SchemaVersion     string                    `json:"schema_version"`
+	ResourceID        string                    `json:"resource_id"`
+	ProjectID         string                    `json:"project_id"`
+	EnvironmentID     string                    `json:"environment_id"`
+	ResourceType      Type                      `json:"resource_type"`
+	Profile           string                    `json:"profile"`
+	Version           string                    `json:"version"`
+	Image             string                    `json:"image"`
+	Assignment        ManagedResourceAssignment `json:"assignment"`
+	Replicas          int32                     `json:"replicas"`
+	CPUMillicores     int64                     `json:"cpu_millicores"`
+	MemoryBytes       int64                     `json:"memory_bytes"`
+	Ports             []ManagedResourcePort     `json:"ports"`
+	Storage           StorageRequest            `json:"storage"`
+	Connection        ManagedResourceConnection `json:"connection"`
+	ConfigurationHash string                    `json:"configuration_hash"`
+	TopologyRevision  uint64                    `json:"topology_revision"`
+	TopologyHash      string                    `json:"topology_hash"`
+	SpecHash          string                    `json:"spec_hash"`
+}
+
+func (s ManagedResourceSpec) Hash() (string, error) {
+	s.SpecHash = ""
+	data, err := json.Marshal(s)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (s ManagedResourceSpec) Validate() error {
+	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || s.ResourceType != TypeNATS {
+		return errors.New("managed resource identity is invalid")
+	}
+	if s.Profile != "single-node-experimental" || s.Version != NATSVersion || s.Image != NATSImage || !strings.Contains(s.Image, "@sha256:") {
+		return errors.New("managed resource image authority is invalid")
+	}
+	if s.Assignment.RuntimeID == "" || s.Assignment.NodeID == "" || s.Assignment.AgentID == "" || s.Replicas != 1 || s.CPUMillicores < 1 || s.MemoryBytes < 1 || s.Storage.Persistent || s.Storage.SizeBytes != 0 {
+		return errors.New("managed resource runtime intent is invalid")
+	}
+	if len(s.Ports) != 1 || s.Ports[0].Name != "nats" || s.Ports[0].Port != 4222 || s.Ports[0].Protocol != ProtocolNATS || s.Connection.Protocol != ProtocolNATS || s.Connection.Port != 4222 || s.Connection.Host == "" || s.Connection.ServiceName == "" || s.Connection.URL != "nats://"+s.Connection.Host+":4222" {
+		return errors.New("managed resource connection intent is invalid")
+	}
+	if len(s.ConfigurationHash) != 64 || s.TopologyRevision < 1 || len(s.TopologyHash) != 64 || len(s.SpecHash) != 64 {
+		return errors.New("managed resource revision authority is invalid")
+	}
+	hash, err := s.Hash()
+	if err != nil || hash != s.SpecHash {
+		return errors.New("managed resource spec hash is invalid")
+	}
+	return nil
+}
+
+type ManagedResourceEvidence struct {
+	ObservedSpecHash  string    `json:"observed_spec_hash"`
+	WorkloadReady     bool      `json:"workload_ready"`
+	PodReady          bool      `json:"pod_ready"`
+	ServiceReady      bool      `json:"service_ready"`
+	Image             string    `json:"image"`
+	AvailableReplicas int32     `json:"available_replicas"`
+	Deleted           bool      `json:"deleted,omitempty"`
+	ObservedAt        time.Time `json:"observed_at"`
 }
 
 type TLSConfig struct {
@@ -138,21 +261,31 @@ type ExternalSpec struct {
 }
 
 type Resource struct {
-	SchemaVersion string         `json:"schema_version"`
-	ID            string         `json:"id"`
-	ProjectID     string         `json:"project_id"`
-	EnvironmentID string         `json:"environment_id"`
-	Name          string         `json:"name"`
-	Kind          Kind           `json:"kind"`
-	Provider      string         `json:"provider"`
-	Type          Type           `json:"type"`
-	Lifecycle     LifecycleState `json:"lifecycle"`
-	Managed       *ManagedSpec   `json:"managed,omitempty"`
-	External      *ExternalSpec  `json:"external,omitempty"`
-	InternalName  string         `json:"internal_name,omitempty"`
-	CreatedBy     string         `json:"created_by"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	SchemaVersion string                  `json:"schema_version"`
+	ID            string                  `json:"id"`
+	ProjectID     string                  `json:"project_id"`
+	EnvironmentID string                  `json:"environment_id"`
+	Name          string                  `json:"name"`
+	Kind          Kind                    `json:"kind"`
+	Provider      string                  `json:"provider"`
+	Type          Type                    `json:"type"`
+	Lifecycle     LifecycleState          `json:"lifecycle"`
+	Managed       *ManagedSpec            `json:"managed,omitempty"`
+	External      *ExternalSpec           `json:"external,omitempty"`
+	InternalName  string                  `json:"internal_name,omitempty"`
+	Runtime       *ManagedResourceRuntime `json:"runtime,omitempty"`
+	CreatedBy     string                  `json:"created_by"`
+	CreatedAt     time.Time               `json:"created_at"`
+	UpdatedAt     time.Time               `json:"updated_at"`
+}
+
+type ManagedResourceRuntime struct {
+	Spec           ManagedResourceSpec      `json:"spec"`
+	Evidence       *ManagedResourceEvidence `json:"evidence,omitempty"`
+	FailureCode    string                   `json:"failure_code,omitempty"`
+	FailureMessage string                   `json:"failure_message,omitempty"`
+	LeaseToken     string                   `json:"-"`
+	LeaseExpiresAt time.Time                `json:"-"`
 }
 
 type CreateRequest struct {

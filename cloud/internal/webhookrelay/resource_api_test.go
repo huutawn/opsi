@@ -10,6 +10,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
 func TestResourceAPIRegistryCreateAndTopologyBoundary(t *testing.T) {
@@ -61,12 +62,32 @@ func TestResourceAPIRegistryCreateAndTopologyBoundary(t *testing.T) {
 		Target: resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: result.Resource.ID}, Protocol: resourcev1.ProtocolPostgres, LogicalName: "DATABASE",
 	})
 	binding := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/resource-bindings", string(bindingBody), "binding-key")
-	if binding.Code != http.StatusCreated || !strings.Contains(binding.Body.String(), `"sensitivity":"secret"`) || strings.Contains(binding.Body.String(), `"value":"vault-postgres"`) {
+	if binding.Code != http.StatusCreated || !strings.Contains(binding.Body.String(), `"runtime_refs":null`) || strings.Contains(binding.Body.String(), `"vault-postgres"`) {
 		t.Fatalf("binding status=%d body=%s", binding.Code, binding.Body.String())
 	}
 	topology := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+project.ID+"/topology/facts", "", "")
 	if topology.Code != http.StatusOK || !strings.Contains(topology.Body.String(), result.Resource.ID) || strings.Contains(topology.Body.String(), `"assignments"`) {
 		t.Fatalf("topology status=%d body=%s", topology.Code, topology.Body.String())
+	}
+	node, err := services.UpsertNode(project.ID, "server", "server", registry.NodeHealthy, "127.0.0.1", "", "node-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := services.RegisterAgent(project.ID, node.ID, strings.Repeat("a", 64), "hash", "test", "agent-key", map[string]any{"managed_resources": true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := services.RecordAgentHeartbeat(project.ID, node.ID, registry.AgentHeartbeat{Version: "test", Capabilities: map[string]any{"managed_resources": true}, NodeReady: true, K3SStatus: "ready", Capacity: registry.NodeCapacity{CPUCores: 2, MemoryMB: 2048}}); err != nil {
+		t.Fatal(err)
+	}
+	current := topologyv1.Plan{}
+	applyBody, _ := json.Marshal(topologyv1.ApplyRequest{ExpectedRevision: current.Revision, ExpectedStateHash: current.StateHash, Draft: topologyv1.Draft{SchemaVersion: topologyv1.SchemaVersion, ProjectID: project.ID, Assignments: []topologyv1.Assignment{{ServiceKey: result.Resource.ID, EnvironmentID: environmentID, RuntimeID: facts.Runtimes[0].ID, Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20, Exposure: topologyv1.ExposureIntent{Mode: "none"}}}}})
+	unsupported := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/topology/apply", string(applyBody), "unsupported-topology")
+	if unsupported.Code != http.StatusBadRequest || !strings.Contains(unsupported.Body.String(), "MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED") {
+		t.Fatalf("unsupported status=%d body=%s", unsupported.Code, unsupported.Body.String())
+	}
+	after, err := server.Topology.Get(t.Context(), project.ID)
+	if err == nil || !strings.Contains(err.Error(), "topology not found") || after.Revision != current.Revision || after.StateHash != current.StateHash {
+		t.Fatalf("unsupported apply mutated topology: before=%+v after=%+v err=%v", current, after, err)
 	}
 }
 
@@ -86,7 +107,7 @@ func TestResourceAPIRejectsUnknownJSONAndType(t *testing.T) {
 	if plaintext.Code != http.StatusBadRequest || !strings.Contains(plaintext.Body.String(), "INVALID_RESOURCE_JSON") {
 		t.Fatalf("status=%d body=%s", plaintext.Code, plaintext.Body.String())
 	}
-	unknownType := requestResourceAPI(t, server, http.MethodPost, path, `{"environment_id":"`+facts.Environments[0].ID+`","name":"kafka","kind":"managed_service","type":"kafka","managed":{"type":"kafka","replicas":1,"cpu_millicores":100,"memory_bytes":1024,"storage":{"persistent":true,"size_bytes":1024},"placement":{},"credential_refs":[{"secret_id":"vault-kafka"}],"connection_policy":{"mode":"internal"}}}`, "unknown-type")
+	unknownType := requestResourceAPI(t, server, http.MethodPost, path, `{"environment_id":"`+facts.Environments[0].ID+`","name":"kafka","kind":"managed_service","type":"kafka","managed":{"type":"kafka","replicas":1,"cpu_millicores":100,"memory_bytes":1024,"storage":{"persistent":true,"size_bytes":1024},"credential_refs":[{"secret_id":"vault-kafka"}],"connection_policy":{"mode":"internal"}}}`, "unknown-type")
 	if unknownType.Code != http.StatusBadRequest || !strings.Contains(unknownType.Body.String(), "RESOURCE_TYPE_UNSUPPORTED") {
 		t.Fatalf("status=%d body=%s", unknownType.Code, unknownType.Body.String())
 	}

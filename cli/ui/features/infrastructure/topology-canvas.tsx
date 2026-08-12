@@ -19,6 +19,7 @@ type DraftReview = { preview: TopologyPreview; validation: TopologyValidation; d
 type ConfigurationReview = { serviceID: string; preview: ServiceConfigurationPreview; validation: ServiceConfigurationValidation; diff: ServiceConfigurationDiff; idempotencyKey: string };
 type ConfigurationDrafts = Record<string, ServiceConfigurationDraft>;
 type SelectedConnection = { sourceID: string; key: string };
+type PlacementResource = { id: string; key: string; kind: "application" | "managed_service"; type: string; lifecycle: string; name: string; version?: string; replicas?: number; cpuMillicores?: number; memoryBytes?: number };
 
 const nodeTypes = { resource: TopologyResourceNode, unplaced: UnplacedGroup } satisfies NodeTypes;
 const groupWidth = 292;
@@ -43,11 +44,12 @@ export function TopologyDesignCanvas({ bindings, builds, console, draft, facts, 
     console.navigate({ topology: id });
     window.requestAnimationFrame(() => document.getElementById("topology-inspector-heading")?.focus());
   };
-  const placements = new Map(facts.services.map((service) => [service.key, canvasPlacement(topology, draft, service.key)]));
+  const placements = new Map([...facts.services.map((service) => [service.key, canvasPlacement(topology, draft, service.key)] as const), ...(facts.resources ?? []).filter((resource) => resource.kind === "managed_service").map((resource) => [resource.id, canvasPlacement(topology, draft, resource.id)] as const)]);
   const nodes = buildNodes(console, facts, topology, draft, placements, selectedID, select);
 	const edges = buildConnectionEdges(console.state.services, configurationDrafts);
   const canvasKey = `${topology?.revision ?? 0}:${topology?.state_hash ?? "none"}:${nodes.map((node) => node.type === "resource" ? `${node.id}:${node.parentId ?? "root"}:${node.data.presentation.status}:${node.data.presentation.draftState ?? "factual"}` : `${node.id}:${node.data.count}`).join("|")}`;
   const selectedService = selectedID.startsWith("service:") ? facts.services.find((service) => service.key === selectedID.slice(8)) : undefined;
+  const selectedManagedResource = selectedID.startsWith("resource:") ? facts.resources?.find((resource) => resource.id === selectedID.slice(9) && resource.kind === "managed_service") : undefined;
   const selectedRuntime = selectedID.startsWith("runtime:") ? facts.runtimes.find((runtime) => runtime.id === selectedID.slice(8)) : undefined;
 
   useEffect(() => {
@@ -66,8 +68,10 @@ export function TopologyDesignCanvas({ bindings, builds, console, draft, facts, 
 
   function move(serviceKey: string, runtimeID?: string) {
     const runtime = facts.runtimes.find((item) => item.id === runtimeID);
-    changeDraft(moveCanvasPlacement(topology, draft, serviceKey, runtime));
-    select(`service:${serviceKey}`);
+    const managed = facts.resources?.find((resource) => resource.id === serviceKey && resource.kind === "managed_service");
+    const next = moveCanvasPlacement(topology, draft, serviceKey, runtime);
+    changeDraft(runtime && managed ? updateCanvasPlacement(topology, next, serviceKey, { replicas: managed.replicas, cpu_request_millicores: managed.cpu_millicores, memory_request_bytes: managed.memory_bytes, exposure: { mode: "none" } }) : next);
+    select(facts.resources?.some((resource) => resource.id === serviceKey) ? `resource:${serviceKey}` : `service:${serviceKey}`);
   }
 
   function reset() {
@@ -233,7 +237,7 @@ export function TopologyDesignCanvas({ bindings, builds, console, draft, facts, 
 		  <CanvasFlow edges={edges} key={canvasKey} nodes={nodes} onConnect={connectApplications} onEdgeSelect={selectConnection} onMove={move} onRemoveEdge={(edge) => { const source = serviceForNode(console.state.services, edge.source); if (source) removeConnection(source.id, String(edge.data?.connectionKey ?? "")); }} />
         </div>
       </section>
-		<TopologyInspector bindings={bindings} builds={builds} busy={busy} configurationDrafts={configurationDrafts} configurationReview={configurationReview} console={console} draft={draft} facts={facts} onApplyConfiguration={applyConfiguration} onConfiguration={changeConfiguration} onDraft={changeDraft} onRemoveConnection={removeConnection} onReviewConfiguration={reviewConfiguration} repositories={repositories} selectedConnection={selectedConnection} selectedRuntime={selectedRuntime} selectedService={selectedService} topology={topology} />
+		<TopologyInspector bindings={bindings} builds={builds} busy={busy} configurationDrafts={configurationDrafts} configurationReview={configurationReview} console={console} draft={draft} facts={facts} onApplyConfiguration={applyConfiguration} onConfiguration={changeConfiguration} onDraft={changeDraft} onRemoveConnection={removeConnection} onReviewConfiguration={reviewConfiguration} repositories={repositories} selectedConnection={selectedConnection} selectedManagedResource={selectedManagedResource} selectedRuntime={selectedRuntime} selectedService={selectedService} topology={topology} />
     </div>
   </section>;
 }
@@ -389,10 +393,12 @@ function DraftReviewPanel({ review }: { review: DraftReview }) {
 function buildNodes(console: ConsoleController, facts: PlacementFacts, topology: TopologyPlan | null, draft: CanvasDraft, placements: Map<string, CanvasPlacement>, selectedID: string, select: (id: string) => void): CanvasNode[] {
   const groups: CanvasNode[] = [];
   const applications: CanvasNode[] = [];
-  const groupServices = new Map<string, typeof facts.services>();
+  const managedResources = (facts.resources ?? []).filter((resource): resource is typeof resource & { kind: "managed_service" } => resource.kind === "managed_service");
+  const resources: PlacementResource[] = [...facts.services.map((service) => ({ id: service.id, key: service.key, kind: "application" as const, type: "application", lifecycle: "", name: service.key })), ...managedResources.map((resource) => ({ id: resource.id, key: resource.id, kind: resource.kind, type: resource.type, lifecycle: resource.lifecycle, name: resource.name, version: resource.version, replicas: resource.replicas, cpuMillicores: resource.cpu_millicores, memoryBytes: resource.memory_bytes }))];
+  const groupServices = new Map<string, typeof resources>();
   const runtimeIDs = new Set(facts.runtimes.map((runtime) => runtime.id));
-  groupServices.set("unplaced", facts.services.filter((service) => { const runtimeID = placements.get(service.key)?.runtime_id; return !runtimeID || !runtimeIDs.has(runtimeID); }));
-  for (const runtime of facts.runtimes) groupServices.set(runtime.id, facts.services.filter((service) => placements.get(service.key)?.runtime_id === runtime.id));
+  groupServices.set("unplaced", resources.filter((service) => { const runtimeID = placements.get(service.key)?.runtime_id; return !runtimeID || !runtimeIDs.has(runtimeID); }));
+  for (const runtime of facts.runtimes) groupServices.set(runtime.id, resources.filter((service) => placements.get(service.key)?.runtime_id === runtime.id));
   const maxItems = Math.max(1, ...groupServices.values().map((services) => services.length));
   const groupHeight = Math.max(300, 150 + maxItems * appHeight);
   groups.push({ id: "unplaced", type: "unplaced", position: { x: 24, y: 24 }, data: { count: groupServices.get("unplaced")?.length ?? 0, onSelect: () => select("unplaced") }, draggable: false, focusable: false, selected: selectedID === "unplaced", style: { width: groupWidth, height: groupHeight }, zIndex: 0 });
@@ -427,14 +433,14 @@ function buildNodes(console: ConsoleController, facts: PlacementFacts, topology:
   for (const [parent, services] of groupServices) services.forEach((service, index) => {
     const placement = placements.get(service.key) ?? { runtime_id: null };
     const runtime = facts.runtimes.find((item) => item.id === placement.runtime_id);
-    const sourceKind = console.state.services.find((item) => item.id === service.id || item.name === service.key)?.type || "application";
+    const sourceKind = service.kind === "managed_service" ? "managed_service" : console.state.services.find((item) => item.id === service.id || item.name === service.key)?.type || "application";
     const status = canvasDraftStatus(topology, draft, service.key);
-    const id = `service:${service.key}`;
+    const id = service.kind === "managed_service" ? `resource:${service.key}` : `service:${service.key}`;
     const assignment = placement.runtime_id ? "Assigned" : "Unplaced";
     const issues = canvasDraftIssues(placement).length;
     const presentation = topologyResourcePresentation({
       kind: sourceKind,
-      name: service.key,
+      name: service.name,
       status: assignment,
       badge: status,
       context: `${assignment} · ${runtime?.name || runtime?.id || (placement.runtime_id ? `${placement.runtime_id} not reported` : "No runtime")}`,
@@ -442,7 +448,13 @@ function buildNodes(console: ConsoleController, facts: PlacementFacts, topology:
       draftState: status,
       notice: issues ? `${issues} missing ${issues === 1 ? "field" : "fields"}` : undefined,
       tone: status === "pending removal" ? "failed" : status === "unchanged" ? "neutral" : "warning",
-      facts: [
+      facts: service.kind === "managed_service" ? [
+        { label: "Type", value: service.type },
+        { label: "Lifecycle", value: service.lifecycle },
+        { label: "Version", value: service.version || "default" },
+        { label: "CPU", value: service.cpuMillicores === undefined ? "Not reported" : `${service.cpuMillicores}m` },
+        { label: "Memory", value: service.memoryBytes === undefined ? "Not reported" : `${mib(service.memoryBytes)} MiB` },
+      ] : [
         { label: "Replicas", value: placement.replicas === undefined ? "Not set" : String(placement.replicas) },
         { label: "CPU", value: placement.cpu_request_millicores === undefined ? "Not set" : `${placement.cpu_request_millicores}m` },
         { label: "Memory", value: placement.memory_request_bytes === undefined ? "Not set" : `${mib(placement.memory_request_bytes)} MiB` },
@@ -454,11 +466,17 @@ function buildNodes(console: ConsoleController, facts: PlacementFacts, topology:
   return [...groups, ...applications];
 }
 
-function TopologyInspector({ bindings, builds, busy, configurationDrafts, configurationReview, console, draft, facts, onApplyConfiguration, onConfiguration, onDraft, onRemoveConnection, onReviewConfiguration, repositories, selectedConnection, selectedRuntime, selectedService, topology }: { bindings: GitHubBinding[]; builds: BuildRecord[]; busy: "" | "review" | "apply"; configurationDrafts: ConfigurationDrafts; configurationReview: ConfigurationReview | null; console: ConsoleController; draft: CanvasDraft; facts: PlacementFacts; onApplyConfiguration: (service: ServiceRecord) => Promise<void>; onConfiguration: (service: ServiceRecord, draft: ServiceConfigurationDraft) => void; onDraft: (draft: CanvasDraft) => void; onRemoveConnection: (sourceID: string, key: string) => void; onReviewConfiguration: (service: ServiceRecord) => Promise<void>; repositories: GitHubRepository[]; selectedConnection: SelectedConnection | null; selectedRuntime?: PlacementFacts["runtimes"][number]; selectedService?: PlacementFacts["services"][number]; topology: TopologyPlan | null }) {
+function TopologyInspector({ bindings, builds, busy, configurationDrafts, configurationReview, console, draft, facts, onApplyConfiguration, onConfiguration, onDraft, onRemoveConnection, onReviewConfiguration, repositories, selectedConnection, selectedManagedResource, selectedRuntime, selectedService, topology }: { bindings: GitHubBinding[]; builds: BuildRecord[]; busy: "" | "review" | "apply"; configurationDrafts: ConfigurationDrafts; configurationReview: ConfigurationReview | null; console: ConsoleController; draft: CanvasDraft; facts: PlacementFacts; onApplyConfiguration: (service: ServiceRecord) => Promise<void>; onConfiguration: (service: ServiceRecord, draft: ServiceConfigurationDraft) => void; onDraft: (draft: CanvasDraft) => void; onRemoveConnection: (sourceID: string, key: string) => void; onReviewConfiguration: (service: ServiceRecord) => Promise<void>; repositories: GitHubRepository[]; selectedConnection: SelectedConnection | null; selectedManagedResource?: NonNullable<PlacementFacts["resources"]>[number]; selectedRuntime?: PlacementFacts["runtimes"][number]; selectedService?: PlacementFacts["services"][number]; topology: TopologyPlan | null }) {
 	if (selectedConnection) {
 		const source = console.state.services.find((service) => service.id === selectedConnection.sourceID);
 		if (source) return <ConnectionInspector busy={busy} drafts={configurationDrafts} onApply={onApplyConfiguration} onChange={onConfiguration} onRemove={onRemoveConnection} onReview={onReviewConfiguration} review={configurationReview} selected={selectedConnection} services={console.state.services} source={source} />;
 	}
+  if (selectedManagedResource) {
+    const placement = canvasPlacement(topology, draft, selectedManagedResource.id);
+    const runtime = facts.runtimes.find((item) => item.id === placement.runtime_id);
+    const status = canvasDraftStatus(topology, draft, selectedManagedResource.id);
+    return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">{runtime?.name ?? "Unplaced"}</p><span className="canvasNodeKind">Managed service</span><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedManagedResource.name}</h3></div><span className={`draftState ${status.replace(" ", "-")}`}>{status}</span></div><section className="inspectorSection"><h4>Managed runtime intent</h4><dl><InspectorFact label="Type" value={selectedManagedResource.type} /><InspectorFact label="Version" value={selectedManagedResource.version || "default"} /><InspectorFact label="Lifecycle" value={selectedManagedResource.lifecycle} /><InspectorFact label="Runtime" value={runtimeLabel(facts, placement.runtime_id)} /><InspectorFact label="Replicas" value={String(selectedManagedResource.replicas ?? 1)} /><InspectorFact label="CPU" value={selectedManagedResource.cpu_millicores === undefined ? "Not reported" : `${selectedManagedResource.cpu_millicores}m`} /><InspectorFact label="Memory" value={selectedManagedResource.memory_bytes === undefined ? "Not reported" : `${mib(selectedManagedResource.memory_bytes)} MiB`} /><InspectorFact label="Exposure" value="internal only" /></dl></section></aside>;
+  }
   if (selectedService) {
     const live = assignmentFor(topology, selectedService.key);
     const placement = canvasPlacement(topology, draft, selectedService.key);
@@ -483,7 +501,9 @@ function TopologyInspector({ bindings, builds, busy, configurationDrafts, config
     const status = serverStatus(nodes, agents, selectedRuntime.status);
     return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">{environment?.name ?? selectedRuntime.environment_id}</p><span className="canvasNodeKind">Selected server</span><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedRuntime.name || record?.public_host || selectedRuntime.id}</h3></div><span className={`reportedState ${status.toLowerCase()}`}>{status}</span></div><section className="inspectorSection"><h4>Reported capacity and state</h4><dl><InspectorFact label="Runtime" value={selectedRuntime.id} /><InspectorFact label="Node" value={node?.id ?? "Not reported"} /><InspectorFact label="CPU capacity" value={node?.cpu_cores === undefined ? "Not reported" : `${node.cpu_cores} cores`} /><InspectorFact label="RAM capacity" value={node?.memory_mb === undefined ? "Not reported" : `${node.memory_mb} MiB`} /><InspectorFact label="Agent state" value={agent ? `${agent.id} · ${agent.status}` : "Not reported"} /></dl></section></aside>;
   }
-  return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">Design / Unplaced</p><span className="canvasNodeKind">Selected area</span><h3 id="topology-inspector-heading" tabIndex={-1}>Unplaced applications</h3></div></div><section className="inspectorSection"><p>{facts.services.filter((service) => { const runtimeID = canvasPlacement(topology, draft, service.key).runtime_id; return !runtimeID || !facts.runtimes.some((runtime) => runtime.id === runtimeID); }).length} applications have no draft server target. Drag an application into a reported server to create placement intent.</p></section></aside>;
+  const unplacedApplications = facts.services.filter((service) => { const runtimeID = canvasPlacement(topology, draft, service.key).runtime_id; return !runtimeID || !facts.runtimes.some((runtime) => runtime.id === runtimeID); }).length;
+  const unplacedManaged = (facts.resources ?? []).filter((resource) => resource.kind === "managed_service" && !canvasPlacement(topology, draft, resource.id).runtime_id).length;
+  return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">Design / Unplaced</p><span className="canvasNodeKind">Selected area</span><h3 id="topology-inspector-heading" tabIndex={-1}>Unplaced resources</h3></div></div><section className="inspectorSection"><p>{unplacedApplications} applications and {unplacedManaged} managed services have no draft server target. Drag a resource into a reported server to create placement intent.</p></section></aside>;
 }
 
 function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
@@ -502,7 +522,7 @@ function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
 }
 
 function UnplacedGroup({ data, selected }: NodeProps<UnplacedFlowNode>) {
-  return <div aria-label={`Unplaced applications, ${data.count} applications`} aria-pressed={selected} className="canvasUnplacedGroup" data-canvas-target="unplaced" onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}><div className="canvasNodeHeading"><span className="canvasNodeKind">Unplaced</span><span className="unplacedCount">{data.count}</span></div><strong>Application queue</strong><small>Drag into a server to place. Drop here to remove a draft placement.</small></div>;
+  return <div aria-label={`Unplaced applications, ${data.count} applications and managed resources`} aria-pressed={selected} className="canvasUnplacedGroup" data-canvas-target="unplaced" onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}><div className="canvasNodeHeading"><span className="canvasNodeKind">Unplaced</span><span className="unplacedCount">{data.count}</span></div><strong>Resource queue</strong><small>Drag into a server to place. Drop here to remove a draft placement.</small></div>;
 }
 
 function ServiceRuntimeInspector({ busy, draft, onApply, onChange, onReview, review }: { busy: "" | "review" | "apply"; draft: ServiceConfigurationDraft; onApply: () => void; onChange: (draft: ServiceConfigurationDraft) => void; onReview: () => void; review: ConfigurationReview | null }) {
@@ -567,6 +587,6 @@ function capacityMemory(value: number | undefined, unknown: boolean) { return un
 function runtimeLabel(facts: PlacementFacts, runtimeID?: string | null) { const runtime = facts.runtimes.find((item) => item.id === runtimeID); return runtime ? `${runtime.name} · ${runtime.id}` : runtimeID ? `${runtimeID} · not reported` : "Unplaced"; }
 function selectKeyDown(event: React.KeyboardEvent, select: () => void) { if (event.key === "Enter") select(); if (event.key === " ") event.preventDefault(); }
 function selectKeyUp(event: React.KeyboardEvent, select: () => void) { if (event.key === " ") select(); }
-function resolveSelection(id: string | undefined, facts: PlacementFacts) { if (!id) return facts.services[0] ? `service:${facts.services[0].key}` : facts.runtimes[0] ? `runtime:${facts.runtimes[0].id}` : "unplaced"; if (id.startsWith("node:")) return `runtime:${facts.nodes.find((node) => node.id === id.slice(5))?.runtime_id ?? ""}`; if (id.startsWith("agent:")) return `runtime:${facts.agents.find((agent) => agent.id === id.slice(6))?.runtime_id ?? ""}`; if (id.startsWith("environment:")) return `runtime:${facts.runtimes.find((runtime) => runtime.environment_id === id.slice(12))?.id ?? ""}`; return id; }
+function resolveSelection(id: string | undefined, facts: PlacementFacts) { if (!id) return facts.services[0] ? `service:${facts.services[0].key}` : facts.resources?.find((resource) => resource.kind === "managed_service") ? `resource:${facts.resources.find((resource) => resource.kind === "managed_service")!.id}` : facts.runtimes[0] ? `runtime:${facts.runtimes[0].id}` : "unplaced"; if (id.startsWith("node:")) return `runtime:${facts.nodes.find((node) => node.id === id.slice(5))?.runtime_id ?? ""}`; if (id.startsWith("agent:")) return `runtime:${facts.agents.find((agent) => agent.id === id.slice(6))?.runtime_id ?? ""}`; if (id.startsWith("environment:")) return `runtime:${facts.runtimes.find((runtime) => runtime.environment_id === id.slice(12))?.id ?? ""}`; return id; }
 function numberValue(event: React.ChangeEvent<HTMLInputElement>) { return Number.isFinite(event.target.valueAsNumber) ? event.target.valueAsNumber : undefined; }
 function mibValue(event: React.ChangeEvent<HTMLInputElement>) { const value = numberValue(event); return value === undefined ? undefined : value * 1024 * 1024; }

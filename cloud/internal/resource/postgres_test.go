@@ -80,12 +80,7 @@ func TestPostgresResourceStorePersistsReferencesAndIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 	var references []resourcev1.RuntimeConnectionReference
-	if err := json.Unmarshal([]byte(stored), &references); err != nil || len(references) == 0 {
+	if err := json.Unmarshal([]byte(stored), &references); err != nil || references != nil {
 		t.Fatalf("stored references=%s", stored)
-	}
-	for _, reference := range references {
-		if reference.Sensitivity == resourcev1.ValueSecret && (reference.Value != "" || reference.SecretRef == nil) {
-			t.Fatalf("plaintext secret reference persisted: %+v", reference)
-		}
 	}
 }

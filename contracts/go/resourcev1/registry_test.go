@@ -1,6 +1,9 @@
 package resourcev1
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestInitialDefinitionsAreExplicitlyExperimental(t *testing.T) {
 	want := map[Type]struct {
@@ -38,5 +41,22 @@ func TestGeneratedValuesClassifySecrets(t *testing.T) {
 	}
 	if definition.Protocols[0] != ProtocolPostgres || values["HOST"] != ValueNonSecret || values["PORT"] != ValueNonSecret || values["PASSWORD"] != ValueSecret || values["URL"] != ValueSecret {
 		t.Fatalf("values=%v", values)
+	}
+}
+
+func TestNATSProvisioningAuthorityIsPinnedAndUnique(t *testing.T) {
+	definition, ok := Definition(TypeNATS)
+	if !ok || !definition.Provisioning.Implemented || len(definition.Provisioning.Profiles) != 1 || len(definition.Provisioning.Profiles[0].Versions) != 1 {
+		t.Fatalf("nats provisioning=%+v", definition.Provisioning)
+	}
+	version := definition.Provisioning.Profiles[0].Versions[0]
+	if version.Version != NATSVersion || version.Image != NATSImage || strings.Contains(version.Image, ":latest") {
+		t.Fatalf("nats version=%+v", version)
+	}
+	for _, resourceType := range []Type{TypePostgres, TypeRedis, TypeRabbitMQ} {
+		definition, _ := Definition(resourceType)
+		if definition.Provisioning.Implemented {
+			t.Fatalf("%s unexpectedly provisionable", resourceType)
+		}
 	}
 }

@@ -62,6 +62,10 @@ func (f *fakeClient) CompleteNodeLifecycle(_ context.Context, _ string, _ string
 	return nil
 }
 
+func (f *fakeClient) CompleteManagedResource(context.Context, string, string, cloudrelay.ManagedResourceResult) error {
+	return nil
+}
+
 func (f *fakeClient) Heartbeat(_ context.Context, _ string, heartbeat cloudrelay.Heartbeat) error {
 	f.heartbeats++
 	f.heartbeat = heartbeat

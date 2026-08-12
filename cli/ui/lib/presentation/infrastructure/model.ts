@@ -72,7 +72,7 @@ export const bootstrapPollInterval = 4_000;
 const topologyResourceKinds = {
   server: { kindLabel: "Server", supported: true, capabilities: { acceptsPlacement: true, connectable: false, movable: false } },
   application: { kindLabel: "Application", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: true } },
-  "managed-service": { kindLabel: "Managed service", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: false } },
+  "managed-service": { kindLabel: "Managed service", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: true } },
   "external-resource": { kindLabel: "External resource", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: false } },
 } as const;
 

@@ -12,7 +12,7 @@ test("P04 Design and Live keep separate authority, preserve CanvasDraft, fail fu
   await expect(page.getByRole("button", { name: "Live", exact: true })).toBeVisible();
   await expectMinimumTarget(page.locator(".topologyMode button"));
   await expectMinimumTarget(page.locator(".designActions button"));
-  await expect(page.getByRole("button", { name: /Unsupported resource database, kind managed-service/ })).toHaveAttribute("data-resource-state", "unsupported");
+  await expect(page.getByRole("button", { name: /Unsupported resource database, kind future-resource/ })).toHaveAttribute("data-resource-state", "unsupported");
 
   await page.getByRole("button", { name: "Live", exact: true }).click();
   await expect(page.locator(".liveInspector")).toHaveAttribute("data-resource-state", "unsupported");
@@ -208,7 +208,7 @@ function fixture() {
   const services = [
     { id: "api", name: "api", type: "application", status: "ready", source_type: "image", container_port: 8080, configuration: { schema_version: "opsi.service_configuration/v1", revision: 3, state_hash: "api-state", bindings: [{ kind: "internal_http", target_service_id: "worker", target_service_key: "worker", env_prefix: "WORKER" }], public_route: { hostname: "apps.example.com", path: "/api" } } },
     { id: "worker", name: "worker", type: "application", status: "ready", source_type: "image", container_port: 9000, configuration: { schema_version: "opsi.service_configuration/v1", revision: 2, state_hash: "worker-state", bindings: [] } },
-    { id: "database", name: "database", type: "managed-service", status: "ready", source_type: "managed", container_port: 5432, configuration: { schema_version: "opsi.service_configuration/v1", revision: 1, state_hash: "database-state", bindings: [] } },
+    { id: "database", name: "database", type: "future-resource", status: "ready", source_type: "managed", container_port: 5432, configuration: { schema_version: "opsi.service_configuration/v1", revision: 1, state_hash: "database-state", bindings: [] } },
   ];
   const facts = { project_id: "proj-1", environments: [{ id: "env-prod", project_id: "proj-1", name: "Production", type: "prod", status: "active" }], runtimes: [{ id: "runtime-primary", project_id: "proj-1", environment_id: "env-prod", name: "Primary runtime", type: "k3s", status: "ready" }], nodes: [{ id: "node-primary", project_id: "proj-1", runtime_id: "runtime-primary", status: "healthy", cpu_cores: 8, memory_mb: 16384, last_seen_at: "2026-08-10T08:00:00Z" }], agents: [{ id: "agent-primary", project_id: "proj-1", runtime_id: "runtime-primary", node_id: "node-primary", status: "active", capabilities: { deploy: true }, last_seen_at: "2026-08-10T08:00:00Z" }], services: services.map((service) => ({ id: service.id, project_id: "proj-1", key: service.name })) };
   const digest = (character: string) => `sha256:${character.repeat(64)}`;

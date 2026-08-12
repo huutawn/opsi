@@ -33,7 +33,7 @@ func TestManagedResourcesAndBindings(t *testing.T) {
 		t.Run(string(resourceType), func(t *testing.T) {
 			request := managedRequest(resourceType)
 			resource, reused, err := service.Create(context.Background(), "project-1", "user-1", "create-"+string(resourceType), request)
-			if err != nil || reused || resource.ProjectID != "project-1" || resource.EnvironmentID != "env-1" || resource.Lifecycle != resourcev1.LifecycleUnplaced || resource.Managed.Placement.RuntimeID != "" {
+			if err != nil || reused || resource.ProjectID != "project-1" || resource.EnvironmentID != "env-1" || resource.Lifecycle != resourcev1.LifecycleUnplaced || resource.Runtime != nil {
 				t.Fatalf("resource=%+v reused=%t err=%v", resource, reused, err)
 			}
 			replay, reused, err := service.Create(context.Background(), "project-1", "user-1", "create-"+string(resourceType), request)
@@ -68,7 +68,6 @@ func TestManagedResourceValidation(t *testing.T) {
 		{"memory", func(request *resourcev1.CreateRequest) { request.Managed.MemoryBytes = 0 }},
 		{"storage size", func(request *resourcev1.CreateRequest) { request.Managed.Storage.SizeBytes = 0 }},
 		{"stateful storage", func(request *resourcev1.CreateRequest) { request.Managed.Storage.Persistent = false }},
-		{"create placement", func(request *resourcev1.CreateRequest) { request.Managed.Placement.RuntimeID = "runtime-1" }},
 		{"plaintext config", func(request *resourcev1.CreateRequest) {
 			request.Managed.ServiceConfig = map[string]string{"password": "plaintext"}
 		}},
@@ -111,16 +110,16 @@ func TestExternalResourceIsConfiguredNotHealthy(t *testing.T) {
 	}
 }
 
-func TestManagedPlacementUsesCanonicalRuntimeReference(t *testing.T) {
+func TestManagedUpdatePreservesUnplacedAuthority(t *testing.T) {
 	service := testService()
 	resource, _, err := service.Create(context.Background(), "project-1", "user-1", "create-placement", managedRequest(resourcev1.TypePostgres))
 	if err != nil {
 		t.Fatal(err)
 	}
 	spec := *resource.Managed
-	spec.Placement.RuntimeID = "runtime-1"
+	spec.CPUMillicores = 500
 	updated, err := service.Update(context.Background(), "project-1", resource.ID, resourcev1.UpdateRequest{Managed: &spec})
-	if err != nil || updated.Lifecycle != resourcev1.LifecyclePlanned || updated.Managed.Placement.RuntimeID != "runtime-1" {
+	if err != nil || updated.Lifecycle != resourcev1.LifecycleUnplaced || updated.Managed.CPUMillicores != 500 || updated.Runtime != nil {
 		t.Fatalf("updated=%+v err=%v", updated, err)
 	}
 }

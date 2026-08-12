@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"sort"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
@@ -297,6 +298,15 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 	workload, err := registry.CompileServiceRuntimeSpecs(service, assignment, plan.Assignments, configuration, services)
 	if err != nil {
 		return result, err
+	}
+	managedEnvironment, err := s.Resources.ApplicationEnvironment(r.Context(), projectID, request.EnvironmentID, service.ID)
+	if err != nil {
+		return result, err
+	}
+	workload.Environment = append(workload.Environment, managedEnvironment...)
+	sort.Slice(workload.Environment, func(i, j int) bool { return workload.Environment[i].Name < workload.Environment[j].Name })
+	if err := deploymentv1.ValidateEnvironment(workload.Environment, nil); err != nil {
+		return result, registry.APIError{Status: 409, Code: "MANAGED_RESOURCE_SPEC_INVALID", Message: err.Error(), RequestID: r.Header.Get("X-Request-ID")}
 	}
 	image, err := deploymentv1.NewImmutableImage(record.Build.OCIRepository, record.Build.OCIDigest)
 	if err != nil {
