@@ -479,7 +479,8 @@ legend {
 .masterDetail,
 .auditExplorer,
 .projectList,
-.serviceList {
+.applicationCard,
+.applicationDetail {
   border-color: var(--opsi-outline-variant);
   background: var(--opsi-surface-lowest);
 }
@@ -495,14 +496,13 @@ th {
 th,
 td,
 .projectRow,
-.serviceRow,
 .auditRow,
 .deploymentRow {
   border-color: var(--opsi-outline-variant);
 }
 
 .projectRow:hover,
-.serviceRow:hover,
+.applicationCard > footer button:hover,
 button.auditRow:hover,
 button.auditRow[aria-pressed="true"] {
   background: var(--opsi-surface-low);

@@ -172,7 +172,7 @@ test("succeeded BuildJob shows immutable accepted BuildRecord and exact commit",
   await expect(page.getByText("Accepted BuildRecord", { exact: true })).toBeVisible();
   await expect(page.getByText(state.sha, { exact: true })).toBeVisible();
   await expect(page.getByText(state.digest, { exact: true })).toBeVisible();
-  await expect(page.getByText("Buildpacks", { exact: true })).toBeVisible();
+  await expect(page.getByText("Cloud Native Buildpacks", { exact: true })).toBeVisible();
   await expect(page.getByText("web", { exact: true })).toBeVisible();
 });
 
@@ -210,7 +210,7 @@ async function reviewApplication(page: Page, options: { root: string; context: s
   await page.getByLabel("Application name").fill("api");
   await page.getByLabel("Application root", { exact: true }).fill(options.root);
   if (options.strategy === "dockerfile") { await page.getByRole("radio", { name: /^Dockerfile / }).check(); await page.getByRole("textbox", { name: "Dockerfile path" }).fill("apps/api/Dockerfile"); }
-  if (options.strategy === "buildpack") await page.getByRole("radio", { name: /^Buildpacks / }).check();
+  if (options.strategy === "buildpack") await page.getByRole("radio", { name: /^Cloud Native Buildpacks / }).check();
   await page.getByText("Advanced build settings", { exact: true }).click();
   await page.getByLabel("Build context").fill(options.context);
   await page.getByRole("button", { name: "Review application" }).click();

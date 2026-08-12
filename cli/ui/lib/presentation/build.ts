@@ -2,6 +2,14 @@ import type { BuildJob } from "@/lib/contracts/registry";
 
 export const terminalBuild = (job?: BuildJob | null) => Boolean(job && ["succeeded", "failed", "cancelled"].includes(job.status));
 
+export function buildFailureCategory(code = "") {
+  if (code.startsWith("GITHUB_") || code.startsWith("EXACT_COMMIT") || code.startsWith("BUILD_SOURCE")) return "Source";
+  if (code.startsWith("DOCKERFILE")) return "Dockerfile";
+  if (code.startsWith("BUILDPACK")) return "Buildpacks";
+  if (code.startsWith("REGISTRY")) return "Registry";
+  return "Executor";
+}
+
 export function buildFailure(code = "", fallback = "Build failed.") {
   const guidance: Record<string, { title: string; action: string }> = {
     GITHUB_INSTALLATION_UNAVAILABLE: { title: "GitHub installation unavailable", action: "Reconnect the GitHub installation, then retry the same build." },

@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildFailure, terminalBuild } from "./build.ts";
+import { buildFailure, buildFailureCategory, terminalBuild } from "./build.ts";
 
 test("BuildJob lifecycle keeps every canonical terminal state", () => {
   for (const status of ["pending", "ready", "running"]) assert.equal(terminalBuild({ status }), false);
   for (const status of ["succeeded", "failed", "cancelled"]) assert.equal(terminalBuild({ status }), true);
+});
+
+test("build failures retain their user-facing authority category", () => {
+  assert.equal(buildFailureCategory("GITHUB_REF_NOT_FOUND"), "Source");
+  assert.equal(buildFailureCategory("DOCKERFILE_NOT_FOUND"), "Dockerfile");
+  assert.equal(buildFailureCategory("BUILDPACK_BUILD_FAILED"), "Buildpacks");
+  assert.equal(buildFailureCategory("EXECUTOR_INFRASTRUCTURE_FAILED"), "Executor");
+  assert.equal(buildFailureCategory("REGISTRY_PUSH_FAILED"), "Registry");
 });
 
 test("typed build failures stay actionable", () => {

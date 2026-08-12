@@ -99,7 +99,7 @@ test("truthful project summaries cover required factual fixtures", async ({ page
       await expect(page.locator(".statusStrip > div").nth(3).getByText("Unavailable", { exact: true })).toBeVisible();
       await expect(page.getByText("Incident source missing", { exact: true })).toBeVisible();
       await page.getByRole("link", { name: "Services", exact: true }).click();
-      await expect(page.locator(".serviceRow .status").first()).toHaveText("Unavailable");
+      await expect(page.locator(".applicationCard").first()).toContainText("Source binding incomplete");
     }
     if (next === "failed-build") await expect(page.getByText(/Latest build failed for worker/)).toBeVisible();
   }
@@ -108,7 +108,7 @@ test("truthful project summaries cover required factual fixtures", async ({ page
   await page.goto("/?project=proj-1&view=overview");
   await expect(page.locator(".statusLead strong")).toHaveText("Unknown");
   await page.goto("/?project=proj-1&view=services");
-  await expect(page.getByText("No services yet", { exact: true })).toBeVisible();
+  await expect(page.getByText("No Applications yet", { exact: true })).toBeVisible();
   await expect(page.getByText(/postgres|redis/i)).toHaveCount(0);
 
   scenario = "long";
@@ -120,8 +120,8 @@ test("truthful project summaries cover required factual fixtures", async ({ page
 test("switching projects clears scoped service detail", async ({ page }) => {
   await mockLocalAPI(page, "healthy");
   await page.goto("/?project=proj-1&view=services");
-  await page.locator(".serviceRow").first().click();
-  await expect(page.getByRole("heading", { name: "api" })).toBeVisible();
+  await page.locator(".applicationCard").first().getByRole("button", { name: "Open" }).click();
+  await expect(page.getByRole("dialog", { name: "api" })).toBeVisible();
   await page.evaluate(() => {
     window.history.pushState({}, "", "/?project=proj-2&view=services");
     window.dispatchEvent(new PopStateEvent("popstate"));
@@ -514,14 +514,14 @@ test("tabs, activity outcomes, service drawer, mobile drawer, and target sizes f
   await expect(page.getByRole("row", { name: /2026-07-26 0 0 0 0 1 1/ })).toBeVisible();
 
   await page.goto("/?project=proj-1&view=services");
-  const service = page.locator(".serviceRow").first();
+  const service = page.locator(".applicationCard").first().getByRole("button", { name: "Open" });
   await service.focus();
   await page.keyboard.press("Enter");
   const drawer = page.getByRole("dialog", { name: "api" });
   await expect(drawer).toBeVisible();
   await expect(page).toHaveURL(/service=api/);
-  for (const section of ["Summary", "Runtime", "Delivery", "Dependencies", "Configuration"]) await expect(drawer.getByRole("heading", { name: section })).toBeVisible();
-  await expect(drawer.getByText("Not reported by Local API.", { exact: true })).toBeVisible();
+  for (const section of ["Overview", "Source", "Builds", "Runtime / Deployment"]) await expect(drawer.getByRole("tab", { name: section })).toBeVisible();
+  await expect(drawer.getByRole("heading", { name: "Identity" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(service).toBeFocused();
   await service.click();

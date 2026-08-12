@@ -52,7 +52,7 @@ export function useDeliveryData(projectID: string, services: ServiceRecord[], in
     setState((current) => ({ ...current, buildState: "loading", buildError: "" }));
     try {
       const result = await client.buildRecords(projectID, filters);
-      setState((current) => ({ ...current, buildResults: result, buildState: "ready", buildError: "" }));
+      setState((current) => ({ ...current, builds: result.records ?? current.builds, buildResults: result, buildState: "ready", buildError: "" }));
     } catch (error) {
       setState((current) => ({ ...current, buildState: "unavailable", buildError: message(error, "BuildRecord inventory is unavailable.") }));
     }
