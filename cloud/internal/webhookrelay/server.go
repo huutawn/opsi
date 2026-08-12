@@ -25,6 +25,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -36,6 +37,7 @@ type Server struct {
 	Auth                    *auth.Service
 	HTTPClient              *http.Client
 	Registry                registry.API
+	Resources               resource.Service
 	BuildJobs               buildjob.Service
 	BuildRecords            buildrecord.Service
 	RegistryPullCredentials RegistryPullCredentialProvider
@@ -85,6 +87,7 @@ func NewServer(cfg Config) *Server {
 	runnerOIDCConfig.Audience = buildjob.RunnerOIDCAudience
 	runnerVerifier, runnerVerifierErr := githuboidc.NewIdentityVerifier(runnerOIDCConfig)
 	registryService := registry.NewService()
+	resourceService := resource.Service{Store: resource.NewMemoryStore(), Scopes: registryService}
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
 	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor, Registry: cfg.BuildRegistry}
@@ -93,6 +96,7 @@ func NewServer(cfg Config) *Server {
 		OTP:                     service,
 		HTTPClient:              newGitHubHTTPClient(),
 		Registry:                registryService,
+		Resources:               resourceService,
 		BuildJobs:               buildJobService,
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,

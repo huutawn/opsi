@@ -240,6 +240,7 @@ export type PlacementFacts = {
   nodes: Array<{ id: string; project_id: string; runtime_id: string; status: string; cpu_cores?: number; memory_mb?: number; last_seen_at?: string }>;
   agents: Array<{ id: string; project_id: string; runtime_id: string; node_id: string; status: string; capabilities: Record<string, unknown>; last_seen_at?: string }>;
   services: Array<{ id: string; project_id: string; key: string }>;
+  resources?: Array<{ id: string; project_id: string; environment_id: string; name: string; kind: "managed_service" | "external_resource"; type: string; lifecycle: string; runtime_id?: string }>;
 };
 
 export type DeploymentPolicyDraft = {

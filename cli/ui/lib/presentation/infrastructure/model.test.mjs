@@ -58,10 +58,11 @@ test("topology resource presentation supports factual kinds and fails future kin
   assert.equal(application.ariaLabel, "Application api, Assigned, moved");
   assert.deepEqual(application.capabilities, { acceptsPlacement: false, connectable: true, movable: true });
 
-  const managed = topologyResourcePresentation({ kind: "managed-service", name: "orders-db", status: "Ready", context: "provider fact" });
+  const managed = topologyResourcePresentation({ kind: "managed_service", name: "orders-db", status: "Ready", context: "provider fact" });
   assert.equal(managed.kind, "managed-service");
-  assert.equal(managed.state, "unsupported");
-  assert.equal(managed.supported, false);
+  assert.equal(managed.state, "factual");
+  assert.equal(managed.supported, true);
+  assert.deepEqual(managed.capabilities, { acceptsPlacement: false, connectable: true, movable: false });
   assert.deepEqual(managed.facts, []);
 
   const unknown = topologyResourcePresentation({ kind: "quantum-cache", name: "future", status: "Ready", context: "untrusted presentation input" });

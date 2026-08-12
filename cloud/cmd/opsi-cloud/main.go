@@ -23,6 +23,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/postgres"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	"github.com/opsi-dev/opsi/cloud/internal/webhookrelay"
 )
@@ -113,6 +114,7 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
 		postgresRegistry := registry.PostgresService{DB: db}
 		relay.Registry = postgresRegistry
+		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry}
 		relay.BuildJobs.Store = buildjob.PostgresStore{DB: db}
 		relay.BuildJobs.Sources = postgresRegistry
 		relay.BuildRecords.Store = buildrecord.PostgresStore{DB: db}

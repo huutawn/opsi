@@ -40,6 +40,7 @@ type RuntimeFact = topologyv1.RuntimeFact
 type NodeFact = topologyv1.NodeFact
 type AgentFact = topologyv1.AgentFact
 type ServiceFact = topologyv1.ServiceFact
+type ResourceIdentity = topologyv1.ResourceIdentity
 type Facts = topologyv1.PlacementFacts
 
 type FactSource interface {

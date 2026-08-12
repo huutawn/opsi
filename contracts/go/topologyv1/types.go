@@ -57,13 +57,25 @@ type ServiceFact struct {
 	Key       string `json:"key"`
 }
 
+type ResourceIdentity struct {
+	ID            string `json:"id"`
+	ProjectID     string `json:"project_id"`
+	EnvironmentID string `json:"environment_id"`
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	Type          string `json:"type"`
+	Lifecycle     string `json:"lifecycle"`
+	RuntimeID     string `json:"runtime_id,omitempty"`
+}
+
 type PlacementFacts struct {
-	ProjectID    string            `json:"project_id"`
-	Environments []EnvironmentFact `json:"environments"`
-	Runtimes     []RuntimeFact     `json:"runtimes"`
-	Nodes        []NodeFact        `json:"nodes"`
-	Agents       []AgentFact       `json:"agents"`
-	Services     []ServiceFact     `json:"services"`
+	ProjectID    string             `json:"project_id"`
+	Environments []EnvironmentFact  `json:"environments"`
+	Runtimes     []RuntimeFact      `json:"runtimes"`
+	Nodes        []NodeFact         `json:"nodes"`
+	Agents       []AgentFact        `json:"agents"`
+	Services     []ServiceFact      `json:"services"`
+	Resources    []ResourceIdentity `json:"resources"`
 }
 
 type Assignment struct {

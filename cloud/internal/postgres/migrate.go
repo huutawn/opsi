@@ -606,5 +606,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateP05CBuildpacks(ctx, db); err != nil {
 		return err
 	}
-	return MigrateR5012ServiceConfiguration(ctx, db)
+	if err := MigrateR5012ServiceConfiguration(ctx, db); err != nil {
+		return err
+	}
+	return MigrateP07AResources(ctx, db)
 }

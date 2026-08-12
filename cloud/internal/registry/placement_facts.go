@@ -154,5 +154,6 @@ func emptyPlacementFacts(projectID string) topology.Facts {
 		Nodes:        []topology.NodeFact{},
 		Agents:       []topology.AgentFact{},
 		Services:     []topology.ServiceFact{},
+		Resources:    []topology.ResourceIdentity{},
 	}
 }

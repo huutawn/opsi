@@ -51,6 +51,9 @@ func (s *Server) handleTopologyAPI(w http.ResponseWriter, r *http.Request, proje
 	}
 	if len(parts) == 4 && parts[3] == "facts" && r.Method == http.MethodGet {
 		facts, err := s.Topology.Facts.PlacementFacts(r.Context(), projectID)
+		if err == nil {
+			facts.Resources, err = resourceIdentities(r.Context(), s.Resources, projectID)
+		}
 		writePlacementResult(w, r, facts, err, http.StatusOK)
 		return
 	}

@@ -72,15 +72,16 @@ export const bootstrapPollInterval = 4_000;
 const topologyResourceKinds = {
   server: { kindLabel: "Server", supported: true, capabilities: { acceptsPlacement: true, connectable: false, movable: false } },
   application: { kindLabel: "Application", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: true } },
-  "managed-service": { kindLabel: "Managed service", supported: false, capabilities: { acceptsPlacement: false, connectable: false, movable: false } },
-  "external-resource": { kindLabel: "External resource", supported: false, capabilities: { acceptsPlacement: false, connectable: false, movable: false } },
+  "managed-service": { kindLabel: "Managed service", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: false } },
+  "external-resource": { kindLabel: "External resource", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: false } },
 } as const;
 
 export function topologyResourcePresentation(input: TopologyResourcePresentationInput): TopologyResourcePresentation {
-  const definition = topologyResourceKinds[input.kind as keyof typeof topologyResourceKinds];
+  const normalizedKind = input.kind === "managed_service" ? "managed-service" : input.kind === "external_resource" ? "external-resource" : input.kind;
+  const definition = topologyResourceKinds[normalizedKind as keyof typeof topologyResourceKinds];
   if (!definition?.supported) {
     return {
-      kind: definition ? input.kind as TopologyResourceKind : "unsupported",
+      kind: definition ? normalizedKind as TopologyResourceKind : "unsupported",
       sourceKind: input.kind,
       supported: false,
       kindLabel: definition?.kindLabel ?? "Unsupported resource",
@@ -96,7 +97,7 @@ export function topologyResourcePresentation(input: TopologyResourcePresentation
     };
   }
   return {
-    kind: input.kind as "server" | "application",
+    kind: normalizedKind as Exclude<TopologyResourceKind, "unsupported">,
     sourceKind: input.kind,
     supported: true,
     kindLabel: definition.kindLabel,
