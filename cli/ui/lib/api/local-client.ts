@@ -1,5 +1,6 @@
 import type {
   AuditEvent,
+  BuildJob,
   BuildRecord,
   BuildRecordList,
   BootstrapSession,
@@ -272,6 +273,18 @@ export class LocalClient {
 
   buildRecord(projectID: string, recordID: string) {
     return this.call<BuildRecord>(`/api/local/projects/${projectID}/build-records/${encodeURIComponent(recordID)}`);
+  }
+
+  createBuildJob(projectID: string, applicationID: string, idempotencyKey: string) {
+    return this.call<BuildJob>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/build-jobs`, { method: "POST", write: true, idempotencyKey, body: "{}" });
+  }
+
+  buildJobs(projectID: string, applicationID: string) {
+    return this.call<{ build_jobs: BuildJob[] }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/build-jobs?limit=50`);
+  }
+
+  buildJob(projectID: string, applicationID: string, buildJobID: string) {
+    return this.call<BuildJob>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/build-jobs/${encodeURIComponent(buildJobID)}`);
   }
 
   placementFacts(projectID: string) { return this.call<PlacementFacts>(`/api/local/projects/${projectID}/topology/facts`); }

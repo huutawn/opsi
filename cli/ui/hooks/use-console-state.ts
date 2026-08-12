@@ -5,6 +5,7 @@ import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/l
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
 import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
 import { deploymentPollInterval, terminalDeployment } from "@/features/delivery/polling-model";
+import { buildFailure } from "@/lib/presentation/build";
 import { deriveProjectSummary, emptyFoundation, normalizeStatus, PROJECT_SUMMARY_TTL_MS, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
 import type { BootstrapSession, ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
 import { terminalBootstrap } from "@/lib/presentation/infrastructure/model";
@@ -75,9 +76,10 @@ export function useConsoleState() {
       setReview((current) => (current ? { ...current, status: "succeeded", evidence } : current));
     } catch (cause) {
       const error = cause as LocalAPIError;
+      const guidance = buildFailure(error.code, error.message);
       setReview((current) =>
         current
-          ? { ...current, status: "failed", error: error.message, nextAction: error.nextAction || "Retry the same reviewed attempt." }
+          ? { ...current, status: "failed", error: error.message, nextAction: error.nextAction !== "Retry after checking Local backend connectivity." ? error.nextAction : guidance.action }
           : current,
       );
     }

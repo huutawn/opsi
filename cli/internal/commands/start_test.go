@@ -850,6 +850,17 @@ func TestLocalBuildRecordReadUsesProjectScopedCloudPathAndKeychainPAT(t *testing
 	}
 }
 
+func TestLocalBuildJobUsesCanonicalV1CloudPath(t *testing.T) {
+	target, err := url.Parse("/api/local/projects/project-1/applications/application-1/build-jobs?status=ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, query, err := localToCloudPath(target)
+	if err != nil || path != "/v1/projects/project-1/applications/application-1/build-jobs" || query != "status=ready" {
+		t.Fatalf("path=%q query=%q err=%v", path, query, err)
+	}
+}
+
 func TestLocalGitHubInstallationClaimRedeemsOnceWithoutBrowserCredential(t *testing.T) {
 	var callbackURL, localState string
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

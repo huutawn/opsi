@@ -128,6 +128,37 @@ export type GitHubBinding = {
   status: string;
 };
 
+export type BuildJob = {
+  id: string;
+  project_id: string;
+  environment_id: string;
+  application_id: string;
+  source: {
+    binding_id: string;
+    binding_updated_at: string;
+    github_installation_id: number;
+    repository_id: number;
+    repository_owner_id: number;
+    repository_full_name: string;
+    selected_ref: string;
+    resolved_commit_sha: string;
+    application_root: string;
+    build_context: string;
+  };
+  requested_build_strategy: "auto" | "dockerfile" | "buildpack";
+  resolved_build_strategy: "dockerfile" | "buildpack" | "";
+  dockerfile_path?: string;
+  status: "pending" | "ready" | "running" | "succeeded" | "failed" | "cancelled";
+  failure_code?: string;
+  failure_message_redacted?: string;
+  failure_cause?: string;
+  build_record_id?: string;
+  completed_at?: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type BuildRecord = {
   schema_version: "opsi.build_record/v1";
   id: string;
@@ -159,6 +190,21 @@ export type BuildRecord = {
     oci_repository: string;
     oci_digest: string;
     provenance_digest?: string;
+    build_job_id?: string;
+    build_strategy?: "dockerfile" | "buildpack";
+    builder_identity?: string;
+    builder_version?: string;
+    builder?: {
+      pack_version?: string;
+      builder_image?: string;
+      builder_image_digest?: string;
+      run_image?: string;
+      run_image_digest?: string;
+      lifecycle_version?: string;
+      buildpacks?: Array<{ id: string; version: string }>;
+      processes?: Array<{ type: string; command?: string[]; arguments?: string[]; direct?: boolean; default?: boolean }>;
+    };
+    media_type?: string;
     status: string;
   };
 };

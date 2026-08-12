@@ -265,6 +265,9 @@ func localToCloudPath(u *url.URL) (string, string, error) {
 	if strings.HasPrefix(path, "/projects/") && strings.Contains(path, "/github/") {
 		return "/v1" + path, u.RawQuery, nil
 	}
+	if strings.HasPrefix(path, "/projects/") && strings.Contains(path, "/applications/") && strings.Contains(path, "/build-jobs") {
+		return "/v1" + path, u.RawQuery, nil
+	}
 	if strings.HasPrefix(path, "/projects/") {
 		return "/api" + path, u.RawQuery, nil
 	}

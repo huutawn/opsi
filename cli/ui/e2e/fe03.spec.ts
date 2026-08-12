@@ -437,10 +437,11 @@ test("confirmed service creation refreshes Topology onboarding without a page re
   page.on("request", (request) => { if (request.isNavigationRequest()) navigationRequests += 1; });
   await page.getByRole("button", { name: "Add application" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Service key").fill("api");
-  await page.getByLabel("Container port").fill("8080");
+  await page.getByLabel("Application name").fill("api");
   await page.getByRole("button", { name: "Review application" }).click();
-  await page.getByRole("button", { name: "Confirm and submit" }).click();
+  const review = page.getByRole("dialog", { name: "create application" });
+  await review.getByRole("button", { name: "Confirm and submit" }).click();
+  await review.getByRole("button", { name: "Close" }).click();
   await expect(page.getByRole("button", { name: "Plan placement" })).toBeVisible();
   expect(navigationRequests).toBe(0);
 });
