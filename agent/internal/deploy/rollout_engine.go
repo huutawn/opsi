@@ -252,17 +252,15 @@ func (e *Engine) failAndRollback(ctx context.Context, record deploymentv1.Rollou
 	defer cancel()
 	previousExists := record.Intent.PreviousKnownGoodID != ""
 	failure := boundedRolloutFailure(cause)
-	if !previousExists {
-		failure = deploymentv1.NewRolloutError(deploymentv1.RolloutCodeNoKnownGood, "desired runtime failed and no previous known-good snapshot exists", false)
-	}
 	failed, err := e.Store.TransitionRollout(recoveryCtx, record.Intent.RolloutID, deploymentv1.RolloutStateFailed, failure, record.Resources, nil, !previousExists)
 	if err != nil {
 		return record, err
 	}
-	_ = emitRolloutProgress(progress, *failed, PhaseFailed, failure.Error(), 80, failure)
 	if !previousExists {
+		_ = emitRolloutProgress(progress, *failed, PhaseFailed, failure.Error()+"; rollback unavailable: no previous known-good snapshot exists", 80, failure)
 		return *failed, failure
 	}
+	_ = emitRolloutProgress(progress, *failed, PhaseFailed, failure.Error(), 80, failure)
 	return e.rollback(recoveryCtx, *failed, progress)
 }
 
@@ -310,7 +308,11 @@ func (e *Engine) resumeRollback(ctx context.Context, record deploymentv1.Rollout
 
 func (e *Engine) rollbackFailed(ctx context.Context, record deploymentv1.RolloutRecord, cause error, progress ProgressFunc) (deploymentv1.RolloutRecord, error) {
 	failure := boundedRolloutFailure(cause)
-	failed, err := e.Store.TransitionRollout(ctx, record.Intent.RolloutID, deploymentv1.RolloutStateRollbackFailed, failure, record.Resources, nil, true)
+	primary := record.Error
+	if primary == nil {
+		primary = failure
+	}
+	failed, err := e.Store.TransitionRollout(ctx, record.Intent.RolloutID, deploymentv1.RolloutStateRollbackFailed, primary, record.Resources, nil, true)
 	if err != nil {
 		return record, err
 	}

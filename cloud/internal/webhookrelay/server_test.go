@@ -14,6 +14,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 type capturedAudit struct {
@@ -25,6 +26,7 @@ type capturedAudit struct {
 type deploymentResultRegistry struct {
 	registry.API
 	completeErr error
+	completed   registry.DeploymentJob
 	audits      []capturedAudit
 }
 
@@ -33,7 +35,22 @@ func (r *deploymentResultRegistry) VerifyAgent(projectID, nodeID, token string) 
 }
 
 func (r *deploymentResultRegistry) CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result registry.DeploymentResult) (registry.DeploymentJob, error) {
+	if r.completed.ID != "" {
+		return r.completed, r.completeErr
+	}
 	return registry.DeploymentJob{ID: deploymentID, OrgID: "org-1", ProjectID: projectID, NodeID: nodeID, Status: registry.DeploymentSucceeded}, r.completeErr
+}
+
+func (r *deploymentResultRegistry) GetDeployment(string, string) (registry.DeploymentJob, error) {
+	return r.completed, nil
+}
+
+func (r *deploymentResultRegistry) CancelDeployment(string, string, string, string) (registry.DeploymentJob, bool, error) {
+	return registry.DeploymentJob{}, false, nil
+}
+
+func (r *deploymentResultRegistry) RetryDeployment(string, string, string, string) (registry.DeploymentJob, bool, error) {
+	return registry.DeploymentJob{}, false, nil
 }
 
 func (r *deploymentResultRegistry) Audit(_, _ string, actorUserID, action, _, _ string, _ string, metadata map[string]any) {
@@ -64,6 +81,24 @@ func TestAgentDeploymentResultAuditOwnership(t *testing.T) {
 	encoded, _ := json.Marshal(audit.metadata)
 	if audit.actor != "agent" || audit.action != "DEPLOYMENT_AGENT_RESULT_REJECTED" || audit.metadata["error_code"] != "DEPLOYMENT_STALE_LEASE" || strings.Contains(string(encoded), "lease-secret") || strings.Contains(string(encoded), "terminal-secret") {
 		t.Fatalf("rejection audit=%+v", audit)
+	}
+}
+
+func TestDeploymentAPIExposesPrimaryTerminalFailure(t *testing.T) {
+	primary := deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRegistryAuthFailed, "registry denied image pull", false)
+	terminal := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateFailed, FailureCode: primary.Code, FailureMessageRedacted: primary.Message}
+	store := &deploymentResultRegistry{completed: registry.DeploymentJob{ID: "dep-1", OrgID: "org-1", ProjectID: "proj-1", NodeID: "node-1", Status: deploymentv1.RolloutStateFailed, FailureCode: primary.Code, FailureMessageRedacted: primary.Message, TerminalResult: terminal}}
+	server := NewServer(Config{})
+	server.Registry = store
+	req := httptest.NewRequest(http.MethodGet, "/api/projects/proj-1/deployments/dep-1", nil)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var job registry.DeploymentJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil || job.FailureCode != primary.Code || job.FailureMessageRedacted != primary.Message || job.TerminalResult == nil || job.TerminalResult.FailureCode != primary.Code || strings.Contains(rec.Body.String(), deploymentv1.RolloutCodeNoKnownGood) {
+		t.Fatalf("job=%+v err=%v body=%s", job, err, rec.Body.String())
 	}
 }
 

@@ -245,7 +245,7 @@ func TestImmutableDeploymentExpiredLeaseRetryKeepsJobID(t *testing.T) {
 	}
 	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "1", "")
 	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateWaiting, "2", "")
-	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "3", deploymentv1.RolloutCodeNoKnownGood)
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "3", deploymentv1.RolloutCodeRuntimeFailed)
 	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
 	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "expired", DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.StateFailed, LeaseToken: lease.LeaseToken, SpecHash: snapshot.SpecHash, ApplicationImage: snapshot.Image.Reference}); apiCode(err) != "DEPLOYMENT_LEASE_EXPIRED" {
 		t.Fatalf("expired result err=%v", err)

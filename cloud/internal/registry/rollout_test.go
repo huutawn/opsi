@@ -259,9 +259,9 @@ func TestExposureAutomaticRollbackKeepsDesiredAndFactualKnownGood(t *testing.T) 
 	reportRolloutProgress(t, service, projectID, cLease, deploymentv1.RolloutStateWaiting, "c", "")
 	reportRolloutProgress(t, service, projectID, cLease, deploymentv1.RolloutStateFailed, "d", deploymentv1.RolloutCodeReadinessFailed)
 	reportRolloutProgress(t, service, projectID, cLease, deploymentv1.RolloutStateRollingBack, "e", deploymentv1.RolloutCodeReadinessFailed)
-	reportRolloutProgress(t, service, projectID, cLease, deploymentv1.RolloutStateRollbackFailed, "f", "ROLLBACK_APPLY_FAILED")
-	rollbackFailed, err := service.CompleteDeployment(projectID, cJob.NodeID, cJob.ID, "rollback-failed", rolloutResult(cLease, deploymentv1.RolloutStateRollbackFailed, "f", "", "", "", "ROLLBACK_APPLY_FAILED"))
-	if err != nil || rollbackFailed.Status != deploymentv1.RolloutStateRollbackFailed || rollbackFailed.FailureCode != "ROLLBACK_APPLY_FAILED" {
+	reportRolloutProgress(t, service, projectID, cLease, deploymentv1.RolloutStateRollbackFailed, "f", deploymentv1.RolloutCodeReadinessFailed)
+	rollbackFailed, err := service.CompleteDeployment(projectID, cJob.NodeID, cJob.ID, "rollback-failed", rolloutResult(cLease, deploymentv1.RolloutStateRollbackFailed, "f", "", "", "", deploymentv1.RolloutCodeReadinessFailed))
+	if err != nil || rollbackFailed.Status != deploymentv1.RolloutStateRollbackFailed || rollbackFailed.FailureCode != deploymentv1.RolloutCodeReadinessFailed {
 		t.Fatalf("rollback_failed=%+v err=%v", rollbackFailed, err)
 	}
 }
@@ -358,10 +358,16 @@ func TestExposureNoKnownGoodStaleLeaseOutOfOrderAndConcurrentApply(t *testing.T)
 	}
 	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "3", "")
 	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateWaiting, "4", "")
-	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "5", deploymentv1.RolloutCodeNoKnownGood)
-	result := rolloutResult(lease, deploymentv1.RolloutStateFailed, "5", "", "", "", deploymentv1.RolloutCodeNoKnownGood)
+	if _, err := service.ProgressImmutableDeployment(projectID, job.NodeID, job.ID, "invalid-no-known-good", rolloutProgress(lease, deploymentv1.RolloutStateFailed, "5", deploymentv1.RolloutCodeNoKnownGood)); apiCode(err) != "DEPLOYMENT_STATE_INVALID" {
+		t.Fatalf("accepted no-known-good as primary progress failure: %v", err)
+	}
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "5", deploymentv1.RolloutCodeRuntimeFailed)
+	if _, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "invalid-no-known-good", rolloutResult(lease, deploymentv1.RolloutStateFailed, "5", "", "", "", deploymentv1.RolloutCodeNoKnownGood)); apiCode(err) != "DEPLOYMENT_RESULT_MISMATCH" {
+		t.Fatalf("accepted no-known-good as terminal primary failure: %v", err)
+	}
+	result := rolloutResult(lease, deploymentv1.RolloutStateFailed, "5", "", "", "", deploymentv1.RolloutCodeRuntimeFailed)
 	failed, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "no-known-good", result)
-	if err != nil || failed.Status != deploymentv1.RolloutStateFailed || failed.FailureCode != deploymentv1.RolloutCodeNoKnownGood {
+	if err != nil || failed.Status != deploymentv1.RolloutStateFailed || failed.FailureCode != deploymentv1.RolloutCodeRuntimeFailed {
 		t.Fatalf("failed=%+v err=%v", failed, err)
 	}
 
@@ -518,14 +524,26 @@ func TestFailedTerminalResultRecordsFailureAudit(t *testing.T) {
 	lease := leaseRollout(t, service, projectID, job)
 	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateApplying, "1", "")
 	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateWaiting, "2", "")
-	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "3", deploymentv1.RolloutCodeNoKnownGood)
-	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "failed", rolloutResult(lease, deploymentv1.RolloutStateFailed, "3", "", "", "", deploymentv1.RolloutCodeNoKnownGood))
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "3", deploymentv1.RolloutCodeRegistryAuthFailed)
+	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "failed", rolloutResult(lease, deploymentv1.RolloutStateFailed, "3", "", "", "", deploymentv1.RolloutCodeRegistryAuthFailed))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if finished.FailureCode != deploymentv1.RolloutCodeRegistryAuthFailed || finished.TerminalResult == nil || finished.TerminalResult.FailureCode != deploymentv1.RolloutCodeRegistryAuthFailed || finished.FailureMessageRedacted != "sanitized rollout failure" {
+		t.Fatalf("terminal failure=%+v", finished)
+	}
+	failedEvents := 0
+	for _, event := range service.deployEvents[finished.ID] {
+		if event.Step == deploymentv1.RolloutStateFailed {
+			failedEvents++
+		}
+	}
+	if failedEvents != 2 {
+		t.Fatalf("failed events=%d events=%+v", failedEvents, service.deployEvents[finished.ID])
+	}
 	for _, audit := range service.audit {
 		if audit.Action == "DEPLOYMENT_AGENT_RESULT_RECORDED" && audit.ResourceID == finished.ID {
-			if audit.Result != "failure" || audit.MetadataRedacted["failure_code"] != deploymentv1.RolloutCodeNoKnownGood {
+			if audit.Result != "failure" || audit.MetadataRedacted["failure_code"] != deploymentv1.RolloutCodeRegistryAuthFailed {
 				t.Fatalf("failure audit=%+v", audit)
 			}
 			return
@@ -551,8 +569,8 @@ func TestObservedMutationRejectsForgedPreMutationUntilFactualTerminalResult(t *t
 	if _, locked := service.deployLocks[job.ServiceID]; !locked || service.deployments[job.ID].TerminalResult != nil {
 		t.Fatalf("forged result released lock or persisted terminal state: lock=%v job=%+v", locked, service.deployments[job.ID])
 	}
-	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "2", deploymentv1.RolloutCodeNoKnownGood)
-	factual := rolloutResult(lease, deploymentv1.RolloutStateFailed, "2", "", "", "", deploymentv1.RolloutCodeNoKnownGood)
+	reportRolloutProgress(t, service, projectID, lease, deploymentv1.RolloutStateFailed, "2", deploymentv1.RolloutCodeRuntimeFailed)
+	factual := rolloutResult(lease, deploymentv1.RolloutStateFailed, "2", "", "", "", deploymentv1.RolloutCodeRuntimeFailed)
 	finished, err := service.CompleteDeployment(projectID, job.NodeID, job.ID, "post-mutation", factual)
 	if err != nil || finished.TerminalResult == nil || finished.TerminalResult.FailurePhase != deploymentv1.FailurePhasePostMutation {
 		t.Fatalf("factual result=%+v err=%v", finished, err)
