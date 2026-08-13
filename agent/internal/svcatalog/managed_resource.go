@@ -2,6 +2,7 @@ package svcatalog
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +41,7 @@ func (r ManagedResourceReconciler) Reconcile(ctx context.Context, lease cloudrel
 		result.Status, result.Evidence = "deleted", evidence
 		return result
 	}
-	evidence, err := r.apply(ctx, lease.Spec)
+	evidence, err := r.apply(ctx, lease.Spec, lease.Credential)
 	if err != nil {
 		result.Status, result.FailureCode, result.FailureMessageRedacted = "failed", failureCode(err), err.Error()
 		return result
@@ -49,11 +50,14 @@ func (r ManagedResourceReconciler) Reconcile(ctx context.Context, lease cloudrel
 	return result
 }
 
-func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
+func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.ManagedResourceSpec, credential *resourcev1.ManagedResourceCredential) (*resourcev1.ManagedResourceEvidence, error) {
+	if spec.ResourceType == resourcev1.TypeRedis && (credential == nil || credential.Validate() != nil || credential.CredentialID != spec.CredentialID) {
+		return nil, errors.New("managed resource credential is unavailable")
+	}
 	if err := r.ensureNamespace(ctx, spec); err != nil {
 		return nil, err
 	}
-	for _, object := range managedResourceObjects(spec) {
+	for _, object := range managedResourceObjects(spec, credential) {
 		current, err := r.get(ctx, strings.ToLower(object["kind"].(string)), metadataString(object, "name"), metadataString(object, "namespace"))
 		if err != nil {
 			return nil, err
@@ -72,6 +76,9 @@ func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.Ma
 		}
 		data, _ := json.Marshal(manifest)
 		if _, err := r.run(ctx, data, verb, "--field-manager="+managedResourceFieldManager, "-f", "-"); err != nil {
+			if manifest["kind"] == "Secret" {
+				return nil, secretApplyError{}
+			}
 			return nil, err
 		}
 	}
@@ -101,8 +108,15 @@ func (r ManagedResourceReconciler) ensureNamespace(ctx context.Context, spec res
 }
 
 func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
-	for _, kind := range []string{"deployment", "service"} {
-		current, err := r.get(ctx, kind, spec.Connection.ServiceName, managedResourceNamespace(spec))
+	for _, kind := range []string{"deployment", "service", "secret"} {
+		if kind == "secret" && spec.ResourceType != resourcev1.TypeRedis {
+			continue
+		}
+		name := spec.Connection.ServiceName
+		if kind == "secret" {
+			name = managedResourceSecretName(spec)
+		}
+		current, err := r.get(ctx, kind, name, managedResourceNamespace(spec))
 		if err != nil {
 			return nil, err
 		}
@@ -112,7 +126,7 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 		if !exactManagedResourceOwnership(current, spec) {
 			return nil, errors.New("refusing to delete Kubernetes object with different Opsi managed-resource ownership")
 		}
-		if _, err := r.run(ctx, nil, "delete", kind, spec.Connection.ServiceName, "-n", managedResourceNamespace(spec), "--wait=true", "--timeout=2m"); err != nil {
+		if _, err := r.run(ctx, nil, "delete", kind, name, "-n", managedResourceNamespace(spec), "--wait=true", "--timeout=2m"); err != nil {
 			return nil, err
 		}
 	}
@@ -134,7 +148,14 @@ func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev
 	defer ticker.Stop()
 	for {
 		evidence, err := r.observe(ctx, spec)
-		if err == nil && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && evidence.Image == spec.Image {
+		if err != nil {
+			var auth authError
+			var secret secretApplyError
+			if errors.As(err, &auth) || errors.As(err, &secret) {
+				return evidence, err
+			}
+		}
+		if err == nil && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (spec.ResourceType != resourcev1.TypeRedis || evidence.SecretReady && evidence.AuthReady) && evidence.Image == spec.Image {
 			return evidence, nil
 		}
 		if err == nil && evidence.Image != "" && evidence.Image != spec.Image {
@@ -160,6 +181,17 @@ func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.
 	if err != nil || service == nil || !exactManagedResourceOwnership(service, spec) {
 		return &resourcev1.ManagedResourceEvidence{}, err
 	}
+	secretReady, authReady := spec.ResourceType != resourcev1.TypeRedis, spec.ResourceType != resourcev1.TypeRedis
+	if spec.ResourceType == resourcev1.TypeRedis {
+		secret, secretErr := r.get(ctx, "secret", managedResourceSecretName(spec), namespace)
+		if secretErr != nil || secret == nil || !exactManagedResourceOwnership(secret, spec) {
+			if secretErr != nil {
+				return &resourcev1.ManagedResourceEvidence{}, secretErr
+			}
+			return &resourcev1.ManagedResourceEvidence{}, secretApplyError{}
+		}
+		secretReady = true
+	}
 	podsRaw, err := r.run(ctx, nil, "get", "pods", "-n", namespace, "-l", selectorString(managedResourceLabels(spec)), "-o", "json")
 	if err != nil {
 		return nil, err
@@ -169,26 +201,55 @@ func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.
 		return nil, errors.New("invalid Kubernetes pod evidence")
 	}
 	available := int32(number(nested(deployment, "status", "availableReplicas")))
-	image, podReady := managedPodEvidence(pods, spec)
+	image, imageID, podReady := managedPodEvidence(pods, spec)
 	workloadReady := available >= spec.Replicas && number(nested(deployment, "status", "observedGeneration")) >= number(nested(deployment, "metadata", "generation"))
 	serviceReady := nested(service, "spec", "clusterIP") != nil && serviceHasPort(service, spec.Ports[0].Port)
-	return &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: workloadReady, PodReady: podReady >= spec.Replicas, ServiceReady: serviceReady, Image: image, AvailableReplicas: available, ObservedAt: time.Now().UTC()}, nil
+	if spec.ResourceType == resourcev1.TypeRedis && workloadReady && podReady >= spec.Replicas && serviceReady {
+		out, authErr := r.run(ctx, nil, "exec", "deployment/"+spec.Connection.ServiceName, "-n", namespace, "-c", "redis", "--", "sh", "-ec", `u=$(cat /run/opsi-valkey/username); export VALKEYCLI_AUTH=$(cat /run/opsi-valkey/password); valkey-cli --user "$u" -h 127.0.0.1 ping`)
+		if authErr != nil || !strings.Contains(string(out), "PONG") {
+			return &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: workloadReady, PodReady: podReady >= spec.Replicas, ServiceReady: serviceReady, SecretReady: secretReady, Image: image, ImageID: imageID, AvailableReplicas: available, ObservedAt: time.Now().UTC()}, authError{}
+		}
+		authReady = true
+	}
+	return &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: workloadReady, PodReady: podReady >= spec.Replicas, ServiceReady: serviceReady, SecretReady: secretReady, AuthReady: authReady, Image: image, ImageID: imageID, AvailableReplicas: available, ObservedAt: time.Now().UTC()}, nil
 }
 
-func managedResourceObjects(spec resourcev1.ManagedResourceSpec) []map[string]any {
+func managedResourceObjects(spec resourcev1.ManagedResourceSpec, credential *resourcev1.ManagedResourceCredential) []map[string]any {
 	namespace := managedResourceNamespace(spec)
 	labels := managedResourceLabels(spec)
 	selector := managedResourceOwnershipLabels(spec)
 	annotations := managedResourceAnnotations(spec)
+	containerName := string(spec.ResourceType)
 	container := map[string]any{
-		"name": "nats", "image": spec.Image, "imagePullPolicy": "IfNotPresent", "args": []any{"--port", strconv.Itoa(int(spec.Ports[0].Port))},
-		"ports":          []any{map[string]any{"name": "nats", "containerPort": spec.Ports[0].Port, "protocol": "TCP"}},
+		"name": containerName, "image": spec.Image, "imagePullPolicy": "IfNotPresent",
+		"ports":          []any{map[string]any{"name": spec.Ports[0].Name, "containerPort": spec.Ports[0].Port, "protocol": "TCP"}},
 		"resources":      map[string]any{"requests": map[string]any{"cpu": fmt.Sprintf("%dm", spec.CPUMillicores), "memory": strconv.FormatInt(spec.MemoryBytes, 10)}, "limits": map[string]any{"cpu": fmt.Sprintf("%dm", spec.CPUMillicores), "memory": strconv.FormatInt(spec.MemoryBytes, 10)}},
-		"readinessProbe": map[string]any{"tcpSocket": map[string]any{"port": "nats"}, "initialDelaySeconds": 1, "periodSeconds": 2, "timeoutSeconds": 1, "failureThreshold": 10},
+		"readinessProbe": map[string]any{"tcpSocket": map[string]any{"port": spec.Ports[0].Name}, "initialDelaySeconds": 1, "periodSeconds": 2, "timeoutSeconds": 1, "failureThreshold": 10},
 	}
-	deployment := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": spec.Connection.ServiceName, "namespace": namespace, "labels": labels, "annotations": annotations}, "spec": map[string]any{"replicas": spec.Replicas, "selector": map[string]any{"matchLabels": selector}, "template": map[string]any{"metadata": map[string]any{"labels": labels, "annotations": annotations}, "spec": map[string]any{"containers": []any{container}}}}}
-	service := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": spec.Connection.ServiceName, "namespace": namespace, "labels": labels, "annotations": annotations}, "spec": map[string]any{"type": "ClusterIP", "selector": selector, "ports": []any{map[string]any{"name": "nats", "port": spec.Ports[0].Port, "targetPort": "nats", "protocol": "TCP"}}}}
-	return []map[string]any{deployment, service}
+	if spec.ResourceType == resourcev1.TypeNATS {
+		container["args"] = []any{"--port", strconv.Itoa(int(spec.Ports[0].Port))}
+	} else {
+		container["command"] = []any{"valkey-server", "/run/opsi-valkey/valkey.conf"}
+		container["volumeMounts"] = []any{map[string]any{"name": "acl", "mountPath": "/run/opsi-valkey", "readOnly": true}}
+	}
+	podSpec := map[string]any{"containers": []any{container}}
+	objects := []map[string]any{}
+	if spec.ResourceType == resourcev1.TypeRedis {
+		if credential == nil || credential.Validate() != nil || credential.CredentialID != spec.CredentialID {
+			return nil
+		}
+		config := "bind 0.0.0.0\nport 6379\nprotected-mode yes\nuser default off\nuser " + credential.Username + " on >" + credential.Password + " ~* &* +@all\n"
+		secret := map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque", "metadata": map[string]any{"name": managedResourceSecretName(spec), "namespace": namespace, "labels": labels, "annotations": annotations}, "data": map[string]any{"username": base64.StdEncoding.EncodeToString([]byte(credential.Username)), "password": base64.StdEncoding.EncodeToString([]byte(credential.Password)), "valkey.conf": base64.StdEncoding.EncodeToString([]byte(config))}}
+		objects = append(objects, secret)
+		podSpec["volumes"] = []any{map[string]any{"name": "acl", "secret": map[string]any{"secretName": managedResourceSecretName(spec)}}}
+	}
+	deployment := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": spec.Connection.ServiceName, "namespace": namespace, "labels": labels, "annotations": annotations}, "spec": map[string]any{"replicas": spec.Replicas, "selector": map[string]any{"matchLabels": selector}, "template": map[string]any{"metadata": map[string]any{"labels": labels, "annotations": annotations}, "spec": podSpec}}}
+	service := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": spec.Connection.ServiceName, "namespace": namespace, "labels": labels, "annotations": annotations}, "spec": map[string]any{"type": "ClusterIP", "selector": selector, "ports": []any{map[string]any{"name": spec.Ports[0].Name, "port": spec.Ports[0].Port, "targetPort": spec.Ports[0].Name, "protocol": "TCP"}}}}
+	return append(objects, deployment, service)
+}
+
+func managedResourceSecretName(spec resourcev1.ManagedResourceSpec) string {
+	return deploymentv1.StableDNSName(spec.Connection.ServiceName, "server-acl")
 }
 
 func managedResourceNamespace(spec resourcev1.ManagedResourceSpec) string {
@@ -258,16 +319,17 @@ func (r ManagedResourceReconciler) run(ctx context.Context, input []byte, args .
 	return runner.Run(ctx, input, defaultString(r.KubectlPath, "kubectl"), args...)
 }
 
-func managedPodEvidence(pods map[string]any, spec resourcev1.ManagedResourceSpec) (string, int32) {
+func managedPodEvidence(pods map[string]any, spec resourcev1.ManagedResourceSpec) (string, string, int32) {
 	var ready int32
 	image := ""
+	imageID := ""
 	items, _ := pods["items"].([]any)
 	for _, raw := range items {
 		pod, _ := raw.(map[string]any)
 		statuses, _ := nested(pod, "status", "containerStatuses").([]any)
 		for _, rawStatus := range statuses {
 			status, _ := rawStatus.(map[string]any)
-			if status["name"] != "nats" {
+			if status["name"] != string(spec.ResourceType) {
 				continue
 			}
 			id, _ := status["imageID"].(string)
@@ -279,9 +341,12 @@ func managedPodEvidence(pods map[string]any, spec resourcev1.ManagedResourceSpec
 			} else if id != "" {
 				image = id
 			}
+			if id != "" {
+				imageID = id
+			}
 		}
 	}
-	return image, ready
+	return image, imageID, ready
 }
 
 func imageMatches(imageID, reference string) bool {
@@ -388,7 +453,18 @@ func failureCode(err error) string {
 	if errors.As(err, &mismatch) {
 		return resourcev1.FailureRuntimeMismatch
 	}
+	var secret secretApplyError
+	if errors.As(err, &secret) {
+		return resourcev1.FailureSecretApplyFailed
+	}
+	var auth authError
+	if errors.As(err, &auth) {
+		return resourcev1.FailureAuthFailed
+	}
 	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "credential") {
+		return resourcev1.FailureCredentialUnavailable
+	}
 	if strings.Contains(message, "image") {
 		return "MANAGED_RESOURCE_IMAGE_UNAVAILABLE"
 	}
@@ -399,6 +475,14 @@ func failureCode(err error) string {
 }
 
 type runtimeMismatchError struct{}
+
+type secretApplyError struct{}
+
+func (secretApplyError) Error() string { return "managed resource secret apply failed" }
+
+type authError struct{}
+
+func (authError) Error() string { return "managed resource authentication check failed" }
 
 func (runtimeMismatchError) Error() string {
 	return "managed resource runtime image does not match compiled intent"

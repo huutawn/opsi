@@ -29,6 +29,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type Server struct {
@@ -87,7 +88,7 @@ func NewServer(cfg Config) *Server {
 	runnerOIDCConfig.Audience = buildjob.RunnerOIDCAudience
 	runnerVerifier, runnerVerifierErr := githuboidc.NewIdentityVerifier(runnerOIDCConfig)
 	registryService := registry.NewService()
-	resourceService := resource.Service{Store: resource.NewMemoryStore(), Scopes: registryService}
+	resourceService := resource.Service{Store: resource.NewMemoryStore(), Scopes: registryService, Credentials: resource.NewMemoryCredentialAuthority()}
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
 	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor, Registry: cfg.BuildRegistry}
@@ -383,6 +384,14 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	}
 	if ok {
 		s.resolveRegistryPullCredential(r.Context(), lease.Command)
+		if lease.Command != nil && len(lease.Command.Workload.SecretReferences) > 0 {
+			materials, err := s.Resources.ResolveSecretMaterials(r.Context(), projectID, lease.Command.Workload.SecretReferences)
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureBindingSecretMaterialization})
+				return
+			}
+			lease.Command.SecretMaterials = materials
+		}
 		if lease.Command != nil && lease.Deployment.AttemptCount == 1 {
 			if err := s.validateLeasedDeploymentAuthority(r.Context(), lease.Deployment); err != nil {
 				_, _ = s.Registry.CompleteDeployment(projectID, nodeID, lease.Deployment.ID, r.Header.Get("X-Request-ID"), registry.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: "failed", LeaseToken: lease.LeaseToken, SpecHash: lease.Deployment.SpecHash, ApplicationImage: lease.Command.Image.Reference, FailureCode: "DEPLOYMENT_AUTHORITY_REVOKED", FailureMessageRedacted: "deployment authority changed before first Agent lease"})
@@ -401,8 +410,12 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if ok {
+		if managed.Action == "apply" && managed.Spec.ResourceType == resourcev1.TypeRedis && managed.Credential == nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureCredentialUnavailable})
+			return
+		}
 		s.observer.Inc("agent_jobs_leased_total")
-		writeJSON(w, http.StatusOK, map[string]any{"kind": "managed_resource", "action": managed.Action, "lease_token": managed.LeaseToken, "spec": managed.Spec})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "managed_resource", "action": managed.Action, "lease_token": managed.LeaseToken, "spec": managed.Spec, "credential": managed.Credential})
 		return
 	}
 	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)

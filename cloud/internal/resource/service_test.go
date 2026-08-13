@@ -57,6 +57,30 @@ func TestManagedResourcesAndBindings(t *testing.T) {
 	}
 }
 
+func TestRedisBindingEmitsTypedSecretReferences(t *testing.T) {
+	service := testService()
+	request := managedRequest(resourcev1.TypeRedis)
+	value, _, err := service.Create(context.Background(), "project-1", "user-1", "redis-bind", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value.Lifecycle = resourcev1.LifecycleReady
+	value.Runtime = &resourcev1.ManagedResourceRuntime{Spec: resourcev1.ManagedResourceSpec{SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion, ResourceID: value.ID, ProjectID: "project-1", EnvironmentID: "env-1", ResourceType: resourcev1.TypeRedis, Profile: "single-node-experimental", Version: resourcev1.ValkeyVersion, Image: resourcev1.ValkeyImage, CredentialID: "mrcred-" + value.ID, Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"}, Replicas: 1, CPUMillicores: 100, MemoryBytes: 64 << 20, Ports: []resourcev1.ManagedResourcePort{{Name: "redis", Port: 6379, Protocol: resourcev1.ProtocolRedis}}, Connection: resourcev1.ManagedResourceConnection{ServiceName: "redis", Host: "redis.internal", Port: 6379, Protocol: resourcev1.ProtocolRedis}}, Evidence: &resourcev1.ManagedResourceEvidence{WorkloadReady: true, PodReady: true, ServiceReady: true, SecretReady: true, AuthReady: true, Image: resourcev1.ValkeyImage, ImageID: resourcev1.ValkeyImage, AvailableReplicas: 1}}
+	value.Runtime.Spec.SpecHash, _ = value.Runtime.Spec.Hash()
+	value.Runtime.Spec.TopologyRevision = 1
+	value.Runtime.Spec.TopologyHash = strings.Repeat("a", 64)
+	value.Runtime.Spec.ConfigurationHash = strings.Repeat("b", 64)
+	value.Runtime.Spec.SpecHash, _ = value.Runtime.Spec.Hash()
+	value.Runtime.Evidence.ObservedSpecHash = value.Runtime.Spec.SpecHash
+	if _, err := service.Store.Update(context.Background(), value); err != nil {
+		t.Fatal(err)
+	}
+	binding, _, err := service.CreateBinding(context.Background(), "project-1", "redis-binding", resourcev1.CreateBindingRequest{EnvironmentID: "env-1", Source: resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: "app-1"}, Target: resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: value.ID}, Protocol: resourcev1.ProtocolRedis, LogicalName: "CACHE"})
+	if err != nil || len(binding.RuntimeRefs) != 5 || binding.RuntimeRefs[2].Sensitivity != resourcev1.ValueSecret || binding.RuntimeRefs[2].Value != "" {
+		t.Fatalf("binding=%+v err=%v", binding, err)
+	}
+}
+
 func TestManagedResourceValidation(t *testing.T) {
 	service := testService()
 	cases := []struct {
@@ -125,16 +149,20 @@ func TestManagedUpdatePreservesUnplacedAuthority(t *testing.T) {
 }
 
 func testService() Service {
-	return Service{Store: NewMemoryStore(), Scopes: testScopes{}, Now: func() time.Time { return time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC) }}
+	return Service{Store: NewMemoryStore(), Scopes: testScopes{}, Credentials: NewMemoryCredentialAuthority(), Now: func() time.Time { return time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC) }}
 }
 
 func managedRequest(resourceType resourcev1.Type) resourcev1.CreateRequest {
-	persistent := resourceType != resourcev1.TypeNATS
+	persistent := resourceType != resourcev1.TypeNATS && resourceType != resourcev1.TypeRedis
+	refs := []resourcev1.SecretReference{{SecretID: "secret-" + string(resourceType)}}
+	if resourceType == resourcev1.TypeRedis {
+		refs = nil
+	}
 	return resourcev1.CreateRequest{
 		EnvironmentID: "env-1", Name: string(resourceType), Kind: resourcev1.KindManagedService, Type: resourceType,
 		Managed: &resourcev1.ManagedSpec{Type: resourceType, Version: "default", Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20,
 			Storage:        resourcev1.StorageRequest{Persistent: persistent, SizeBytes: map[bool]int64{true: 1 << 30}[persistent]},
-			CredentialRefs: []resourcev1.SecretReference{{SecretID: "secret-" + string(resourceType)}}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+			CredentialRefs: refs, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
 	}
 }
 

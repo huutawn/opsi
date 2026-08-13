@@ -12,6 +12,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type CloudClient interface {
@@ -29,6 +30,10 @@ type DeployEngine interface {
 }
 
 type RegistryPullSecretEnsurer interface {
+	Ensure(context.Context, deploymentv1.AgentCommand) error
+}
+
+type WorkloadSecretEnsurer interface {
 	Ensure(context.Context, deploymentv1.AgentCommand) error
 }
 
@@ -50,6 +55,7 @@ type Runner struct {
 	Client              CloudClient
 	Engine              DeployEngine
 	RegistryPullSecrets RegistryPullSecretEnsurer
+	WorkloadSecrets     WorkloadSecretEnsurer
 	NodeLifecycle       NodeLifecycleExecutor
 	ManagedResources    ManagedResourceReconciler
 	NodeID              string
@@ -239,6 +245,14 @@ func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentL
 		if err := r.RegistryPullSecrets.Ensure(ctx, *lease.Command); err != nil {
 			failure := rolloutFailure(err, deploymentv1.RolloutCodeRegistryCredentialUnavailable)
 			return deploymentFailure(lease, failure.Code, failure.Message), true
+		}
+	}
+	if len(lease.Command.Workload.SecretReferences) > 0 {
+		if r.WorkloadSecrets == nil {
+			return deploymentFailure(lease, resourcev1.FailureBindingSecretMaterialization, "workload secret delivery is unavailable"), true
+		}
+		if err := r.WorkloadSecrets.Ensure(ctx, *lease.Command); err != nil {
+			return deploymentFailure(lease, resourcev1.FailureBindingSecretMaterialization, err.Error()), true
 		}
 	}
 	var progressMu sync.Mutex

@@ -285,6 +285,13 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 		}
 		container["env"] = env
 	}
+	if len(spec.SecretReferences) > 0 {
+		env, _ := container["env"].([]any)
+		for _, item := range spec.SecretReferences {
+			env = append(env, map[string]any{"name": item.EnvName, "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": workloadSecretName(command, item.SecretID), "key": item.EnvName}}})
+		}
+		container["env"] = env
+	}
 	if spec.ReadinessProbe != nil {
 		container["readinessProbe"] = probeObject(*spec.ReadinessProbe)
 	}

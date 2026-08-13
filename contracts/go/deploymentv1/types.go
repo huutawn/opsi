@@ -107,6 +107,25 @@ type SecretReference struct {
 	SecretID string `json:"secret_id"`
 }
 
+// SecretMaterial is transient Cloud-to-Agent delivery data and is never part
+// of WorkloadSpec, RuntimeSnapshot, or persisted deployment authority.
+type SecretMaterial struct {
+	SecretID string            `json:"secret_id"`
+	Values   map[string]string `json:"values"`
+}
+
+func (m SecretMaterial) Validate() error {
+	if !validOpaqueID(m.SecretID) || len(m.Values) == 0 || len(m.Values) > 32 {
+		return errors.New("secret material is invalid")
+	}
+	for name, value := range m.Values {
+		if !envNamePattern.MatchString(name) || value == "" || len(value) > 16*1024 || strings.ContainsRune(value, '\x00') {
+			return errors.New("secret material is invalid")
+		}
+	}
+	return nil
+}
+
 type RegistryPullCredentialReference struct {
 	Provider     string `json:"provider"`
 	CredentialID string `json:"credential_id"`
@@ -431,6 +450,7 @@ type AgentCommand struct {
 	Rollout                *RolloutIntent          `json:"rollout,omitempty"`
 	Preview                *PreviewSpec            `json:"preview,omitempty"`
 	RegistryPullCredential *RegistryPullCredential `json:"registry_pull_credential,omitempty"`
+	SecretMaterials        []SecretMaterial        `json:"secret_materials,omitempty"`
 }
 
 type Progress struct {

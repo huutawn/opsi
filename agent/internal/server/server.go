@@ -561,6 +561,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			Version:             version,
 			Engine:              engine,
 			RegistryPullSecrets: deploy.KubernetesRegistryPullSecretEnsurer{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			WorkloadSecrets:     deploy.KubernetesWorkloadSecretEnsurer{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			NodeLifecycle:       nodelifecycle.Service{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			ManagedResources:    svcatalog.ManagedResourceReconciler{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			PollInterval:        pollInterval,

@@ -7,11 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type encryptedPostgresStore struct {
@@ -41,6 +44,63 @@ func NewPostgresRegistryPullCredentialVault(db *sql.DB, key string) (RegistryPul
 		return nil, err
 	}
 	return postgresRegistryPullCredentialVault{encryptedPostgresStore: store}, nil
+}
+
+type ManagedResourceCredentialVault interface {
+	Ensure(context.Context, string) (resourcev1.ManagedResourceCredential, error)
+	Get(context.Context, string) (resourcev1.ManagedResourceCredential, error)
+	Delete(context.Context, string) error
+}
+
+type postgresManagedResourceCredentialVault struct{ encryptedPostgresStore }
+
+func NewPostgresManagedResourceCredentialVault(db *sql.DB, key string) (ManagedResourceCredentialVault, error) {
+	store, err := newEncryptedPostgresStore(db, key)
+	if err != nil {
+		return nil, err
+	}
+	return postgresManagedResourceCredentialVault{encryptedPostgresStore: store}, nil
+}
+
+func (s postgresManagedResourceCredentialVault) Ensure(ctx context.Context, id string) (resourcev1.ManagedResourceCredential, error) {
+	credential, err := s.Get(ctx, id)
+	if err == nil {
+		return credential, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	password := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, password); err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	credential = resourcev1.ManagedResourceCredential{CredentialID: id, Username: "opsi", Password: base64.RawURLEncoding.EncodeToString(password)}
+	ciphertext, nonce, err := s.seal(credential)
+	if err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_resource_credentials(id,ciphertext,nonce,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT(id) DO NOTHING`, id, ciphertext, nonce)
+	if err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	return s.Get(ctx, id)
+}
+
+func (s postgresManagedResourceCredentialVault) Get(ctx context.Context, id string) (resourcev1.ManagedResourceCredential, error) {
+	var ciphertext, nonce []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT ciphertext,nonce FROM managed_resource_credentials WHERE id=$1`, id).Scan(&ciphertext, &nonce); err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	var credential resourcev1.ManagedResourceCredential
+	if err := s.open(ciphertext, nonce, &credential); err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	return credential, credential.Validate()
+}
+
+func (s postgresManagedResourceCredentialVault) Delete(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM managed_resource_credentials WHERE id=$1`, id)
+	return err
 }
 
 func newEncryptedPostgresStore(db *sql.DB, key string) (encryptedPostgresStore, error) {

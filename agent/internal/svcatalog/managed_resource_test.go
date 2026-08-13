@@ -86,12 +86,29 @@ func TestManagedResourceReconcileIsIdempotentReadyAndOwnedDelete(t *testing.T) {
 
 func TestManagedResourceDeleteRejectsForeignOwnership(t *testing.T) {
 	spec := managedSpec(t)
-	objects := managedResourceObjects(spec)
+	objects := managedResourceObjects(spec, nil)
 	objects[0]["metadata"].(map[string]any)["labels"].(map[string]string)["opsi.dev/managed-resource-id"] = "other"
 	runner := &managedRunner{objects: map[string]map[string]any{"deployment/" + spec.Connection.ServiceName: objects[0]}}
 	result := (ManagedResourceReconciler{Runner: runner}).Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "delete", LeaseToken: "lease", Spec: spec})
 	if result.Status != "failed" || result.FailureCode != "MANAGED_RESOURCE_DELETE_FAILED" || len(runner.objects) != 1 {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestValkeyManifestUsesSecretFilesAndNoPasswordArgs(t *testing.T) {
+	spec := resourcev1.ManagedResourceSpec{SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion, ResourceID: "res-redis", ProjectID: "project-1", EnvironmentID: "env-1", ResourceType: resourcev1.TypeRedis, Profile: "single-node-experimental", Version: resourcev1.ValkeyVersion, Image: resourcev1.ValkeyImage, CredentialID: "mrcred-res-redis", Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"}, Replicas: 1, CPUMillicores: 100, MemoryBytes: 64 << 20, Ports: []resourcev1.ManagedResourcePort{{Name: "redis", Port: 6379, Protocol: resourcev1.ProtocolRedis}}, Connection: resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-res-redis-runtime-1", Host: "redis.default", Port: 6379, Protocol: resourcev1.ProtocolRedis}, ConfigurationHash: strings.Repeat("a", 64), TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64)}
+	spec.SpecHash, _ = spec.Hash()
+	objects := managedResourceObjects(spec, &resourcev1.ManagedResourceCredential{CredentialID: spec.CredentialID, Username: "opsi", Password: "secret"})
+	if len(objects) != 3 {
+		t.Fatalf("objects=%d", len(objects))
+	}
+	deployment := objects[1]
+	container := nested(deployment, "spec", "template", "spec", "containers").([]any)[0].(map[string]any)
+	if _, ok := container["args"]; ok || container["command"].([]any)[1] != "/run/opsi-valkey/valkey.conf" {
+		t.Fatalf("container=%v", container)
+	}
+	if _, ok := nested(deployment, "metadata", "annotations").(map[string]string)["opsi.dev/managed-resource-id"]; !ok {
+		t.Fatal("deployment ownership annotation missing")
 	}
 }
 

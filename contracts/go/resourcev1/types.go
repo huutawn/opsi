@@ -147,21 +147,40 @@ type ManagedSpec struct {
 const ManagedResourceSpecSchemaVersion = "opsi.managed_resource_spec/v1"
 
 const (
-	FailureProvisioningUnsupported = "MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED"
-	FailureUnplaced                = "MANAGED_RESOURCE_UNPLACED"
-	FailureAssignmentInvalid       = "MANAGED_RESOURCE_ASSIGNMENT_INVALID"
-	FailureSpecInvalid             = "MANAGED_RESOURCE_SPEC_INVALID"
-	FailureImageUnavailable        = "MANAGED_RESOURCE_IMAGE_UNAVAILABLE"
-	FailureApplyFailed             = "MANAGED_RESOURCE_APPLY_FAILED"
-	FailureReadinessFailed         = "MANAGED_RESOURCE_READINESS_FAILED"
-	FailureRuntimeMismatch         = "MANAGED_RESOURCE_RUNTIME_MISMATCH"
-	FailureDeleteFailed            = "MANAGED_RESOURCE_DELETE_FAILED"
+	FailureProvisioningUnsupported      = "MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED"
+	FailureUnplaced                     = "MANAGED_RESOURCE_UNPLACED"
+	FailureAssignmentInvalid            = "MANAGED_RESOURCE_ASSIGNMENT_INVALID"
+	FailureSpecInvalid                  = "MANAGED_RESOURCE_SPEC_INVALID"
+	FailureImageUnavailable             = "MANAGED_RESOURCE_IMAGE_UNAVAILABLE"
+	FailureApplyFailed                  = "MANAGED_RESOURCE_APPLY_FAILED"
+	FailureCredentialUnavailable        = "MANAGED_RESOURCE_CREDENTIAL_UNAVAILABLE"
+	FailureSecretApplyFailed            = "MANAGED_RESOURCE_SECRET_APPLY_FAILED"
+	FailureAuthFailed                   = "MANAGED_RESOURCE_AUTH_FAILED"
+	FailureReadinessFailed              = "MANAGED_RESOURCE_READINESS_FAILED"
+	FailureRuntimeMismatch              = "MANAGED_RESOURCE_RUNTIME_MISMATCH"
+	FailureDeleteFailed                 = "MANAGED_RESOURCE_DELETE_FAILED"
+	FailureBindingSecretMaterialization = "RESOURCE_BINDING_SECRET_MATERIALIZATION_FAILED"
 )
 
 type ManagedResourceAssignment struct {
 	RuntimeID string `json:"runtime_id"`
 	NodeID    string `json:"node_id"`
 	AgentID   string `json:"agent_id"`
+}
+
+// ManagedResourceCredential is transient Cloud-to-Agent material. It is never
+// part of Resource, TopologyPlan, ManagedResourceSpec, or WorkloadSpec.
+type ManagedResourceCredential struct {
+	CredentialID string `json:"credential_id"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+}
+
+func (c ManagedResourceCredential) Validate() error {
+	if c.CredentialID == "" || c.Username == "" || c.Password == "" || len(c.Username) > 128 || len(c.Password) > 1024 || strings.ContainsAny(c.Username+c.Password, "\x00\r\n") {
+		return errors.New("managed resource credential is invalid")
+	}
+	return nil
 }
 
 type ManagedResourcePort struct {
@@ -175,7 +194,7 @@ type ManagedResourceConnection struct {
 	Host        string   `json:"host"`
 	Port        int32    `json:"port"`
 	Protocol    Protocol `json:"protocol"`
-	URL         string   `json:"url"`
+	URL         string   `json:"url,omitempty"`
 }
 
 // ManagedResourceSpec is the immutable Cloud-compiled runtime authority sent to an Agent.
@@ -195,6 +214,7 @@ type ManagedResourceSpec struct {
 	Ports             []ManagedResourcePort     `json:"ports"`
 	Storage           StorageRequest            `json:"storage"`
 	Connection        ManagedResourceConnection `json:"connection"`
+	CredentialID      string                    `json:"credential_id,omitempty"`
 	ConfigurationHash string                    `json:"configuration_hash"`
 	TopologyRevision  uint64                    `json:"topology_revision"`
 	TopologyHash      string                    `json:"topology_hash"`
@@ -212,16 +232,27 @@ func (s ManagedResourceSpec) Hash() (string, error) {
 }
 
 func (s ManagedResourceSpec) Validate() error {
-	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || s.ResourceType != TypeNATS {
+	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || (s.ResourceType != TypeNATS && s.ResourceType != TypeRedis) {
 		return errors.New("managed resource identity is invalid")
 	}
-	if s.Profile != "single-node-experimental" || s.Version != NATSVersion || s.Image != NATSImage || !strings.Contains(s.Image, "@sha256:") {
+	expectedVersion, expectedImage := NATSVersion, NATSImage
+	if s.ResourceType == TypeRedis {
+		expectedVersion, expectedImage = ValkeyVersion, ValkeyImage
+	}
+	if s.Profile != "single-node-experimental" || s.Version != expectedVersion || s.Image != expectedImage || !strings.Contains(s.Image, "@sha256:") {
 		return errors.New("managed resource image authority is invalid")
 	}
 	if s.Assignment.RuntimeID == "" || s.Assignment.NodeID == "" || s.Assignment.AgentID == "" || s.Replicas != 1 || s.CPUMillicores < 1 || s.MemoryBytes < 1 || s.Storage.Persistent || s.Storage.SizeBytes != 0 {
 		return errors.New("managed resource runtime intent is invalid")
 	}
-	if len(s.Ports) != 1 || s.Ports[0].Name != "nats" || s.Ports[0].Port != 4222 || s.Ports[0].Protocol != ProtocolNATS || s.Connection.Protocol != ProtocolNATS || s.Connection.Port != 4222 || s.Connection.Host == "" || s.Connection.ServiceName == "" || s.Connection.URL != "nats://"+s.Connection.Host+":4222" {
+	portName, port, protocol := "nats", int32(4222), ProtocolNATS
+	if s.ResourceType == TypeRedis {
+		portName, port, protocol = "redis", 6379, ProtocolRedis
+		if s.CredentialID == "" || s.Connection.URL != "" {
+			return errors.New("managed resource credential authority is invalid")
+		}
+	}
+	if len(s.Ports) != 1 || s.Ports[0].Name != portName || s.Ports[0].Port != port || s.Ports[0].Protocol != protocol || s.Connection.Protocol != protocol || s.Connection.Port != port || s.Connection.Host == "" || s.Connection.ServiceName == "" || s.ResourceType == TypeNATS && s.Connection.URL != "nats://"+s.Connection.Host+":4222" {
 		return errors.New("managed resource connection intent is invalid")
 	}
 	if len(s.ConfigurationHash) != 64 || s.TopologyRevision < 1 || len(s.TopologyHash) != 64 || len(s.SpecHash) != 64 {
@@ -239,7 +270,10 @@ type ManagedResourceEvidence struct {
 	WorkloadReady     bool      `json:"workload_ready"`
 	PodReady          bool      `json:"pod_ready"`
 	ServiceReady      bool      `json:"service_ready"`
+	SecretReady       bool      `json:"secret_ready"`
+	AuthReady         bool      `json:"auth_ready"`
 	Image             string    `json:"image"`
+	ImageID           string    `json:"image_id,omitempty"`
 	AvailableReplicas int32     `json:"available_replicas"`
 	Deleted           bool      `json:"deleted,omitempty"`
 	ObservedAt        time.Time `json:"observed_at"`

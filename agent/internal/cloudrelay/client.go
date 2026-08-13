@@ -41,9 +41,10 @@ type JobLease struct {
 }
 
 type ManagedResourceLease struct {
-	Action     string                         `json:"action"`
-	LeaseToken string                         `json:"lease_token"`
-	Spec       resourcev1.ManagedResourceSpec `json:"spec"`
+	Action     string                                `json:"action"`
+	LeaseToken string                                `json:"lease_token"`
+	Spec       resourcev1.ManagedResourceSpec        `json:"spec"`
+	Credential *resourcev1.ManagedResourceCredential `json:"credential,omitempty"`
 }
 
 type ManagedResourceResult struct {

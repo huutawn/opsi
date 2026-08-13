@@ -115,6 +115,13 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		postgresRegistry := registry.PostgresService{DB: db}
 		relay.Registry = postgresRegistry
 		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry}
+		if cfg.BootstrapSecretKey != "" {
+			credentialVault, vaultErr := webhookrelay.NewPostgresManagedResourceCredentialVault(db, cfg.BootstrapSecretKey)
+			if vaultErr != nil {
+				return fmt.Errorf("configure managed resource credential vault: %w", vaultErr)
+			}
+			relay.Resources.Credentials = credentialVault
+		}
 		relay.BuildJobs.Store = buildjob.PostgresStore{DB: db}
 		relay.BuildJobs.Sources = postgresRegistry
 		relay.BuildRecords.Store = buildrecord.PostgresStore{DB: db}

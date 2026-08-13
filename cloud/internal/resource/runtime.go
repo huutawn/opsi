@@ -22,9 +22,10 @@ type RuntimeTargetResolver interface {
 }
 
 type ManagedLease struct {
-	Spec       resourcev1.ManagedResourceSpec `json:"spec"`
-	Action     string                         `json:"action"`
-	LeaseToken string                         `json:"lease_token"`
+	Spec       resourcev1.ManagedResourceSpec        `json:"spec"`
+	Action     string                                `json:"action"`
+	LeaseToken string                                `json:"lease_token"`
+	Credential *resourcev1.ManagedResourceCredential `json:"credential,omitempty"`
 }
 
 type ManagedResult struct {
@@ -50,7 +51,7 @@ func (s Service) ValidateTopologyProvisioning(ctx context.Context, projectID str
 			continue
 		}
 		definition, known := resourcev1.Definition(value.Type)
-		if !known || !definition.Provisioning.Implemented || value.Type != resourcev1.TypeNATS {
+		if !known || !definition.Provisioning.Implemented {
 			return invalid("MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED", "managed resource provisioning is not implemented for this type")
 		}
 		if value.Runtime != nil && value.Runtime.Spec.Assignment.RuntimeID != assignment.RuntimeID {
@@ -105,7 +106,17 @@ func (s Service) ReconcileTopology(ctx context.Context, projectID string, plan t
 		if err != nil {
 			return invalid("MANAGED_RESOURCE_ASSIGNMENT_INVALID", "managed resource assignment has no unique factual Agent target")
 		}
-		spec, err := compileManaged(value, target, plan.Revision, plan.PlanHash)
+		credentialID := ""
+		if value.Type == resourcev1.TypeRedis {
+			if s.Credentials == nil {
+				return invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential authority is unavailable")
+			}
+			credentialID = managedCredentialID(value.ID)
+			if _, err := s.Credentials.Ensure(ctx, credentialID); err != nil {
+				return invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential could not be generated")
+			}
+		}
+		spec, err := compileManaged(value, target, plan.Revision, plan.PlanHash, credentialID)
 		if err != nil {
 			return err
 		}
@@ -119,12 +130,12 @@ func (s Service) ReconcileTopology(ctx context.Context, projectID string, plan t
 	return nil
 }
 
-func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedResourceAssignment, topologyRevision uint64, topologyHash string) (resourcev1.ManagedResourceSpec, error) {
+func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedResourceAssignment, topologyRevision uint64, topologyHash, credentialID string) (resourcev1.ManagedResourceSpec, error) {
 	if value.Managed == nil {
 		return resourcev1.ManagedResourceSpec{}, invalid("MANAGED_RESOURCE_SPEC_INVALID", "managed resource spec is missing")
 	}
 	definition, ok := resourcev1.Definition(value.Type)
-	if !ok || !definition.Provisioning.Implemented || value.Type != resourcev1.TypeNATS {
+	if !ok || !definition.Provisioning.Implemented {
 		return resourcev1.ManagedResourceSpec{}, invalid("MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED", "managed resource provisioning is not implemented for this type")
 	}
 	if assignment.RuntimeID == "" || assignment.NodeID == "" || assignment.AgentID == "" {
@@ -152,12 +163,20 @@ func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedReso
 	configurationHash := hashValue(value.Managed.ServiceConfig)
 	serviceName := deploymentv1.StableDNSName("opsi-mr", value.ID, assignment.RuntimeID)
 	host := internalHost(value.ProjectID, value.EnvironmentID, serviceName)
+	portName, protocol, connectionURL := "nats", resourcev1.ProtocolNATS, "nats://"+host+":"+strconv.Itoa(definition.DefaultPort)
+	if value.Type == resourcev1.TypeRedis {
+		portName, protocol, connectionURL = "redis", resourcev1.ProtocolRedis, ""
+		if credentialID == "" {
+			return resourcev1.ManagedResourceSpec{}, invalid(resourcev1.FailureCredentialUnavailable, "managed Redis credential identity is unavailable")
+		}
+	}
 	spec := resourcev1.ManagedResourceSpec{
 		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion, ResourceID: value.ID, ProjectID: value.ProjectID, EnvironmentID: value.EnvironmentID,
 		ResourceType: value.Type, Profile: profile, Version: version, Image: image, Assignment: assignment,
 		Replicas: value.Managed.Replicas, CPUMillicores: value.Managed.CPUMillicores, MemoryBytes: value.Managed.MemoryBytes,
-		Ports: []resourcev1.ManagedResourcePort{{Name: "nats", Port: int32(definition.DefaultPort), Protocol: resourcev1.ProtocolNATS}}, Storage: value.Managed.Storage,
-		Connection:        resourcev1.ManagedResourceConnection{ServiceName: serviceName, Host: host, Port: int32(definition.DefaultPort), Protocol: resourcev1.ProtocolNATS, URL: "nats://" + host + ":" + strconv.Itoa(definition.DefaultPort)},
+		Ports: []resourcev1.ManagedResourcePort{{Name: portName, Port: int32(definition.DefaultPort), Protocol: protocol}}, Storage: value.Managed.Storage,
+		Connection:        resourcev1.ManagedResourceConnection{ServiceName: serviceName, Host: host, Port: int32(definition.DefaultPort), Protocol: protocol, URL: connectionURL},
+		CredentialID:      credentialID,
 		ConfigurationHash: configurationHash, TopologyRevision: topologyRevision, TopologyHash: topologyHash,
 	}
 	hash, err := spec.Hash()
@@ -179,7 +198,18 @@ func (s Service) LeaseManaged(ctx context.Context, projectID, nodeID string) (Ma
 	if value.Lifecycle == resourcev1.LifecycleDeleting {
 		action = "delete"
 	}
-	return ManagedLease{Spec: value.Runtime.Spec, Action: action, LeaseToken: token}, true, nil
+	lease := ManagedLease{Spec: value.Runtime.Spec, Action: action, LeaseToken: token}
+	if action == "apply" && value.Type == resourcev1.TypeRedis {
+		if s.Credentials == nil {
+			return ManagedLease{}, false, invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential authority is unavailable")
+		}
+		credential, err := s.Credentials.Get(ctx, value.Runtime.Spec.CredentialID)
+		if err != nil {
+			return ManagedLease{}, false, invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential is unavailable")
+		}
+		lease.Credential = &credential
+	}
+	return lease, true, nil
 }
 
 func (s Service) CompleteManaged(ctx context.Context, projectID, resourceID string, result ManagedResult) (resourcev1.Resource, error) {
@@ -194,6 +224,9 @@ func (s Service) CompleteManaged(ctx context.Context, projectID, resourceID stri
 	value.Runtime.FailureMessage = strings.TrimSpace(result.FailureMessage)
 	value.Runtime.Evidence = result.Evidence
 	if result.Status == "deleted" && result.Evidence != nil && result.Evidence.Deleted {
+		if value.Runtime.Spec.CredentialID != "" && (s.Credentials == nil || s.Credentials.Delete(ctx, value.Runtime.Spec.CredentialID) != nil) {
+			return resourcev1.Resource{}, invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential could not be deleted")
+		}
 		if err := s.Store.DeleteClaimed(ctx, projectID, resourceID, result.LeaseToken); err != nil {
 			return resourcev1.Resource{}, err
 		}
@@ -214,19 +247,33 @@ func (s Service) CompleteManaged(ctx context.Context, projectID, resourceID stri
 }
 
 func factualReady(spec resourcev1.ManagedResourceSpec, evidence *resourcev1.ManagedResourceEvidence) bool {
-	return evidence != nil && evidence.ObservedSpecHash == spec.SpecHash && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && evidence.Image == spec.Image && evidence.AvailableReplicas >= spec.Replicas
+	return evidence != nil && evidence.ObservedSpecHash == spec.SpecHash && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (spec.ResourceType != resourcev1.TypeRedis || evidence.SecretReady && evidence.AuthReady) && evidence.Image == spec.Image && imageIDMatches(evidence.ImageID, spec.Image) && evidence.AvailableReplicas >= spec.Replicas
 }
+
+func imageIDMatches(imageID, reference string) bool {
+	parts := strings.Split(reference, "@")
+	return imageID != "" && len(parts) == 2 && (strings.HasSuffix(imageID, "@"+parts[1]) || strings.HasSuffix(imageID, "://"+parts[1]) || imageID == parts[1])
+}
+
+func managedCredentialID(resourceID string) string { return "mrcred-" + resourceID }
 
 func runtimeRefs(target resourcev1.Resource) []resourcev1.RuntimeConnectionReference {
 	if target.Kind == resourcev1.KindManagedService {
 		if target.Lifecycle != resourcev1.LifecycleReady || target.Runtime == nil || !factualReady(target.Runtime.Spec, target.Runtime.Evidence) {
 			return nil
 		}
-		return []resourcev1.RuntimeConnectionReference{
+		refs := []resourcev1.RuntimeConnectionReference{
 			{Name: "HOST", Sensitivity: resourcev1.ValueNonSecret, Value: target.Runtime.Spec.Connection.Host},
 			{Name: "PORT", Sensitivity: resourcev1.ValueNonSecret, Value: strconv.Itoa(int(target.Runtime.Spec.Connection.Port))},
-			{Name: "URL", Sensitivity: resourcev1.ValueNonSecret, Value: target.Runtime.Spec.Connection.URL},
 		}
+		if target.Type == resourcev1.TypeRedis {
+			for _, name := range []string{"USER", "PASSWORD", "URL"} {
+				refs = append(refs, resourcev1.RuntimeConnectionReference{Name: name, Sensitivity: resourcev1.ValueSecret, SecretRef: &resourcev1.SecretReference{SecretID: target.Runtime.Spec.CredentialID}})
+			}
+		} else {
+			refs = append(refs, resourcev1.RuntimeConnectionReference{Name: "URL", Sensitivity: resourcev1.ValueNonSecret, Value: target.Runtime.Spec.Connection.URL})
+		}
+		return refs
 	}
 	return legacyRuntimeRefs(target)
 }

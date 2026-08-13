@@ -53,7 +53,15 @@ func TestNATSProvisioningAuthorityIsPinnedAndUnique(t *testing.T) {
 	if version.Version != NATSVersion || version.Image != NATSImage || strings.Contains(version.Image, ":latest") {
 		t.Fatalf("nats version=%+v", version)
 	}
-	for _, resourceType := range []Type{TypePostgres, TypeRedis, TypeRabbitMQ} {
+	redis, ok := Definition(TypeRedis)
+	if !ok || !redis.Provisioning.Implemented || len(redis.Provisioning.Profiles) != 1 || len(redis.Provisioning.Profiles[0].Versions) != 1 {
+		t.Fatalf("redis provisioning=%+v", redis.Provisioning)
+	}
+	valkey := redis.Provisioning.Profiles[0].Versions[0]
+	if valkey.Version != ValkeyVersion || valkey.Image != ValkeyImage || strings.Contains(valkey.Image, ":latest") || redis.Storage.Supported {
+		t.Fatalf("valkey version=%+v storage=%+v", valkey, redis.Storage)
+	}
+	for _, resourceType := range []Type{TypePostgres, TypeRabbitMQ} {
 		definition, _ := Definition(resourceType)
 		if definition.Provisioning.Implemented {
 			t.Fatalf("%s unexpectedly provisionable", resourceType)
