@@ -92,7 +92,7 @@ func (s PostgresStore) ClaimManaged(ctx context.Context, projectID, nodeID, toke
 		AND (managed_lease_token IS NULL OR managed_lease_expires_at<=$3)
 		ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
 	) UPDATE resources r SET managed_lease_token=$4,managed_lease_expires_at=$5,lifecycle=CASE WHEN r.lifecycle='deleting' THEN r.lifecycle ELSE 'provisioning' END,updated_at=$3
-	FROM candidate c WHERE r.id=c.id RETURNING `+resourceReturning, projectID, nodeID, now, token, expires)
+	FROM candidate c WHERE r.id=c.id RETURNING `+qualifiedResourceReturning, projectID, nodeID, now, token, expires)
 	value, err := scanResource(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return resourcev1.Resource{}, false, nil
@@ -212,6 +212,7 @@ func (s PostgresStore) ListBindings(ctx context.Context, projectID, environmentI
 }
 
 const resourceReturning = `id,project_id,environment_id,name,kind,provider,type,lifecycle,managed_spec::text,external_spec::text,runtime_state::text,COALESCE(managed_lease_token,''),managed_lease_expires_at,COALESCE(internal_name,''),COALESCE(created_by,''),created_at,updated_at`
+const qualifiedResourceReturning = `r.id,r.project_id,r.environment_id,r.name,r.kind,r.provider,r.type,r.lifecycle,r.managed_spec::text,r.external_spec::text,r.runtime_state::text,COALESCE(r.managed_lease_token,''),r.managed_lease_expires_at,COALESCE(r.internal_name,''),COALESCE(r.created_by,''),r.created_at,r.updated_at`
 const resourceColumns = `SELECT ` + resourceReturning + ` FROM resources`
 const bindingColumns = `SELECT id,project_id,environment_id,source_kind,source_id,target_kind,target_id,protocol,logical_name,runtime_references::text,created_at,updated_at FROM resource_bindings`
 

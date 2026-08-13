@@ -2,13 +2,21 @@ package webhookrelay
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/postgres"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
@@ -110,6 +118,88 @@ func TestResourceAPIRejectsUnknownJSONAndType(t *testing.T) {
 	unknownType := requestResourceAPI(t, server, http.MethodPost, path, `{"environment_id":"`+facts.Environments[0].ID+`","name":"kafka","kind":"managed_service","type":"kafka","managed":{"type":"kafka","replicas":1,"cpu_millicores":100,"memory_bytes":1024,"storage":{"persistent":true,"size_bytes":1024},"credential_refs":[{"secret_id":"vault-kafka"}],"connection_policy":{"mode":"internal"}}}`, "unknown-type")
 	if unknownType.Code != http.StatusBadRequest || !strings.Contains(unknownType.Body.String(), "RESOURCE_TYPE_UNSUPPORTED") {
 		t.Fatalf("status=%d body=%s", unknownType.Code, unknownType.Body.String())
+	}
+}
+
+func TestPostgresAgentManagedResourceLeaseEndpoint(t *testing.T) {
+	db, err := sql.Open("pgx", requirePostgresTestDSN(t, "managed resource lease endpoint"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	if err := postgres.Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	userID, orgID := "user-lease-http-"+suffix, "org-lease-http-"+suffix
+	if _, err := db.ExecContext(ctx, `INSERT INTO users(id,email) VALUES($1,$2)`, userID, userID+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO organizations(id,name,slug) VALUES($1,'Lease HTTP',$2)`, orgID, orgID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM organizations WHERE id=$1`, orgID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+	registryStore := registry.PostgresService{DB: db}
+	project, err := registryStore.CreateProject(orgID, "Lease HTTP", "lease-http-"+suffix, userID, "project-"+suffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := registryStore.PlacementFacts(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := registryStore.UpsertNode(project.ID, "lease-node", "server", registry.NodeHealthy, "127.0.0.1", "", "node-"+suffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialHash, err := auth.HashPAT("agent-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := registryStore.RegisterAgent(project.ID, node.ID, "sha256:lease-http", credentialHash, "test", "agent-"+suffix, map[string]any{"managed_resources": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resourceStore := resource.PostgresStore{DB: db}
+	resources := resource.Service{Store: resourceStore, Scopes: registryStore}
+	created, _, err := resources.Create(ctx, project.ID, userID, "resource-"+suffix, resourcev1.CreateRequest{
+		EnvironmentID: facts.Environments[0].ID, Name: "postgres", Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres,
+		Managed: &resourcev1.ManagedSpec{Type: resourcev1.TypePostgres, Version: "default", Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30}, CredentialRefs: []resourcev1.SecretReference{{SecretID: "secret-postgres"}}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Lifecycle = resourcev1.LifecyclePlanned
+	created.Runtime = &resourcev1.ManagedResourceRuntime{Spec: resourcev1.ManagedResourceSpec{
+		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion, ResourceID: created.ID, ProjectID: project.ID, EnvironmentID: facts.Environments[0].ID, ResourceType: resourcev1.TypePostgres,
+		Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: facts.Runtimes[0].ID, NodeID: node.ID, AgentID: agent.ID}, SpecHash: "http-spec-hash",
+	}}
+	if _, err := resourceStore.Update(ctx, created); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Config{})
+	server.Registry = registryStore
+	server.Resources = resources
+	handler := server.Handler()
+	path := "/v1/agents/" + node.ID + "/webhooks/next?project_id=" + project.ID + "&wait=0s"
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer agent-secret")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"kind":"managed_resource"`) || !strings.Contains(w.Body.String(), `"resource_id":"`+created.ID+`"`) {
+		t.Fatalf("lease status=%d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer agent-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("no-work status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
