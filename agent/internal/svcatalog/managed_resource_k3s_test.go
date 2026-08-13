@@ -298,6 +298,10 @@ func captureK3sDiagnostics(t *testing.T, reason string) {
 		_ = os.WriteFile(filepath.Join(dir, file), []byte(out), 0o600)
 	}
 	out, _ := exec.Command("journalctl", "-u", "k3s", "-n", "100", "--no-pager").CombinedOutput()
+	if len(strings.TrimSpace(string(out))) == 0 || strings.Contains(string(out), "-- No entries --") {
+		node, _ := kubectlOutput(context.Background(), "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}")
+		out, _ = exec.Command("docker", "logs", "--tail", "100", strings.TrimSpace(node)).CombinedOutput()
+	}
 	_ = os.WriteFile(filepath.Join(dir, "k3s-logs.txt"), out, 0o600)
 	t.Logf("K3S_INFRA_NOT_READY evidence=%s", dir)
 }
