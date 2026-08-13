@@ -241,6 +241,72 @@ func TestPrivateRegistryK3sIntegration(t *testing.T) {
 	t.Logf("private image ready imageID=%s secret=%s", imageID, registryPullSecretName(ref))
 }
 
+func TestP07B2AcceptanceFixtureImagePullIntegration(t *testing.T) {
+	reference := os.Getenv("OPSI_P07B2_ACCEPTANCE_E2E_IMAGE")
+	username := os.Getenv("OPSI_PRIVATE_REGISTRY_E2E_USERNAME")
+	password := os.Getenv("OPSI_PRIVATE_REGISTRY_E2E_PASSWORD")
+	if reference == "" || username == "" || password == "" {
+		t.Skip("set the P07B2 fixture image and test registry credential for a real K3s pull")
+	}
+	parts := strings.Split(reference, "@")
+	if len(parts) != 2 {
+		t.Fatal("P07B2 fixture image must be an immutable digest reference")
+	}
+	image, err := deploymentv1.NewImmutableImage(parts[0], parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := strings.SplitN(image.Repository, "/", 2)[0]
+	ref := deploymentv1.RegistryPullCredentialReference{Provider: "local", CredentialID: "p07b2-fixture", Registry: registry}
+	command := testAgentCommand(t)
+	command.ProjectID = "p07b2-fixture"
+	command.EnvironmentID = "registry"
+	command.RuntimeID = "k3s"
+	command.Image = image
+	command.Workload.ServiceKey = "p07b2-app"
+	command.Workload.RegistryPullCredential = &ref
+	command.SpecHash, err = command.Workload.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.RegistryPullCredential = &deploymentv1.RegistryPullCredential{Reference: ref, Username: username, Password: password}
+	runner := ExecCommandRunner{}
+	namespace := deploymentv1.StableDNSName("opsi", command.ProjectID, command.EnvironmentID)
+	t.Cleanup(func() {
+		_, _ = runner.Run(context.Background(), nil, "kubectl", "delete", "namespace", namespace, "--wait=false")
+	})
+	if err := (KubernetesRegistryPullSecretEnsurer{Runner: runner, KubectlPath: "kubectl"}).Ensure(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	manifest, resources, _, err := renderProductionResources(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifest), "CACHE_") || strings.Contains(string(manifest), username) || strings.Contains(string(manifest), password) {
+		t.Fatal("fixture workload received manually injected binding or registry credential values")
+	}
+	if _, err := runner.Run(context.Background(), manifest, "kubectl", "apply", "--server-side", "--field-manager=opsi-p07b2-fixture", "-f", "-"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		pods, err := (ProductionAdapter{Runner: runner, KubectlPath: "kubectl"}).getJSON(context.Background(), "pods", "", namespace, resources.Selector)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pullErr := applicationImagePullFailure(pods); pullErr != nil {
+			t.Fatalf("P07B2 fixture pull failed before ResourceBinding acceptance: %v", pullErr)
+		}
+		imageID, _ := applicationPodReadiness(pods, image.Digest)
+		if containsExactDigest(imageID, image.Digest) {
+			t.Logf("P07B2 fixture pull succeeded image=%s imageID=%s", image.Reference, imageID)
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatal("P07B2 fixture did not report the published digest in application container imageID")
+}
+
 func TestPrivateRegistryK3sWrongCredentialIntegration(t *testing.T) {
 	reference := os.Getenv("OPSI_PRIVATE_REGISTRY_E2E_WRONG_IMAGE")
 	username := os.Getenv("OPSI_PRIVATE_REGISTRY_E2E_USERNAME")
