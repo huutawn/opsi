@@ -105,17 +105,24 @@ func assertManagedK3sObjects(t *testing.T, spec resourcev1.ManagedResourceSpec, 
 	t.Helper()
 	namespace := managedResourceNamespace(spec)
 	selector := "opsi.dev/managed-resource-id=" + managedLabel(spec.ResourceID)
-	for _, kind := range []string{"deployment", "service"} {
-		out := kubectl(t, "get", kind, "-n", namespace, "-l", selector, "-o", "name")
-		count := 0
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			if line != "" {
-				count++
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		mismatch := ""
+		for _, kind := range []string{"deployment", "service", "pod"} {
+			out := kubectl(t, "get", kind, "-n", namespace, "-l", selector, "-o", "name")
+			count := len(strings.Fields(out))
+			if count != want {
+				mismatch = fmt.Sprintf("%s count=%d want=%d output=%q", kind, count, want, out)
+				break
 			}
 		}
-		if count != want {
-			t.Fatalf("%s count=%d want=%d output=%q", kind, count, want, out)
+		if mismatch == "" {
+			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatal(mismatch)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	if want == 1 {
 		pod := kubectl(t, "get", "pod", "-n", namespace, "-l", selector, "-o", "json")
