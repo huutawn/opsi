@@ -228,20 +228,6 @@ func assertManagedK3sObjects(t *testing.T, spec resourcev1.ManagedResourceSpec, 
 	}
 }
 
-func assertNATSConnection(t *testing.T, spec resourcev1.ManagedResourceSpec) {
-	t.Helper()
-	namespace := managedResourceNamespace(spec)
-	t.Logf("NATS service DNS=%s namespace=%s", spec.Connection.Host, namespace)
-	name := fmt.Sprintf("nats-client-%d", time.Now().UnixNano())
-	dns := kubectl(t, "run", name+"-dns", "-n", namespace, "--restart=Never", "--rm", "-i", "--image="+k3sDNSImage, "--command", "--", "nslookup", spec.Connection.Host)
-	t.Logf("NATS service DNS resolution=%q", strings.TrimSpace(dns))
-	out := kubectl(t, "run", name, "-n", namespace, "--restart=Never", "--rm", "-i", "--image="+k3sDNSImage, "--command", "--", "sh", "-ec", "nc -w 5 "+spec.Connection.Host+" 4222 | head -n 1")
-	if !strings.Contains(out, "INFO") {
-		t.Fatalf("NATS connection output=%q", out)
-	}
-	t.Logf("NATS INFO result=%q", strings.TrimSpace(out))
-}
-
 func requireK3sInfrastructure(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), k3sInfrastructureTimeout)
