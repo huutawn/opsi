@@ -205,7 +205,7 @@ func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.
 	workloadReady := available >= spec.Replicas && number(nested(deployment, "status", "observedGeneration")) >= number(nested(deployment, "metadata", "generation"))
 	serviceReady := nested(service, "spec", "clusterIP") != nil && serviceHasPort(service, spec.Ports[0].Port)
 	if spec.ResourceType == resourcev1.TypeRedis && workloadReady && podReady >= spec.Replicas && serviceReady {
-		out, authErr := r.run(ctx, nil, "exec", "deployment/"+spec.Connection.ServiceName, "-n", namespace, "-c", "redis", "--", "sh", "-ec", `u=$(cat /run/opsi-valkey/username); export VALKEYCLI_AUTH=$(cat /run/opsi-valkey/password); valkey-cli --user "$u" -h 127.0.0.1 ping`)
+		out, authErr := r.run(ctx, nil, "exec", "deployment/"+spec.Connection.ServiceName, "-n", namespace, "-c", "redis", "--", "sh", "-ec", `u=$(cat /run/opsi-valkey/username); export REDISCLI_AUTH=$(cat /run/opsi-valkey/password); valkey-cli --user "$u" -h 127.0.0.1 PING`)
 		if authErr != nil || !strings.Contains(string(out), "PONG") {
 			return &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: workloadReady, PodReady: podReady >= spec.Replicas, ServiceReady: serviceReady, SecretReady: secretReady, Image: image, ImageID: imageID, AvailableReplicas: available, ObservedAt: time.Now().UTC()}, authError{}
 		}

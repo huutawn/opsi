@@ -3,6 +3,7 @@ package svcatalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,19 +13,24 @@ import (
 )
 
 type managedRunner struct {
-	objects map[string]map[string]any
-	applies int
+	objects    map[string]map[string]any
+	applies    int
+	commands   [][]string
+	execOutput []byte
+	execError  error
 }
 
 func (r *managedRunner) Run(_ context.Context, input []byte, _ string, args ...string) ([]byte, error) {
+	r.commands = append(r.commands, append([]string(nil), args...))
 	if args[0] == "get" && args[1] == "pods" {
 		for _, object := range r.objects {
 			if object["kind"] != "Deployment" {
 				continue
 			}
-			image := nested(object, "spec", "template", "spec", "containers").([]any)[0].(map[string]any)["image"]
+			container := nested(object, "spec", "template", "spec", "containers").([]any)[0].(map[string]any)
+			image := container["image"]
 			digest := strings.Split(image.(string), "@")[1]
-			return json.Marshal(map[string]any{"items": []any{map[string]any{"status": map[string]any{"containerStatuses": []any{map[string]any{"name": "nats", "ready": true, "imageID": "docker-pullable://nats@" + digest}}}}}})
+			return json.Marshal(map[string]any{"items": []any{map[string]any{"status": map[string]any{"containerStatuses": []any{map[string]any{"name": container["name"], "ready": true, "imageID": "docker-pullable://runtime@" + digest}}}}}})
 		}
 	}
 	if args[0] == "get" {
@@ -46,7 +52,7 @@ func (r *managedRunner) Run(_ context.Context, input []byte, _ string, args ...s
 		}
 		if object["kind"] == "Deployment" {
 			object["status"] = map[string]any{"observedGeneration": float64(1), "availableReplicas": float64(1)}
-		} else {
+		} else if object["kind"] == "Service" {
 			object["spec"].(map[string]any)["clusterIP"] = "10.43.0.10"
 		}
 		r.objects[strings.ToLower(object["kind"].(string))+"/"+metadata["name"].(string)] = object
@@ -56,6 +62,9 @@ func (r *managedRunner) Run(_ context.Context, input []byte, _ string, args ...s
 	if args[0] == "delete" {
 		delete(r.objects, args[1]+"/"+args[2])
 		return nil, nil
+	}
+	if args[0] == "exec" {
+		return r.execOutput, r.execError
 	}
 	return nil, nil
 }
@@ -96,9 +105,8 @@ func TestManagedResourceDeleteRejectsForeignOwnership(t *testing.T) {
 }
 
 func TestValkeyManifestUsesSecretFilesAndNoPasswordArgs(t *testing.T) {
-	spec := resourcev1.ManagedResourceSpec{SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion, ResourceID: "res-redis", ProjectID: "project-1", EnvironmentID: "env-1", ResourceType: resourcev1.TypeRedis, Profile: "single-node-experimental", Version: resourcev1.ValkeyVersion, Image: resourcev1.ValkeyImage, CredentialID: "mrcred-res-redis", Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"}, Replicas: 1, CPUMillicores: 100, MemoryBytes: 64 << 20, Ports: []resourcev1.ManagedResourcePort{{Name: "redis", Port: 6379, Protocol: resourcev1.ProtocolRedis}}, Connection: resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-res-redis-runtime-1", Host: "redis.default", Port: 6379, Protocol: resourcev1.ProtocolRedis}, ConfigurationHash: strings.Repeat("a", 64), TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64)}
-	spec.SpecHash, _ = spec.Hash()
-	objects := managedResourceObjects(spec, &resourcev1.ManagedResourceCredential{CredentialID: spec.CredentialID, Username: "opsi", Password: "secret"})
+	spec, credential := valkeySpec(t)
+	objects := managedResourceObjects(spec, credential)
 	if len(objects) != 3 {
 		t.Fatalf("objects=%d", len(objects))
 	}
@@ -109,6 +117,42 @@ func TestValkeyManifestUsesSecretFilesAndNoPasswordArgs(t *testing.T) {
 	}
 	if _, ok := nested(deployment, "metadata", "annotations").(map[string]string)["opsi.dev/managed-resource-id"]; !ok {
 		t.Fatal("deployment ownership annotation missing")
+	}
+}
+
+func TestValkeyReadinessUsesPinnedCLIAuthContractWithoutPasswordArg(t *testing.T) {
+	spec, credential := valkeySpec(t)
+	runner := &managedRunner{objects: map[string]map[string]any{}, execOutput: []byte("PONG\n")}
+	reconciler := ManagedResourceReconciler{Runner: runner}
+	result := reconciler.Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "apply", LeaseToken: "lease", Spec: spec, Credential: credential})
+	if result.Status != "ready" || result.Evidence == nil || !result.Evidence.AuthReady {
+		t.Fatalf("result=%+v", result)
+	}
+	args := runner.commands[len(runner.commands)-1]
+	command := strings.Join(args, " ")
+	for _, required := range []string{"u=$(cat /run/opsi-valkey/username)", "REDISCLI_AUTH=$(cat /run/opsi-valkey/password)", `--user "$u"`, "valkey-cli", "PING"} {
+		if !strings.Contains(command, required) {
+			t.Fatalf("readiness command missing %q: %q", required, command)
+		}
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, credential.Password) {
+			t.Fatalf("password leaked into cmd.Args: %q", args)
+		}
+	}
+	for _, forbidden := range []string{"VALKEYCLI_AUTH", "--pass", " -a ", credential.Password} {
+		if strings.Contains(command, forbidden) {
+			t.Fatalf("readiness argv contains forbidden value %q: %q", forbidden, command)
+		}
+	}
+}
+
+func TestValkeyReadinessAuthFailureIsCategorizedWithoutCredentialLeak(t *testing.T) {
+	spec, credential := valkeySpec(t)
+	runner := &managedRunner{objects: map[string]map[string]any{}, execError: errors.New("WRONGPASS invalid username-password pair")}
+	result := (ManagedResourceReconciler{Runner: runner}).Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "apply", LeaseToken: "lease", Spec: spec, Credential: credential})
+	if result.Status != "failed" || result.FailureCode != resourcev1.FailureAuthFailed || strings.Contains(result.FailureMessageRedacted, credential.Username) || strings.Contains(result.FailureMessageRedacted, credential.Password) {
+		t.Fatalf("result=%+v", result)
 	}
 }
 
@@ -144,4 +188,12 @@ func managedSpec(t *testing.T) resourcev1.ManagedResourceSpec {
 		t.Fatal(err)
 	}
 	return spec
+}
+
+func valkeySpec(t *testing.T) (resourcev1.ManagedResourceSpec, *resourcev1.ManagedResourceCredential) {
+	t.Helper()
+	spec := resourcev1.ManagedResourceSpec{SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion, ResourceID: "res-redis", ProjectID: "project-1", EnvironmentID: "env-1", ResourceType: resourcev1.TypeRedis, Profile: "single-node-experimental", Version: resourcev1.ValkeyVersion, Image: resourcev1.ValkeyImage, CredentialID: "mrcred-res-redis", Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"}, Replicas: 1, CPUMillicores: 100, MemoryBytes: 64 << 20, Ports: []resourcev1.ManagedResourcePort{{Name: "redis", Port: 6379, Protocol: resourcev1.ProtocolRedis}}, Connection: resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-res-redis-runtime-1", Host: "redis.default", Port: 6379, Protocol: resourcev1.ProtocolRedis}, ConfigurationHash: strings.Repeat("a", 64), TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64)}
+	spec.SpecHash, _ = spec.Hash()
+	credential := &resourcev1.ManagedResourceCredential{CredentialID: spec.CredentialID, Username: "opsi-readiness-exact", Password: "readiness-password-must-not-leak"}
+	return spec, credential
 }

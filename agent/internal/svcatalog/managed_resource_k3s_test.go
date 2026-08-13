@@ -83,6 +83,74 @@ func TestManagedResourceRealK3sValkey(t *testing.T) {
 	assertManagedK3sObjects(t, spec, 0)
 }
 
+func TestPinnedValkeyImageCLIAuthContract(t *testing.T) {
+	if os.Getenv("OPSI_E2E_DOCKER_VALKEY") != "1" {
+		t.Skip("set OPSI_E2E_DOCKER_VALKEY=1 with Docker available")
+	}
+	const username = "opsi-pinned-image"
+	const password = "pinned-image-password-must-not-leak"
+	dir := t.TempDir()
+	config := "bind 0.0.0.0\nport 6379\nprotected-mode yes\nuser default off\nuser " + username + " on >" + password + " ~* &* +@all\n"
+	configPath := filepath.Join(dir, "valkey.conf")
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("opsi-valkey-auth-%d", time.Now().UnixNano())
+	create := exec.Command("docker", "create", "--name", name, resourcev1.ValkeyImage, "valkey-server", "/tmp/valkey.conf")
+	if out, err := create.CombinedOutput(); err != nil {
+		t.Fatalf("create pinned Valkey image: %v output=%s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+	if out, err := exec.Command("docker", "cp", configPath, name+":/tmp/valkey.conf").CombinedOutput(); err != nil {
+		t.Fatalf("copy Valkey config: %v output=%s", err, out)
+	}
+	if out, err := exec.Command("docker", "start", name).CombinedOutput(); err != nil {
+		t.Fatalf("start pinned Valkey image: %v output=%s", err, out)
+	}
+	image, err := exec.Command("docker", "inspect", "--format={{.Config.Image}}", name).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(image)) != resourcev1.ValkeyImage {
+		t.Fatalf("running image=%q want=%q err=%v", strings.TrimSpace(string(image)), resourcev1.ValkeyImage, err)
+	}
+	waitForValkeyContainer(t, name)
+	if out := dockerValkeyCLI(t, name, "VALKEYCLI_AUTH", password, username); !strings.Contains(strings.ToUpper(out), "NOAUTH") {
+		t.Fatalf("VALKEYCLI_AUTH unexpectedly authenticated pinned image output=%q", out)
+	}
+	if out := dockerValkeyCLI(t, name, "REDISCLI_AUTH", "wrong", username); !strings.Contains(strings.ToUpper(out), "WRONGPASS") {
+		t.Fatalf("wrong password output=%q", out)
+	}
+	if out := dockerValkeyCLI(t, name, "REDISCLI_AUTH", password, username); strings.TrimSpace(out) != "PONG" {
+		t.Fatalf("authenticated PING output=%q", out)
+	}
+}
+
+func dockerValkeyCLI(t *testing.T, container, envName, password, username string) string {
+	t.Helper()
+	cmd := exec.Command("docker", "exec", "-e", envName, container, "valkey-cli", "--user", username, "PING")
+	cmd.Env = append(os.Environ(), envName+"="+password)
+	for _, arg := range cmd.Args {
+		if strings.Contains(arg, password) {
+			t.Fatalf("password leaked into cmd.Args: %q", cmd.Args)
+		}
+	}
+	out, _ := cmd.CombinedOutput()
+	return string(out)
+}
+
+func waitForValkeyContainer(t *testing.T, container string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		out, _ := exec.Command("docker", "exec", container, "valkey-cli", "PING").CombinedOutput()
+		if strings.Contains(strings.ToUpper(string(out)), "NOAUTH") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pinned Valkey image did not start: %q", out)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func assertValkeyAuth(t *testing.T, spec resourcev1.ManagedResourceSpec, credential *resourcev1.ManagedResourceCredential) {
 	t.Helper()
 	name := spec.Connection.ServiceName
@@ -91,11 +159,15 @@ func assertValkeyAuth(t *testing.T, spec resourcev1.ManagedResourceSpec, credent
 	if !strings.Contains(strings.ToUpper(unauth), "NOAUTH") {
 		t.Fatalf("unauthenticated output=%q", unauth)
 	}
-	wrong := kubectl(t, "exec", "deployment/"+name, "-n", namespace, "-c", "redis", "--", "sh", "-ec", "VALKEYCLI_AUTH=wrong valkey-cli --user opsi ping 2>&1 || true")
+	unsupported := kubectl(t, "exec", "deployment/"+name, "-n", namespace, "-c", "redis", "--", "sh", "-ec", `VALKEYCLI_AUTH=$(cat /run/opsi-valkey/password) valkey-cli --user "$(cat /run/opsi-valkey/username)" PING 2>&1 || true`)
+	if !strings.Contains(strings.ToUpper(unsupported), "NOAUTH") {
+		t.Fatalf("VALKEYCLI_AUTH unexpectedly authenticated pinned image output=%q", unsupported)
+	}
+	wrong := kubectl(t, "exec", "deployment/"+name, "-n", namespace, "-c", "redis", "--", "sh", "-ec", `REDISCLI_AUTH=wrong valkey-cli --user "$(cat /run/opsi-valkey/username)" PING 2>&1 || true`)
 	if !strings.Contains(strings.ToUpper(wrong), "WRONGPASS") {
 		t.Fatalf("wrong password output=%q", wrong)
 	}
-	correct := kubectl(t, "exec", "deployment/"+name, "-n", namespace, "-c", "redis", "--", "sh", "-ec", "export VALKEYCLI_AUTH=$(cat /run/opsi-valkey/password); valkey-cli --user $(cat /run/opsi-valkey/username) ping; valkey-cli --user $(cat /run/opsi-valkey/username) set p07b2 value; valkey-cli --user $(cat /run/opsi-valkey/username) get p07b2")
+	correct := kubectl(t, "exec", "deployment/"+name, "-n", namespace, "-c", "redis", "--", "sh", "-ec", `u=$(cat /run/opsi-valkey/username); export REDISCLI_AUTH=$(cat /run/opsi-valkey/password); valkey-cli --user "$u" PING; valkey-cli --user "$u" SET p07b2 value; valkey-cli --user "$u" GET p07b2`)
 	if !strings.Contains(correct, "PONG") || !strings.Contains(correct, "OK") || !strings.Contains(correct, "value") || strings.Contains(correct, credential.Password) {
 		t.Fatalf("authenticated output=%q", correct)
 	}
