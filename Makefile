@@ -153,6 +153,7 @@ ui-build:
 	cd cli/ui && $(RUN) $(UI_NPM) run build
 
 ui-test:
+	cd cli/ui && $(RUN) $(UI_NPM) ci
 	cd cli/ui && $(RUN) $(UI_NPM) test
 
 ui-lint:
