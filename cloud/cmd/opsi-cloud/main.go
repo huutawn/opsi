@@ -16,16 +16,21 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/postgres"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	"github.com/opsi-dev/opsi/cloud/internal/webhookrelay"
 )
 
 var version = "dev"
+
+const bootstrapRunnerPath = "/usr/local/bin/opsi-bootstrap-worker"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -82,6 +87,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookrelay.GitHubAppClient, stderr io.Writer) error {
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	relay := webhookrelay.NewServer(cfg)
+	if cfg.BootstrapWorkerConfig != "" {
+		install, err := bootstrapworker.LoadInstallConfig(cfg.BootstrapWorkerConfig)
+		if err != nil {
+			return fmt.Errorf("load bootstrap install config: %w", err)
+		}
+		if err := relay.SetBootstrapRunner(install, bootstrapRunnerPath); err != nil {
+			return fmt.Errorf("configure bootstrap command runner: %w", err)
+		}
+	}
 	if githubAppClient != nil {
 		relay.SetGitHubAppClient(githubAppClient)
 		logger.Info("GitHub App signer loaded", "app_id", cfg.GitHubApp.AppID)
@@ -100,6 +114,16 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
 		postgresRegistry := registry.PostgresService{DB: db}
 		relay.Registry = postgresRegistry
+		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry}
+		if cfg.BootstrapSecretKey != "" {
+			credentialVault, vaultErr := webhookrelay.NewPostgresManagedResourceCredentialVault(db, cfg.BootstrapSecretKey)
+			if vaultErr != nil {
+				return fmt.Errorf("configure managed resource credential vault: %w", vaultErr)
+			}
+			relay.Resources.Credentials = credentialVault
+		}
+		relay.BuildJobs.Store = buildjob.PostgresStore{DB: db}
+		relay.BuildJobs.Sources = postgresRegistry
 		relay.BuildRecords.Store = buildrecord.PostgresStore{DB: db}
 		relay.BuildRecords.Bindings = postgresRegistry
 		relay.Topology = topology.Service{Store: topology.PostgresStore{DB: db}, Facts: postgresRegistry, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
@@ -119,6 +143,13 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 				return fmt.Errorf("configure registration vault: %w", err)
 			}
 			relay.SetSecurityStores(credentials, registrations, webhookrelay.NewPostgresRateLimiter(db))
+			if cfg.BuildRegistry.Visibility == "private" {
+				pullVault, err := webhookrelay.NewPostgresRegistryPullCredentialVault(db, cfg.BootstrapSecretKey)
+				if err != nil {
+					return fmt.Errorf("configure registry pull credential vault: %w", err)
+				}
+				relay.RegistryPullCredentials = webhookrelay.NewGHCRRegistryPullCredentialProvider(cfg.BuildRegistry, pullVault, cfg.RegistryPull)
+			}
 		}
 	}
 	if err := configureGitHubAppEventSink(relay, cfg); err != nil {

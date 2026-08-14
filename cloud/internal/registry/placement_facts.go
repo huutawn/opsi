@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 // PlacementFacts exposes factual registry state without granting topology or
@@ -42,6 +44,46 @@ func (s *Service) PlacementFacts(_ context.Context, projectID string) (topology.
 		if binding.ProjectID == projectID && binding.Status == "active" {
 			result.Services = append(result.Services, topology.ServiceFact{ID: binding.ServiceID, ProjectID: binding.ProjectID, Key: binding.ServiceKey})
 		}
+	}
+	return result, nil
+}
+
+func (s *Service) ResolveManagedResourceTarget(_ context.Context, projectID, environmentID, runtimeID string) (resourcev1.ManagedResourceAssignment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return resolveManagedResourceTarget(projectID, environmentID, runtimeID, s.runtimes, s.nodes, s.agents)
+}
+
+func (s PostgresService) ResolveManagedResourceTarget(ctx context.Context, projectID, environmentID, runtimeID string) (resourcev1.ManagedResourceAssignment, error) {
+	var assignment resourcev1.ManagedResourceAssignment
+	err := s.DB.QueryRowContext(ctx, `SELECT r.id,n.id,a.id FROM runtimes r JOIN nodes n ON n.project_id=r.project_id AND n.runtime_id=r.id JOIN agents a ON a.project_id=r.project_id AND a.runtime_id=r.id AND a.node_id=n.id WHERE r.project_id=$1 AND r.environment_id=$2 AND r.id=$3 AND r.type='k3s' AND r.status='ready' AND n.status='healthy' AND a.status='active' AND COALESCE((a.capabilities->>'managed_resources')::boolean,false)=true`, projectID, environmentID, runtimeID).Scan(&assignment.RuntimeID, &assignment.NodeID, &assignment.AgentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return assignment, ErrNotFound
+	}
+	return assignment, err
+}
+
+func resolveManagedResourceTarget(projectID, environmentID, runtimeID string, runtimes map[string]Runtime, nodes map[string]Node, agents map[string]Agent) (resourcev1.ManagedResourceAssignment, error) {
+	runtime, ok := runtimes[runtimeID]
+	if !ok || runtime.ProjectID != projectID || runtime.EnvironmentID != environmentID || runtime.Type != "k3s" || runtime.Status != "ready" {
+		return resourcev1.ManagedResourceAssignment{}, ErrNotFound
+	}
+	var result resourcev1.ManagedResourceAssignment
+	for _, node := range nodes {
+		if node.ProjectID != projectID || node.RuntimeID != runtimeID || node.Status != "healthy" {
+			continue
+		}
+		for _, agent := range agents {
+			if agent.ProjectID == projectID && agent.RuntimeID == runtimeID && agent.NodeID == node.ID && agent.Status == "active" && capabilityEnabled(agent.Capabilities, "managed_resources") {
+				if result.AgentID != "" {
+					return resourcev1.ManagedResourceAssignment{}, fmt.Errorf("managed resource Agent target is ambiguous")
+				}
+				result = resourcev1.ManagedResourceAssignment{RuntimeID: runtimeID, NodeID: node.ID, AgentID: agent.ID}
+			}
+		}
+	}
+	if result.AgentID == "" {
+		return result, ErrNotFound
 	}
 	return result, nil
 }
@@ -154,5 +196,6 @@ func emptyPlacementFacts(projectID string) topology.Facts {
 		Nodes:        []topology.NodeFact{},
 		Agents:       []topology.AgentFact{},
 		Services:     []topology.ServiceFact{},
+		Resources:    []topology.ResourceIdentity{},
 	}
 }

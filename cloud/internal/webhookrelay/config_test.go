@@ -42,6 +42,7 @@ var cloudEnvNames = append([]string{
 	"OPSI_CLOUD_ALERTS_OUTBOX_PATH",
 	"OPSI_CLOUD_ALERTS_INTERNAL_TOKEN",
 	"OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN",
+	"OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG",
 	"OPSI_CLOUD_BOOTSTRAP_SECRET_KEY",
 	"OPSI_CLOUD_GITHUB_APP_CLIENT_ID",
 	"OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET",
@@ -535,6 +536,7 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 		"OPSI_CLOUD_ALERTS_OUTBOX_PATH":       "/tmp/alerts.log",
 		"OPSI_CLOUD_ALERTS_INTERNAL_TOKEN":    "alert-token",
 		"OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN":   "worker-token",
+		"OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG":  "/etc/opsi/bootstrap-worker.json",
 		"OPSI_CLOUD_BOOTSTRAP_SECRET_KEY":     "bootstrap-key",
 		"OPSI_CLOUD_GITHUB_APP_CLIENT_ID":     "client-id",
 		"OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET": "client-secret",
@@ -549,8 +551,29 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 	}
 	if cfg.TTL != Duration(90*time.Minute) || cfg.DatabaseURL != values["OPSI_CLOUD_DATABASE_URL"] ||
 		cfg.GitHubApp.ClientID != "client-id" || cfg.GitHubApp.ClientSecret != "client-secret" ||
-		cfg.GitHubApp.CallbackURL != values["OPSI_CLOUD_GITHUB_APP_CALLBACK_URL"] {
+		cfg.GitHubApp.CallbackURL != values["OPSI_CLOUD_GITHUB_APP_CALLBACK_URL"] || cfg.BootstrapWorkerConfig != values["OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG"] {
 		t.Fatalf("environment-only config mismatch: %#v", cfg)
+	}
+}
+
+func TestBuildExecutorEnvironmentOverrides(t *testing.T) {
+	t.Setenv("OPSI_BUILD_EXECUTOR_OWNER", "opsi")
+	t.Setenv("OPSI_BUILD_EXECUTOR_REPOSITORY", "executor")
+	t.Setenv("OPSI_BUILD_EXECUTOR_WORKFLOW", ".github/workflows/opsi-build-executor.yml")
+	t.Setenv("OPSI_BUILD_EXECUTOR_REF", "refs/heads/main")
+	t.Setenv("OPSI_BUILD_REGISTRY_HOST", "ghcr.io")
+	t.Setenv("OPSI_BUILD_REGISTRY_NAMESPACE", "opsi")
+	t.Setenv("OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX", "builds")
+	t.Setenv("OPSI_BUILD_REGISTRY_VISIBILITY", "private")
+	config := Config{}
+	if err := applyEnvOverrides(&config); err != nil {
+		t.Fatal(err)
+	}
+	if !config.BuildExecutor.Available() || config.BuildExecutor.RepositoryFullName() != "opsi/executor" || config.BuildExecutor.WorkflowRef() != "opsi/executor/.github/workflows/opsi-build-executor.yml@refs/heads/main" {
+		t.Fatalf("build executor=%+v", config.BuildExecutor)
+	}
+	if err := config.BuildRegistry.Validate(); err != nil || config.BuildRegistry.Host != "ghcr.io" || config.BuildRegistry.Visibility != "private" {
+		t.Fatalf("build registry=%+v err=%v", config.BuildRegistry, err)
 	}
 }
 

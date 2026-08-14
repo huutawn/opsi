@@ -29,7 +29,7 @@ func TestConcurrentBootstrapLeaseClaimsExactlyOnce(t *testing.T) {
 		wg.Add(1)
 		go func(workerID string) {
 			defer wg.Done()
-			lease, ok, err := service.LeaseNextBootstrapSession(workerID, now, 15*time.Minute)
+			lease, ok, err := service.LeaseNextBootstrapSession(workerID, "", now, 15*time.Minute)
 			results <- result{lease: lease, ok: ok, err: err}
 		}(workerID)
 	}
@@ -65,7 +65,7 @@ func TestBootstrapLeaseOldestEligibleAndOwnerValidation(t *testing.T) {
 	oldest, _ := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.10", "root", "password", "", "boot-1", 22)
 	now = now.Add(time.Second)
 	_, _ = service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.11", "root", "password", "", "boot-2", 22)
-	lease, ok, err := service.LeaseNextBootstrapSession("worker-1", now, 15*time.Minute)
+	lease, ok, err := service.LeaseNextBootstrapSession("worker-1", "", now, 15*time.Minute)
 	if err != nil || !ok || lease.Session.ID != oldest.ID {
 		t.Fatalf("lease=%+v ok=%v err=%v", lease, ok, err)
 	}
@@ -74,6 +74,51 @@ func TestBootstrapLeaseOldestEligibleAndOwnerValidation(t *testing.T) {
 	}
 	if _, err := service.UpdateBootstrapSessionForLease(project.ID, oldest.ID, "worker-1", "wrong", "connecting", "connecting", now); apiErrorCode(err) != "BOOTSTRAP_LEASE_INVALID" {
 		t.Fatalf("invalid token err=%v", err)
+	}
+}
+
+func TestCommandBootstrapLeaseIsExactAndClaimedOnce(t *testing.T) {
+	service := NewService()
+	project, err := service.CreateProject("org-1", "Command", "command", "", "project-command")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.CreateBootstrapSession(project.ID, "first_server", "203.0.113.90", "root", "command", "", "boot-command", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, ok, err := service.LeaseNextBootstrapSession("pool-worker", "", now, time.Minute); err != nil || ok {
+		t.Fatalf("pool worker leased command session ok=%v err=%v", ok, err)
+	}
+	type result struct {
+		worker string
+		ok     bool
+		err    error
+	}
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for _, worker := range []string{"target-a", "target-b"} {
+		wg.Add(1)
+		go func(worker string) {
+			defer wg.Done()
+			_, ok, err := service.LeaseNextBootstrapSession(worker, session.ID, now, time.Minute)
+			results <- result{worker: worker, ok: ok, err: err}
+		}(worker)
+	}
+	wg.Wait()
+	close(results)
+	winners := 0
+	for value := range results {
+		if value.err != nil {
+			t.Fatal(value.err)
+		}
+		if value.ok {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("exact command lease winners=%d", winners)
 	}
 }
 

@@ -204,6 +204,12 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			consumed_at TIMESTAMPTZ
 		)`,
 		`CREATE INDEX IF NOT EXISTS bootstrap_credentials_expires_idx ON bootstrap_credentials(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS registry_pull_credentials (
+			id TEXT PRIMARY KEY,
+			ciphertext BYTEA NOT NULL,
+			nonce BYTEA NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_registration_tokens (
 			session_id TEXT PRIMARY KEY REFERENCES bootstrap_sessions(id) ON DELETE CASCADE,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -585,5 +591,26 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateR5011Rollout(ctx, db); err != nil {
 		return err
 	}
-	return MigrateR5012ServiceConfiguration(ctx, db)
+	if err := MigrateP05AApplicationSource(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP05B1BuildJobs(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP05B2ABuildExecutor(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP05B2B2RegistryBuildRecord(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP05CBuildpacks(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateR5012ServiceConfiguration(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07AResources(ctx, db); err != nil {
+		return err
+	}
+	return MigrateP07B2Valkey(ctx, db)
 }

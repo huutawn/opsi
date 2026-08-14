@@ -11,7 +11,7 @@ import (
 func TestBootstrapLeaseHeartbeatRenewalAndValidation(t *testing.T) {
 	service, projectID, session := newBootstrapDurabilityFixture(t)
 	now := service.clock()
-	lease, ok, err := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	lease, ok, err := service.LeaseNextBootstrapSession("worker-1", "", now, 90*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
 	}
@@ -37,7 +37,7 @@ func TestBootstrapLeaseHeartbeatRenewalAndValidation(t *testing.T) {
 func TestBootstrapRetryFailureBackoffAndCompletion(t *testing.T) {
 	service, projectID, session := newBootstrapDurabilityFixture(t)
 	now := service.clock()
-	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", "", now, 90*time.Second)
 	failed, err := service.FinishBootstrapSessionForLease(projectID, session.ID, "worker-1", lease.LeaseToken, BootstrapFinishResult{Status: "failed", FailureCode: "BOOTSTRAP_CONNECT_FAILED", MessageRedacted: "temporary network timeout", Retryable: true}, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -45,10 +45,10 @@ func TestBootstrapRetryFailureBackoffAndCompletion(t *testing.T) {
 	if failed.Status != BootstrapRetryWait || failed.NextAttemptAt == nil || !failed.NextAttemptAt.Equal(now.Add(time.Second).Add(bootstrapRetryDelay(1))) || failed.LeaseTokenHash != "" {
 		t.Fatalf("retry state=%+v", failed)
 	}
-	if _, ok, err := service.LeaseNextBootstrapSession("worker-2", failed.NextAttemptAt.Add(-time.Nanosecond), 90*time.Second); err != nil || ok {
+	if _, ok, err := service.LeaseNextBootstrapSession("worker-2", "", failed.NextAttemptAt.Add(-time.Nanosecond), 90*time.Second); err != nil || ok {
 		t.Fatalf("leased before backoff ok=%v err=%v", ok, err)
 	}
-	second, ok, err := service.LeaseNextBootstrapSession("worker-2", *failed.NextAttemptAt, 90*time.Second)
+	second, ok, err := service.LeaseNextBootstrapSession("worker-2", "", *failed.NextAttemptAt, 90*time.Second)
 	if err != nil || !ok || second.Session.AttemptCount != 2 {
 		t.Fatalf("second lease=%+v ok=%v err=%v", second, ok, err)
 	}
@@ -61,7 +61,7 @@ func TestBootstrapRetryFailureBackoffAndCompletion(t *testing.T) {
 func TestBootstrapExpiredLeaseRecoveryAndAttemptExhaustion(t *testing.T) {
 	service, _, session := newBootstrapDurabilityFixture(t)
 	now := service.clock()
-	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", now, 30*time.Second)
+	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", "", now, 30*time.Second)
 	summary, err := service.RecoverExpiredBootstrapLeases(now.Add(30 * time.Second))
 	if err != nil || len(summary.Recovered) != 1 {
 		t.Fatalf("summary=%+v err=%v", summary, err)
@@ -70,7 +70,7 @@ func TestBootstrapExpiredLeaseRecoveryAndAttemptExhaustion(t *testing.T) {
 	if recovered.Status != BootstrapRetryWait || recovered.LastFailureCode != "BOOTSTRAP_LEASE_EXPIRED" || recovered.NextAttemptAt == nil || recovered.LeaseTokenHash != "" {
 		t.Fatalf("recovered=%+v", recovered)
 	}
-	second, ok, err := service.LeaseNextBootstrapSession("worker-2", *recovered.NextAttemptAt, 30*time.Second)
+	second, ok, err := service.LeaseNextBootstrapSession("worker-2", "", *recovered.NextAttemptAt, 30*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("second lease ok=%v err=%v", ok, err)
 	}
@@ -87,7 +87,7 @@ func TestBootstrapExpiredLeaseRecoveryAndAttemptExhaustion(t *testing.T) {
 	if dead.Status != BootstrapDeadLetter || dead.DeadLetteredAt == nil || dead.AttemptCount != 2 {
 		t.Fatalf("dead-letter=%+v", dead)
 	}
-	if _, ok, err := service.LeaseNextBootstrapSession("worker-3", second.LeaseExpiresAt.Add(time.Hour), 30*time.Second); err != nil || ok {
+	if _, ok, err := service.LeaseNextBootstrapSession("worker-3", "", second.LeaseExpiresAt.Add(time.Hour), 30*time.Second); err != nil || ok {
 		t.Fatalf("dead-letter leased ok=%v err=%v lease=%+v", ok, err, lease)
 	}
 }
@@ -95,7 +95,7 @@ func TestBootstrapExpiredLeaseRecoveryAndAttemptExhaustion(t *testing.T) {
 func TestBootstrapPermanentFailureDeadLettersImmediately(t *testing.T) {
 	service, projectID, session := newBootstrapDurabilityFixture(t)
 	now := service.clock()
-	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", "", now, 90*time.Second)
 	dead, err := service.FinishBootstrapSessionForLease(projectID, session.ID, "worker-1", lease.LeaseToken, BootstrapFinishResult{Status: "failed", FailureCode: "SSH_AUTH_METHOD_UNSUPPORTED", MessageRedacted: "private key mode is unsupported"}, now.Add(time.Second))
 	if err != nil || dead.Status != BootstrapDeadLetter || dead.DeadLetteredAt == nil || dead.NextAttemptAt != nil {
 		t.Fatalf("dead=%+v err=%v", dead, err)
@@ -128,7 +128,7 @@ func TestBootstrapManualRetryIsIdempotentAndDeadLetterOnly(t *testing.T) {
 func TestConcurrentBootstrapRecoveryTransitionsOnce(t *testing.T) {
 	service, _, _ := newBootstrapDurabilityFixture(t)
 	now := service.clock()
-	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", now, time.Second)
+	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", "", now, time.Second)
 	var wg sync.WaitGroup
 	results := make(chan BootstrapRecoverySummary, 2)
 	for range 2 {
@@ -159,7 +159,7 @@ func TestBootstrapRetryDelayIsBounded(t *testing.T) {
 func TestBootstrapCheckpointTransitionsAndLeaseValidation(t *testing.T) {
 	service, projectID, session := newBootstrapDurabilityFixture(t)
 	now := service.clock()
-	lease, ok, err := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	lease, ok, err := service.LeaseNextBootstrapSession("worker-1", "", now, 90*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
 	}
@@ -249,7 +249,7 @@ func TestBootstrapCheckpointMetadataPreservesV1AndAcceptsV2(t *testing.T) {
 func TestBootstrapCheckpointSurvivesRetryRecoveryNewWorkerAndFinish(t *testing.T) {
 	service, projectID, session := newBootstrapDurabilityFixture(t)
 	now := service.clock()
-	first, _, _ := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	first, _, _ := service.LeaseNextBootstrapSession("worker-1", "", now, 90*time.Second)
 	_, _ = service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", first.LeaseToken, testBootstrapCheckpoint(0), now.Add(time.Second))
 	checkpointed, err := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", first.LeaseToken, testBootstrapCheckpoint(2), now.Add(2*time.Second))
 	if apiErrorCode(err) != "BOOTSTRAP_CHECKPOINT_INVALID" {
@@ -264,7 +264,7 @@ func TestBootstrapCheckpointSurvivesRetryRecoveryNewWorkerAndFinish(t *testing.T
 	if err != nil || failed.Checkpoint != checkpointed.Checkpoint {
 		t.Fatalf("retry checkpoint=%+v err=%v", failed.Checkpoint, err)
 	}
-	second, ok, err := service.LeaseNextBootstrapSession("worker-2", *failed.NextAttemptAt, 90*time.Second)
+	second, ok, err := service.LeaseNextBootstrapSession("worker-2", "", *failed.NextAttemptAt, 90*time.Second)
 	if err != nil || !ok || second.Session.Checkpoint.NextStepIndex != 2 {
 		t.Fatalf("second lease=%+v ok=%v err=%v", second, ok, err)
 	}
@@ -272,7 +272,7 @@ func TestBootstrapCheckpointSurvivesRetryRecoveryNewWorkerAndFinish(t *testing.T
 	if err != nil || len(summary.Recovered) != 1 || summary.Recovered[0].Checkpoint.NextStepIndex != 2 {
 		t.Fatalf("recovery=%+v err=%v", summary, err)
 	}
-	third, ok, err := service.LeaseNextBootstrapSession("worker-3", *summary.Recovered[0].NextAttemptAt, 90*time.Second)
+	third, ok, err := service.LeaseNextBootstrapSession("worker-3", "", *summary.Recovered[0].NextAttemptAt, 90*time.Second)
 	if err != nil || !ok || third.Session.Checkpoint.NextStepIndex != 2 {
 		t.Fatalf("third lease=%+v ok=%v err=%v", third, ok, err)
 	}
@@ -285,7 +285,7 @@ func TestBootstrapCheckpointSurvivesRetryRecoveryNewWorkerAndFinish(t *testing.T
 func TestBootstrapCheckpointSurvivesManualRetry(t *testing.T) {
 	service, projectID, session := newBootstrapDurabilityFixture(t)
 	now := service.clock()
-	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	lease, _, _ := service.LeaseNextBootstrapSession("worker-1", "", now, 90*time.Second)
 	_, _ = service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(0), now.Add(time.Second))
 	checkpointed, _ := service.UpdateBootstrapCheckpointForLease(projectID, session.ID, "worker-1", lease.LeaseToken, testBootstrapCheckpoint(1), now.Add(2*time.Second))
 	dead, err := service.FinishBootstrapSessionForLease(projectID, session.ID, "worker-1", lease.LeaseToken, BootstrapFinishResult{Status: "failed", FailureCode: "BOOTSTRAP_PLAN_MISMATCH", MessageRedacted: "plan mismatch", Retryable: false}, now.Add(3*time.Second))

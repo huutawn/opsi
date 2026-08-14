@@ -375,6 +375,9 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 	if err != nil {
 		return deploymentv1.ReadinessEvidence{}, nil, false, err
 	}
+	if err := applicationImagePullFailure(pods); err != nil {
+		return deploymentv1.ReadinessEvidence{}, nil, false, err
+	}
 	metadata, _ := deployment["metadata"].(map[string]any)
 	status, _ := deployment["status"].(map[string]any)
 	generation := number(metadata["generation"])

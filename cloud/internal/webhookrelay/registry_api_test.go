@@ -1528,7 +1528,7 @@ func TestBootstrapManualRetryOwnerAdminIdempotencyAndPreconditions(t *testing.T)
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	lease, ok, err := server.Registry.LeaseNextBootstrapSession("worker-1", now, time.Minute)
+	lease, ok, err := server.Registry.LeaseNextBootstrapSession("worker-1", "", now, time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
 	}
@@ -1710,24 +1710,38 @@ func TestGitHubInventoryClaimBindingAPIAndRBAC(t *testing.T) {
 	if invalidPath.Code != http.StatusBadRequest {
 		t.Fatalf("invalid path status=%d body=%s", invalidPath.Code, invalidPath.Body.String())
 	}
-	bindingResponse := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", `{"service_id":"`+service.ID+`","repository_id":9001,"service_key":"api"}`)
+	invalidRoot := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", `{"service_id":"`+service.ID+`","repository_id":9001,"service_key":"api","application_root":"apps/api","build_context":"packages"}`)
+	if invalidRoot.Code != http.StatusBadRequest {
+		t.Fatalf("invalid root status=%d body=%s", invalidRoot.Code, invalidRoot.Body.String())
+	}
+	bindingDraft := `{"service_id":"` + service.ID + `","repository_id":9001,"service_key":"api","selected_ref":"main","application_root":"apps/api","build_context":".","build_strategy":"dockerfile","dockerfile_path":"apps/api/Dockerfile"}`
+	bindingResponse := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", bindingDraft)
 	if bindingResponse.Code != http.StatusCreated {
 		t.Fatalf("binding status=%d body=%s", bindingResponse.Code, bindingResponse.Body.String())
 	}
 	var binding registry.GitHubServiceBinding
-	if err := json.Unmarshal(bindingResponse.Body.Bytes(), &binding); err != nil {
+	if err := json.Unmarshal(bindingResponse.Body.Bytes(), &binding); err != nil || binding.ApplicationRoot != "apps/api" || binding.BuildContext != "." || binding.BuildStrategy != registry.BuildStrategyDockerfile || binding.DockerfilePath != "apps/api/Dockerfile" {
 		t.Fatal(err)
 	}
-	duplicate := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", `{"service_id":"`+service.ID+`","repository_id":9001,"service_key":"api"}`)
+	duplicate := serveGitHubAPI(server, token, http.MethodPost, "/v1/projects/"+projectID+"/github/bindings", bindingDraft)
 	var duplicateBinding registry.GitHubServiceBinding
 	if duplicate.Code != http.StatusCreated || json.Unmarshal(duplicate.Body.Bytes(), &duplicateBinding) != nil || duplicateBinding.ID != binding.ID {
 		t.Fatalf("duplicate status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	bindingPath := "/v1/projects/" + projectID + "/github/bindings/" + binding.ID
+	read := serveGitHubAPI(server, token, http.MethodGet, bindingPath, "")
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"application_root":"apps/api"`) {
+		t.Fatalf("read status=%d body=%s", read.Code, read.Body.String())
+	}
+	update := serveGitHubAPI(server, token, http.MethodPut, bindingPath, `{"selected_ref":"release","application_root":"apps/api","build_context":"apps","build_strategy":"auto"}`)
+	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), `"selected_ref":"release"`) || !strings.Contains(update.Body.String(), `"build_context":"apps"`) {
+		t.Fatalf("update status=%d body=%s", update.Code, update.Body.String())
 	}
 	release := serveGitHubAPI(server, token, http.MethodDelete, "/v1/projects/"+projectID+"/github/repositories/9001/claim", "")
 	if release.Code != http.StatusConflict {
 		t.Fatalf("release with binding status=%d body=%s", release.Code, release.Body.String())
 	}
-	removePath := "/v1/projects/" + projectID + "/github/bindings/" + binding.ID
+	removePath := bindingPath
 	for range 2 {
 		remove := serveGitHubAPI(server, token, http.MethodDelete, removePath, "")
 		if remove.Code != http.StatusOK {

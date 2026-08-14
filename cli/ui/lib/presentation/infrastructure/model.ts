@@ -11,6 +11,36 @@ export type CanvasPlacement = {
 };
 export type CanvasDraft = Record<string, CanvasPlacement>;
 export type CanvasDraftStatus = "unchanged" | "edited" | "moved" | "new placement" | "pending removal";
+export type TopologyResourceKind = "server" | "application" | "managed-service" | "external-resource" | "unsupported";
+export type TopologyResourcePresentation = {
+  kind: TopologyResourceKind;
+  sourceKind: string;
+  supported: boolean;
+  kindLabel: string;
+  name: string;
+  status: string;
+  badge: string;
+  tone: "ready" | "warning" | "failed" | "neutral";
+  state: "factual" | "draft" | "unsupported";
+  context: string;
+  ariaLabel: string;
+  notice?: string;
+  draftState?: CanvasDraftStatus;
+  facts: Array<{ label: string; value: string }>;
+  capabilities: { acceptsPlacement: boolean; connectable: boolean; movable: boolean };
+};
+export type TopologyResourcePresentationInput = {
+  kind: string;
+  name: string;
+  status: string;
+  context: string;
+  ariaDetail?: string;
+  notice?: string;
+  badge?: string;
+  tone?: TopologyResourcePresentation["tone"];
+  draftState?: CanvasDraftStatus;
+  facts?: TopologyResourcePresentation["facts"];
+};
 export type TopologyOnboardingState = {
   kind: "connect" | "bootstrap" | "retry" | "application" | "placement" | "inspect";
   title: string;
@@ -20,19 +50,70 @@ export type TopologyOnboardingState = {
   sessionID?: string;
 };
 export type ServerLifecycle = {
-  status: "Connecting" | "Bootstrapping" | "Ready" | "Offline" | "Failed" | "Unknown";
+  status: "Waiting" | "Connecting" | "Bootstrapping" | "Ready" | "Offline" | "Failed" | "Unknown";
   runtime?: PlacementFacts["runtimes"][number];
   node?: PlacementFacts["nodes"][number];
   agent?: PlacementFacts["agents"][number];
   session?: BootstrapSession;
 };
 
-const activeBootstrapStatuses = new Set(["created", "pending", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
-const connectingBootstrapStatuses = new Set(["created", "pending", "retry_wait", "connecting"]);
+const activeBootstrapStatuses = new Set(["created", "pending", "waiting", "retry_wait", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying"]);
+const connectingBootstrapStatuses = new Set(["created", "pending", "retry_wait", "validating", "connecting"]);
+const failedBootstrapStatuses = new Set(["failed", "dead_letter"]);
+const offlineRuntimeStatuses = new Set(["offline", "failed", "unavailable", "degraded"]);
+const offlineNodeStatuses = new Set(["offline", "failed", "unavailable", "unhealthy", "degraded", "stale", "not_ready"]);
+const offlineAgentStatuses = new Set(["offline", "failed", "unavailable", "disconnected", "stale"]);
+const usableRuntimeStatuses = new Set(["healthy", "ready", "active"]);
 const usableNodeStatuses = new Set(["healthy", "ready", "active"]);
 const defaultCPURequestMillicores = 100;
 const defaultMemoryRequestBytes = 128 * 1024 * 1024;
 export const bootstrapPollInterval = 4_000;
+
+const topologyResourceKinds = {
+  server: { kindLabel: "Server", supported: true, capabilities: { acceptsPlacement: true, connectable: false, movable: false } },
+  application: { kindLabel: "Application", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: true } },
+  "managed-service": { kindLabel: "Managed service", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: true } },
+  "external-resource": { kindLabel: "External resource", supported: true, capabilities: { acceptsPlacement: false, connectable: true, movable: false } },
+} as const;
+
+export function topologyResourcePresentation(input: TopologyResourcePresentationInput): TopologyResourcePresentation {
+  const normalizedKind = input.kind === "managed_service" ? "managed-service" : input.kind === "external_resource" ? "external-resource" : input.kind;
+  const definition = topologyResourceKinds[normalizedKind as keyof typeof topologyResourceKinds];
+  if (!definition?.supported) {
+    return {
+      kind: definition ? normalizedKind as TopologyResourceKind : "unsupported",
+      sourceKind: input.kind,
+      supported: false,
+      kindLabel: definition?.kindLabel ?? "Unsupported resource",
+      name: input.name,
+      status: "Unsupported",
+      badge: "Unsupported",
+      tone: "neutral",
+      state: "unsupported",
+      context: `No factual ${input.kind} presentation is backed by the topology domain.`,
+      ariaLabel: `Unsupported resource ${input.name}, kind ${input.kind}`,
+      facts: [],
+      capabilities: definition?.capabilities ?? { acceptsPlacement: false, connectable: false, movable: false },
+    };
+  }
+  return {
+    kind: normalizedKind as Exclude<TopologyResourceKind, "unsupported">,
+    sourceKind: input.kind,
+    supported: true,
+    kindLabel: definition.kindLabel,
+    name: input.name,
+    status: input.status,
+    badge: input.badge ?? input.status,
+    tone: input.tone ?? "neutral",
+    state: input.draftState && input.draftState !== "unchanged" ? "draft" : "factual",
+    context: input.context,
+    ariaLabel: `${definition.kindLabel} ${input.name}, ${input.status}${input.ariaDetail ? `, ${input.ariaDetail}` : ""}`,
+    notice: input.notice,
+    draftState: input.draftState,
+    facts: input.facts ?? [],
+    capabilities: definition.capabilities,
+  };
+}
 
 export function assignmentFor(plan: TopologyPlan | null, serviceKey: string): TopologyAssignment | undefined {
   return plan?.assignments.find((item) => item.service_key === serviceKey);
@@ -136,30 +217,40 @@ export function terminalBootstrap(session?: BootstrapSession) {
   return !session || !activeBootstrapStatuses.has(session.status);
 }
 
+export function bootstrapLifecycleStatus(status: string): "Waiting" | "Connecting" | "Bootstrapping" | "Failed" | "Unknown" {
+  if (status === "waiting") return "Waiting";
+  if (connectingBootstrapStatuses.has(status)) return "Connecting";
+  if (activeBootstrapStatuses.has(status)) return "Bootstrapping";
+  if (failedBootstrapStatuses.has(status)) return "Failed";
+  return "Unknown";
+}
+
 export function serverLifecycle(facts: PlacementFacts, sessions: BootstrapSession[]): ServerLifecycle {
   const active = latestActiveBootstrap(sessions);
   const latest = latestBootstrap(sessions);
   for (const runtime of facts.runtimes) {
     const match = readyServer(facts.nodes.filter((node) => node.runtime_id === runtime.id), facts.agents.filter((agent) => agent.runtime_id === runtime.id));
-    if (match) return { status: "Ready", runtime, ...match, session: active ? undefined : latest };
+    if (usableRuntimeStatuses.has(runtime.status) && match) return { status: "Ready", runtime, ...match, session: active ? undefined : latest };
   }
-  if (active) return { status: connectingBootstrapStatuses.has(active.status) ? "Connecting" : "Bootstrapping", session: active };
+  if (active) return { status: bootstrapLifecycleStatus(active.status) as "Waiting" | "Connecting" | "Bootstrapping", session: active };
   const runtime = facts.runtimes[0];
-  const node = facts.nodes.find((item) => item.runtime_id === runtime?.id) ?? facts.nodes[0];
-  const agent = facts.agents.find((item) => item.runtime_id === runtime?.id && (!node || item.node_id === node.id)) ?? facts.agents[0];
-  if (latest && ["failed", "dead_letter"].includes(latest.status)) return { status: "Failed", runtime, node, agent, session: latest };
-  if (runtime || node || agent) return { status: "Offline", runtime, node, agent, session: latest };
+  const agent = facts.agents.find((item) => item.runtime_id === runtime?.id) ?? facts.agents[0];
+  const node = facts.nodes.find((item) => item.id === agent?.node_id && item.runtime_id === agent.runtime_id) ?? facts.nodes.find((item) => item.runtime_id === runtime?.id) ?? facts.nodes[0];
+  if (latest && failedBootstrapStatuses.has(latest.status)) return { status: "Failed", runtime, node, agent, session: latest };
+  if (serverStatus(node ? [node] : [], agent ? [agent] : [], runtime?.status) === "Offline") return { status: "Offline", runtime, node, agent, session: latest };
   return { status: "Unknown", session: latest };
 }
 
-export function serverStatus(nodes: PlacementFacts["nodes"], agents: PlacementFacts["agents"]): "Ready" | "Offline" | "Unknown" {
-  if (readyServer(nodes, agents)) return "Ready";
-  return nodes.length || agents.length ? "Offline" : "Unknown";
+export function serverStatus(nodes: PlacementFacts["nodes"], agents: PlacementFacts["agents"], runtimeStatus?: string): "Ready" | "Offline" | "Unknown" {
+  if ((!runtimeStatus || usableRuntimeStatuses.has(runtimeStatus)) && readyServer(nodes, agents)) return "Ready";
+  if (runtimeStatus && offlineRuntimeStatuses.has(runtimeStatus)) return "Offline";
+  if (nodes.some((node) => offlineNodeStatuses.has(node.status)) || agents.some((agent) => offlineAgentStatuses.has(agent.status))) return "Offline";
+  return "Unknown";
 }
 
 export function topologyOnboarding(facts: PlacementFacts, plan: TopologyPlan | null, sessions: BootstrapSession[]): TopologyOnboardingState {
   const lifecycle = serverLifecycle(facts, sessions);
-  if (lifecycle.status === "Connecting" || lifecycle.status === "Bootstrapping") return { kind: "bootstrap", title: "Server connection in progress", description: `Bootstrap ${lifecycle.session?.id} is ${lifecycle.session?.status}.`, action: "Inspect progress", progress: bootstrapProgress(lifecycle.session?.checkpoint), sessionID: lifecycle.session?.id };
+  if (lifecycle.status === "Waiting" || lifecycle.status === "Connecting" || lifecycle.status === "Bootstrapping") return { kind: "bootstrap", title: lifecycle.status === "Waiting" ? "Waiting for connection" : "Server connection in progress", description: `Bootstrap ${lifecycle.session?.id} is ${lifecycle.session?.status}.`, action: "Inspect progress", progress: bootstrapProgress(lifecycle.session?.checkpoint), sessionID: lifecycle.session?.id };
   if (lifecycle.status === "Failed") return { kind: "retry", title: "Server bootstrap failed", description: lifecycle.session?.last_failure_message_redacted || lifecycle.session?.last_failure_code || "The latest bootstrap session failed.", action: "Retry bootstrap", sessionID: lifecycle.session?.id };
   if (lifecycle.status === "Unknown" && !lifecycle.session) return { kind: "connect", title: "Connect the first server", description: "No server facts are reported for this project.", action: "Connect server" };
   if (lifecycle.status !== "Ready") return { kind: "inspect", title: `Server status is ${lifecycle.status.toLowerCase()}`, description: "Runtime, node, and active Agent facts do not currently establish a ready server.", action: "Inspect topology" };

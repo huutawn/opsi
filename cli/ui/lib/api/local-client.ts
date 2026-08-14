@@ -1,5 +1,6 @@
 import type {
   AuditEvent,
+  BuildJob,
   BuildRecord,
   BuildRecordList,
   BootstrapSession,
@@ -274,6 +275,18 @@ export class LocalClient {
     return this.call<BuildRecord>(`/api/local/projects/${projectID}/build-records/${encodeURIComponent(recordID)}`);
   }
 
+  createBuildJob(projectID: string, applicationID: string, idempotencyKey: string) {
+    return this.call<BuildJob>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/build-jobs`, { method: "POST", write: true, idempotencyKey, body: "{}" });
+  }
+
+  buildJobs(projectID: string, applicationID: string) {
+    return this.call<{ build_jobs: BuildJob[] }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/build-jobs?limit=50`);
+  }
+
+  buildJob(projectID: string, applicationID: string, buildJobID: string) {
+    return this.call<BuildJob>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/build-jobs/${encodeURIComponent(buildJobID)}`);
+  }
+
   placementFacts(projectID: string) { return this.call<PlacementFacts>(`/api/local/projects/${projectID}/topology/facts`); }
   topology(projectID: string) { return this.call<TopologyPlan>(`/api/local/projects/${projectID}/topology`); }
   topologyPlan(projectID: string, draft: TopologyDraft) { return this.call<TopologyPreview>(`/api/local/projects/${projectID}/topology/plan`, { method: "POST", body: JSON.stringify({ draft }) }); }
@@ -329,9 +342,18 @@ export class LocalClient {
     return this.call<{ bindings: GitHubBinding[] }>(`/api/local/projects/${projectID}/github/bindings`);
   }
 
-  createGitHubBinding(projectID: string, body: { service_id: string; repository_id: number; service_key: string; config_path: string }, idempotencyKey?: string) {
+  createGitHubBinding(projectID: string, body: { service_id: string; repository_id: number; service_key: string; config_path: string; selected_ref?: string; application_root?: string; build_context?: string; build_strategy?: "auto" | "dockerfile" | "buildpack"; dockerfile_path?: string }, idempotencyKey?: string) {
     return this.call<GitHubBinding>(`/api/local/projects/${projectID}/github/bindings`, {
       method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify(body),
+    });
+  }
+
+  updateGitHubBinding(projectID: string, bindingID: string, body: Pick<GitHubBinding, "selected_ref" | "application_root" | "build_context" | "build_strategy" | "dockerfile_path">, idempotencyKey?: string) {
+    return this.call<GitHubBinding>(`/api/local/projects/${projectID}/github/bindings/${encodeURIComponent(bindingID)}`, {
+      method: "PUT",
       write: true,
       idempotencyKey,
       body: JSON.stringify(body),

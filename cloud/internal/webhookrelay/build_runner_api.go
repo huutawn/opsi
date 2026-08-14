@@ -1,0 +1,199 @@
+package webhookrelay
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
+	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
+)
+
+func (s *Server) handleBuildJobDispatchAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	applicationID := r.PathValue("application_id")
+	jobID := r.PathValue("build_job_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "build_job", jobID, "owner", "admin", "developer") || !decodeBuildJobIntent(w, r) {
+		return
+	}
+	attempt, err := s.BuildJobs.Dispatch(r.Context(), projectID, applicationID, jobID)
+	if err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, attempt)
+}
+
+func (s *Server) handleBuildRunnerClaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		BuildJobID string `json:"build_job_id"`
+		AttemptID  string `json:"attempt_id"`
+		OIDCToken  string `json:"oidc_token"`
+	}
+	if !decodeStrictRunnerJSON(w, r, &request, buildjob.Error{Code: "RUNNER_CLAIM_INVALID", Status: 400, Message: "Runner claim is invalid.", Cause: "request"}) {
+		return
+	}
+	if request.OIDCToken == "" {
+		writeBuildJobFailure(w, r, buildjob.Error{Code: "OIDC_MISSING", Status: 401, Message: "GitHub OIDC token is required.", Cause: "oidc"})
+		return
+	}
+	if s.RunnerOIDC == nil || s.runnerOIDCInitError != nil {
+		writeBuildJobFailure(w, r, buildjob.Error{Code: "OIDC_UNAVAILABLE", Status: 503, Message: "GitHub OIDC verification is unavailable.", Cause: "oidc"})
+		return
+	}
+	identity, err := s.RunnerOIDC.Verify(r.Context(), request.OIDCToken)
+	if err != nil {
+		writeBuildJobFailure(w, r, runnerOIDCError(err))
+		return
+	}
+	lease, err := s.BuildJobs.Claim(r.Context(), request.BuildJobID, request.AttemptID, runnerIdentity(identity))
+	if err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, lease)
+}
+
+func (s *Server) handleBuildRunnerSourceAccess(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		BuildJobID string `json:"build_job_id"`
+		AttemptID  string `json:"attempt_id"`
+		RunID      uint64 `json:"github_run_id"`
+		RunAttempt uint32 `json:"github_run_attempt"`
+	}
+	invalidRequest := buildjob.Error{Code: "SOURCE_ACCESS_REQUEST_INVALID", Status: 400, Message: "Source access request is invalid.", Cause: "request"}
+	if !decodeStrictRunnerJSON(w, r, &request, invalidRequest) {
+		return
+	}
+	if request.BuildJobID == "" || request.AttemptID == "" || request.RunID == 0 || request.RunAttempt == 0 {
+		writeBuildJobFailure(w, r, invalidRequest)
+		return
+	}
+	grant, err := s.BuildJobs.SourceGrant(r.Context(), request.BuildJobID, request.AttemptID, request.RunID, request.RunAttempt, bearerToken(r))
+	if err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	if s.githubAppClient == nil {
+		writeBuildJobFailure(w, r, buildjob.Error{Code: "SOURCE_TOKEN_UNAVAILABLE", Status: 503, Message: "Source credential is unavailable.", Cause: "github_installation_token"})
+		return
+	}
+	token, expiresAt, err := s.githubAppClient.RepositoryReadToken(r.Context(), grant.GitHubInstallationID, grant.RepositoryID)
+	if err != nil {
+		failure := buildjob.Error{Code: "SOURCE_TOKEN_UNAVAILABLE", Status: 503, Message: "Source credential is unavailable.", Cause: "github_installation_token"}
+		if errors.Is(err, errGitHubRepositoryTokenDenied) {
+			failure = buildjob.Error{Code: "SOURCE_ACCESS_DENIED", Status: 403, Message: "Source access is denied for this BuildJob.", Cause: "github_repository"}
+		}
+		writeBuildJobFailure(w, r, failure)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, struct {
+		buildjob.SourceGrant
+		AccessToken string    `json:"access_token"`
+		ExpiresAt   time.Time `json:"expires_at"`
+	}{SourceGrant: grant, AccessToken: token, ExpiresAt: expiresAt})
+}
+
+func (s *Server) handleBuildRunnerBuildSpec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if len(r.URL.Query()) != 1 || len(r.URL.Query()["build_job_id"]) != 1 {
+		writeBuildJobFailure(w, r, buildjob.Error{Code: "BUILD_SPEC_REQUEST_INVALID", Status: 400, Message: "Build Spec request is invalid.", Cause: "request"})
+		return
+	}
+	spec, err := s.BuildJobs.BuildSpec(r.Context(), r.URL.Query().Get("build_job_id"), bearerToken(r))
+	if err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, spec)
+}
+
+func (s *Server) handleBuildRunnerResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request buildjob.RunnerResult
+	invalid := buildjob.Error{Code: "RUNNER_RESULT_INVALID", Status: 400, Message: "Runner result is invalid.", Cause: "request"}
+	if !decodeStrictRunnerJSONLimit(w, r, &request, invalid, 5<<20) {
+		return
+	}
+	result, err := s.BuildJobs.Complete(r.Context(), request, bearerToken(r))
+	if err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleBuildRunnerFailure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request buildjob.RunnerFailure
+	invalid := buildjob.Error{Code: "RUNNER_FAILURE_INVALID", Status: 400, Message: "Runner failure is invalid.", Cause: "request"}
+	if !decodeStrictRunnerJSON(w, r, &request, invalid) {
+		return
+	}
+	if err := s.BuildJobs.Fail(r.Context(), request, bearerToken(r)); err != nil {
+		writeBuildJobFailure(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]string{"status": buildjob.StatusFailed})
+}
+
+func decodeStrictRunnerJSON(w http.ResponseWriter, r *http.Request, target any, invalidRequest buildjob.Error) bool {
+	return decodeStrictRunnerJSONLimit(w, r, target, invalidRequest, 96<<10)
+}
+
+func decodeStrictRunnerJSONLimit(w http.ResponseWriter, r *http.Request, target any, invalidRequest buildjob.Error, limit int64) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeBuildJobFailure(w, r, invalidRequest)
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeBuildJobFailure(w, r, invalidRequest)
+		return false
+	}
+	return true
+}
+
+func runnerIdentity(identity githuboidc.VerifiedIdentity) buildjob.RunnerIdentity {
+	return buildjob.RunnerIdentity{Repository: identity.Repository, WorkflowRef: identity.WorkflowRef, Ref: identity.Ref, EventName: identity.EventName, RunID: identity.RunID, RunAttempt: identity.RunAttempt}
+}
+
+func runnerOIDCError(err error) error {
+	code := err.Error()
+	switch code {
+	case "OIDC_SIGNATURE_INVALID", "OIDC_ISSUER_INVALID", "OIDC_AUDIENCE_INVALID", "OIDC_EXP_INVALID", "OIDC_NBF_INVALID", "OIDC_IAT_INVALID", "OIDC_TIME_INVALID", "OIDC_CLAIMS_INVALID", "OIDC_TOKEN_INVALID":
+		return buildjob.Error{Code: code, Status: 401, Message: "GitHub OIDC token is invalid.", Cause: "oidc"}
+	default:
+		return buildjob.Error{Code: "OIDC_INVALID", Status: 401, Message: "GitHub OIDC token is invalid.", Cause: "oidc"}
+	}
+}

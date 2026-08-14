@@ -12,6 +12,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type CloudClient interface {
@@ -19,12 +20,21 @@ type CloudClient interface {
 	CompleteDeployment(context.Context, string, string, cloudrelay.DeploymentResult) error
 	ProgressDeployment(context.Context, string, string, deploymentv1.Progress) error
 	CompleteNodeLifecycle(context.Context, string, string, cloudrelay.NodeLifecycleResult) error
+	CompleteManagedResource(context.Context, string, string, cloudrelay.ManagedResourceResult) error
 	Heartbeat(context.Context, string, cloudrelay.Heartbeat) error
 }
 
 type DeployEngine interface {
 	ReconcileRollout(context.Context, deploymentv1.RolloutIntent, deploy.ProgressFunc) (deploymentv1.RolloutRecord, error)
 	ReconcilePending(context.Context, deploy.ProgressFunc) ([]deploymentv1.RolloutRecord, error)
+}
+
+type RegistryPullSecretEnsurer interface {
+	Ensure(context.Context, deploymentv1.AgentCommand) error
+}
+
+type WorkloadSecretEnsurer interface {
+	Ensure(context.Context, deploymentv1.AgentCommand) error
 }
 
 type ConnectionState struct {
@@ -42,17 +52,24 @@ func (s *ConnectionState) Connected() bool {
 }
 
 type Runner struct {
-	Client            CloudClient
-	Engine            DeployEngine
-	NodeLifecycle     NodeLifecycleExecutor
-	NodeID            string
-	Version           string
-	PollInterval      time.Duration
-	LongPollWait      time.Duration
-	HeartbeatInterval time.Duration
-	HealthProbe       HealthProbe
-	ConnectionState   *ConnectionState
-	Logger            *slog.Logger
+	Client              CloudClient
+	Engine              DeployEngine
+	RegistryPullSecrets RegistryPullSecretEnsurer
+	WorkloadSecrets     WorkloadSecretEnsurer
+	NodeLifecycle       NodeLifecycleExecutor
+	ManagedResources    ManagedResourceReconciler
+	NodeID              string
+	Version             string
+	PollInterval        time.Duration
+	LongPollWait        time.Duration
+	HeartbeatInterval   time.Duration
+	HealthProbe         HealthProbe
+	ConnectionState     *ConnectionState
+	Logger              *slog.Logger
+}
+
+type ManagedResourceReconciler interface {
+	Reconcile(context.Context, cloudrelay.ManagedResourceLease) cloudrelay.ManagedResourceResult
 }
 
 type NodeLifecycleExecutor interface {
@@ -104,7 +121,7 @@ func (r Runner) sendHeartbeat(ctx context.Context) {
 		NodeReady:    health.NodeReady,
 		K3SStatus:    health.K3SStatus,
 		Capacity:     health.Capacity,
-		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil},
+		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil},
 	})
 	if err != nil {
 		r.ConnectionState.SetConnected(false)
@@ -137,7 +154,27 @@ func (r Runner) jobLoop(ctx context.Context) error {
 		if lease != nil && lease.NodeLifecycle != nil {
 			r.handleNodeLifecycle(ctx, *lease.NodeLifecycle)
 		}
+		if lease != nil && lease.ManagedResource != nil {
+			r.handleManagedResource(ctx, *lease.ManagedResource)
+		}
 		timer.Reset(r.PollInterval)
+	}
+}
+
+func (r Runner) handleManagedResource(ctx context.Context, lease cloudrelay.ManagedResourceLease) {
+	result := cloudrelay.ManagedResourceResult{Status: "failed", LeaseToken: lease.LeaseToken, FailureCode: "MANAGED_RESOURCE_APPLY_FAILED", FailureMessageRedacted: "managed resource reconciler is unavailable"}
+	if r.ManagedResources != nil {
+		result = r.ManagedResources.Reconcile(ctx, lease)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := r.Client.CompleteManagedResource(ctx, r.NodeID, lease.Spec.ResourceID, result); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
 	}
 }
 
@@ -200,6 +237,23 @@ func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentL
 	intent, err := RolloutIntentFromLease(lease, r.NodeID)
 	if err != nil {
 		return deploymentFailure(lease, "ROLLOUT_COMMAND_INVALID", err.Error()), true
+	}
+	if lease.Command.Workload.RegistryPullCredential != nil {
+		if r.RegistryPullSecrets == nil {
+			return deploymentFailure(lease, deploymentv1.RolloutCodeRegistryCredentialUnavailable, "registry pull secret delivery is unavailable"), true
+		}
+		if err := r.RegistryPullSecrets.Ensure(ctx, *lease.Command); err != nil {
+			failure := rolloutFailure(err, deploymentv1.RolloutCodeRegistryCredentialUnavailable)
+			return deploymentFailure(lease, failure.Code, failure.Message), true
+		}
+	}
+	if len(lease.Command.Workload.SecretReferences) > 0 {
+		if r.WorkloadSecrets == nil {
+			return deploymentFailure(lease, resourcev1.FailureBindingSecretMaterialization, "workload secret delivery is unavailable"), true
+		}
+		if err := r.WorkloadSecrets.Ensure(ctx, *lease.Command); err != nil {
+			return deploymentFailure(lease, resourcev1.FailureBindingSecretMaterialization, err.Error()), true
+		}
 	}
 	var progressMu sync.Mutex
 	var latest *deploymentv1.Progress

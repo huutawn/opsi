@@ -28,9 +28,13 @@ test("Design renders applied placement, unplaced applications, factual servers, 
   await expect(page.getByRole("heading", { name: "api", exact: true })).toBeFocused();
   await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Live", exact: true }).click();
-  await expect(page.locator(".liveRuntimeList").getByText("agent-primary", { exact: false })).toBeVisible();
-  await expect(page.getByText("node-primary (healthy)", { exact: true })).toBeVisible();
-  await expect(page.getByText("dep-1", { exact: true })).toBeVisible();
+  const liveCanvas = page.getByLabel("Read-only factual topology canvas");
+  const liveServer = liveCanvas.locator('.topologyResourceNode[data-resource-mode="live"][data-resource-kind="server"]').filter({ hasText: "Primary runtime" });
+  await expect(liveServer).toContainText("Primary runtime");
+  await expect(liveServer).toContainText("Ready");
+  await expect(liveServer).toContainText("agent-primary · active");
+  await expect(liveServer).toContainText("node-primary · healthy");
+  await expect(page.locator(".liveDeploymentList").getByText("dep-1", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Design", exact: true }).click();
   await expect(page.getByRole("link", { name: "Support", exact: true })).toHaveCount(0);
   await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
@@ -38,6 +42,21 @@ test("Design renders applied placement, unplaced applications, factual servers, 
   await expect(page).toHaveURL(/runtime=runtime-edge/);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Edge runtime" })).toBeVisible();
+});
+
+test("Design moves an applied application through Unplaced without a backend write", async ({ page }) => {
+  let applyRequests = 0;
+  page.on("request", (request) => { if (new URL(request.url()).pathname.endsWith("/topology/apply")) applyRequests += 1; });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+
+  await dragNode(page, /Application api, Assigned, unchanged/, /Unplaced applications, 1 applications/);
+  await expect(page.getByRole("button", { name: /Application api, Unplaced, pending removal/ })).toBeVisible();
+  await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
+
+  await dragNode(page, /Application api, Unplaced, pending removal/, /Server Primary runtime/);
+  await expect(page.getByRole("button", { name: /Application api, Assigned, unchanged/ })).toBeVisible();
+  await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
+  expect(applyRequests).toBe(0);
 });
 
 test("Design edits resources, reviews through Cloud, survives Live, and Reset avoids apply", async ({ page }) => {
@@ -69,8 +88,8 @@ test("Design edits resources, reviews through Cloud, survives Live, and Reset av
   await expect(cloudReview.getByText("Cloud semantic diff", { exact: true })).toBeVisible();
   await expect(cloudReview.getByText("reports", { exact: true })).toBeVisible();
   await expect(page.getByText("Requested 1550m / 2048 MiB", { exact: false })).toContainText("Available 4000m CPU / 8192 MiB memory");
-  await expect(page.getByText("topology-state", { exact: true })).toBeVisible();
-  await expect(page.getByText("proposal-hash", { exact: true })).toBeVisible();
+  await expect(cloudReview.getByText("topology-state", { exact: true })).toBeVisible();
+  await expect(cloudReview.getByText("proposal-hash", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Apply topology" })).toBeEnabled();
   expect(reviewRequests).toEqual(["plan", "validate", "diff"]);
   await page.getByRole("button", { name: "Live", exact: true }).click();
@@ -96,11 +115,13 @@ test("Application edges review internal and same-origin browser HTTP without cre
 	await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
 	await connectApplications(page, /Application api, Assigned, unchanged/, /Application worker, Assigned, unchanged/);
 	await expect(page.getByRole("heading", { name: "HTTP connection" })).toBeVisible();
+	await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
 	await expect(page.getByLabel("Runtime intent")).toHaveValue("internal_http");
 	await page.getByLabel("Environment prefix").fill("BACKEND");
 	await page.getByRole("button", { name: "Review connection" }).click();
 	await expect(page.getByLabel("Cloud service configuration review").getByText("generated environment", { exact: true }).first()).toBeVisible();
 	await page.getByRole("button", { name: "Apply service configuration" }).click();
+	await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
 	await expect(page.getByText("Internal · applied", { exact: true })).toBeVisible();
 	expect(data.deployments).toHaveLength(1);
 
@@ -258,7 +279,7 @@ test("State conflict refreshes once, preserves local edits, and requires review 
   await expect(page.getByText("TopologyPlan r5", { exact: true })).toBeVisible();
   await expect(page.getByText("1 unpublished change", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Application reports, Assigned, new placement/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Apply topology" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Apply topology" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Review draft" })).toBeEnabled();
   expect(applyRequests).toBe(1);
   expect(topologyReads).toBeGreaterThan(readsBeforeApply.topology);
@@ -282,12 +303,12 @@ test("Topology onboarding exposes the factual next action for every state", asyn
     await expect(page.locator(".topologyOnboarding")).toHaveAttribute("data-state", state);
     const button = page.getByRole("button", { name: action, exact: true });
     await expect(button).toBeVisible();
-    if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Add server" })).toBeVisible(); await page.getByRole("button", { name: "Close add server dialog" }).click(); }
+    if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Connect Server" })).toBeVisible(); await page.getByRole("button", { name: "Close connect server dialog" }).click(); }
     if (next === "bootstrap") { await expect(page.locator(".topologyOnboarding").getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=topology/); await expect(page.getByRole("heading", { name: "203.0.113.10" })).toBeFocused(); }
     if (next === "failed") { await button.click(); await expect(page.getByRole("dialog", { name: /retry bootstrap session/i })).toBeVisible(); await page.getByRole("button", { name: "Confirm and submit" }).click(); await expect(page.getByText(/Bootstrap boot-failed returned status pending/)).toBeVisible(); await page.getByRole("button", { name: "Close" }).click(); }
     if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add application" })).toBeVisible(); await page.getByRole("button", { name: "Close application wizard" }).click(); }
     if (next === "placement") { await button.click(); await expect(page.getByRole("dialog", { name: "Plan placement" })).toBeVisible(); await page.getByRole("button", { name: "Close placement dialog" }).click(); }
-    if (next === "review") { await page.getByRole("button", { name: "Live", exact: true }).click(); await button.click(); await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true"); }
+    if (next === "review") { await button.click(); await expect(page.getByRole("button", { name: "Design", exact: true })).toHaveAttribute("aria-pressed", "true"); }
   }
 });
 
@@ -416,10 +437,11 @@ test("confirmed service creation refreshes Topology onboarding without a page re
   page.on("request", (request) => { if (request.isNavigationRequest()) navigationRequests += 1; });
   await page.getByRole("button", { name: "Add application" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Service key").fill("api");
-  await page.getByLabel("Container port").fill("8080");
+  await page.getByLabel("Application name").fill("api");
   await page.getByRole("button", { name: "Review application" }).click();
-  await page.getByRole("button", { name: "Confirm and submit" }).click();
+  const review = page.getByRole("dialog", { name: "create application" });
+  await review.getByRole("button", { name: "Confirm and submit" }).click();
+  await review.getByRole("button", { name: "Close" }).click();
   await expect(page.getByRole("button", { name: "Plan placement" })).toBeVisible();
   expect(navigationRequests).toBe(0);
 });

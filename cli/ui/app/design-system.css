@@ -1,0 +1,520 @@
+:root {
+  color-scheme: dark;
+
+  /* Opsi Factual Systems surfaces */
+  --opsi-surface: #131315;
+  --opsi-surface-dim: #131315;
+  --opsi-surface-bright: #39393b;
+  --opsi-surface-lowest: #0e0e10;
+  --opsi-surface-low: #1b1b1d;
+  --opsi-surface-container: #1f1f21;
+  --opsi-surface-high: #2a2a2b;
+  --opsi-surface-highest: #353436;
+  --opsi-on-surface: #e4e2e4;
+  --opsi-on-surface-variant: #c6c6cd;
+  --opsi-outline: #909097;
+  --opsi-outline-variant: #45464d;
+  --opsi-primary: #bec6e0;
+  --opsi-on-primary: #283044;
+  --opsi-secondary: #7bd0ff;
+  --opsi-secondary-container: #00a6e0;
+  --opsi-tertiary: #dec29a;
+  --opsi-error: #ffb4ab;
+  --opsi-error-container: #93000a;
+
+  /* Factual state */
+  --opsi-ready: #10b981;
+  --opsi-failed: #ef4444;
+  --opsi-progress: #7c83ff;
+  --opsi-warning: #f59e0b;
+  --opsi-unknown: #8b93a7;
+  --opsi-draft-bg: #1e293b;
+  --opsi-live-bg: #0f172a;
+  --opsi-draft-border: #64748b;
+  --opsi-live-border: #38bdf8;
+
+  /* Typography */
+  --opsi-font-ui: var(--font-ui), Inter, sans-serif;
+  --opsi-font-mono: var(--font-mono), "JetBrains Mono", monospace;
+  --opsi-text-xs: 0.6875rem;
+  --opsi-text-sm: 0.75rem;
+  --opsi-text-md: 0.875rem;
+  --opsi-text-lg: 1rem;
+  --opsi-title-sm: 1.125rem;
+  --opsi-title-md: 1.5rem;
+  --opsi-title-lg: 2rem;
+
+  /* Four-pixel spacing scale */
+  --opsi-space-1: 0.25rem;
+  --opsi-space-2: 0.5rem;
+  --opsi-space-3: 0.75rem;
+  --opsi-space-4: 1rem;
+  --opsi-space-5: 1.25rem;
+  --opsi-space-6: 1.5rem;
+  --opsi-space-8: 2rem;
+  --opsi-space-10: 2.5rem;
+  --opsi-canvas-grid: 1.5rem;
+
+  /* Shape and hierarchy */
+  --opsi-radius-sm: 0.125rem;
+  --opsi-radius: 0.25rem;
+  --opsi-radius-md: 0.375rem;
+  --opsi-radius-lg: 0.5rem;
+  --opsi-radius-pill: 9999px;
+  --opsi-border: 1px solid var(--opsi-outline-variant);
+  --opsi-border-strong: 1px solid var(--opsi-outline);
+  --opsi-review-shadow: 0 24px 72px rgb(0 0 0 / 48%);
+  --opsi-focus-ring: 0 0 0 3px rgb(123 208 255 / 28%);
+
+  /* Compatibility tokens consumed by the current presentation layer. */
+  --bg: var(--opsi-surface);
+  --surface: var(--opsi-surface-container);
+  --surface-muted: var(--opsi-surface-low);
+  --ink: var(--opsi-on-surface);
+  --muted: var(--opsi-on-surface-variant);
+  --line: var(--opsi-outline-variant);
+  --line-strong: var(--opsi-outline);
+  --accent: var(--opsi-primary);
+  --ok: var(--opsi-ready);
+  --ok-bg: rgb(16 185 129 / 12%);
+  --warn: var(--opsi-warning);
+  --warn-bg: rgb(245 158 11 / 12%);
+  --bad: var(--opsi-failed);
+  --bad-bg: rgb(239 68 68 / 12%);
+  --blue: var(--opsi-secondary);
+  --blue-bg: rgb(56 189 248 / 12%);
+  --shadow: var(--opsi-review-shadow);
+}
+
+html,
+body {
+  background: var(--opsi-surface);
+  color: var(--opsi-on-surface);
+  font-family: var(--opsi-font-ui);
+}
+
+body {
+  font-size: var(--opsi-text-md);
+}
+
+code,
+pre,
+kbd,
+samp,
+.mono,
+.monoWrap,
+.eyebrow,
+.status,
+.sourceTag,
+.switcherContext {
+  font-family: var(--opsi-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  text-wrap: pretty;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--opsi-on-surface);
+}
+
+::selection {
+  background: rgb(123 208 255 / 24%);
+  color: var(--opsi-on-surface);
+}
+
+button,
+input,
+select,
+textarea,
+summary,
+a {
+  accent-color: var(--opsi-secondary);
+}
+
+button {
+  min-height: 40px;
+  border: var(--opsi-border);
+  border-radius: var(--opsi-radius);
+  background: var(--opsi-surface-high);
+  color: var(--opsi-on-surface);
+  font-weight: 600;
+  box-shadow: none;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--opsi-outline);
+  background: var(--opsi-surface-highest);
+}
+
+button:active:not(:disabled) {
+  transform: none;
+}
+
+button:disabled {
+  opacity: 0.48;
+}
+
+button.primary,
+.primary {
+  border-color: var(--opsi-primary);
+  background: var(--opsi-primary);
+  color: var(--opsi-on-primary);
+}
+
+button.primary:hover:not(:disabled),
+.primary:hover:not(:disabled) {
+  border-color: #dae2fd;
+  background: #dae2fd;
+}
+
+button.danger,
+.danger {
+  border-color: rgb(239 68 68 / 48%);
+  background: rgb(239 68 68 / 10%);
+  color: var(--opsi-error);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--opsi-secondary);
+  outline-offset: 2px;
+  box-shadow: var(--opsi-focus-ring);
+}
+
+.field,
+.select,
+.textarea,
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  border: var(--opsi-border);
+  border-radius: var(--opsi-radius);
+  background: var(--opsi-surface-lowest);
+  color: var(--opsi-on-surface);
+  box-shadow: none;
+}
+
+.field:hover,
+.select:hover,
+.textarea:hover,
+input:not([type="checkbox"]):not([type="radio"]):hover,
+select:hover,
+textarea:hover {
+  border-color: var(--opsi-outline);
+}
+
+.field::placeholder,
+.textarea::placeholder,
+input::placeholder,
+textarea::placeholder {
+  color: var(--opsi-unknown);
+  opacity: 1;
+}
+
+label,
+legend {
+  color: var(--opsi-on-surface-variant);
+}
+
+.eyebrow {
+  color: var(--opsi-on-surface-variant);
+  font-size: var(--opsi-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.surfaceBlock,
+.sectionBlock,
+.deliverySection,
+.securitySection,
+.settingsSection,
+.capacityCard,
+.coverageItem,
+.nextAction {
+  border-color: var(--opsi-outline-variant);
+  background: var(--opsi-surface-container);
+  box-shadow: none;
+}
+
+.surfaceBlock,
+.capacityCard,
+.nextAction {
+  border: var(--opsi-border);
+  border-radius: var(--opsi-radius);
+  padding: var(--opsi-space-4);
+}
+
+.empty {
+  border: 1px dashed var(--opsi-outline-variant);
+  border-radius: var(--opsi-radius);
+  background: var(--opsi-surface-lowest);
+  color: var(--opsi-on-surface-variant);
+}
+
+.empty strong {
+  color: var(--opsi-on-surface);
+}
+
+.status {
+  min-height: 24px;
+  gap: 6px;
+  border: 1px solid var(--opsi-outline-variant);
+  border-radius: var(--opsi-radius-pill);
+  padding: 3px 8px;
+  background: var(--opsi-surface-low);
+  color: var(--opsi-unknown);
+  font-size: var(--opsi-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  text-transform: none;
+}
+
+.statusIcon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.status i {
+  display: none;
+}
+
+.status.healthy {
+  border-color: rgb(16 185 129 / 42%);
+  background: rgb(16 185 129 / 10%);
+  color: #42d3a0;
+}
+
+.status.degraded {
+  border-color: rgb(245 158 11 / 42%);
+  background: rgb(245 158 11 / 10%);
+  color: #fbbf24;
+}
+
+.status.failed {
+  border-color: rgb(239 68 68 / 42%);
+  background: rgb(239 68 68 / 10%);
+  color: #ff7b72;
+}
+
+.status.in_progress {
+  border-color: rgb(124 131 255 / 48%);
+  background: rgb(99 102 241 / 12%);
+  color: #aeb4ff;
+}
+
+.status.unavailable,
+.status.unknown {
+  border-color: var(--opsi-outline-variant);
+  background: var(--opsi-surface-low);
+  color: var(--opsi-unknown);
+}
+
+.notice,
+.truthCallout,
+.errorBox,
+.inlineError,
+.risk,
+.warning {
+  border-radius: var(--opsi-radius);
+  box-shadow: none;
+}
+
+.notice {
+  border-color: rgb(56 189 248 / 38%);
+  background: rgb(56 189 248 / 8%);
+  color: var(--opsi-on-surface-variant);
+}
+
+.truthCallout,
+.warning {
+  border-color: rgb(245 158 11 / 42%);
+  background: rgb(245 158 11 / 8%);
+  color: var(--opsi-on-surface-variant);
+}
+
+.errorBox,
+.inlineError {
+  border-color: rgb(239 68 68 / 48%);
+  background: rgb(239 68 68 / 8%);
+  color: var(--opsi-error);
+}
+
+.draftState,
+[data-draft],
+.draftReview {
+  border-color: var(--opsi-draft-border);
+  background-color: var(--opsi-draft-bg);
+}
+
+.draftReview,
+[data-draft]:not([data-draft="applied"]) {
+  border-style: dashed;
+}
+
+.liveTopology,
+[data-mode="live"] {
+  border-color: var(--opsi-live-border);
+  background-color: var(--opsi-live-bg);
+}
+
+.modal,
+.nativeDialog,
+.placementDialog,
+.deliveryDialog,
+.protectedDialog,
+.detailDrawer {
+  border: var(--opsi-border-strong);
+  border-radius: var(--opsi-radius-lg);
+  background: var(--opsi-surface-low);
+  color: var(--opsi-on-surface);
+  box-shadow: var(--opsi-review-shadow);
+}
+
+.modal::backdrop,
+.nativeDialog::backdrop,
+.placementDialog::backdrop,
+.deliveryDialog::backdrop,
+.protectedDialog::backdrop,
+.detailDrawer::backdrop {
+  background: rgb(3 7 18 / 72%);
+  backdrop-filter: blur(10px);
+}
+
+.reviewFacts > div,
+.detailFacts > div,
+.evidenceGrid > div,
+.metadataList > div,
+.hashPair > div {
+  border-color: var(--opsi-outline-variant);
+}
+
+.reviewFacts dt,
+.detailFacts dt,
+.evidenceGrid dt,
+.metadataList dt,
+.hashPair span {
+  color: var(--opsi-on-surface-variant);
+  font-family: var(--opsi-font-mono);
+  font-size: var(--opsi-text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.reviewFacts dd,
+.detailFacts dd,
+.evidenceGrid dd,
+.metadataList dd,
+.hashPair code {
+  color: var(--opsi-on-surface);
+}
+
+.tabs,
+.sectionHeading,
+.pageHeader,
+.groupedHeader,
+.dialogHeading,
+.detailHeader,
+.detailHeading,
+.contextHeader {
+  border-color: var(--opsi-outline-variant);
+}
+
+.tabs a {
+  color: var(--opsi-on-surface-variant);
+  font-weight: 600;
+}
+
+.tabs a:hover,
+.tabs a.active {
+  border-color: var(--opsi-secondary);
+  color: var(--opsi-on-surface);
+}
+
+.connectionMenu,
+.accountMenu > div {
+  border-color: var(--opsi-outline-variant);
+  border-radius: var(--opsi-radius);
+  background: var(--opsi-surface-container);
+  color: var(--opsi-on-surface);
+}
+
+.sourceWarning {
+  border: 1px solid rgb(245 158 11 / 42%);
+  background: rgb(245 158 11 / 10%);
+  color: #fbbf24;
+}
+
+.connectionDot,
+.connectionRow i {
+  background: var(--opsi-ready);
+}
+
+.connectionDot.degraded,
+.connectionRow i.degraded {
+  background: var(--opsi-warning);
+}
+
+.tableWrap,
+.masterDetail,
+.auditExplorer,
+.projectList,
+.applicationCard,
+.applicationDetail {
+  border-color: var(--opsi-outline-variant);
+  background: var(--opsi-surface-lowest);
+}
+
+th {
+  color: var(--opsi-on-surface-variant);
+  font-family: var(--opsi-font-mono);
+  font-size: var(--opsi-text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+th,
+td,
+.projectRow,
+.auditRow,
+.deploymentRow {
+  border-color: var(--opsi-outline-variant);
+}
+
+.projectRow:hover,
+.applicationCard > footer button:hover,
+button.auditRow:hover,
+button.auditRow[aria-pressed="true"] {
+  background: var(--opsi-surface-low);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

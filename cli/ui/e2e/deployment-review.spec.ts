@@ -79,8 +79,8 @@ test("Topology reviews canonical multi-service deployments, retries only missing
   for (const job of state.deployments) { job.status = "succeeded"; job.rollout_state = "succeeded"; }
   await page.reload();
   await expect(page.getByRole("button", { name: "Live", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByText("Running", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("Workload is ready", { exact: true }).first()).toBeVisible();
+  await expect(page.locator(".liveDeploymentList").getByText("Running", { exact: true }).first()).toBeVisible();
+  await expect(page.locator(".liveDeploymentList").getByText("Workload is ready", { exact: true }).first()).toBeVisible();
 });
 
 test("deployment review fails closed without a current environment and selects the exact environment assignment", async ({ page }) => {
@@ -165,7 +165,7 @@ test("public deployment waits for workload success and keeps route failure as a 
   expect(calls).toEqual(["workload-succeeded", "exposure-preview", "exposure-failed"]);
   await expect(page.locator(".liveDeploymentList li").filter({ hasText: "Deploy workload" })).toContainText("Running");
   await expect(page.locator(".liveDeploymentList li").filter({ hasText: "Publish route" })).toContainText("Degraded");
-  await expect(page.getByText("apps.example.com/api", { exact: true })).toBeVisible();
+  await expect(page.locator(".liveDeploymentList").getByText("apps.example.com/api", { exact: true })).toBeVisible();
 });
 
 test("public deployment failure never starts Exposure", async ({ page }) => {

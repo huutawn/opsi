@@ -163,6 +163,20 @@ func TestRenderProductionResourcesIsDeterministicAndOwned(t *testing.T) {
 	}
 }
 
+func TestRenderProductionResourcesUsesTypedSecretRefs(t *testing.T) {
+	command := testAgentCommand(t)
+	command.Workload.SecretReferences = []deploymentv1.SecretReference{{EnvName: "CACHE_PASSWORD", SecretID: "mrcred-res-1"}}
+	command.SecretMaterials = []deploymentv1.SecretMaterial{{SecretID: "mrcred-res-1", Values: map[string]string{"CACHE_PASSWORD": "must-not-be-inline"}}}
+	command.Workload.Environment = nil
+	data, _, _, err := renderProductionResources(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "must-not-be-inline") || !strings.Contains(string(data), "secretKeyRef") || !strings.Contains(string(data), "CACHE_PASSWORD") {
+		t.Fatalf("secret was rendered unsafely: %s", data)
+	}
+}
+
 func TestNoExternalRolloutRendersNoIngress(t *testing.T) {
 	snapshot := testRuntimeSnapshot(t, "job-internal", "a")
 	snapshot.Exposure = exposurev1.ExposureSpec{}

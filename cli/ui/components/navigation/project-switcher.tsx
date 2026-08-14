@@ -2,8 +2,7 @@ import { routeHref } from "@/features/console/navigation";
 import type { Project } from "@/lib/contracts/registry";
 import { useRef } from "react";
 
-export function ProjectSwitcher({ environment, orgID, project, projects, onBrowse, onSelect }: {
-  environment: string;
+export function ProjectSwitcher({ orgID, project, projects, onBrowse, onSelect }: {
   orgID: string;
   project: Project | null;
   projects: Project[];
@@ -29,7 +28,7 @@ export function ProjectSwitcher({ environment, orgID, project, projects, onBrows
     <summary aria-label="Switch project">
       <span className="switcherContext">{project ? "Project" : "Workspace"}</span>
       <strong title={project?.name}>{project?.name || "All projects"}</strong>
-      <span title={project ? environment : orgID}>{project ? environment : orgID || "Organization unavailable"}</span>
+      <span title={project?.slug || orgID}>{project?.slug || orgID || "Organization unavailable"}</span>
       <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
     </summary>
     <div className="switcherMenu">

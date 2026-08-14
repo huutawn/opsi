@@ -25,6 +25,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
@@ -43,6 +44,97 @@ type GitHubPullRequest struct {
 	BaseRef          string
 	BaseRepositoryID uint64
 	HeadRepositoryID uint64
+}
+
+func (c *GitHubAppClient) ResolveCommit(ctx context.Context, installationID int64, repository, selectedRef string) (string, error) {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 || !validGitHubPathPart(parts[0]) || !validGitHubPathPart(parts[1]) || selectedRef == "" || len(selectedRef) > 1024 || strings.TrimSpace(selectedRef) != selectedRef || strings.IndexFunc(selectedRef, unicode.IsControl) >= 0 {
+		return "", buildjob.Error{Code: "GITHUB_COMMIT_UNRESOLVED", Status: 409, Message: "The selected ref could not be resolved.", Cause: "github_commit"}
+	}
+	body, status, err := c.repositoryAPIGet(ctx, installationID, parts, "/commits/"+url.PathEscape(selectedRef))
+	if err != nil {
+		return "", err
+	}
+	if status == http.StatusNotFound {
+		return "", buildjob.Error{Code: "GITHUB_REF_NOT_FOUND", Status: 409, Message: "The selected Git ref does not exist.", Cause: "github_ref"}
+	}
+	if status != http.StatusOK {
+		return "", buildjob.Error{Code: "GITHUB_COMMIT_UNRESOLVED", Status: 409, Message: "The selected ref could not be resolved.", Cause: "github_commit"}
+	}
+	var payload struct {
+		SHA string `json:"sha"`
+	}
+	if json.Unmarshal(body, &payload) != nil || !validSHA40(payload.SHA) {
+		return "", buildjob.Error{Code: "GITHUB_COMMIT_UNRESOLVED", Status: 409, Message: "The selected ref did not resolve to a valid commit.", Cause: "github_commit"}
+	}
+	return strings.ToLower(payload.SHA), nil
+}
+
+func (c *GitHubAppClient) RepositoryFileExists(ctx context.Context, installationID int64, repository, commitSHA, filePath string) (bool, error) {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 || !validGitHubPathPart(parts[0]) || !validGitHubPathPart(parts[1]) || !validSHA40(commitSHA) || !validGitHubRepositoryFilePath(filePath) {
+		return false, buildjob.Error{Code: "GITHUB_FILE_METADATA_INVALID", Status: 409, Message: "Repository file metadata is invalid.", Cause: "github_file"}
+	}
+	escaped := make([]string, 0, len(strings.Split(filePath, "/")))
+	for _, segment := range strings.Split(filePath, "/") {
+		escaped = append(escaped, url.PathEscape(segment))
+	}
+	body, status, err := c.repositoryAPIGet(ctx, installationID, parts, "/contents/"+strings.Join(escaped, "/")+"?ref="+url.QueryEscape(commitSHA))
+	if err != nil {
+		return false, err
+	}
+	if status == http.StatusNotFound {
+		return false, nil
+	}
+	if status != http.StatusOK {
+		return false, buildjob.Error{Code: "GITHUB_REPOSITORY_UNAVAILABLE", Status: 409, Message: "GitHub repository file metadata is unavailable.", Cause: "github_repository"}
+	}
+	var payload struct {
+		Type string `json:"type"`
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Path != filePath {
+		return false, buildjob.Error{Code: "GITHUB_FILE_METADATA_INVALID", Status: 409, Message: "Repository file metadata is invalid.", Cause: "github_file"}
+	}
+	return payload.Type == "file", nil
+}
+
+func (c *GitHubAppClient) repositoryAPIGet(ctx context.Context, installationID int64, repository []string, suffix string) ([]byte, int, error) {
+	token, _, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, 0, buildjob.Error{Code: "GITHUB_INSTALLATION_UNAVAILABLE", Status: 409, Message: "The bound GitHub installation is unavailable.", Cause: "github_installation"}
+	}
+	endpoint := "https://api.github.com/repos/" + url.PathEscape(repository[0]) + "/" + url.PathEscape(repository[1]) + suffix
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, 0, buildjob.Error{Code: "GITHUB_REPOSITORY_UNAVAILABLE", Status: 409, Message: "GitHub repository metadata is unavailable.", Cause: "github_repository"}
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
+	request.Header.Set("User-Agent", githubUserAgent)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, 0, buildjob.Error{Code: "GITHUB_REPOSITORY_UNAVAILABLE", Status: 409, Message: "GitHub repository metadata is unavailable.", Cause: "github_repository"}
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, githubResponseMaxBytes+1))
+	if err != nil || len(body) > githubResponseMaxBytes {
+		return nil, 0, buildjob.Error{Code: "GITHUB_REPOSITORY_UNAVAILABLE", Status: 409, Message: "GitHub repository metadata is unavailable.", Cause: "github_repository"}
+	}
+	return body, response.StatusCode, nil
+}
+
+func validGitHubRepositoryFilePath(value string) bool {
+	if value == "" || len(value) > 1024 || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *GitHubAppClient) PullRequest(ctx context.Context, installationID int64, repository string, number int) (GitHubPullRequest, error) {
@@ -343,12 +435,36 @@ func (c *GitHubAppClient) fetchInstallationToken(ctx context.Context, installati
 }
 
 func (c *GitHubAppClient) requestInstallationToken(ctx context.Context, installationID int64) (installationToken, error) {
+	return c.requestInstallationTokenWithBody(ctx, installationID, "{}", false)
+}
+
+var errGitHubRepositoryTokenDenied = errors.New("github repository token denied")
+
+func (c *GitHubAppClient) RepositoryReadToken(ctx context.Context, installationID, repositoryID int64) (string, time.Time, error) {
+	if installationID <= 0 || repositoryID <= 0 {
+		return "", time.Time{}, errGitHubRepositoryTokenDenied
+	}
+	body, err := json.Marshal(struct {
+		RepositoryIDs []int64           `json:"repository_ids"`
+		Permissions   map[string]string `json:"permissions"`
+	}{RepositoryIDs: []int64{repositoryID}, Permissions: map[string]string{"contents": "read"}})
+	if err != nil {
+		return "", time.Time{}, errors.New("repository token request unavailable")
+	}
+	token, err := c.requestInstallationTokenWithBody(ctx, installationID, string(body), true)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return token.Token, token.ExpiresAt, nil
+}
+
+func (c *GitHubAppClient) requestInstallationTokenWithBody(ctx context.Context, installationID int64, requestBody string, repositoryScoped bool) (installationToken, error) {
 	jwt, err := c.appJWT()
 	if err != nil {
 		return installationToken{}, fmt.Errorf("request installation token for installation %d: JWT creation failed", installationID)
 	}
 	endpoint := githubInstallationTokenBaseURL + strconv.FormatInt(installationID, 10) + "/access_tokens"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader("{}"))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(requestBody))
 	if err != nil {
 		return installationToken{}, fmt.Errorf("request installation token for installation %d: request creation failed", installationID)
 	}
@@ -364,6 +480,9 @@ func (c *GitHubAppClient) requestInstallationToken(ctx context.Context, installa
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		if repositoryScoped && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound) {
+			return installationToken{}, errGitHubRepositoryTokenDenied
+		}
 		return installationToken{}, fmt.Errorf("request installation token for installation %d: HTTP status %d", installationID, response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, githubResponseMaxBytes+1))

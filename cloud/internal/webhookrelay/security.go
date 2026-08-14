@@ -13,6 +13,7 @@ type BootstrapCredential struct {
 	Username   string
 	PrivateKey []byte
 	Password   []byte
+	Token      []byte
 }
 
 type CredentialVault interface {
@@ -46,6 +47,7 @@ func (s *CredentialStore) Put(sessionID string, credential BootstrapCredential, 
 	}
 	credential.PrivateKey = append([]byte(nil), credential.PrivateKey...)
 	credential.Password = append([]byte(nil), credential.Password...)
+	credential.Token = append([]byte(nil), credential.Token...)
 	s.items[sessionID] = credentialEnvelope{value: credential, expiresAt: s.clock().Add(ttl)}
 }
 
@@ -60,6 +62,7 @@ func (s *CredentialStore) GetForBootstrapLease(sessionID string) (BootstrapCrede
 	credential := envelope.value
 	credential.PrivateKey = append([]byte(nil), credential.PrivateKey...)
 	credential.Password = append([]byte(nil), credential.Password...)
+	credential.Token = append([]byte(nil), credential.Token...)
 	return credential, true
 }
 
@@ -96,8 +99,12 @@ func zeroBootstrapCredential(credential *BootstrapCredential) {
 	for i := range credential.Password {
 		credential.Password[i] = 0
 	}
+	for i := range credential.Token {
+		credential.Token[i] = 0
+	}
 	credential.PrivateKey = nil
 	credential.Password = nil
+	credential.Token = nil
 }
 
 func (s *CredentialStore) clock() time.Time {

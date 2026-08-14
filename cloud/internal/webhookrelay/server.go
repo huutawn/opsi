@@ -1,47 +1,57 @@
 package webhookrelay
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/actiondevice"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type Server struct {
-	Config       Config
-	OTP          *otp.Service
-	Auth         *auth.Service
-	HTTPClient   *http.Client
-	Registry     registry.API
-	BuildRecords buildrecord.Service
-	Topology     topology.Service
-	Policies     deploymentpolicy.Service
-	OIDC         interface {
+	Config                  Config
+	OTP                     *otp.Service
+	Auth                    *auth.Service
+	HTTPClient              *http.Client
+	Registry                registry.API
+	Resources               resource.Service
+	BuildJobs               buildjob.Service
+	BuildRecords            buildrecord.Service
+	RegistryPullCredentials RegistryPullCredentialProvider
+	Topology                topology.Service
+	Policies                deploymentpolicy.Service
+	OIDC                    interface {
+		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
+	}
+	RunnerOIDC interface {
 		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
 	}
 	oidcInitError           error
+	runnerOIDCInitError     error
 	credentials             CredentialVault
 	registrations           RegistrationVault
 	limits                  RateLimiter
@@ -60,6 +70,9 @@ type Server struct {
 	random                  io.Reader
 	actionDeviceMu          sync.Mutex
 	actionDevices           actiondevice.Store
+	bootstrapInstall        bootstrapworker.InstallConfig
+	bootstrapRunnerPath     string
+	bootstrapRunnerSHA256   string
 }
 
 func NewServer(cfg Config) *Server {
@@ -70,19 +83,29 @@ func NewServer(cfg Config) *Server {
 		oidcConfig = githuboidc.DefaultConfig()
 	}
 	verifier, verifierErr := githuboidc.New(oidcConfig)
+	runnerOIDCConfig := githuboidc.DefaultConfig()
+	runnerOIDCConfig.Enabled = true
+	runnerOIDCConfig.Audience = buildjob.RunnerOIDCAudience
+	runnerVerifier, runnerVerifierErr := githuboidc.NewIdentityVerifier(runnerOIDCConfig)
 	registryService := registry.NewService()
+	resourceService := resource.Service{Store: resource.NewMemoryStore(), Scopes: registryService, Credentials: resource.NewMemoryCredentialAuthority()}
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
+	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor, Registry: cfg.BuildRegistry}
 	server := &Server{
 		Config:                  cfg,
 		OTP:                     service,
 		HTTPClient:              newGitHubHTTPClient(),
 		Registry:                registryService,
+		Resources:               resourceService,
+		BuildJobs:               buildJobService,
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
 		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
 		OIDC:                    verifier,
+		RunnerOIDC:              runnerVerifier,
 		oidcInitError:           verifierErr,
+		runnerOIDCInitError:     runnerVerifierErr,
 		credentials:             NewCredentialStore(),
 		registrations:           NewRegistrationTokenStore(),
 		limits:                  newRateLimiter(),
@@ -98,6 +121,9 @@ func NewServer(cfg Config) *Server {
 		registryService.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
 	}
 	server.githubReplay = newGitHubReplayStore(githubReplayMaxEntries, githubReplayTTL, server.clock)
+	if cfg.BuildRegistry.Visibility == "private" {
+		server.RegistryPullCredentials = NewGHCRRegistryPullCredentialProvider(cfg.BuildRegistry, nil, cfg.RegistryPull)
+	}
 	return server
 }
 
@@ -124,8 +150,26 @@ func (s *Server) SetHealthCheck(check func(context.Context) error) {
 	s.healthCheck = check
 }
 
+func (s *Server) SetBootstrapRunner(install bootstrapworker.InstallConfig, path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+	s.bootstrapInstall = install
+	s.bootstrapRunnerPath = path
+	s.bootstrapRunnerSHA256 = hex.EncodeToString(hash.Sum(nil))
+	return nil
+}
+
 func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
 	s.githubAppClient = client
+	s.BuildJobs.Repository = client
+	s.BuildJobs.Dispatcher = client
 }
 
 func (s *Server) SetActionDeviceStore(store actiondevice.Store) {
@@ -152,14 +196,27 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/projects/{project_id}/github/repositories/{repository_id}/claim", s.handleGitHubRepositoryClaimAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/github/bindings", s.handleGitHubBindingsAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/github/bindings/{binding_id}", s.handleGitHubBindingAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs", s.handleBuildJobsAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs/{build_job_id}/dispatch", s.handleBuildJobDispatchAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/build-jobs/{build_job_id}", s.handleBuildJobAPI)
+	mux.HandleFunc("/v1/build-runner/claim", s.handleBuildRunnerClaim)
+	mux.HandleFunc("/v1/build-runner/build-spec", s.handleBuildRunnerBuildSpec)
+	mux.HandleFunc("/v1/build-runner/source-access", s.handleBuildRunnerSourceAccess)
+	mux.HandleFunc("/v1/build-runner/result", s.handleBuildRunnerResult)
+	mux.HandleFunc("/v1/build-runner/failure", s.handleBuildRunnerFailure)
 	mux.HandleFunc("/v1/auth/pat/rotate", s.handlePATRotate)
 	mux.HandleFunc("/v1/auth/pat/revoke", s.handlePATRevoke)
 	mux.HandleFunc("/v1/otp/request", s.handleOTPRequest)
 	mux.HandleFunc("/v1/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("/v1/agents/register", s.handleAgentRegister)
+	mux.HandleFunc("/v1/bootstrap/install", s.handleBootstrapInstall)
+	mux.HandleFunc("/v1/bootstrap/runner/linux-amd64", s.handleBootstrapRunner)
+	mux.HandleFunc("/v1/bootstrap/claim", s.handleBootstrapCommandClaim)
+	mux.HandleFunc("/v1/bootstrap/sessions/{session_id}/checkpoint", s.handleBootstrapWorkerCheckpoint)
+	mux.HandleFunc("/v1/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	mux.HandleFunc("/v1/agent/projects/{project_id}/action-devices/{device_id}", s.handleAgentActionDevice)
-	mux.HandleFunc("/internal/bootstrap/sessions/lease", s.handleBootstrapWorkerLeaseWithCheckpoint)
+	mux.HandleFunc("/internal/bootstrap/sessions/lease", s.handleBootstrapWorker)
 	mux.HandleFunc("/internal/bootstrap/sessions/{session_id}/checkpoint", s.handleBootstrapWorkerCheckpoint)
 	mux.HandleFunc("/internal/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/api/internal/alerts", s.handleInternalAlerts)
@@ -170,76 +227,7 @@ func (s *Server) Handler() http.Handler {
 	return s.observer.Wrap(mux)
 }
 
-type capturedHTTPResponse struct {
-	header http.Header
-	body   bytes.Buffer
-	status int
-}
-
-func (r *capturedHTTPResponse) Header() http.Header {
-	if r.header == nil {
-		r.header = make(http.Header)
-	}
-	return r.header
-}
-
-func (r *capturedHTTPResponse) WriteHeader(status int) { r.status = status }
-
-func (r *capturedHTTPResponse) Write(data []byte) (int, error) {
-	if r.status == 0 {
-		r.status = http.StatusOK
-	}
-	return r.body.Write(data)
-}
-
-func (s *Server) handleBootstrapWorkerLeaseWithCheckpoint(w http.ResponseWriter, r *http.Request) {
-	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeRegistryFailure(w, r, err)
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewReader(requestBody))
-	var leaseRequest struct {
-		WorkerID string `json:"worker_id"`
-	}
-	_ = json.Unmarshal(requestBody, &leaseRequest)
-	captured := &capturedHTTPResponse{}
-	s.handleBootstrapWorker(captured, r)
-	if captured.status != http.StatusOK {
-		for key, values := range captured.Header() {
-			w.Header()[key] = append([]string(nil), values...)
-		}
-		w.WriteHeader(captured.status)
-		_, _ = w.Write(captured.body.Bytes())
-		return
-	}
-	var response map[string]any
-	if err := json.Unmarshal(captured.body.Bytes(), &response); err != nil {
-		writeRegistryFailure(w, r, err)
-		return
-	}
-	bundle, ok := response["bundle"].(map[string]any)
-	if !ok {
-		writeRegistryFailure(w, r, fmt.Errorf("bootstrap lease response is missing bundle"))
-		return
-	}
-	sessionID, _ := bundle["session_id"].(string)
-	projectID, _ := bundle["project_id"].(string)
-	leaseToken, _ := response["lease_token"].(string)
-	session, err := s.Registry.GetBootstrapSessionForLease(projectID, sessionID, strings.TrimSpace(leaseRequest.WorkerID), leaseToken, s.clock())
-	if err != nil {
-		writeRegistryFailure(w, r, err)
-		return
-	}
-	bundle["checkpoint"] = session.Checkpoint
-	writeJSON(w, http.StatusOK, response)
-}
-
 func (s *Server) handleBootstrapWorkerCheckpoint(w http.ResponseWriter, r *http.Request) {
-	if s.Config.BootstrapWorkerToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Bootstrap-Worker-Token")), []byte(s.Config.BootstrapWorkerToken)) != 1 {
-		writeRegistryError(w, registry.APIError{Status: http.StatusUnauthorized, Code: "BOOTSTRAP_WORKER_AUTH_REQUIRED", Message: "bootstrap worker token is required", RequestID: r.Header.Get("X-Request-ID")})
-		return
-	}
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -373,6 +361,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentNodeLifecycleResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/managed-resources/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentManagedResourceResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -391,6 +383,15 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if ok {
+		s.resolveRegistryPullCredential(r.Context(), lease.Command)
+		if lease.Command != nil && len(lease.Command.Workload.SecretReferences) > 0 {
+			materials, err := s.Resources.ResolveSecretMaterials(r.Context(), projectID, lease.Command.Workload.SecretReferences)
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureBindingSecretMaterialization})
+				return
+			}
+			lease.Command.SecretMaterials = materials
+		}
 		if lease.Command != nil && lease.Deployment.AttemptCount == 1 {
 			if err := s.validateLeasedDeploymentAuthority(r.Context(), lease.Deployment); err != nil {
 				_, _ = s.Registry.CompleteDeployment(projectID, nodeID, lease.Deployment.ID, r.Header.Get("X-Request-ID"), registry.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: "failed", LeaseToken: lease.LeaseToken, SpecHash: lease.Deployment.SpecHash, ApplicationImage: lease.Command.Image.Reference, FailureCode: "DEPLOYMENT_AUTHORITY_REVOKED", FailureMessageRedacted: "deployment authority changed before first Agent lease"})
@@ -401,6 +402,20 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
+		return
+	}
+	managed, ok, err := s.Resources.LeaseManaged(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if ok {
+		if managed.Action == "apply" && managed.Spec.ResourceType == resourcev1.TypeRedis && managed.Credential == nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureCredentialUnavailable})
+			return
+		}
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "managed_resource", "action": managed.Action, "lease_token": managed.LeaseToken, "spec": managed.Spec, "credential": managed.Credential})
 		return
 	}
 	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)
@@ -437,6 +452,33 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAgentManagedResourceResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 6 {
+		http.NotFound(w, r)
+		return
+	}
+	var result resource.ManagedResult
+	if !decodeResourceJSON(w, r, &result) {
+		return
+	}
+	value, err := s.Resources.CompleteManaged(r.Context(), projectID, parts[len(parts)-2], result)
+	if err != nil {
+		writeResourceResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"resource": value})
 }
 
 func (s *Server) recoverAutomaticDeliveries(ctx context.Context, projectID string) {

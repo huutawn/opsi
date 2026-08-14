@@ -64,3 +64,18 @@ func TestHTTPCloudClientCheckpointParsesConflictWithoutRetry(t *testing.T) {
 		t.Fatalf("code=%q requests=%d lease_loss=%v err=%v", cloudErrorCode(err), requests, isLeaseLossError(err), err)
 	}
 }
+
+func TestHTTPCloudClientClaimedCheckpointUsesPublicRoute(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/bootstrap/sessions/boot-1/checkpoint" {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(registry.BootstrapCheckpoint{})
+	}))
+	defer server.Close()
+	client := httpCloudClient{client: server.Client(), cfg: Config{CloudURL: server.URL, WorkerID: "worker-1", claimed: true}}
+	lease := Lease{Bundle: Bundle{SessionID: "boot-1", ProjectID: "proj-1"}, LeaseToken: "lease-token"}
+	if _, err := client.Checkpoint(context.Background(), lease, registry.BootstrapCheckpoint{}); err != nil {
+		t.Fatal(err)
+	}
+}

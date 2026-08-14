@@ -58,9 +58,19 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 	if err != nil || len(secondInventory) != 1 || secondInventory[0].ClaimStatus != "conflict" || secondInventory[0].ClaimedProjectID != "" {
 		t.Fatalf("cross-project conflict inventory=%+v err=%v", secondInventory, err)
 	}
-	binding, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", CreatedBy: firstProject.CreatedBy})
-	if err != nil {
+	binding, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", GitHubSource: GitHubSource{SelectedRef: "main", ApplicationRoot: "apps/api", BuildContext: ".", BuildStrategy: BuildStrategyDockerfile, DockerfilePath: "apps/api/Dockerfile"}, CreatedBy: firstProject.CreatedBy})
+	if err != nil || binding.ApplicationRoot != "apps/api" || binding.BuildContext != "." || binding.DockerfilePath != "apps/api/Dockerfile" {
 		t.Fatal(err)
+	}
+	if repeated, err := service.CreateGitHubServiceBinding(firstProject.ID, GitHubServiceBindingDraft{ServiceID: firstService.ID, RepositoryID: repository.RepositoryID, ServiceKey: "api", GitHubSource: binding.GitHubSource, CreatedBy: firstProject.CreatedBy}); err != nil || repeated.ID != binding.ID {
+		t.Fatalf("idempotent binding=%+v err=%v", repeated, err)
+	}
+	updated, err := service.UpdateGitHubServiceBinding(firstProject.ID, binding.ID, firstProject.CreatedBy, GitHubSource{SelectedRef: "release", ApplicationRoot: "apps/api", BuildContext: "apps", BuildStrategy: BuildStrategyAuto})
+	if err != nil || updated.SelectedRef != "release" || updated.BuildContext != "apps" {
+		t.Fatalf("updated binding=%+v err=%v", updated, err)
+	}
+	if read, err := service.GetGitHubServiceBinding(firstProject.ID, binding.ID); err != nil || read.ID != updated.ID || read.GitHubSource != updated.GitHubSource {
+		t.Fatalf("read binding=%+v err=%v", read, err)
 	}
 	resolved, err := service.ResolveBuildBinding(context.Background(), uint64(repository.RepositoryID), "api")
 	if err != nil || resolved.BindingID != binding.ID || resolved.ProjectID != firstProject.ID || resolved.RepositoryOwnerID != uint64(repository.OwnerID) {
@@ -84,6 +94,9 @@ func TestPostgresGitHubInventoryClaimsBindingsAndDurableDeliveries(t *testing.T)
 	}
 	if _, err := db.ExecContext(context.Background(), `UPDATE github_service_bindings SET config_path='/absolute' WHERE id=$1`, binding.ID); err == nil {
 		t.Fatal("absolute config path passed database constraint")
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE github_service_bindings SET application_root='other',build_context='apps' WHERE id=$1`, binding.ID); err == nil {
+		t.Fatal("application root outside build context passed database constraint")
 	}
 	if err := service.MarkGitHubRepositoryStatus(repository.RepositoryID, GitHubRepositoryRemoved); err != nil {
 		t.Fatal(err)

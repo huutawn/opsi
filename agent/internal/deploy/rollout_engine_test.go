@@ -46,6 +46,9 @@ func TestRolloutHealthyAThenBrokenBRollsBackExactA(t *testing.T) {
 	if recordB.State != deploymentv1.RolloutStateRolledBack || err == nil {
 		t.Fatalf("B record=%+v err=%v", recordB, err)
 	}
+	if recordB.Error == nil || recordB.Error.Code != deploymentv1.RolloutCodeRuntimeFailed || !strings.Contains(recordB.Error.Message, "application never became ready") {
+		t.Fatalf("B primary failure was not preserved: %+v", recordB.Error)
+	}
 	if !containsOrderedStates(states, deploymentv1.RolloutStateFailed, deploymentv1.RolloutStateRollingBack, deploymentv1.RolloutStateRolledBack) {
 		t.Fatalf("B progress states=%v", states)
 	}
@@ -68,23 +71,40 @@ func TestRolloutFailureWithoutKnownGoodIsTerminalFailed(t *testing.T) {
 	store := openTestStore(t)
 	runtime := newFakeRolloutRuntime()
 	snapshot := testRuntimeSnapshot(t, "job-broken", "c")
-	runtime.failReadiness[snapshot.DeploymentJobID] = errors.New("unready")
+	primary := deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRegistryAuthFailed, "registry denied image pull token=top-secret", false)
+	sanitizedMessage := "registry denied image pull token=[REDACTED]"
+	runtime.failReadiness[snapshot.DeploymentJobID] = primary
 	engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
 	var states []string
+	var failedMessage string
 	record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-broken", snapshot, nil), func(event *ProgressEvent) error {
 		if event != nil && event.Rollout != nil {
 			states = append(states, event.Rollout.State)
+			if event.Rollout.State == deploymentv1.RolloutStateFailed {
+				failedMessage = event.Message
+			}
 		}
 		return nil
 	})
-	if record.State != deploymentv1.RolloutStateFailed || record.TerminalAt == nil || rolloutErrorCode(err) != deploymentv1.RolloutCodeNoKnownGood {
+	if record.State != deploymentv1.RolloutStateFailed || record.TerminalAt == nil || record.Error == nil || record.Error.Code != primary.Code || record.Error.Message != sanitizedMessage || strings.Contains(record.Error.Message, "top-secret") || rolloutErrorCode(err) != primary.Code {
 		t.Fatalf("record=%+v err=%v", record, err)
+	}
+	if !strings.Contains(failedMessage, "no previous known-good snapshot exists") || strings.Contains(failedMessage, deploymentv1.RolloutCodeNoKnownGood) {
+		t.Fatalf("no-known-good outcome was not kept as context: %q", failedMessage)
 	}
 	if containsOrderedStates(states, deploymentv1.RolloutStateRollingBack) || record.Intent.PreviousKnownGoodID != "" {
 		t.Fatalf("failure without known-good claimed rollback: states=%v record=%+v", states, record)
 	}
 	if known, err := store.CurrentKnownGood(context.Background(), snapshot.Target); err != nil || known != nil {
 		t.Fatalf("failed rollout created known-good: %+v err=%v", known, err)
+	}
+	var eventJSON string
+	if err := store.db.QueryRowContext(context.Background(), `SELECT event_json FROM rollout_events WHERE rollout_id = ? AND version = ?`, record.Intent.RolloutID, record.Version).Scan(&eventJSON); err != nil {
+		t.Fatal(err)
+	}
+	var event deploymentv1.RolloutEvent
+	if err := json.Unmarshal([]byte(eventJSON), &event); err != nil || event.Error == nil || event.Error.Code != primary.Code || event.Error.Message != sanitizedMessage {
+		t.Fatalf("stored event=%+v err=%v", event, err)
 	}
 }
 
@@ -274,9 +294,18 @@ func TestRolloutApplyAndReadinessRollbackFailuresAreTerminal(t *testing.T) {
 			tc.configure(runtime, a)
 			b := testRuntimeSnapshot(t, "job-b", "b")
 			runtime.failReadiness[b.DeploymentJobID] = errors.New("B failed")
-			record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-b", b, knownA), nil)
-			if err == nil || record.State != deploymentv1.RolloutStateRollbackFailed || record.TerminalAt == nil {
+			var rollbackFailure string
+			record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-b", b, knownA), func(event *ProgressEvent) error {
+				if event != nil && event.Rollout != nil && event.Rollout.State == deploymentv1.RolloutStateRollbackFailed {
+					rollbackFailure = event.Message
+				}
+				return nil
+			})
+			if err == nil || record.State != deploymentv1.RolloutStateRollbackFailed || record.TerminalAt == nil || record.Error == nil || record.Error.Code != deploymentv1.RolloutCodeRuntimeFailed || record.Error.Message != "B failed" || strings.Contains(record.Error.Message, "rollback") {
 				t.Fatalf("record=%+v err=%v", record, err)
+			}
+			if !strings.Contains(rollbackFailure, "rollback "+tc.name+" failed") {
+				t.Fatalf("rollback failure context=%q", rollbackFailure)
 			}
 		})
 	}

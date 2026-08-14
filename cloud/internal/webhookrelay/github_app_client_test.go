@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 )
 
 type githubAppRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -77,6 +79,104 @@ func githubAppResponse(status int, body string) *http.Response {
 		StatusCode: status,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestGitHubExecutorDispatchUsesAppAuthorityAndMinimalInputs(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	requests := 0
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		switch requests {
+		case 1:
+			if request.Method != http.MethodGet || request.URL.Path != "/repos/opsi/executor/installation" || !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") {
+				t.Fatalf("installation request=%s %s", request.Method, request.URL.Path)
+			}
+			return githubAppResponse(http.StatusOK, `{"id":555}`), nil
+		case 2:
+			if request.Method != http.MethodPost || request.URL.Path != "/app/installations/555/access_tokens" {
+				t.Fatalf("token request=%s %s", request.Method, request.URL.Path)
+			}
+			return githubAppResponse(http.StatusCreated, `{"token":"executor-installation-token","expires_at":"`+now.Add(time.Hour).Format(time.RFC3339)+`"}`), nil
+		case 3:
+			if request.Method != http.MethodPost || request.URL.Path != "/repos/opsi/executor/actions/workflows/.github/workflows/opsi-build-executor.yml/dispatches" || request.Header.Get("Authorization") != "Bearer executor-installation-token" {
+				t.Fatalf("dispatch request=%s %s", request.Method, request.URL.Path)
+			}
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload struct {
+				Ref    string            `json:"ref"`
+				Inputs map[string]string `json:"inputs"`
+			}
+			if json.Unmarshal(body, &payload) != nil || payload.Ref != "main" || len(payload.Inputs) != 2 || payload.Inputs["build_job_id"] != "job-1" || payload.Inputs["attempt_id"] != "attempt-1" {
+				t.Fatalf("payload=%s", body)
+			}
+			for _, forbidden := range []string{"executor-installation-token", "private_key", "registry", "password", "cloud_pat", "source_token"} {
+				if strings.Contains(strings.ToLower(string(body)), forbidden) {
+					t.Fatalf("dispatch input leaked %q: %s", forbidden, body)
+				}
+			}
+			return githubAppResponse(http.StatusNoContent, ""), nil
+		default:
+			t.Fatalf("unexpected request %d", requests)
+			return nil, nil
+		}
+	}), now)
+	config := buildjob.ExecutorConfig{Owner: "opsi", Repository: "executor", Workflow: ".github/workflows/opsi-build-executor.yml", Ref: "refs/heads/main"}
+	if _, err := client.DispatchWorkflow(context.Background(), config, "job-1", "attempt-1"); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
+
+func TestGitHubBuildSourceResolutionUsesExactCommitAndTransientToken(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	sha := strings.Repeat("a", 40)
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Header.Get("Authorization") != "Bearer transient-installation-token" {
+			t.Fatalf("unexpected authorization header")
+		}
+		switch request.URL.EscapedPath() {
+		case "/repos/owner/repository/commits/main":
+			return githubAppResponse(http.StatusOK, `{"sha":"`+sha+`"}`), nil
+		case "/repos/owner/repository/contents/apps/api/Dockerfile":
+			if request.URL.Query().Get("ref") != sha {
+				t.Fatalf("file lookup did not use exact SHA: %s", request.URL.RawQuery)
+			}
+			return githubAppResponse(http.StatusOK, `{"type":"file","path":"apps/api/Dockerfile"}`), nil
+		default:
+			return githubAppResponse(http.StatusNotFound, `{}`), nil
+		}
+	}), now)
+	client.tokens[99] = installationToken{Token: "transient-installation-token", ExpiresAt: now.Add(time.Hour)}
+
+	resolved, err := client.ResolveCommit(context.Background(), 99, "owner/repository", "main")
+	if err != nil || resolved != sha {
+		t.Fatalf("resolved=%q err=%v", resolved, err)
+	}
+	exists, err := client.RepositoryFileExists(context.Background(), 99, "owner/repository", resolved, "apps/api/Dockerfile")
+	if err != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
+	}
+	exists, err = client.RepositoryFileExists(context.Background(), 99, "owner/repository", resolved, "Dockerfile")
+	if err != nil || exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
+	}
+}
+
+func TestGitHubBuildSourceResolutionFailsClosedWithoutCredentialLeak(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transient-installation-token")
+	}), now)
+	client.tokens[99] = installationToken{Token: "transient-installation-token", ExpiresAt: now.Add(time.Hour)}
+	_, err := client.ResolveCommit(context.Background(), 99, "owner/repository", "main")
+	if buildjob.Code(err) != "GITHUB_REPOSITORY_UNAVAILABLE" || strings.Contains(err.Error(), "transient-installation-token") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -391,5 +491,30 @@ func TestInstallationTokenRequestBodyIsCanonicalEmptyObject(t *testing.T) {
 	_, _, err := client.InstallationToken(t.Context(), 1)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRepositoryReadTokenIsExactAndNotCached(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	requests := 0
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		var body struct {
+			RepositoryIDs []int64           `json:"repository_ids"`
+			Permissions   map[string]string `json:"permissions"`
+		}
+		if json.NewDecoder(request.Body).Decode(&body) != nil || len(body.RepositoryIDs) != 1 || body.RepositoryIDs[0] != 77 || len(body.Permissions) != 1 || body.Permissions["contents"] != "read" {
+			t.Fatalf("body=%+v", body)
+		}
+		return githubAppResponse(http.StatusCreated, `{"token":"source-token","expires_at":"`+now.Add(time.Hour).Format(time.RFC3339)+`"}`), nil
+	}), now)
+	for range 2 {
+		token, expiresAt, err := client.RepositoryReadToken(t.Context(), 42, 77)
+		if err != nil || token != "source-token" || !expiresAt.Equal(now.Add(time.Hour)) {
+			t.Fatalf("token=%q expires=%s err=%v", token, expiresAt, err)
+		}
+	}
+	if requests != 2 {
+		t.Fatalf("repository-scoped source tokens must not be cached: requests=%d", requests)
 	}
 }

@@ -12,7 +12,6 @@ import { currentEnvironment } from "@/lib/presentation/infrastructure/model";
 export function AppShell() {
   const console = useConsoleState();
   const [navigationOpen, setNavigationOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const navigation = useRef<HTMLElement>(null);
   const main = useRef<HTMLElement>(null);
@@ -55,12 +54,12 @@ export function AppShell() {
   const environments = console.state.foundation.placement?.environments ?? [];
   const environment = currentEnvironment(console.state.foundation.placement, console.route.environment ?? "");
   const environmentName = environment?.name ?? (environments.length > 1 ? "Choose environment" : "Environment not reported");
-  return <div className={`app ${collapsed ? "sidebarCollapsed" : ""}`}>
+  return <div className="app">
     <a className="skipLink" href="#main">Skip to content</a>
-    <Sidebar collapsed={collapsed} drawerRef={navigation} environment={environmentName} onBrowse={() => console.navigate({ projectID: "", view: "projects", tab: "" })} onClose={closeNavigation} onCollapse={() => setCollapsed((value) => !value)} onNavigate={console.navigate} onSelectProject={console.setProjectID} open={navigationOpen} orgID={console.session.org_id ?? ""} project={console.state.project} projects={console.state.projects} route={console.route} />
+    <Sidebar agentConnected={console.session.agent_connected} cloudConnected={console.session.cloud_connected} drawerRef={navigation} environment={environmentName} environmentID={environment?.id ?? ""} environments={environments} onBrowse={() => console.navigate({ projectID: "", view: "projects", tab: "" })} onClose={closeNavigation} onEnvironment={(id) => console.navigate({ environment: id })} onNavigate={console.navigate} onSelectProject={console.setProjectID} open={navigationOpen} orgID={console.session.org_id ?? ""} project={console.state.project} projects={console.state.projects} route={console.route} />
     <main className="main" id="main" ref={main} tabIndex={-1}>
-      <ContextHeader environment={environmentName} environmentID={environment?.id ?? ""} environments={environments} lastUpdated={latestUpdate(console)} menuButtonRef={menuButton} onEnvironment={(id) => console.navigate({ environment: id })} onMenu={() => setNavigationOpen(true)} onRefresh={() => void console.actions.load()} project={console.state.project} route={console.route} serviceScope={console.state.services.find((item) => item.id === console.route.service)?.name} session={console.session} />
-      <ConsoleRouter console={console} />
+      <ContextHeader environment={environmentName} lastUpdated={latestUpdate(console)} menuButtonRef={menuButton} onMenu={() => setNavigationOpen(true)} onRefresh={() => void console.actions.load()} project={console.state.project} route={console.route} serviceScope={console.state.services.find((item) => item.id === console.route.service)?.name} session={console.session} />
+      <div className="shellContent"><ConsoleRouter console={console} /></div>
     </main>
     <MutationDialog console={console} />
   </div>;

@@ -49,6 +49,7 @@ services:
       OPSI_CLOUD_ALERTS_OUTBOX_PATH: ${OPSI_CLOUD_ALERTS_OUTBOX_PATH}
       OPSI_CLOUD_ALERTS_INTERNAL_TOKEN: ${OPSI_CLOUD_ALERTS_INTERNAL_TOKEN}
       OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN: ${OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN}
+      OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG: /etc/opsi/bootstrap-worker.json
       OPSI_CLOUD_BOOTSTRAP_SECRET_KEY: ${OPSI_CLOUD_BOOTSTRAP_SECRET_KEY}
       OPSI_CLOUD_GITHUB_APP_CLIENT_ID: ${OPSI_CLOUD_GITHUB_APP_CLIENT_ID}
       OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET: ${OPSI_CLOUD_GITHUB_APP_CLIENT_SECRET}
@@ -61,6 +62,7 @@ services:
         condition: service_healthy
     volumes:
       - ./config/cloud.json:/etc/opsi/cloud.json:ro,Z
+      - ./config/bootstrap-worker.json:/etc/opsi/bootstrap-worker.json:ro,Z
       - ./secrets/github-app-private-key.pem:/run/secrets/github-app-private-key.pem:ro,Z
       - ./secrets:/run/opsi-secrets:Z
       - ./secrets/github-app-private-key.pem:/run/opsi-secrets/github-app-private-key.pem:ro,Z

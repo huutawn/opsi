@@ -6,13 +6,196 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
+
+func TestBootstrapCommandClaimsReviewedSessionOnce(t *testing.T) {
+	server := NewServer(Config{BootstrapWorkerToken: "long-lived-worker-secret", PublicBaseURL: "https://cloud.example"})
+	runner := t.TempDir() + "/opsi-bootstrap-worker"
+	if err := os.WriteFile(runner, []byte("reviewed-runner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	install := bootstrapInstallFixture()
+	if err := server.SetBootstrapRunner(install, runner); err != nil {
+		t.Fatal(err)
+	}
+	project, err := server.Registry.CreateProject("org-1", "Command", "command", "", "project-command")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+	create := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/bootstrap-sessions", bytes.NewBufferString(`{"role":"first_server","public_host":"203.0.113.80","auth_method":"command"}`))
+	create.Header.Set("Idempotency-Key", "command-create")
+	create.Header.Set("X-Request-ID", "req-command-create")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, create)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var session registry.BootstrapSession
+	if err := json.NewDecoder(created.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Status != registry.BootstrapWaiting || session.AuthMethod != "command" || !strings.Contains(session.BootstrapCommand, "OPSI_BOOTSTRAP_TOKEN=") || strings.Contains(session.BootstrapCommand, server.Config.BootstrapWorkerToken) {
+		t.Fatalf("session=%+v command=%q", session, session.BootstrapCommand)
+	}
+	duplicateCreate := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/bootstrap-sessions", bytes.NewBufferString(`{"role":"first_server","public_host":"203.0.113.80","auth_method":"command"}`))
+	duplicateCreate.Header.Set("Idempotency-Key", "command-create")
+	duplicateCreate.Header.Set("X-Request-ID", "req-command-create-duplicate")
+	duplicateCreateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateCreateResponse, duplicateCreate)
+	var duplicateSession registry.BootstrapSession
+	if duplicateCreateResponse.Code != http.StatusCreated || json.NewDecoder(duplicateCreateResponse.Body).Decode(&duplicateSession) != nil || duplicateSession.ID != session.ID || duplicateSession.BootstrapCommand != session.BootstrapCommand {
+		t.Fatalf("duplicate create status=%d session=%+v body=%s", duplicateCreateResponse.Code, duplicateSession, duplicateCreateResponse.Body.String())
+	}
+	token := strings.TrimSuffix(strings.SplitN(session.BootstrapCommand, "OPSI_BOOTSTRAP_TOKEN='", 2)[1], "' sh")
+	installRequest := httptest.NewRequest(http.MethodGet, "/v1/bootstrap/install", nil)
+	installResponse := httptest.NewRecorder()
+	handler.ServeHTTP(installResponse, installRequest)
+	if installResponse.Code != http.StatusOK || !strings.Contains(installResponse.Body.String(), server.bootstrapRunnerSHA256) || !strings.Contains(installResponse.Body.String(), "https://cloud.example/v1/bootstrap/claim") || strings.Contains(installResponse.Body.String(), token) {
+		t.Fatalf("install status=%d body=%s", installResponse.Code, installResponse.Body.String())
+	}
+	runnerRequest := httptest.NewRequest(http.MethodGet, "/v1/bootstrap/runner/linux-amd64", nil)
+	runnerResponse := httptest.NewRecorder()
+	handler.ServeHTTP(runnerResponse, runnerRequest)
+	if runnerResponse.Code != http.StatusOK || runnerResponse.Body.String() != "reviewed-runner" {
+		t.Fatalf("runner status=%d body=%q", runnerResponse.Code, runnerResponse.Body.String())
+	}
+	pool := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewBufferString(`{"worker_id":"worker-pool"}`))
+	pool.Header.Set("X-Bootstrap-Worker-Token", server.Config.BootstrapWorkerToken)
+	poolResponse := httptest.NewRecorder()
+	handler.ServeHTTP(poolResponse, pool)
+	if poolResponse.Code != http.StatusNoContent {
+		t.Fatalf("pool leased command session status=%d body=%s", poolResponse.Code, poolResponse.Body.String())
+	}
+	claim := func(value string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/bootstrap/claim", bytes.NewBufferString(`{"worker_id":"target-command"}`))
+		req.Header.Set("Authorization", "Bootstrap "+value)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	if w := claim(session.ID + ".wrong"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token status=%d body=%s", w.Code, w.Body.String())
+	}
+	claimed := claim(token)
+	if claimed.Code != http.StatusOK {
+		t.Fatalf("claim status=%d body=%s", claimed.Code, claimed.Body.String())
+	}
+	var lease struct {
+		LeaseToken string `json:"lease_token"`
+		Bundle     struct {
+			SessionID  string                        `json:"session_id"`
+			ProjectID  string                        `json:"project_id"`
+			Checkpoint registry.BootstrapCheckpoint  `json:"checkpoint"`
+			Install    bootstrapworker.InstallConfig `json:"install"`
+			SSH        struct {
+				AuthMethod string `json:"auth_method"`
+				Username   string `json:"username"`
+				PrivateKey string `json:"private_key"`
+				Password   string `json:"password"`
+			} `json:"ssh"`
+		} `json:"bundle"`
+	}
+	if err := json.NewDecoder(claimed.Body).Decode(&lease); err != nil {
+		t.Fatal(err)
+	}
+	if lease.Bundle.SessionID != session.ID || lease.Bundle.ProjectID != project.ID || lease.Bundle.SSH.AuthMethod != "command" || lease.Bundle.SSH.Username != "root" || lease.Bundle.SSH.PrivateKey != "" || lease.Bundle.SSH.Password != "" || lease.Bundle.Install != install || lease.LeaseToken == "" {
+		t.Fatalf("lease=%+v", lease)
+	}
+	if server.credentials.Len() != 0 {
+		t.Fatal("one-time command token remained after claim")
+	}
+	if w := claim(token); w.Code != http.StatusUnauthorized {
+		t.Fatalf("replay status=%d body=%s", w.Code, w.Body.String())
+	}
+	progress := httptest.NewRequest(http.MethodPost, "/v1/bootstrap/sessions/"+session.ID+"/progress", bytes.NewBufferString(`{"project_id":"`+project.ID+`","status":"connecting","message":"connected"}`))
+	progress.Header.Set("X-Bootstrap-Worker-ID", "target-command")
+	progress.Header.Set("X-Bootstrap-Lease-Token", lease.LeaseToken)
+	progressResponse := httptest.NewRecorder()
+	handler.ServeHTTP(progressResponse, progress)
+	if progressResponse.Code != http.StatusOK {
+		t.Fatalf("lease-bound progress status=%d body=%s", progressResponse.Code, progressResponse.Body.String())
+	}
+	finish := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/finish", bytes.NewBufferString(`{"project_id":"`+project.ID+`","status":"failed","failure_code":"BOOTSTRAP_COMMAND_FAILED","message":"command stopped","retryable":true}`))
+	finish.Header.Set("X-Bootstrap-Worker-ID", "target-command")
+	finish.Header.Set("X-Bootstrap-Lease-Token", lease.LeaseToken)
+	finishResponse := httptest.NewRecorder()
+	handler.ServeHTTP(finishResponse, finish)
+	failed, _ := server.Registry.GetBootstrapSession(project.ID, session.ID)
+	if finishResponse.Code != http.StatusOK || failed.Status != registry.BootstrapDeadLetter {
+		t.Fatalf("finish status=%d session=%+v body=%s", finishResponse.Code, failed, finishResponse.Body.String())
+	}
+	retry := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/bootstrap-sessions/"+session.ID+"/retry", bytes.NewBufferString(`{}`))
+	retry.Header.Set("Idempotency-Key", "command-retry")
+	retry.Header.Set("X-Request-ID", "req-command-retry")
+	retriedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(retriedResponse, retry)
+	var retried registry.BootstrapSession
+	if retriedResponse.Code != http.StatusAccepted || json.NewDecoder(retriedResponse.Body).Decode(&retried) != nil || retried.Status != registry.BootstrapWaiting || retried.BootstrapCommand == "" || retried.BootstrapCommand == session.BootstrapCommand {
+		t.Fatalf("retry status=%d session=%+v body=%s", retriedResponse.Code, retried, retriedResponse.Body.String())
+	}
+	duplicateRetry := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/bootstrap-sessions/"+session.ID+"/retry", bytes.NewBufferString(`{}`))
+	duplicateRetry.Header.Set("Idempotency-Key", "command-retry")
+	duplicateRetry.Header.Set("X-Request-ID", "req-command-retry-duplicate")
+	duplicateRetryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateRetryResponse, duplicateRetry)
+	var duplicate registry.BootstrapSession
+	if duplicateRetryResponse.Code != http.StatusAccepted || json.NewDecoder(duplicateRetryResponse.Body).Decode(&duplicate) != nil || duplicate.BootstrapCommand != retried.BootstrapCommand {
+		t.Fatalf("duplicate retry status=%d session=%+v body=%s", duplicateRetryResponse.Code, duplicate, duplicateRetryResponse.Body.String())
+	}
+	retryToken := strings.TrimSuffix(strings.SplitN(retried.BootstrapCommand, "OPSI_BOOTSTRAP_TOKEN='", 2)[1], "' sh")
+	if w := claim(retryToken); w.Code != http.StatusOK {
+		t.Fatalf("retried command claim status=%d body=%s", w.Code, w.Body.String())
+	}
+	audit, _ := server.Registry.ListAudit(project.ID)
+	auditJSON, _ := json.Marshal(audit)
+	if bytes.Contains(auditJSON, []byte(token)) || bytes.Contains(auditJSON, []byte(retryToken)) {
+		t.Fatal("bootstrap command token leaked into audit events")
+	}
+}
+
+func TestBootstrapCommandExpiresBeforeClaim(t *testing.T) {
+	server := NewServer(Config{PublicBaseURL: "https://cloud.example"})
+	now := time.Now().UTC()
+	store := NewCredentialStore()
+	store.now = func() time.Time { return now }
+	server.SetSecurityStores(store, nil, nil)
+	runner := t.TempDir() + "/opsi-bootstrap-worker"
+	if err := os.WriteFile(runner, []byte("runner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.SetBootstrapRunner(bootstrapInstallFixture(), runner); err != nil {
+		t.Fatal(err)
+	}
+	project, _ := server.Registry.CreateProject("org-1", "Expired", "expired", "", "project-expired")
+	session, _ := server.Registry.CreateBootstrapSession(project.ID, "first_server", "203.0.113.81", "root", "command", "", "boot-expired", 0)
+	token := session.ID + ".btok-expired"
+	store.Put(session.ID, BootstrapCredential{AuthMethod: "command", Username: "root", Token: []byte(token)}, time.Second)
+	now = now.Add(time.Second)
+	req := httptest.NewRequest(http.MethodPost, "/v1/bootstrap/claim", bytes.NewBufferString(`{"worker_id":"target-expired"}`))
+	req.Header.Set("Authorization", "Bootstrap "+token)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expired claim status=%d body=%s", w.Code, w.Body.String())
+	}
+	stored, _ := server.Registry.GetBootstrapSession(project.ID, session.ID)
+	if stored.Status != registry.BootstrapWaiting || stored.LeaseOwner != "" {
+		t.Fatalf("expired token mutated session: %+v", stored)
+	}
+}
+
+func bootstrapInstallFixture() bootstrapworker.InstallConfig {
+	return bootstrapworker.InstallConfig{AgentCloudURL: "https://cloud.example", K3sVersion: "v1.32.5+k3s1", K3sInstallerURL: "https://get.k3s.io", K3sInstallerSHA256: strings.Repeat("b", 64), AgentInstallURL: "https://downloads.example/opsi-agent", AgentInstallSHA256: strings.Repeat("a", 64), Production: true}
+}
 
 func TestBootstrapWorkerLeaseAndLeaseBoundMutations(t *testing.T) {
 	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})
@@ -110,10 +293,10 @@ func TestBootstrapWorkerCheckpointAPIAndLeaseResponse(t *testing.T) {
 	body := func(index int, last, fingerprint string) string {
 		return `{"project_id":"` + project.ID + `","schema_version":1,"plan_version":"first-server-v1","plan_fingerprint":"` + fingerprint + `","next_step_index":` + fmt.Sprint(index) + `,"last_completed_step":"` + last + `"}`
 	}
-	if w := request(body(0, "", strings.Repeat("a", 64)), nil); w.Code != http.StatusUnauthorized {
+	if w := request(body(0, "", strings.Repeat("a", 64)), nil); w.Code != http.StatusConflict {
 		t.Fatalf("missing token status=%d body=%s", w.Code, w.Body.String())
 	}
-	if w := request(body(0, "", strings.Repeat("a", 64)), map[string]string{"X-Bootstrap-Worker-Token": "wrong"}); w.Code != http.StatusUnauthorized {
+	if w := request(body(0, "", strings.Repeat("a", 64)), map[string]string{"X-Bootstrap-Worker-Token": "wrong"}); w.Code != http.StatusConflict {
 		t.Fatalf("invalid token status=%d body=%s", w.Code, w.Body.String())
 	}
 	leaseReq := httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/lease", bytes.NewBufferString(`{"worker_id":"worker-1"}`))
@@ -133,7 +316,7 @@ func TestBootstrapWorkerCheckpointAPIAndLeaseResponse(t *testing.T) {
 	if lease.Bundle.Checkpoint.SchemaVersion != 0 {
 		t.Fatalf("fresh checkpoint=%+v", lease.Bundle.Checkpoint)
 	}
-	workerAuth := map[string]string{"X-Bootstrap-Worker-Token": "worker-secret", "X-Bootstrap-Worker-ID": "worker-1", "X-Bootstrap-Lease-Token": lease.LeaseToken}
+	workerAuth := map[string]string{"X-Bootstrap-Worker-ID": "worker-1", "X-Bootstrap-Lease-Token": lease.LeaseToken}
 	if w := request(body(0, "", strings.Repeat("a", 64)), map[string]string{"X-Bootstrap-Worker-Token": "worker-secret", "X-Bootstrap-Lease-Token": lease.LeaseToken}); w.Code != http.StatusForbidden {
 		t.Fatalf("missing worker id status=%d body=%s", w.Code, w.Body.String())
 	}

@@ -63,6 +63,7 @@ const (
 	DeploymentDeadLetter   = "dead_letter"
 
 	BootstrapPending    = "pending"
+	BootstrapWaiting    = "waiting"
 	BootstrapRetryWait  = "retry_wait"
 	BootstrapDeadLetter = "dead_letter"
 
@@ -303,6 +304,7 @@ type BootstrapSession struct {
 	Checkpoint          BootstrapCheckpoint `json:"checkpoint"`
 	CreatedAt           time.Time           `json:"created_at"`
 	UpdatedAt           time.Time           `json:"updated_at"`
+	BootstrapCommand    string              `json:"bootstrap_command,omitempty"`
 }
 
 const (
@@ -651,7 +653,7 @@ type API interface {
 	CompleteNodeLifecycle(projectID, nodeID, jobID, requestID string, result NodeLifecycleResult) (NodeLifecycleJob, error)
 	CreateBootstrapSession(projectID, role, publicHost, username, authMethod, createdBy, key string, sshPort int) (BootstrapSession, error)
 	UpdateBootstrapSession(projectID, sessionID, status, message string) (BootstrapSession, error)
-	LeaseNextBootstrapSession(workerID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error)
+	LeaseNextBootstrapSession(workerID, sessionID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error)
 	RenewBootstrapLease(projectID, sessionID, workerID, rawLeaseToken string, now time.Time, leaseDuration time.Duration) (BootstrapSession, error)
 	RecoverExpiredBootstrapLeases(now time.Time) (BootstrapRecoverySummary, error)
 	GetBootstrapSessionForLease(projectID, sessionID, workerID, leaseToken string, now time.Time) (BootstrapSession, error)
@@ -688,6 +690,8 @@ type API interface {
 	ClaimGitHubRepository(projectID string, repositoryID int64, userID string) (GitHubRepositoryClaim, error)
 	ReleaseGitHubRepository(projectID string, repositoryID int64, userID string) error
 	CreateGitHubServiceBinding(projectID string, draft GitHubServiceBindingDraft) (GitHubServiceBinding, error)
+	GetGitHubServiceBinding(projectID, bindingID string) (GitHubServiceBinding, error)
+	UpdateGitHubServiceBinding(projectID, bindingID, userID string, source GitHubSource) (GitHubServiceBinding, error)
 	RemoveGitHubServiceBinding(projectID, bindingID, userID string) error
 	ListGitHubServiceBindings(projectID string) ([]GitHubServiceBinding, error)
 	ResolveBuildBinding(ctx context.Context, repositoryID uint64, serviceKey string) (buildrecord.Binding, error)
@@ -1289,8 +1293,12 @@ func (s *Service) CreateBootstrapSession(projectID, role, publicHost, username, 
 			break
 		}
 	}
-	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: BootstrapPending, IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), MaxAttempts: defaultBootstrapMaxAttempts, CreatedAt: now, UpdatedAt: now}
-	event := BootstrapEvent{ID: newID("evt"), OrgID: project.OrgID, ProjectID: project.ID, SessionID: session.ID, NodeID: node.ID, Level: "info", Step: "pending", MessageRedacted: "bootstrap session pending worker", ProgressPercent: 0, CreatedAt: now}
+	status, step, message := BootstrapPending, "pending", "bootstrap session pending worker"
+	if authMethod == "command" {
+		status, step, message = BootstrapWaiting, BootstrapWaiting, "waiting for bootstrap command connection"
+	}
+	session := BootstrapSession{ID: newID("boot"), OrgID: project.OrgID, ProjectID: project.ID, EnvironmentID: env.ID, RuntimeID: runtime.ID, NodeID: node.ID, CreatedBy: createdBy, Role: role, Status: status, IdempotencyKey: key, PublicHost: publicHost, SSHPort: sshPort, SSHUsername: username, AuthMethod: authMethod, ExpiresAt: now.Add(30 * time.Minute), MaxAttempts: defaultBootstrapMaxAttempts, CreatedAt: now, UpdatedAt: now}
+	event := BootstrapEvent{ID: newID("evt"), OrgID: project.OrgID, ProjectID: project.ID, SessionID: session.ID, NodeID: node.ID, Level: "info", Step: step, MessageRedacted: message, ProgressPercent: 0, CreatedAt: now}
 	runtime.Status = RuntimeProvisioning
 	runtime.UpdatedAt = now
 	s.nodes[node.ID] = node
@@ -1337,7 +1345,7 @@ func (s *Service) UpdateBootstrapSession(projectID, sessionID, status, message s
 	return session, nil
 }
 
-func (s *Service) LeaseNextBootstrapSession(workerID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error) {
+func (s *Service) LeaseNextBootstrapSession(workerID, sessionID string, now time.Time, leaseDuration time.Duration) (BootstrapSessionLease, bool, error) {
 	if err := ValidateBootstrapWorkerID(workerID); err != nil {
 		return BootstrapSessionLease{}, false, err
 	}
@@ -1354,6 +1362,11 @@ func (s *Service) LeaseNextBootstrapSession(workerID string, now time.Time, leas
 	var selected BootstrapSession
 	for _, session := range s.bootstraps {
 		eligible := session.Status == "created" || session.Status == BootstrapPending || (session.Status == BootstrapRetryWait && session.NextAttemptAt != nil && !session.NextAttemptAt.After(now))
+		if sessionID != "" {
+			eligible = session.ID == sessionID && session.AuthMethod == "command" && session.Status == BootstrapWaiting
+		} else if session.AuthMethod == "command" {
+			eligible = false
+		}
 		if !eligible || session.LeaseTokenHash != "" || !now.Before(session.ExpiresAt) {
 			continue
 		}
@@ -2465,7 +2478,7 @@ func (s *Service) expireBootstrapsLocked() {
 
 func isActiveBootstrap(status string) bool {
 	switch status {
-	case "created", BootstrapPending, BootstrapRetryWait, "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
+	case "created", BootstrapPending, BootstrapWaiting, BootstrapRetryWait, "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
 		return true
 	default:
 		return false
@@ -2541,7 +2554,7 @@ func validateBootstrapLease(session BootstrapSession, workerID, leaseToken strin
 
 func bootstrapProgress(status string) int {
 	switch status {
-	case BootstrapPending, BootstrapRetryWait, "created":
+	case BootstrapPending, BootstrapWaiting, BootstrapRetryWait, "created":
 		return 0
 	case "preflight", "validating":
 		return 10

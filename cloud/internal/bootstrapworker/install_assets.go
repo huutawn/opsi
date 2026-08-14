@@ -39,6 +39,10 @@ func ValidateBundle(bundle Bundle) error {
 		return errors.New("ssh username is required")
 	}
 	switch bundle.SSH.AuthMethod {
+	case "command":
+		if bundle.SSH.PrivateKey != "" || bundle.SSH.Password != "" {
+			return errors.New("bootstrap command bundle contains SSH credentials")
+		}
 	case "password":
 		if bundle.SSH.Password == "" || bundle.SSH.PrivateKey != "" {
 			return errors.New("ssh password credential is missing")

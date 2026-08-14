@@ -28,36 +28,10 @@ func (r *recordingApplier) Delete(_ context.Context, namespace, projectID, servi
 	return nil
 }
 
-func TestManagerCreateManagedAppliesAndStores(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "catalog.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	applier := &recordingApplier{}
-	manager := Manager{Store: store, Applier: applier, Probe: func(context.Context, string, string) error { return nil }}
-
-	service, err := manager.CreateManaged(context.Background(), CreateManagedRequest{
-		ProjectID: "demo",
-		Name:      "cache",
-		Type:      "redis",
-		Namespace: "prod",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if service.ID != "cache" || service.Status != "created" || applier.namespace != "prod" {
-		t.Fatalf("bad create result: service=%#v namespace=%q", service, applier.namespace)
-	}
-	if !strings.Contains(applier.manifest, "name: opsi-svc-cache") {
-		t.Fatalf("manifest was not applied:\n%s", applier.manifest)
-	}
-	got, err := store.GetManagedService(context.Background(), "demo", "cache")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil || got.SecretName != "opsi-svc-cache" || got.Config["host"] != "cache.prod.svc.cluster.local" {
-		t.Fatalf("service not stored: %#v", got)
+func TestManagerCreateManagedRequiresCloudAuthority(t *testing.T) {
+	_, err := (Manager{}).CreateManaged(context.Background(), CreateManagedRequest{ProjectID: "demo", Name: "cache", Type: "redis"})
+	if err == nil || !strings.Contains(err.Error(), "Cloud-owned") {
+		t.Fatalf("err=%v", err)
 	}
 }
 

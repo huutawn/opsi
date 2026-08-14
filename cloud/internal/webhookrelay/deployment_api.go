@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"sort"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
@@ -298,6 +299,21 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 	if err != nil {
 		return result, err
 	}
+	managedEnvironment, managedSecrets, err := s.Resources.ApplicationRuntimeConfiguration(r.Context(), projectID, request.EnvironmentID, service.ID)
+	if err != nil {
+		return result, err
+	}
+	workload.Environment = append(workload.Environment, managedEnvironment...)
+	workload.SecretReferences = append(workload.SecretReferences, managedSecrets...)
+	sort.Slice(workload.Environment, func(i, j int) bool { return workload.Environment[i].Name < workload.Environment[j].Name })
+	if err := deploymentv1.ValidateEnvironment(workload.Environment, workload.SecretReferences); err != nil {
+		return result, registry.APIError{Status: 409, Code: "MANAGED_RESOURCE_SPEC_INVALID", Message: err.Error(), RequestID: r.Header.Get("X-Request-ID")}
+	}
+	image, err := deploymentv1.NewImmutableImage(record.Build.OCIRepository, record.Build.OCIDigest)
+	if err != nil {
+		return result, registry.APIError{Status: 409, Code: "BUILD_ARTIFACT_INVALID", Message: "BuildRecord image identity is invalid", RequestID: r.Header.Get("X-Request-ID")}
+	}
+	s.associateRegistryPullCredential(image, &workload)
 	if request.Workload != nil {
 		clientWorkload := request.Workload.Normalize()
 		if err := clientWorkload.Validate(); err != nil {
@@ -306,10 +322,6 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 		if !reflect.DeepEqual(clientWorkload, workload) {
 			return result, registry.APIError{Status: 409, Code: "WORKLOAD_CANONICAL_MISMATCH", Message: "client WorkloadSpec does not exactly match the Cloud-compiled canonical spec", NextAction: "refresh_cli_spec", RequestID: r.Header.Get("X-Request-ID")}
 		}
-	}
-	image, err := deploymentv1.NewImmutableImage(record.Build.OCIRepository, record.Build.OCIDigest)
-	if err != nil {
-		return result, registry.APIError{Status: 409, Code: "BUILD_ARTIFACT_INVALID", Message: "BuildRecord image identity is invalid", RequestID: r.Header.Get("X-Request-ID")}
 	}
 	specHash, _ := workload.Hash()
 	snapshot := deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: workload, SpecHash: specHash, ActorUserID: actor, IdempotencyKey: request.IdempotencyKey, CreatedAt: s.clock(), Authority: deploymentv1.AuthoritySnapshot{BuildRecord: record, TopologyPlanID: plan.ID, TopologyRevision: plan.Revision, TopologyHash: plan.PlanHash, ServiceConfigurationRevision: configuration.Revision, ServiceConfigurationStateHash: configuration.StateHash, DeploymentPolicyID: policy.ID, DeploymentPolicyRevision: policy.Revision, DeploymentPolicyHash: policy.PolicyHash, RoutingDecisionHash: decision.DecisionHash, EnvironmentID: request.EnvironmentID, RuntimeID: decision.RuntimeID, NodeID: decision.NodeID, AgentID: decision.AgentID}}

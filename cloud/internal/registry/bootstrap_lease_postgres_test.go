@@ -56,7 +56,7 @@ func TestPostgresBootstrapLeaseIsAtomicAcrossWorkers(t *testing.T) {
 		wg.Add(1)
 		go func(workerID string) {
 			defer wg.Done()
-			lease, ok, err := (PostgresService{DB: db, Now: func() time.Time { return now }}).LeaseNextBootstrapSession(workerID, now, 15*time.Minute)
+			lease, ok, err := (PostgresService{DB: db, Now: func() time.Time { return now }}).LeaseNextBootstrapSession(workerID, "", now, 15*time.Minute)
 			results <- result{lease: lease, ok: ok, err: err}
 		}(workerID)
 	}
@@ -113,7 +113,7 @@ func TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, ok, err := repoA.LeaseNextBootstrapSession("worker-a", now, 90*time.Second)
+	first, ok, err := repoA.LeaseNextBootstrapSession("worker-a", "", now, 90*time.Second)
 	if err != nil || !ok || first.Session.AttemptCount != 1 {
 		t.Fatalf("first=%+v ok=%v err=%v", first, ok, err)
 	}
@@ -129,7 +129,7 @@ func TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart(t *testin
 		t.Fatalf("summary=%+v err=%v", summary, err)
 	}
 	retryAt := *summary.Recovered[0].NextAttemptAt
-	second, ok, err := (PostgresService{DB: db, Now: func() time.Time { return retryAt }}).LeaseNextBootstrapSession("worker-b", retryAt, 90*time.Second)
+	second, ok, err := (PostgresService{DB: db, Now: func() time.Time { return retryAt }}).LeaseNextBootstrapSession("worker-b", "", retryAt, 90*time.Second)
 	if err != nil || !ok || second.Session.AttemptCount != 2 {
 		t.Fatalf("second=%+v ok=%v err=%v", second, ok, err)
 	}
@@ -147,7 +147,7 @@ func TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadLease, ok, err := repoC.LeaseNextBootstrapSession("worker-c", retryAt.Add(2*time.Second), 90*time.Second)
+	deadLease, ok, err := repoC.LeaseNextBootstrapSession("worker-c", "", retryAt.Add(2*time.Second), 90*time.Second)
 	if err != nil || !ok || deadLease.Session.ID != deadSession.ID {
 		t.Fatalf("dead lease=%+v ok=%v err=%v", deadLease, ok, err)
 	}
@@ -183,7 +183,7 @@ func TestPostgresBootstrapConcurrentRecoveryIsAtomic(t *testing.T) {
 	repo := PostgresService{DB: db, Now: func() time.Time { return now }}
 	project, _ := repo.CreateProject(orgID, "Bootstrap Recover", "bootstrap-recover-"+suffix, userID, "project-key")
 	session, _ := repo.CreateBootstrapSession(project.ID, "first_server", "203.0.113.30", "root", "password", userID, "boot-key", 22)
-	lease, ok, err := repo.LeaseNextBootstrapSession("worker-a", now, time.Second)
+	lease, ok, err := repo.LeaseNextBootstrapSession("worker-a", "", now, time.Second)
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%v err=%v", ok, err)
 	}
@@ -226,7 +226,7 @@ func TestPostgresBootstrapCheckpointTransitionsAndDurability(t *testing.T) {
 	if err != nil || !bootstrapCheckpointEmpty(stored.Checkpoint) {
 		t.Fatalf("uninitialized checkpoint=%+v err=%v", stored.Checkpoint, err)
 	}
-	lease, ok, err := repo.LeaseNextBootstrapSession("worker-1", now, 90*time.Second)
+	lease, ok, err := repo.LeaseNextBootstrapSession("worker-1", "", now, 90*time.Second)
 	if err != nil || !ok || lease.Session.ID != session.ID {
 		t.Fatalf("lease=%+v ok=%v err=%v", lease, ok, err)
 	}
@@ -289,7 +289,7 @@ func TestPostgresBootstrapCheckpointTransitionsAndDurability(t *testing.T) {
 	if err != nil || failed.Checkpoint.NextStepIndex != 1 {
 		t.Fatalf("failed=%+v err=%v", failed, err)
 	}
-	second, ok, err := repo.LeaseNextBootstrapSession("worker-2", *failed.NextAttemptAt, 90*time.Second)
+	second, ok, err := repo.LeaseNextBootstrapSession("worker-2", "", *failed.NextAttemptAt, 90*time.Second)
 	if err != nil || !ok || second.Session.Checkpoint.NextStepIndex != 1 {
 		t.Fatalf("second=%+v ok=%v err=%v", second, ok, err)
 	}

@@ -157,6 +157,38 @@ func applicationPodReadiness(pods map[string]any, digest string) (string, int) {
 	return imageID, ready
 }
 
+func applicationImagePullFailure(pods map[string]any) error {
+	items, _ := pods["items"].([]any)
+	for _, raw := range items {
+		pod, _ := raw.(map[string]any)
+		status, _ := pod["status"].(map[string]any)
+		containers, _ := status["containerStatuses"].([]any)
+		for _, rawStatus := range containers {
+			container, _ := rawStatus.(map[string]any)
+			if container["name"] != deploymentv1.ApplicationContainer {
+				continue
+			}
+			state, _ := container["state"].(map[string]any)
+			waiting, _ := state["waiting"].(map[string]any)
+			reason, _ := waiting["reason"].(string)
+			message, _ := waiting["message"].(string)
+			if reason != "ErrImagePull" && reason != "ImagePullBackOff" && reason != "InvalidImageName" {
+				continue
+			}
+			lower := strings.ToLower(message)
+			switch {
+			case strings.Contains(lower, "unauthorized"), strings.Contains(lower, "authentication required"), strings.Contains(lower, "denied"), strings.Contains(lower, "insufficient_scope"):
+				return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRegistryAuthFailed, "registry rejected the managed pull credential", false)
+			case strings.Contains(lower, "manifest unknown"), strings.Contains(lower, "no matching manifest"), strings.Contains(lower, "not found"):
+				return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeImageDigestNotFound, "immutable image digest was not found in the registry", false)
+			default:
+				return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeImagePullFailed, "container runtime could not pull the immutable image", true)
+			}
+		}
+	}
+	return nil
+}
+
 func containsExactDigest(imageID, digest string) bool {
 	if imageID == digest || strings.HasSuffix(imageID, "@"+digest) || strings.HasSuffix(imageID, "://"+digest) {
 		return true
@@ -253,6 +285,13 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 		}
 		container["env"] = env
 	}
+	if len(spec.SecretReferences) > 0 {
+		env, _ := container["env"].([]any)
+		for _, item := range spec.SecretReferences {
+			env = append(env, map[string]any{"name": item.EnvName, "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": workloadSecretName(command, item.SecretID), "key": item.EnvName}}})
+		}
+		container["env"] = env
+	}
 	if spec.ReadinessProbe != nil {
 		container["readinessProbe"] = probeObject(*spec.ReadinessProbe)
 	}
@@ -260,10 +299,14 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 		container["livenessProbe"] = probeObject(*spec.LivenessProbe)
 	}
 	annotations := map[string]string{"opsi.dev/spec-hash": command.SpecHash, "opsi.dev/image-digest": command.Image.Digest}
+	podSpec := map[string]any{"terminationGracePeriodSeconds": spec.TerminationGracePeriodSecond, "containers": []any{container}}
+	if spec.RegistryPullCredential != nil {
+		podSpec["imagePullSecrets"] = []any{map[string]any{"name": registryPullSecretName(*spec.RegistryPullCredential)}}
+	}
 	deployment := map[string]any{
 		"apiVersion": "apps/v1", "kind": "Deployment",
 		"metadata": map[string]any{"name": resourceName, "namespace": namespace, "labels": labels, "annotations": annotations},
-		"spec":     map[string]any{"replicas": spec.Replicas, "selector": map[string]any{"matchLabels": selector}, "template": map[string]any{"metadata": map[string]any{"labels": selector, "annotations": annotations}, "spec": map[string]any{"terminationGracePeriodSeconds": spec.TerminationGracePeriodSecond, "containers": []any{container}}}},
+		"spec":     map[string]any{"replicas": spec.Replicas, "selector": map[string]any{"matchLabels": selector}, "template": map[string]any{"metadata": map[string]any{"labels": selector, "annotations": annotations}, "spec": podSpec}},
 	}
 	service := map[string]any{
 		"apiVersion": "v1", "kind": "Service",

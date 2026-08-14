@@ -90,11 +90,8 @@ workloads, deployment, exposure, and known-good rollback.
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [System requirements](docs/opsi_srs.md)
 - [CLI installation](docs/runbooks/install_cli.md)
 - [Development control plane](docs/runbooks/dev_control_plane.md)
-- [Security model](docs/security_story.md)
-- [Architecture decisions](docs/architecture_decisions/)
 
 ## License
 

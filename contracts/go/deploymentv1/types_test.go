@@ -58,6 +58,9 @@ func TestWorkloadSpecRejectsUnsafeAndInlineSecretShapes(t *testing.T) {
 		},
 		func(spec *WorkloadSpec) { spec.Resources.Limits.CPU = "50m" },
 		func(spec *WorkloadSpec) { spec.Resources.Limits.Memory = "64Mi" },
+		func(spec *WorkloadSpec) {
+			spec.RegistryPullCredential = &RegistryPullCredentialReference{Provider: "ghcr", CredentialID: "hosted-opsi", Registry: "https://ghcr.io"}
+		},
 	}
 	for index, mutate := range cases {
 		spec := validWorkload()
@@ -65,6 +68,18 @@ func TestWorkloadSpecRejectsUnsafeAndInlineSecretShapes(t *testing.T) {
 		if spec.Validate() == nil {
 			t.Fatalf("unsafe workload case %d was accepted", index)
 		}
+	}
+}
+
+func TestRegistryPullCredentialRequiresTypedNonSecretReference(t *testing.T) {
+	ref := RegistryPullCredentialReference{Provider: "ghcr", CredentialID: "hosted-opsi", Registry: "ghcr.io"}
+	spec := validWorkload()
+	spec.RegistryPullCredential = &ref
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (RegistryPullCredential{Reference: ref, Username: "opsi-pull", Password: ""}).Validate(); err == nil {
+		t.Fatal("empty registry token was accepted")
 	}
 }
 

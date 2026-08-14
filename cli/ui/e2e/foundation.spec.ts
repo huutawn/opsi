@@ -25,10 +25,9 @@ test("workspace, grouped navigation, restoration, and back-forward behavior", as
   for (const destination of ["Topology", "Overview", "Services", "Delivery", "Observability", "Security"]) await expect(page.getByRole("link", { name: destination, exact: true })).toBeVisible();
   await expect(page.locator(".navSection a").first()).toHaveText("Topology");
   await expect(page.locator(".navSection a")).toHaveCount(6);
-  await page.getByRole("button", { name: "Collapse sidebar" }).click();
-  await expect(page.getByRole("button", { name: "Expand sidebar" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("Current environment")).toHaveValue("env-1");
+  await expect(page.getByRole("link", { name: "Topology", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.getByLabel("Switch project")).toBeVisible();
-  await page.getByRole("button", { name: "Expand sidebar" }).click();
 
   await page.getByRole("link", { name: "Observability", exact: true }).click();
   await page.getByRole("tab", { name: "Health", exact: true }).focus();
@@ -46,6 +45,37 @@ test("workspace, grouped navigation, restoration, and back-forward behavior", as
   await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.goForward();
   await expect(page.getByRole("tab", { name: "Secrets", exact: true })).toHaveAttribute("aria-selected", "true");
+});
+
+test("factual shell preserves environment and deep-link state through refresh and keyboard project switching", async ({ page }) => {
+  await mockLocalAPI(page, "healthy");
+  await page.goto("/?project=proj-1&view=observability&tab=logs&environment=env-1&query=timeout&window=1h");
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Logs");
+  await expect(page.getByLabel("Current environment")).toHaveValue("env-1");
+  await expect(page.getByRole("link", { name: "Observability", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("link", { name: "Delivery", exact: true })).toHaveAttribute("href", /environment=env-1/);
+
+  const deepLink = page.url();
+  await page.getByRole("button", { name: "Refresh current data" }).click();
+  await expect(page).toHaveURL(deepLink);
+  await page.reload();
+  await expect(page).toHaveURL(deepLink);
+  await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+
+  const switcher = page.getByLabel("Switch project");
+  await switcher.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".projectSwitcher")).toHaveAttribute("open", "");
+  await page.getByRole("link", { name: /Payments/ }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/project=proj-2&view=infrastructure&tab=topology/);
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Payments/Production/Topology");
+
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology&environment=env-1&topology=topo-1&topologyMode=live");
+  await page.reload();
+  await expect(page).toHaveURL(/topology=topo-1/);
+  await expect(page).toHaveURL(/topologyMode=live/);
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Topology");
 });
 
 test("truthful project summaries cover required factual fixtures", async ({ page }) => {
@@ -69,7 +99,7 @@ test("truthful project summaries cover required factual fixtures", async ({ page
       await expect(page.locator(".statusStrip > div").nth(3).getByText("Unavailable", { exact: true })).toBeVisible();
       await expect(page.getByText("Incident source missing", { exact: true })).toBeVisible();
       await page.getByRole("link", { name: "Services", exact: true }).click();
-      await expect(page.locator(".serviceRow .status").first()).toHaveText("Unavailable");
+      await expect(page.locator(".applicationCard").first()).toContainText("Source binding incomplete");
     }
     if (next === "failed-build") await expect(page.getByText(/Latest build failed for worker/)).toBeVisible();
   }
@@ -78,7 +108,7 @@ test("truthful project summaries cover required factual fixtures", async ({ page
   await page.goto("/?project=proj-1&view=overview");
   await expect(page.locator(".statusLead strong")).toHaveText("Unknown");
   await page.goto("/?project=proj-1&view=services");
-  await expect(page.getByText("No services yet", { exact: true })).toBeVisible();
+  await expect(page.getByText("No Applications yet", { exact: true })).toBeVisible();
   await expect(page.getByText(/postgres|redis/i)).toHaveCount(0);
 
   scenario = "long";
@@ -90,8 +120,8 @@ test("truthful project summaries cover required factual fixtures", async ({ page
 test("switching projects clears scoped service detail", async ({ page }) => {
   await mockLocalAPI(page, "healthy");
   await page.goto("/?project=proj-1&view=services");
-  await page.locator(".serviceRow").first().click();
-  await expect(page.getByRole("heading", { name: "api" })).toBeVisible();
+  await page.locator(".applicationCard").first().getByRole("button", { name: "Open" }).click();
+  await expect(page.getByRole("dialog", { name: "api" })).toBeVisible();
   await page.evaluate(() => {
     window.history.pushState({}, "", "/?project=proj-2&view=services");
     window.dispatchEvent(new PopStateEvent("popstate"));
@@ -484,14 +514,14 @@ test("tabs, activity outcomes, service drawer, mobile drawer, and target sizes f
   await expect(page.getByRole("row", { name: /2026-07-26 0 0 0 0 1 1/ })).toBeVisible();
 
   await page.goto("/?project=proj-1&view=services");
-  const service = page.locator(".serviceRow").first();
+  const service = page.locator(".applicationCard").first().getByRole("button", { name: "Open" });
   await service.focus();
   await page.keyboard.press("Enter");
   const drawer = page.getByRole("dialog", { name: "api" });
   await expect(drawer).toBeVisible();
   await expect(page).toHaveURL(/service=api/);
-  for (const section of ["Summary", "Runtime", "Delivery", "Dependencies", "Configuration"]) await expect(drawer.getByRole("heading", { name: section })).toBeVisible();
-  await expect(drawer.getByText("Not reported by Local API.", { exact: true })).toBeVisible();
+  for (const section of ["Overview", "Source", "Builds", "Runtime / Deployment"]) await expect(drawer.getByRole("tab", { name: section })).toBeVisible();
+  await expect(drawer.getByRole("heading", { name: "Identity" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(service).toBeFocused();
   await service.click();
@@ -515,7 +545,7 @@ test("tabs, activity outcomes, service drawer, mobile drawer, and target sizes f
   }
   await page.keyboard.press("Escape");
   await expect(menu).toBeFocused();
-  const undersized = await page.locator(".iconButton:visible, .projectSwitcher summary:visible, .sidebar a:visible, .accountMenu summary:visible").evaluateAll((elements) => elements.filter((element) => { const box = element.getBoundingClientRect(); return box.width < 40 || box.height < 40; }).map((element) => ({ tag: element.tagName, label: element.getAttribute("aria-label") || element.textContent, box: element.getBoundingClientRect().toJSON() })));
+  const undersized = await page.locator(".iconButton:visible, .projectSwitcher summary:visible, .environmentPicker select:visible, .sidebar a:visible, .accountMenu summary:visible").evaluateAll((elements) => elements.filter((element) => { const box = element.getBoundingClientRect(); return box.width < 40 || box.height < 40; }).map((element) => ({ tag: element.tagName, label: element.getAttribute("aria-label") || element.textContent, box: element.getBoundingClientRect().toJSON() })));
   expect(undersized).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
@@ -539,6 +569,7 @@ test("bootstrap credential leaves the DOM before the request resolves", async ({
   const input = page.getByLabel("One-time SSH password");
   await input.fill(secret);
   await page.getByRole("button", { name: "Confirm and submit" }).click();
+  await expect.poll(() => submitted.length).toBe(1);
   await expect(input).toHaveCount(0);
   await expect(page.getByText(secret, { exact: false })).toHaveCount(0);
   expect(await page.locator("body").textContent()).not.toContain(secret);
@@ -548,6 +579,49 @@ test("bootstrap credential leaves the DOM before the request resolves", async ({
   await expect(page.getByText(/Bootstrap boot-new accepted/)).toBeVisible();
   await page.getByRole("button", { name: "Close" }).click();
   await expect(trigger).toBeFocused();
+});
+
+test("Connect Server defaults to a one-time command and refresh restores waiting facts", async ({ page }) => {
+  const command = "curl -fsSL 'https://cloud.example/v1/bootstrap/install' | OPSI_BOOTSTRAP_TOKEN='boot-command.btok-secret' sh";
+  const submitted: Record<string, unknown>[] = [];
+  let created = false;
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { (window as unknown as { copiedCommand: string }).copiedCommand = value; } } });
+  });
+  await page.route("**/api/local/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/local/projects/proj-1/bootstrap-sessions" && route.request().method() === "POST") {
+      submitted.push(route.request().postDataJSON());
+      created = true;
+      await route.fulfill({ body: JSON.stringify({ id: "boot-command", status: "waiting", role: "first_server", auth_method: "command", public_host: "203.0.113.10", bootstrap_command: command, created_at: "2026-08-09T10:00:00Z" }), contentType: "application/json", status: 201 });
+      return;
+    }
+    if (path.endsWith("/bootstrap-sessions") && route.request().method() === "GET") {
+      const sessions = created ? [{ id: "boot-command", status: "waiting", role: "first_server", auth_method: "command", public_host: "203.0.113.10", created_at: "2026-08-09T10:00:00Z" }] : [];
+      await route.fulfill({ body: JSON.stringify({ sessions }), contentType: "application/json", status: 200 });
+      return;
+    }
+    await respond(route, "empty");
+  });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=bootstrap");
+  await page.getByRole("button", { name: "Connect Server" }).click();
+  const setup = page.getByRole("dialog", { name: "Connect Server" });
+  await expect(setup.getByLabel("Run bootstrap command")).toBeChecked();
+  await expect(setup.getByLabel("SSH port")).toHaveCount(0);
+  await setup.getByLabel("Server IP or hostname").fill("203.0.113.10");
+  await setup.getByRole("button", { name: "Generate bootstrap command" }).click();
+  await page.getByRole("button", { name: "Confirm and submit" }).click();
+  await expect(page.getByText(/Bootstrap boot-command accepted with status waiting/)).toBeVisible();
+  expect(submitted).toEqual([{ role: "first_server", public_host: "203.0.113.10", ssh_port: 0, ssh_username: "", auth_method: "command" }]);
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByText(command, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Copy command" }).click();
+  await expect(page.getByRole("button", { name: "Copied" })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { copiedCommand: string }).copiedCommand)).toBe(command);
+  await page.reload();
+  await expect(page.getByText("waiting", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/This browser only shows the command when it is issued/)).toBeVisible();
+  await expect(page.getByText("btok-secret", { exact: false })).toHaveCount(0);
 });
 
 test("bootstrap failure requires a new credential and lifecycle exits clear it", async ({ page }) => {
@@ -684,15 +758,16 @@ function build(projectID: string, serviceKey: string, status: string, createdAt:
 
 async function openBootstrapReview(page: Page) {
   await page.goto("/?project=proj-1&view=infrastructure&tab=bootstrap");
-  const trigger = page.getByRole("button", { name: "Add server" });
+  const trigger = page.getByRole("button", { name: "Connect Server" });
   await trigger.click();
-  const setup = page.getByRole("dialog", { name: "Add server" });
+  const setup = page.getByRole("dialog", { name: "Connect Server" });
   await setup.getByLabel("Role").selectOption("worker");
-  await setup.getByLabel("SSH host or IP").fill("203.0.113.10");
+  await setup.getByLabel("Server IP or hostname").fill("203.0.113.10");
+  await setup.getByText("Advanced: Bootstrap over SSH").click();
+  await setup.getByRole("radio", { name: /^SSH password/ }).check();
   await setup.getByLabel("SSH port").fill("22");
   await setup.getByLabel("SSH username").fill("opsi");
-  await setup.getByLabel("Authentication").selectOption("password");
-  await setup.getByRole("button", { name: "Review bootstrap request" }).click();
+  await setup.getByRole("button", { name: "Generate bootstrap command" }).click();
   const review = page.getByRole("dialog", { name: "bootstrap server" });
   await expect(review).toBeVisible();
   expect(await page.evaluate(() => document.activeElement?.closest("dialog") !== null)).toBe(true);

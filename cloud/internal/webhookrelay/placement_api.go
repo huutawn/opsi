@@ -1,6 +1,7 @@
 package webhookrelay
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
@@ -51,6 +53,9 @@ func (s *Server) handleTopologyAPI(w http.ResponseWriter, r *http.Request, proje
 	}
 	if len(parts) == 4 && parts[3] == "facts" && r.Method == http.MethodGet {
 		facts, err := s.Topology.Facts.PlacementFacts(r.Context(), projectID)
+		if err == nil {
+			facts.Resources, err = resourceIdentities(r.Context(), s.Resources, projectID)
+		}
 		writePlacementResult(w, r, facts, err, http.StatusOK)
 		return
 	}
@@ -60,6 +65,10 @@ func (s *Server) handleTopologyAPI(w http.ResponseWriter, r *http.Request, proje
 			PolicyID string           `json:"policy_id,omitempty"`
 		}
 		if !decodePlacementJSON(w, r, &request) {
+			return
+		}
+		if err := s.enrichTopologyFacts(r.Context(), projectID); err != nil {
+			writePlacementFailure(w, r, err, nil)
 			return
 		}
 		switch parts[3] {
@@ -88,12 +97,28 @@ func (s *Server) handleTopologyAPI(w http.ResponseWriter, r *http.Request, proje
 		if !decodePlacementJSON(w, r, &request) {
 			return
 		}
+		if err := s.enrichTopologyFacts(r.Context(), projectID); err != nil {
+			writePlacementFailure(w, r, err, nil)
+			return
+		}
 		override, err := s.unknownCapacityOverride(r, projectID, request.PolicyID)
 		if err != nil {
 			writePlacementFailure(w, r, err, nil)
 			return
 		}
+		if err := s.Resources.ValidateTopologyProvisioning(r.Context(), projectID, request.Draft); err != nil {
+			writePlacementFailure(w, r, err, nil)
+			return
+		}
 		value, err := s.Topology.ApplyScoped(r.Context(), projectID, principal.UserID, r.Header.Get("Idempotency-Key"), request, override)
+		if err == nil {
+			targets, ok := s.Registry.(resource.RuntimeTargetResolver)
+			if !ok {
+				err = resource.Error{Code: "MANAGED_RESOURCE_ASSIGNMENT_INVALID", Status: 409, Message: "managed resource target resolver is unavailable"}
+			} else {
+				err = s.Resources.ReconcileTopology(r.Context(), projectID, value.Plan, targets)
+			}
+		}
 		if err == nil {
 			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "TOPOLOGY_PLAN_APPLIED", "topology_plan", value.Plan.ID, "success", map[string]any{"revision": value.Plan.Revision, "plan_hash": value.Plan.PlanHash, "reused": value.Reused})
 		}
@@ -128,6 +153,30 @@ func (s *Server) handleTopologyAPI(w http.ResponseWriter, r *http.Request, proje
 		}
 	}
 	http.NotFound(w, r)
+}
+
+type enrichedPlacementFacts struct {
+	base      topology.FactSource
+	resources resourceTopologySource
+}
+
+func (s enrichedPlacementFacts) PlacementFacts(ctx context.Context, projectID string) (topology.Facts, error) {
+	facts, err := s.base.PlacementFacts(ctx, projectID)
+	if err != nil {
+		return facts, err
+	}
+	facts.Resources, err = resourceIdentities(ctx, s.resources, projectID)
+	return facts, err
+}
+
+func (s *Server) enrichTopologyFacts(_ context.Context, _ string) error {
+	if s.Topology.Facts == nil || s.Resources.Store == nil {
+		return topology.Error{Code: "TOPOLOGY_UNAVAILABLE", Status: 503, Message: "topology facts are unavailable"}
+	}
+	if _, ok := s.Topology.Facts.(enrichedPlacementFacts); !ok {
+		s.Topology.Facts = enrichedPlacementFacts{base: s.Topology.Facts, resources: s.Resources}
+	}
+	return nil
 }
 
 func (s *Server) handleDeploymentPolicyAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) {
@@ -242,6 +291,10 @@ func writePlacementFailure(w http.ResponseWriter, r *http.Request, err error, de
 	var pe deploymentpolicy.Error
 	if errors.As(err, &pe) {
 		status, code, message = pe.Status, pe.Code, pe.Message
+	}
+	var re resource.Error
+	if errors.As(err, &re) {
+		status, code, message = re.Status, re.Code, re.Message
 	}
 	if errors.Is(err, topology.ErrNotFound) || errors.Is(err, deploymentpolicy.ErrNotFound) || errors.Is(err, registry.ErrNotFound) {
 		status, code, message = 404, "PLACEMENT_NOT_FOUND", "requested placement resource was not found"

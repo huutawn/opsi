@@ -19,7 +19,7 @@ DEV_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/dev-contro
 STAGING_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml
 STAGING_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env.example -f deploy/staging-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres verify-buildpacks-e2e build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -54,7 +54,10 @@ verify-postgres:
 		for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do docker exec "$$container" pg_isready -U opsi -d opsi >/dev/null 2>&1 && break; test "$$attempt" -eq 12 || sleep 1; done; \
 		port="$$(docker port "$$container" 5432/tcp | awk -F: '{print $$2}')"; dsn="postgres://opsi:opsi@127.0.0.1:$$port/opsi?sslmode=disable"; \
 	fi; \
-	cd cloud; OPSI_TEST_DATABASE_URL="$$dsn" OPSI_REQUIRE_POSTGRES_TESTS=1 GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test -tags postgresintegration -p 1 ./internal/postgres ./internal/actiondevice ./internal/registry ./internal/adminbootstrap -run 'Test(Postgres|R5012)' -count=1
+	cd cloud; OPSI_TEST_DATABASE_URL="$$dsn" OPSI_REQUIRE_POSTGRES_TESTS=1 GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test -tags postgresintegration -p 1 ./internal/postgres ./internal/actiondevice ./internal/buildjob ./internal/registry ./internal/resource ./internal/adminbootstrap ./internal/webhookrelay -run 'Test(Postgres|R5012)' -count=1
+
+verify-buildpacks-e2e:
+	$(RUN) ./scripts/e2e/verify-buildpacks.sh
 
 verify-dr:
 	$(RUN) ./scripts/verify-dr.sh
@@ -71,6 +74,9 @@ verify-e2e-k3s-selfcheck:
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/e2e/second_factor_handoff_test.py
 	$(RUN) ./scripts/e2e/verify-k3s.sh --self-test
 	@if rg -n 'OPSI_E2E_APPROVE_MITIGATION|incidents/.*/analyze|incidents/.*/actions/.*/approve|recommended_actions|action_hash' scripts/e2e/verify-k3s.sh; then echo "stale incident RCA/approval E2E dependency found"; exit 1; fi
+
+verify-private-registry-e2e:
+	$(RUN) ./scripts/e2e/verify-private-registry.sh
 
 verify-e2e-node-lifecycle-preflight:
 	$(RUN) ./scripts/e2e/verify-node-lifecycle.sh --preflight
@@ -94,6 +100,7 @@ build:
 	cd cli && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(CLI_LDFLAGS)" -o ../bin/opsi ./cmd/opsi
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-cloud ./cmd/opsi-cloud
 	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -ldflags "$(LDFLAGS)" -o ../bin/opsi-bootstrap-worker ./cmd/opsi-bootstrap-worker
+	cd cloud && $(RUN) env GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go build -o ../bin/opsi-build-executor ./cmd/opsi-build-executor
 
 build-cli-release:
 	cd cli/ui && $(RUN) $(UI_NPM) ci
@@ -181,9 +188,9 @@ source-hygiene: verify-source-package-policy verify-bootstrap-worker-release ver
 	@if ! rg -n 'IsFactualTerminalRollout\(record\)' agent/internal/cloudrunner/result.go >/dev/null || ! rg -n 'FailurePhase == deploymentv1\.FailurePhasePreMutation' agent/internal/cloudrunner/result.go >/dev/null || ! rg -n 'if !terminal' agent/internal/cloudrunner/runner.go >/dev/null; then echo "Agent factual terminal and explicit failure phase guard is missing"; exit 1; fi
 	@if ! rg -n 'result\.FailurePhase == deploymentv1\.FailurePhasePreMutation' cloud/internal/registry/rollout.go >/dev/null || ! rg -n 'RolloutMutationObserved\(job\.RolloutState\)' cloud/internal/registry/rollout.go >/dev/null; then echo "Cloud failure phase and observed progress validation is missing"; exit 1; fi
 	@if rg -ni 'password|sshpass|SSHPASS|accept-new|StrictHostKeyChecking=accept-new|auth_method.?[=:].?password|ssh_password' scripts/e2e/verify-k3s.sh; then echo "retired E2E SSH transport found"; exit 1; fi
-	@if rg -n 'OPSI_E2E_SERVICE_REPO|OPSI_E2E_SERVICE_SHA|OPSI_E2E_BAD_SERVICE_SHA' scripts/e2e/verify-k3s.sh README.md agent/README.md docs/architecture.md docs/security_story.md docs/architecture_decisions/ADR-004-trusted-artifact-cd.md docs/architecture_decisions/ADR-006-immutable-manual-deployment.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "retired E2E source input found"; exit 1; fi
-	@if rg -ni 'Agent currently (clones|builds)|current Agent.*(clone|build).*Git|Git deployment and user-provided manifest application exist|user manifests may contain their own resources|generic GitHub (push )?relay remains (active|current)|generic GitHub webhook relay is (active|current)' README.md agent/README.md docs/architecture.md docs/security_story.md docs/architecture_decisions/ADR-004-trusted-artifact-cd.md docs/architecture_decisions/ADR-006-immutable-manual-deployment.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "stale active delivery claim found"; exit 1; fi
-	@if rg -ni 'BuildRecord.*(direct|directly).*(Engine\.Deploy|ProductionAdapter\.Deploy)|BuildRecord.*directly reaches Engine\.Deploy' README.md agent/README.md docs/architecture.md docs/security_story.md docs/architecture_decisions/ADR-004-trusted-artifact-cd.md docs/architecture_decisions/ADR-006-immutable-manual-deployment.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "stale direct BuildRecord-to-Engine claim found"; exit 1; fi
+	@if rg -n 'OPSI_E2E_SERVICE_REPO|OPSI_E2E_SERVICE_SHA|OPSI_E2E_BAD_SERVICE_SHA' scripts/e2e/verify-k3s.sh README.md agent/README.md docs/architecture.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "retired E2E source input found"; exit 1; fi
+	@if rg -ni 'Agent currently (clones|builds)|current Agent.*(clone|build).*Git|Git deployment and user-provided manifest application exist|user manifests may contain their own resources|generic GitHub (push )?relay remains (active|current)|generic GitHub webhook relay is (active|current)' README.md agent/README.md docs/architecture.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "stale active delivery claim found"; exit 1; fi
+	@if rg -ni 'BuildRecord.*(direct|directly).*(Engine\.Deploy|ProductionAdapter\.Deploy)|BuildRecord.*directly reaches Engine\.Deploy' README.md agent/README.md docs/architecture.md docs/runbooks/clean_vps_k3s_e2e.md docs/current_state.md docs/status_matrix.md docs/opsi_roadmap_v5_production.md .agents/current.md; then echo "stale direct BuildRecord-to-Engine claim found"; exit 1; fi
 	@for token in rolled_back desired_digest 'current_digest' 'previous_digest' 'healthy A.*broken B.*restored A'; do rg -n "$$token" scripts/e2e/verify-k3s.sh >/dev/null || { echo "E2E rollback restoration gate missing: $$token"; exit 1; }; done
 	@if ! rg -n 'select_fresh_incident "\$$service_id" "\$$bad_deployment_started_at"' scripts/e2e/verify-k3s.sh >/dev/null || ! rg -n 'incident\.get\("created_at_unix", 0\)' scripts/e2e/verify-k3s.sh >/dev/null || ! rg -n 'created_at >= minimum_created_at' scripts/e2e/verify-k3s.sh >/dev/null; then echo "E2E incident selection is missing the freshness boundary"; exit 1; fi
 	@test ! -e .github/workflows/e2e-k3s.yml || { echo "retired GitHub-hosted K3s workflow restored"; exit 1; }
@@ -205,14 +212,13 @@ e2e-dry-run:
 
 release: build
 	$(RUN) rm -rf release
-	$(RUN) mkdir -p release/config.examples release/docs
+	$(RUN) mkdir -p release/config.examples
 	$(RUN) cp bin/opsi release/opsi
 	$(RUN) cp bin/opsi-agent release/opsi-agent
 	$(RUN) cp bin/opsi-cloud release/opsi-cloud
 	$(RUN) cp bin/opsi-bootstrap-worker release/opsi-bootstrap-worker
 	$(RUN) cp agent/config.example.yaml release/config.examples/agent.config.example.yaml
 	$(RUN) cp cloud/config.example.json release/config.examples/cloud.config.example.json
-	$(RUN) cp docs/demo_runbook.md release/docs/demo_runbook.md
 	cd release && $(RUN) sha256sum opsi opsi-agent opsi-cloud opsi-bootstrap-worker > checksums.txt
 	$(RUN) ./scripts/source-package.sh check-release release
 

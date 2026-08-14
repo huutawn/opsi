@@ -257,7 +257,7 @@ func TestPostgresUnresolvedRolloutRetainsServiceOwnership(t *testing.T) {
 	if _, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "waiting", rolloutProgress(secondLease, deploymentv1.RolloutStateWaiting, "5", "")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "failed", rolloutProgress(secondLease, deploymentv1.RolloutStateFailed, "6", deploymentv1.RolloutCodeNoKnownGood)); err != nil {
+	if _, err := fresh().ProgressImmutableDeployment(project.ID, job.NodeID, job.ID, "failed", rolloutProgress(secondLease, deploymentv1.RolloutStateFailed, "6", deploymentv1.RolloutCodeRuntimeFailed)); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(defaultDeploymentLeaseDuration + time.Second)
@@ -331,7 +331,7 @@ func TestPostgresUnresolvedRolloutRetainsServiceOwnership(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("final lease=%+v ok=%v err=%v", finalLease, ok, err)
 	}
-	finished, err := fresh().CompleteDeployment(project.ID, job.NodeID, job.ID, "terminal", rolloutResult(finalLease, deploymentv1.RolloutStateFailed, "6", "", "", "", deploymentv1.RolloutCodeNoKnownGood))
+	finished, err := fresh().CompleteDeployment(project.ID, job.NodeID, job.ID, "terminal", rolloutResult(finalLease, deploymentv1.RolloutStateFailed, "6", "", "", "", deploymentv1.RolloutCodeRuntimeFailed))
 	if err != nil || finished.TerminalResult == nil {
 		t.Fatalf("terminal=%+v err=%v", finished, err)
 	}
@@ -783,10 +783,10 @@ func TestPostgresPreMutationFailureSurvivesRestartAndReplaysExactly(t *testing.T
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM service_deployment_locks WHERE service_id=$1`, record.ID).Scan(&locks); err != nil || locks != 1 {
 		t.Fatalf("forged result lock count=%d err=%v", locks, err)
 	}
-	if _, err := fresh().ProgressImmutableDeployment(project.ID, postJob.NodeID, postJob.ID, "failed", rolloutProgress(postLease, deploymentv1.RolloutStateFailed, "8", deploymentv1.RolloutCodeNoKnownGood)); err != nil {
+	if _, err := fresh().ProgressImmutableDeployment(project.ID, postJob.NodeID, postJob.ID, "failed", rolloutProgress(postLease, deploymentv1.RolloutStateFailed, "8", deploymentv1.RolloutCodeRuntimeFailed)); err != nil {
 		t.Fatal(err)
 	}
-	postResult := rolloutResult(postLease, deploymentv1.RolloutStateFailed, "8", "", "", "", deploymentv1.RolloutCodeNoKnownGood)
+	postResult := rolloutResult(postLease, deploymentv1.RolloutStateFailed, "8", "", "", "", deploymentv1.RolloutCodeRuntimeFailed)
 	postFinished, err := fresh().CompleteDeployment(project.ID, postJob.NodeID, postJob.ID, "post-mutation-result", postResult)
 	if err != nil || postFinished.TerminalResult == nil || postFinished.TerminalResult.FailurePhase != deploymentv1.FailurePhasePostMutation {
 		t.Fatalf("post-mutation result=%+v err=%v", postFinished, err)

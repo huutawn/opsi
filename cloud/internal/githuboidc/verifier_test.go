@@ -90,6 +90,53 @@ func TestVerifierValidAndNegativeClaims(t *testing.T) {
 	}
 }
 
+func TestBuildRunnerOIDCUsesSignedJWTAndExactAudience(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]string{"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "runner", "n": base64.RawURLEncoding.EncodeToString(private.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(bigIntBytes(private.E))}}})
+	}))
+	defer server.Close()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.Issuer = server.URL
+	config.JWKSURL = server.URL
+	config.Audience = "opsi-build"
+	verifier := newVerifier(config, server.Client(), func() time.Time { return now })
+	claims := map[string]any{"iss": server.URL, "aud": "opsi-build", "sub": "repo:opsi/executor:ref:refs/heads/main", "repository": "opsi/executor", "repository_owner": "opsi", "repository_id": "7", "repository_owner_id": "8", "ref": "refs/heads/main", "sha": strings.Repeat("a", 40), "event_name": "workflow_dispatch", "workflow": "Opsi Build Executor", "workflow_ref": "opsi/executor/.github/workflows/opsi-build-executor.yml@refs/heads/main", "run_id": "99", "run_attempt": "1", "nbf": now.Add(-time.Minute).Unix(), "iat": now.Add(-time.Second).Unix(), "exp": now.Add(time.Minute).Unix()}
+	valid := testToken(t, private, "runner", claims)
+	identity, err := verifier.Verify(context.Background(), valid)
+	if err != nil || identity.Repository != "opsi/executor" || identity.RunID != 99 {
+		t.Fatalf("identity=%+v err=%v", identity, err)
+	}
+	for name, test := range map[string]struct {
+		code   string
+		mutate func(map[string]any)
+	}{
+		"issuer":   {"OIDC_ISSUER_INVALID", func(c map[string]any) { c["iss"] = "https://token.actions.githubusercontent.com" }},
+		"audience": {"OIDC_AUDIENCE_INVALID", func(c map[string]any) { c["aud"] = "another-audience" }},
+		"expired":  {"OIDC_EXP_INVALID", func(c map[string]any) { c["exp"] = now.Add(-2 * time.Minute).Unix() }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := make(map[string]any, len(claims))
+			for key, value := range claims {
+				candidate[key] = value
+			}
+			test.mutate(candidate)
+			if _, err := verifier.Verify(context.Background(), testToken(t, private, "runner", candidate)); err == nil || err.Error() != test.code {
+				t.Fatalf("err=%v want=%s", err, test.code)
+			}
+		})
+	}
+	tampered := valid[:len(valid)-1] + "x"
+	if _, err := verifier.Verify(context.Background(), tampered); err == nil {
+		t.Fatal("tampered runner signature accepted")
+	}
+}
+
 func TestConfigValidationFailsClosed(t *testing.T) {
 	base := DefaultConfig()
 	if err := base.Validate(true); err == nil {

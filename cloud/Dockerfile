@@ -20,6 +20,7 @@ USER opsi:opsi
 
 FROM runtime-base AS cloud
 COPY --from=builder --chown=opsi:opsi /out/opsi-cloud /usr/local/bin/opsi-cloud
+COPY --from=builder --chown=opsi:opsi /out/opsi-bootstrap-worker /usr/local/bin/opsi-bootstrap-worker
 ENTRYPOINT ["/usr/local/bin/opsi-cloud"]
 
 FROM runtime-base AS bootstrap-worker

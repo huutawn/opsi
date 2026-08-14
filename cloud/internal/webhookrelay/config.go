@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 )
 
@@ -21,19 +22,28 @@ const (
 )
 
 type Config struct {
-	TTL                    Duration          `json:"ttl"`
-	DatabaseURL            string            `json:"database_url"`
-	PublicBaseURL          string            `json:"public_base_url"`
-	Production             bool              `json:"production"`
-	OTP                    OTPConfig         `json:"otp"`
-	SMTP                   SMTPConfig        `json:"smtp"`
-	Alerts                 AlertConfig       `json:"alerts"`
-	BootstrapWorkerToken   string            `json:"bootstrap_worker_token"`
-	BootstrapSecretKey     string            `json:"bootstrap_secret_key"`
-	RequireAgentSignatures bool              `json:"require_agent_signatures"`
-	GitHubApp              GitHubAppConfig   `json:"github_app"`
-	GitHubOIDC             githuboidc.Config `json:"github_oidc"`
-	Placement              PlacementConfig   `json:"placement"`
+	TTL                    Duration                `json:"ttl"`
+	DatabaseURL            string                  `json:"database_url"`
+	PublicBaseURL          string                  `json:"public_base_url"`
+	Production             bool                    `json:"production"`
+	OTP                    OTPConfig               `json:"otp"`
+	SMTP                   SMTPConfig              `json:"smtp"`
+	Alerts                 AlertConfig             `json:"alerts"`
+	BootstrapWorkerToken   string                  `json:"bootstrap_worker_token"`
+	BootstrapWorkerConfig  string                  `json:"bootstrap_worker_config"`
+	BootstrapSecretKey     string                  `json:"bootstrap_secret_key"`
+	RequireAgentSignatures bool                    `json:"require_agent_signatures"`
+	GitHubApp              GitHubAppConfig         `json:"github_app"`
+	GitHubOIDC             githuboidc.Config       `json:"github_oidc"`
+	BuildExecutor          buildjob.ExecutorConfig `json:"build_executor"`
+	BuildRegistry          buildjob.RegistryConfig `json:"build_registry"`
+	RegistryPull           RegistryPullConfig      `json:"registry_pull"`
+	Placement              PlacementConfig         `json:"placement"`
+}
+
+type RegistryPullConfig struct {
+	UsernameFile string `json:"username_file,omitempty"`
+	TokenFile    string `json:"token_file,omitempty"`
 }
 
 type PlacementConfig struct {
@@ -155,6 +165,7 @@ func applyEnvOverrides(cfg *Config) error {
 	if err := applyStringOrFileEnv("OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN", "OPSI_CLOUD_BOOTSTRAP_WORKER_TOKEN_FILE", &cfg.BootstrapWorkerToken); err != nil {
 		return err
 	}
+	applyStringEnv("OPSI_CLOUD_BOOTSTRAP_WORKER_CONFIG", &cfg.BootstrapWorkerConfig)
 	if err := applyStringOrFileEnv("OPSI_CLOUD_BOOTSTRAP_SECRET_KEY", "OPSI_CLOUD_BOOTSTRAP_SECRET_KEY_FILE", &cfg.BootstrapSecretKey); err != nil {
 		return err
 	}
@@ -194,6 +205,16 @@ func applyEnvOverrides(cfg *Config) error {
 	if err := applyIntEnv("OPSI_CLOUD_GITHUB_OIDC_MAX_JWK_KEYS", &cfg.GitHubOIDC.MaxJWKKeys); err != nil {
 		return err
 	}
+	applyStringEnv("OPSI_BUILD_EXECUTOR_OWNER", &cfg.BuildExecutor.Owner)
+	applyStringEnv("OPSI_BUILD_EXECUTOR_REPOSITORY", &cfg.BuildExecutor.Repository)
+	applyStringEnv("OPSI_BUILD_EXECUTOR_WORKFLOW", &cfg.BuildExecutor.Workflow)
+	applyStringEnv("OPSI_BUILD_EXECUTOR_REF", &cfg.BuildExecutor.Ref)
+	applyStringEnv("OPSI_BUILD_REGISTRY_HOST", &cfg.BuildRegistry.Host)
+	applyStringEnv("OPSI_BUILD_REGISTRY_NAMESPACE", &cfg.BuildRegistry.Namespace)
+	applyStringEnv("OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX", &cfg.BuildRegistry.RepositoryPrefix)
+	applyStringEnv("OPSI_BUILD_REGISTRY_VISIBILITY", &cfg.BuildRegistry.Visibility)
+	applyStringEnv("OPSI_CLOUD_GHCR_PULL_USERNAME_FILE", &cfg.RegistryPull.UsernameFile)
+	applyStringEnv("OPSI_CLOUD_GHCR_PULL_TOKEN_FILE", &cfg.RegistryPull.TokenFile)
 	return nil
 }
 
@@ -352,6 +373,7 @@ func validateConfig(cfg *Config) error {
 			"database_url":                cfg.DatabaseURL,
 			"public_base_url":             cfg.PublicBaseURL,
 			"bootstrap_worker_token":      cfg.BootstrapWorkerToken,
+			"bootstrap_worker_config":     cfg.BootstrapWorkerConfig,
 			"bootstrap_secret_key":        cfg.BootstrapSecretKey,
 			"alerts.internal_token":       cfg.Alerts.InternalToken,
 			"smtp.host":                   cfg.SMTP.Host,
@@ -363,6 +385,13 @@ func validateConfig(cfg *Config) error {
 			"github_app.callback_url":     cfg.GitHubApp.CallbackURL,
 			"github_app.webhook_secret":   cfg.GitHubApp.WebhookSecret,
 			"github_app.private_key_path": cfg.GitHubApp.PrivateKeyPath,
+			"build_executor.owner":        cfg.BuildExecutor.Owner,
+			"build_executor.repository":   cfg.BuildExecutor.Repository,
+			"build_executor.workflow":     cfg.BuildExecutor.Workflow,
+			"build_executor.ref":          cfg.BuildExecutor.Ref,
+			"build_registry.host":         cfg.BuildRegistry.Host,
+			"build_registry.namespace":    cfg.BuildRegistry.Namespace,
+			"build_registry.prefix":       cfg.BuildRegistry.RepositoryPrefix,
 		} {
 			if isProductionPlaceholder(value) {
 				return fmt.Errorf("production %s must not use a placeholder", name)
@@ -383,6 +412,25 @@ func validateConfig(cfg *Config) error {
 	}
 	if err := validateGitHubAppConfig(cfg); err != nil {
 		return err
+	}
+	if !cfg.BuildExecutor.Empty() {
+		if err := cfg.BuildExecutor.Validate(); err != nil {
+			return fmt.Errorf("build_executor: %w", err)
+		}
+		if !cfg.GitHubApp.InstallationEnabled() {
+			return fmt.Errorf("build_executor requires GitHub App installation credentials")
+		}
+		if err := cfg.BuildRegistry.Validate(); err != nil {
+			return fmt.Errorf("build_registry: %w", err)
+		}
+		if cfg.BuildRegistry.Host != "ghcr.io" || cfg.BuildRegistry.Visibility != "private" {
+			return fmt.Errorf("build_registry must use private ghcr.io publication")
+		}
+	} else if !cfg.BuildRegistry.Empty() {
+		return fmt.Errorf("build_registry requires build_executor")
+	}
+	if (cfg.RegistryPull.UsernameFile == "") != (cfg.RegistryPull.TokenFile == "") {
+		return fmt.Errorf("registry_pull username_file and token_file must be configured together")
 	}
 	if cfg.Production {
 		expectedAudience := cfg.PublicBaseURL + buildRecordPath

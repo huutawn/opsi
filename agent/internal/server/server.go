@@ -557,16 +557,19 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 				AgentToken:   cfg.CloudRelay.AgentToken,
 				SignRequests: cfg.CloudRelay.SignRequests,
 			},
-			NodeID:            cfg.NodeID,
-			Version:           version,
-			Engine:            engine,
-			NodeLifecycle:     nodelifecycle.Service{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
-			PollInterval:      pollInterval,
-			LongPollWait:      longPollWait,
-			HeartbeatInterval: heartbeatInterval,
-			HealthProbe:       healthProbe,
-			ConnectionState:   cloudConnection,
-			Logger:            logger,
+			NodeID:              cfg.NodeID,
+			Version:             version,
+			Engine:              engine,
+			RegistryPullSecrets: deploy.KubernetesRegistryPullSecretEnsurer{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			WorkloadSecrets:     deploy.KubernetesWorkloadSecretEnsurer{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			NodeLifecycle:       nodelifecycle.Service{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			ManagedResources:    svcatalog.ManagedResourceReconciler{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			PollInterval:        pollInterval,
+			LongPollWait:        longPollWait,
+			HeartbeatInterval:   heartbeatInterval,
+			HealthProbe:         healthProbe,
+			ConnectionState:     cloudConnection,
+			Logger:              logger,
 		}
 		go func() {
 			logger.Info("agent cloud relay runner started", "poll_interval", pollInterval.String())
@@ -838,7 +841,7 @@ func mapServiceCatalogError(err error) error {
 	}
 	message := err.Error()
 	switch {
-	case strings.Contains(message, "required") || strings.Contains(message, "unknown") || strings.Contains(message, "not implemented") || strings.Contains(message, "must be"):
+	case strings.Contains(message, "required") || strings.Contains(message, "unknown") || strings.Contains(message, "not implemented") || strings.Contains(message, "must be") || strings.Contains(message, "Cloud-owned"):
 		return status.Error(codes.InvalidArgument, message)
 	default:
 		return status.Error(codes.Internal, message)

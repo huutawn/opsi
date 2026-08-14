@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, currentEnvironment, deploymentAssignmentFor, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, updateCanvasPlacement } from "./model.ts";
+import { bootstrapLifecycleStatus, bootstrapPollInterval, bootstrapProgress, canvasDraftIssues, canvasDraftStatus, canvasPlacement, capacityLabel, compileCanvasDraft, currentEnvironment, deploymentAssignmentFor, latestActiveBootstrap, moveCanvasPlacement, serverLifecycle, serverStatus, topologyOnboarding, topologyResourcePresentation, updateCanvasPlacement } from "./model.ts";
 
 const facts = {
   project_id: "p1",
@@ -51,6 +51,28 @@ test("canvas edits resources and exposure, excludes unplaced assignments, and co
   assert.deepEqual(compileCanvasDraft("p1", null, { z: draft.reports, a: { ...draft.reports } }).assignments.map((assignment) => assignment.service_key), ["a", "z"]);
 });
 
+test("topology resource presentation supports factual kinds and fails future kinds closed", () => {
+  const application = topologyResourcePresentation({ kind: "application", name: "api", status: "Assigned", badge: "moved", context: "Assigned · Primary", ariaDetail: "moved", draftState: "moved", facts: [{ label: "CPU", value: "100m" }] });
+  assert.equal(application.supported, true);
+  assert.equal(application.state, "draft");
+  assert.equal(application.ariaLabel, "Application api, Assigned, moved");
+  assert.deepEqual(application.capabilities, { acceptsPlacement: false, connectable: true, movable: true });
+
+  const managed = topologyResourcePresentation({ kind: "managed_service", name: "orders-db", status: "Ready", context: "provider fact" });
+  assert.equal(managed.kind, "managed-service");
+  assert.equal(managed.state, "factual");
+  assert.equal(managed.supported, true);
+  assert.deepEqual(managed.capabilities, { acceptsPlacement: false, connectable: true, movable: true });
+  assert.deepEqual(managed.facts, []);
+
+  const unknown = topologyResourcePresentation({ kind: "quantum-cache", name: "future", status: "Ready", context: "untrusted presentation input" });
+  assert.equal(unknown.kind, "unsupported");
+  assert.equal(unknown.state, "unsupported");
+  assert.equal(unknown.status, "Unsupported");
+  assert.match(unknown.context, /No factual quantum-cache presentation/);
+  assert.deepEqual(unknown.capabilities, { acceptsPlacement: false, connectable: false, movable: false });
+});
+
 test("capacity and progress stay truthful", () => {
   assert.equal(capacityLabel(undefined, 512), "Unknown capacity");
   assert.deepEqual(bootstrapProgress(undefined), { label: "Not reported", percent: null });
@@ -60,6 +82,9 @@ test("capacity and progress stay truthful", () => {
 test("topology onboarding follows factual project state", () => {
   const withoutServer = { ...facts, runtimes: [], nodes: [], agents: [], services: [] };
   assert.equal(topologyOnboarding(withoutServer, null, []).action, "Connect server");
+  assert.deepEqual(topologyOnboarding(withoutServer, null, [{ id: "boot-waiting", status: "waiting", role: "first_server", created_at: "now" }]), {
+    kind: "bootstrap", title: "Waiting for connection", description: "Bootstrap boot-waiting is waiting.", action: "Inspect progress", progress: { label: "Not reported", percent: null }, sessionID: "boot-waiting",
+  });
   assert.deepEqual(topologyOnboarding(withoutServer, null, [{ id: "boot-1", status: "installing", role: "first_server", checkpoint: { plan_version: "v1", next_step_index: 2, last_completed_step: "preflight" }, created_at: "now" }]), {
     kind: "bootstrap", title: "Server connection in progress", description: "Bootstrap boot-1 is installing.", action: "Inspect progress", progress: { label: "preflight", percent: 50 }, sessionID: "boot-1",
   });
@@ -75,6 +100,16 @@ test("server lifecycle requires a usable node and active Agent", () => {
   assert.equal(serverStatus(wrongNode.nodes, wrongNode.agents), "Offline");
   assert.equal(serverLifecycle(wrongNode, []).status, "Offline");
   assert.equal(topologyOnboarding({ ...facts, agents: [{ ...facts.agents[0], status: "offline" }] }, null, []).action, "Inspect topology");
+  const withoutServer = { ...facts, runtimes: [], nodes: [], agents: [], services: [] };
+  assert.equal(serverLifecycle(withoutServer, [{ id: "boot-waiting", status: "waiting", role: "first_server", created_at: "1" }]).status, "Waiting");
+  assert.equal(serverLifecycle(withoutServer, [{ id: "boot-validating", status: "validating", role: "first_server", created_at: "2" }]).status, "Connecting");
+  assert.equal(serverLifecycle(withoutServer, [{ id: "boot-installing", status: "installing_k3s", role: "first_server", created_at: "3" }]).status, "Bootstrapping");
+  assert.equal(serverLifecycle({ ...facts, runtimes: [{ ...facts.runtimes[0], status: "mystery" }], nodes: [{ ...facts.nodes[0], status: "mystery" }], agents: [{ ...facts.agents[0], status: "mystery" }] }, []).status, "Unknown");
+  assert.equal(bootstrapLifecycleStatus("waiting"), "Waiting");
+  assert.equal(bootstrapLifecycleStatus("connecting"), "Connecting");
+  assert.equal(bootstrapLifecycleStatus("installing_agent"), "Bootstrapping");
+  assert.equal(bootstrapLifecycleStatus("dead_letter"), "Failed");
+  assert.equal(bootstrapLifecycleStatus("succeeded"), "Unknown");
 });
 
 test("ready facts win over stale bootstrap and failed sessions retry", () => {

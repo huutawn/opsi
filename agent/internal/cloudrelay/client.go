@@ -14,6 +14,7 @@ import (
 	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type Client struct {
@@ -33,9 +34,25 @@ type DeploymentLease struct {
 }
 
 type JobLease struct {
-	Kind          string              `json:"kind"`
-	Deployment    *DeploymentLease    `json:"deployment_lease,omitempty"`
-	NodeLifecycle *NodeLifecycleLease `json:"node_lifecycle_lease,omitempty"`
+	Kind            string                `json:"kind"`
+	Deployment      *DeploymentLease      `json:"deployment_lease,omitempty"`
+	NodeLifecycle   *NodeLifecycleLease   `json:"node_lifecycle_lease,omitempty"`
+	ManagedResource *ManagedResourceLease `json:"managed_resource_lease,omitempty"`
+}
+
+type ManagedResourceLease struct {
+	Action     string                                `json:"action"`
+	LeaseToken string                                `json:"lease_token"`
+	Spec       resourcev1.ManagedResourceSpec        `json:"spec"`
+	Credential *resourcev1.ManagedResourceCredential `json:"credential,omitempty"`
+}
+
+type ManagedResourceResult struct {
+	Status                 string                              `json:"status"`
+	LeaseToken             string                              `json:"lease_token"`
+	Evidence               *resourcev1.ManagedResourceEvidence `json:"evidence,omitempty"`
+	FailureCode            string                              `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                              `json:"failure_message_redacted,omitempty"`
 }
 
 type DeploymentJobEnvelope struct {
@@ -132,9 +149,52 @@ func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) 
 			return nil, err
 		}
 		return &JobLease{Kind: kind.Kind, NodeLifecycle: &lease}, nil
+	case "managed_resource":
+		var lease ManagedResourceLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, ManagedResource: &lease}, nil
 	default:
 		return nil, nil
 	}
+}
+
+func (c Client) CompleteManagedResource(ctx context.Context, nodeID, resourceID string, result ManagedResourceResult) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/managed-resources/" + url.PathEscape(resourceID) + "/result"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete managed resource: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID string, result DeploymentResult) error {

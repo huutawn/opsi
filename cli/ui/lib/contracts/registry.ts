@@ -120,7 +120,43 @@ export type GitHubBinding = {
   installation_id: number;
   service_key: string;
   config_path: string;
+  selected_ref: string;
+  application_root: string;
+  build_context: string;
+  build_strategy: "auto" | "dockerfile" | "buildpack";
+  dockerfile_path?: string;
   status: string;
+};
+
+export type BuildJob = {
+  id: string;
+  project_id: string;
+  environment_id: string;
+  application_id: string;
+  source: {
+    binding_id: string;
+    binding_updated_at: string;
+    github_installation_id: number;
+    repository_id: number;
+    repository_owner_id: number;
+    repository_full_name: string;
+    selected_ref: string;
+    resolved_commit_sha: string;
+    application_root: string;
+    build_context: string;
+  };
+  requested_build_strategy: "auto" | "dockerfile" | "buildpack";
+  resolved_build_strategy: "dockerfile" | "buildpack" | "";
+  dockerfile_path?: string;
+  status: "pending" | "ready" | "running" | "succeeded" | "failed" | "cancelled";
+  failure_code?: string;
+  failure_message_redacted?: string;
+  failure_cause?: string;
+  build_record_id?: string;
+  completed_at?: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export type BuildRecord = {
@@ -154,6 +190,21 @@ export type BuildRecord = {
     oci_repository: string;
     oci_digest: string;
     provenance_digest?: string;
+    build_job_id?: string;
+    build_strategy?: "dockerfile" | "buildpack";
+    builder_identity?: string;
+    builder_version?: string;
+    builder?: {
+      pack_version?: string;
+      builder_image?: string;
+      builder_image_digest?: string;
+      run_image?: string;
+      run_image_digest?: string;
+      lifecycle_version?: string;
+      buildpacks?: Array<{ id: string; version: string }>;
+      processes?: Array<{ type: string; command?: string[]; arguments?: string[]; direct?: boolean; default?: boolean }>;
+    };
+    media_type?: string;
     status: string;
   };
 };
@@ -189,6 +240,7 @@ export type PlacementFacts = {
   nodes: Array<{ id: string; project_id: string; runtime_id: string; status: string; cpu_cores?: number; memory_mb?: number; last_seen_at?: string }>;
   agents: Array<{ id: string; project_id: string; runtime_id: string; node_id: string; status: string; capabilities: Record<string, unknown>; last_seen_at?: string }>;
   services: Array<{ id: string; project_id: string; key: string }>;
+  resources?: Array<{ id: string; project_id: string; environment_id: string; name: string; kind: "managed_service" | "external_resource"; type: string; lifecycle: string; runtime_id?: string; version?: string; replicas?: number; cpu_millicores?: number; memory_bytes?: number }>;
 };
 
 export type DeploymentPolicyDraft = {
@@ -333,6 +385,7 @@ export type WorkloadSpec = {
 	termination_grace_period_seconds: number;
 	environment?: Array<{ name: string; value: string }>;
 	secret_references?: Array<{ env_name: string; secret_id: string }>;
+	registry_pull_credential?: { provider: string; credential_id: string; registry: string };
 	exposure: { mode: "none" | "internal" };
 };
 
@@ -478,6 +531,8 @@ export type BootstrapSession = {
   status: string;
   public_host?: string;
   role: string;
+  auth_method?: string;
+  bootstrap_command?: string;
   attempt_count?: number;
   max_attempts?: number;
   last_failure_code?: string;
@@ -617,6 +672,8 @@ export type ConsoleState = {
   services: ServiceRecord[];
   deployments: DeploymentJob[];
   sessions: BootstrapSession[];
+  bootstrapCommand: string;
+  bootstrapCommandSessionID: string;
   bootstrapEvents: TimelineEvent[];
   bootstrapEventsSessionID: string;
   deploymentEvents: TimelineEvent[];

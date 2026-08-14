@@ -6,12 +6,21 @@ Project creation and selection now land on the existing
 `Infrastructure / Topology` route. Topology is the first project navigation
 destination, the header shows `Projects / project / environment / Topology`,
 and the workspace separates Design facts (TopologyPlan and unassigned services)
-from Live runtime, node, Agent, and deployment facts. Design now uses one
-`@xyflow/react` canvas where factual servers contain application nodes and
-unassigned applications remain in Unplaced. Dragging creates an in-memory
-`CanvasDraft` with unpublished-change count, local semantic diff, reset, and
-incomplete-field issues; it makes no apply, policy, deployment, or backend
-write and is discarded when project or applied topology identity changes.
+from Live runtime, node, Agent, and deployment facts. Design now opens on one
+focal `@xyflow/react` canvas with explicit project, environment, revision/hash,
+unpublished-change, validation, Review, and Apply context. Reported servers show
+capacity and Agent state without presenting fabricated live workload state;
+application nodes show placement, replicas, CPU, memory, and exposure intent,
+while unassigned applications remain in Unplaced. The selected resource and
+connection inspector owns edits for placement and service configuration.
+Server and application facts are normalized through one
+`TopologyResourcePresentation` and rendered by one resource-node primitive;
+future or unknown kinds remain visibly unsupported until backed by factual
+domain data.
+Dragging creates an in-memory `CanvasDraft`; Cloud preview/validate/diff is
+required before Apply, stale or conflicting reviews are invalidated, and no
+topology backend write occurs before Apply. Project and applied-topology
+identity changes retain the existing draft isolation rules.
 
 ## R5-014 Local API/UI parity checkpoint
 
@@ -200,10 +209,8 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
 | Last updated | 2026-08-05 |
-| Requirements | `docs/opsi_srs.md` |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
-| Trusted artifact target | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
 ## Corrective Prompt 07 checkpoint
 
@@ -956,8 +963,8 @@ R5-009 adds `opsi.topology_plan/v1` and `opsi.deployment_policy/v1` without
 changing the R5-008 OIDC verifier or static workload-admission policy.
 `DeploymentPolicy` is evaluated only for an already accepted `BuildRecord` and
 cannot override issuer, JWKS, audience, signature, claim/body binding,
-repository ownership, or active service binding checks. ADR-005 records this
-authority boundary.
+repository ownership, or active service binding checks. This bounded authority
+is enforced by the deployment policy contracts and tests.
 
 Topology and policy state use immutable PostgreSQL revisions with mutable heads,
 expected revision/state-hash concurrency, project/operation/key/payload-bound

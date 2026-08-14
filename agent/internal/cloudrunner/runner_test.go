@@ -62,6 +62,10 @@ func (f *fakeClient) CompleteNodeLifecycle(_ context.Context, _ string, _ string
 	return nil
 }
 
+func (f *fakeClient) CompleteManagedResource(context.Context, string, string, cloudrelay.ManagedResourceResult) error {
+	return nil
+}
+
 func (f *fakeClient) Heartbeat(_ context.Context, _ string, heartbeat cloudrelay.Heartbeat) error {
 	f.heartbeats++
 	f.heartbeat = heartbeat
@@ -288,16 +292,33 @@ func TestRunnerBoundedResumeCompletesOnlyFactualRollbackTerminal(t *testing.T) {
 		wantState string
 	}{
 		{name: "rolled back", terminal: deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateRolledBack, Version: 6, StateHash: strings.Repeat("6", 64), Error: failure, Resources: resources, Evidence: &evidence, CreatedAt: now, UpdatedAt: now, TerminalAt: &now}, wantState: deploymentv1.RolloutStateRolledBack},
-		{name: "rollback failed", terminal: deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateRollbackFailed, Version: 6, StateHash: strings.Repeat("7", 64), Error: deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "rollback apply failed", false), Resources: resources, CreatedAt: now, UpdatedAt: now, TerminalAt: &now}, wantState: deploymentv1.RolloutStateRollbackFailed},
+		{name: "rollback failed", terminal: deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateRollbackFailed, Version: 6, StateHash: strings.Repeat("7", 64), Error: failure, Resources: resources, CreatedAt: now, UpdatedAt: now, TerminalAt: &now}, wantState: deploymentv1.RolloutStateRollbackFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := &sequenceRolloutEngine{records: []deploymentv1.RolloutRecord{failed, tc.terminal}, errors: []error{errors.New("failed to enter rolling_back"), tc.terminal.Error}}
 			client := &fakeClient{}
 			Runner{Client: client, Engine: engine, NodeID: intent.Target.NodeID}.handleLease(context.Background(), lease)
-			if engine.calls != rolloutReconcileAttempts || len(client.results) != 1 || client.results[0].RolloutResult == nil || client.results[0].RolloutResult.RolloutState != tc.wantState || client.results[0].RolloutResult.FailurePhase != deploymentv1.FailurePhasePostMutation {
+			if engine.calls != rolloutReconcileAttempts || len(client.results) != 1 || client.results[0].RolloutResult == nil || client.results[0].RolloutResult.RolloutState != tc.wantState || client.results[0].RolloutResult.FailurePhase != deploymentv1.FailurePhasePostMutation || client.results[0].FailureCode != failure.Code || client.results[0].FailureMessageRedacted != failure.Message {
 				t.Fatalf("calls=%d results=%+v", engine.calls, client.results)
 			}
 		})
+	}
+}
+
+func TestRunnerFreshFailureKeepsPrimaryResult(t *testing.T) {
+	intent := testCloudRolloutIntent(t)
+	lease := cloudrelay.DeploymentLease{Kind: "deployment", Action: intent.Operation, LeaseToken: "lease-failed", Deployment: cloudrelay.DeploymentJobEnvelope{ID: intent.Desired.DeploymentJobID}}
+	command := intent.Desired.AgentCommand()
+	command.Rollout = &intent
+	command.LeaseToken = lease.LeaseToken
+	lease.Command = &command
+	now := time.Now().UTC()
+	primary := deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRegistryAuthFailed, "registry denied image pull", false)
+	record := deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateFailed, Version: 4, StateHash: strings.Repeat("4", 64), Error: primary, CreatedAt: now, UpdatedAt: now, TerminalAt: &now}
+
+	result, terminal := Runner{Engine: &fakeRolloutEngine{record: record, reconcileErr: primary}, NodeID: intent.Target.NodeID}.executeRollout(context.Background(), lease)
+	if !terminal || result.Status != deploymentv1.StateFailed || result.FailureCode != primary.Code || result.FailureMessageRedacted != primary.Message || result.RolloutResult == nil || result.RolloutResult.FailureCode != primary.Code || result.RolloutResult.FailureMessageRedacted != primary.Message {
+		t.Fatalf("result=%+v terminal=%v", result, terminal)
 	}
 }
 

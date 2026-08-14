@@ -5,10 +5,8 @@
 | Version | 6.1 |
 | Status | Active architecture map |
 | Last updated | 2026-07-24 |
-| Requirements | `docs/opsi_srs.md` |
 | Implementation truth | `docs/current_state.md`, `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
-| Trusted artifact decision | `docs/architecture_decisions/ADR-004-trusted-artifact-cd.md` |
 
 This document separates implemented architecture from later roadmap work. The
 status matrix remains the evidence authority.
@@ -70,12 +68,13 @@ relay and route-scoped webhook secrets are retired. The historical
 `/webhooks/next` transport name remains, but `PollJob` carries only canonical
 deployment or node lifecycle jobs; it is not a generic webhook relay.
 
-Bootstrap Worker is a long-running, single-concurrency Cloud-side worker. It
-polls `POST /internal/bootstrap/sessions/lease`; the registry atomically claims
-the oldest eligible pending or due retry session, increments its attempt count,
-and stores only a hash of the one-time lease token. The worker renews active
-leases through authenticated heartbeat requests. Progress and finish calls also
-require worker identity and the raw lease token.
+Bootstrap has one worker execution contract with two transports. The long-running,
+single-concurrency Cloud-side worker polls `POST /internal/bootstrap/sessions/lease`
+for Advanced SSH sessions. The default Connect Server command runs the same worker
+on the target and claims only its reviewed session with an expiring one-time token.
+The registry atomically leases either target, increments its attempt count, and
+stores only a hash of the per-lease token. Checkpoint, heartbeat, progress, and
+finish calls require worker identity and that raw lease token.
 
 Cloud recovers expired leases before polling. Retryable outcomes receive
 persisted bounded backoff; exhausted or permanent outcomes enter
@@ -203,6 +202,22 @@ The workflow submits an OIDC-bound `BuildRecord` with repository ID, commit SHA,
 ref, event, run ID/attempt, workflow identity, image repository/digest, and
 optional provenance digest. Cloud compares request-body values with verified
 claims and fails closed on mismatch.
+
+The canonical trusted build executor resolves `dockerfile` to the pinned
+BuildKit adapter and `buildpack` to `pack` with the digest-pinned Paketo Ubuntu
+24.04 builder and run image. `auto` selects a canonical Dockerfile when exactly
+one exists; otherwise it selects Buildpacks. A failed Dockerfile build never
+falls back to Buildpacks. Both adapters reuse the same immutable source
+materialization, registry target, remote digest verification, BuildRecord
+finalization, lease, and failure callback.
+
+Buildpacks operate on `application_root`. Supported layouts are a standalone
+root (`application_root=build_context=.`) and a nested independent app where
+both paths name the same directory. A shared monorepo that needs files outside
+the application root fails with `BUILDPACK_MONOREPO_UNSUPPORTED`; Opsi does not
+truncate or silently build an incomplete workspace. CNB-selected buildpacks and
+processes are recorded as factual BuildRecord metadata only. They do not set
+deployment ports, health paths, or ServiceConfiguration.
 
 Routing is:
 
