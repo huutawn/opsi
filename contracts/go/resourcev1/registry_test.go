@@ -44,7 +44,15 @@ func TestGeneratedValuesClassifySecrets(t *testing.T) {
 	}
 }
 
-func TestNATSProvisioningAuthorityIsPinnedAndUnique(t *testing.T) {
+func TestManagedProvisioningAuthorityIsPinnedAndUnique(t *testing.T) {
+	postgres, ok := Definition(TypePostgres)
+	if !ok || !postgres.Provisioning.Implemented || len(postgres.Provisioning.Profiles) != 1 || len(postgres.Provisioning.Profiles[0].Versions) != 1 || !postgres.Storage.Required {
+		t.Fatalf("postgres provisioning=%+v storage=%+v", postgres.Provisioning, postgres.Storage)
+	}
+	postgresVersion := postgres.Provisioning.Profiles[0].Versions[0]
+	if postgresVersion.Version != PostgresVersion || postgresVersion.Image != PostgresImage || !strings.Contains(postgresVersion.Image, ":"+PostgresImageVariant+"@sha256:") || strings.Contains(postgresVersion.Image, ":latest") {
+		t.Fatalf("postgres version=%+v", postgresVersion)
+	}
 	definition, ok := Definition(TypeNATS)
 	if !ok || !definition.Provisioning.Implemented || len(definition.Provisioning.Profiles) != 1 || len(definition.Provisioning.Profiles[0].Versions) != 1 {
 		t.Fatalf("nats provisioning=%+v", definition.Provisioning)
@@ -61,7 +69,7 @@ func TestNATSProvisioningAuthorityIsPinnedAndUnique(t *testing.T) {
 	if valkey.Version != ValkeyVersion || valkey.Image != ValkeyImage || strings.Contains(valkey.Image, ":latest") || redis.Storage.Supported {
 		t.Fatalf("valkey version=%+v storage=%+v", valkey, redis.Storage)
 	}
-	for _, resourceType := range []Type{TypePostgres, TypeRabbitMQ} {
+	for _, resourceType := range []Type{TypeRabbitMQ} {
 		definition, _ := Definition(resourceType)
 		if definition.Provisioning.Implemented {
 			t.Fatalf("%s unexpectedly provisionable", resourceType)

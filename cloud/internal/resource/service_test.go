@@ -7,6 +7,7 @@ import (
 	"time"
 
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
 type testScopes struct{}
@@ -95,7 +96,11 @@ func TestManagedResourceValidation(t *testing.T) {
 		{"plaintext config", func(request *resourcev1.CreateRequest) {
 			request.Managed.ServiceConfig = map[string]string{"password": "plaintext"}
 		}},
-		{"missing credential ref", func(request *resourcev1.CreateRequest) { request.Managed.CredentialRefs = nil }},
+		{"supplied credential ref", func(request *resourcev1.CreateRequest) {
+			request.Managed.CredentialRefs = []resourcev1.SecretReference{{SecretID: "user-supplied"}}
+		}},
+		{"storage policy", func(request *resourcev1.CreateRequest) { request.Managed.Storage.PolicyRef = "unsupported" }},
+		{"version upgrade", func(request *resourcev1.CreateRequest) { request.Managed.Version = "19" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,20 +153,62 @@ func TestManagedUpdatePreservesUnplacedAuthority(t *testing.T) {
 	}
 }
 
+func TestPostgresManagedUpdatePreservesStorageCredentialAndVersion(t *testing.T) {
+	service := testService()
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "postgres-update", managedRequest(resourcev1.TypePostgres))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := topologyv1.Plan{ProjectID: "project-1", Revision: 1, PlanHash: strings.Repeat("c", 64), Assignments: []topologyv1.Assignment{{ServiceKey: created.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20}}}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	planned, _ := service.Get(context.Background(), "project-1", created.ID)
+	credentialID := planned.Runtime.Spec.CredentialID
+	next := *planned.Managed
+	next.CPUMillicores = 500
+	updated, err := service.Update(context.Background(), "project-1", created.ID, resourcev1.UpdateRequest{Managed: &next})
+	if err != nil || updated.Runtime.Spec.Storage != planned.Runtime.Spec.Storage || updated.Runtime.Spec.CredentialID != credentialID || updated.Runtime.Spec.Version != resourcev1.PostgresVersion {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*resourcev1.ManagedSpec)
+		code string
+	}{
+		{"grow", func(spec *resourcev1.ManagedSpec) { spec.Storage.SizeBytes++ }, resourcev1.FailureStorageResizeUnsupported},
+		{"shrink", func(spec *resourcev1.ManagedSpec) { spec.Storage.SizeBytes-- }, resourcev1.FailureStorageResizeUnsupported},
+		{"policy", func(spec *resourcev1.ManagedSpec) { spec.Storage.PolicyRef = "other" }, resourcev1.FailureStorageInvalid},
+		{"version", func(spec *resourcev1.ManagedSpec) { spec.Version = "18.7" }, resourcev1.FailureVersionUpgradeUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := *updated.Managed
+			tc.edit(&candidate)
+			if _, err := service.Update(context.Background(), "project-1", created.ID, resourcev1.UpdateRequest{Managed: &candidate}); err == nil || !strings.Contains(err.Error(), tc.code) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func testService() Service {
 	return Service{Store: NewMemoryStore(), Scopes: testScopes{}, Credentials: NewMemoryCredentialAuthority(), Now: func() time.Time { return time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC) }}
 }
 
 func managedRequest(resourceType resourcev1.Type) resourcev1.CreateRequest {
 	persistent := resourceType != resourcev1.TypeNATS && resourceType != resourcev1.TypeRedis
-	refs := []resourcev1.SecretReference{{SecretID: "secret-" + string(resourceType)}}
-	if resourceType == resourcev1.TypeRedis {
-		refs = nil
+	var refs []resourcev1.SecretReference
+	if resourceType != resourcev1.TypeRedis && resourceType != resourcev1.TypePostgres {
+		refs = []resourcev1.SecretReference{{SecretID: "secret-" + string(resourceType)}}
+	}
+	storage := resourcev1.StorageRequest{Persistent: persistent, SizeBytes: map[bool]int64{true: 1 << 30}[persistent]}
+	if resourceType == resourcev1.TypePostgres {
+		storage.PolicyRef = resourcev1.StoragePolicyDefault
 	}
 	return resourcev1.CreateRequest{
 		EnvironmentID: "env-1", Name: string(resourceType), Kind: resourcev1.KindManagedService, Type: resourceType,
 		Managed: &resourcev1.ManagedSpec{Type: resourceType, Version: "default", Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20,
-			Storage:        resourcev1.StorageRequest{Persistent: persistent, SizeBytes: map[bool]int64{true: 1 << 30}[persistent]},
+			Storage:        storage,
 			CredentialRefs: refs, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
 	}
 }

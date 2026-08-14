@@ -31,8 +31,8 @@ func TestPostgresResourceStorePersistsReferencesAndIdempotency(t *testing.T) {
 	}
 	service := Service{Store: PostgresStore{DB: db}, Scopes: registryStore}
 	request := resourcev1.CreateRequest{EnvironmentID: facts.Environments[0].ID, Name: "postgres", Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres, Managed: &resourcev1.ManagedSpec{
-		Type: resourcev1.TypePostgres, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30},
-		CredentialRefs: []resourcev1.SecretReference{{SecretID: "vault-postgres"}}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"},
+		Type: resourcev1.TypePostgres, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault},
+		ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"},
 	}}
 	created, reused, err := service.Create(context.Background(), project.ID, userID, "resource-"+suffix, request)
 	if err != nil || reused {

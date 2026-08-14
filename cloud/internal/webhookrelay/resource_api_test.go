@@ -48,7 +48,7 @@ func TestResourceAPIRegistryCreateAndTopologyBoundary(t *testing.T) {
 	createBody, _ := json.Marshal(resourcev1.CreateRequest{
 		EnvironmentID: environmentID, Name: "database", Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres,
 		Managed: &resourcev1.ManagedSpec{Type: resourcev1.TypePostgres, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20,
-			Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30}, CredentialRefs: []resourcev1.SecretReference{{SecretID: "vault-postgres"}}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+			Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
 	})
 	created := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/resources", string(createBody), "resource-key")
 	if created.Code != http.StatusCreated || strings.Contains(created.Body.String(), "plaintext") {
@@ -89,13 +89,13 @@ func TestResourceAPIRegistryCreateAndTopologyBoundary(t *testing.T) {
 	}
 	current := topologyv1.Plan{}
 	applyBody, _ := json.Marshal(topologyv1.ApplyRequest{ExpectedRevision: current.Revision, ExpectedStateHash: current.StateHash, Draft: topologyv1.Draft{SchemaVersion: topologyv1.SchemaVersion, ProjectID: project.ID, Assignments: []topologyv1.Assignment{{ServiceKey: result.Resource.ID, EnvironmentID: environmentID, RuntimeID: facts.Runtimes[0].ID, Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20, Exposure: topologyv1.ExposureIntent{Mode: "none"}}}}})
-	unsupported := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/topology/apply", string(applyBody), "unsupported-topology")
-	if unsupported.Code != http.StatusBadRequest || !strings.Contains(unsupported.Body.String(), "MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED") {
-		t.Fatalf("unsupported status=%d body=%s", unsupported.Code, unsupported.Body.String())
+	unavailable := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/topology/apply", string(applyBody), "unavailable-topology")
+	if unavailable.Code != http.StatusServiceUnavailable || !strings.Contains(unavailable.Body.String(), "TOPOLOGY_UNAVAILABLE") {
+		t.Fatalf("unavailable status=%d body=%s", unavailable.Code, unavailable.Body.String())
 	}
 	after, err := server.Topology.Get(t.Context(), project.ID)
 	if err == nil || !strings.Contains(err.Error(), "topology not found") || after.Revision != current.Revision || after.StateHash != current.StateHash {
-		t.Fatalf("unsupported apply mutated topology: before=%+v after=%+v err=%v", current, after, err)
+		t.Fatalf("unavailable apply mutated topology: before=%+v after=%+v err=%v", current, after, err)
 	}
 }
 
@@ -165,19 +165,30 @@ func TestPostgresAgentManagedResourceLeaseEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	resourceStore := resource.PostgresStore{DB: db}
-	resources := resource.Service{Store: resourceStore, Scopes: registryStore}
+	credentials := resource.NewMemoryCredentialAuthority()
+	resources := resource.Service{Store: resourceStore, Scopes: registryStore, Credentials: credentials}
 	created, _, err := resources.Create(ctx, project.ID, userID, "resource-"+suffix, resourcev1.CreateRequest{
 		EnvironmentID: facts.Environments[0].ID, Name: "postgres", Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres,
-		Managed: &resourcev1.ManagedSpec{Type: resourcev1.TypePostgres, Version: "default", Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30}, CredentialRefs: []resourcev1.SecretReference{{SecretID: "secret-postgres"}}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+		Managed: &resourcev1.ManagedSpec{Type: resourcev1.TypePostgres, Version: "default", Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	credentialID := "mrcred-" + created.ID
+	if _, err := credentials.Ensure(ctx, credentialID); err != nil {
+		t.Fatal(err)
+	}
 	created.Lifecycle = resourcev1.LifecyclePlanned
-	created.Runtime = &resourcev1.ManagedResourceRuntime{Spec: resourcev1.ManagedResourceSpec{
+	spec := resourcev1.ManagedResourceSpec{
 		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion, ResourceID: created.ID, ProjectID: project.ID, EnvironmentID: facts.Environments[0].ID, ResourceType: resourcev1.TypePostgres,
-		Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: facts.Runtimes[0].ID, NodeID: node.ID, AgentID: agent.ID}, SpecHash: "http-spec-hash",
-	}}
+		Profile: "single-node-experimental", Version: resourcev1.PostgresVersion, Image: resourcev1.PostgresImage, CredentialID: credentialID,
+		Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: facts.Runtimes[0].ID, NodeID: node.ID, AgentID: agent.ID}, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20,
+		Ports: []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}}, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault},
+		Connection:        resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-" + created.ID, Host: "opsi-mr-" + created.ID + ".default.svc.cluster.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres},
+		ConfigurationHash: strings.Repeat("a", 64), TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64),
+	}
+	spec.SpecHash, _ = spec.Hash()
+	created.Runtime = &resourcev1.ManagedResourceRuntime{Spec: spec}
 	if _, err := resourceStore.Update(ctx, created); err != nil {
 		t.Fatal(err)
 	}

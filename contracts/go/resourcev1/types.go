@@ -159,6 +159,15 @@ const (
 	FailureReadinessFailed              = "MANAGED_RESOURCE_READINESS_FAILED"
 	FailureRuntimeMismatch              = "MANAGED_RESOURCE_RUNTIME_MISMATCH"
 	FailureDeleteFailed                 = "MANAGED_RESOURCE_DELETE_FAILED"
+	FailureStorageRequired              = "MANAGED_RESOURCE_STORAGE_REQUIRED"
+	FailureStorageInvalid               = "MANAGED_RESOURCE_STORAGE_INVALID"
+	FailurePVCApplyFailed               = "MANAGED_RESOURCE_PVC_APPLY_FAILED"
+	FailurePVCNotBound                  = "MANAGED_RESOURCE_PVC_NOT_BOUND"
+	FailureVolumeMountFailed            = "MANAGED_RESOURCE_VOLUME_MOUNT_FAILED"
+	FailureDatabaseInitFailed           = "MANAGED_RESOURCE_DATABASE_INIT_FAILED"
+	FailureStorageResizeUnsupported     = "MANAGED_RESOURCE_STORAGE_RESIZE_UNSUPPORTED"
+	FailureVersionUpgradeUnsupported    = "MANAGED_RESOURCE_VERSION_UPGRADE_UNSUPPORTED"
+	FailurePersistentDeleteUnsupported  = "MANAGED_RESOURCE_PERSISTENT_DELETE_UNSUPPORTED"
 	FailureBindingSecretMaterialization = "RESOURCE_BINDING_SECRET_MATERIALIZATION_FAILED"
 )
 
@@ -174,11 +183,22 @@ type ManagedResourceCredential struct {
 	CredentialID string `json:"credential_id"`
 	Username     string `json:"username"`
 	Password     string `json:"password"`
+	Database     string `json:"database,omitempty"`
 }
 
 func (c ManagedResourceCredential) Validate() error {
-	if c.CredentialID == "" || c.Username == "" || c.Password == "" || len(c.Username) > 128 || len(c.Password) > 1024 || strings.ContainsAny(c.Username+c.Password, "\x00\r\n") {
+	if c.CredentialID == "" || c.Username == "" || c.Password == "" || len(c.Username) > 128 || len(c.Password) > 1024 || len(c.Database) > 128 || strings.ContainsAny(c.Username+c.Password+c.Database, "\x00\r\n") {
 		return errors.New("managed resource credential is invalid")
+	}
+	return nil
+}
+
+func (c ManagedResourceCredential) ValidateFor(resourceType Type) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if resourceType == TypePostgres && c.Database == "" {
+		return errors.New("managed PostgreSQL credential is invalid")
 	}
 	return nil
 }
@@ -232,22 +252,36 @@ func (s ManagedResourceSpec) Hash() (string, error) {
 }
 
 func (s ManagedResourceSpec) Validate() error {
-	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || (s.ResourceType != TypeNATS && s.ResourceType != TypeRedis) {
+	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || (s.ResourceType != TypeNATS && s.ResourceType != TypeRedis && s.ResourceType != TypePostgres) {
 		return errors.New("managed resource identity is invalid")
 	}
 	expectedVersion, expectedImage := NATSVersion, NATSImage
 	if s.ResourceType == TypeRedis {
 		expectedVersion, expectedImage = ValkeyVersion, ValkeyImage
+	} else if s.ResourceType == TypePostgres {
+		expectedVersion, expectedImage = PostgresVersion, PostgresImage
 	}
 	if s.Profile != "single-node-experimental" || s.Version != expectedVersion || s.Image != expectedImage || !strings.Contains(s.Image, "@sha256:") {
 		return errors.New("managed resource image authority is invalid")
 	}
-	if s.Assignment.RuntimeID == "" || s.Assignment.NodeID == "" || s.Assignment.AgentID == "" || s.Replicas != 1 || s.CPUMillicores < 1 || s.MemoryBytes < 1 || s.Storage.Persistent || s.Storage.SizeBytes != 0 {
+	if s.Assignment.RuntimeID == "" || s.Assignment.NodeID == "" || s.Assignment.AgentID == "" || s.Replicas != 1 || s.CPUMillicores < 1 || s.MemoryBytes < 1 {
+		return errors.New("managed resource runtime intent is invalid")
+	}
+	if s.ResourceType == TypePostgres {
+		if !s.Storage.Persistent || s.Storage.SizeBytes < 1 || s.Storage.PolicyRef != StoragePolicyDefault {
+			return errors.New("managed PostgreSQL storage intent is invalid")
+		}
+	} else if s.Storage.Persistent || s.Storage.SizeBytes != 0 || s.Storage.PolicyRef != "" {
 		return errors.New("managed resource runtime intent is invalid")
 	}
 	portName, port, protocol := "nats", int32(4222), ProtocolNATS
 	if s.ResourceType == TypeRedis {
 		portName, port, protocol = "redis", 6379, ProtocolRedis
+		if s.CredentialID == "" || s.Connection.URL != "" {
+			return errors.New("managed resource credential authority is invalid")
+		}
+	} else if s.ResourceType == TypePostgres {
+		portName, port, protocol = "postgres", 5432, ProtocolPostgres
 		if s.CredentialID == "" || s.Connection.URL != "" {
 			return errors.New("managed resource credential authority is invalid")
 		}
@@ -275,6 +309,14 @@ type ManagedResourceEvidence struct {
 	Image             string    `json:"image"`
 	ImageID           string    `json:"image_id,omitempty"`
 	AvailableReplicas int32     `json:"available_replicas"`
+	StorageReady      bool      `json:"storage_ready,omitempty"`
+	VolumeMounted     bool      `json:"volume_mounted,omitempty"`
+	PVCName           string    `json:"pvc_name,omitempty"`
+	PVName            string    `json:"pv_name,omitempty"`
+	StorageClass      string    `json:"storage_class,omitempty"`
+	RequestedBytes    int64     `json:"requested_bytes,omitempty"`
+	ActualStorage     string    `json:"actual_storage,omitempty"`
+	StorageRetained   bool      `json:"storage_retained,omitempty"`
 	Deleted           bool      `json:"deleted,omitempty"`
 	ObservedAt        time.Time `json:"observed_at"`
 }

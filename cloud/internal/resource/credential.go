@@ -29,7 +29,7 @@ func (a *MemoryCredentialAuthority) Ensure(_ context.Context, id string) (resour
 	if _, err := rand.Read(password); err != nil {
 		return resourcev1.ManagedResourceCredential{}, err
 	}
-	credential := resourcev1.ManagedResourceCredential{CredentialID: id, Username: "opsi", Password: base64.RawURLEncoding.EncodeToString(password)}
+	credential := resourcev1.ManagedResourceCredential{CredentialID: id, Username: "opsi", Password: base64.RawURLEncoding.EncodeToString(password), Database: "opsi"}
 	a.credentials[id] = credential
 	return credential, nil
 }

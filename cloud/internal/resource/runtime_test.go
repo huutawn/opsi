@@ -73,13 +73,56 @@ func TestNATSCompilerLeaseReadinessDeleteAndBinding(t *testing.T) {
 	}
 }
 
-func TestCompilerFailsClosedForUnsupportedTypeAndMove(t *testing.T) {
+func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing.T) {
 	service := testService()
 	postgres, _, err := service.Create(context.Background(), "project-1", "user-1", "postgres-runtime", managedRequest(resourcev1.TypePostgres))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if postgres.Lifecycle != resourcev1.LifecycleUnplaced || postgres.Runtime != nil {
+		t.Fatalf("created=%+v", postgres)
+	}
 	plan := topologyv1.Plan{ProjectID: "project-1", Revision: 1, PlanHash: strings.Repeat("b", 64), Assignments: []topologyv1.Assignment{{ServiceKey: postgres.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20, Exposure: topologyv1.ExposureIntent{Mode: "internal"}}}}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	planned, _ := service.Get(context.Background(), "project-1", postgres.ID)
+	if planned.Lifecycle != resourcev1.LifecyclePlanned || planned.Runtime == nil || planned.Runtime.Spec.ResourceType != resourcev1.TypePostgres || planned.Runtime.Spec.Version != resourcev1.PostgresVersion || planned.Runtime.Spec.Image != resourcev1.PostgresImage || planned.Runtime.Spec.Storage.PolicyRef != resourcev1.StoragePolicyDefault || !planned.Runtime.Spec.Storage.Persistent || planned.Runtime.Spec.CredentialID == "" || planned.Runtime.Spec.Connection.Protocol != resourcev1.ProtocolPostgres || planned.Runtime.Spec.Connection.Port != 5432 || planned.Runtime.Spec.Connection.URL != "" {
+		t.Fatalf("planned=%+v", planned)
+	}
+	first, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
+	if err != nil || !ok || first.Credential == nil || first.Credential.Database == "" || first.Credential.CredentialID != planned.Runtime.Spec.CredentialID {
+		t.Fatalf("lease=%+v ok=%t err=%v", first, ok, err)
+	}
+	now := time.Now().UTC()
+	ready, err := service.CompleteManaged(context.Background(), "project-1", postgres.ID, ManagedResult{Status: "ready", LeaseToken: first.LeaseToken, Evidence: &resourcev1.ManagedResourceEvidence{ObservedSpecHash: first.Spec.SpecHash, WorkloadReady: true, PodReady: true, ServiceReady: true, SecretReady: true, AuthReady: true, StorageReady: true, VolumeMounted: true, PVCName: "pvc", PVName: "pv", Image: first.Spec.Image, ImageID: first.Spec.Image, AvailableReplicas: 1, ObservedAt: now}})
+	if err != nil || ready.Lifecycle != resourcev1.LifecycleReady {
+		t.Fatalf("ready=%+v err=%v", ready, err)
+	}
+	if _, err := service.DeleteIntent(context.Background(), "project-1", postgres.ID); err != nil {
+		t.Fatal(err)
+	}
+	deleteLease, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
+	if err != nil || !ok || deleteLease.Action != "delete" {
+		t.Fatalf("delete lease=%+v ok=%t err=%v", deleteLease, ok, err)
+	}
+	unsafeEvidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: deleteLease.Spec.SpecHash, Deleted: true, ObservedAt: now}
+	if _, err := service.CompleteManaged(context.Background(), "project-1", postgres.ID, ManagedResult{Status: "deleted", LeaseToken: deleteLease.LeaseToken, Evidence: unsafeEvidence}); err == nil || !strings.Contains(err.Error(), resourcev1.FailurePersistentDeleteUnsupported) {
+		t.Fatalf("unsafe delete err=%v", err)
+	}
+	safeEvidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: deleteLease.Spec.SpecHash, Deleted: true, StorageRetained: true, PVCName: "pvc", PVName: "pv", ObservedAt: now}
+	if _, err := service.CompleteManaged(context.Background(), "project-1", postgres.ID, ManagedResult{Status: "deleted", LeaseToken: deleteLease.LeaseToken, Evidence: safeEvidence}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompilerFailsClosedForUnsupportedTypeAndMove(t *testing.T) {
+	service := testService()
+	rabbit, _, err := service.Create(context.Background(), "project-1", "user-1", "rabbit-runtime", managedRequest(resourcev1.TypeRabbitMQ))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := topologyv1.Plan{ProjectID: "project-1", Revision: 1, PlanHash: strings.Repeat("b", 64), Assignments: []topologyv1.Assignment{{ServiceKey: rabbit.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20, Exposure: topologyv1.ExposureIntent{Mode: "internal"}}}}
 	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err == nil || !strings.Contains(err.Error(), "MANAGED_RESOURCE_PROVISIONING_UNSUPPORTED") {
 		t.Fatalf("unsupported err=%v", err)
 	}

@@ -74,7 +74,7 @@ func (s postgresManagedResourceCredentialVault) Ensure(ctx context.Context, id s
 	if _, err := io.ReadFull(rand.Reader, password); err != nil {
 		return resourcev1.ManagedResourceCredential{}, err
 	}
-	credential = resourcev1.ManagedResourceCredential{CredentialID: id, Username: "opsi", Password: base64.RawURLEncoding.EncodeToString(password)}
+	credential = resourcev1.ManagedResourceCredential{CredentialID: id, Username: "opsi", Password: base64.RawURLEncoding.EncodeToString(password), Database: "opsi"}
 	ciphertext, nonce, err := s.seal(credential)
 	if err != nil {
 		return resourcev1.ManagedResourceCredential{}, err

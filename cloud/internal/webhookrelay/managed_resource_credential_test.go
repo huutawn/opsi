@@ -33,7 +33,7 @@ func TestPostgresManagedResourceCredentialVaultEncryptsReusesAndDeletes(t *testi
 	if err := db.QueryRowContext(context.Background(), `SELECT ciphertext FROM managed_resource_credentials WHERE id = $1`, id).Scan(&ciphertext); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(ciphertext, []byte(first.Username)) || bytes.Contains(ciphertext, []byte(first.Password)) {
+	if first.Database == "" || bytes.Contains(ciphertext, []byte(first.Username)) || bytes.Contains(ciphertext, []byte(first.Password)) || bytes.Contains(ciphertext, []byte(first.Database)) {
 		t.Fatal("managed resource credential was stored as plaintext")
 	}
 	second, err := vault.Ensure(context.Background(), id)
