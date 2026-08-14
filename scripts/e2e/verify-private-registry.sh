@@ -16,6 +16,8 @@ password="opsi-private-${suffix}"
 local_image=""
 generic_image=""
 wrong_image=""
+postgres_image=""
+evidence_dir="${OPSI_K3S_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3b1-postgres-binding-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 cleanup() {
 	status=$?
@@ -26,7 +28,7 @@ cleanup() {
 			docker rm -f "$container" >/dev/null 2>&1 || cleanup_status=1
 		fi
 	done
-	for image in "$local_image" "$generic_image" "$wrong_image"; do
+	for image in "$local_image" "$generic_image" "$wrong_image" "$postgres_image"; do
 		if [ -n "$image" ] && docker image inspect "$image" >/dev/null 2>&1; then
 			docker image rm -f "$image" >/dev/null 2>&1 || cleanup_status=1
 		fi
@@ -45,7 +47,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$work_dir/auth" "$work_dir/bin" "$work_dir/fixture" "$DOCKER_CONFIG"
+mkdir -p "$work_dir/auth" "$work_dir/bin" "$work_dir/fixture" "$work_dir/postgres-fixture" "$DOCKER_CONFIG" "$evidence_dir"
 htpasswd -Bbn "$username" "$password" >"$work_dir/auth/htpasswd"
 chmod 755 "$work_dir" "$work_dir/auth"
 chmod 644 "$work_dir/auth/htpasswd"
@@ -75,6 +77,10 @@ local_image="${registry_host}/opsi/p07b2-acceptance:fixture-${suffix}"
 docker build -q -f agent/integration/fixtures/p07b2-application/Dockerfile -t "$local_image" "$work_dir/fixture" >/dev/null
 printf '%s' "$password" | docker login "$registry_host" --username "$username" --password-stdin >/dev/null
 docker push "$local_image" >/dev/null || { echo 'fixture push failed' >&2; exit 1; }
+(cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/postgres-fixture/p07b3b1-application" ./integration/fixtures/p07b3b1-application)
+postgres_image="${registry_host}/opsi/p07b3b1-acceptance:fixture-${suffix}"
+docker build -q -f cloud/integration/fixtures/p07b3b1-application/Dockerfile -t "$postgres_image" "$work_dir/postgres-fixture" >/dev/null
+docker push "$postgres_image" >/dev/null || { echo 'PostgreSQL fixture push failed' >&2; exit 1; }
 docker pull nginx:1.27-alpine >/dev/null
 generic_image="${registry_host}/opsi/e2e:seed"
 docker tag nginx:1.27-alpine "$generic_image"
@@ -104,13 +110,19 @@ generic_headers="$work_dir/generic-headers"
 http_status -D "$generic_headers" -u "${username}:${password}" -H "Accept: ${accept}" "http://${registry_host}/v2/opsi/e2e/manifests/seed"
 generic_status="$status"
 generic_digest="$(awk 'BEGIN{IGNORECASE=1} /^Docker-Content-Digest:/ {gsub("\r", "", $2); print $2}' "$generic_headers")"
+postgres_headers="$work_dir/postgres-headers"
+http_status -D "$postgres_headers" -u "${username}:${password}" -H "Accept: ${accept}" "http://${registry_host}/v2/opsi/p07b3b1-acceptance/manifests/fixture-${suffix}"
+postgres_status="$status"
+postgres_digest="$(awk 'BEGIN{IGNORECASE=1} /^Docker-Content-Digest:/ {gsub("\r", "", $2); print $2}' "$postgres_headers")"
 [[ "$anonymous_status" == 401 ]]
 [[ "$wrong_status" == 401 ]]
 [[ "$correct_status" == 200 ]]
 [[ "$digest_status" == 200 ]]
 [[ "$generic_status" == 200 ]]
+[[ "$postgres_status" == 200 ]]
 [[ "${digest#sha256:}" != "$digest" ]]
 [[ "${generic_digest#sha256:}" != "$generic_digest" ]]
+[[ "${postgres_digest#sha256:}" != "$postgres_digest" ]]
 printf 'registry_manifest_checks=PASS\n'
 
 printf '%s\n' \
@@ -140,8 +152,21 @@ PATH="$work_dir/bin:$PATH" \
 	OPSI_PRIVATE_REGISTRY_E2E_WRONG_IMAGE="registry:5000/opsi/wrong@${generic_digest}" \
 	OPSI_PRIVATE_REGISTRY_E2E_USERNAME="$username" \
 	OPSI_PRIVATE_REGISTRY_E2E_PASSWORD="$password" \
-	go test -count=1 -run '^Test(PrivateRegistryK3s.*|P07B2AcceptanceFixtureImagePull)Integration$' -v ./agent/internal/deploy
+go test -count=1 -run '^Test(PrivateRegistryK3s.*|P07B2AcceptanceFixtureImagePull)Integration$' -v ./agent/internal/deploy
 printf 'registry_pull_tests=PASS\n'
+
+PATH="$work_dir/bin:$PATH" \
+	OPSI_E2E_K3S_POSTGRES=1 \
+	OPSI_E2E_K3S_POSTGRES_BINDING=1 \
+	OPSI_E2E_K3S_NATS=1 \
+	OPSI_E2E_K3S_VALKEY=1 \
+	OPSI_P07B3B1_ACCEPTANCE_E2E_IMAGE="registry:5000/opsi/p07b3b1-acceptance@${postgres_digest}" \
+	OPSI_PRIVATE_REGISTRY_E2E_USERNAME="$username" \
+	OPSI_PRIVATE_REGISTRY_E2E_PASSWORD="$password" \
+	OPSI_K3S_EVIDENCE_DIR="$evidence_dir" \
+	go test -count=1 -run '^TestManagedResourceRealK3s(NATS|Valkey|Postgres(Persistence|ApplicationBinding))$' -v ./agent/internal/svcatalog
+printf 'postgres_application_binding_tests=PASS evidence=%s\n' "$evidence_dir"
 
 printf 'fixture_reference=registry:5000/opsi/p07b2-acceptance@%s anonymous_pull=%s wrong_credential=%s authenticated_tag_lookup=%s digest_lookup=%s\n' \
 	"$digest" "$anonymous_status" "$wrong_status" "$correct_status" "$digest_status"
+printf 'postgres_fixture_reference=registry:5000/opsi/p07b3b1-acceptance@%s\n' "$postgres_digest"

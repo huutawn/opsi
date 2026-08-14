@@ -13,7 +13,7 @@ func TestPostgresManagedResourceSpecRequiresPinnedStatefulAuthority(t *testing.T
 		Replicas:   1, CPUMillicores: 250, MemoryBytes: 256 << 20,
 		Ports:        []ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: ProtocolPostgres}},
 		Storage:      StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: StoragePolicyDefault},
-		Connection:   ManagedResourceConnection{ServiceName: "opsi-mr-postgres", Host: "opsi-mr-postgres.opsi-project-1-env-1.svc.cluster.local", Port: 5432, Protocol: ProtocolPostgres},
+		Connection:   ManagedResourceConnection{ServiceName: "opsi-mr-postgres", Host: "opsi-mr-postgres.opsi-project-1-env-1.svc.cluster.local", Port: 5432, Protocol: ProtocolPostgres, Database: "opsi"},
 		CredentialID: "mrcred-postgres", ConfigurationHash: strings.Repeat("a", 64), TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64),
 	}
 	spec.SpecHash, _ = spec.Hash()
@@ -27,6 +27,7 @@ func TestPostgresManagedResourceSpecRequiresPinnedStatefulAuthority(t *testing.T
 		func(value *ManagedResourceSpec) { value.Version = "19" },
 		func(value *ManagedResourceSpec) { value.Image = "postgres:latest" },
 		func(value *ManagedResourceSpec) { value.CredentialID = "" },
+		func(value *ManagedResourceSpec) { value.Connection.Database = "other" },
 	} {
 		invalid := spec
 		mutate(&invalid)

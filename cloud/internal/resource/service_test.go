@@ -46,6 +46,14 @@ func TestManagedResourcesAndBindings(t *testing.T) {
 			if _, _, err := service.Create(context.Background(), "project-1", "user-1", "create-"+string(resourceType), conflict); err == nil {
 				t.Fatal("idempotency key accepted another payload")
 			}
+			if resourceType == resourcev1.TypePostgres {
+				resource.Lifecycle = resourcev1.LifecycleReady
+				spec := resourcev1.ManagedResourceSpec{ResourceType: resourcev1.TypePostgres, Image: resourcev1.PostgresImage, Replicas: 1, SpecHash: "ready", Connection: resourcev1.ManagedResourceConnection{Host: "postgres.internal", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"}}
+				resource.Runtime = &resourcev1.ManagedResourceRuntime{Spec: spec, Evidence: &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: true, PodReady: true, ServiceReady: true, SecretReady: true, AuthReady: true, StorageReady: true, VolumeMounted: true, PVCName: "pvc", PVName: "pv", Image: spec.Image, ImageID: spec.Image, AvailableReplicas: 1}}
+				if _, err := service.Store.Update(context.Background(), resource); err != nil {
+					t.Fatal(err)
+				}
+			}
 			binding, reused, err := service.CreateBinding(context.Background(), "project-1", "bind-"+string(resourceType), resourcev1.CreateBindingRequest{
 				EnvironmentID: "env-1", Source: resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: "app-1"},
 				Target: resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: resource.ID}, Protocol: protocol, LogicalName: strings.ToUpper(string(resourceType)),
@@ -53,7 +61,13 @@ func TestManagedResourcesAndBindings(t *testing.T) {
 			if err != nil || reused || binding.Protocol != protocol {
 				t.Fatalf("binding=%+v reused=%t err=%v", binding, reused, err)
 			}
-			assertReferences(t, binding.RuntimeRefs)
+			if resourceType == resourcev1.TypePostgres {
+				if binding.Lifecycle != resourcev1.LifecycleProvisioning || binding.CredentialID == "" || binding.RoleName == "" || binding.Database != "opsi" || len(binding.RuntimeRefs) != 6 {
+					t.Fatalf("PostgreSQL binding authority=%+v", binding)
+				}
+			} else {
+				assertReferences(t, binding.RuntimeRefs)
+			}
 		})
 	}
 }

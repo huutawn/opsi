@@ -19,7 +19,7 @@ DEV_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/dev-contro
 STAGING_CONTROL_PLANE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env -f deploy/staging-control-plane/compose.yaml
 STAGING_CONTROL_PLANE_EXAMPLE_COMPOSE := docker compose --env-file deploy/staging-control-plane/.env.example -f deploy/staging-control-plane/compose.yaml
 
-.PHONY: check-toolchain verify test verify-postgres verify-buildpacks-e2e build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
+.PHONY: check-toolchain verify test verify-postgres verify-postgres-binding-e2e verify-buildpacks-e2e build build-cli-release verify-cli-release verify-cli-installer verify-cli-clean-install agent-release verify-agent-release verify-dr verify-dr-full verify-e2e-k3s-preflight verify-e2e-k3s verify-e2e-k3s-selfcheck verify-e2e-node-lifecycle-preflight verify-e2e-node-lifecycle verify-e2e-node-lifecycle-selfcheck verify-dev-control-plane-preflight verify-dev-control-plane-clean-vm verify-r5-005-github-app-preflight verify-bootstrap-worker-release ui-build ui-test ui-lint lint source-hygiene package-source check-source-package verify-source-package-policy clean e2e-dry-run release smoke-release dev-control-plane-validate-source dev-control-plane-validate dev-control-plane-build dev-control-plane-up dev-control-plane-down verify-staging-control-plane-policy verify-staging-control-plane-caddy-smoke staging-control-plane-validate-source staging-control-plane-validate staging-control-plane-up staging-control-plane-down
 
 check-toolchain:
 	@go version | grep -q "go$(GO_VERSION)" || { echo "Go $(GO_VERSION) required"; go version; exit 1; }
@@ -76,6 +76,9 @@ verify-e2e-k3s-selfcheck:
 	@if rg -n 'OPSI_E2E_APPROVE_MITIGATION|incidents/.*/analyze|incidents/.*/actions/.*/approve|recommended_actions|action_hash' scripts/e2e/verify-k3s.sh; then echo "stale incident RCA/approval E2E dependency found"; exit 1; fi
 
 verify-private-registry-e2e:
+	$(RUN) ./scripts/e2e/verify-private-registry.sh
+
+verify-postgres-binding-e2e:
 	$(RUN) ./scripts/e2e/verify-private-registry.sh
 
 verify-e2e-node-lifecycle-preflight:

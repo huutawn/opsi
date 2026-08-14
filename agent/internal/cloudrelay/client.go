@@ -45,6 +45,7 @@ type ManagedResourceLease struct {
 	LeaseToken string                                `json:"lease_token"`
 	Spec       resourcev1.ManagedResourceSpec        `json:"spec"`
 	Credential *resourcev1.ManagedResourceCredential `json:"credential,omitempty"`
+	Bindings   []resourcev1.PostgresBindingOperation `json:"bindings,omitempty"`
 }
 
 type ManagedResourceResult struct {
@@ -53,6 +54,7 @@ type ManagedResourceResult struct {
 	Evidence               *resourcev1.ManagedResourceEvidence `json:"evidence,omitempty"`
 	FailureCode            string                              `json:"failure_code,omitempty"`
 	FailureMessageRedacted string                              `json:"failure_message_redacted,omitempty"`
+	BindingResults         []resourcev1.PostgresBindingResult  `json:"binding_results,omitempty"`
 }
 
 type DeploymentJobEnvelope struct {

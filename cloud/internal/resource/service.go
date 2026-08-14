@@ -49,11 +49,15 @@ type Store interface {
 	Delete(context.Context, string, string) error
 	DeleteClaimed(context.Context, string, string, string) error
 	CreateBinding(context.Context, resourcev1.Binding, string, string) (resourcev1.Binding, bool, error)
+	GetBinding(context.Context, string, string) (resourcev1.Binding, error)
 	ListBindings(context.Context, string, string) ([]resourcev1.Binding, error)
+	UpdateBinding(context.Context, resourcev1.Binding) (resourcev1.Binding, error)
+	DeleteBinding(context.Context, string, string) error
 }
 
 type CredentialAuthority interface {
 	Ensure(context.Context, string) (resourcev1.ManagedResourceCredential, error)
+	EnsureBinding(context.Context, resourcev1.BindingCredentialSpec) (resourcev1.ManagedResourceCredential, error)
 	Get(context.Context, string) (resourcev1.ManagedResourceCredential, error)
 	Delete(context.Context, string) error
 }
@@ -167,6 +171,17 @@ func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID string)
 	if err != nil {
 		return resourcev1.Resource{}, err
 	}
+	if current.Type == resourcev1.TypePostgres {
+		bindings, err := s.ListBindings(ctx, projectID, current.EnvironmentID)
+		if err != nil {
+			return resourcev1.Resource{}, err
+		}
+		for _, binding := range bindings {
+			if binding.Target.ID == resourceID {
+				return resourcev1.Resource{}, Error{Code: resourcev1.FailureBindingActive, Status: 409, Message: "resource has active bindings"}
+			}
+		}
+	}
 	current.Lifecycle = resourcev1.LifecycleDeleting
 	current.UpdatedAt = s.clock()
 	return s.Store.Update(ctx, current)
@@ -203,13 +218,49 @@ func (s Service) CreateBinding(ctx context.Context, projectID, key string, reque
 	if logical == "" || len(logical) > 64 {
 		return resourcev1.Binding{}, false, invalid("RESOURCE_BINDING_NAME_INVALID", "binding logical name is required")
 	}
+	if target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres && (target.Lifecycle == resourcev1.LifecycleDeleting || target.Runtime == nil || !factualReady(target.Runtime.Spec, target.Runtime.Evidence)) {
+		return resourcev1.Binding{}, false, invalid("RESOURCE_BINDING_TARGET_NOT_READY", "managed resource must be factually Ready before binding")
+	}
 	now := s.clock()
 	binding := resourcev1.Binding{
 		SchemaVersion: resourcev1.SchemaVersion, ID: newID("rbind"), ProjectID: projectID, EnvironmentID: request.EnvironmentID,
 		Source: request.Source, Target: request.Target, Protocol: request.Protocol, LogicalName: logical,
-		RuntimeRefs: runtimeRefs(target), CreatedAt: now, UpdatedAt: now,
+		Lifecycle: resourcev1.LifecycleReady, RuntimeRefs: runtimeRefs(target), CreatedAt: now, UpdatedAt: now,
 	}
-	return s.Store.CreateBinding(ctx, binding, key, bindingPayload(request))
+	postgresBinding := target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres
+	if postgresBinding {
+		binding.Lifecycle = resourcev1.LifecycleProvisioning
+		binding.CredentialID = "rbcred-" + binding.ID
+		binding.RoleName = postgresBindingRole(binding.ID)
+		binding.Database = target.Runtime.Spec.Connection.Database
+		binding.RuntimeRefs = postgresBindingRuntimeRefs(target, binding)
+	}
+	stored, reused, err := s.Store.CreateBinding(ctx, binding, key, bindingPayload(request))
+	if err != nil || !postgresBinding {
+		return stored, reused, err
+	}
+	if s.Credentials == nil {
+		return stored, reused, invalid(resourcev1.FailureBindingCredentialUnavailable, "PostgreSQL binding credential authority is unavailable")
+	}
+	credential, err := s.Credentials.EnsureBinding(ctx, resourcev1.BindingCredentialSpec{CredentialID: stored.CredentialID, BindingID: stored.ID, ResourceID: stored.Target.ID, Username: stored.RoleName, Database: stored.Database})
+	if err != nil || credential.ValidateBinding(stored.ID, stored.Target.ID) != nil {
+		return stored, reused, invalid(resourcev1.FailureBindingCredentialUnavailable, "PostgreSQL binding credential could not be generated")
+	}
+	if stored.Lifecycle != resourcev1.LifecycleReady {
+		target.Lifecycle = resourcev1.LifecyclePlanned
+		target.UpdatedAt = now
+		if _, err := s.Store.Update(ctx, target); err != nil {
+			return stored, reused, err
+		}
+	}
+	return stored, reused, nil
+}
+
+func (s Service) GetBinding(ctx context.Context, projectID, bindingID string) (resourcev1.Binding, error) {
+	if s.Store == nil {
+		return resourcev1.Binding{}, unavailable()
+	}
+	return s.Store.GetBinding(ctx, projectID, bindingID)
 }
 
 func (s Service) ListBindings(ctx context.Context, projectID, environmentID string) ([]resourcev1.Binding, error) {
@@ -217,6 +268,52 @@ func (s Service) ListBindings(ctx context.Context, projectID, environmentID stri
 		return nil, unavailable()
 	}
 	return s.Store.ListBindings(ctx, projectID, environmentID)
+}
+
+func (s Service) DeleteBinding(ctx context.Context, projectID, bindingID string) (resourcev1.Binding, error) {
+	binding, err := s.GetBinding(ctx, projectID, bindingID)
+	if err != nil {
+		return resourcev1.Binding{}, err
+	}
+	target, err := s.Get(ctx, projectID, binding.Target.ID)
+	if err != nil {
+		return resourcev1.Binding{}, err
+	}
+	if target.Kind != resourcev1.KindManagedService || target.Type != resourcev1.TypePostgres {
+		return resourcev1.Binding{}, s.Store.DeleteBinding(ctx, projectID, bindingID)
+	}
+	if binding.Lifecycle != resourcev1.LifecycleDeleting {
+		binding.Lifecycle = resourcev1.LifecycleDeleting
+		binding.FailureCode = ""
+		binding.UpdatedAt = s.clock()
+		binding, err = s.Store.UpdateBinding(ctx, binding)
+		if err != nil {
+			return resourcev1.Binding{}, err
+		}
+	}
+	target.Lifecycle = resourcev1.LifecyclePlanned
+	target.UpdatedAt = binding.UpdatedAt
+	if _, err := s.Store.Update(ctx, target); err != nil {
+		return resourcev1.Binding{}, err
+	}
+	return binding, nil
+}
+
+func postgresBindingRole(bindingID string) string {
+	sum := sha256.Sum256([]byte(bindingID))
+	return "opsi_b_" + hex.EncodeToString(sum[:16])
+}
+
+func postgresBindingRuntimeRefs(target resourcev1.Resource, binding resourcev1.Binding) []resourcev1.RuntimeConnectionReference {
+	secret := &resourcev1.SecretReference{SecretID: binding.CredentialID}
+	return []resourcev1.RuntimeConnectionReference{
+		{Name: "HOST", Sensitivity: resourcev1.ValueNonSecret, Value: target.Runtime.Spec.Connection.Host},
+		{Name: "PORT", Sensitivity: resourcev1.ValueNonSecret, Value: strconv.Itoa(int(target.Runtime.Spec.Connection.Port))},
+		{Name: "NAME", Sensitivity: resourcev1.ValueNonSecret, Value: binding.Database},
+		{Name: "USER", Sensitivity: resourcev1.ValueSecret, SecretRef: secret},
+		{Name: "PASSWORD", Sensitivity: resourcev1.ValueSecret, SecretRef: secret},
+		{Name: "URL", Sensitivity: resourcev1.ValueSecret, SecretRef: secret},
+	}
 }
 
 func (s Service) TopologyResources(ctx context.Context, projectID string) ([]resourcev1.Resource, error) {

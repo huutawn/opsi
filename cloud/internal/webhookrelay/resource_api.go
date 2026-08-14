@@ -67,6 +67,17 @@ func (s *Server) handleResourceAPI(w http.ResponseWriter, r *http.Request, proje
 			writeResourceResult(w, r, map[string]any{"binding": value, "reused": reused}, err, http.StatusCreated)
 			return true
 		}
+		if len(parts) == 4 && r.Method == http.MethodDelete {
+			if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "resource_binding", parts[3], "owner", "admin", "developer") {
+				return true
+			}
+			value, err := s.Resources.DeleteBinding(r.Context(), projectID, parts[3])
+			if err == nil {
+				s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RESOURCE_BINDING_DELETE_REQUESTED", "resource_binding", parts[3], "success", nil)
+			}
+			writeResourceResult(w, r, value, err, http.StatusAccepted)
+			return true
+		}
 		return false
 	}
 	if parts[2] != "resources" {

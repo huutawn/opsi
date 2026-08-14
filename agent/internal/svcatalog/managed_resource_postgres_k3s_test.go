@@ -30,7 +30,7 @@ func TestManagedResourceRealK3sPostgresPersistence(t *testing.T) {
 		CredentialID: "mrcred-res-postgres-e2e", Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-e2e", NodeID: "node-e2e", AgentID: "agent-e2e"},
 		Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Ports: []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}},
 		Storage:           resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault},
-		Connection:        resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-postgres-e2e", Host: "opsi-mr-postgres-e2e." + managedResourceNamespace(resourcev1.ManagedResourceSpec{ProjectID: "project-postgres-e2e", EnvironmentID: "env-postgres-e2e"}) + ".svc.cluster.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres},
+		Connection:        resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-postgres-e2e", Host: "opsi-mr-postgres-e2e." + managedResourceNamespace(resourcev1.ManagedResourceSpec{ProjectID: "project-postgres-e2e", EnvironmentID: "env-postgres-e2e"}) + ".svc.cluster.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
 		ConfigurationHash: strings.Repeat("a", 64), TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64),
 	}
 	spec.SpecHash, _ = spec.Hash()

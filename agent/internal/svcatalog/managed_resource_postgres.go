@@ -6,13 +6,110 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
+
+const postgresBindingRoleScript = `set -eu
+role=$1; db=$2
+IFS= read -r password
+manager=$(cat /run/opsi-postgres/username)
+export PGPASSWORD=$(cat /run/opsi-postgres/password)
+psql_admin() { psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$manager" -d "$db" "$@"; }
+exists=$(psql_admin -tAc "SELECT 1 FROM pg_roles WHERE rolname='$role'")
+if [ "$exists" != 1 ]; then
+  printf 'CREATE ROLE "%s" WITH LOGIN PASSWORD '\''%s'\'' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n' "$role" "$password" | psql_admin
+else
+  printf 'ALTER ROLE "%s" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n' "$role" | psql_admin
+fi
+printf 'GRANT CONNECT ON DATABASE "%s" TO "%s"; GRANT USAGE,CREATE ON SCHEMA public TO "%s"; GRANT SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON ALL TABLES IN SCHEMA public TO "%s"; GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA public TO "%s"; ALTER DEFAULT PRIVILEGES FOR ROLE "%s" IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON TABLES TO "%s"; ALTER DEFAULT PRIVILEGES FOR ROLE "%s" IN SCHEMA public GRANT USAGE,SELECT,UPDATE ON SEQUENCES TO "%s";\n' "$db" "$role" "$role" "$role" "$role" "$manager" "$role" "$manager" "$role" | psql_admin
+test "$(psql_admin -tAc "SELECT rolcanlogin::int||':'||rolsuper::int||':'||rolcreatedb::int||':'||rolcreaterole::int||':'||rolreplication::int||':'||rolbypassrls::int FROM pg_roles WHERE rolname='$role'")" = "1:0:0:0:0:0"`
+
+const postgresBindingAuthScript = `set -eu
+role=$1; db=$2
+IFS= read -r password
+PGPASSWORD="$password" psql -v ON_ERROR_STOP=1 -qAt -h 127.0.0.1 -U "$role" -d "$db" -c 'SELECT 1' | grep -qx 1`
+
+const postgresBindingPasswordScript = `set -eu
+role=$1; db=$2
+IFS= read -r password
+manager=$(cat /run/opsi-postgres/username)
+export PGPASSWORD=$(cat /run/opsi-postgres/password)
+printf 'ALTER ROLE "%s" WITH PASSWORD '\''%s'\'';\n' "$role" "$password" | psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$manager" -d "$db"`
+
+const postgresBindingRevokeScript = `set -eu
+role=$1; db=$2
+manager=$(cat /run/opsi-postgres/username)
+export PGPASSWORD=$(cat /run/opsi-postgres/password)
+psql_admin() { psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$manager" -d "$db" "$@"; }
+test "$(psql_admin -tAc "SELECT COUNT(*) FROM pg_roles WHERE rolname='$role'")" = 0 && exit 0
+psql_admin -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='$role' AND pid<>pg_backend_pid()" >/dev/null
+printf 'ALTER ROLE "%s" WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; REVOKE CONNECT ON DATABASE "%s" FROM "%s"; REVOKE ALL ON SCHEMA public FROM "%s"; REVOKE ALL ON ALL TABLES IN SCHEMA public FROM "%s"; REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM "%s"; ALTER DEFAULT PRIVILEGES FOR ROLE "%s" IN SCHEMA public REVOKE ALL ON TABLES FROM "%s"; ALTER DEFAULT PRIVILEGES FOR ROLE "%s" IN SCHEMA public REVOKE ALL ON SEQUENCES FROM "%s";\n' "$role" "$db" "$role" "$role" "$role" "$role" "$manager" "$role" "$manager" "$role" | psql_admin`
+
+func (r ManagedResourceReconciler) reconcilePostgresBindings(ctx context.Context, spec resourcev1.ManagedResourceSpec, operations []resourcev1.PostgresBindingOperation) []resourcev1.PostgresBindingResult {
+	results := make([]resourcev1.PostgresBindingResult, 0, len(operations))
+	for _, operation := range operations {
+		result := resourcev1.PostgresBindingResult{BindingID: operation.BindingID, Action: operation.Action, Status: "ready"}
+		if err := validatePostgresBindingOperation(spec, operation); err != nil {
+			result.Status, result.FailureCode = "failed", resourcev1.FailureBindingRoleReconcile
+			results = append(results, result)
+			continue
+		}
+		if operation.Action == resourcev1.PostgresBindingRevoke {
+			if _, err := r.postgresBindingExec(ctx, spec, nil, postgresBindingRevokeScript, operation); err != nil {
+				result.Status, result.FailureCode = "failed", resourcev1.FailureBindingRoleRevoke
+			} else if _, err := r.run(ctx, nil, "delete", "secret", "-n", managedResourceNamespace(spec), "-l", "opsi.dev/workload-secret="+managedLabel(operation.CredentialID), "--ignore-not-found"); err != nil {
+				result.Status, result.FailureCode = "failed", resourcev1.FailureBindingSecretMaterialization
+			}
+			results = append(results, result)
+			continue
+		}
+		password := []byte(operation.Credential.Password + "\n")
+		if _, err := r.postgresBindingExec(ctx, spec, password, postgresBindingRoleScript, operation); err != nil {
+			result.Status, result.FailureCode = "failed", resourcev1.FailureBindingRoleReconcile
+			if operation.Create {
+				result.FailureCode = resourcev1.FailureBindingRoleCreate
+			}
+		} else if _, err := r.postgresBindingExec(ctx, spec, password, postgresBindingAuthScript, operation); err != nil {
+			if _, resetErr := r.postgresBindingExec(ctx, spec, password, postgresBindingPasswordScript, operation); resetErr != nil {
+				result.Status, result.FailureCode = "failed", resourcev1.FailureBindingRoleReconcile
+			} else if _, authErr := r.postgresBindingExec(ctx, spec, password, postgresBindingAuthScript, operation); authErr != nil {
+				result.Status, result.FailureCode = "failed", resourcev1.FailureBindingAuth
+			}
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func validatePostgresBindingOperation(spec resourcev1.ManagedResourceSpec, operation resourcev1.PostgresBindingOperation) error {
+	roleSuffix := strings.TrimPrefix(operation.RoleName, "opsi_b_")
+	roleBytes, roleErr := hex.DecodeString(roleSuffix)
+	if operation.BindingID == "" || operation.CredentialID == "" || !strings.HasPrefix(operation.RoleName, "opsi_b_") || spec.Connection.Database != "opsi" || operation.Database != spec.Connection.Database || len(roleBytes) != 16 || roleErr != nil || roleSuffix != strings.ToLower(roleSuffix) {
+		return errors.New("PostgreSQL binding operation identity is invalid")
+	}
+	if operation.Action == resourcev1.PostgresBindingRevoke {
+		return nil
+	}
+	if operation.Action != resourcev1.PostgresBindingEnsure || operation.Credential == nil || operation.Credential.CredentialID != operation.CredentialID || operation.Credential.Username != operation.RoleName || operation.Credential.Database != operation.Database || operation.Credential.ValidateBinding(operation.BindingID, spec.ResourceID) != nil {
+		return errors.New("PostgreSQL binding credential is invalid")
+	}
+	password, err := base64.RawURLEncoding.DecodeString(operation.Credential.Password)
+	if err != nil || len(password) != 32 || base64.RawURLEncoding.EncodeToString(password) != operation.Credential.Password {
+		return errors.New("PostgreSQL binding credential is invalid")
+	}
+	return nil
+}
+
+func (r ManagedResourceReconciler) postgresBindingExec(ctx context.Context, spec resourcev1.ManagedResourceSpec, input []byte, script string, operation resourcev1.PostgresBindingOperation) ([]byte, error) {
+	return r.run(ctx, input, "exec", "-i", "pod/"+spec.Connection.ServiceName+"-0", "-n", managedResourceNamespace(spec), "-c", "postgres", "--", "sh", "-ec", script, "opsi-binding", operation.RoleName, operation.Database)
+}
 
 const (
 	postgresDataVolume = "data"

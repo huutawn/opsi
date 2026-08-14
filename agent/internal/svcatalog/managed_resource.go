@@ -47,6 +47,9 @@ func (r ManagedResourceReconciler) Reconcile(ctx context.Context, lease cloudrel
 		return result
 	}
 	result.Status, result.Evidence = "ready", evidence
+	if lease.Spec.ResourceType == resourcev1.TypePostgres {
+		result.BindingResults = r.reconcilePostgresBindings(ctx, lease.Spec, lease.Bindings)
+	}
 	return result
 }
 

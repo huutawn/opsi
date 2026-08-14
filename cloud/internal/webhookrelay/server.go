@@ -410,12 +410,12 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if ok {
-		if managed.Action == "apply" && managed.Spec.ResourceType == resourcev1.TypeRedis && managed.Credential == nil {
+		if managed.Action == "apply" && (managed.Spec.ResourceType == resourcev1.TypeRedis || managed.Spec.ResourceType == resourcev1.TypePostgres) && managed.Credential == nil {
 			writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureCredentialUnavailable})
 			return
 		}
 		s.observer.Inc("agent_jobs_leased_total")
-		writeJSON(w, http.StatusOK, map[string]any{"kind": "managed_resource", "action": managed.Action, "lease_token": managed.LeaseToken, "spec": managed.Spec, "credential": managed.Credential})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "managed_resource", "action": managed.Action, "lease_token": managed.LeaseToken, "spec": managed.Spec, "credential": managed.Credential, "bindings": managed.Bindings})
 		return
 	}
 	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)

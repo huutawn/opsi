@@ -168,7 +168,18 @@ const (
 	FailureStorageResizeUnsupported     = "MANAGED_RESOURCE_STORAGE_RESIZE_UNSUPPORTED"
 	FailureVersionUpgradeUnsupported    = "MANAGED_RESOURCE_VERSION_UPGRADE_UNSUPPORTED"
 	FailurePersistentDeleteUnsupported  = "MANAGED_RESOURCE_PERSISTENT_DELETE_UNSUPPORTED"
+	FailureBindingCredentialUnavailable = "RESOURCE_BINDING_CREDENTIAL_UNAVAILABLE"
+	FailureBindingRoleCreate            = "RESOURCE_BINDING_ROLE_CREATE_FAILED"
+	FailureBindingRoleReconcile         = "RESOURCE_BINDING_ROLE_RECONCILE_FAILED"
+	FailureBindingAuth                  = "RESOURCE_BINDING_AUTH_FAILED"
 	FailureBindingSecretMaterialization = "RESOURCE_BINDING_SECRET_MATERIALIZATION_FAILED"
+	FailureBindingRoleRevoke            = "RESOURCE_BINDING_ROLE_REVOKE_FAILED"
+	FailureBindingActive                = "RESOURCE_BINDING_ACTIVE"
+)
+
+const (
+	CredentialPurposeResourceManagement = "resource_management"
+	CredentialPurposeResourceBinding    = "resource_binding"
 )
 
 type ManagedResourceAssignment struct {
@@ -181,6 +192,9 @@ type ManagedResourceAssignment struct {
 // part of Resource, TopologyPlan, ManagedResourceSpec, or WorkloadSpec.
 type ManagedResourceCredential struct {
 	CredentialID string `json:"credential_id"`
+	Purpose      string `json:"purpose,omitempty"`
+	OwnerID      string `json:"owner_id,omitempty"`
+	ResourceID   string `json:"resource_id,omitempty"`
 	Username     string `json:"username"`
 	Password     string `json:"password"`
 	Database     string `json:"database,omitempty"`
@@ -191,6 +205,21 @@ func (c ManagedResourceCredential) Validate() error {
 		return errors.New("managed resource credential is invalid")
 	}
 	return nil
+}
+
+func (c ManagedResourceCredential) ValidateBinding(bindingID, resourceID string) error {
+	if err := c.ValidateFor(TypePostgres); err != nil || c.Purpose != CredentialPurposeResourceBinding || c.OwnerID != bindingID || c.ResourceID != resourceID {
+		return errors.New("PostgreSQL binding credential is invalid")
+	}
+	return nil
+}
+
+type BindingCredentialSpec struct {
+	CredentialID string
+	BindingID    string
+	ResourceID   string
+	Username     string
+	Database     string
 }
 
 func (c ManagedResourceCredential) ValidateFor(resourceType Type) error {
@@ -214,6 +243,7 @@ type ManagedResourceConnection struct {
 	Host        string   `json:"host"`
 	Port        int32    `json:"port"`
 	Protocol    Protocol `json:"protocol"`
+	Database    string   `json:"database,omitempty"`
 	URL         string   `json:"url,omitempty"`
 }
 
@@ -282,7 +312,7 @@ func (s ManagedResourceSpec) Validate() error {
 		}
 	} else if s.ResourceType == TypePostgres {
 		portName, port, protocol = "postgres", 5432, ProtocolPostgres
-		if s.CredentialID == "" || s.Connection.URL != "" {
+		if s.CredentialID == "" || s.Connection.Database != "opsi" || s.Connection.URL != "" {
 			return errors.New("managed resource credential authority is invalid")
 		}
 	}
@@ -400,9 +430,36 @@ type Binding struct {
 	Target        EndpointReference            `json:"target"`
 	Protocol      Protocol                     `json:"protocol"`
 	LogicalName   string                       `json:"logical_name"`
+	Lifecycle     LifecycleState               `json:"lifecycle"`
+	CredentialID  string                       `json:"credential_id,omitempty"`
+	RoleName      string                       `json:"role_name,omitempty"`
+	Database      string                       `json:"database,omitempty"`
+	FailureCode   string                       `json:"failure_code,omitempty"`
 	RuntimeRefs   []RuntimeConnectionReference `json:"runtime_refs"`
 	CreatedAt     time.Time                    `json:"created_at"`
 	UpdatedAt     time.Time                    `json:"updated_at"`
+}
+
+const (
+	PostgresBindingEnsure = "ensure"
+	PostgresBindingRevoke = "revoke"
+)
+
+type PostgresBindingOperation struct {
+	BindingID    string                     `json:"binding_id"`
+	CredentialID string                     `json:"credential_id"`
+	RoleName     string                     `json:"role_name"`
+	Database     string                     `json:"database"`
+	Action       string                     `json:"action"`
+	Create       bool                       `json:"create,omitempty"`
+	Credential   *ManagedResourceCredential `json:"credential,omitempty"`
+}
+
+type PostgresBindingResult struct {
+	BindingID   string `json:"binding_id"`
+	Action      string `json:"action"`
+	Status      string `json:"status"`
+	FailureCode string `json:"failure_code,omitempty"`
 }
 
 type CreateBindingRequest struct {

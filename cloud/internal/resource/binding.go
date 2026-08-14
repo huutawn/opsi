@@ -2,6 +2,7 @@ package resource
 
 import (
 	"context"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,15 +24,11 @@ func (s Service) ApplicationRuntimeConfiguration(ctx context.Context, projectID,
 	environment := []deploymentv1.EnvironmentVariable{}
 	secrets := []deploymentv1.SecretReference{}
 	for _, binding := range bindings {
-		if binding.Source.ID != applicationID {
+		if binding.Source.ID != applicationID || binding.Lifecycle != resourcev1.LifecycleReady {
 			continue
 		}
-		target, err := s.Get(ctx, projectID, binding.Target.ID)
-		if err != nil {
-			return nil, nil, err
-		}
 		prefix := environmentPrefix(binding.LogicalName)
-		for _, reference := range runtimeRefs(target) {
+		for _, reference := range binding.RuntimeRefs {
 			name := prefix + "_" + reference.Name
 			if reference.Sensitivity == resourcev1.ValueSecret && reference.SecretRef != nil {
 				secrets = append(secrets, deploymentv1.SecretReference{EnvName: name, SecretID: reference.SecretRef.SecretID})
@@ -56,21 +53,44 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID string, r
 	if err != nil {
 		return nil, err
 	}
-	byCredential := map[string]resourcev1.Resource{}
+	type secretAuthority struct {
+		target  resourcev1.Resource
+		binding *resourcev1.Binding
+	}
+	byCredential := map[string]secretAuthority{}
 	for _, value := range resources {
 		if value.Runtime != nil && value.Runtime.Spec.CredentialID != "" {
-			byCredential[value.Runtime.Spec.CredentialID] = value
+			byCredential[value.Runtime.Spec.CredentialID] = secretAuthority{target: value}
+		}
+	}
+	bindings, err := s.ListBindings(ctx, projectID, "")
+	if err != nil {
+		return nil, err
+	}
+	for index := range bindings {
+		binding := &bindings[index]
+		if binding.Lifecycle == resourcev1.LifecycleReady && binding.CredentialID != "" {
+			target, getErr := s.Get(ctx, projectID, binding.Target.ID)
+			if getErr != nil {
+				return nil, getErr
+			}
+			byCredential[binding.CredentialID] = secretAuthority{target: target, binding: binding}
 		}
 	}
 	grouped := map[string]map[string]string{}
 	for _, reference := range references {
-		target, ok := byCredential[reference.SecretID]
-		if !ok || target.Type != resourcev1.TypeRedis {
+		authority, ok := byCredential[reference.SecretID]
+		redisManagement := ok && authority.binding == nil && authority.target.Type == resourcev1.TypeRedis && authority.target.Runtime != nil && authority.target.Runtime.Spec.CredentialID == reference.SecretID
+		postgresBinding := ok && authority.binding != nil && authority.target.Type == resourcev1.TypePostgres
+		if !redisManagement && !postgresBinding {
 			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding secret reference is unavailable")
 		}
 		credential, err := s.Credentials.Get(ctx, reference.SecretID)
 		if err != nil {
 			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding credential is unavailable")
+		}
+		if postgresBinding && credential.ValidateBinding(authority.binding.ID, authority.target.ID) != nil {
+			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "PostgreSQL binding credential authority is invalid")
 		}
 		value := ""
 		switch {
@@ -79,7 +99,17 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID string, r
 		case strings.HasSuffix(reference.EnvName, "_PASSWORD"):
 			value = credential.Password
 		case strings.HasSuffix(reference.EnvName, "_URL"):
-			value = "redis://" + credential.Username + ":" + credential.Password + "@" + target.Runtime.Spec.Connection.Host + ":" + strconv.Itoa(int(target.Runtime.Spec.Connection.Port))
+			scheme := "redis"
+			host, port, database := authority.target.Runtime.Spec.Connection.Host, strconv.Itoa(int(authority.target.Runtime.Spec.Connection.Port)), ""
+			if authority.binding != nil {
+				scheme, host, port, database = "postgres", bindingValue(authority.binding.RuntimeRefs, "HOST"), bindingValue(authority.binding.RuntimeRefs, "PORT"), bindingValue(authority.binding.RuntimeRefs, "NAME")
+			}
+			connection := url.URL{Scheme: scheme, User: url.UserPassword(credential.Username, credential.Password), Host: host + ":" + port}
+			if database != "" {
+				connection.Path = database
+				connection.RawQuery = "sslmode=disable"
+			}
+			value = connection.String()
 		default:
 			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding secret name is unsupported")
 		}
@@ -94,6 +124,15 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID string, r
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].SecretID < result[j].SecretID })
 	return result, nil
+}
+
+func bindingValue(references []resourcev1.RuntimeConnectionReference, name string) string {
+	for _, reference := range references {
+		if reference.Name == name {
+			return reference.Value
+		}
+	}
+	return ""
 }
 
 func environmentPrefix(value string) string {

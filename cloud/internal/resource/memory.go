@@ -171,3 +171,35 @@ func (s *MemoryStore) ListBindings(_ context.Context, projectID, environmentID s
 	}
 	return out, nil
 }
+
+func (s *MemoryStore) GetBinding(_ context.Context, projectID, bindingID string) (resourcev1.Binding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.bindings[bindingID]
+	if !ok || value.ProjectID != projectID {
+		return resourcev1.Binding{}, ErrNotFound
+	}
+	return value, nil
+}
+
+func (s *MemoryStore) UpdateBinding(_ context.Context, value resourcev1.Binding) (resourcev1.Binding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.bindings[value.ID]
+	if !ok || current.ProjectID != value.ProjectID {
+		return resourcev1.Binding{}, ErrNotFound
+	}
+	s.bindings[value.ID] = value
+	return value, nil
+}
+
+func (s *MemoryStore) DeleteBinding(_ context.Context, projectID, bindingID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.bindings[bindingID]
+	if !ok || value.ProjectID != projectID {
+		return ErrNotFound
+	}
+	delete(s.bindings, bindingID)
+	return nil
+}

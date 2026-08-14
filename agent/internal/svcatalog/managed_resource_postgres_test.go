@@ -2,6 +2,7 @@ package svcatalog
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 type postgresRunner struct {
 	objects    map[string]map[string]any
 	commands   [][]string
+	inputs     [][]byte
 	pvcApplies int
 	execError  error
 	nextUID    int
@@ -23,6 +25,7 @@ type postgresRunner struct {
 
 func (r *postgresRunner) Run(_ context.Context, input []byte, _ string, args ...string) ([]byte, error) {
 	r.commands = append(r.commands, append([]string(nil), args...))
+	r.inputs = append(r.inputs, append([]byte(nil), input...))
 	if args[0] == "get" && args[1] == "pods" {
 		statefulSet := r.objects["statefulset/opsi-mr-res-postgres-runtime-1"]
 		if statefulSet == nil {
@@ -171,6 +174,50 @@ func TestPostgresDeleteRequiresFactualRetainedPVC(t *testing.T) {
 	}
 }
 
+func TestPostgresBindingRoleReconcileAndRevokeUseScopedCredential(t *testing.T) {
+	spec, management := postgresSpec(t)
+	bindingPassword := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	binding := resourcev1.PostgresBindingOperation{
+		BindingID: "rbind-test", CredentialID: "rbcred-rbind-test", RoleName: "opsi_b_0123456789abcdef0123456789abcdef", Database: "opsi", Action: resourcev1.PostgresBindingEnsure, Create: true,
+		Credential: &resourcev1.ManagedResourceCredential{CredentialID: "rbcred-rbind-test", Purpose: resourcev1.CredentialPurposeResourceBinding, OwnerID: "rbind-test", ResourceID: spec.ResourceID, Username: "opsi_b_0123456789abcdef0123456789abcdef", Password: bindingPassword, Database: "opsi"},
+	}
+	runner := &postgresRunner{objects: map[string]map[string]any{}}
+	result := (ManagedResourceReconciler{Runner: runner}).reconcilePostgresBindings(context.Background(), spec, []resourcev1.PostgresBindingOperation{binding})
+	if len(result) != 1 || result[0].Status != "ready" {
+		t.Fatalf("result=%+v", result)
+	}
+	for _, command := range runner.commands {
+		if strings.Contains(strings.Join(command, " "), binding.Credential.Password) || strings.Contains(strings.Join(command, " "), management.Password) {
+			t.Fatalf("credential leaked into command arguments: %q", command)
+		}
+	}
+	binding.Action, binding.Create, binding.Credential = resourcev1.PostgresBindingRevoke, false, nil
+	result = (ManagedResourceReconciler{Runner: runner}).reconcilePostgresBindings(context.Background(), spec, []resourcev1.PostgresBindingOperation{binding})
+	if len(result) != 1 || result[0].Status != "ready" {
+		t.Fatalf("revoke=%+v", result)
+	}
+	last := runner.commands[len(runner.commands)-1]
+	if len(last) != 7 || last[0] != "delete" || last[1] != "secret" || last[2] != "-n" || last[3] != managedResourceNamespace(spec) || last[4] != "-l" || last[5] != "opsi.dev/workload-secret=rbcred-rbind-test" || last[6] != "--ignore-not-found" {
+		t.Fatalf("secret delete command=%q", last)
+	}
+	failing := &postgresRunner{objects: map[string]map[string]any{}, execError: errors.New("role mutation failed")}
+	binding.Action, binding.Create, binding.Credential = resourcev1.PostgresBindingEnsure, true, &resourcev1.ManagedResourceCredential{CredentialID: "rbcred-rbind-test", Purpose: resourcev1.CredentialPurposeResourceBinding, OwnerID: "rbind-test", ResourceID: spec.ResourceID, Username: binding.RoleName, Password: bindingPassword, Database: "opsi"}
+	failed := (ManagedResourceReconciler{Runner: failing}).reconcilePostgresBindings(context.Background(), spec, []resourcev1.PostgresBindingOperation{binding})
+	if len(failed) != 1 || failed[0].FailureCode != resourcev1.FailureBindingRoleCreate {
+		t.Fatalf("failed=%+v", failed)
+	}
+	for _, role := range []string{"0123456789abcdef0123456789abcdef", "opsi_b_0123456789abcdef0123456789abcde'"} {
+		invalidBinding := binding
+		invalidCredential := *binding.Credential
+		invalidBinding.RoleName, invalidCredential.Username, invalidBinding.Credential = role, role, &invalidCredential
+		invalidRunner := &postgresRunner{objects: map[string]map[string]any{}}
+		invalid := (ManagedResourceReconciler{Runner: invalidRunner}).reconcilePostgresBindings(context.Background(), spec, []resourcev1.PostgresBindingOperation{invalidBinding})
+		if len(invalid) != 1 || invalid[0].FailureCode != resourcev1.FailureBindingRoleReconcile || len(invalidRunner.commands) != 0 {
+			t.Fatalf("unsafe role %q accepted result=%+v commands=%q", role, invalid, invalidRunner.commands)
+		}
+	}
+}
+
 func postgresSpec(t *testing.T) (resourcev1.ManagedResourceSpec, *resourcev1.ManagedResourceCredential) {
 	t.Helper()
 	spec := resourcev1.ManagedResourceSpec{
@@ -179,7 +226,7 @@ func postgresSpec(t *testing.T) (resourcev1.ManagedResourceSpec, *resourcev1.Man
 		CredentialID: "mrcred-res-postgres", Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
 		Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Ports: []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}},
 		Storage:           resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault},
-		Connection:        resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-res-postgres-runtime-1", Host: "opsi-mr-res-postgres-runtime-1.opsi-project-1-env-1.svc.cluster.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres},
+		Connection:        resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-res-postgres-runtime-1", Host: "opsi-mr-res-postgres-runtime-1.opsi-project-1-env-1.svc.cluster.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
 		ConfigurationHash: strings.Repeat("a", 64), TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64),
 	}
 	spec.SpecHash, _ = spec.Hash()

@@ -70,7 +70,7 @@ func TestResourceAPIRegistryCreateAndTopologyBoundary(t *testing.T) {
 		Target: resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: result.Resource.ID}, Protocol: resourcev1.ProtocolPostgres, LogicalName: "DATABASE",
 	})
 	binding := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/resource-bindings", string(bindingBody), "binding-key")
-	if binding.Code != http.StatusCreated || !strings.Contains(binding.Body.String(), `"runtime_refs":null`) || strings.Contains(binding.Body.String(), `"vault-postgres"`) {
+	if binding.Code != http.StatusBadRequest || !strings.Contains(binding.Body.String(), "RESOURCE_BINDING_TARGET_NOT_READY") || strings.Contains(binding.Body.String(), `"vault-postgres"`) {
 		t.Fatalf("binding status=%d body=%s", binding.Code, binding.Body.String())
 	}
 	topology := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+project.ID+"/topology/facts", "", "")
@@ -96,6 +96,49 @@ func TestResourceAPIRegistryCreateAndTopologyBoundary(t *testing.T) {
 	after, err := server.Topology.Get(t.Context(), project.ID)
 	if err == nil || !strings.Contains(err.Error(), "topology not found") || after.Revision != current.Revision || after.StateHash != current.StateHash {
 		t.Fatalf("unavailable apply mutated topology: before=%+v after=%+v err=%v", current, after, err)
+	}
+}
+
+func TestPostgresBindingDeleteAPIAndActiveResourceConflict(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-1", "Project", "project-binding-delete", "user-1", "project-binding-delete-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := server.Registry.(*registry.Service)
+	application, err := services.CreateService(project.ID, registry.ServiceDraft{Name: "api"}, "application-binding-delete-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, _ := services.PlacementFacts(t.Context(), project.ID)
+	created, _, err := server.Resources.Create(t.Context(), project.ID, "user-1", "postgres-binding-delete-key", resourcev1.CreateRequest{
+		EnvironmentID: facts.Environments[0].ID, Name: "postgres", Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres,
+		Managed: &resourcev1.ManagedSpec{Type: resourcev1.TypePostgres, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Lifecycle = resourcev1.LifecycleReady
+	spec := resourcev1.ManagedResourceSpec{ResourceType: resourcev1.TypePostgres, Image: resourcev1.PostgresImage, Replicas: 1, SpecHash: "ready", Connection: resourcev1.ManagedResourceConnection{Host: "postgres.internal", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"}}
+	created.Runtime = &resourcev1.ManagedResourceRuntime{Spec: spec, Evidence: &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: true, PodReady: true, ServiceReady: true, SecretReady: true, AuthReady: true, StorageReady: true, VolumeMounted: true, PVCName: "pvc", PVName: "pv", Image: spec.Image, ImageID: spec.Image, AvailableReplicas: 1}}
+	if _, err := server.Resources.Store.Update(t.Context(), created); err != nil {
+		t.Fatal(err)
+	}
+	bindingBody, _ := json.Marshal(resourcev1.CreateBindingRequest{EnvironmentID: created.EnvironmentID, Source: resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: application.ID}, Target: resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: created.ID}, Protocol: resourcev1.ProtocolPostgres, LogicalName: "DATABASE"})
+	bindingResponse := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/resource-bindings", string(bindingBody), "binding-delete-create-key")
+	var bindingResult struct {
+		Binding resourcev1.Binding `json:"binding"`
+	}
+	if bindingResponse.Code != http.StatusCreated || json.Unmarshal(bindingResponse.Body.Bytes(), &bindingResult) != nil || bindingResult.Binding.Lifecycle != resourcev1.LifecycleProvisioning {
+		t.Fatalf("binding status=%d body=%s", bindingResponse.Code, bindingResponse.Body.String())
+	}
+	activeDelete := requestResourceAPI(t, server, http.MethodDelete, "/api/projects/"+project.ID+"/resources/"+created.ID, "", "resource-active-delete-key")
+	if activeDelete.Code != http.StatusConflict || !strings.Contains(activeDelete.Body.String(), resourcev1.FailureBindingActive) {
+		t.Fatalf("active delete status=%d body=%s", activeDelete.Code, activeDelete.Body.String())
+	}
+	bindingDelete := requestResourceAPI(t, server, http.MethodDelete, "/api/projects/"+project.ID+"/resource-bindings/"+bindingResult.Binding.ID, "", "binding-delete-key")
+	if bindingDelete.Code != http.StatusAccepted || !strings.Contains(bindingDelete.Body.String(), `"lifecycle":"deleting"`) {
+		t.Fatalf("binding delete status=%d body=%s", bindingDelete.Code, bindingDelete.Body.String())
 	}
 }
 
@@ -184,7 +227,7 @@ func TestPostgresAgentManagedResourceLeaseEndpoint(t *testing.T) {
 		Profile: "single-node-experimental", Version: resourcev1.PostgresVersion, Image: resourcev1.PostgresImage, CredentialID: credentialID,
 		Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: facts.Runtimes[0].ID, NodeID: node.ID, AgentID: agent.ID}, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20,
 		Ports: []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}}, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault},
-		Connection:        resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-" + created.ID, Host: "opsi-mr-" + created.ID + ".default.svc.cluster.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres},
+		Connection:        resourcev1.ManagedResourceConnection{ServiceName: "opsi-mr-" + created.ID, Host: "opsi-mr-" + created.ID + ".default.svc.cluster.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
 		ConfigurationHash: strings.Repeat("a", 64), TopologyRevision: 1, TopologyHash: strings.Repeat("b", 64),
 	}
 	spec.SpecHash, _ = spec.Hash()

@@ -30,7 +30,8 @@ const (
 func Definitions() []ResourceTypeDefinition {
 	return []ResourceTypeDefinition{
 		func() ResourceTypeDefinition {
-			definition := managedDefinition(TypePostgres, "PostgreSQL", 5432, ProtocolPostgres, true, true, []string{"user", "password", "database"}, []string{"HOST", "PORT", "USER", "PASSWORD", "DATABASE", "URL"})
+			definition := managedDefinition(TypePostgres, "PostgreSQL", 5432, ProtocolPostgres, true, true, []string{"user", "password", "database"}, []string{"HOST", "PORT", "NAME", "USER", "PASSWORD", "URL"})
+			definition.GeneratedValues[2].Sensitivity = ValueNonSecret
 			definition.Provisioning = ProvisioningCapability{Implemented: true, Profiles: []ProvisioningProfile{{Name: "single-node-experimental", Versions: []SupportedVersion{{Version: PostgresVersion, Image: PostgresImage}}}}}
 			return definition
 		}(),
