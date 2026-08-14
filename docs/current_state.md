@@ -408,6 +408,22 @@ bindings live under `contracts/`; business logic remains in the owning domain.
   binding injection.
 - Managed PostgreSQL/Redis renderers and external service registration with
   project-scoped storage and deletion/purge distinction.
+- Managed PostgreSQL logical backup uses one durable Cloud Backup authority and
+  the existing Agent lease path. Only a Ready Resource's canonical `opsi`
+  database is eligible. The pinned PostgreSQL 18 container supplies exact
+  `pg_dump`/`pg_restore` tooling; archives are custom format with
+  `--no-owner --no-privileges`, so schema/data are included while ownership
+  commands and ACL/GRANT restoration are excluded. Opsi binding roles and all
+  credential authority are reconciled outside the archive. S3-compatible
+  object storage is external to the source PVC; success requires PUT, HEAD,
+  full remote SHA-256 verification, and `pg_restore --list`. Expired Agent
+  leases restart the same Backup ID from the beginning; a running Agent
+  refreshes its lease, and a lost heartbeat cancels local execution before
+  recovery. Retry may replace only an incomplete, non-authoritative object.
+  Succeeded object identity/checksum is
+  immutable and survives Resource and retained-PVC destruction. Restore, PITR,
+  WAL/physical backup, schedules, retention cleanup, and artifact deletion are
+  not implemented.
 - Kubernetes/cAdvisor/runtime telemetry collection, bounded logs, retention,
   compressed sync chunks, redacted summaries, and service health queries.
 - Kubernetes Secret application through stdin, Cloud PAT verification cache,

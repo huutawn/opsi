@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/actionplane"
+	backupagent "github.com/opsi-dev/opsi/agent/internal/backup"
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/cloudrunner"
 	"github.com/opsi-dev/opsi/agent/internal/config"
@@ -564,6 +565,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			WorkloadSecrets:     deploy.KubernetesWorkloadSecretEnsurer{Runner: deploy.ExecCommandRunner{}, KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			NodeLifecycle:       nodelifecycle.Service{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			ManagedResources:    svcatalog.ManagedResourceReconciler{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			Backups:             backupagent.Executor{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			PollInterval:        pollInterval,
 			LongPollWait:        longPollWait,
 			HeartbeatInterval:   heartbeatInterval,

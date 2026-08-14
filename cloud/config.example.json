@@ -11,5 +11,17 @@
     "max_jwk_keys": 32,
     "cache_ttl": "15m",
     "workloads": []
+  },
+  "backup_store": {
+    "id": "",
+    "endpoint": "",
+    "bucket": "",
+    "region": "",
+    "prefix": "",
+    "ca_file": "",
+    "access_key_file": "",
+    "secret_key_file": "",
+    "session_token_file": "",
+    "allow_insecure": false
   }
 }

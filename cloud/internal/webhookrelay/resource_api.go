@@ -42,6 +42,9 @@ func (s *Server) handleResourceAPI(w http.ResponseWriter, r *http.Request, proje
 	if len(parts) < 3 {
 		return false
 	}
+	if s.handleBackupAPI(w, r, projectID, parts, principal) {
+		return true
+	}
 	if parts[2] == "resource-types" && len(parts) == 3 && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]any{"resource_types": s.Resources.Definitions()})
 		return true

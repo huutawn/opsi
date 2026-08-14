@@ -70,10 +70,15 @@ type CredentialAuthority interface {
 	Delete(context.Context, string) error
 }
 
+type ActiveOperationAuthority interface {
+	HasActive(context.Context, string, string) (bool, error)
+}
+
 type Service struct {
 	Store       Store
 	Scopes      ScopeAuthority
 	Credentials CredentialAuthority
+	Operations  ActiveOperationAuthority
 	Now         func() time.Time
 }
 
@@ -138,6 +143,15 @@ func (s Service) Update(ctx context.Context, projectID, resourceID string, reque
 	}
 	switch current.Kind {
 	case resourcev1.KindManagedService:
+		if current.Type == resourcev1.TypePostgres {
+			active, err := s.hasActiveOperation(ctx, projectID, resourceID)
+			if err != nil {
+				return resourcev1.Resource{}, err
+			}
+			if active {
+				return resourcev1.Resource{}, Error{Code: "RESOURCE_ACTIVE_OPERATION_CONFLICT", Status: 409, Message: "resource has an active backup"}
+			}
+		}
 		if request.Managed == nil || request.External != nil || request.Managed.Type != current.Type {
 			return resourcev1.Resource{}, invalid("RESOURCE_SPEC_INVALID", "managed resource update must preserve kind and type")
 		}
@@ -180,6 +194,13 @@ func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID, actor 
 		return resourcev1.Resource{}, err
 	}
 	if current.Type == resourcev1.TypePostgres {
+		active, err := s.hasActiveOperation(ctx, projectID, resourceID)
+		if err != nil {
+			return resourcev1.Resource{}, err
+		}
+		if active {
+			return resourcev1.Resource{}, Error{Code: "RESOURCE_ACTIVE_OPERATION_CONFLICT", Status: 409, Message: "resource has an active backup"}
+		}
 		bindings, err := s.ListBindings(ctx, projectID, current.EnvironmentID)
 		if err != nil {
 			return resourcev1.Resource{}, err
@@ -197,6 +218,13 @@ func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID, actor 
 	current.Runtime.DeleteActor = actor
 	current.UpdatedAt = s.clock()
 	return s.Store.Update(ctx, current)
+}
+
+func (s Service) hasActiveOperation(ctx context.Context, projectID, resourceID string) (bool, error) {
+	if s.Operations == nil {
+		return false, nil
+	}
+	return s.Operations.HasActive(ctx, projectID, resourceID)
 }
 
 func (s Service) CreateBinding(ctx context.Context, projectID, key string, request resourcev1.CreateBindingRequest) (resourcev1.Binding, bool, error) {

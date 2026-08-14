@@ -12,6 +12,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
+	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
@@ -24,6 +25,7 @@ type fakeClient struct {
 	progress       []deploymentv1.Progress
 	nodeResults    []cloudrelay.NodeLifecycleResult
 	storageResults []cloudrelay.RetainedStorageResult
+	backupResults  []backupv1.Result
 	heartbeats     int
 	heartbeat      cloudrelay.Heartbeat
 	cancel         context.CancelFunc
@@ -73,6 +75,11 @@ func (f *fakeClient) CompleteRetainedStorage(_ context.Context, _ string, _ stri
 	return nil
 }
 
+func (f *fakeClient) CompleteBackup(_ context.Context, _ string, _ string, result backupv1.Result) error {
+	f.backupResults = append(f.backupResults, result)
+	return nil
+}
+
 func (f *fakeClient) Heartbeat(_ context.Context, _ string, heartbeat cloudrelay.Heartbeat) error {
 	f.heartbeats++
 	f.heartbeat = heartbeat
@@ -93,6 +100,46 @@ func (fakeManagedResources) Reconcile(context.Context, cloudrelay.ManagedResourc
 
 func (fakeManagedResources) ReconcileRetainedStorage(_ context.Context, lease cloudrelay.RetainedStorageLease) cloudrelay.RetainedStorageResult {
 	return cloudrelay.RetainedStorageResult{Status: "destroyed", LeaseToken: lease.LeaseToken, Evidence: &resourcev1.RetainedStorageDestroyEvidence{PVCAbsent: true, PVAbsent: true}}
+}
+
+type fakeBackupExecutor struct{}
+
+func (fakeBackupExecutor) Execute(_ context.Context, lease backupv1.Lease) backupv1.Result {
+	return backupv1.Result{Status: backupv1.LifecycleSucceeded, LeaseToken: lease.LeaseToken, ArtifactSize: 42, SHA256: strings.Repeat("a", 64), ArchiveVerified: true}
+}
+
+type slowBackupExecutor struct{ delay time.Duration }
+
+func (e slowBackupExecutor) Execute(ctx context.Context, lease backupv1.Lease) backupv1.Result {
+	select {
+	case <-ctx.Done():
+		return backupv1.Result{Status: backupv1.LifecycleFailed, LeaseToken: lease.LeaseToken, FailureCode: backupv1.FailureLeaseLost}
+	case <-time.After(e.delay):
+		return (fakeBackupExecutor{}).Execute(ctx, lease)
+	}
+}
+
+func TestRunnerStartsAndCompletesBackupJob(t *testing.T) {
+	client := &fakeClient{}
+	lease := backupv1.Lease{LeaseToken: "backup-lease", Backup: backupv1.Backup{ID: "bkp-1"}}
+	Runner{Client: client, Backups: fakeBackupExecutor{}, NodeID: "node-1"}.handleBackup(context.Background(), lease)
+	if len(client.backupResults) != 2 || client.backupResults[0].Status != backupv1.LifecycleRunning || client.backupResults[1].Status != backupv1.LifecycleSucceeded || client.backupResults[1].LeaseToken != lease.LeaseToken {
+		t.Fatalf("results=%+v", client.backupResults)
+	}
+}
+
+func TestRunnerRefreshesLeaseDuringLongBackup(t *testing.T) {
+	client := &fakeClient{}
+	lease := backupv1.Lease{LeaseToken: "backup-lease", Backup: backupv1.Backup{ID: "bkp-1"}}
+	Runner{Client: client, Backups: slowBackupExecutor{delay: 25 * time.Millisecond}, BackupHeartbeat: 5 * time.Millisecond, NodeID: "node-1"}.handleBackup(context.Background(), lease)
+	if len(client.backupResults) < 3 || client.backupResults[0].Status != backupv1.LifecycleRunning || client.backupResults[len(client.backupResults)-1].Status != backupv1.LifecycleSucceeded {
+		t.Fatalf("results=%+v", client.backupResults)
+	}
+	for _, result := range client.backupResults[1 : len(client.backupResults)-1] {
+		if result.Status != backupv1.LifecycleRunning || result.LeaseToken != lease.LeaseToken {
+			t.Fatalf("heartbeat=%+v", result)
+		}
+	}
 }
 
 func TestRunnerCompletesRetainedStorageJob(t *testing.T) {

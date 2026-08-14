@@ -9,6 +9,7 @@ suffix="$$"
 network="opsi-private-registry-${suffix}"
 registry_container="opsi-registry-${suffix}"
 k3s_container="opsi-k3s-${suffix}"
+minio_container="opsi-minio-${suffix}"
 work_dir="$(mktemp -d)"
 export DOCKER_CONFIG="$work_dir/docker"
 username="opsi-pull"
@@ -18,17 +19,22 @@ generic_image=""
 wrong_image=""
 postgres_image=""
 evidence_dir="${OPSI_K3S_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3b1-postgres-binding-$(date -u +%Y%m%dT%H%M%SZ)}"
+backup_evidence_dir="${OPSI_P07B3C1_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c1-postgres-backup-$(date -u +%Y%m%dT%H%M%SZ)}"
+minio_image="minio/minio@sha256:f6efb212cad3b62f78ca02339f16d8bc28d5bb2fbe792dfc21225c6037d2af8b"
+minio_access="opsi-minio-${suffix}"
+minio_secret="opsi-minio-secret-${suffix}"
+minio_bucket="opsi-p07b3c1"
 
 cleanup() {
 	status=$?
 	trap - EXIT
 	cleanup_status=0
-	for container in "$k3s_container" "$registry_container"; do
+	for container in "$k3s_container" "$registry_container" "$minio_container"; do
 		if docker inspect "$container" >/dev/null 2>&1; then
 			docker rm -f "$container" >/dev/null 2>&1 || cleanup_status=1
 		fi
 	done
-	for image in "$local_image" "$generic_image" "$wrong_image" "$postgres_image"; do
+	for image in "$local_image" "$generic_image" "$wrong_image" "$postgres_image" "$minio_image"; do
 		if [ -n "$image" ] && docker image inspect "$image" >/dev/null 2>&1; then
 			docker image rm -f "$image" >/dev/null 2>&1 || cleanup_status=1
 		fi
@@ -47,12 +53,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$work_dir/auth" "$work_dir/bin" "$work_dir/fixture" "$work_dir/postgres-fixture" "$DOCKER_CONFIG" "$evidence_dir"
+mkdir -p "$work_dir/auth" "$work_dir/bin" "$work_dir/fixture" "$work_dir/postgres-fixture" "$DOCKER_CONFIG" "$evidence_dir" "$backup_evidence_dir"
 htpasswd -Bbn "$username" "$password" >"$work_dir/auth/htpasswd"
 chmod 755 "$work_dir" "$work_dir/auth"
 chmod 644 "$work_dir/auth/htpasswd"
 docker network create "$network" >/dev/null
 registry_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+minio_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 docker run -d --name "$registry_container" --network "$network" --network-alias registry \
 	-p "127.0.0.1:${registry_port}:5000" \
 	-v "$work_dir/auth:/auth:ro,Z" \
@@ -71,6 +78,26 @@ for _ in $(seq 1 60); do
 	sleep 1
 done
 [[ "$status" == 401 ]]
+
+docker pull "$minio_image" >/dev/null
+docker run -d --name "$minio_container" --network "$network" --network-alias minio \
+	-p "127.0.0.1:${minio_port}:9000" \
+	-e MINIO_ROOT_USER="$minio_access" \
+	-e MINIO_ROOT_PASSWORD="$minio_secret" \
+	"$minio_image" server /data --address :9000 >/dev/null
+for _ in $(seq 1 60); do
+	if curl -fsS "http://127.0.0.1:${minio_port}/minio/health/ready" >/dev/null 2>&1; then
+		break
+	fi
+	sleep 1
+done
+curl -fsS "http://127.0.0.1:${minio_port}/minio/health/ready" >/dev/null
+OPSI_E2E_MINIO_ENDPOINT="http://127.0.0.1:${minio_port}" \
+	OPSI_E2E_MINIO_ACCESS_KEY="$minio_access" \
+	OPSI_E2E_MINIO_SECRET_KEY="$minio_secret" \
+	OPSI_E2E_MINIO_BUCKET="$minio_bucket" \
+	go test -count=1 -run '^TestS3StoreRealMinIO$' -v ./agent/internal/backup
+printf 's3_compatible_backup_store=PASS\n'
 
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/fixture/p07b2-application" ./agent/integration/fixtures/p07b2-application
 local_image="${registry_host}/opsi/p07b2-acceptance:fixture-${suffix}"
@@ -163,14 +190,21 @@ printf 'registry_pull_tests=PASS\n'
 PATH="$work_dir/bin:$PATH" \
 	OPSI_E2E_K3S_POSTGRES=1 \
 	OPSI_E2E_K3S_POSTGRES_BINDING=1 \
+	OPSI_E2E_K3S_POSTGRES_BACKUP=1 \
 	OPSI_E2E_K3S_NATS=1 \
 	OPSI_E2E_K3S_VALKEY=1 \
+	OPSI_E2E_MINIO_ENDPOINT="http://127.0.0.1:${minio_port}" \
+	OPSI_E2E_MINIO_ACCESS_KEY="$minio_access" \
+	OPSI_E2E_MINIO_SECRET_KEY="$minio_secret" \
+	OPSI_E2E_MINIO_BUCKET="$minio_bucket" \
 	OPSI_P07B3B1_ACCEPTANCE_E2E_IMAGE="registry:5000/opsi/p07b3b1-acceptance@${postgres_digest}" \
 	OPSI_PRIVATE_REGISTRY_E2E_USERNAME="$username" \
 	OPSI_PRIVATE_REGISTRY_E2E_PASSWORD="$password" \
 	OPSI_K3S_EVIDENCE_DIR="$evidence_dir" \
-	go test -count=1 -run '^TestManagedResourceRealK3s(NATS|Valkey|Postgres(Persistence|ApplicationBinding))$' -v ./agent/internal/svcatalog
+	OPSI_P07B3C1_EVIDENCE_DIR="$backup_evidence_dir" \
+	go test -count=1 -run '^TestManagedResourceRealK3s(NATS|Valkey|Postgres(Persistence|ApplicationBinding|LogicalBackup))$' -v ./agent/internal/svcatalog
 printf 'postgres_application_binding_tests=PASS evidence=%s\n' "$evidence_dir"
+printf 'postgres_logical_backup_test=PASS evidence=%s\n' "$backup_evidence_dir"
 
 printf 'fixture_reference=registry:5000/opsi/p07b2-acceptance@%s anonymous_pull=%s wrong_credential=%s authenticated_tag_lookup=%s digest_lookup=%s\n' \
 	"$digest" "$anonymous_status" "$wrong_status" "$correct_status" "$digest_status"

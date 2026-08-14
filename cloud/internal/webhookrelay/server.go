@@ -18,6 +18,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/actiondevice"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	backupdomain "github.com/opsi-dev/opsi/cloud/internal/backup"
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
@@ -27,6 +28,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
@@ -39,6 +41,7 @@ type Server struct {
 	HTTPClient              *http.Client
 	Registry                registry.API
 	Resources               resource.Service
+	Backups                 backupdomain.Service
 	BuildJobs               buildjob.Service
 	BuildRecords            buildrecord.Service
 	RegistryPullCredentials RegistryPullCredentialProvider
@@ -89,6 +92,12 @@ func NewServer(cfg Config) *Server {
 	runnerVerifier, runnerVerifierErr := githuboidc.NewIdentityVerifier(runnerOIDCConfig)
 	registryService := registry.NewService()
 	resourceService := resource.Service{Store: resource.NewMemoryStore(), Scopes: registryService, Credentials: resource.NewMemoryCredentialAuthority()}
+	backupService := backupdomain.Service{Store: backupdomain.NewMemoryStore(), Resources: resourceService}
+	if cfg.BackupStore.Enabled() {
+		backupService.Artifacts = backupStoreAuthority(cfg.BackupStore)
+	}
+	resourceService.Operations = backupService
+	backupService.Resources = resourceService
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
 	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor, Registry: cfg.BuildRegistry}
@@ -98,6 +107,7 @@ func NewServer(cfg Config) *Server {
 		HTTPClient:              newGitHubHTTPClient(),
 		Registry:                registryService,
 		Resources:               resourceService,
+		Backups:                 backupService,
 		BuildJobs:               buildJobService,
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
@@ -369,6 +379,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentRetainedStorageResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/backups/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentBackupResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -406,6 +420,19 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
+		return
+	}
+	backupLease, ok, err := s.Backups.Lease(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeBackupResult(w, r, backupLease, err, http.StatusOK)
+		return
+	}
+	if backupLease.Backup.Lifecycle == backupv1.LifecycleFailed {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "BACKUP_FAILED", "backup", backupLease.Backup.ID, "failure", map[string]any{"resource_id": backupLease.Backup.SourceResourceID, "failure_code": backupLease.Backup.FailureCode})
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "backup", "lease_token": backupLease.LeaseToken, "backup": backupLease.Backup, "source_spec": backupLease.SourceSpec, "store": backupLease.Store, "credential": backupLease.Credential})
 		return
 	}
 	retained, ok, err := s.Resources.LeaseRetainedStorageDestroy(r.Context(), projectID, nodeID)
@@ -466,6 +493,50 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAgentBackupResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 6 {
+		http.NotFound(w, r)
+		return
+	}
+	var result backupv1.Result
+	if !decodeResourceJSON(w, r, &result) {
+		return
+	}
+	id := parts[len(parts)-2]
+	started := false
+	if result.Status == backupv1.LifecycleRunning {
+		current, getErr := s.Backups.Get(r.Context(), projectID, id)
+		started = getErr == nil && current.Lifecycle == backupv1.LifecycleLeased
+	}
+	value, err := s.Backups.Complete(r.Context(), projectID, id, result)
+	if err != nil {
+		writeBackupResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	action, outcome, metadata := "BACKUP_FAILED", "failure", map[string]any{"resource_id": value.SourceResourceID, "failure_code": value.FailureCode}
+	if result.Status == backupv1.LifecycleRunning && started {
+		action, outcome, metadata = "BACKUP_STARTED", "success", map[string]any{"resource_id": value.SourceResourceID, "attempt_count": value.AttemptCount}
+	} else if result.Status == backupv1.LifecycleRunning {
+		writeJSON(w, http.StatusOK, map[string]any{"backup": value})
+		return
+	} else if value.Lifecycle == backupv1.LifecycleSucceeded {
+		action, outcome, metadata = "BACKUP_SUCCEEDED", "success", map[string]any{"resource_id": value.SourceResourceID, "sha256": value.SHA256, "artifact_size": value.ArtifactSize}
+	}
+	s.Registry.Audit(agent.OrgID, projectID, agent.ID, action, "backup", id, outcome, metadata)
+	writeJSON(w, http.StatusOK, map[string]any{"backup": value})
 }
 
 func (s *Server) handleAgentManagedResourceResult(w http.ResponseWriter, r *http.Request) {

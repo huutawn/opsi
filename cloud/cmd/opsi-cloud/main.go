@@ -16,6 +16,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	backupdomain "github.com/opsi-dev/opsi/cloud/internal/backup"
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
@@ -114,13 +115,16 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
 		postgresRegistry := registry.PostgresService{DB: db}
 		relay.Registry = postgresRegistry
-		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry}
+		relay.Backups.Store = backupdomain.PostgresStore{DB: db}
+		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry, Operations: relay.Backups}
+		relay.Backups.Resources = relay.Resources
 		if cfg.BootstrapSecretKey != "" {
 			credentialVault, vaultErr := webhookrelay.NewPostgresManagedResourceCredentialVault(db, cfg.BootstrapSecretKey)
 			if vaultErr != nil {
 				return fmt.Errorf("configure managed resource credential vault: %w", vaultErr)
 			}
 			relay.Resources.Credentials = credentialVault
+			relay.Backups.Resources = relay.Resources
 		}
 		relay.BuildJobs.Store = buildjob.PostgresStore{DB: db}
 		relay.BuildJobs.Sources = postgresRegistry

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"time"
 
+	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
@@ -39,6 +40,7 @@ type JobLease struct {
 	NodeLifecycle   *NodeLifecycleLease   `json:"node_lifecycle_lease,omitempty"`
 	ManagedResource *ManagedResourceLease `json:"managed_resource_lease,omitempty"`
 	RetainedStorage *RetainedStorageLease `json:"retained_storage_lease,omitempty"`
+	Backup          *backupv1.Lease       `json:"backup_lease,omitempty"`
 }
 
 type ManagedResourceLease struct {
@@ -177,9 +179,52 @@ func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) 
 			return nil, err
 		}
 		return &JobLease{Kind: kind.Kind, RetainedStorage: &lease}, nil
+	case "backup":
+		var lease backupv1.Lease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, Backup: &lease}, nil
 	default:
 		return nil, nil
 	}
+}
+
+func (c Client) CompleteBackup(ctx context.Context, nodeID, backupID string, result backupv1.Result) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/backups/" + url.PathEscape(backupID) + "/result"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete backup: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c Client) CompleteRetainedStorage(ctx context.Context, nodeID, retainedStorageID string, result RetainedStorageResult) error {

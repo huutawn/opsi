@@ -11,6 +11,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
+	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
@@ -22,6 +23,7 @@ type CloudClient interface {
 	CompleteNodeLifecycle(context.Context, string, string, cloudrelay.NodeLifecycleResult) error
 	CompleteManagedResource(context.Context, string, string, cloudrelay.ManagedResourceResult) error
 	CompleteRetainedStorage(context.Context, string, string, cloudrelay.RetainedStorageResult) error
+	CompleteBackup(context.Context, string, string, backupv1.Result) error
 	Heartbeat(context.Context, string, cloudrelay.Heartbeat) error
 }
 
@@ -59,6 +61,8 @@ type Runner struct {
 	WorkloadSecrets     WorkloadSecretEnsurer
 	NodeLifecycle       NodeLifecycleExecutor
 	ManagedResources    ManagedResourceReconciler
+	Backups             BackupExecutor
+	BackupHeartbeat     time.Duration
 	NodeID              string
 	Version             string
 	PollInterval        time.Duration
@@ -74,11 +78,16 @@ type ManagedResourceReconciler interface {
 	ReconcileRetainedStorage(context.Context, cloudrelay.RetainedStorageLease) cloudrelay.RetainedStorageResult
 }
 
+type BackupExecutor interface {
+	Execute(context.Context, backupv1.Lease) backupv1.Result
+}
+
 type NodeLifecycleExecutor interface {
 	Execute(context.Context, nodelifecycle.Request) nodelifecycle.Result
 }
 
 const rolloutReconcileAttempts = 2
+const defaultBackupHeartbeat = time.Minute
 
 func (r Runner) Run(ctx context.Context) error {
 	if r.Client == nil || r.Engine == nil {
@@ -123,7 +132,7 @@ func (r Runner) sendHeartbeat(ctx context.Context) {
 		NodeReady:    health.NodeReady,
 		K3SStatus:    health.K3SStatus,
 		Capacity:     health.Capacity,
-		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil},
+		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil},
 	})
 	if err != nil {
 		r.ConnectionState.SetConnected(false)
@@ -162,7 +171,61 @@ func (r Runner) jobLoop(ctx context.Context) error {
 		if lease != nil && lease.RetainedStorage != nil {
 			r.handleRetainedStorage(ctx, *lease.RetainedStorage)
 		}
+		if lease != nil && lease.Backup != nil {
+			r.handleBackup(ctx, *lease.Backup)
+		}
 		timer.Reset(r.PollInterval)
+	}
+}
+
+func (r Runner) handleBackup(ctx context.Context, lease backupv1.Lease) {
+	if err := r.Client.CompleteBackup(ctx, r.NodeID, lease.Backup.ID, backupv1.Result{Status: backupv1.LifecycleRunning, LeaseToken: lease.LeaseToken}); err != nil {
+		return
+	}
+	executionCtx, cancel := context.WithCancel(ctx)
+	heartbeat := make(chan error, 1)
+	go func() {
+		interval := r.BackupHeartbeat
+		if interval <= 0 {
+			interval = defaultBackupHeartbeat
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-executionCtx.Done():
+				heartbeat <- nil
+				return
+			case <-ticker.C:
+				if err := r.Client.CompleteBackup(executionCtx, r.NodeID, lease.Backup.ID, backupv1.Result{Status: backupv1.LifecycleRunning, LeaseToken: lease.LeaseToken}); err != nil {
+					if executionCtx.Err() != nil {
+						heartbeat <- nil
+						return
+					}
+					heartbeat <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	result := backupv1.Result{Status: backupv1.LifecycleFailed, LeaseToken: lease.LeaseToken, FailureCode: backupv1.FailureDumpFailed, FailureMessageRedacted: "backup executor is unavailable"}
+	if r.Backups != nil {
+		result = r.Backups.Execute(executionCtx, lease)
+	}
+	cancel()
+	if err := <-heartbeat; err != nil {
+		return
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := r.Client.CompleteBackup(ctx, r.NodeID, lease.Backup.ID, result); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
 	}
 }
 
