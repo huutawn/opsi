@@ -104,22 +104,93 @@ func TestManagedResourceRealK3sPostgresPersistence(t *testing.T) {
 	assertPostgresAcceptanceRow(t, updatedSpec)
 
 	deleted := reconciler.Reconcile(context.Background(), cloudrelay.ManagedResourceLease{Action: "delete", LeaseToken: "lease-delete", Spec: updatedSpec})
-	if deleted.Status != "deleted" || deleted.Evidence == nil || !deleted.Evidence.StorageRetained || deleted.Evidence.PVCName != first.Evidence.PVCName || kubectl(t, "get", "pvc", first.Evidence.PVCName, "-n", namespace, "-o", "jsonpath={.metadata.uid}") != pvcUID {
+	if deleted.Status != "deleted" || deleted.Evidence == nil || !deleted.Evidence.StorageRetained || deleted.Evidence.PVCName != first.Evidence.PVCName || deleted.Evidence.PVCUID != pvcUID || deleted.Evidence.PVUID == "" || deleted.Evidence.ReclaimPolicy == "" || kubectl(t, "get", "pvc", first.Evidence.PVCName, "-n", namespace, "-o", "jsonpath={.metadata.uid}") != pvcUID {
 		t.Fatalf("safe delete=%+v", deleted)
 	}
 	assertPostgresObjectCounts(t, updatedSpec, 0, 1)
 
+	unrelatedPVC, unrelatedUID, unrelatedPod := createUnrelatedPVC(t, namespace, deleted.Evidence.StorageClass, updatedSpec.Image)
+	unrelatedPV := kubectl(t, "get", "pvc", unrelatedPVC, "-n", namespace, "-o", "jsonpath={.spec.volumeName}")
+	unrelatedPVUID := kubectl(t, "get", "pv", unrelatedPV, "-o", "jsonpath={.metadata.uid}")
+	unrelatedReclaim := kubectl(t, "get", "pv", unrelatedPV, "-o", "jsonpath={.spec.persistentVolumeReclaimPolicy}")
+	mismatchSpec := resourcev1.RetainedStorageDestroySpec{
+		SchemaVersion: resourcev1.RetainedStorageSchemaVersion, RetainedStorageID: "rsto-unrelated", OriginalResourceID: updatedSpec.ResourceID,
+		ProjectID: updatedSpec.ProjectID, EnvironmentID: updatedSpec.EnvironmentID, ResourceType: updatedSpec.ResourceType, Namespace: namespace,
+		PVCName: unrelatedPVC, PVCUID: unrelatedUID, PVName: unrelatedPV, PVUID: unrelatedPVUID, StorageClass: deleted.Evidence.StorageClass,
+		ReclaimPolicy: unrelatedReclaim, StorageHash: deleted.Evidence.StorageHash, Assignment: updatedSpec.Assignment, Revision: 2, Operation: "destroy",
+	}
+	mismatch := reconciler.ReconcileRetainedStorage(context.Background(), cloudrelay.RetainedStorageLease{LeaseToken: "ownership-mismatch", Spec: mismatchSpec})
+	if mismatch.Status != "failed" || mismatch.FailureCode != resourcev1.FailureRetainedStorageOwnership || kubectl(t, "get", "pvc", unrelatedPVC, "-n", namespace, "-o", "jsonpath={.metadata.uid}") != unrelatedUID {
+		t.Fatalf("unrelated PVC safety result=%+v", mismatch)
+	}
+	kubectl(t, "delete", "pod", unrelatedPod, "-n", namespace, "--wait=true", "--timeout=2m")
+	kubectl(t, "delete", "pvc", unrelatedPVC, "-n", namespace, "--wait=true", "--timeout=2m")
+
+	destroySpec := resourcev1.RetainedStorageDestroySpec{
+		SchemaVersion: resourcev1.RetainedStorageSchemaVersion, RetainedStorageID: "rsto-postgres-e2e", OriginalResourceID: updatedSpec.ResourceID,
+		ProjectID: updatedSpec.ProjectID, EnvironmentID: updatedSpec.EnvironmentID, ResourceType: updatedSpec.ResourceType, Namespace: deleted.Evidence.Namespace,
+		PVCName: deleted.Evidence.PVCName, PVCUID: deleted.Evidence.PVCUID, PVName: deleted.Evidence.PVName, PVUID: deleted.Evidence.PVUID,
+		StorageClass: deleted.Evidence.StorageClass, ReclaimPolicy: deleted.Evidence.ReclaimPolicy, StorageHash: deleted.Evidence.StorageHash,
+		Assignment: updatedSpec.Assignment, Revision: 2, Operation: "destroy",
+	}
+	if destroySpec.ReclaimPolicy != "Delete" {
+		t.Fatalf("local-path factual reclaim policy=%s; explicit destruction is unsupported", destroySpec.ReclaimPolicy)
+	}
+	destroyed := reconciler.ReconcileRetainedStorage(context.Background(), cloudrelay.RetainedStorageLease{LeaseToken: "destroy-storage", Spec: destroySpec})
+	if destroyed.Status != "destroyed" || destroyed.Evidence == nil || !destroyed.Evidence.PVCAbsent || !destroyed.Evidence.PVAbsent {
+		t.Fatalf("destroyed=%+v", destroyed)
+	}
+	if pvc, _ := kubectlOutput(context.Background(), "get", "pvc", destroySpec.PVCName, "-n", namespace, "-o", "name", "--ignore-not-found"); strings.TrimSpace(pvc) != "" {
+		t.Fatalf("PVC remains after destruction: %s", pvc)
+	}
+	if pv, _ := kubectlOutput(context.Background(), "get", "pv", destroySpec.PVName, "-o", "name", "--ignore-not-found"); strings.TrimSpace(pv) != "" {
+		t.Fatalf("PV remains after destruction: %s", pv)
+	}
+	if recovered := (ManagedResourceReconciler{Timeout: 8 * time.Minute, PollInterval: time.Second}).ReconcileRetainedStorage(context.Background(), cloudrelay.RetainedStorageLease{LeaseToken: "destroy-recovery", Spec: destroySpec}); recovered.Status != "destroyed" || recovered.Evidence == nil || !recovered.Evidence.PVCAbsent || !recovered.Evidence.PVAbsent {
+		t.Fatalf("destroy recovery=%+v", recovered)
+	}
+	assertPostgresObjectCounts(t, updatedSpec, 0, 0)
+
 	evidence := map[string]any{
 		"resource_id": spec.ResourceID, "lifecycle": []string{"unplaced", "planned", "provisioning", "ready", "deleting", "deleted-runtime-storage-retained"},
 		"profile": spec.Profile, "version": resourcev1.PostgresVersion, "image": resourcev1.PostgresImage, "namespace": namespace, "statefulset": spec.Connection.ServiceName,
-		"service": spec.Connection.ServiceName, "pvc": first.Evidence.PVCName, "pv": first.Evidence.PVName, "storage_class": first.Evidence.StorageClass,
+		"service": spec.Connection.ServiceName, "pvc": first.Evidence.PVCName, "pvc_uid": deleted.Evidence.PVCUID, "pv": first.Evidence.PVName, "pv_uid": deleted.Evidence.PVUID, "storage_class": first.Evidence.StorageClass, "reclaim_policy": deleted.Evidence.ReclaimPolicy,
 		"requested_bytes": spec.Storage.SizeBytes, "actual_storage": first.Evidence.ActualStorage, "image_id": first.Evidence.ImageID,
 		"secret": managedResourceSecretName(spec), "authenticated_readiness": first.Evidence.AuthReady, "invalid_auth": "rejected", "select_1": strings.TrimSpace(selectOne),
 		"acceptance_row": lastNonEmptyLine(row), "pod_uid_before": podUIDBefore, "pod_uid_after": podUIDAfter, "pvc_uid_before": pvcUID, "pvc_uid_after": pvcUID,
-		"persistence": "PASS", "idempotency": "PASS", "credential_stable": "PASS", "agent_recovery": "PASS", "compute_update": "PASS", "storage_resize": "unsupported", "delete_behavior": "runtime_deleted_pvc_retained",
-		"spec_hash": spec.SpecHash, "storage_hash": postgresStorageHash(spec), "storage": spec.Storage,
+		"persistence": "PASS", "idempotency": "PASS", "credential_stable": "PASS", "agent_recovery": "PASS", "compute_update": "PASS", "storage_resize": "unsupported", "delete_behavior": "runtime_deleted_pvc_retained", "ownership_mismatch": "REJECTED_UNRELATED_PVC_SURVIVED", "destroy_lifecycle": "destroying_to_destroyed", "pvc_absent": destroyed.Evidence.PVCAbsent, "pv_absent": destroyed.Evidence.PVAbsent, "destroy_recovery": "PASS",
+		"spec_hash": spec.SpecHash, "storage_hash": resourcev1.ManagedResourceStorageHash(spec), "storage": spec.Storage,
 	}
 	writePostgresEvidence(t, credential.Password, evidence)
+}
+
+func createUnrelatedPVC(t *testing.T, namespace, storageClass, image string) (string, string, string) {
+	t.Helper()
+	name := fmt.Sprintf("unrelated-pvc-%d", time.Now().UnixNano())
+	pvc := map[string]any{
+		"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+		"metadata": map[string]any{"name": name, "namespace": namespace, "labels": map[string]any{"app.kubernetes.io/managed-by": "unrelated"}},
+		"spec":     map[string]any{"accessModes": []any{"ReadWriteOnce"}, "storageClassName": storageClass, "resources": map[string]any{"requests": map[string]any{"storage": "16Mi"}}},
+	}
+	data, _ := json.Marshal(pvc)
+	if out, err := kubectlInput(context.Background(), data, "create", "-f", "-"); err != nil {
+		t.Fatalf("create unrelated PVC: %v\n%s", err, out)
+	}
+	podName := name + "-consumer"
+	pod := map[string]any{
+		"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": podName, "namespace": namespace},
+		"spec": map[string]any{"restartPolicy": "Never", "containers": []any{map[string]any{"name": "consumer", "image": image, "command": []any{"sh", "-ec", "sleep 600"}, "volumeMounts": []any{map[string]any{"name": "data", "mountPath": "/data"}}}}, "volumes": []any{map[string]any{"name": "data", "persistentVolumeClaim": map[string]any{"claimName": name}}}},
+	}
+	data, _ = json.Marshal(pod)
+	if out, err := kubectlInput(context.Background(), data, "create", "-f", "-"); err != nil {
+		t.Fatalf("create unrelated PVC consumer: %v\n%s", err, out)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if out, err := kubectlOutput(ctx, "wait", "--for=jsonpath={.status.phase}=Bound", "pvc/"+name, "-n", namespace, "--timeout=2m"); err != nil {
+		t.Fatalf("wait unrelated PVC: %v\n%s", err, out)
+	}
+	return name, kubectl(t, "get", "pvc", name, "-n", namespace, "-o", "jsonpath={.metadata.uid}"), podName
 }
 
 func runPostgresClient(t *testing.T, spec resourcev1.ManagedResourceSpec, valid bool, sql string) (string, error) {

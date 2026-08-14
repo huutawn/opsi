@@ -365,6 +365,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentManagedResourceResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/retained-storages/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentRetainedStorageResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -402,6 +406,16 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
+		return
+	}
+	retained, ok, err := s.Resources.LeaseRetainedStorageDestroy(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "retained_storage", "lease_token": retained.LeaseToken, "spec": retained.Spec})
 		return
 	}
 	managed, ok, err := s.Resources.LeaseManaged(r.Context(), projectID, nodeID)
@@ -461,7 +475,8 @@ func (s *Server) handleAgentManagedResourceResult(w http.ResponseWriter, r *http
 	}
 	projectID := r.URL.Query().Get("project_id")
 	nodeID := nodeIDFromAgentPath(r.URL.Path)
-	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
@@ -478,7 +493,46 @@ func (s *Server) handleAgentManagedResourceResult(w http.ResponseWriter, r *http
 		writeResourceResult(w, r, value, err, http.StatusOK)
 		return
 	}
+	if result.Status == "deleted" {
+		if retained, retainedErr := s.Resources.GetRetainedStorageByResource(r.Context(), projectID, parts[len(parts)-2]); retainedErr == nil {
+			s.Registry.Audit(agent.OrgID, projectID, agent.ID, "RESOURCE_RUNTIME_DELETED_STORAGE_RETAINED", "resource", parts[len(parts)-2], "success", map[string]any{"retained_storage_id": retained.ID, "pvc_uid": retained.PVCUID, "pv_uid": retained.PVUID})
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"resource": value})
+}
+
+func (s *Server) handleAgentRetainedStorageResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 6 {
+		http.NotFound(w, r)
+		return
+	}
+	var result resource.RetainedStorageResult
+	if !decodeResourceJSON(w, r, &result) {
+		return
+	}
+	id := parts[len(parts)-2]
+	value, err := s.Resources.CompleteRetainedStorageDestroy(r.Context(), projectID, id, result)
+	if err != nil {
+		writeResourceResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	action, outcome := "RETAINED_STORAGE_DESTROY_FAILED", "failure"
+	if value.Lifecycle == resourcev1.RetainedStorageDestroyed {
+		action, outcome = "RETAINED_STORAGE_DESTROYED", "success"
+	}
+	s.Registry.Audit(agent.OrgID, projectID, agent.ID, action, "retained_storage", id, outcome, map[string]any{"lifecycle": value.Lifecycle, "failure_code": value.FailureCode})
+	writeJSON(w, http.StatusOK, map[string]any{"retained_storage": value})
 }
 
 func (s *Server) recoverAutomaticDeliveries(ctx context.Context, projectID string) {

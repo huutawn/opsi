@@ -72,6 +72,35 @@ func TestPollJobAndCompleteDeployment(t *testing.T) {
 	}
 }
 
+func TestPollAndCompleteRetainedStorage(t *testing.T) {
+	var completed bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents/node-1/webhooks/next":
+			_, _ = w.Write([]byte(`{"kind":"retained_storage","lease_token":"lease-storage","spec":{"retained_storage_id":"rsto-1","pvc_uid":"pvc-uid"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/node-1/retained-storages/rsto-1/result":
+			completed = true
+			var result RetainedStorageResult
+			if err := json.NewDecoder(r.Body).Decode(&result); err != nil || result.Status != "destroyed" || result.LeaseToken != "lease-storage" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := Client{BaseURL: server.URL, ProjectID: "proj-dev"}
+	job, err := client.PollJob(context.Background(), "node-1", time.Second)
+	if err != nil || job == nil || job.RetainedStorage == nil || job.RetainedStorage.Spec.RetainedStorageID != "rsto-1" {
+		t.Fatalf("job=%+v err=%v", job, err)
+	}
+	if err := client.CompleteRetainedStorage(context.Background(), "node-1", "rsto-1", RetainedStorageResult{Status: "destroyed", LeaseToken: job.RetainedStorage.LeaseToken}); err != nil || !completed {
+		t.Fatalf("completed=%t err=%v", completed, err)
+	}
+}
+
 func TestClientSignsAgentRequests(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ts := r.Header.Get("X-Agent-Timestamp")

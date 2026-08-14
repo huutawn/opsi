@@ -57,7 +57,7 @@ func TestNATSCompilerLeaseReadinessDeleteAndBinding(t *testing.T) {
 	if err != nil || len(env) != 3 || env[0].Name != "MESSAGING_HOST" || env[1].Name != "MESSAGING_PORT" || env[2].Name != "MESSAGING_URL" || env[0].Value != planned.Runtime.Spec.Connection.Host {
 		t.Fatalf("env=%+v err=%v", env, err)
 	}
-	deleting, err := service.DeleteIntent(context.Background(), "project-1", created.ID)
+	deleting, err := service.DeleteIntent(context.Background(), "project-1", created.ID, "user-1")
 	if err != nil || deleting.Lifecycle != resourcev1.LifecycleDeleting {
 		t.Fatalf("deleting=%+v err=%v", deleting, err)
 	}
@@ -100,7 +100,7 @@ func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing
 	if err != nil || ready.Lifecycle != resourcev1.LifecycleReady {
 		t.Fatalf("ready=%+v err=%v", ready, err)
 	}
-	if _, err := service.DeleteIntent(context.Background(), "project-1", postgres.ID); err != nil {
+	if _, err := service.DeleteIntent(context.Background(), "project-1", postgres.ID, "user-1"); err != nil {
 		t.Fatal(err)
 	}
 	deleteLease, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
@@ -108,12 +108,20 @@ func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing
 		t.Fatalf("delete lease=%+v ok=%t err=%v", deleteLease, ok, err)
 	}
 	unsafeEvidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: deleteLease.Spec.SpecHash, Deleted: true, ObservedAt: now}
-	if _, err := service.CompleteManaged(context.Background(), "project-1", postgres.ID, ManagedResult{Status: "deleted", LeaseToken: deleteLease.LeaseToken, Evidence: unsafeEvidence}); err == nil || !strings.Contains(err.Error(), resourcev1.FailurePersistentDeleteUnsupported) {
+	if _, err := service.CompleteManaged(context.Background(), "project-1", postgres.ID, ManagedResult{Status: "deleted", LeaseToken: deleteLease.LeaseToken, Evidence: unsafeEvidence}); err == nil || !strings.Contains(err.Error(), resourcev1.FailureRetainedStorageIdentityMismatch) {
 		t.Fatalf("unsafe delete err=%v", err)
 	}
-	safeEvidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: deleteLease.Spec.SpecHash, Deleted: true, StorageRetained: true, PVCName: "pvc", PVName: "pv", ObservedAt: now}
+	safeEvidence := &resourcev1.ManagedResourceEvidence{
+		ObservedSpecHash: deleteLease.Spec.SpecHash, Deleted: true, StorageRetained: true, Namespace: "opsi-project-1-env-1",
+		PVCName: "pvc", PVCUID: "pvc-uid", PVName: "pv", PVUID: "pv-uid", StorageClass: "local-path", ReclaimPolicy: "Delete",
+		RequestedBytes: deleteLease.Spec.Storage.SizeBytes, ActualStorage: "1Gi", StorageHash: resourcev1.ManagedResourceStorageHash(deleteLease.Spec), ObservedAt: now,
+	}
 	if _, err := service.CompleteManaged(context.Background(), "project-1", postgres.ID, ManagedResult{Status: "deleted", LeaseToken: deleteLease.LeaseToken, Evidence: safeEvidence}); err != nil {
 		t.Fatal(err)
+	}
+	retained, err := service.GetRetainedStorageByResource(context.Background(), "project-1", postgres.ID)
+	if err != nil || retained.PVCUID != "pvc-uid" || retained.PVUID != "pv-uid" || retained.Lifecycle != resourcev1.RetainedStorageRetained || retained.RetainedBy != "user-1" {
+		t.Fatalf("retained=%+v err=%v", retained, err)
 	}
 }
 
@@ -167,7 +175,7 @@ func TestPostgresBindingCredentialRoleIsolationAndRevocationLifecycle(t *testing
 		t.Fatalf("bindings are not isolated: first=%+v second=%+v", first, second)
 	}
 	completePostgresBindingLease(t, &service, postgres.ID, first.ID, second.ID)
-	if _, err := service.DeleteIntent(context.Background(), "project-1", postgres.ID); err == nil || !strings.Contains(err.Error(), resourcev1.FailureBindingActive) {
+	if _, err := service.DeleteIntent(context.Background(), "project-1", postgres.ID, "user-1"); err == nil || !strings.Contains(err.Error(), resourcev1.FailureBindingActive) {
 		t.Fatalf("active binding delete err=%v", err)
 	}
 	if _, err := service.DeleteBinding(context.Background(), "project-1", first.ID); err != nil {

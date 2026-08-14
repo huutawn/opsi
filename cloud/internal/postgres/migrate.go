@@ -615,5 +615,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateP07B2Valkey(ctx, db); err != nil {
 		return err
 	}
-	return MigrateP07B3B1PostgresBinding(ctx, db)
+	if err := MigrateP07B3B1PostgresBinding(ctx, db); err != nil {
+		return err
+	}
+	return MigrateP07B3B2RetainedStorage(ctx, db)
 }

@@ -129,7 +129,7 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 		if pvc == nil {
 			return nil, managedResourceError{resourcev1.FailurePersistentDeleteUnsupported, "managed PostgreSQL runtime delete cannot verify a retained PVC"}
 		}
-		if !exactManagedResourceOwnership(pvc, spec) {
+		if !exactManagedResourceOwnership(pvc, spec) || !postgresPVCMatchesIntent(pvc, spec) {
 			return nil, errors.New("refusing to retain a PostgreSQL PVC with different Opsi managed-resource ownership")
 		}
 		retainedPVC = pvc
@@ -162,9 +162,25 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 	}
 	evidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, Deleted: true, ObservedAt: time.Now().UTC()}
 	if spec.ResourceType == resourcev1.TypePostgres {
-		evidence.PVCName, evidence.StorageRetained = managedResourcePVCName(spec), true
+		evidence.Namespace, evidence.PVCName, evidence.StorageRetained = managedResourceNamespace(spec), managedResourcePVCName(spec), true
+		evidence.PVCUID, _ = nested(retainedPVC, "metadata", "uid").(string)
 		evidence.PVName, _ = nested(retainedPVC, "spec", "volumeName").(string)
 		evidence.StorageClass, _ = nested(retainedPVC, "spec", "storageClassName").(string)
+		evidence.ActualStorage, _ = nested(retainedPVC, "status", "capacity", "storage").(string)
+		evidence.RequestedBytes, evidence.StorageHash = spec.Storage.SizeBytes, resourcev1.ManagedResourceStorageHash(spec)
+		pv, err := r.get(ctx, "persistentvolume", evidence.PVName, "")
+		if err != nil || pv == nil {
+			return nil, managedResourceError{resourcev1.FailureRetainedStorageIdentityMismatch, "managed PostgreSQL runtime delete cannot verify the bound PV"}
+		}
+		evidence.PVUID, _ = nested(pv, "metadata", "uid").(string)
+		evidence.ReclaimPolicy, _ = nested(pv, "spec", "persistentVolumeReclaimPolicy").(string)
+		claimName, _ := nested(pv, "spec", "claimRef", "name").(string)
+		claimNamespace, _ := nested(pv, "spec", "claimRef", "namespace").(string)
+		claimUID, _ := nested(pv, "spec", "claimRef", "uid").(string)
+		pvStorageClass, _ := nested(pv, "spec", "storageClassName").(string)
+		if evidence.PVCUID == "" || evidence.PVUID == "" || evidence.PVName == "" || evidence.ReclaimPolicy == "" || claimName != evidence.PVCName || claimNamespace != evidence.Namespace || claimUID != evidence.PVCUID || pvStorageClass != evidence.StorageClass {
+			return nil, managedResourceError{resourcev1.FailureRetainedStorageIdentityMismatch, "managed PostgreSQL retained PVC/PV identity does not match"}
+		}
 	}
 	return evidence, nil
 }

@@ -61,6 +61,13 @@ func (r *postgresRunner) Run(_ context.Context, input []byte, _ string, args ...
 			object["spec"].(map[string]any)["volumeName"] = "pv-postgres"
 			object["spec"].(map[string]any)["storageClassName"] = "local-path"
 			object["status"] = map[string]any{"phase": "Bound", "capacity": map[string]any{"storage": "1Gi"}}
+			r.objects["persistentvolume/pv-postgres"] = map[string]any{
+				"metadata": map[string]any{"name": "pv-postgres", "uid": "pv-uid-postgres"},
+				"spec": map[string]any{
+					"storageClassName": "local-path", "persistentVolumeReclaimPolicy": "Delete",
+					"claimRef": map[string]any{"name": metadata["name"], "namespace": metadata["namespace"], "uid": metadata["uid"]},
+				},
+			}
 		case "StatefulSet":
 			object["status"] = map[string]any{"observedGeneration": float64(1), "readyReplicas": float64(1), "currentRevision": "revision-1", "updateRevision": "revision-1"}
 		case "Service":
@@ -71,6 +78,9 @@ func (r *postgresRunner) Run(_ context.Context, input []byte, _ string, args ...
 	}
 	if args[0] == "delete" {
 		delete(r.objects, args[1]+"/"+args[2])
+		if args[1] == "persistentvolumeclaim" {
+			delete(r.objects, "persistentvolume/pv-postgres")
+		}
 		return nil, nil
 	}
 	if args[0] == "exec" {

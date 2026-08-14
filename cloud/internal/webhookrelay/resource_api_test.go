@@ -164,6 +164,84 @@ func TestResourceAPIRejectsUnknownJSONAndType(t *testing.T) {
 	}
 }
 
+func TestRetainedStorageAPIRequiresFreshReviewAndIdempotentDestroy(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-1", "Project", "retained-api", "user-1", "retained-api-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := server.Registry.(*registry.Service)
+	facts, _ := services.PlacementFacts(t.Context(), project.ID)
+	node, err := services.UpsertNode(project.ID, "retained-node", "server", registry.NodeHealthy, "127.0.0.1", "", "retained-api-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := services.RegisterAgent(project.ID, node.ID, "sha256:retained-api", "hash", "test", "retained-api-agent", map[string]any{"managed_resources": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, _, err := server.Resources.Create(t.Context(), project.ID, "user-1", "retained-api-resource", resourcev1.CreateRequest{
+		EnvironmentID: facts.Environments[0].ID, Name: "postgres-retained", Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres,
+		Managed: &resourcev1.ManagedSpec{Type: resourcev1.TypePostgres, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Lifecycle = resourcev1.LifecycleReady
+	created.Runtime = &resourcev1.ManagedResourceRuntime{Spec: resourcev1.ManagedResourceSpec{
+		ResourceID: created.ID, ProjectID: project.ID, EnvironmentID: created.EnvironmentID, ResourceType: resourcev1.TypePostgres,
+		Assignment: resourcev1.ManagedResourceAssignment{RuntimeID: facts.Runtimes[0].ID, NodeID: node.ID, AgentID: agent.ID},
+		Storage:    resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault}, SpecHash: strings.Repeat("a", 64),
+	}}
+	if _, err := server.Resources.Store.Update(t.Context(), created); err != nil {
+		t.Fatal(err)
+	}
+	deleted := requestResourceAPI(t, server, http.MethodDelete, "/api/projects/"+project.ID+"/resources/"+created.ID, "", "retain-resource-delete")
+	if deleted.Code != http.StatusAccepted || !strings.Contains(deleted.Body.String(), `"lifecycle":"deleting"`) {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	lease, ok, err := server.Resources.LeaseManaged(t.Context(), project.ID, node.ID)
+	if err != nil || !ok || lease.Action != "delete" {
+		t.Fatalf("lease=%+v ok=%t err=%v", lease, ok, err)
+	}
+	evidence := &resourcev1.ManagedResourceEvidence{
+		ObservedSpecHash: lease.Spec.SpecHash, Deleted: true, StorageRetained: true, Namespace: "opsi-retained-api",
+		PVCName: "postgres-data", PVCUID: "pvc-retained-api", PVName: "pv-retained-api", PVUID: "pv-uid-retained-api",
+		StorageClass: "local-path", ReclaimPolicy: "Delete", RequestedBytes: lease.Spec.Storage.SizeBytes, ActualStorage: "1Gi",
+		StorageHash: resourcev1.ManagedResourceStorageHash(lease.Spec), ObservedAt: time.Now().UTC(),
+	}
+	if _, err := server.Resources.CompleteManaged(t.Context(), project.ID, created.ID, resource.ManagedResult{Status: "deleted", LeaseToken: lease.LeaseToken, Evidence: evidence}); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := server.Resources.GetRetainedStorageByResource(t.Context(), project.ID, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+project.ID+"/retained-storages?environment_id="+created.EnvironmentID, "", "")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), retained.ID) || !strings.Contains(list.Body.String(), `"lifecycle":"retained"`) {
+		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
+	}
+	reviewOne := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/retained-storages/"+retained.ID+"/review", "", "review-one")
+	reviewTwo := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/retained-storages/"+retained.ID+"/review", "", "review-two")
+	var one, two struct {
+		Review resourcev1.RetainedStorageReview `json:"review"`
+	}
+	if reviewOne.Code != http.StatusOK || reviewTwo.Code != http.StatusOK || json.Unmarshal(reviewOne.Body.Bytes(), &one) != nil || json.Unmarshal(reviewTwo.Body.Bytes(), &two) != nil || one.Review.ReviewToken == two.Review.ReviewToken {
+		t.Fatalf("review one=%s two=%s", reviewOne.Body.String(), reviewTwo.Body.String())
+	}
+	staleBody, _ := json.Marshal(resourcev1.DestroyRetainedStorageRequest{ReviewToken: one.Review.ReviewToken})
+	stale := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/retained-storages/"+retained.ID+"/destroy", string(staleBody), "destroy-stale")
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), resourcev1.FailureRetainedStorageStaleReview) {
+		t.Fatalf("stale status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	destroyBody, _ := json.Marshal(resourcev1.DestroyRetainedStorageRequest{ReviewToken: two.Review.ReviewToken})
+	destroy := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/retained-storages/"+retained.ID+"/destroy", string(destroyBody), "destroy-once")
+	replay := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+project.ID+"/retained-storages/"+retained.ID+"/destroy", string(destroyBody), "destroy-once")
+	if destroy.Code != http.StatusAccepted || replay.Code != http.StatusAccepted || !strings.Contains(destroy.Body.String(), `"lifecycle":"destroying"`) || !strings.Contains(replay.Body.String(), `"reused":true`) {
+		t.Fatalf("destroy=%s replay=%s", destroy.Body.String(), replay.Body.String())
+	}
+}
+
 func TestPostgresAgentManagedResourceLeaseEndpoint(t *testing.T) {
 	db, err := sql.Open("pgx", requirePostgresTestDSN(t, "managed resource lease endpoint"))
 	if err != nil {

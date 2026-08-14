@@ -38,6 +38,7 @@ type JobLease struct {
 	Deployment      *DeploymentLease      `json:"deployment_lease,omitempty"`
 	NodeLifecycle   *NodeLifecycleLease   `json:"node_lifecycle_lease,omitempty"`
 	ManagedResource *ManagedResourceLease `json:"managed_resource_lease,omitempty"`
+	RetainedStorage *RetainedStorageLease `json:"retained_storage_lease,omitempty"`
 }
 
 type ManagedResourceLease struct {
@@ -55,6 +56,19 @@ type ManagedResourceResult struct {
 	FailureCode            string                              `json:"failure_code,omitempty"`
 	FailureMessageRedacted string                              `json:"failure_message_redacted,omitempty"`
 	BindingResults         []resourcev1.PostgresBindingResult  `json:"binding_results,omitempty"`
+}
+
+type RetainedStorageLease struct {
+	LeaseToken string                                `json:"lease_token"`
+	Spec       resourcev1.RetainedStorageDestroySpec `json:"spec"`
+}
+
+type RetainedStorageResult struct {
+	Status                 string                                     `json:"status"`
+	LeaseToken             string                                     `json:"lease_token"`
+	Evidence               *resourcev1.RetainedStorageDestroyEvidence `json:"evidence,omitempty"`
+	FailureCode            string                                     `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                                     `json:"failure_message_redacted,omitempty"`
 }
 
 type DeploymentJobEnvelope struct {
@@ -157,9 +171,52 @@ func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) 
 			return nil, err
 		}
 		return &JobLease{Kind: kind.Kind, ManagedResource: &lease}, nil
+	case "retained_storage":
+		var lease RetainedStorageLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, RetainedStorage: &lease}, nil
 	default:
 		return nil, nil
 	}
+}
+
+func (c Client) CompleteRetainedStorage(ctx context.Context, nodeID, retainedStorageID string, result RetainedStorageResult) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/retained-storages/" + url.PathEscape(retainedStorageID) + "/result"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete retained storage: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c Client) CompleteManagedResource(ctx context.Context, nodeID, resourceID string, result ManagedResourceResult) error {

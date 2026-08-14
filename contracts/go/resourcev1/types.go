@@ -341,11 +341,16 @@ type ManagedResourceEvidence struct {
 	AvailableReplicas int32     `json:"available_replicas"`
 	StorageReady      bool      `json:"storage_ready,omitempty"`
 	VolumeMounted     bool      `json:"volume_mounted,omitempty"`
+	Namespace         string    `json:"namespace,omitempty"`
 	PVCName           string    `json:"pvc_name,omitempty"`
+	PVCUID            string    `json:"pvc_uid,omitempty"`
 	PVName            string    `json:"pv_name,omitempty"`
+	PVUID             string    `json:"pv_uid,omitempty"`
 	StorageClass      string    `json:"storage_class,omitempty"`
+	ReclaimPolicy     string    `json:"reclaim_policy,omitempty"`
 	RequestedBytes    int64     `json:"requested_bytes,omitempty"`
 	ActualStorage     string    `json:"actual_storage,omitempty"`
+	StorageHash       string    `json:"storage_hash,omitempty"`
 	StorageRetained   bool      `json:"storage_retained,omitempty"`
 	Deleted           bool      `json:"deleted,omitempty"`
 	ObservedAt        time.Time `json:"observed_at"`
@@ -390,6 +395,7 @@ type ManagedResourceRuntime struct {
 	Evidence       *ManagedResourceEvidence `json:"evidence,omitempty"`
 	FailureCode    string                   `json:"failure_code,omitempty"`
 	FailureMessage string                   `json:"failure_message,omitempty"`
+	DeleteActor    string                   `json:"delete_actor,omitempty"`
 	LeaseToken     string                   `json:"-"`
 	LeaseExpiresAt time.Time                `json:"-"`
 }

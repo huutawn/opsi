@@ -2,7 +2,6 @@ package svcatalog
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -200,13 +199,8 @@ func postgresPVCAnnotations(spec resourcev1.ManagedResourceSpec) map[string]stri
 	annotations := managedResourceOwnershipAnnotations(spec)
 	annotations["opsi.dev/storage-policy"] = spec.Storage.PolicyRef
 	annotations["opsi.dev/storage-size-bytes"] = strconv.FormatInt(spec.Storage.SizeBytes, 10)
-	annotations["opsi.dev/storage-hash"] = postgresStorageHash(spec)
+	annotations["opsi.dev/storage-hash"] = resourcev1.ManagedResourceStorageHash(spec)
 	return annotations
-}
-
-func postgresStorageHash(spec resourcev1.ManagedResourceSpec) string {
-	sum := sha256.Sum256([]byte(spec.ResourceID + "\x00" + spec.Storage.PolicyRef + "\x00" + strconv.FormatInt(spec.Storage.SizeBytes, 10)))
-	return hex.EncodeToString(sum[:])
 }
 
 func postgresPVCMatchesIntent(pvc map[string]any, spec resourcev1.ManagedResourceSpec) bool {
@@ -214,7 +208,7 @@ func postgresPVCMatchesIntent(pvc map[string]any, spec resourcev1.ManagedResourc
 	return metadataString(pvc, "name") == managedResourcePVCName(spec) &&
 		annotations["opsi.dev/storage-policy"] == spec.Storage.PolicyRef &&
 		annotations["opsi.dev/storage-size-bytes"] == strconv.FormatInt(spec.Storage.SizeBytes, 10) &&
-		annotations["opsi.dev/storage-hash"] == postgresStorageHash(spec)
+		annotations["opsi.dev/storage-hash"] == resourcev1.ManagedResourceStorageHash(spec)
 }
 
 func (r ManagedResourceReconciler) observePostgres(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {

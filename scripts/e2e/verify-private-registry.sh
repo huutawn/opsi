@@ -135,12 +135,17 @@ docker run -d --privileged --name "$k3s_container" --network "$network" \
 	-v "$work_dir/registries.yaml:/etc/rancher/k3s/registries.yaml:ro,Z" \
 	rancher/k3s:v1.33.1-k3s1 server --disable traefik --disable servicelb >/dev/null
 for _ in $(seq 1 120); do
-	if docker exec "$k3s_container" kubectl get nodes >/dev/null 2>&1; then
+	if docker exec "$k3s_container" kubectl get nodes -o name 2>/dev/null | rg -q '^node/' &&
+		docker exec "$k3s_container" kubectl get deployment coredns -n kube-system >/dev/null 2>&1 &&
+		docker exec "$k3s_container" kubectl get deployment local-path-provisioner -n kube-system >/dev/null 2>&1; then
 		break
 	fi
 	sleep 1
 done
-docker exec "$k3s_container" kubectl get nodes >/dev/null
+docker exec "$k3s_container" kubectl get nodes -o name | rg -q '^node/'
+docker exec "$k3s_container" kubectl wait --for=condition=Ready node --all --timeout=4m >/dev/null
+docker exec "$k3s_container" kubectl wait --for=condition=Available deployment/coredns -n kube-system --timeout=4m >/dev/null
+docker exec "$k3s_container" kubectl wait --for=condition=Available deployment/local-path-provisioner -n kube-system --timeout=4m >/dev/null
 printf 'k3s_registry_cluster=PASS\n'
 
 printf '#!/usr/bin/env bash\nexec docker exec -i %q kubectl "$@"\n' "$k3s_container" >"$work_dir/bin/kubectl"

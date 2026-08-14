@@ -14,17 +14,19 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type fakeClient struct {
-	leases      []cloudrelay.DeploymentLease
-	nodeLeases  []cloudrelay.NodeLifecycleLease
-	results     []cloudrelay.DeploymentResult
-	progress    []deploymentv1.Progress
-	nodeResults []cloudrelay.NodeLifecycleResult
-	heartbeats  int
-	heartbeat   cloudrelay.Heartbeat
-	cancel      context.CancelFunc
+	leases         []cloudrelay.DeploymentLease
+	nodeLeases     []cloudrelay.NodeLifecycleLease
+	results        []cloudrelay.DeploymentResult
+	progress       []deploymentv1.Progress
+	nodeResults    []cloudrelay.NodeLifecycleResult
+	storageResults []cloudrelay.RetainedStorageResult
+	heartbeats     int
+	heartbeat      cloudrelay.Heartbeat
+	cancel         context.CancelFunc
 }
 
 func (f *fakeClient) ProgressDeployment(_ context.Context, _ string, _ string, progress deploymentv1.Progress) error {
@@ -66,6 +68,11 @@ func (f *fakeClient) CompleteManagedResource(context.Context, string, string, cl
 	return nil
 }
 
+func (f *fakeClient) CompleteRetainedStorage(_ context.Context, _ string, _ string, result cloudrelay.RetainedStorageResult) error {
+	f.storageResults = append(f.storageResults, result)
+	return nil
+}
+
 func (f *fakeClient) Heartbeat(_ context.Context, _ string, heartbeat cloudrelay.Heartbeat) error {
 	f.heartbeats++
 	f.heartbeat = heartbeat
@@ -76,6 +83,25 @@ type fakeLifecycle struct{}
 
 func (fakeLifecycle) Execute(context.Context, nodelifecycle.Request) nodelifecycle.Result {
 	return nodelifecycle.Result{Status: nodelifecycle.StatusCompleted, Verified: true}
+}
+
+type fakeManagedResources struct{}
+
+func (fakeManagedResources) Reconcile(context.Context, cloudrelay.ManagedResourceLease) cloudrelay.ManagedResourceResult {
+	return cloudrelay.ManagedResourceResult{Status: "ready"}
+}
+
+func (fakeManagedResources) ReconcileRetainedStorage(_ context.Context, lease cloudrelay.RetainedStorageLease) cloudrelay.RetainedStorageResult {
+	return cloudrelay.RetainedStorageResult{Status: "destroyed", LeaseToken: lease.LeaseToken, Evidence: &resourcev1.RetainedStorageDestroyEvidence{PVCAbsent: true, PVAbsent: true}}
+}
+
+func TestRunnerCompletesRetainedStorageJob(t *testing.T) {
+	client := &fakeClient{}
+	runner := Runner{Client: client, ManagedResources: fakeManagedResources{}, NodeID: "node-1"}
+	runner.handleRetainedStorage(context.Background(), cloudrelay.RetainedStorageLease{LeaseToken: "lease-storage", Spec: resourcev1.RetainedStorageDestroySpec{RetainedStorageID: "rsto-1"}})
+	if len(client.storageResults) != 1 || client.storageResults[0].Status != "destroyed" || client.storageResults[0].LeaseToken != "lease-storage" {
+		t.Fatalf("results=%+v", client.storageResults)
+	}
 }
 
 type staticHealthProbe RuntimeHealth

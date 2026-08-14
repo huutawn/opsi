@@ -17,11 +17,13 @@ type MemoryStore struct {
 	mu        sync.Mutex
 	resources map[string]resourcev1.Resource
 	bindings  map[string]resourcev1.Binding
+	retained  map[string]resourcev1.RetainedStorage
+	reviews   map[string]string
 	replays   map[string]memoryReplay
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{resources: map[string]resourcev1.Resource{}, bindings: map[string]resourcev1.Binding{}, replays: map[string]memoryReplay{}}
+	return &MemoryStore{resources: map[string]resourcev1.Resource{}, bindings: map[string]resourcev1.Binding{}, retained: map[string]resourcev1.RetainedStorage{}, reviews: map[string]string{}, replays: map[string]memoryReplay{}}
 }
 
 func (s *MemoryStore) Create(_ context.Context, value resourcev1.Resource, key, payload string) (resourcev1.Resource, bool, error) {

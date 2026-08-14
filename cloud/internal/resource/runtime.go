@@ -267,11 +267,18 @@ func (s Service) CompleteManaged(ctx context.Context, projectID, resourceID stri
 	value.Runtime.FailureMessage = strings.TrimSpace(result.FailureMessage)
 	value.Runtime.Evidence = result.Evidence
 	if result.Status == "deleted" && result.Evidence != nil && result.Evidence.Deleted {
-		if value.Type == resourcev1.TypePostgres && (!result.Evidence.StorageRetained || result.Evidence.PVCName == "") {
-			return resourcev1.Resource{}, invalid(resourcev1.FailurePersistentDeleteUnsupported, "managed PostgreSQL delete did not prove retained storage")
-		}
 		if value.Runtime.Spec.CredentialID != "" && (s.Credentials == nil || s.Credentials.Delete(ctx, value.Runtime.Spec.CredentialID) != nil) {
 			return resourcev1.Resource{}, invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential could not be deleted")
+		}
+		if value.Type == resourcev1.TypePostgres {
+			retained, retainedErr := retainedStorageFromDeletion(value, result.Evidence, s.clock())
+			if retainedErr != nil {
+				return resourcev1.Resource{}, retainedErr
+			}
+			if err := s.Store.RetainAndDeleteClaimed(ctx, value, retained, result.LeaseToken); err != nil {
+				return resourcev1.Resource{}, err
+			}
+			return resourcev1.Resource{}, nil
 		}
 		if err := s.Store.DeleteClaimed(ctx, projectID, resourceID, result.LeaseToken); err != nil {
 			return resourcev1.Resource{}, err

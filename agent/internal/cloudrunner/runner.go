@@ -21,6 +21,7 @@ type CloudClient interface {
 	ProgressDeployment(context.Context, string, string, deploymentv1.Progress) error
 	CompleteNodeLifecycle(context.Context, string, string, cloudrelay.NodeLifecycleResult) error
 	CompleteManagedResource(context.Context, string, string, cloudrelay.ManagedResourceResult) error
+	CompleteRetainedStorage(context.Context, string, string, cloudrelay.RetainedStorageResult) error
 	Heartbeat(context.Context, string, cloudrelay.Heartbeat) error
 }
 
@@ -70,6 +71,7 @@ type Runner struct {
 
 type ManagedResourceReconciler interface {
 	Reconcile(context.Context, cloudrelay.ManagedResourceLease) cloudrelay.ManagedResourceResult
+	ReconcileRetainedStorage(context.Context, cloudrelay.RetainedStorageLease) cloudrelay.RetainedStorageResult
 }
 
 type NodeLifecycleExecutor interface {
@@ -157,7 +159,27 @@ func (r Runner) jobLoop(ctx context.Context) error {
 		if lease != nil && lease.ManagedResource != nil {
 			r.handleManagedResource(ctx, *lease.ManagedResource)
 		}
+		if lease != nil && lease.RetainedStorage != nil {
+			r.handleRetainedStorage(ctx, *lease.RetainedStorage)
+		}
 		timer.Reset(r.PollInterval)
+	}
+}
+
+func (r Runner) handleRetainedStorage(ctx context.Context, lease cloudrelay.RetainedStorageLease) {
+	result := cloudrelay.RetainedStorageResult{Status: "failed", LeaseToken: lease.LeaseToken, FailureCode: resourcev1.FailureStorageDestroyFailed, FailureMessageRedacted: "retained storage reconciler is unavailable"}
+	if r.ManagedResources != nil {
+		result = r.ManagedResources.ReconcileRetainedStorage(ctx, lease)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := r.Client.CompleteRetainedStorage(ctx, r.NodeID, lease.Spec.RetainedStorageID, result); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
 	}
 }
 

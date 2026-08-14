@@ -48,6 +48,14 @@ type Store interface {
 	UpdateClaimed(context.Context, resourcev1.Resource, string) (resourcev1.Resource, error)
 	Delete(context.Context, string, string) error
 	DeleteClaimed(context.Context, string, string, string) error
+	RetainAndDeleteClaimed(context.Context, resourcev1.Resource, resourcev1.RetainedStorage, string) error
+	GetRetainedStorage(context.Context, string, string) (resourcev1.RetainedStorage, error)
+	GetRetainedStorageByResource(context.Context, string, string) (resourcev1.RetainedStorage, error)
+	ListRetainedStorage(context.Context, string, string) ([]resourcev1.RetainedStorage, error)
+	SaveRetainedStorageReview(context.Context, string, string, uint64, string, string, time.Time) (resourcev1.RetainedStorage, bool, bool, error)
+	RequestRetainedStorageDestroy(context.Context, string, string, string, string, string, string, time.Time) (resourcev1.RetainedStorage, bool, error)
+	ClaimRetainedStorageDestroy(context.Context, string, string, string, time.Time, time.Time) (resourcev1.RetainedStorage, bool, error)
+	UpdateRetainedStorageClaimed(context.Context, resourcev1.RetainedStorage, string) (resourcev1.RetainedStorage, error)
 	CreateBinding(context.Context, resourcev1.Binding, string, string) (resourcev1.Binding, bool, error)
 	GetBinding(context.Context, string, string) (resourcev1.Binding, error)
 	ListBindings(context.Context, string, string) ([]resourcev1.Binding, error)
@@ -166,7 +174,7 @@ func (s Service) Update(ctx context.Context, projectID, resourceID string, reque
 	return s.Store.Update(ctx, current)
 }
 
-func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID string) (resourcev1.Resource, error) {
+func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID, actor string) (resourcev1.Resource, error) {
 	current, err := s.Get(ctx, projectID, resourceID)
 	if err != nil {
 		return resourcev1.Resource{}, err
@@ -182,7 +190,11 @@ func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID string)
 			}
 		}
 	}
+	if current.Runtime == nil {
+		return resourcev1.Resource{}, invalid("MANAGED_RESOURCE_DELETE_FAILED", "managed resource runtime authority is unavailable")
+	}
 	current.Lifecycle = resourcev1.LifecycleDeleting
+	current.Runtime.DeleteActor = actor
 	current.UpdatedAt = s.clock()
 	return s.Store.Update(ctx, current)
 }
