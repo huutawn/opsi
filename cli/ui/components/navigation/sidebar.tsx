@@ -54,6 +54,26 @@ function NavItem({ active, href, icon, label, onClick }: { active: boolean; href
 }
 
 function Icon({ kind }: { kind: string }) {
-  const path = kind === "home" ? "M3 9.5 10 3l7 6.5V17H5V9.5" : kind === "projects" ? "M3 5h14v11H3zM6 5V3h8v2" : kind === "settings" ? "M10 3v2m0 10v2M3 10h2m10 0h2M5 5l1.5 1.5m7 7L15 15m0-10-1.5 1.5m-7 7L5 15M10 7a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" : kind === "close" ? "m5 5 10 10M15 5 5 15" : kind === "overview" ? "M3 4h6v6H3zm8 0h6v3h-6zm0 5h6v7h-6zM3 12h6v4H3z" : kind === "services" ? "M4 5h12v4H4zm0 6h12v4H4z" : kind === "delivery" ? "M3 10h11m-4-4 4 4-4 4m6-9v10" : kind === "infrastructure" ? "M10 3v4m0 6v4M3 10h4m6 0h4M7 7h6v6H7z" : kind === "observability" ? "M3 13h3l2-6 3 8 2-5h4" : "M10 3 4 6v4c0 4 2.5 6 6 7 3.5-1 6-3 6-7V6z";
+  const path = kind === "home"
+    ? "M3 9.5 10 3l7 6.5V17H5V9.5"
+    : kind === "projects"
+    ? "M3 5h14v11H3zM6 5V3h8v2"
+    : kind === "settings"
+    ? "M10 3v2m0 10v2M3 10h2m10 0h2M5 5l1.5 1.5m7 7L15 15m0-10-1.5 1.5m-7 7L5 15M10 7a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z"
+    : kind === "close"
+    ? "m5 5 10 10M15 5 5 15"
+    : kind === "topology"
+    ? "M10 3v4m0 6v4M3 10h4m6 0h4M7 7h6v6H7z"
+    : kind === "overview"
+    ? "M3 4h6v6H3zm8 0h6v3h-6zm0 5h6v7h-6zM3 12h6v4H3z"
+    : kind === "services"
+    ? "M4 5h12v4H4zm0 6h12v4H4z"
+    : kind === "delivery"
+    ? "M3 10h11m-4-4 4 4-4 4m6-9v10"
+    : kind === "infrastructure"
+    ? "M3 4h14v3H3zm0 5h14v3H3zm0 5h14v3H3z"
+    : kind === "observability"
+    ? "M3 13h3l2-6 3 8 2-5h4"
+    : "M10 3 4 6v4c0 4 2.5 6 6 7 3.5-1 6-3 6-7V6z";
   return <svg aria-hidden="true" viewBox="0 0 20 20"><path d={path} /></svg>;
 }

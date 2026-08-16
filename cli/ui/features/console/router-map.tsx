@@ -1,5 +1,7 @@
 import { DeliveryView } from "@/features/delivery/delivery-view";
 import { InfrastructureView } from "@/features/infrastructure/infrastructure-view";
+import { InfrastructureCenterView } from "@/features/infrastructure/infrastructure-center";
+import { TopologyView } from "@/features/infrastructure/topology-view";
 import { ObservabilityView } from "@/features/observability/observability-view";
 import { SecurityView } from "@/features/security/security-view";
 import { SettingsView } from "@/features/settings/settings-view";
@@ -10,11 +12,24 @@ import { Tabs, tabPanelProps } from "@/components/navigation/tabs";
 import { ServicesView } from "@/features/services/services-view";
 import type { ConsoleController } from "@/features/console/types";
 
-export const coreViewMap = { overview: OverviewView, services: ServicesView } as const;
+export const coreViewMap = {
+  overview: OverviewView,
+  services: ServicesView,
+  topology: TopologyView,
+} as const;
 
 const tabViewMap: Record<string, Record<string, (props: { console: ConsoleController }) => React.ReactNode>> = {
   delivery: { pipeline: DeliveryView, builds: DeliveryView, deployments: DeliveryView, exposure: DeliveryView, source: DeliveryView },
-  infrastructure: { topology: InfrastructureView, runtimes: InfrastructureView, nodes: InfrastructureView, bootstrap: InfrastructureView },
+  infrastructure: {
+    servers: InfrastructureCenterView,
+    resources: InfrastructureCenterView,
+    storage: InfrastructureCenterView,
+    // backward-compatibility mappings
+    topology: TopologyView,
+    runtimes: InfrastructureView,
+    nodes: InfrastructureView,
+    bootstrap: InfrastructureView,
+  },
   observability: { health: ObservabilityView, metrics: ObservabilityView, logs: ObservabilityView, incidents: ObservabilityView },
   security: { secrets: SecurityView, audit: SecurityView },
 };
@@ -29,11 +44,42 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
   if (!View) return null;
   const tabs = groupedTabs[route.view as keyof typeof groupedTabs];
   const label = `${groupedTitle(route.view)} sections`;
-  return <section className="groupedPage"><div className="groupedHeader"><div><p className="eyebrow">Project workspace</p><h1>{groupedTitle(route.view)}</h1><p>{groupedDescription(route.view)}</p></div></div><Tabs label={label} items={tabs.map((tab) => ({ ...tab, href: routeHref({ ...route, tab: tab.id }) }))} selected={route.tab} onSelect={(event, tab) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); console.navigate({ tab }); }} /><div {...tabPanelProps(label, route.tab)}><View console={console} /></div></section>;
+  return (
+    <section className="groupedPage">
+      <div className="groupedHeader">
+        <div>
+          <p className="eyebrow">Project workspace</p>
+          <h1>{groupedTitle(route.view)}</h1>
+          <p>{groupedDescription(route.view)}</p>
+        </div>
+      </div>
+      <Tabs
+        items={tabs.map((tab) => ({ ...tab, href: routeHref({ ...route, tab: tab.id }) }))}
+        label={label}
+        onSelect={(event, tab) => {
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          console.navigate({ tab });
+        }}
+        selected={route.tab}
+      />
+      <div {...tabPanelProps(label, route.tab)}>
+        <View console={console} />
+      </div>
+    </section>
+  );
 }
 
-function groupedTitle(view: string) { return view[0].toUpperCase() + view.slice(1); }
+function groupedTitle(view: string) {
+  return view[0].toUpperCase() + view.slice(1);
+}
+
 function groupedDescription(view: string) {
-  const descriptions: Record<string, string> = { delivery: "Commit, artifact, rollout, and exposure evidence.", infrastructure: "Runtime placement and Agent-backed infrastructure facts.", observability: "Health, telemetry, logs, incidents, and support evidence.", security: "Protected secret flows and audit history." };
+  const descriptions: Record<string, string> = {
+    delivery: "Commit, artifact, rollout, and exposure evidence.",
+    infrastructure: "Factual server execution capacity, managed resources, and persistent database storage.",
+    observability: "Health, telemetry, logs, incidents, and support evidence.",
+    security: "Protected secret flows and audit history.",
+  };
   return descriptions[view] ?? "";
 }

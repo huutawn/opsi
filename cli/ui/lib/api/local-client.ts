@@ -41,6 +41,21 @@ import type {
   ExposureMutationRequest,
   ExposurePreview,
   WorkloadSpec,
+  Resource,
+  CreateResourceRequest,
+  UpdateResourceRequest,
+  ResourceTypeDefinition,
+  ResourceBinding,
+  CreateResourceBindingRequest,
+  RetainedStorage,
+  RetainedStorageReview,
+  Backup,
+  RestoreReview,
+  Restore,
+  ApplicationCutoverReview,
+  ApplicationCutover,
+  ApplicationCutoverRollback,
+  ApplicationCutoverFinalization,
 } from "@/lib/contracts/registry";
 
 type RequestOptions = RequestInit & { write?: boolean; idempotencyKey?: string };
@@ -543,6 +558,234 @@ export class LocalClient {
 
   incidentEvidence(projectID: string, incidentID: string) {
 	return this.call<IncidentEvidence>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/evidence`);
+  }
+
+  async resources(projectID: string, environmentID?: string) {
+    const query = environmentID ? `?environment_id=${encodeURIComponent(environmentID)}` : "";
+    const response = await this.call<{ resources: Resource[] }>(`/api/local/projects/${projectID}/resources${query}`);
+    return response.resources ?? [];
+  }
+
+  resource(projectID: string, resourceID: string) {
+    return this.call<Resource>(`/api/local/projects/${projectID}/resources/${encodeURIComponent(resourceID)}`);
+  }
+
+  createResource(projectID: string, body: CreateResourceRequest, idempotencyKey?: string) {
+    return this.call<{ resource: Resource; reused: boolean }>(`/api/local/projects/${projectID}/resources`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify(body),
+    });
+  }
+
+  updateResource(projectID: string, resourceID: string, body: UpdateResourceRequest, idempotencyKey?: string) {
+    return this.call<Resource>(`/api/local/projects/${projectID}/resources/${encodeURIComponent(resourceID)}`, {
+      method: "PUT",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify(body),
+    });
+  }
+
+  deleteResource(projectID: string, resourceID: string, idempotencyKey?: string) {
+    return this.call<Resource>(`/api/local/projects/${projectID}/resources/${encodeURIComponent(resourceID)}`, {
+      method: "DELETE",
+      write: true,
+      idempotencyKey,
+    });
+  }
+
+  async resourceTypes(projectID: string) {
+    const response = await this.call<{ resource_types: ResourceTypeDefinition[] }>(`/api/local/projects/${projectID}/resource-types`);
+    return response.resource_types ?? [];
+  }
+
+  async resourceBindings(projectID: string, environmentID?: string) {
+    const query = environmentID ? `?environment_id=${encodeURIComponent(environmentID)}` : "";
+    const response = await this.call<{ bindings: ResourceBinding[] }>(`/api/local/projects/${projectID}/resource-bindings${query}`);
+    return response.bindings ?? [];
+  }
+
+  createResourceBinding(projectID: string, body: CreateResourceBindingRequest, idempotencyKey?: string) {
+    return this.call<{ binding: ResourceBinding; reused: boolean }>(`/api/local/projects/${projectID}/resource-bindings`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify(body),
+    });
+  }
+
+  deleteResourceBinding(projectID: string, bindingID: string, idempotencyKey?: string) {
+    return this.call<ResourceBinding>(`/api/local/projects/${projectID}/resource-bindings/${encodeURIComponent(bindingID)}`, {
+      method: "DELETE",
+      write: true,
+      idempotencyKey,
+    });
+  }
+
+  async retainedStorages(projectID: string, environmentID?: string) {
+    const query = environmentID ? `?environment_id=${encodeURIComponent(environmentID)}` : "";
+    const response = await this.call<{ retained_storages: RetainedStorage[] }>(`/api/local/projects/${projectID}/retained-storages${query}`);
+    return response.retained_storages ?? [];
+  }
+
+  retainedStorage(projectID: string, id: string) {
+    return this.call<RetainedStorage>(`/api/local/projects/${projectID}/retained-storages/${encodeURIComponent(id)}`);
+  }
+
+  reviewRetainedStorageDestroy(projectID: string, id: string, idempotencyKey?: string) {
+    return this.call<{ review: RetainedStorageReview }>(`/api/local/projects/${projectID}/retained-storages/${encodeURIComponent(id)}/review`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: "{}",
+    });
+  }
+
+  destroyRetainedStorage(projectID: string, id: string, reviewToken: string, idempotencyKey?: string) {
+    return this.call<{ retained_storage: RetainedStorage; reused: boolean }>(`/api/local/projects/${projectID}/retained-storages/${encodeURIComponent(id)}/destroy`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify({ review_token: reviewToken }),
+    });
+  }
+
+  async backups(projectID: string, resourceID?: string) {
+    const path = resourceID
+      ? `/api/local/projects/${projectID}/resources/${encodeURIComponent(resourceID)}/backups`
+      : `/api/local/projects/${projectID}/backups`;
+    const response = await this.call<{ backups: Backup[] }>(path);
+    return response.backups ?? [];
+  }
+
+  backup(projectID: string, backupID: string) {
+    return this.call<Backup>(`/api/local/projects/${projectID}/backups/${encodeURIComponent(backupID)}`);
+  }
+
+  createBackup(projectID: string, resourceID: string, idempotencyKey?: string) {
+    return this.call<{ backup: Backup; reused: boolean }>(`/api/local/projects/${projectID}/resources/${encodeURIComponent(resourceID)}/backups`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: "{}",
+    });
+  }
+
+  reviewRestore(projectID: string, backupID: string, targetResourceID: string, idempotencyKey?: string) {
+    return this.call<{ review: RestoreReview }>(`/api/local/projects/${projectID}/backups/${encodeURIComponent(backupID)}/restore-review`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify({ target_resource_id: targetResourceID }),
+    });
+  }
+
+  restoreReview(projectID: string, reviewID: string) {
+    return this.call<RestoreReview>(`/api/local/projects/${projectID}/restore-reviews/${encodeURIComponent(reviewID)}`);
+  }
+
+  async restores(projectID: string, backupID?: string, targetResourceID?: string) {
+    const query = new URLSearchParams();
+    if (backupID) query.set("backup_id", backupID);
+    if (targetResourceID) query.set("target_resource_id", targetResourceID);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    const response = await this.call<{ restores: Restore[] }>(`/api/local/projects/${projectID}/restores${suffix}`);
+    return response.restores ?? [];
+  }
+
+  restore(projectID: string, restoreID: string) {
+    return this.call<Restore>(`/api/local/projects/${projectID}/restores/${encodeURIComponent(restoreID)}`);
+  }
+
+  createRestore(projectID: string, backupID: string, targetResourceID: string, reviewID: string, idempotencyKey?: string) {
+    return this.call<{ restore: Restore; reused: boolean }>(`/api/local/projects/${projectID}/backups/${encodeURIComponent(backupID)}/restores`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify({ target_resource_id: targetResourceID, review_id: reviewID }),
+    });
+  }
+
+  async cutoverReviews(projectID: string, applicationID?: string) {
+    const path = applicationID
+      ? `/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/cutover-reviews`
+      : `/api/local/projects/${projectID}/cutover-reviews`;
+    const response = await this.call<{ cutover_reviews?: ApplicationCutoverReview[]; reviews?: ApplicationCutoverReview[] }>(path);
+    return response.cutover_reviews ?? response.reviews ?? [];
+  }
+
+  cutoverReview(projectID: string, reviewID: string) {
+    return this.call<{ cutover_review?: ApplicationCutoverReview; review?: ApplicationCutoverReview }>(`/api/local/projects/${projectID}/cutover-reviews/${encodeURIComponent(reviewID)}`);
+  }
+
+  createCutoverReview(projectID: string, applicationID: string, targetBindingID: string, sourceBindingID?: string, idempotencyKey?: string) {
+    return this.call<{ cutover_review?: ApplicationCutoverReview; review?: ApplicationCutoverReview; reused: boolean }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/cutover-reviews`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify({ target_binding_id: targetBindingID, source_binding_id: sourceBindingID || "" }),
+    });
+  }
+
+  async cutovers(projectID: string, applicationID?: string) {
+    const path = applicationID
+      ? `/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/cutovers`
+      : `/api/local/projects/${projectID}/cutovers`;
+    const response = await this.call<{ cutovers?: ApplicationCutover[]; application_cutovers?: ApplicationCutover[] }>(path);
+    return response.cutovers ?? response.application_cutovers ?? [];
+  }
+
+  cutover(projectID: string, cutoverID: string) {
+    return this.call<{ cutover?: ApplicationCutover; application_cutover?: ApplicationCutover }>(`/api/local/projects/${projectID}/cutovers/${encodeURIComponent(cutoverID)}`);
+  }
+
+  applyCutover(projectID: string, applicationID: string, cutoverReviewID: string, idempotencyKey?: string) {
+    return this.call<{ cutover?: ApplicationCutover; application_cutover?: ApplicationCutover; reused: boolean }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/cutovers`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify({ cutover_review_id: cutoverReviewID }),
+    });
+  }
+
+  async cutoverRollbacks(projectID: string, applicationID?: string) {
+    const query = applicationID ? `?application_id=${encodeURIComponent(applicationID)}` : "";
+    const response = await this.call<{ rollbacks?: ApplicationCutoverRollback[]; cutover_rollbacks?: ApplicationCutoverRollback[] }>(`/api/local/projects/${projectID}/cutover-rollbacks${query}`);
+    return response.rollbacks ?? response.cutover_rollbacks ?? [];
+  }
+
+  cutoverRollback(projectID: string, rollbackID: string) {
+    return this.call<{ rollback?: ApplicationCutoverRollback; cutover_rollback?: ApplicationCutoverRollback }>(`/api/local/projects/${projectID}/cutover-rollbacks/${encodeURIComponent(rollbackID)}`);
+  }
+
+  applyCutoverRollback(projectID: string, applicationID: string, cutoverID: string, idempotencyKey?: string) {
+    return this.call<{ rollback?: ApplicationCutoverRollback; cutover_rollback?: ApplicationCutoverRollback; reused: boolean }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/cutovers/${encodeURIComponent(cutoverID)}/rollbacks`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: "{}",
+    });
+  }
+
+  async cutoverFinalizations(projectID: string, applicationID?: string) {
+    const query = applicationID ? `?application_id=${encodeURIComponent(applicationID)}` : "";
+    const response = await this.call<{ finalizations?: ApplicationCutoverFinalization[]; application_cutover_finalizations?: ApplicationCutoverFinalization[] }>(`/api/local/projects/${projectID}/cutover-finalizations${query}`);
+    return response.finalizations ?? response.application_cutover_finalizations ?? [];
+  }
+
+  cutoverFinalization(projectID: string, finalizationID: string) {
+    return this.call<{ finalization?: ApplicationCutoverFinalization; application_cutover_finalization?: ApplicationCutoverFinalization }>(`/api/local/projects/${projectID}/cutover-finalizations/${encodeURIComponent(finalizationID)}`);
+  }
+
+  applyCutoverFinalization(projectID: string, applicationID: string, cutoverID: string, idempotencyKey?: string) {
+    return this.call<{ finalization?: ApplicationCutoverFinalization; application_cutover_finalization?: ApplicationCutoverFinalization; reused: boolean }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/cutovers/${encodeURIComponent(cutoverID)}/finalize`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: JSON.stringify({ cutover_id: cutoverID }),
+    });
   }
 
   private async call<T>(path: string, init: RequestOptions = {}) {

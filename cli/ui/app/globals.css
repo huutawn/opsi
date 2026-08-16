@@ -907,3 +907,525 @@ button.auditRow:hover, button.auditRow[aria-pressed="true"] { background: var(--
   .inspectorHeading { position: static; }
   .resourceIntentForm { grid-template-columns: 1fr; }
 }
+
+/* ==========================================================================
+   Infrastructure Resource Center Styles
+   ========================================================================== */
+
+.infrastructureCenter {
+  display: grid;
+  gap: 24px;
+}
+
+.centerSection {
+  display: grid;
+  gap: 20px;
+}
+
+.centerSection .sectionHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.centerSection .sectionHeader h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.centerSection .sectionHeader p {
+  margin: 4px 0 0;
+  color: var(--opsi-neutral-500, #94a3b8);
+  font-size: 14px;
+}
+
+.resourceGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.resourceCard {
+  background: var(--opsi-surface-raised, #131722);
+  border: 1px solid var(--opsi-outline-variant, #242c3d);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  cursor: pointer;
+  transition: border-color 150ms ease, transform 150ms ease;
+  text-align: left;
+}
+
+.resourceCard:hover {
+  border-color: var(--opsi-outline-active, #3d4a63);
+}
+
+.resourceCard.selected {
+  border-color: var(--opsi-primary, #38bdf8);
+  box-shadow: 0 0 0 1px var(--opsi-primary, #38bdf8);
+}
+
+.resourceCard .cardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.cardKind {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--opsi-neutral-400, #94a3b8);
+  margin-bottom: 2px;
+}
+
+.resourceCard h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #f8fafc;
+  word-break: break-word;
+}
+
+.cardFacts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px 14px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.cardFacts dt {
+  color: var(--opsi-neutral-500, #94a3b8);
+  font-size: 11px;
+}
+
+.cardFacts dd {
+  margin: 2px 0 0;
+  font-weight: 500;
+  color: #e2e8f0;
+  word-break: break-word;
+}
+
+.cardFooter {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--opsi-outline-variant, #242c3d);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--opsi-neutral-400, #94a3b8);
+}
+
+.cardActionLink {
+  color: var(--opsi-primary, #38bdf8);
+  font-weight: 500;
+}
+
+.storageCard .storageSource {
+  display: block;
+  font-size: 12px;
+  color: var(--opsi-neutral-400, #94a3b8);
+  margin-top: 2px;
+}
+
+.emptyStateCard {
+  background: var(--opsi-surface-raised, #131722);
+  border: 1px dashed var(--opsi-outline-variant, #242c3d);
+  border-radius: 8px;
+  padding: 48px 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.emptyStateIcon {
+  font-size: 32px;
+}
+
+.emptyStateCard h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.emptyStateCard p {
+  margin: 0;
+  color: var(--opsi-neutral-400, #94a3b8);
+  max-width: 440px;
+}
+
+/* Detail Drawers & Tabs */
+.resourceDetailPanel, .serverDetailPanel {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(600px, 92vw);
+  background: var(--opsi-surface-overlay, #0f131c);
+  border-left: 1px solid var(--opsi-outline-variant, #242c3d);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
+}
+
+.resourceTabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--opsi-outline-variant, #242c3d);
+  overflow-x: auto;
+}
+
+.resourceTabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 12px;
+  color: var(--opsi-neutral-400, #94a3b8);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.resourceTabs button.active {
+  color: var(--opsi-primary, #38bdf8);
+  border-bottom-color: var(--opsi-primary, #38bdf8);
+}
+
+.detailSection {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.factsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px 16px;
+  margin: 0;
+}
+
+.factsGrid dt {
+  font-size: 11px;
+  color: var(--opsi-neutral-500, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.factsGrid dd {
+  margin: 3px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #f1f5f9;
+  word-break: break-all;
+}
+
+.secondaryFacts dd code {
+  font-size: 11px;
+  color: var(--opsi-neutral-400, #94a3b8);
+}
+
+.sectionActionBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.sectionHint {
+  font-size: 12px;
+  color: var(--opsi-neutral-400, #94a3b8);
+  margin-bottom: 12px;
+}
+
+.dangerSection {
+  border-top: 1px solid var(--opsi-outline-variant, #242c3d);
+  padding-top: 16px;
+}
+
+.buttonRow {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Status Indicators */
+.statusPass {
+  color: #4ade80 !important;
+}
+
+.statusFail {
+  color: #f87171 !important;
+}
+
+.statusNeutral {
+  color: #94a3b8 !important;
+}
+
+/* Resource Catalog Modal */
+.resourceCatalogGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  padding: 8px 0;
+}
+
+.catalogCard {
+  background: var(--opsi-surface-raised, #131722);
+  border: 1px solid var(--opsi-outline-variant, #242c3d);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease;
+}
+
+.catalogCard:hover {
+  border-color: var(--opsi-primary, #38bdf8);
+}
+
+.catalogCardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.catalogBadge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--opsi-neutral-400, #94a3b8);
+}
+
+.storageBadge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(56, 189, 248, 0.1);
+  color: #38bdf8;
+}
+
+.ephemeralBadge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.1);
+  color: #94a3b8;
+}
+
+.catalogCard h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.catalogCard p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--opsi-neutral-400, #94a3b8);
+  line-height: 1.4;
+}
+
+.catalogCardFooter {
+  margin-top: auto;
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--opsi-neutral-500, #94a3b8);
+}
+
+.catalogAction {
+  color: var(--opsi-primary, #38bdf8);
+  font-weight: 600;
+}
+
+/* Operations Timeline */
+.operationsTimeline {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+  padding-left: 14px;
+}
+
+.operationsTimeline::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: var(--opsi-outline-variant, #242c3d);
+}
+
+.timelineItem {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.timelineDot {
+  position: absolute;
+  left: -14px;
+  top: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--opsi-neutral-500, #94a3b8);
+}
+
+.timelineDot[data-tone="ready"] { background: #4ade80; }
+.timelineDot[data-tone="bootstrapping"] { background: #38bdf8; }
+.timelineDot[data-tone="warning"] { background: #fbbf24; }
+.timelineDot[data-tone="failed"] { background: #f87171; }
+
+.timelineContent {
+  flex: 1;
+  background: var(--opsi-surface-raised, #131722);
+  border: 1px solid var(--opsi-outline-variant, #242c3d);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.timelineHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.timelineDetails {
+  margin: 0;
+  font-size: 12px;
+  color: var(--opsi-neutral-400, #94a3b8);
+}
+
+.timelineError {
+  margin: 0;
+  font-size: 12px;
+  color: #f87171;
+}
+
+.timelineTime {
+  font-size: 11px;
+  color: var(--opsi-neutral-500, #94a3b8);
+}
+
+/* Card Lists for Backups, Restores, Cutovers, Bindings */
+.bindingsList, .backupsList, .restoresList, .cutoversList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bindingCard, .backupCard, .restoreCard, .cutoverCard {
+  background: var(--opsi-surface-raised, #131722);
+  border: 1px solid var(--opsi-outline-variant, #242c3d);
+  border-radius: 6px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bindingCardHeader, .backupCardHeader, .restoreCardHeader, .cutoverCardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.cutoverEndpoints {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--opsi-neutral-400, #94a3b8);
+}
+
+.confirmationDiagram {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: var(--opsi-surface-raised, #131722);
+  border: 1px solid var(--opsi-outline-variant, #242c3d);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.diagramState {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.diagramState span {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--opsi-neutral-500, #94a3b8);
+}
+
+.diagramArrow {
+  font-size: 20px;
+  color: var(--opsi-primary, #38bdf8);
+}
+
+.diagramState.nextState strong {
+  color: var(--opsi-primary, #38bdf8);
+}
+
+.restoreSafetyNotice {
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #e2e8f0;
+}
+
+.rollbackPreservationNotice {
+  background: rgba(74, 222, 128, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.finalizedBanner {
+  background: var(--opsi-surface-overlay, #0f131c);
+  border: 1px solid var(--opsi-outline-variant, #242c3d);
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: var(--opsi-neutral-400, #94a3b8);
+}
+
+.destroyConfirmationField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #f1f5f9;
+}
