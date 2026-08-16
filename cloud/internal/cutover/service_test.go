@@ -25,6 +25,22 @@ func (a testApplicationAuthority) GetServiceConfiguration(projectID, serviceID s
 	return registry.ServiceConfiguration{Revision: 1, StateHash: strings.Repeat("1", 64)}, nil
 }
 
+func (a testApplicationAuthority) ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request registry.ServiceConfigurationApplyRequest) (registry.ServiceConfigurationApplyResult, error) {
+	current := a.configs[serviceID]
+	now := time.Now().UTC()
+	cfg := registry.ServiceConfiguration{
+		ServiceConfigurationDraft: request.Draft,
+		Revision:                  current.Revision + 1,
+		StateHash:                 strings.Repeat("9", 64),
+		AppliedBy:                 actorUserID,
+		AppliedAt:                 &now,
+	}
+	if a.configs != nil {
+		a.configs[serviceID] = cfg
+	}
+	return registry.ServiceConfigurationApplyResult{Configuration: cfg}, nil
+}
+
 func (a testApplicationAuthority) ListServices(projectID string) ([]registry.ServiceRecord, error) {
 	out := make([]registry.ServiceRecord, 0, len(a.apps))
 	for _, app := range a.apps {
@@ -136,6 +152,9 @@ func setupTestService(t *testing.T) (Service, *MemoryStore, registry.ServiceReco
 		ProjectID:     "proj-1",
 		EnvironmentID: "env-1",
 		Name:          "web",
+		ContainerPort: 8080,
+		HealthPath:    "/health",
+		Replicas:      1,
 		Configuration: registry.ServiceConfiguration{Revision: 1, StateHash: strings.Repeat("1", 64)},
 	}
 

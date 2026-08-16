@@ -12,9 +12,12 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -48,6 +51,9 @@ func setupCutoverAPITestServer(t *testing.T) (*Server, string, string, string, s
 		t.Fatal(err)
 	}
 	agentID := agent.ID
+	if _, err := server.Registry.RecordAgentHeartbeat(projectID, nodeID, registry.AgentHeartbeat{Version: "v1", NodeReady: true, K3SStatus: "ready", Capabilities: map[string]any{"deploy": true}}); err != nil {
+		t.Fatal(err)
+	}
 
 	sourceResource := webhookReadyPostgres(projectID, envID, runtimeID, nodeID, agentID)
 	sourceResource.ID = "res-source"
@@ -209,6 +215,135 @@ func setupCutoverAPITestServer(t *testing.T) (*Server, string, string, string, s
 	server.Resources.Credentials = credAuthority
 	server.Cutovers.Credentials = credAuthority
 
+	appDraft := app.Configuration.ServiceConfigurationDraft
+	appDraft.ResourceBindings = []serviceconfigurationv1.ResourceBinding{
+		{LogicalName: "DATABASE", BindingID: sourceBinding.ID},
+	}
+	appliedCfg, err := server.Registry.ApplyServiceConfiguration(projectID, app.ID, "user-1", "init-cfg", registry.ServiceConfigurationApplyRequest{
+		Draft:             appDraft,
+		ExpectedRevision:  app.Configuration.Revision,
+		ExpectedStateHash: app.Configuration.StateHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workload := deploymentv1.WorkloadSpec{
+		SchemaVersion:            deploymentv1.WorkloadSchemaVersion,
+		ServiceKey:               app.Name,
+		Replicas:                 1,
+		ApplicationContainerName: deploymentv1.ApplicationContainer,
+		ContainerPort:            8080,
+		Resources: deploymentv1.Resources{
+			Requests: deploymentv1.ResourceValues{CPU: "100m", Memory: "128Mi"},
+			Limits:   deploymentv1.ResourceValues{CPU: "500m", Memory: "512Mi"},
+		},
+		TerminationGracePeriodSecond: 30,
+		Exposure:                     deploymentv1.ExposureIntent{Mode: "internal"},
+	}
+	workloadHash, _ := workload.Hash()
+	image, _ := deploymentv1.NewImmutableImage("ghcr.io/opsi-dev/app", "sha256:"+strings.Repeat("a", 64))
+	record := buildrecordv1.Record{
+		SchemaVersion:   buildrecordv1.SchemaVersion,
+		ID:              "br-app-1",
+		ProjectID:       projectID,
+		ServiceID:       app.ID,
+		ServiceKey:      app.Name,
+		ActiveBindingID: sourceBinding.ID,
+		Build: buildrecordv1.BuildMetadata{
+			OCIRepository: image.Repository,
+			OCIDigest:     image.Digest,
+			Status:        "succeeded",
+		},
+	}
+	_, _, _ = server.BuildRecords.Store.Create(ctx, projectID, record)
+	snapshot := deploymentv1.JobSnapshot{
+		SchemaVersion: deploymentv1.JobSchemaVersion,
+		ProjectID:     projectID,
+		Image:         image,
+		Workload:      workload,
+		SpecHash:      workloadHash,
+		PayloadHash:   "base-payload",
+		Authority: deploymentv1.AuthoritySnapshot{
+			BuildRecord:                   record,
+			TopologyPlanID:                "topology-1",
+			TopologyRevision:              1,
+			TopologyHash:                  strings.Repeat("1", 64),
+			ServiceConfigurationRevision: appliedCfg.Configuration.Revision,
+			ServiceConfigurationStateHash: appliedCfg.Configuration.StateHash,
+			DeploymentPolicyID:            "policy-1",
+			DeploymentPolicyRevision:      1,
+			DeploymentPolicyHash:          strings.Repeat("2", 64),
+			RoutingDecisionHash:           strings.Repeat("3", 64),
+			EnvironmentID:                 envID,
+			RuntimeID:                     runtimeID,
+			NodeID:                        nodeID,
+			AgentID:                       agentID,
+		},
+	}
+	baseJob, _, err := server.Registry.(*registry.Service).StartImmutableDeployment(snapshot, "user-1", "base-key", "base-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseLease, ok, err := server.Registry.(*registry.Service).LeaseDeployment(projectID, nodeID)
+	if err != nil || !ok {
+		t.Fatalf("base lease ok=%v err=%v", ok, err)
+	}
+	for index, state := range []string{deploymentv1.RolloutStateApplying, deploymentv1.RolloutStateWaiting, deploymentv1.RolloutStateSucceeded} {
+		currentDigest := ""
+		if state == deploymentv1.RolloutStateSucceeded {
+			currentDigest = image.Digest
+		}
+		progress := deploymentv1.Progress{
+			SchemaVersion:    deploymentv1.EventSchemaVersion,
+			LeaseToken:       baseLease.LeaseToken,
+			State:            state,
+			RolloutID:        baseJob.RolloutIntent.RolloutID,
+			IntentHash:       baseJob.IntentHash,
+			StateHash:        strings.Repeat(string(rune('a'+index)), 64),
+			WorkloadSpecHash: baseJob.RolloutIntent.Desired.WorkloadSpecHash,
+			ExposureSpecHash: baseJob.RolloutIntent.Desired.ExposureSpecHash,
+			DesiredDigest:    image.Digest,
+			CurrentDigest:    currentDigest,
+			PreviousDigest:   baseJob.PreviousDigest,
+			Attempt:          baseJob.RolloutIntent.Attempt,
+		}
+		if _, err := server.Registry.(*registry.Service).ProgressImmutableDeployment(projectID, nodeID, baseJob.ID, "base-progress-"+state, progress); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	intent := baseLease.Command.Rollout
+	agentResult := &deploymentv1.AgentResult{
+		SchemaVersion:         deploymentv1.ResultSchemaVersion,
+		Status:                deploymentv1.RolloutStateSucceeded,
+		RolloutID:             intent.RolloutID,
+		RolloutState:          deploymentv1.RolloutStateSucceeded,
+		IntentHash:            intent.IntentHash,
+		StateHash:             strings.Repeat("c", 64),
+		SpecHash:              intent.Desired.WorkloadSpecHash,
+		WorkloadSpecHash:      intent.Desired.WorkloadSpecHash,
+		ExposureSpecHash:      intent.Desired.ExposureSpecHash,
+		DesiredDigest:         intent.Desired.Image.Digest,
+		CurrentDigest:         intent.Desired.Image.Digest,
+		PreviousDigest:        intent.PreviousDigest,
+		KnownGoodID:           baseJob.RolloutIntent.RolloutID,
+		KnownGoodHash:         strings.Repeat("a", 64),
+		ReadinessEvidenceHash: strings.Repeat("e", 64),
+		Attempt:               intent.Attempt,
+		Resources:             []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}},
+	}
+	result := registry.DeploymentResult{
+		SchemaVersion: deploymentv1.ResultSchemaVersion,
+		Status:        deploymentv1.RolloutStateSucceeded,
+		LeaseToken:    baseLease.LeaseToken,
+		IntentHash:    intent.IntentHash,
+		RolloutResult: agentResult,
+	}
+	if _, err := server.Registry.(*registry.Service).CompleteDeployment(projectID, nodeID, baseJob.ID, "base-result", result); err != nil {
+		t.Fatal(err)
+	}
+
 	return server, projectID, app.ID, sourceBinding.ID, targetBinding.ID, nodeID, agentID
 }
 
@@ -350,7 +485,7 @@ func TestCutoverReviewAPIEndToEnd(t *testing.T) {
 
 	// 8. Zero mutations proof
 	appConfig, _ := server.Registry.GetServiceConfiguration(projectID, appID)
-	if appConfig.Revision != 0 {
+	if appConfig.Revision != 1 {
 		t.Fatalf("application config mutated during review: %+v", appConfig)
 	}
 	srcBinding, _ := server.Resources.Store.GetBinding(context.Background(), projectID, sourceBindingID)
@@ -358,7 +493,165 @@ func TestCutoverReviewAPIEndToEnd(t *testing.T) {
 		t.Fatalf("source binding mutated during review: %+v", srcBinding)
 	}
 	deployments, _ := server.Registry.ListDeployments(projectID)
-	if len(deployments) != 0 {
-		t.Fatalf("deployments created during review: %+v", deployments)
+	if len(deployments) != 1 {
+		t.Fatalf("unexpected deployments created during review: %+v", deployments)
+	}
+}
+
+func TestCutoverApplyAPIEndToEndAndAudit(t *testing.T) {
+	server, projectID, appID, sourceBindingID, targetBindingID, nodeID, _ := setupCutoverAPITestServer(t)
+
+	// 1. Create and complete a Cutover Review
+	reqBody, _ := json.Marshal(cutoverv1.ReviewRequest{
+		SourceBindingID: sourceBindingID,
+		TargetBindingID: targetBindingID,
+	})
+	reviewResp := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+projectID+"/applications/"+appID+"/cutover-reviews", string(reqBody), "rev-key-1")
+	if reviewResp.Code != http.StatusAccepted {
+		t.Fatalf("create review failed: %d %s", reviewResp.Code, reviewResp.Body.String())
+	}
+	var revPayload struct {
+		Review cutoverv1.ApplicationCutoverReview `json:"review"`
+	}
+	_ = json.Unmarshal(reviewResp.Body.Bytes(), &revPayload)
+	reviewID := revPayload.Review.ID
+
+	// Agent claims and completes review
+	agentReq := httptest.NewRequest(http.MethodGet, "/v1/agents/"+nodeID+"/webhooks/next?project_id="+projectID+"&wait=0s", nil)
+	agentReq.Header.Set("Authorization", "Bearer agent-secret")
+	agentResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentResp, agentReq)
+	var leasePayload struct {
+		LeaseToken string `json:"lease_token"`
+	}
+	_ = json.Unmarshal(agentResp.Body.Bytes(), &leasePayload)
+
+	resultPayload, _ := json.Marshal(cutoverv1.ReviewResult{
+		Status:               cutoverv1.ReviewSucceeded,
+		LeaseToken:           leasePayload.LeaseToken,
+		SourceSQLPreflight:   "PASS",
+		TargetSQLPreflight:   "PASS",
+		TargetRoleAttributes: "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+		ValidationSummary: cutoverv1.ValidationSummary{
+			SourceSQLPreflight:   "PASS",
+			TargetSQLPreflight:   "PASS",
+			TargetRoleAttributes: "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+			SourceBindingReady:   true,
+			TargetBindingReady:   true,
+			TargetRestoreReady:   true,
+		},
+	})
+	agentResultReq := httptest.NewRequest(http.MethodPost, "/v1/agents/"+nodeID+"/cutover-reviews/"+reviewID+"/result?project_id="+projectID, strings.NewReader(string(resultPayload)))
+	agentResultReq.Header.Set("Authorization", "Bearer agent-secret")
+	agentResultReq.Header.Set("Content-Type", "application/json")
+	agentResultResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentResultResp, agentResultReq)
+	if agentResultResp.Code != http.StatusOK {
+		t.Fatalf("agent complete review failed: %d %s", agentResultResp.Code, agentResultResp.Body.String())
+	}
+
+	// 2. Explicit Cutover Apply: POST /api/projects/{project}/applications/{application}/cutovers
+	applyBody, _ := json.Marshal(cutoverv1.ApplyRequest{
+		CutoverReviewID: reviewID,
+	})
+	cutoverResp := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers", string(applyBody), "cutover-key-1")
+	if cutoverResp.Code != http.StatusAccepted {
+		t.Fatalf("create cutover failed: %d %s", cutoverResp.Code, cutoverResp.Body.String())
+	}
+
+	var cutoverPayload struct {
+		Cutover cutoverv1.ApplicationCutover `json:"cutover"`
+		Reused  bool                         `json:"reused"`
+	}
+	if err := json.Unmarshal(cutoverResp.Body.Bytes(), &cutoverPayload); err != nil {
+		t.Fatal(err)
+	}
+	cutover := cutoverPayload.Cutover
+	if cutover.ID == "" || cutover.Lifecycle != cutoverv1.CutoverDeploying {
+		t.Fatalf("unexpected cutover: %+v", cutover)
+	}
+	if cutoverPayload.Reused {
+		t.Fatal("expected first cutover apply to not be reused")
+	}
+
+	// 3. Replay with same Idempotency-Key returns reused: true
+	replayResp := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers", string(applyBody), "cutover-key-1")
+	if replayResp.Code != http.StatusAccepted || !strings.Contains(replayResp.Body.String(), `"reused":true`) {
+		t.Fatalf("expected reused cutover on replay: %s", replayResp.Body.String())
+	}
+
+	// 4. GET /api/projects/{project}/applications/{application}/cutovers/{cutover}
+	getResp := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers/"+cutover.ID, "", "")
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("get cutover failed: %d %s", getResp.Code, getResp.Body.String())
+	}
+
+	// 5. GET /api/projects/{project}/application-cutovers
+	listResp := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+projectID+"/application-cutovers?application_id="+appID, "", "")
+	if listResp.Code != http.StatusOK || !strings.Contains(listResp.Body.String(), cutover.ID) {
+		t.Fatalf("list application-cutovers failed: %s", listResp.Body.String())
+	}
+
+	// 6. Complete Cutover Verification: POST /v1/agents/{node}/cutovers/{cutover}/result
+	completeResult, _ := json.Marshal(cutoverv1.CutoverApplyResult{
+		Status: "succeeded",
+		VerificationSummary: cutoverv1.CutoverVerificationSummary{
+			SourceSQLPreflight:       "PASS",
+			TargetSQLPreflight:       "PASS",
+			TargetRoleAttributes:     "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+			DeploymentReady:          true,
+			WorkloadReady:            true,
+			TargetDBConnected:        true,
+			RestoredDataVerified:     true,
+			TargetOnlyMarkerPresent:  true,
+			SourceOnlyMarkerAbsent:   true,
+			PostCutoverTargetWritten: true,
+			SourceRollbackPreserved:  true,
+		},
+	})
+	completeReq := httptest.NewRequest(http.MethodPost, "/v1/agents/"+nodeID+"/cutovers/"+cutover.ID+"/result?project_id="+projectID, strings.NewReader(string(completeResult)))
+	completeReq.Header.Set("Authorization", "Bearer agent-secret")
+	completeReq.Header.Set("Content-Type", "application/json")
+	completeResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(completeResp, completeReq)
+	if completeResp.Code != http.StatusOK {
+		t.Fatalf("agent complete cutover failed: %d %s", completeResp.Code, completeResp.Body.String())
+	}
+
+	// 7. Verify Succeeded Cutover
+	finalGetResp := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+projectID+"/application-cutovers/"+cutover.ID, "", "")
+	var finalPayload struct {
+		Cutover cutoverv1.ApplicationCutover `json:"cutover"`
+	}
+	_ = json.Unmarshal(finalGetResp.Body.Bytes(), &finalPayload)
+	if finalPayload.Cutover.Lifecycle != cutoverv1.CutoverSucceeded {
+		t.Fatalf("expected succeeded cutover, got %+v", finalPayload.Cutover)
+	}
+	if err := finalPayload.Cutover.ValidateSucceeded(); err != nil {
+		t.Fatalf("cutover validation failed: %v\ncutover=%+v\nhash=%s\nwant=%s", err, finalPayload.Cutover, finalPayload.Cutover.EvidenceHash, cutoverv1.CutoverEvidenceHash(finalPayload.Cutover))
+	}
+
+	// 8. Verify SOURCE rollback authority is strictly preserved (NOT deleted, NOT revoked)
+	srcBinding, err := server.Resources.Store.GetBinding(context.Background(), projectID, sourceBindingID)
+	if err != nil || srcBinding.Lifecycle != resourcev1.LifecycleReady {
+		t.Fatalf("source binding must remain ready as rollback authority: %+v err=%v", srcBinding, err)
+	}
+	srcResource, err := server.Resources.Store.Get(context.Background(), projectID, "res-source")
+	if err != nil || srcResource.Lifecycle != resourcev1.LifecycleReady {
+		t.Fatalf("source resource must remain ready: %+v err=%v", srcResource, err)
+	}
+
+	// 9. Verify Audits
+	audits, _ := server.Registry.ListAudit(projectID)
+	actions := map[string]bool{}
+	for _, a := range audits {
+		if a.ResourceID == cutover.ID {
+			actions[a.Action] = true
+		}
+	}
+	for _, expectedAction := range []string{"CUTOVER_REQUESTED", "CUTOVER_APPLY_STARTED", "CUTOVER_SUCCEEDED"} {
+		if !actions[expectedAction] {
+			t.Fatalf("missing expected audit action %s: %+v", expectedAction, audits)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
 
 func (s Service) ApplicationEnvironment(ctx context.Context, projectID, environmentID, applicationID string) ([]deploymentv1.EnvironmentVariable, error) {
@@ -21,11 +22,27 @@ func (s Service) ApplicationRuntimeConfiguration(ctx context.Context, projectID,
 	if err != nil {
 		return nil, nil, err
 	}
+	var selectedBindings map[string]string
+	if reader, ok := s.Scopes.(interface {
+		GetServiceConfiguration(projectID, serviceID string) (serviceconfigurationv1.Configuration, error)
+	}); ok {
+		if config, err := reader.GetServiceConfiguration(projectID, applicationID); err == nil && len(config.ResourceBindings) > 0 {
+			selectedBindings = make(map[string]string, len(config.ResourceBindings))
+			for _, rb := range config.ResourceBindings {
+				selectedBindings[rb.LogicalName] = rb.BindingID
+			}
+		}
+	}
 	environment := []deploymentv1.EnvironmentVariable{}
 	secrets := []deploymentv1.SecretReference{}
 	for _, binding := range bindings {
 		if binding.Source.ID != applicationID || binding.Lifecycle != resourcev1.LifecycleReady {
 			continue
+		}
+		if selectedBindings != nil {
+			if targetID, ok := selectedBindings[binding.LogicalName]; ok && binding.ID != targetID {
+				continue
+			}
 		}
 		prefix := environmentPrefix(binding.LogicalName)
 		for _, reference := range binding.RuntimeRefs {

@@ -8,17 +8,23 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
+	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
+	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
-var ErrNotFound = errors.New("cutover review not found")
+var ErrNotFound = errors.New("cutover not found")
 
 const leaseTTL = 10 * time.Minute
 
@@ -28,7 +34,7 @@ type Error struct {
 	Message string
 }
 
-func (e Error) Error() string { return e.Message }
+func (e Error) Error() string { return e.Code + ": " + e.Message }
 
 type Store interface {
 	CreateReview(context.Context, cutoverv1.ApplicationCutoverReview, string, string) (cutoverv1.ApplicationCutoverReview, bool, error)
@@ -37,12 +43,42 @@ type Store interface {
 	ClaimReview(context.Context, string, string, string, time.Time, time.Time) (cutoverv1.ApplicationCutoverReview, bool, error)
 	UpdateReviewClaimed(context.Context, cutoverv1.ApplicationCutoverReview, string) (cutoverv1.ApplicationCutoverReview, error)
 	HasActive(context.Context, string, string) (bool, error)
+
+	CreateCutover(context.Context, cutoverv1.ApplicationCutover, string, string) (cutoverv1.ApplicationCutover, bool, error)
+	GetCutover(context.Context, string, string) (cutoverv1.ApplicationCutover, error)
+	ListCutovers(context.Context, string, string) ([]cutoverv1.ApplicationCutover, error)
+	UpdateCutover(context.Context, cutoverv1.ApplicationCutover) (cutoverv1.ApplicationCutover, error)
+	HasActiveCutover(context.Context, string, string) (bool, error)
 }
 
 type ApplicationAuthority interface {
 	GetServiceConfiguration(projectID, serviceID string) (registry.ServiceConfiguration, error)
+	ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request registry.ServiceConfigurationApplyRequest) (registry.ServiceConfigurationApplyResult, error)
 	ListServices(projectID string) ([]registry.ServiceRecord, error)
 	ApplicationBelongs(ctx context.Context, projectID, environmentID, applicationID string) (bool, error)
+}
+
+type DeploymentAuthority interface {
+	ListDeployments(projectID string) ([]registry.DeploymentJob, error)
+	GetDeployment(projectID, deploymentID string) (registry.DeploymentJob, error)
+	StartImmutableDeployment(snapshot deploymentv1.JobSnapshot, requestedBy, key, requestID string) (registry.DeploymentJob, bool, error)
+}
+
+type BuildRecordAuthority interface {
+	Get(ctx context.Context, projectID, recordID string) (buildrecordv1.Record, error)
+}
+
+type TopologyAuthority interface {
+	Get(ctx context.Context, projectID string) (topologyv1.Plan, error)
+}
+
+type PolicyAuthority interface {
+	Route(ctx context.Context, projectID string, request deploymentpolicyv1.RoutingRequest) (deploymentpolicyv1.RoutingDecision, error)
+	Get(ctx context.Context, projectID, policyID string) (deploymentpolicyv1.Policy, error)
+}
+
+type RuntimeResolverAuthority interface {
+	ApplicationRuntimeConfiguration(ctx context.Context, projectID, environmentID, applicationID string) ([]deploymentv1.EnvironmentVariable, []deploymentv1.SecretReference, error)
 }
 
 type ResourceAuthority interface {
@@ -67,13 +103,18 @@ type CredentialAuthority interface {
 }
 
 type Service struct {
-	Store        Store
-	Applications ApplicationAuthority
-	Resources    ResourceAuthority
-	Restores     RestoreAuthority
-	Backups      BackupAuthority
-	Credentials  CredentialAuthority
-	Now          func() time.Time
+	Store           Store
+	Applications    ApplicationAuthority
+	Deployments     DeploymentAuthority
+	BuildRecords    BuildRecordAuthority
+	Topology        TopologyAuthority
+	Policies        PolicyAuthority
+	RuntimeResolver RuntimeResolverAuthority
+	Resources       ResourceAuthority
+	Restores        RestoreAuthority
+	Backups         BackupAuthority
+	Credentials     CredentialAuthority
+	Now             func() time.Time
 }
 
 func (s Service) Review(ctx context.Context, projectID, applicationID string, request cutoverv1.ReviewRequest, actor, key string) (cutoverv1.ApplicationCutoverReview, bool, error) {
@@ -515,6 +556,439 @@ func invalid(code, message string) Error {
 	return Error{Code: code, Status: 400, Message: message}
 }
 
+func conflict(code, message string) Error {
+	return Error{Code: code, Status: 409, Message: message}
+}
+
+func notFound(message string) Error {
+	return Error{Code: "NOT_FOUND", Status: 404, Message: message}
+}
+
 func unavailable(message string) Error {
 	return Error{Code: "SERVICE_UNAVAILABLE", Status: 503, Message: message}
+}
+
+func sha256Hex(data string) string {
+	sum := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s Service) ValidateStaleReview(ctx context.Context, review cutoverv1.ApplicationCutoverReview) error {
+	app, err := s.findApplication(ctx, review.ProjectID, review.ApplicationID)
+	if err != nil {
+		return err
+	}
+	sourceBinding, sourceRes, err := s.resolveSource(ctx, review.ProjectID, app, review.SourceBindingID)
+	if err != nil {
+		return err
+	}
+	targetBinding, targetRes, err := s.resolveTarget(ctx, review.ProjectID, app, review.TargetBindingID)
+	if err != nil {
+		return err
+	}
+	targetRestore, _, err := s.resolveLineage(ctx, review.ProjectID, targetRes.ID)
+	if err != nil {
+		return err
+	}
+	return s.ValidateStale(ctx, review, app, sourceRes, sourceBinding, targetRes, targetBinding, targetRestore)
+}
+
+func (s Service) Apply(ctx context.Context, projectID, applicationID string, request cutoverv1.ApplyRequest, actor, key string) (cutoverv1.ApplicationCutover, bool, error) {
+	if s.Store == nil || s.Applications == nil || s.Resources == nil || s.Restores == nil || s.Backups == nil {
+		return cutoverv1.ApplicationCutover{}, false, unavailable("cutover authority is unavailable")
+	}
+	if key == "" || !validKey(key) {
+		return cutoverv1.ApplicationCutover{}, false, invalid(cutoverv1.FailureIdempotencyKeyInvalid, "idempotency key is invalid")
+	}
+	if request.CutoverReviewID == "" {
+		return cutoverv1.ApplicationCutover{}, false, invalid(cutoverv1.FailureTargetInvalid, "cutover_review_id is required")
+	}
+
+	app, err := s.findApplication(ctx, projectID, applicationID)
+	if err != nil {
+		return cutoverv1.ApplicationCutover{}, false, err
+	}
+
+	payloadHash := sha256Hex(request.CutoverReviewID + "\x00" + app.ID)
+
+	review, err := s.Store.GetReview(ctx, projectID, request.CutoverReviewID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutover{}, false, notFound("cutover review not found")
+		}
+		return cutoverv1.ApplicationCutover{}, false, err
+	}
+
+	if review.Lifecycle != cutoverv1.ReviewSucceeded {
+		return cutoverv1.ApplicationCutover{}, false, invalid(cutoverv1.FailureReviewNotReady, "cutover review must be succeeded before applying cutover")
+	}
+	if review.ApplicationID != app.ID {
+		return cutoverv1.ApplicationCutover{}, false, invalid(cutoverv1.FailureTargetInvalid, "review application does not match requested application")
+	}
+
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+
+	cutoverID := newID("acut")
+	initialCutover := cutoverv1.ApplicationCutover{
+		SchemaVersion:         cutoverv1.CutoverSchemaVersion,
+		ID:                    cutoverID,
+		ProjectID:             projectID,
+		EnvironmentID:         review.EnvironmentID,
+		ApplicationID:         app.ID,
+		CutoverReviewID:       review.ID,
+		SourceBindingID:       review.SourceBindingID,
+		TargetBindingID:       review.TargetBindingID,
+		SourceResourceID:      review.SourceResourceID,
+		TargetResourceID:      review.TargetResourceID,
+		Lifecycle:             cutoverv1.CutoverApplying,
+		RequestedBy:           actor,
+		RequestedAt:           now,
+		TargetNodeID:          review.TargetNodeID,
+		VerificationSummary: cutoverv1.CutoverVerificationSummary{
+			SourceSQLPreflight:   review.ValidationSummary.SourceSQLPreflight,
+			TargetSQLPreflight:   review.ValidationSummary.TargetSQLPreflight,
+			TargetRoleAttributes: review.ValidationSummary.TargetRoleAttributes,
+		},
+	}
+
+	savedCutover, reused, err := s.Store.CreateCutover(ctx, initialCutover, key, payloadHash)
+	if err != nil {
+		return cutoverv1.ApplicationCutover{}, false, err
+	}
+	if reused {
+		return savedCutover, true, nil
+	}
+
+	if err := review.ValidateSucceeded(); err != nil {
+		savedCutover.Lifecycle = cutoverv1.CutoverFailed
+		savedCutover.FailureCode = cutoverv1.FailureStaleReview
+		savedCutover.FailureMessageRedacted = "cutover review evidence is invalid"
+		failedTime := now
+		savedCutover.CompletedAt = &failedTime
+		_, _ = s.Store.UpdateCutover(ctx, savedCutover)
+		return savedCutover, false, invalid(cutoverv1.FailureStaleReview, "cutover review evidence is invalid")
+	}
+
+	// Server-side stale validation against live entities
+	if err := s.ValidateStaleReview(ctx, review); err != nil {
+		savedCutover.Lifecycle = cutoverv1.CutoverFailed
+		savedCutover.FailureCode = cutoverv1.FailureStaleReview
+		savedCutover.FailureMessageRedacted = err.Error()
+		failedTime := now
+		savedCutover.CompletedAt = &failedTime
+		_, _ = s.Store.UpdateCutover(ctx, savedCutover)
+		return savedCutover, false, invalid(cutoverv1.FailureStaleReview, err.Error())
+	}
+
+	config, err := s.Applications.GetServiceConfiguration(projectID, app.ID)
+	if err != nil {
+		savedCutover.Lifecycle = cutoverv1.CutoverFailed
+		savedCutover.FailureCode = cutoverv1.FailureApplicationStateInvalid
+		savedCutover.FailureMessageRedacted = "application configuration is unavailable"
+		failedTime := now
+		savedCutover.CompletedAt = &failedTime
+		_, _ = s.Store.UpdateCutover(ctx, savedCutover)
+		return savedCutover, false, invalid(cutoverv1.FailureApplicationStateInvalid, "application configuration is unavailable")
+	}
+	if config.Revision != review.ApplicationConfigRevision || config.StateHash != review.ApplicationConfigHash {
+		savedCutover.Lifecycle = cutoverv1.CutoverFailed
+		savedCutover.FailureCode = cutoverv1.FailureStaleReview
+		savedCutover.FailureMessageRedacted = "application configuration changed after review"
+		failedTime := now
+		savedCutover.CompletedAt = &failedTime
+		_, _ = s.Store.UpdateCutover(ctx, savedCutover)
+		return savedCutover, false, invalid(cutoverv1.FailureStaleReview, "application configuration changed after review")
+	}
+
+	var preCutoverDeploymentJobID, preCutoverBuildRecordID, preCutoverImageDigest string
+	var currentJob *registry.DeploymentJob
+	if s.Deployments != nil {
+		jobs, _ := s.Deployments.ListDeployments(projectID)
+		for _, j := range jobs {
+			if j.ServiceID == app.ID && (j.Status == deploymentv1.StateSucceeded || j.Status == registry.DeploymentSucceeded) && j.Snapshot != nil {
+				jobCopy := j
+				currentJob = &jobCopy
+				preCutoverDeploymentJobID = j.ID
+				preCutoverBuildRecordID = j.Snapshot.Authority.BuildRecord.ID
+				preCutoverImageDigest = j.Snapshot.Image.Digest
+				break
+			}
+		}
+	}
+
+	savedCutover.ReviewedApplicationConfigRevision = review.ApplicationConfigRevision
+	savedCutover.ReviewedApplicationConfigHash = review.ApplicationConfigHash
+	savedCutover.PreCutoverApplicationConfigRevision = config.Revision
+	savedCutover.PreCutoverApplicationConfigHash = config.StateHash
+	savedCutover.PreCutoverDeploymentJobID = preCutoverDeploymentJobID
+	savedCutover.PreCutoverBuildRecordID = preCutoverBuildRecordID
+	savedCutover.PreCutoverImageDigest = preCutoverImageDigest
+
+	// 1. Mutate Application configuration: switch DATABASE binding from SOURCE to TARGET
+	nextDraft := config.ServiceConfigurationDraft
+	nextResBindings := []serviceconfigurationv1.ResourceBinding{}
+	for _, rb := range nextDraft.ResourceBindings {
+		if rb.LogicalName != "DATABASE" {
+			nextResBindings = append(nextResBindings, rb)
+		}
+	}
+	nextResBindings = append(nextResBindings, serviceconfigurationv1.ResourceBinding{
+		LogicalName: "DATABASE",
+		BindingID:   review.TargetBindingID,
+	})
+	nextDraft.ResourceBindings = nextResBindings
+
+	applyResult, err := s.Applications.ApplyServiceConfiguration(projectID, app.ID, actor, "cutover-"+savedCutover.ID, registry.ServiceConfigurationApplyRequest{
+		Draft:             nextDraft,
+		ExpectedRevision:  config.Revision,
+		ExpectedStateHash: config.StateHash,
+	})
+	if err != nil {
+		savedCutover.Lifecycle = cutoverv1.CutoverFailed
+		savedCutover.FailureCode = cutoverv1.FailureConfigApplyFailed
+		savedCutover.FailureMessageRedacted = "failed to apply new application configuration"
+		failedTime := now
+		savedCutover.CompletedAt = &failedTime
+		_, _ = s.Store.UpdateCutover(ctx, savedCutover)
+		return savedCutover, false, invalid(cutoverv1.FailureConfigApplyFailed, "failed to apply application configuration: "+err.Error())
+	}
+
+	savedCutover.ResultingApplicationConfigRevision = applyResult.Configuration.Revision
+	savedCutover.ResultingApplicationConfigHash = applyResult.Configuration.StateHash
+	appliedAt := now
+	savedCutover.AppliedAt = &appliedAt
+	savedCutover.Lifecycle = cutoverv1.CutoverDeploying
+
+	// 2. Trigger canonical immutable deployment
+	if s.Deployments != nil && currentJob != nil && currentJob.Snapshot != nil {
+		newConfig := registry.ServiceConfiguration{
+			ServiceConfigurationDraft: nextDraft,
+			Revision:                  applyResult.Configuration.Revision,
+			StateHash:                 applyResult.Configuration.StateHash,
+		}
+		var services []registry.ServiceRecord
+		if svcs, listErr := s.Applications.ListServices(projectID); listErr == nil {
+			services = svcs
+		}
+
+		var record buildrecordv1.Record
+		if s.BuildRecords != nil {
+			if rec, recErr := s.BuildRecords.Get(ctx, projectID, currentJob.Snapshot.Authority.BuildRecord.ID); recErr == nil {
+				record = rec
+			}
+		}
+		if record.ID == "" {
+			record = currentJob.Snapshot.Authority.BuildRecord
+		}
+
+		var plan topologyv1.Plan
+		if s.Topology != nil {
+			if p, pErr := s.Topology.Get(ctx, projectID); pErr == nil && p.ID != "" {
+				plan = p
+			}
+		}
+		if plan.ID == "" {
+			plan.ID = currentJob.Snapshot.Authority.TopologyPlanID
+			plan.Revision = currentJob.Snapshot.Authority.TopologyRevision
+			plan.PlanHash = currentJob.Snapshot.Authority.TopologyHash
+		}
+
+		var policy deploymentpolicyv1.Policy
+		if s.Policies != nil {
+			if pol, polErr := s.Policies.Get(ctx, projectID, currentJob.Snapshot.Authority.DeploymentPolicyID); polErr == nil && pol.ID != "" {
+				policy = pol
+			}
+		}
+		if policy.ID == "" {
+			policy.ID = currentJob.Snapshot.Authority.DeploymentPolicyID
+			policy.Revision = currentJob.Snapshot.Authority.DeploymentPolicyRevision
+			policy.PolicyHash = currentJob.Snapshot.Authority.DeploymentPolicyHash
+		}
+
+		decision := deploymentpolicyv1.RoutingDecision{
+			DecisionHash:  currentJob.Snapshot.Authority.RoutingDecisionHash,
+			EnvironmentID: review.EnvironmentID,
+			RuntimeID:     currentJob.Snapshot.Authority.RuntimeID,
+			NodeID:        currentJob.Snapshot.Authority.NodeID,
+			AgentID:       currentJob.Snapshot.Authority.AgentID,
+		}
+
+		snapshot, snapErr := s.compileDeploymentSnapshot(ctx, projectID, review.EnvironmentID, app, record, plan, policy, decision, newConfig, services, actor, "cutover-dep-"+savedCutover.ID, "req-cutover-"+savedCutover.ID)
+		if snapErr != nil {
+			savedCutover.Lifecycle = cutoverv1.CutoverFailed
+			savedCutover.FailureCode = cutoverv1.FailureDeploymentFailed
+			savedCutover.FailureMessageRedacted = "failed to compile deployment snapshot: " + snapErr.Error()
+			failedTime := now
+			savedCutover.CompletedAt = &failedTime
+			_, _ = s.Store.UpdateCutover(ctx, savedCutover)
+			return savedCutover, false, snapErr
+		}
+
+		job, _, depErr := s.Deployments.StartImmutableDeployment(snapshot, actor, "cutover-dep-"+savedCutover.ID, "req-cutover-"+savedCutover.ID)
+		if depErr != nil {
+			savedCutover.Lifecycle = cutoverv1.CutoverFailed
+			savedCutover.FailureCode = cutoverv1.FailureDeploymentFailed
+			savedCutover.FailureMessageRedacted = "failed to start deployment: " + depErr.Error()
+			failedTime := now
+			savedCutover.CompletedAt = &failedTime
+			_, _ = s.Store.UpdateCutover(ctx, savedCutover)
+			return savedCutover, false, depErr
+		}
+		savedCutover.DeploymentJobID = job.ID
+	}
+
+	updated, err := s.Store.UpdateCutover(ctx, savedCutover)
+	if err != nil {
+		return savedCutover, false, err
+	}
+	return updated, false, nil
+}
+
+func (s Service) compileDeploymentSnapshot(ctx context.Context, projectID, environmentID string, app registry.ServiceRecord, record buildrecordv1.Record, plan topologyv1.Plan, policy deploymentpolicyv1.Policy, decision deploymentpolicyv1.RoutingDecision, configuration registry.ServiceConfiguration, services []registry.ServiceRecord, actor, key, requestID string) (deploymentv1.JobSnapshot, error) {
+	var assignment topologyv1.Assignment
+	for _, a := range plan.Assignments {
+		if a.ServiceKey == record.ServiceKey && a.EnvironmentID == environmentID {
+			assignment = a
+			break
+		}
+	}
+	if assignment.ServiceKey == "" {
+		if len(plan.Assignments) > 0 {
+			assignment = plan.Assignments[0]
+		} else {
+			replicas := app.Replicas
+			if replicas <= 0 {
+				replicas = 1
+			}
+			assignment = topologyv1.Assignment{
+				ServiceKey:           app.Name,
+				EnvironmentID:        environmentID,
+				RuntimeID:            decision.RuntimeID,
+				Replicas:             int32(replicas),
+				CPURequestMillicores: 100,
+				MemoryRequestBytes:   128 << 20,
+				Exposure:             topologyv1.ExposureIntent{Mode: "internal"},
+			}
+		}
+	}
+	workload, err := registry.CompileServiceRuntimeSpecs(app, assignment, plan.Assignments, configuration, services)
+	if err != nil {
+		return deploymentv1.JobSnapshot{}, invalid(cutoverv1.FailureConfigApplyFailed, err.Error())
+	}
+	if s.RuntimeResolver != nil {
+		managedEnv, managedSecrets, err := s.RuntimeResolver.ApplicationRuntimeConfiguration(ctx, projectID, environmentID, app.ID)
+		if err != nil {
+			return deploymentv1.JobSnapshot{}, invalid(cutoverv1.FailureConfigApplyFailed, err.Error())
+		}
+		workload.Environment = append(workload.Environment, managedEnv...)
+		workload.SecretReferences = append(workload.SecretReferences, managedSecrets...)
+	}
+	sort.Slice(workload.Environment, func(i, j int) bool { return workload.Environment[i].Name < workload.Environment[j].Name })
+	sort.Slice(workload.SecretReferences, func(i, j int) bool { return workload.SecretReferences[i].EnvName < workload.SecretReferences[j].EnvName })
+	if err := deploymentv1.ValidateEnvironment(workload.Environment, workload.SecretReferences); err != nil {
+		return deploymentv1.JobSnapshot{}, invalid(cutoverv1.FailureConfigApplyFailed, err.Error())
+	}
+	image, err := deploymentv1.NewImmutableImage(record.Build.OCIRepository, record.Build.OCIDigest)
+	if err != nil {
+		return deploymentv1.JobSnapshot{}, invalid(cutoverv1.FailureConfigApplyFailed, err.Error())
+	}
+	specHash, _ := workload.Hash()
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	snapshot := deploymentv1.JobSnapshot{
+		SchemaVersion:  deploymentv1.JobSchemaVersion,
+		ProjectID:      projectID,
+		Image:          image,
+		Workload:       workload,
+		SpecHash:       specHash,
+		PayloadHash:    sha256Hex(record.ID + "\x00" + configuration.StateHash + "\x00" + key),
+		ActorUserID:    actor,
+		IdempotencyKey: key,
+		CreatedAt:      now,
+		Authority: deploymentv1.AuthoritySnapshot{
+			BuildRecord:                   record,
+			TopologyPlanID:                plan.ID,
+			TopologyRevision:              plan.Revision,
+			TopologyHash:                  plan.PlanHash,
+			ServiceConfigurationRevision: configuration.Revision,
+			ServiceConfigurationStateHash: configuration.StateHash,
+			DeploymentPolicyID:            policy.ID,
+			DeploymentPolicyRevision:      policy.Revision,
+			DeploymentPolicyHash:          policy.PolicyHash,
+			RoutingDecisionHash:           decision.DecisionHash,
+			EnvironmentID:                 environmentID,
+			RuntimeID:                     decision.RuntimeID,
+			NodeID:                        decision.NodeID,
+			AgentID:                       decision.AgentID,
+		},
+	}
+	return snapshot, nil
+}
+
+func (s Service) GetCutover(ctx context.Context, projectID, cutoverID string) (cutoverv1.ApplicationCutover, error) {
+	if s.Store == nil {
+		return cutoverv1.ApplicationCutover{}, unavailable("cutover store is unavailable")
+	}
+	cutover, err := s.Store.GetCutover(ctx, projectID, cutoverID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutover{}, notFound("cutover not found")
+		}
+		return cutoverv1.ApplicationCutover{}, err
+	}
+	return cutover, nil
+}
+
+func (s Service) ListCutovers(ctx context.Context, projectID, applicationID string) ([]cutoverv1.ApplicationCutover, error) {
+	if s.Store == nil {
+		return nil, unavailable("cutover store is unavailable")
+	}
+	return s.Store.ListCutovers(ctx, projectID, applicationID)
+}
+
+func (s Service) UpdateCutover(ctx context.Context, cutover cutoverv1.ApplicationCutover) (cutoverv1.ApplicationCutover, error) {
+	if s.Store == nil {
+		return cutoverv1.ApplicationCutover{}, unavailable("cutover store is unavailable")
+	}
+	return s.Store.UpdateCutover(ctx, cutover)
+}
+
+func (s Service) CompleteCutover(ctx context.Context, projectID, cutoverID string, result cutoverv1.CutoverApplyResult) (cutoverv1.ApplicationCutover, error) {
+	if s.Store == nil {
+		return cutoverv1.ApplicationCutover{}, unavailable("cutover authority is unavailable")
+	}
+	cutover, err := s.Store.GetCutover(ctx, projectID, cutoverID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutover{}, notFound("cutover not found")
+		}
+		return cutoverv1.ApplicationCutover{}, err
+	}
+	if cutover.Lifecycle == cutoverv1.CutoverSucceeded {
+		return cutover, nil
+	}
+
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+
+	if result.Status == "succeeded" {
+		cutover.VerificationSummary = result.VerificationSummary
+		cutover.Lifecycle = cutoverv1.CutoverSucceeded
+		cutover.CompletedAt = &now
+		cutover.EvidenceHash = cutoverv1.CutoverEvidenceHash(cutover)
+		return s.Store.UpdateCutover(ctx, cutover)
+	}
+
+	cutover.Lifecycle = cutoverv1.CutoverFailed
+	cutover.CompletedAt = &now
+	cutover.FailureCode = result.FailureCode
+	cutover.FailureMessageRedacted = result.FailureMessageRedacted
+	return s.Store.UpdateCutover(ctx, cutover)
 }

@@ -141,6 +141,11 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.BuildRecords.Bindings = postgresRegistry
 		relay.Topology = topology.Service{Store: topology.PostgresStore{DB: db}, Facts: postgresRegistry, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 		relay.Policies = deploymentpolicy.Service{Store: deploymentpolicy.PostgresStore{DB: db}, BuildRecords: relay.BuildRecords.Store, Bindings: postgresRegistry, Topology: relay.Topology}
+		relay.Cutovers.Deployments = postgresRegistry
+		relay.Cutovers.BuildRecords = relay.BuildRecords.Store
+		relay.Cutovers.Topology = relay.Topology
+		relay.Cutovers.Policies = relay.Policies
+		relay.Cutovers.RuntimeResolver = relay.Resources
 		relay.BuildRecords.AuditSink = func(event buildrecord.AuditEvent) {
 			postgresRegistry.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
 		}

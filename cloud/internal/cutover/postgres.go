@@ -130,6 +130,111 @@ func (s PostgresStore) HasActive(ctx context.Context, projectID, applicationID s
 	return exists, err
 }
 
+func (s PostgresStore) CreateCutover(ctx context.Context, v cutoverv1.ApplicationCutover, key, payload string) (cutoverv1.ApplicationCutover, bool, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return cutoverv1.ApplicationCutover{}, false, err
+	}
+	defer tx.Rollback()
+
+	if key != "" {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, v.ProjectID+"\x1f"+key); err != nil {
+			return cutoverv1.ApplicationCutover{}, false, err
+		}
+		var id, oldPayload string
+		err = tx.QueryRowContext(ctx, `SELECT cutover_id, payload_hash FROM application_cutover_idempotency WHERE project_id=$1 AND idempotency_key=$2`, v.ProjectID, key).Scan(&id, &oldPayload)
+		if err == nil {
+			if oldPayload != payload {
+				return cutoverv1.ApplicationCutover{}, false, invalid(cutoverv1.FailureIdempotencyConflict, "idempotency key was used with another cutover request")
+			}
+			loaded, getErr := getCutover(ctx, tx, v.ProjectID, id)
+			return loaded, true, getErr
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return cutoverv1.ApplicationCutover{}, false, err
+		}
+	}
+
+	var active bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM application_cutovers WHERE project_id=$1 AND application_id=$2 AND lifecycle IN ('queued','validating','applying','deploying','verifying'))`, v.ProjectID, v.ApplicationID).Scan(&active); err != nil {
+		return cutoverv1.ApplicationCutover{}, false, err
+	}
+	if active {
+		return cutoverv1.ApplicationCutover{}, false, conflict(cutoverv1.FailureCutoverAlreadyRunning, "an active cutover is already running for this application")
+	}
+
+	authority, _ := json.Marshal(v)
+	_, err = tx.ExecContext(ctx, `INSERT INTO application_cutovers(
+		id,project_id,environment_id,application_id,cutover_review_id,
+		source_binding_id,source_resource_id,target_resource_id,target_binding_id,target_node_id,
+		deployment_job_id,lifecycle,authority,requested_by,requested_at,applied_at,completed_at,updated_at,
+		failure_code,failure_message
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,$19,$20)`,
+		v.ID, v.ProjectID, v.EnvironmentID, v.ApplicationID, v.CutoverReviewID,
+		v.SourceBindingID, v.SourceResourceID, v.TargetResourceID, v.TargetBindingID, v.TargetNodeID,
+		v.DeploymentJobID, v.Lifecycle, authority, v.RequestedBy, v.RequestedAt, v.AppliedAt, v.CompletedAt, v.UpdatedAt,
+		v.FailureCode, v.FailureMessageRedacted)
+	if err != nil {
+		return cutoverv1.ApplicationCutover{}, false, err
+	}
+
+	if key != "" {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO application_cutover_idempotency(project_id,idempotency_key,payload_hash,cutover_id,created_at) VALUES($1,$2,$3,$4,$5)`, v.ProjectID, key, payload, v.ID, v.RequestedAt); err != nil {
+			return cutoverv1.ApplicationCutover{}, false, err
+		}
+	}
+	return v, false, tx.Commit()
+}
+
+func (s PostgresStore) GetCutover(ctx context.Context, projectID, id string) (cutoverv1.ApplicationCutover, error) {
+	return getCutover(ctx, s.DB, projectID, id)
+}
+
+func (s PostgresStore) ListCutovers(ctx context.Context, projectID, applicationID string) ([]cutoverv1.ApplicationCutover, error) {
+	query, args := `SELECT authority,lifecycle,deployment_job_id,applied_at,completed_at,updated_at,failure_code,failure_message FROM application_cutovers WHERE project_id=$1`, []any{projectID}
+	if applicationID != "" {
+		query += ` AND application_id=$2`
+		args = append(args, applicationID)
+	}
+	query += ` ORDER BY requested_at,id`
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []cutoverv1.ApplicationCutover{}
+	for rows.Next() {
+		v, scanErr := scanCutover(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s PostgresStore) UpdateCutover(ctx context.Context, v cutoverv1.ApplicationCutover) (cutoverv1.ApplicationCutover, error) {
+	authority, _ := json.Marshal(v)
+	row := s.DB.QueryRowContext(ctx, `UPDATE application_cutovers
+		SET lifecycle=$1, authority=$2::jsonb,
+		    applied_at=$3, completed_at=$4, updated_at=now(),
+		    deployment_job_id=$5, failure_code=$6, failure_message=$7
+		WHERE project_id=$8 AND id=$9
+		RETURNING authority,lifecycle,deployment_job_id,applied_at,completed_at,updated_at,failure_code,failure_message`,
+		v.Lifecycle, authority, v.AppliedAt, v.CompletedAt, v.DeploymentJobID, v.FailureCode, v.FailureMessageRedacted, v.ProjectID, v.ID)
+	updated, err := scanCutover(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return cutoverv1.ApplicationCutover{}, ErrNotFound
+	}
+	return updated, err
+}
+
+func (s PostgresStore) HasActiveCutover(ctx context.Context, projectID, applicationID string) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM application_cutovers WHERE project_id=$1 AND application_id=$2 AND lifecycle IN ('queued','validating','applying','deploying','verifying'))`, projectID, applicationID).Scan(&exists)
+	return exists, err
+}
+
 type rowScanner interface{ Scan(...any) error }
 type queryExecutor interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -162,5 +267,43 @@ func scanReview(row rowScanner) (cutoverv1.ApplicationCutoverReview, error) {
 	if expires.Valid {
 		v.LeaseExpiresAt = expires.Time
 	}
+	return v, nil
+}
+
+func getCutover(ctx context.Context, db queryExecutor, projectID, id string) (cutoverv1.ApplicationCutover, error) {
+	v, err := scanCutover(db.QueryRowContext(ctx, `SELECT authority,lifecycle,deployment_job_id,applied_at,completed_at,updated_at,failure_code,failure_message FROM application_cutovers WHERE project_id=$1 AND id=$2`, projectID, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return cutoverv1.ApplicationCutover{}, ErrNotFound
+	}
+	return v, err
+}
+
+func scanCutover(row rowScanner) (cutoverv1.ApplicationCutover, error) {
+	var raw []byte
+	var lifecycle string
+	var deploymentJobID sql.NullString
+	var appliedAt sql.NullTime
+	var completedAt sql.NullTime
+	var updatedAt time.Time
+	var failureCode sql.NullString
+	var failureMessage sql.NullString
+	if err := row.Scan(&raw, &lifecycle, &deploymentJobID, &appliedAt, &completedAt, &updatedAt, &failureCode, &failureMessage); err != nil {
+		return cutoverv1.ApplicationCutover{}, err
+	}
+	var v cutoverv1.ApplicationCutover
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return v, err
+	}
+	v.Lifecycle = lifecycle
+	v.DeploymentJobID = deploymentJobID.String
+	if appliedAt.Valid {
+		v.AppliedAt = &appliedAt.Time
+	}
+	if completedAt.Valid {
+		v.CompletedAt = &completedAt.Time
+	}
+	v.UpdatedAt = updatedAt
+	v.FailureCode = failureCode.String
+	v.FailureMessageRedacted = failureMessage.String
 	return v, nil
 }

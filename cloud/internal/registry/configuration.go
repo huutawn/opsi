@@ -340,6 +340,26 @@ func configurationDiff(current ServiceConfigurationDraft, next ServiceConfigurat
 			changes = append(changes, ServiceConfigurationChange{Kind: "user_environment", Action: "set", Name: name, Before: currentValue, After: value})
 		}
 	}
+	currentResBindings := map[string]string{}
+	nextResBindings := map[string]string{}
+	for _, b := range current.ResourceBindings {
+		currentResBindings[b.LogicalName] = b.BindingID
+	}
+	for _, b := range next.ResourceBindings {
+		nextResBindings[b.LogicalName] = b.BindingID
+	}
+	for name, value := range currentResBindings {
+		if nextValue, ok := nextResBindings[name]; !ok {
+			changes = append(changes, ServiceConfigurationChange{Kind: "resource_binding", Action: "remove", Name: name, Before: value})
+		} else if nextValue != value {
+			changes = append(changes, ServiceConfigurationChange{Kind: "resource_binding", Action: "change", Name: name, Before: value, After: nextValue})
+		}
+	}
+	for name, value := range nextResBindings {
+		if _, ok := currentResBindings[name]; !ok {
+			changes = append(changes, ServiceConfigurationChange{Kind: "resource_binding", Action: "add", Name: name, After: value})
+		}
+	}
 	sort.Slice(changes, func(i, j int) bool {
 		return changes[i].Kind+changes[i].Name+changes[i].Action < changes[j].Kind+changes[j].Name+changes[j].Action
 	})

@@ -32,11 +32,17 @@ type Binding struct {
 	Path             string `json:"path,omitempty"`
 }
 
+type ResourceBinding struct {
+	LogicalName string `json:"logical_name"`
+	BindingID   string `json:"binding_id"`
+}
+
 type ServiceConfigurationDraft struct {
-	SchemaVersion string                             `json:"schema_version"`
-	Environment   []deploymentv1.EnvironmentVariable `json:"environment,omitempty"`
-	PublicRoute   *PublicRouteIntent                 `json:"public_route,omitempty"`
-	Bindings      []Binding                          `json:"bindings,omitempty"`
+	SchemaVersion    string                             `json:"schema_version"`
+	Environment      []deploymentv1.EnvironmentVariable `json:"environment,omitempty"`
+	PublicRoute      *PublicRouteIntent                 `json:"public_route,omitempty"`
+	Bindings         []Binding                          `json:"bindings,omitempty"`
+	ResourceBindings []ResourceBinding                  `json:"resource_bindings,omitempty"`
 }
 
 type Configuration struct {
@@ -53,6 +59,7 @@ func Normalize(draft ServiceConfigurationDraft) ServiceConfigurationDraft {
 	draft.SchemaVersion = SchemaVersion
 	draft.Environment = append([]deploymentv1.EnvironmentVariable(nil), draft.Environment...)
 	draft.Bindings = append([]Binding(nil), draft.Bindings...)
+	draft.ResourceBindings = append([]ResourceBinding(nil), draft.ResourceBindings...)
 	sort.Slice(draft.Environment, func(i, j int) bool { return draft.Environment[i].Name < draft.Environment[j].Name })
 	if draft.PublicRoute != nil {
 		route := *draft.PublicRoute
@@ -78,6 +85,14 @@ func Normalize(draft ServiceConfigurationDraft) ServiceConfigurationDraft {
 	sort.Slice(draft.Bindings, func(i, j int) bool {
 		first, second := draft.Bindings[i], draft.Bindings[j]
 		return first.Kind+"\x00"+first.TargetServiceID+"\x00"+first.TargetServiceKey+"\x00"+first.EnvPrefix+"\x00"+first.EnvName+"\x00"+first.Path < second.Kind+"\x00"+second.TargetServiceID+"\x00"+second.TargetServiceKey+"\x00"+second.EnvPrefix+"\x00"+second.EnvName+"\x00"+second.Path
+	})
+	for i := range draft.ResourceBindings {
+		draft.ResourceBindings[i].LogicalName = strings.TrimSpace(draft.ResourceBindings[i].LogicalName)
+		draft.ResourceBindings[i].BindingID = strings.TrimSpace(draft.ResourceBindings[i].BindingID)
+	}
+	sort.Slice(draft.ResourceBindings, func(i, j int) bool {
+		first, second := draft.ResourceBindings[i], draft.ResourceBindings[j]
+		return first.LogicalName+"\x00"+first.BindingID < second.LogicalName+"\x00"+second.BindingID
 	})
 	return draft
 }

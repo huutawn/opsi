@@ -140,6 +140,11 @@ func NewServer(cfg Config) *Server {
 		installationClaimGrants: map[string]installationClaimGrant{},
 		random:                  rand.Reader,
 	}
+	server.Cutovers.Deployments = registryService
+	server.Cutovers.BuildRecords = buildRecordService.Store
+	server.Cutovers.Topology = topologyService
+	server.Cutovers.Policies = server.Policies
+	server.Cutovers.RuntimeResolver = resourceService
 	server.BuildRecords.AuditSink = func(event buildrecord.AuditEvent) {
 		registryService.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
 	}
@@ -406,6 +411,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	}
 	if strings.Contains(r.URL.Path, "/cutover-reviews/") && strings.HasSuffix(r.URL.Path, "/result") {
 		s.handleAgentCutoverReviewResult(w, r)
+		return
+	}
+	if (strings.Contains(r.URL.Path, "/cutovers/") || strings.Contains(r.URL.Path, "/application-cutovers/")) && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentCutoverResult(w, r)
 		return
 	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {

@@ -46,7 +46,174 @@ const (
 	FailureSourceInvalid              = "CUTOVER_SOURCE_INVALID"
 	FailureIdempotencyKeyInvalid      = "CUTOVER_IDEMPOTENCY_KEY_INVALID"
 	FailureIdempotencyConflict        = "CUTOVER_IDEMPOTENCY_CONFLICT"
+	FailureReviewNotReady             = "CUTOVER_REVIEW_NOT_READY"
+	FailureCutoverAlreadyRunning      = "CUTOVER_ALREADY_RUNNING"
+	FailureSourceUnavailable          = "CUTOVER_SOURCE_UNAVAILABLE"
+	FailureTargetUnavailable          = "CUTOVER_TARGET_UNAVAILABLE"
+	FailureTargetPrivilegeInvalid     = "CUTOVER_TARGET_PRIVILEGE_INVALID"
+	FailureConfigApplyFailed          = "CUTOVER_CONFIG_APPLY_FAILED"
+	FailureDeploymentFailed           = "CUTOVER_DEPLOYMENT_FAILED"
+	FailureApplicationHealthFailed    = "CUTOVER_APPLICATION_HEALTH_FAILED"
+	FailureTargetVerificationFailed   = "CUTOVER_TARGET_VERIFICATION_FAILED"
 )
+
+const CutoverSchemaVersion = "opsi.cutover/v1"
+
+const (
+	CutoverQueued     = "queued"
+	CutoverValidating = "validating"
+	CutoverApplying   = "applying"
+	CutoverDeploying  = "deploying"
+	CutoverVerifying  = "verifying"
+	CutoverSucceeded  = "succeeded"
+	CutoverFailed     = "failed"
+)
+
+type CutoverVerificationSummary struct {
+	SourceSQLPreflight       string `json:"source_sql_preflight"`
+	TargetSQLPreflight       string `json:"target_sql_preflight"`
+	TargetRoleAttributes     string `json:"target_role_attributes"`
+	DeploymentReady          bool   `json:"deployment_ready"`
+	WorkloadReady            bool   `json:"workload_ready"`
+	TargetDBConnected        bool   `json:"target_db_connected"`
+	RestoredDataVerified     bool   `json:"restored_data_verified"`
+	TargetOnlyMarkerPresent  bool   `json:"target_only_marker_present"`
+	SourceOnlyMarkerAbsent   bool   `json:"source_only_marker_absent"`
+	PostCutoverTargetWritten bool   `json:"post_cutover_target_written"`
+	SourceRollbackPreserved  bool   `json:"source_rollback_preserved"`
+}
+
+type ApplicationCutover struct {
+	SchemaVersion                       string                     `json:"schema_version"`
+	ID                                  string                     `json:"id"`
+	ProjectID                           string                     `json:"project_id"`
+	EnvironmentID                       string                     `json:"environment_id"`
+	ApplicationID                       string                     `json:"application_id"`
+	CutoverReviewID                     string                     `json:"cutover_review_id"`
+	SourceBindingID                     string                     `json:"source_binding_id"`
+	TargetBindingID                     string                     `json:"target_binding_id"`
+	SourceResourceID                    string                     `json:"source_resource_id"`
+	TargetResourceID                    string                     `json:"target_resource_id"`
+	ReviewedApplicationConfigRevision   uint64                     `json:"reviewed_application_config_revision"`
+	ReviewedApplicationConfigHash       string                     `json:"reviewed_application_config_hash"`
+	PreCutoverApplicationConfigRevision uint64                     `json:"pre_cutover_application_config_revision"`
+	PreCutoverApplicationConfigHash     string                     `json:"pre_cutover_application_config_hash"`
+	ResultingApplicationConfigRevision  uint64                     `json:"resulting_application_config_revision"`
+	ResultingApplicationConfigHash      string                     `json:"resulting_application_config_hash"`
+	PreCutoverDeploymentJobID           string                     `json:"pre_cutover_deployment_job_id,omitempty"`
+	PreCutoverBuildRecordID             string                     `json:"pre_cutover_build_record_id,omitempty"`
+	PreCutoverImageDigest               string                     `json:"pre_cutover_image_digest,omitempty"`
+	DeploymentJobID                     string                     `json:"deployment_job_id,omitempty"`
+	Lifecycle                           string                     `json:"lifecycle"`
+	RequestedBy                         string                     `json:"requested_by"`
+	RequestedAt                         time.Time                  `json:"requested_at"`
+	AppliedAt                           *time.Time                 `json:"applied_at,omitempty"`
+	CompletedAt                         *time.Time                 `json:"completed_at,omitempty"`
+	UpdatedAt                           time.Time                  `json:"updated_at"`
+	TargetNodeID                        string                     `json:"target_node_id,omitempty"`
+	LeaseToken                          string                     `json:"-"`
+	LeaseExpiresAt                      time.Time                  `json:"-"`
+	AttemptCount                        int                        `json:"attempt_count"`
+	FailureCode                         string                     `json:"failure_code,omitempty"`
+	FailureMessageRedacted              string                     `json:"failure_message_redacted,omitempty"`
+	VerificationSummary                 CutoverVerificationSummary `json:"verification_summary"`
+	EvidenceHash                        string                     `json:"evidence_hash,omitempty"`
+}
+
+type ApplyRequest struct {
+	CutoverReviewID string `json:"cutover_review_id"`
+}
+
+func CutoverEvidenceHash(c ApplicationCutover) string {
+	data, _ := json.Marshal([]any{
+		c.ID,
+		c.ProjectID,
+		c.EnvironmentID,
+		c.ApplicationID,
+		c.CutoverReviewID,
+		c.SourceBindingID,
+		c.TargetBindingID,
+		c.SourceResourceID,
+		c.TargetResourceID,
+		c.ReviewedApplicationConfigRevision,
+		c.ReviewedApplicationConfigHash,
+		c.PreCutoverApplicationConfigRevision,
+		c.PreCutoverApplicationConfigHash,
+		c.ResultingApplicationConfigRevision,
+		c.ResultingApplicationConfigHash,
+		c.PreCutoverDeploymentJobID,
+		c.PreCutoverBuildRecordID,
+		c.PreCutoverImageDigest,
+		c.DeploymentJobID,
+		c.VerificationSummary,
+	})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (c ApplicationCutover) ValidateSucceeded() error {
+	if c.SchemaVersion != CutoverSchemaVersion ||
+		c.ID == "" ||
+		c.ProjectID == "" ||
+		c.EnvironmentID == "" ||
+		c.ApplicationID == "" ||
+		c.CutoverReviewID == "" ||
+		c.SourceBindingID == "" ||
+		c.TargetBindingID == "" ||
+		c.SourceResourceID == "" ||
+		c.TargetResourceID == "" ||
+		c.SourceBindingID == c.TargetBindingID ||
+		c.SourceResourceID == c.TargetResourceID ||
+		c.ResultingApplicationConfigRevision <= c.PreCutoverApplicationConfigRevision ||
+		c.DeploymentJobID == "" ||
+		c.Lifecycle != CutoverSucceeded ||
+		c.CompletedAt == nil ||
+		!c.VerificationSummary.WorkloadReady ||
+		!c.VerificationSummary.TargetDBConnected ||
+		!c.VerificationSummary.SourceRollbackPreserved ||
+		c.EvidenceHash == "" ||
+		c.EvidenceHash != CutoverEvidenceHash(c) {
+		return errors.New("cutover evidence is invalid")
+	}
+	return nil
+}
+
+func ValidFailure(code string) bool {
+	for _, value := range []string{
+		FailureSourceBindingInvalid,
+		FailureTargetBindingInvalid,
+		FailureTargetNotReady,
+		FailureSourceNotReady,
+		FailureTargetRestoreNotSucceeded,
+		FailureApplicationStateInvalid,
+		FailureActiveOperationConflict,
+		FailureDatabaseUnavailable,
+		FailurePrivilegeInvalid,
+		FailureStaleReview,
+		FailureEnvironmentMismatch,
+		FailureIdentityConflict,
+		FailureLeaseLost,
+		FailureSchemaMismatch,
+		FailureTargetInvalid,
+		FailureSourceInvalid,
+		FailureIdempotencyKeyInvalid,
+		FailureIdempotencyConflict,
+		FailureReviewNotReady,
+		FailureCutoverAlreadyRunning,
+		FailureSourceUnavailable,
+		FailureTargetUnavailable,
+		FailureTargetPrivilegeInvalid,
+		FailureConfigApplyFailed,
+		FailureDeploymentFailed,
+		FailureApplicationHealthFailed,
+		FailureTargetVerificationFailed,
+	} {
+		if strings.TrimSpace(code) == value {
+			return true
+		}
+	}
+	return false
+}
 
 type ValidationSummary struct {
 	SourceSQLPreflight   string `json:"source_sql_preflight"`
@@ -137,6 +304,17 @@ type ReviewResult struct {
 	FailureMessageRedacted string            `json:"failure_message_redacted,omitempty"`
 }
 
+type CutoverApplyResult struct {
+	Status                 string                     `json:"status"`
+	VerificationSummary    CutoverVerificationSummary `json:"verification_summary"`
+	EvidenceHash           string                     `json:"evidence_hash,omitempty"`
+	FailureCode            string                     `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                     `json:"failure_message_redacted,omitempty"`
+}
+
+type CutoverResult = CutoverApplyResult
+
+
 func EvidenceHash(review ApplicationCutoverReview) string {
 	data, _ := json.Marshal([]any{
 		review.ID,
@@ -226,32 +404,4 @@ func (r ApplicationCutoverReview) ValidateSucceeded() error {
 		return errors.New("cutover review evidence is invalid")
 	}
 	return nil
-}
-
-func ValidFailure(code string) bool {
-	for _, value := range []string{
-		FailureSourceBindingInvalid,
-		FailureTargetBindingInvalid,
-		FailureTargetNotReady,
-		FailureSourceNotReady,
-		FailureTargetRestoreNotSucceeded,
-		FailureApplicationStateInvalid,
-		FailureActiveOperationConflict,
-		FailureDatabaseUnavailable,
-		FailurePrivilegeInvalid,
-		FailureStaleReview,
-		FailureEnvironmentMismatch,
-		FailureIdentityConflict,
-		FailureLeaseLost,
-		FailureSchemaMismatch,
-		FailureTargetInvalid,
-		FailureSourceInvalid,
-		FailureIdempotencyKeyInvalid,
-		FailureIdempotencyConflict,
-	} {
-		if strings.TrimSpace(code) == value {
-			return true
-		}
-	}
-	return false
 }

@@ -173,7 +173,88 @@ func TestValidFailureCodes(t *testing.T) {
 	if !ValidFailure(FailureStaleReview) {
 		t.Fatal("expected FailureStaleReview to be valid")
 	}
+	if !ValidFailure(FailureReviewNotReady) {
+		t.Fatal("expected FailureReviewNotReady to be valid")
+	}
+	if !ValidFailure(FailureCutoverAlreadyRunning) {
+		t.Fatal("expected FailureCutoverAlreadyRunning to be valid")
+	}
 	if ValidFailure("UNKNOWN_FAILURE_CODE") {
 		t.Fatal("expected UNKNOWN_FAILURE_CODE to be invalid")
+	}
+}
+
+func TestApplicationCutoverValidationAndEvidenceHash(t *testing.T) {
+	now := time.Now().UTC()
+	cutover := ApplicationCutover{
+		SchemaVersion:                       CutoverSchemaVersion,
+		ID:                                  "acut-1",
+		ProjectID:                           "proj-1",
+		EnvironmentID:                       "env-1",
+		ApplicationID:                       "app-1",
+		CutoverReviewID:                     "acrv-1",
+		SourceBindingID:                     "bind-src",
+		TargetBindingID:                     "bind-tgt",
+		SourceResourceID:                    "res-src",
+		TargetResourceID:                    "res-tgt",
+		ReviewedApplicationConfigRevision:   1,
+		ReviewedApplicationConfigHash:       strings.Repeat("a", 64),
+		PreCutoverApplicationConfigRevision: 1,
+		PreCutoverApplicationConfigHash:     strings.Repeat("a", 64),
+		ResultingApplicationConfigRevision:  2,
+		ResultingApplicationConfigHash:      strings.Repeat("b", 64),
+		PreCutoverDeploymentJobID:           "dep-1",
+		PreCutoverBuildRecordID:             "br-1",
+		PreCutoverImageDigest:               strings.Repeat("c", 64),
+		DeploymentJobID:                     "dep-2",
+		Lifecycle:                           CutoverSucceeded,
+		RequestedBy:                         "user-1",
+		RequestedAt:                         now,
+		CompletedAt:                         &now,
+		VerificationSummary: CutoverVerificationSummary{
+			SourceSQLPreflight:       "PASS",
+			TargetSQLPreflight:       "PASS",
+			TargetRoleAttributes:     "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+			DeploymentReady:          true,
+			WorkloadReady:            true,
+			TargetDBConnected:        true,
+			RestoredDataVerified:     true,
+			TargetOnlyMarkerPresent:  true,
+			SourceOnlyMarkerAbsent:   true,
+			PostCutoverTargetWritten: true,
+			SourceRollbackPreserved:  true,
+		},
+	}
+	cutover.EvidenceHash = CutoverEvidenceHash(cutover)
+
+	if err := cutover.ValidateSucceeded(); err != nil {
+		t.Fatalf("expected valid succeeded cutover: %v", err)
+	}
+
+	// Tampered evidence hash
+	badHash := cutover
+	badHash.EvidenceHash = "badhash"
+	if err := badHash.ValidateSucceeded(); err == nil {
+		t.Fatal("expected error with tampered evidence hash")
+	}
+
+	// Incomplete verification
+	unverified := cutover
+	unverified.VerificationSummary.TargetDBConnected = false
+	unverified.EvidenceHash = CutoverEvidenceHash(unverified)
+	if err := unverified.ValidateSucceeded(); err == nil {
+		t.Fatal("expected error with incomplete verification")
+	}
+
+	// Check serialization security
+	data, err := json.Marshal(cutover)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(data)
+	for _, forbidden := range []string{"password", "secret", "bearer", "token"} {
+		if strings.Contains(strings.ToLower(serialized), `"`+forbidden+`"`) {
+			t.Fatalf("forbidden field %q found in cutover JSON", forbidden)
+		}
 	}
 }
