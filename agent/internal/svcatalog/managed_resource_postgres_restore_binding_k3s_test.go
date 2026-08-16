@@ -42,6 +42,7 @@ func TestManagedResourceRealK3sPostgresRestoreApplicationBinding(t *testing.T) {
 	requireK3sInfrastructure(t)
 
 	spec := postgresBackupK3sSpec()
+	spec.ResourceID, spec.CredentialID, spec.Connection.ServiceName = "res-postgres-rb-src-e2e", "mrcred-res-postgres-rb-src-e2e", "opsi-mr-postgres-rb-src"
 	spec.ProjectID, spec.EnvironmentID = projectID, environmentID
 	spec.Assignment.NodeID, spec.Assignment.AgentID = nodeID, agentID
 	spec.Connection.Host = spec.Connection.ServiceName + "." + managedResourceNamespace(spec) + ".svc.cluster.local"
@@ -86,7 +87,8 @@ func TestManagedResourceRealK3sPostgresRestoreApplicationBinding(t *testing.T) {
 
 	authorityAPI := restoreAcceptanceAPI{baseURL: cloudURL, projectID: projectID, pat: pat, postgresContainer: postgresContainer}
 	authorityAPI.seedReadyResource(t, spec, ready.Evidence)
-	createdBackup := authorityAPI.createBackup(t, spec.ResourceID)
+	seedVaultManagedResourceCredential(t, authorityAPI, *management)
+	createdBackup := authorityAPI.createBackupWithKey(t, spec.ResourceID, "p07b3c2b1-backup")
 	backupID := createdBackup.ID
 	storeSpec := backupv1.StoreSpec{ID: "minio-p07b3c2a", Provider: backupv1.StoreProviderS3, Endpoint: endpoint, Bucket: bucket, Region: "us-east-1", AllowInsecure: true}
 	credential := backupv1.StoreCredential{AccessKey: access, SecretKey: secret}
@@ -97,6 +99,7 @@ func TestManagedResourceRealK3sPostgresRestoreApplicationBinding(t *testing.T) {
 
 	cloud := &restoreAcceptanceCloudClient{Client: cloudrelay.Client{BaseURL: cloudURL, ProjectID: projectID, AgentToken: agentToken}}
 	runCtx, stopRunner := context.WithCancel(context.Background())
+	t.Cleanup(stopRunner)
 	runResult := make(chan error, 1)
 	go func() {
 		runResult <- (cloudrunner.Runner{Client: cloud, Engine: postgresBackupRolloutEngine{}, Backups: backupagent.Executor{KubectlPath: "kubectl"}, Restores: restoreagent.Executor{KubectlPath: "kubectl"}, NodeID: spec.Assignment.NodeID, PollInterval: 10 * time.Millisecond, LongPollWait: 10 * time.Millisecond, HeartbeatInterval: time.Hour, BackupHeartbeat: 250 * time.Millisecond}).Run(runCtx)
@@ -119,7 +122,7 @@ psql -v ON_ERROR_STOP=1 -qAt -h 127.0.0.1 -U "$role" -d "$db" -c 'CREATE TABLE s
 	}
 
 	targetSpec := spec
-	targetSpec.ResourceID, targetSpec.CredentialID, targetSpec.Connection.ServiceName = "res-postgres-restore-e2e", "mrcred-res-postgres-restore-e2e", "opsi-mr-postgres-restore"
+	targetSpec.ResourceID, targetSpec.CredentialID, targetSpec.Connection.ServiceName = "res-postgres-rb-tgt-e2e", "mrcred-res-postgres-rb-tgt-e2e", "opsi-mr-postgres-rb-tgt"
 	targetSpec.Connection.Host = targetSpec.Connection.ServiceName + "." + managedResourceNamespace(targetSpec) + ".svc.cluster.local"
 	targetSpec.SpecHash, _ = targetSpec.Hash()
 	targetNamespace := managedResourceNamespace(targetSpec)
@@ -135,11 +138,12 @@ psql -v ON_ERROR_STOP=1 -qAt -h 127.0.0.1 -U "$role" -d "$db" -c 'CREATE TABLE s
 	targetPVUID := kubectl(t, "get", "pv", targetReady.Evidence.PVName, "-o", "jsonpath={.metadata.uid}")
 	targetReady.Evidence.PVCUID, targetReady.Evidence.PVUID, targetReady.Evidence.StorageHash = targetPVCUID, targetPVUID, resourcev1.ManagedResourceStorageHash(targetSpec)
 	authorityAPI.seedReadyResource(t, targetSpec, targetReady.Evidence)
+	seedVaultManagedResourceCredential(t, authorityAPI, *targetManagement)
 
-	queuedReview := authorityAPI.createReview(t, backupID, targetSpec.ResourceID)
+	queuedReview := authorityAPI.createReviewWithKey(t, backupID, targetSpec.ResourceID, "p07b3c2b1-review")
 	restoreReview, _ := authorityAPI.waitReview(t, queuedReview.ID, 5*time.Minute)
 
-	queuedRestore := authorityAPI.createRestore(t, backupID, restoreReview)
+	queuedRestore := authorityAPI.createRestoreWithKey(t, backupID, restoreReview, "p07b3c2b1-restore")
 	restoreAuthority, _ := authorityAPI.waitRestore(t, queuedRestore.ID, 10*time.Minute)
 
 	if err := restoreAuthority.ValidateSucceeded(); err != nil {

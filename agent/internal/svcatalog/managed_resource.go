@@ -202,7 +202,7 @@ func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev
 		evidence, err := r.observe(ctx, spec)
 		if err != nil {
 			code := failureCode(err)
-			if code == resourcev1.FailureAuthFailed || code == resourcev1.FailureSecretApplyFailed {
+			if code == resourcev1.FailureSecretApplyFailed {
 				return evidence, err
 			}
 		}
@@ -216,6 +216,9 @@ func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev
 		case <-ctx.Done():
 			return nil, errors.New("managed resource readiness cancelled")
 		case <-deadline.C:
+			if evidence != nil && !evidence.AuthReady && managedCredentialRequired(spec.ResourceType) {
+				return evidence, managedResourceError{resourcev1.FailureAuthFailed, "managed resource authenticated readiness check failed"}
+			}
 			if spec.ResourceType == resourcev1.TypePostgres && evidence != nil {
 				switch {
 				case !evidence.StorageReady:

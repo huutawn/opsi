@@ -23,7 +23,12 @@ postgres_image=""
 evidence_dir="${OPSI_K3S_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3b1-postgres-binding-$(date -u +%Y%m%dT%H%M%SZ)}"
 backup_evidence_dir="${OPSI_P07B3C1_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c1-postgres-backup-$(date -u +%Y%m%dT%H%M%SZ)}"
 restore_evidence_dir="${OPSI_P07B3C2A_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c2a-postgres-restore-$(date -u +%Y%m%dT%H%M%SZ)}"
+restore_binding_evidence_dir="${OPSI_P07B3C2B1_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c2b1-restore-binding-$(date -u +%Y%m%dT%H%M%SZ)}"
 cutover_evidence_dir="${OPSI_P07B3C2B2A_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c2b2a-cutover-review-$(date -u +%Y%m%dT%H%M%SZ)}"
+cutover_apply_evidence_dir="${OPSI_P07B3C2B2B1_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c2b2b1-cutover-apply-$(date -u +%Y%m%dT%H%M%SZ)}"
+cutover_rollback_evidence_dir="${OPSI_P07B3C2B2B2_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c2b2b2-cutover-rollback-$(date -u +%Y%m%dT%H%M%SZ)}"
+cutover_finalize_evidence_dir="${OPSI_P07B3C2C_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c2c-cutover-finalize-$(date -u +%Y%m%dT%H%M%SZ)}"
+final_evidence_dir="${OPSI_P07B3_FINAL_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3-final-$(date -u +%Y%m%dT%H%M%SZ)}"
 minio_image="minio/minio@sha256:f6efb212cad3b62f78ca02339f16d8bc28d5bb2fbe792dfc21225c6037d2af8b"
 minio_access="opsi-minio-${suffix}"
 minio_secret="opsi-minio-secret-${suffix}"
@@ -64,7 +69,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$work_dir/auth" "$work_dir/bin" "$work_dir/fixture" "$work_dir/postgres-fixture" "$DOCKER_CONFIG" "$evidence_dir" "$backup_evidence_dir" "$restore_evidence_dir" "$cutover_evidence_dir"
+mkdir -p "$work_dir/auth" "$work_dir/bin" "$work_dir/fixture" "$work_dir/postgres-fixture" "$DOCKER_CONFIG" \
+	"$evidence_dir" "$backup_evidence_dir" "$restore_evidence_dir" "$restore_binding_evidence_dir" \
+	"$cutover_evidence_dir" "$cutover_apply_evidence_dir" "$cutover_rollback_evidence_dir" "$cutover_finalize_evidence_dir" \
+	"$final_evidence_dir"
 htpasswd -Bbn "$username" "$password" >"$work_dir/auth/htpasswd"
 chmod 755 "$work_dir" "$work_dir/auth"
 chmod 644 "$work_dir/auth/htpasswd"
@@ -276,15 +284,19 @@ printf 'registry_pull_tests=PASS\n'
 export PATH="$work_dir/bin:$PATH" OPSI_E2E_K3S_POSTGRES=1 OPSI_E2E_K3S_POSTGRES_BINDING=1 OPSI_E2E_K3S_POSTGRES_BACKUP=1 OPSI_E2E_K3S_NATS=1 OPSI_E2E_K3S_VALKEY=1 \
 	OPSI_E2E_MINIO_ENDPOINT="http://127.0.0.1:${minio_port}" OPSI_E2E_MINIO_ACCESS_KEY="$minio_access" OPSI_E2E_MINIO_SECRET_KEY="$minio_secret" OPSI_E2E_MINIO_BUCKET="$minio_bucket" \
 	OPSI_P07B3B1_ACCEPTANCE_E2E_IMAGE="registry:5000/opsi/p07b3b1-acceptance@${postgres_digest}" OPSI_PRIVATE_REGISTRY_E2E_USERNAME="$username" OPSI_PRIVATE_REGISTRY_E2E_PASSWORD="$password" \
-	OPSI_K3S_EVIDENCE_DIR="$evidence_dir" OPSI_P07B3C1_EVIDENCE_DIR="$backup_evidence_dir" OPSI_P07B3C2A_EVIDENCE_DIR="$restore_evidence_dir" OPSI_P07B3C2B2A_EVIDENCE_DIR="$cutover_evidence_dir" \
+	OPSI_K3S_EVIDENCE_DIR="$evidence_dir" OPSI_P07B3C1_EVIDENCE_DIR="$backup_evidence_dir" OPSI_P07B3C2A_EVIDENCE_DIR="$restore_evidence_dir" \
+	OPSI_P07B3C2B1_EVIDENCE_DIR="$restore_binding_evidence_dir" OPSI_P07B3C2B2A_EVIDENCE_DIR="$cutover_evidence_dir" \
+	OPSI_P07B3C2B2B1_EVIDENCE_DIR="$cutover_apply_evidence_dir" OPSI_P07B3C2B2B2_EVIDENCE_DIR="$cutover_rollback_evidence_dir" \
+	OPSI_P07B3C2C_EVIDENCE_DIR="$cutover_finalize_evidence_dir" \
+	OPSI_P07B3_FINAL_EVIDENCE_DIR="$final_evidence_dir" \
 	OPSI_P07B3C2A_CLOUD_URL="$cloud_url" OPSI_P07B3C2A_CLOUD_PROJECT_ID="$cloud_project_id" OPSI_P07B3C2A_CLOUD_ENVIRONMENT_ID="$cloud_environment_id" \
 	OPSI_P07B3C2A_CLOUD_NODE_ID="$cloud_node_id" OPSI_P07B3C2A_CLOUD_AGENT_ID="$cloud_agent_id" OPSI_P07B3C2A_CLOUD_PAT="$cloud_pat" OPSI_P07B3C2A_CLOUD_AGENT_TOKEN="$cloud_agent_token" OPSI_P07B3C2A_POSTGRES_CONTAINER="$cloud_postgres_container"
 if [ "${OPSI_P07B3C2A_ONLY:-}" = "1" ]; then
-	go test -count=1 -run '^TestManagedResourceRealK3sPostgresLogicalBackup$' -v ./agent/internal/svcatalog
+	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3sPostgresLogicalBackup$' -v ./agent/internal/svcatalog
 else
-	go test -count=1 -run '^TestManagedResourceRealK3s(NATS|Valkey)$' -v ./agent/internal/svcatalog
-	go test -count=1 -run '^TestManagedResourceRealK3sPostgresLogicalBackup$' -v ./agent/internal/svcatalog
-	go test -count=1 -run '^TestManagedResourceRealK3sPostgres(Persistence|ApplicationBinding|CutoverReview)$' -v ./agent/internal/svcatalog
+	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3s(NATS|Valkey)$' -v ./agent/internal/svcatalog
+	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3sPostgresLogicalBackup$' -v ./agent/internal/svcatalog
+	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3sPostgres(Persistence|ApplicationBinding|RestoreApplicationBinding|CutoverReview|CutoverApply|CutoverRollback|CutoverFinalize|FullLifecycleFinalAcceptance)$' -v ./agent/internal/svcatalog
 fi
 
 authority_file="$restore_evidence_dir/restore-authority.json"
@@ -347,7 +359,12 @@ PY
 printf 'postgres_application_binding_tests=PASS evidence=%s\n' "$evidence_dir"
 printf 'postgres_logical_backup_test=PASS evidence=%s\n' "$backup_evidence_dir"
 printf 'postgres_restore_test=PASS evidence=%s\n' "$restore_evidence_dir"
+printf 'postgres_restore_application_binding_test=PASS evidence=%s\n' "$restore_binding_evidence_dir"
 printf 'postgres_cutover_review_test=PASS evidence=%s\n' "$cutover_evidence_dir"
+printf 'postgres_cutover_apply_test=PASS evidence=%s\n' "$cutover_apply_evidence_dir"
+printf 'postgres_cutover_rollback_test=PASS evidence=%s\n' "$cutover_rollback_evidence_dir"
+printf 'postgres_cutover_finalize_test=PASS evidence=%s\n' "$cutover_finalize_evidence_dir"
+printf 'postgres_full_lifecycle_final_acceptance=PASS evidence=%s\n' "$final_evidence_dir"
 
 printf 'fixture_reference=registry:5000/opsi/p07b2-acceptance@%s anonymous_pull=%s wrong_credential=%s authenticated_tag_lookup=%s digest_lookup=%s\n' \
 	"$digest" "$anonymous_status" "$wrong_status" "$correct_status" "$digest_status"
