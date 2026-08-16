@@ -27,11 +27,13 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
+	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
 )
 
 type Server struct {
@@ -42,6 +44,7 @@ type Server struct {
 	Registry                registry.API
 	Resources               resource.Service
 	Backups                 backupdomain.Service
+	Restores                restoredomain.Service
 	BuildJobs               buildjob.Service
 	BuildRecords            buildrecord.Service
 	RegistryPullCredentials RegistryPullCredentialProvider
@@ -93,11 +96,15 @@ func NewServer(cfg Config) *Server {
 	registryService := registry.NewService()
 	resourceService := resource.Service{Store: resource.NewMemoryStore(), Scopes: registryService, Credentials: resource.NewMemoryCredentialAuthority()}
 	backupService := backupdomain.Service{Store: backupdomain.NewMemoryStore(), Resources: resourceService}
+	restoreService := restoredomain.Service{Store: restoredomain.NewMemoryStore(), Backups: backupService, Resources: resourceService}
 	if cfg.BackupStore.Enabled() {
 		backupService.Artifacts = backupStoreAuthority(cfg.BackupStore)
 	}
-	resourceService.Operations = backupService
+	resourceService.Operations = []resource.ActiveOperationAuthority{backupService, restoreService}
 	backupService.Resources = resourceService
+	restoreService.Resources = resourceService
+	restoreService.Backups = backupService
+	restoreService.Artifacts = backupService.Artifacts
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
 	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor, Registry: cfg.BuildRegistry}
@@ -108,6 +115,7 @@ func NewServer(cfg Config) *Server {
 		Registry:                registryService,
 		Resources:               resourceService,
 		Backups:                 backupService,
+		Restores:                restoreService,
 		BuildJobs:               buildJobService,
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
@@ -383,6 +391,14 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentBackupResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/restore-reviews/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentRestoreReviewResult(w, r)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/restores/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentRestoreResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -420,6 +436,32 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.observer.Inc("agent_jobs_leased_total")
 		s.Registry.Audit(lease.Deployment.OrgID, projectID, agent.ID, "DEPLOYMENT_AGENT_LEASED", "deployment_job", lease.Deployment.ID, "success", map[string]any{"status": lease.Deployment.Status, "attempt_count": lease.Deployment.AttemptCount})
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
+		return
+	}
+	reviewLease, ok, err := s.Restores.LeaseReview(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeRestoreResult(w, r, reviewLease, err, http.StatusOK)
+		return
+	}
+	if reviewLease.Review.Lifecycle == restorev1.ReviewFailed {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "RESTORE_FAILED", "restore_review", reviewLease.Review.ID, "failure", map[string]any{"failure_code": reviewLease.Review.FailureCode})
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "restore_review", "lease_token": reviewLease.LeaseToken, "review": reviewLease.Review, "target_spec": reviewLease.TargetSpec})
+		return
+	}
+	restoreLease, ok, err := s.Restores.Lease(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeRestoreResult(w, r, restoreLease, err, http.StatusOK)
+		return
+	}
+	if restoreLease.Restore.Lifecycle == restorev1.LifecycleFailed {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "RESTORE_FAILED", "restore", restoreLease.Restore.ID, "failure", map[string]any{"target_resource_id": restoreLease.Restore.TargetResourceID, "failure_code": restoreLease.Restore.FailureCode})
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "restore", "lease_token": restoreLease.LeaseToken, "restore": restoreLease.Restore, "backup": restoreLease.Backup, "target_spec": restoreLease.TargetSpec, "store": restoreLease.Store, "credential": restoreLease.Credential})
 		return
 	}
 	backupLease, ok, err := s.Backups.Lease(r.Context(), projectID, nodeID)

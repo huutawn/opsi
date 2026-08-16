@@ -47,7 +47,7 @@ func TestBackupAPICreateListGetLeaseAndResult(t *testing.T) {
 	}
 	server.Backups.Artifacts = backupdomain.StaticStoreAuthority{Spec: backupv1.StoreSpec{ID: "store-1", Provider: backupv1.StoreProviderS3, Endpoint: "https://s3.example.test", Bucket: "backups", Region: "test-1"}, Credential: backupv1.StoreCredential{AccessKey: "access-canary", SecretKey: "secret-canary"}}
 	server.Backups.Resources = server.Resources
-	server.Resources.Operations = server.Backups
+	server.Resources.Operations = []resource.ActiveOperationAuthority{server.Backups}
 
 	path := "/api/projects/" + project.ID + "/resources/" + resourceValue.ID + "/backups"
 	created := requestResourceAPI(t, server, http.MethodPost, path, `{}`, "backup-key")

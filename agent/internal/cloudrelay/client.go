@@ -16,6 +16,7 @@ import (
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
 )
 
 type Client struct {
@@ -35,12 +36,14 @@ type DeploymentLease struct {
 }
 
 type JobLease struct {
-	Kind            string                `json:"kind"`
-	Deployment      *DeploymentLease      `json:"deployment_lease,omitempty"`
-	NodeLifecycle   *NodeLifecycleLease   `json:"node_lifecycle_lease,omitempty"`
-	ManagedResource *ManagedResourceLease `json:"managed_resource_lease,omitempty"`
-	RetainedStorage *RetainedStorageLease `json:"retained_storage_lease,omitempty"`
-	Backup          *backupv1.Lease       `json:"backup_lease,omitempty"`
+	Kind            string                 `json:"kind"`
+	Deployment      *DeploymentLease       `json:"deployment_lease,omitempty"`
+	NodeLifecycle   *NodeLifecycleLease    `json:"node_lifecycle_lease,omitempty"`
+	ManagedResource *ManagedResourceLease  `json:"managed_resource_lease,omitempty"`
+	RetainedStorage *RetainedStorageLease  `json:"retained_storage_lease,omitempty"`
+	Backup          *backupv1.Lease        `json:"backup_lease,omitempty"`
+	RestoreReview   *restorev1.ReviewLease `json:"restore_review_lease,omitempty"`
+	Restore         *restorev1.Lease       `json:"restore_lease,omitempty"`
 }
 
 type ManagedResourceLease struct {
@@ -185,9 +188,66 @@ func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) 
 			return nil, err
 		}
 		return &JobLease{Kind: kind.Kind, Backup: &lease}, nil
+	case "restore_review":
+		var lease restorev1.ReviewLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, RestoreReview: &lease}, nil
+	case "restore":
+		var lease restorev1.Lease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, Restore: &lease}, nil
 	default:
 		return nil, nil
 	}
+}
+
+func (c Client) CompleteRestoreReview(ctx context.Context, nodeID, reviewID string, result restorev1.ReviewResult) error {
+	return c.completeRestore(ctx, nodeID, "restore-reviews", reviewID, result)
+}
+
+func (c Client) CompleteRestore(ctx context.Context, nodeID, restoreID string, result restorev1.Result) error {
+	return c.completeRestore(ctx, nodeID, "restores", restoreID, result)
+}
+
+func (c Client) completeRestore(ctx context.Context, nodeID, collection, id string, result any) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/" + collection + "/" + url.PathEscape(id) + "/result"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete restore: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c Client) CompleteBackup(ctx context.Context, nodeID, backupID string, result backupv1.Result) error {

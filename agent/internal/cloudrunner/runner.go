@@ -14,6 +14,7 @@ import (
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
 )
 
 type CloudClient interface {
@@ -62,6 +63,7 @@ type Runner struct {
 	NodeLifecycle       NodeLifecycleExecutor
 	ManagedResources    ManagedResourceReconciler
 	Backups             BackupExecutor
+	Restores            RestoreExecutor
 	BackupHeartbeat     time.Duration
 	NodeID              string
 	Version             string
@@ -80,6 +82,16 @@ type ManagedResourceReconciler interface {
 
 type BackupExecutor interface {
 	Execute(context.Context, backupv1.Lease) backupv1.Result
+}
+
+type RestoreExecutor interface {
+	Review(context.Context, restorev1.ReviewLease) restorev1.ReviewResult
+	Execute(context.Context, restorev1.Lease) restorev1.Result
+}
+
+type restoreCloudClient interface {
+	CompleteRestoreReview(context.Context, string, string, restorev1.ReviewResult) error
+	CompleteRestore(context.Context, string, string, restorev1.Result) error
 }
 
 type NodeLifecycleExecutor interface {
@@ -132,7 +144,7 @@ func (r Runner) sendHeartbeat(ctx context.Context) {
 		NodeReady:    health.NodeReady,
 		K3SStatus:    health.K3SStatus,
 		Capacity:     health.Capacity,
-		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil},
+		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil, "postgres_logical_restore": health.NodeReady && r.Restores != nil},
 	})
 	if err != nil {
 		r.ConnectionState.SetConnected(false)
@@ -174,7 +186,85 @@ func (r Runner) jobLoop(ctx context.Context) error {
 		if lease != nil && lease.Backup != nil {
 			r.handleBackup(ctx, *lease.Backup)
 		}
+		if lease != nil && lease.RestoreReview != nil {
+			r.handleRestoreReview(ctx, *lease.RestoreReview)
+		}
+		if lease != nil && lease.Restore != nil {
+			r.handleRestore(ctx, *lease.Restore)
+		}
 		timer.Reset(r.PollInterval)
+	}
+}
+
+func (r Runner) handleRestoreReview(ctx context.Context, lease restorev1.ReviewLease) {
+	client, ok := r.Client.(restoreCloudClient)
+	if !ok {
+		return
+	}
+	result := restorev1.ReviewResult{Status: restorev1.ReviewFailed, LeaseToken: lease.LeaseToken, FailureCode: restorev1.FailureTargetStateUnknown, FailureMessageRedacted: "restore executor is unavailable"}
+	if r.Restores != nil {
+		result = r.Restores.Review(ctx, lease)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := client.CompleteRestoreReview(ctx, r.NodeID, lease.Review.ID, result); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
+	}
+}
+
+func (r Runner) handleRestore(ctx context.Context, lease restorev1.Lease) {
+	client, ok := r.Client.(restoreCloudClient)
+	if !ok {
+		return
+	}
+	if err := client.CompleteRestore(ctx, r.NodeID, lease.Restore.ID, restorev1.Result{Status: restorev1.LifecycleRunning, LeaseToken: lease.LeaseToken}); err != nil {
+		return
+	}
+	executionCtx, cancel := context.WithCancel(ctx)
+	heartbeat := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(defaultBackupHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-executionCtx.Done():
+				heartbeat <- nil
+				return
+			case <-ticker.C:
+				if err := client.CompleteRestore(executionCtx, r.NodeID, lease.Restore.ID, restorev1.Result{Status: restorev1.LifecycleRunning, LeaseToken: lease.LeaseToken}); err != nil {
+					if executionCtx.Err() != nil {
+						heartbeat <- nil
+					} else {
+						heartbeat <- err
+						cancel()
+					}
+					return
+				}
+			}
+		}
+	}()
+	result := restorev1.Result{Status: restorev1.LifecycleFailed, LeaseToken: lease.LeaseToken, FailureCode: restorev1.FailureExecution, FailureMessageRedacted: "restore executor is unavailable"}
+	if r.Restores != nil {
+		result = r.Restores.Execute(executionCtx, lease)
+	}
+	cancel()
+	if err := <-heartbeat; err != nil {
+		return
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := client.CompleteRestore(ctx, r.NodeID, lease.Restore.ID, result); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
 	}
 }
 

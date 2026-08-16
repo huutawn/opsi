@@ -15,7 +15,7 @@ import (
 
 type PostgresStore struct{ DB *sql.DB }
 
-const backupColumns = `id,project_id,environment_id,source_resource_id,source_node_id,resource_type,backup_type,source_database,source_postgres_version,source_spec_revision,source_spec_hash,source_pvc_name,source_pvc_uid,source_pv_name,source_pv_uid,source_storage_hash,dump_format,dump_options,lifecycle,store_id,object_key,object_etag,object_version_id,artifact_size,sha256,pg_dump_version,archive_verified,requested_by,requested_at,created_at,leased_at,started_at,completed_at,failure_code,failure_message_redacted,attempt_count,lease_token,lease_expires_at`
+const backupColumns = `id,project_id,environment_id,source_resource_id,source_node_id,resource_type,backup_type,source_database,source_postgres_version,source_profile,source_image,source_spec_revision,source_spec_hash,source_pvc_name,source_pvc_uid,source_pv_name,source_pv_uid,source_storage_hash,dump_format,dump_options,lifecycle,store_id,object_key,object_etag,object_version_id,artifact_size,sha256,pg_dump_version,archive_verified,requested_by,requested_at,created_at,leased_at,started_at,completed_at,failure_code,failure_message_redacted,attempt_count,lease_token,lease_expires_at`
 
 var qualifiedBackupColumns = "b." + strings.ReplaceAll(backupColumns, ",", ",b.")
 
@@ -41,7 +41,7 @@ func (s PostgresStore) Create(ctx context.Context, value backupv1.Backup, key, p
 		return backupv1.Backup{}, false, err
 	}
 	options, _ := json.Marshal(value.DumpOptions)
-	_, err = tx.ExecContext(ctx, `INSERT INTO backups(id,project_id,environment_id,source_resource_id,source_node_id,resource_type,backup_type,source_database,source_postgres_version,source_spec_revision,source_spec_hash,source_pvc_name,source_pvc_uid,source_pv_name,source_pv_uid,source_storage_hash,dump_format,dump_options,lifecycle,store_id,object_key,requested_by,requested_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NULLIF($14,''),NULLIF($15,''),$16,$17,$18::jsonb,$19,$20,$21,$22,$23,$24)`, value.ID, value.ProjectID, value.EnvironmentID, value.SourceResourceID, value.SourceNodeID, value.ResourceType, value.BackupType, value.SourceDatabase, value.SourcePostgresVersion, value.SourceSpecRevision, value.SourceSpecHash, value.SourcePVCName, value.SourcePVCUID, value.SourcePVName, value.SourcePVUID, value.SourceStorageHash, value.Format, string(options), value.Lifecycle, value.StoreID, value.ObjectKey, value.RequestedBy, value.RequestedAt, value.CreatedAt)
+	_, err = tx.ExecContext(ctx, `INSERT INTO backups(id,project_id,environment_id,source_resource_id,source_node_id,resource_type,backup_type,source_database,source_postgres_version,source_profile,source_image,source_spec_revision,source_spec_hash,source_pvc_name,source_pvc_uid,source_pv_name,source_pv_uid,source_storage_hash,dump_format,dump_options,lifecycle,store_id,object_key,requested_by,requested_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,''),NULLIF($17,''),$18,$19,$20::jsonb,$21,$22,$23,$24,$25,$26)`, value.ID, value.ProjectID, value.EnvironmentID, value.SourceResourceID, value.SourceNodeID, value.ResourceType, value.BackupType, value.SourceDatabase, value.SourcePostgresVersion, value.SourceProfile, value.SourceImage, value.SourceSpecRevision, value.SourceSpecHash, value.SourcePVCName, value.SourcePVCUID, value.SourcePVName, value.SourcePVUID, value.SourceStorageHash, value.Format, string(options), value.Lifecycle, value.StoreID, value.ObjectKey, value.RequestedBy, value.RequestedAt, value.CreatedAt)
 	if err != nil {
 		if constraint(err) == "backups_one_active_per_resource_uidx" {
 			return backupv1.Backup{}, false, Error{Code: backupv1.FailureAlreadyRunning, Status: 409, Message: "a logical backup is already active for this resource"}
@@ -126,15 +126,15 @@ func scanBackup(row rowScanner) (backupv1.Backup, error) {
 	var value backupv1.Backup
 	var resourceType string
 	var options []byte
-	var postgresVersion, pvName, pvUID, etag, versionID, sha, pgDump, failureCode, failureMessage, leaseToken sql.NullString
+	var postgresVersion, sourceProfile, sourceImage, pvName, pvUID, etag, versionID, sha, pgDump, failureCode, failureMessage, leaseToken sql.NullString
 	var artifactSize sql.NullInt64
 	var leasedAt, startedAt, completedAt, leaseExpiresAt sql.NullTime
-	err := row.Scan(&value.ID, &value.ProjectID, &value.EnvironmentID, &value.SourceResourceID, &value.SourceNodeID, &resourceType, &value.BackupType, &value.SourceDatabase, &postgresVersion, &value.SourceSpecRevision, &value.SourceSpecHash, &value.SourcePVCName, &value.SourcePVCUID, &pvName, &pvUID, &value.SourceStorageHash, &value.Format, &options, &value.Lifecycle, &value.StoreID, &value.ObjectKey, &etag, &versionID, &artifactSize, &sha, &pgDump, &value.ArchiveVerified, &value.RequestedBy, &value.RequestedAt, &value.CreatedAt, &leasedAt, &startedAt, &completedAt, &failureCode, &failureMessage, &value.AttemptCount, &leaseToken, &leaseExpiresAt)
+	err := row.Scan(&value.ID, &value.ProjectID, &value.EnvironmentID, &value.SourceResourceID, &value.SourceNodeID, &resourceType, &value.BackupType, &value.SourceDatabase, &postgresVersion, &sourceProfile, &sourceImage, &value.SourceSpecRevision, &value.SourceSpecHash, &value.SourcePVCName, &value.SourcePVCUID, &pvName, &pvUID, &value.SourceStorageHash, &value.Format, &options, &value.Lifecycle, &value.StoreID, &value.ObjectKey, &etag, &versionID, &artifactSize, &sha, &pgDump, &value.ArchiveVerified, &value.RequestedBy, &value.RequestedAt, &value.CreatedAt, &leasedAt, &startedAt, &completedAt, &failureCode, &failureMessage, &value.AttemptCount, &leaseToken, &leaseExpiresAt)
 	if err != nil {
 		return backupv1.Backup{}, err
 	}
 	value.SchemaVersion, value.ResourceType = backupv1.SchemaVersion, resourcev1.Type(resourceType)
-	value.SourcePostgresVersion, value.SourcePVName, value.SourcePVUID = postgresVersion.String, pvName.String, pvUID.String
+	value.SourcePostgresVersion, value.SourceProfile, value.SourceImage, value.SourcePVName, value.SourcePVUID = postgresVersion.String, sourceProfile.String, sourceImage.String, pvName.String, pvUID.String
 	value.ObjectETag, value.ObjectVersionID, value.ArtifactSize, value.SHA256, value.PGDumpVersion = etag.String, versionID.String, artifactSize.Int64, sha.String, pgDump.String
 	value.FailureCode, value.FailureMessageRedacted, value.LeaseToken = failureCode.String, failureMessage.String, leaseToken.String
 	if leasedAt.Valid {

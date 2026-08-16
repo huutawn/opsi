@@ -19,7 +19,7 @@ func TestPostgresMutationBlockedDuringActiveBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.Operations = activeOperation(true)
+	service.Operations = []ActiveOperationAuthority{activeOperation(true)}
 	if _, err := service.Update(context.Background(), "project-1", created.ID, resourcev1.UpdateRequest{Managed: managedRequest(resourcev1.TypePostgres).Managed}); resourceErrorCode(err) != "RESOURCE_ACTIVE_OPERATION_CONFLICT" {
 		t.Fatalf("update err=%v", err)
 	}

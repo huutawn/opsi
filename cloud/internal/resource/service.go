@@ -78,7 +78,7 @@ type Service struct {
 	Store       Store
 	Scopes      ScopeAuthority
 	Credentials CredentialAuthority
-	Operations  ActiveOperationAuthority
+	Operations  []ActiveOperationAuthority
 	Now         func() time.Time
 }
 
@@ -221,10 +221,16 @@ func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID, actor 
 }
 
 func (s Service) hasActiveOperation(ctx context.Context, projectID, resourceID string) (bool, error) {
-	if s.Operations == nil {
-		return false, nil
+	for _, authority := range s.Operations {
+		if authority == nil {
+			continue
+		}
+		active, err := authority.HasActive(ctx, projectID, resourceID)
+		if err != nil || active {
+			return active, err
+		}
 	}
-	return s.Operations.HasActive(ctx, projectID, resourceID)
+	return false, nil
 }
 
 func (s Service) CreateBinding(ctx context.Context, projectID, key string, request resourcev1.CreateBindingRequest) (resourcev1.Binding, bool, error) {
@@ -260,6 +266,15 @@ func (s Service) CreateBinding(ctx context.Context, projectID, key string, reque
 	}
 	if target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres && (target.Lifecycle == resourcev1.LifecycleDeleting || target.Runtime == nil || !factualReady(target.Runtime.Spec, target.Runtime.Evidence)) {
 		return resourcev1.Binding{}, false, invalid("RESOURCE_BINDING_TARGET_NOT_READY", "managed resource must be factually Ready before binding")
+	}
+	if target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres {
+		active, err := s.hasActiveOperation(ctx, projectID, target.ID)
+		if err != nil {
+			return resourcev1.Binding{}, false, err
+		}
+		if active {
+			return resourcev1.Binding{}, false, Error{Code: "RESOURCE_ACTIVE_OPERATION_CONFLICT", Status: 409, Message: "resource has an active operation"}
+		}
 	}
 	now := s.clock()
 	binding := resourcev1.Binding{

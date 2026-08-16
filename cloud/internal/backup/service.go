@@ -103,6 +103,7 @@ func (s Service) Create(ctx context.Context, projectID, resourceID, actor, key s
 		SchemaVersion: backupv1.SchemaVersion, ID: id, ProjectID: projectID, EnvironmentID: resource.EnvironmentID,
 		SourceResourceID: resource.ID, SourceNodeID: resource.Runtime.Spec.Assignment.NodeID, ResourceType: resource.Type,
 		BackupType: backupv1.BackupTypePostgresLogical, SourceDatabase: backupv1.CanonicalDatabase, SourcePostgresVersion: resource.Runtime.Spec.Version,
+		SourceProfile: resource.Runtime.Spec.Profile, SourceImage: resource.Runtime.Spec.Image,
 		SourceSpecRevision: resource.Runtime.Spec.TopologyRevision, SourceSpecHash: resource.Runtime.Spec.SpecHash,
 		SourcePVCName: resource.Runtime.Evidence.PVCName, SourcePVCUID: resource.Runtime.Evidence.PVCUID,
 		SourcePVName: resource.Runtime.Evidence.PVName, SourcePVUID: resource.Runtime.Evidence.PVUID, SourceStorageHash: resource.Runtime.Evidence.StorageHash,

@@ -18,6 +18,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/incident"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
+	restoreagent "github.com/opsi-dev/opsi/agent/internal/restore"
 	"github.com/opsi-dev/opsi/agent/internal/secret"
 	"github.com/opsi-dev/opsi/agent/internal/svcatalog"
 	"github.com/opsi-dev/opsi/agent/internal/telemetry"
@@ -566,6 +567,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			NodeLifecycle:       nodelifecycle.Service{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			ManagedResources:    svcatalog.ManagedResourceReconciler{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			Backups:             backupagent.Executor{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			Restores:            restoreagent.Executor{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			PollInterval:        pollInterval,
 			LongPollWait:        longPollWait,
 			HeartbeatInterval:   heartbeatInterval,

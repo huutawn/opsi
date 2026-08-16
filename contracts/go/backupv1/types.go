@@ -53,6 +53,8 @@ type Backup struct {
 	BackupType             string          `json:"backup_type"`
 	SourceDatabase         string          `json:"source_database"`
 	SourcePostgresVersion  string          `json:"source_postgres_version,omitempty"`
+	SourceProfile          string          `json:"source_profile,omitempty"`
+	SourceImage            string          `json:"source_image,omitempty"`
 	SourceSpecRevision     uint64          `json:"source_spec_revision"`
 	SourceSpecHash         string          `json:"source_spec_hash"`
 	SourcePVCName          string          `json:"source_pvc_name"`
