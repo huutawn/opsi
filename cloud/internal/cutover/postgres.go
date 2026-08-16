@@ -240,6 +240,110 @@ type queryExecutor interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+func (s PostgresStore) CreateRollback(ctx context.Context, v cutoverv1.ApplicationCutoverRollback, key, payload string) (cutoverv1.ApplicationCutoverRollback, bool, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverRollback{}, false, err
+	}
+	defer tx.Rollback()
+
+	if key != "" {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, v.ProjectID+"\x1f"+key); err != nil {
+			return cutoverv1.ApplicationCutoverRollback{}, false, err
+		}
+		var id, oldPayload string
+		err = tx.QueryRowContext(ctx, `SELECT rollback_id, payload_hash FROM application_cutover_rollback_idempotency WHERE project_id=$1 AND idempotency_key=$2`, v.ProjectID, key).Scan(&id, &oldPayload)
+		if err == nil {
+			if oldPayload != payload {
+				return cutoverv1.ApplicationCutoverRollback{}, false, invalid(cutoverv1.FailureIdempotencyConflict, "idempotency key was used with another rollback request")
+			}
+			loaded, getErr := getRollback(ctx, tx, v.ProjectID, id)
+			return loaded, true, getErr
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return cutoverv1.ApplicationCutoverRollback{}, false, err
+		}
+	}
+
+	var activeCount int
+	err = tx.QueryRowContext(ctx, `SELECT count(*) FROM application_cutover_rollbacks WHERE project_id=$1 AND application_id=$2 AND lifecycle IN ('queued','validating','applying','deploying','verifying')`, v.ProjectID, v.ApplicationID).Scan(&activeCount)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverRollback{}, false, err
+	}
+	if activeCount > 0 {
+		return cutoverv1.ApplicationCutoverRollback{}, false, conflict(cutoverv1.FailureRollbackAlreadyRunning, "another cutover rollback is already active for this application")
+	}
+
+	authority, _ := json.Marshal(v)
+	_, err = tx.ExecContext(ctx, `INSERT INTO application_cutover_rollbacks(
+		id,project_id,environment_id,application_id,cutover_id,
+		source_binding_id,source_resource_id,target_resource_id,target_binding_id,target_node_id,
+		deployment_job_id,lifecycle,authority,requested_by,requested_at,applied_at,completed_at,updated_at,failure_code,failure_message)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,now(),$18,$19)`,
+		v.ID, v.ProjectID, v.EnvironmentID, v.ApplicationID, v.CutoverID,
+		v.SourceBindingID, v.SourceResourceID, v.TargetResourceID, v.TargetBindingID, v.TargetNodeID,
+		v.DeploymentJobID, v.Lifecycle, authority, v.RequestedBy, v.RequestedAt, v.AppliedAt, v.CompletedAt, v.FailureCode, v.FailureMessageRedacted)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverRollback{}, false, err
+	}
+
+	if key != "" {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO application_cutover_rollback_idempotency(project_id,idempotency_key,payload_hash,rollback_id,created_at) VALUES($1,$2,$3,$4,$5)`, v.ProjectID, key, payload, v.ID, v.RequestedAt); err != nil {
+			return cutoverv1.ApplicationCutoverRollback{}, false, err
+		}
+	}
+	return v, false, tx.Commit()
+}
+
+func (s PostgresStore) GetRollback(ctx context.Context, projectID, id string) (cutoverv1.ApplicationCutoverRollback, error) {
+	return getRollback(ctx, s.DB, projectID, id)
+}
+
+func (s PostgresStore) ListRollbacks(ctx context.Context, projectID, applicationID string) ([]cutoverv1.ApplicationCutoverRollback, error) {
+	query, args := `SELECT authority,lifecycle,deployment_job_id,applied_at,completed_at,updated_at,failure_code,failure_message FROM application_cutover_rollbacks WHERE project_id=$1`, []any{projectID}
+	if applicationID != "" {
+		query += ` AND application_id=$2`
+		args = append(args, applicationID)
+	}
+	query += ` ORDER BY requested_at,id`
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []cutoverv1.ApplicationCutoverRollback{}
+	for rows.Next() {
+		v, scanErr := scanRollback(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s PostgresStore) UpdateRollback(ctx context.Context, v cutoverv1.ApplicationCutoverRollback) (cutoverv1.ApplicationCutoverRollback, error) {
+	authority, _ := json.Marshal(v)
+	row := s.DB.QueryRowContext(ctx, `UPDATE application_cutover_rollbacks
+		SET lifecycle=$1, authority=$2::jsonb,
+		    applied_at=$3, completed_at=$4, updated_at=now(),
+		    deployment_job_id=$5, failure_code=$6, failure_message=$7
+		WHERE project_id=$8 AND id=$9
+		RETURNING authority,lifecycle,deployment_job_id,applied_at,completed_at,updated_at,failure_code,failure_message`,
+		v.Lifecycle, authority, v.AppliedAt, v.CompletedAt, v.DeploymentJobID, v.FailureCode, v.FailureMessageRedacted, v.ProjectID, v.ID)
+	updated, err := scanRollback(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return cutoverv1.ApplicationCutoverRollback{}, ErrNotFound
+	}
+	return updated, err
+}
+
+func (s PostgresStore) HasActiveRollback(ctx context.Context, projectID, applicationID string) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM application_cutover_rollbacks WHERE project_id=$1 AND application_id=$2 AND lifecycle IN ('queued','validating','applying','deploying','verifying'))`, projectID, applicationID).Scan(&exists)
+	return exists, err
+}
+
 func getReview(ctx context.Context, db queryExecutor, projectID, id string) (cutoverv1.ApplicationCutoverReview, error) {
 	v, err := scanReview(db.QueryRowContext(ctx, `SELECT authority,lifecycle,attempt_count,lease_token,lease_expires_at FROM application_cutover_reviews WHERE project_id=$1 AND id=$2`, projectID, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -291,6 +395,44 @@ func scanCutover(row rowScanner) (cutoverv1.ApplicationCutover, error) {
 		return cutoverv1.ApplicationCutover{}, err
 	}
 	var v cutoverv1.ApplicationCutover
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return v, err
+	}
+	v.Lifecycle = lifecycle
+	v.DeploymentJobID = deploymentJobID.String
+	if appliedAt.Valid {
+		v.AppliedAt = &appliedAt.Time
+	}
+	if completedAt.Valid {
+		v.CompletedAt = &completedAt.Time
+	}
+	v.UpdatedAt = updatedAt
+	v.FailureCode = failureCode.String
+	v.FailureMessageRedacted = failureMessage.String
+	return v, nil
+}
+
+func getRollback(ctx context.Context, db queryExecutor, projectID, id string) (cutoverv1.ApplicationCutoverRollback, error) {
+	v, err := scanRollback(db.QueryRowContext(ctx, `SELECT authority,lifecycle,deployment_job_id,applied_at,completed_at,updated_at,failure_code,failure_message FROM application_cutover_rollbacks WHERE project_id=$1 AND id=$2`, projectID, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return cutoverv1.ApplicationCutoverRollback{}, ErrNotFound
+	}
+	return v, err
+}
+
+func scanRollback(row rowScanner) (cutoverv1.ApplicationCutoverRollback, error) {
+	var raw []byte
+	var lifecycle string
+	var deploymentJobID sql.NullString
+	var appliedAt sql.NullTime
+	var completedAt sql.NullTime
+	var updatedAt time.Time
+	var failureCode sql.NullString
+	var failureMessage sql.NullString
+	if err := row.Scan(&raw, &lifecycle, &deploymentJobID, &appliedAt, &completedAt, &updatedAt, &failureCode, &failureMessage); err != nil {
+		return cutoverv1.ApplicationCutoverRollback{}, err
+	}
+	var v cutoverv1.ApplicationCutoverRollback
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return v, err
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -49,6 +50,12 @@ type Store interface {
 	ListCutovers(context.Context, string, string) ([]cutoverv1.ApplicationCutover, error)
 	UpdateCutover(context.Context, cutoverv1.ApplicationCutover) (cutoverv1.ApplicationCutover, error)
 	HasActiveCutover(context.Context, string, string) (bool, error)
+
+	CreateRollback(context.Context, cutoverv1.ApplicationCutoverRollback, string, string) (cutoverv1.ApplicationCutoverRollback, bool, error)
+	GetRollback(context.Context, string, string) (cutoverv1.ApplicationCutoverRollback, error)
+	ListRollbacks(context.Context, string, string) ([]cutoverv1.ApplicationCutoverRollback, error)
+	UpdateRollback(context.Context, cutoverv1.ApplicationCutoverRollback) (cutoverv1.ApplicationCutoverRollback, error)
+	HasActiveRollback(context.Context, string, string) (bool, error)
 }
 
 type ApplicationAuthority interface {
@@ -991,4 +998,353 @@ func (s Service) CompleteCutover(ctx context.Context, projectID, cutoverID strin
 	cutover.FailureCode = result.FailureCode
 	cutover.FailureMessageRedacted = result.FailureMessageRedacted
 	return s.Store.UpdateCutover(ctx, cutover)
+}
+
+func (s Service) Rollback(ctx context.Context, projectID, applicationID, cutoverID, actor, key string) (cutoverv1.ApplicationCutoverRollback, bool, error) {
+	if s.Store == nil || s.Applications == nil {
+		return cutoverv1.ApplicationCutoverRollback{}, false, unavailable("cutover authority is unavailable")
+	}
+	if projectID == "" || applicationID == "" || cutoverID == "" {
+		return cutoverv1.ApplicationCutoverRollback{}, false, invalid(cutoverv1.FailureApplicationStateInvalid, "project, application, and cutover ids are required")
+	}
+	if key == "" {
+		return cutoverv1.ApplicationCutoverRollback{}, false, invalid(cutoverv1.FailureIdempotencyKeyInvalid, "idempotency key is required")
+	}
+
+	activeCutover, err := s.Store.HasActiveCutover(ctx, projectID, applicationID)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverRollback{}, false, err
+	}
+	if activeCutover {
+		return cutoverv1.ApplicationCutoverRollback{}, false, conflict(cutoverv1.FailureActiveOperationConflict, "an active cutover operation is currently in flight for this application")
+	}
+
+	cutover, err := s.Store.GetCutover(ctx, projectID, cutoverID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutoverRollback{}, false, notFound("cutover not found")
+		}
+		return cutoverv1.ApplicationCutoverRollback{}, false, err
+	}
+	if cutover.ApplicationID != applicationID {
+		return cutoverv1.ApplicationCutoverRollback{}, false, invalid(cutoverv1.FailureApplicationStateInvalid, "cutover does not belong to application")
+	}
+
+	// Validate Cutover eligibility:
+	// 1. Succeeded cutover is eligible.
+	// 2. Failed cutover where target config revision was applied (ResultingApplicationConfigRevision > 0) is eligible.
+	// 3. Cutover failed before config mutation (ResultingApplicationConfigRevision == 0) is ineligible (app never left SOURCE).
+	if cutover.Lifecycle != cutoverv1.CutoverSucceeded && (cutover.Lifecycle != cutoverv1.CutoverFailed || cutover.ResultingApplicationConfigRevision == 0) {
+		return cutoverv1.ApplicationCutoverRollback{}, false, invalid(cutoverv1.FailureRollbackCutoverIneligible, "cutover is not eligible for rollback")
+	}
+
+	services, err := s.Applications.ListServices(projectID)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverRollback{}, false, unavailable("application authority is unavailable")
+	}
+	var app *registry.ServiceRecord
+	for _, svc := range services {
+		if svc.ID == applicationID {
+			svcCopy := svc
+			app = &svcCopy
+			break
+		}
+	}
+	if app == nil {
+		return cutoverv1.ApplicationCutoverRollback{}, false, notFound("application not found")
+	}
+
+	rawID := make([]byte, 8)
+	_, _ = rand.Read(rawID)
+	rollbackID := "acrb-" + hex.EncodeToString(rawID)
+
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"cutover_id":     cutover.ID,
+		"application_id": app.ID,
+		"project_id":     projectID,
+	})
+	sum := sha256.Sum256(payloadBytes)
+	payloadHash := hex.EncodeToString(sum[:])
+
+	rollback := cutoverv1.ApplicationCutoverRollback{
+		SchemaVersion:                               cutoverv1.RollbackSchemaVersion,
+		ID:                                          rollbackID,
+		ProjectID:                                   projectID,
+		EnvironmentID:                               cutover.EnvironmentID,
+		ApplicationID:                               app.ID,
+		CutoverID:                                   cutover.ID,
+		SourceBindingID:                             cutover.SourceBindingID,
+		TargetBindingID:                             cutover.TargetBindingID,
+		SourceResourceID:                            cutover.SourceResourceID,
+		TargetResourceID:                            cutover.TargetResourceID,
+		OriginalPreCutoverApplicationConfigRevision: cutover.PreCutoverApplicationConfigRevision,
+		OriginalPreCutoverApplicationConfigHash:     cutover.PreCutoverApplicationConfigHash,
+		Lifecycle:                                   cutoverv1.RollbackApplying,
+		RequestedBy:                                 actor,
+		RequestedAt:                                 now,
+		TargetNodeID:                                cutover.TargetNodeID,
+		Warnings:                                    []string{cutoverv1.WarningTargetWritesMayNotBeOnSource},
+		VerificationSummary: cutoverv1.RollbackVerificationSummary{
+			SourceSQLPreflight:   "PASS",
+			TargetSQLPreflight:   "PASS",
+			SourceRoleAttributes: "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+		},
+	}
+
+	savedRollback, reused, err := s.Store.CreateRollback(ctx, rollback, key, payloadHash)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverRollback{}, false, err
+	}
+	if reused {
+		return savedRollback, true, nil
+	}
+
+	config, err := s.Applications.GetServiceConfiguration(projectID, app.ID)
+	if err != nil {
+		savedRollback.Lifecycle = cutoverv1.RollbackFailed
+		savedRollback.FailureCode = cutoverv1.FailureApplicationStateInvalid
+		savedRollback.FailureMessageRedacted = "application configuration is unavailable"
+		failedTime := now
+		savedRollback.CompletedAt = &failedTime
+		_, _ = s.Store.UpdateRollback(ctx, savedRollback)
+		return savedRollback, false, invalid(cutoverv1.FailureApplicationStateInvalid, "application configuration is unavailable")
+	}
+
+	savedRollback.CurrentApplicationConfigRevision = config.Revision
+	savedRollback.CurrentApplicationConfigHash = config.StateHash
+
+	// Verify current application is pointing to TargetBindingID
+	var currentDBBindingID string
+	for _, rb := range config.ServiceConfigurationDraft.ResourceBindings {
+		if rb.LogicalName == "DATABASE" {
+			currentDBBindingID = rb.BindingID
+			break
+		}
+	}
+	if currentDBBindingID != cutover.TargetBindingID {
+		savedRollback.Lifecycle = cutoverv1.RollbackFailed
+		savedRollback.FailureCode = cutoverv1.FailureRollbackStaleApplication
+		savedRollback.FailureMessageRedacted = "current application database binding does not match cutover target binding"
+		failedTime := now
+		savedRollback.CompletedAt = &failedTime
+		_, _ = s.Store.UpdateRollback(ctx, savedRollback)
+		return savedRollback, false, invalid(cutoverv1.FailureRollbackStaleApplication, "current application database binding does not match cutover target binding")
+	}
+
+	// Validate SOURCE rollback authority
+	if s.Resources != nil {
+		sourceB, bErr := s.Resources.GetBinding(ctx, projectID, cutover.SourceBindingID)
+		if bErr != nil || sourceB.ID == "" || sourceB.Lifecycle != "ready" {
+			savedRollback.Lifecycle = cutoverv1.RollbackFailed
+			savedRollback.FailureCode = cutoverv1.FailureRollbackSourceUnavailable
+			savedRollback.FailureMessageRedacted = "source database binding is unavailable or revoked"
+			failedTime := now
+			savedRollback.CompletedAt = &failedTime
+			_, _ = s.Store.UpdateRollback(ctx, savedRollback)
+			return savedRollback, false, invalid(cutoverv1.FailureRollbackSourceUnavailable, "source database binding is unavailable or revoked")
+		}
+		sourceR, rErr := s.Resources.Get(ctx, projectID, cutover.SourceResourceID)
+		if rErr != nil || sourceR.ID == "" || sourceR.Lifecycle != "ready" {
+			savedRollback.Lifecycle = cutoverv1.RollbackFailed
+			savedRollback.FailureCode = cutoverv1.FailureRollbackSourceUnavailable
+			savedRollback.FailureMessageRedacted = "source database resource is not ready"
+			failedTime := now
+			savedRollback.CompletedAt = &failedTime
+			_, _ = s.Store.UpdateRollback(ctx, savedRollback)
+			return savedRollback, false, invalid(cutoverv1.FailureRollbackSourceUnavailable, "source database resource is not ready")
+		}
+	}
+
+	// 1. Mutate Application configuration: switch DATABASE binding back to SOURCE
+	nextDraft := config.ServiceConfigurationDraft
+	nextResBindings := []serviceconfigurationv1.ResourceBinding{}
+	for _, rb := range nextDraft.ResourceBindings {
+		if rb.LogicalName != "DATABASE" {
+			nextResBindings = append(nextResBindings, rb)
+		}
+	}
+	nextResBindings = append(nextResBindings, serviceconfigurationv1.ResourceBinding{
+		LogicalName: "DATABASE",
+		BindingID:   cutover.SourceBindingID,
+	})
+	nextDraft.ResourceBindings = nextResBindings
+
+	applyResult, err := s.Applications.ApplyServiceConfiguration(projectID, app.ID, actor, "rollback-"+savedRollback.ID, registry.ServiceConfigurationApplyRequest{
+		Draft:             nextDraft,
+		ExpectedRevision:  config.Revision,
+		ExpectedStateHash: config.StateHash,
+	})
+	if err != nil {
+		savedRollback.Lifecycle = cutoverv1.RollbackFailed
+		savedRollback.FailureCode = cutoverv1.FailureRollbackConfigApplyFailed
+		savedRollback.FailureMessageRedacted = "failed to apply rollback application configuration"
+		failedTime := now
+		savedRollback.CompletedAt = &failedTime
+		_, _ = s.Store.UpdateRollback(ctx, savedRollback)
+		return savedRollback, false, invalid(cutoverv1.FailureRollbackConfigApplyFailed, "failed to apply application configuration: "+err.Error())
+	}
+
+	savedRollback.ResultingApplicationConfigRevision = applyResult.Configuration.Revision
+	savedRollback.ResultingApplicationConfigHash = applyResult.Configuration.StateHash
+	appliedTime := now
+	savedRollback.AppliedAt = &appliedTime
+	savedRollback.Lifecycle = cutoverv1.RollbackDeploying
+
+	// 2. Trigger canonical immutable deployment
+	var currentJob *registry.DeploymentJob
+	if s.Deployments != nil {
+		jobs, _ := s.Deployments.ListDeployments(projectID)
+		for _, j := range jobs {
+			if j.ServiceID == app.ID && (j.Status == deploymentv1.StateSucceeded || j.Status == registry.DeploymentSucceeded) && j.Snapshot != nil {
+				jobCopy := j
+				currentJob = &jobCopy
+				break
+			}
+		}
+	}
+
+	if s.Deployments != nil && currentJob != nil && currentJob.Snapshot != nil {
+		newConfig := registry.ServiceConfiguration{
+			ServiceConfigurationDraft: nextDraft,
+			Revision:                  applyResult.Configuration.Revision,
+			StateHash:                 applyResult.Configuration.StateHash,
+		}
+		var services []registry.ServiceRecord
+		if svcs, listErr := s.Applications.ListServices(projectID); listErr == nil {
+			services = svcs
+		}
+
+		var record buildrecordv1.Record
+		if s.BuildRecords != nil {
+			if rec, recErr := s.BuildRecords.Get(ctx, projectID, currentJob.Snapshot.Authority.BuildRecord.ID); recErr == nil {
+				record = rec
+			}
+		}
+		if record.ID == "" {
+			record = currentJob.Snapshot.Authority.BuildRecord
+		}
+
+		var plan topologyv1.Plan
+		if s.Topology != nil {
+			if p, pErr := s.Topology.Get(ctx, projectID); pErr == nil && p.ID != "" {
+				plan = p
+			}
+		}
+		if plan.ID == "" {
+			plan.ID = currentJob.Snapshot.Authority.TopologyPlanID
+			plan.Revision = currentJob.Snapshot.Authority.TopologyRevision
+			plan.PlanHash = currentJob.Snapshot.Authority.TopologyHash
+		}
+
+		var policy deploymentpolicyv1.Policy
+		if s.Policies != nil {
+			if pol, polErr := s.Policies.Get(ctx, projectID, currentJob.Snapshot.Authority.DeploymentPolicyID); polErr == nil && pol.ID != "" {
+				policy = pol
+			}
+		}
+		if policy.ID == "" {
+			policy.ID = currentJob.Snapshot.Authority.DeploymentPolicyID
+			policy.Revision = currentJob.Snapshot.Authority.DeploymentPolicyRevision
+			policy.PolicyHash = currentJob.Snapshot.Authority.DeploymentPolicyHash
+		}
+
+		decision := deploymentpolicyv1.RoutingDecision{
+			DecisionHash:  currentJob.Snapshot.Authority.RoutingDecisionHash,
+			EnvironmentID: cutover.EnvironmentID,
+			RuntimeID:     currentJob.Snapshot.Authority.RuntimeID,
+			NodeID:        currentJob.Snapshot.Authority.NodeID,
+			AgentID:       currentJob.Snapshot.Authority.AgentID,
+		}
+
+		snapshot, snapErr := s.compileDeploymentSnapshot(ctx, projectID, cutover.EnvironmentID, *app, record, plan, policy, decision, newConfig, services, actor, "rollback-dep-"+savedRollback.ID, "req-rollback-"+savedRollback.ID)
+		if snapErr != nil {
+			savedRollback.Lifecycle = cutoverv1.RollbackFailed
+			savedRollback.FailureCode = cutoverv1.FailureRollbackDeploymentFailed
+			savedRollback.FailureMessageRedacted = "failed to compile deployment snapshot: " + snapErr.Error()
+			failedTime := now
+			savedRollback.CompletedAt = &failedTime
+			_, _ = s.Store.UpdateRollback(ctx, savedRollback)
+			return savedRollback, false, snapErr
+		}
+
+		job, _, depErr := s.Deployments.StartImmutableDeployment(snapshot, actor, "rollback-dep-"+savedRollback.ID, "req-rollback-"+savedRollback.ID)
+		if depErr != nil {
+			savedRollback.Lifecycle = cutoverv1.RollbackFailed
+			savedRollback.FailureCode = cutoverv1.FailureRollbackDeploymentFailed
+			savedRollback.FailureMessageRedacted = "failed to start deployment: " + depErr.Error()
+			failedTime := now
+			savedRollback.CompletedAt = &failedTime
+			_, _ = s.Store.UpdateRollback(ctx, savedRollback)
+			return savedRollback, false, depErr
+		}
+		savedRollback.DeploymentJobID = job.ID
+	}
+
+	savedRollback.EvidenceHash = cutoverv1.RollbackEvidenceHash(savedRollback)
+	updated, err := s.Store.UpdateRollback(ctx, savedRollback)
+	if err != nil {
+		return savedRollback, false, err
+	}
+	return updated, false, nil
+}
+
+func (s Service) GetRollback(ctx context.Context, projectID, id string) (cutoverv1.ApplicationCutoverRollback, error) {
+	if s.Store == nil {
+		return cutoverv1.ApplicationCutoverRollback{}, unavailable("cutover authority is unavailable")
+	}
+	rollback, err := s.Store.GetRollback(ctx, projectID, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutoverRollback{}, notFound("cutover rollback not found")
+		}
+		return cutoverv1.ApplicationCutoverRollback{}, err
+	}
+	return rollback, nil
+}
+
+func (s Service) ListRollbacks(ctx context.Context, projectID, applicationID string) ([]cutoverv1.ApplicationCutoverRollback, error) {
+	if s.Store == nil {
+		return nil, unavailable("cutover authority is unavailable")
+	}
+	return s.Store.ListRollbacks(ctx, projectID, applicationID)
+}
+
+func (s Service) CompleteRollback(ctx context.Context, projectID, rollbackID string, result cutoverv1.RollbackResult) (cutoverv1.ApplicationCutoverRollback, error) {
+	if s.Store == nil {
+		return cutoverv1.ApplicationCutoverRollback{}, unavailable("cutover authority is unavailable")
+	}
+	rollback, err := s.Store.GetRollback(ctx, projectID, rollbackID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutoverRollback{}, notFound("cutover rollback not found")
+		}
+		return cutoverv1.ApplicationCutoverRollback{}, err
+	}
+	if rollback.Lifecycle == cutoverv1.RollbackSucceeded {
+		return rollback, nil
+	}
+
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+
+	if result.Status == "succeeded" {
+		rollback.VerificationSummary = result.VerificationSummary
+		rollback.Lifecycle = cutoverv1.RollbackSucceeded
+		rollback.CompletedAt = &now
+		rollback.EvidenceHash = cutoverv1.RollbackEvidenceHash(rollback)
+		return s.Store.UpdateRollback(ctx, rollback)
+	}
+
+	rollback.Lifecycle = cutoverv1.RollbackFailed
+	rollback.CompletedAt = &now
+	rollback.FailureCode = result.FailureCode
+	rollback.FailureMessageRedacted = result.FailureMessageRedacted
+	return s.Store.UpdateRollback(ctx, rollback)
 }

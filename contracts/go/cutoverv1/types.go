@@ -55,6 +55,20 @@ const (
 	FailureDeploymentFailed           = "CUTOVER_DEPLOYMENT_FAILED"
 	FailureApplicationHealthFailed    = "CUTOVER_APPLICATION_HEALTH_FAILED"
 	FailureTargetVerificationFailed   = "CUTOVER_TARGET_VERIFICATION_FAILED"
+
+	FailureRollbackSourceUnavailable        = "ROLLBACK_SOURCE_UNAVAILABLE"
+	FailureRollbackStaleApplication         = "ROLLBACK_STALE_APPLICATION"
+	FailureRollbackConfigApplyFailed        = "ROLLBACK_CONFIG_APPLY_FAILED"
+	FailureRollbackDeploymentFailed         = "ROLLBACK_DEPLOYMENT_FAILED"
+	FailureRollbackApplicationHealthFailed  = "ROLLBACK_APPLICATION_HEALTH_FAILED"
+	FailureRollbackSourceVerificationFailed = "ROLLBACK_SOURCE_VERIFICATION_FAILED"
+	FailureRollbackTargetVerificationFailed = "ROLLBACK_TARGET_VERIFICATION_FAILED"
+	FailureRollbackCutoverIneligible        = "ROLLBACK_CUTOVER_INELIGIBLE"
+	FailureRollbackAlreadyRunning           = "ROLLBACK_ALREADY_RUNNING"
+)
+
+const (
+	WarningTargetWritesMayNotBeOnSource = "TARGET_WRITES_MAY_NOT_EXIST_ON_SOURCE"
 )
 
 const CutoverSchemaVersion = "opsi.cutover/v1"
@@ -67,6 +81,18 @@ const (
 	CutoverVerifying  = "verifying"
 	CutoverSucceeded  = "succeeded"
 	CutoverFailed     = "failed"
+)
+
+const RollbackSchemaVersion = "opsi.cutover_rollback/v1"
+
+const (
+	RollbackQueued     = "queued"
+	RollbackValidating = "validating"
+	RollbackApplying   = "applying"
+	RollbackDeploying  = "deploying"
+	RollbackVerifying  = "verifying"
+	RollbackSucceeded  = "succeeded"
+	RollbackFailed     = "failed"
 )
 
 type CutoverVerificationSummary struct {
@@ -402,6 +428,129 @@ func (r ApplicationCutoverReview) ValidateSucceeded() error {
 		r.EvidenceHash == "" ||
 		r.EvidenceHash != EvidenceHash(r) {
 		return errors.New("cutover review evidence is invalid")
+	}
+	return nil
+}
+
+type ApplicationCutoverRollback struct {
+	SchemaVersion                               string                      `json:"schema_version"`
+	ID                                          string                      `json:"id"`
+	ProjectID                                   string                      `json:"project_id"`
+	EnvironmentID                               string                      `json:"environment_id"`
+	ApplicationID                               string                      `json:"application_id"`
+	CutoverID                                   string                      `json:"cutover_id"`
+	SourceBindingID                             string                      `json:"source_binding_id"`
+	TargetBindingID                             string                      `json:"target_binding_id"`
+	SourceResourceID                            string                      `json:"source_resource_id"`
+	TargetResourceID                            string                      `json:"target_resource_id"`
+	CurrentApplicationConfigRevision            uint64                      `json:"current_application_config_revision"`
+	CurrentApplicationConfigHash                string                      `json:"current_application_config_hash"`
+	OriginalPreCutoverApplicationConfigRevision uint64                      `json:"original_pre_cutover_application_config_revision"`
+	OriginalPreCutoverApplicationConfigHash     string                      `json:"original_pre_cutover_application_config_hash"`
+	ResultingApplicationConfigRevision          uint64                      `json:"resulting_application_config_revision"`
+	ResultingApplicationConfigHash              string                      `json:"resulting_application_config_hash"`
+	DeploymentJobID                             string                      `json:"deployment_job_id,omitempty"`
+	Lifecycle                                   string                      `json:"lifecycle"`
+	RequestedBy                                 string                      `json:"requested_by,omitempty"`
+	RequestedAt                                 time.Time                   `json:"requested_at"`
+	AppliedAt                                   *time.Time                  `json:"applied_at,omitempty"`
+	CompletedAt                                 *time.Time                  `json:"completed_at,omitempty"`
+	UpdatedAt                                   time.Time                   `json:"updated_at,omitempty"`
+	TargetNodeID                                string                      `json:"target_node_id,omitempty"`
+	FailureCode                                 string                      `json:"failure_code,omitempty"`
+	FailureMessageRedacted                      string                      `json:"failure_message_redacted,omitempty"`
+	Warnings                                    []string                    `json:"warnings,omitempty"`
+	VerificationSummary                         RollbackVerificationSummary `json:"verification_summary,omitempty"`
+	EvidenceHash                                string                      `json:"evidence_hash,omitempty"`
+}
+
+type RollbackVerificationSummary struct {
+	SourceSQLPreflight        string `json:"source_sql_preflight"`
+	TargetSQLPreflight        string `json:"target_sql_preflight,omitempty"`
+	SourceRoleAttributes      string `json:"source_role_attributes"`
+	DeploymentReady           bool   `json:"deployment_ready"`
+	WorkloadReady             bool   `json:"workload_ready"`
+	SourceDBConnected         bool   `json:"source_db_connected"`
+	SourceMarkerPresent       bool   `json:"source_marker_present"`
+	TargetMarkerAbsent        bool   `json:"target_marker_absent"`
+	PostRollbackSourceWritten bool   `json:"post_rollback_source_written"`
+	TargetAuthorityPreserved  bool   `json:"target_authority_preserved"`
+}
+
+type RollbackRequest struct {
+}
+
+type RollbackResult struct {
+	Status                 string                      `json:"status"`
+	FailureCode            string                      `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                      `json:"failure_message_redacted,omitempty"`
+	VerificationSummary    RollbackVerificationSummary `json:"verification_summary,omitempty"`
+}
+
+type RollbackApplyResult struct {
+	Rollback ApplicationCutoverRollback `json:"rollback"`
+	Reused   bool                       `json:"reused"`
+}
+
+func RollbackEvidenceHash(r ApplicationCutoverRollback) string {
+	summary, _ := json.Marshal(r.VerificationSummary)
+	warnings, _ := json.Marshal(r.Warnings)
+	data, _ := json.Marshal([]any{
+		r.SchemaVersion,
+		r.ID,
+		r.ProjectID,
+		r.EnvironmentID,
+		r.ApplicationID,
+		r.CutoverID,
+		r.SourceBindingID,
+		r.TargetBindingID,
+		r.SourceResourceID,
+		r.TargetResourceID,
+		r.CurrentApplicationConfigRevision,
+		r.CurrentApplicationConfigHash,
+		r.OriginalPreCutoverApplicationConfigRevision,
+		r.OriginalPreCutoverApplicationConfigHash,
+		r.ResultingApplicationConfigRevision,
+		r.ResultingApplicationConfigHash,
+		r.DeploymentJobID,
+		r.Lifecycle,
+		r.RequestedBy,
+		r.RequestedAt,
+		r.AppliedAt,
+		r.CompletedAt,
+		r.TargetNodeID,
+		r.FailureCode,
+		r.FailureMessageRedacted,
+		string(warnings),
+		string(summary),
+	})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (r ApplicationCutoverRollback) ValidateSucceeded() error {
+	if r.SchemaVersion != RollbackSchemaVersion ||
+		r.ID == "" ||
+		r.ProjectID == "" ||
+		r.EnvironmentID == "" ||
+		r.ApplicationID == "" ||
+		r.CutoverID == "" ||
+		r.SourceBindingID == "" ||
+		r.TargetBindingID == "" ||
+		r.SourceResourceID == "" ||
+		r.TargetResourceID == "" ||
+		r.SourceBindingID == r.TargetBindingID ||
+		r.SourceResourceID == r.TargetResourceID ||
+		r.ResultingApplicationConfigRevision <= r.CurrentApplicationConfigRevision ||
+		r.DeploymentJobID == "" ||
+		r.Lifecycle != RollbackSucceeded ||
+		r.CompletedAt == nil ||
+		!r.VerificationSummary.WorkloadReady ||
+		!r.VerificationSummary.SourceDBConnected ||
+		!r.VerificationSummary.TargetAuthorityPreserved ||
+		r.EvidenceHash == "" ||
+		r.EvidenceHash != RollbackEvidenceHash(r) {
+		return errors.New("cutover rollback evidence is invalid")
 	}
 	return nil
 }

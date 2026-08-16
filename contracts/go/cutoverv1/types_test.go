@@ -258,3 +258,75 @@ func TestApplicationCutoverValidationAndEvidenceHash(t *testing.T) {
 		}
 	}
 }
+
+func TestApplicationCutoverRollbackEvidenceValidation(t *testing.T) {
+	now := time.Now().UTC()
+	rollback := ApplicationCutoverRollback{
+		SchemaVersion:                               RollbackSchemaVersion,
+		ID:                                          "acrb-1",
+		ProjectID:                                   "proj-1",
+		EnvironmentID:                               "env-1",
+		ApplicationID:                               "app-1",
+		CutoverID:                                   "acut-1",
+		SourceBindingID:                             "bind-source",
+		TargetBindingID:                             "bind-target",
+		SourceResourceID:                            "res-source",
+		TargetResourceID:                            "res-target",
+		CurrentApplicationConfigRevision:            2,
+		CurrentApplicationConfigHash:                strings.Repeat("b", 64),
+		OriginalPreCutoverApplicationConfigRevision: 1,
+		OriginalPreCutoverApplicationConfigHash:     strings.Repeat("a", 64),
+		ResultingApplicationConfigRevision:          3,
+		ResultingApplicationConfigHash:              strings.Repeat("c", 64),
+		DeploymentJobID:                             "dep-3",
+		Lifecycle:                                   RollbackSucceeded,
+		RequestedBy:                                 "user-1",
+		RequestedAt:                                 now,
+		CompletedAt:                                 &now,
+		Warnings:                                    []string{WarningTargetWritesMayNotBeOnSource},
+		VerificationSummary: RollbackVerificationSummary{
+			SourceSQLPreflight:        "PASS",
+			TargetSQLPreflight:        "PASS",
+			SourceRoleAttributes:      "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+			DeploymentReady:           true,
+			WorkloadReady:             true,
+			SourceDBConnected:         true,
+			SourceMarkerPresent:       true,
+			TargetMarkerAbsent:        true,
+			PostRollbackSourceWritten: true,
+			TargetAuthorityPreserved:  true,
+		},
+	}
+	rollback.EvidenceHash = RollbackEvidenceHash(rollback)
+
+	if err := rollback.ValidateSucceeded(); err != nil {
+		t.Fatalf("expected valid succeeded rollback: %v", err)
+	}
+
+	// Tampered evidence hash
+	badHash := rollback
+	badHash.EvidenceHash = "badhash"
+	if err := badHash.ValidateSucceeded(); err == nil {
+		t.Fatal("expected error with tampered evidence hash")
+	}
+
+	// Incomplete verification
+	unverified := rollback
+	unverified.VerificationSummary.SourceDBConnected = false
+	unverified.EvidenceHash = RollbackEvidenceHash(unverified)
+	if err := unverified.ValidateSucceeded(); err == nil {
+		t.Fatal("expected error with incomplete verification")
+	}
+
+	// Check serialization security
+	data, err := json.Marshal(rollback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(data)
+	for _, forbidden := range []string{"password", "secret", "bearer", "token"} {
+		if strings.Contains(strings.ToLower(serialized), `"`+forbidden+`"`) {
+			t.Fatalf("forbidden field %q found in rollback JSON", forbidden)
+		}
+	}
+}

@@ -11,11 +11,13 @@ import (
 )
 
 type MemoryStore struct {
-	mu                 sync.Mutex
-	reviews            map[string]cutoverv1.ApplicationCutoverReview
-	idempotency        map[string]idempotencyRecord
-	cutovers           map[string]cutoverv1.ApplicationCutover
-	cutoverIdempotency map[string]cutoverIdempotencyRecord
+	mu                  sync.Mutex
+	reviews             map[string]cutoverv1.ApplicationCutoverReview
+	idempotency         map[string]idempotencyRecord
+	cutovers            map[string]cutoverv1.ApplicationCutover
+	cutoverIdempotency  map[string]cutoverIdempotencyRecord
+	rollbacks           map[string]cutoverv1.ApplicationCutoverRollback
+	rollbackIdempotency map[string]rollbackIdempotencyRecord
 }
 
 type idempotencyRecord struct {
@@ -28,12 +30,19 @@ type cutoverIdempotencyRecord struct {
 	payloadHash string
 }
 
+type rollbackIdempotencyRecord struct {
+	rollbackID  string
+	payloadHash string
+}
+
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		reviews:            map[string]cutoverv1.ApplicationCutoverReview{},
-		idempotency:        map[string]idempotencyRecord{},
-		cutovers:           map[string]cutoverv1.ApplicationCutover{},
-		cutoverIdempotency: map[string]cutoverIdempotencyRecord{},
+		reviews:             map[string]cutoverv1.ApplicationCutoverReview{},
+		idempotency:         map[string]idempotencyRecord{},
+		cutovers:            map[string]cutoverv1.ApplicationCutover{},
+		cutoverIdempotency:  map[string]cutoverIdempotencyRecord{},
+		rollbacks:           map[string]cutoverv1.ApplicationCutoverRollback{},
+		rollbackIdempotency: map[string]rollbackIdempotencyRecord{},
 	}
 }
 
@@ -224,6 +233,92 @@ func (s *MemoryStore) HasActiveCutover(_ context.Context, projectID, application
 	for _, cutover := range s.cutovers {
 		if cutover.ProjectID == projectID && cutover.ApplicationID == applicationID {
 			if cutover.Lifecycle == cutoverv1.CutoverQueued || cutover.Lifecycle == cutoverv1.CutoverValidating || cutover.Lifecycle == cutoverv1.CutoverApplying || cutover.Lifecycle == cutoverv1.CutoverDeploying || cutover.Lifecycle == cutoverv1.CutoverVerifying {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (s *MemoryStore) CreateRollback(_ context.Context, value cutoverv1.ApplicationCutoverRollback, key, payload string) (cutoverv1.ApplicationCutoverRollback, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key != "" {
+		compoundKey := value.ProjectID + ":" + key
+		if record, ok := s.rollbackIdempotency[compoundKey]; ok {
+			if record.payloadHash != payload {
+				return cutoverv1.ApplicationCutoverRollback{}, false, Error{Code: cutoverv1.FailureIdempotencyConflict, Status: 409, Message: "idempotency key was used with another payload"}
+			}
+			existing, found := s.rollbacks[record.rollbackID]
+			if found {
+				return existing, true, nil
+			}
+		}
+	}
+	for _, rollback := range s.rollbacks {
+		if rollback.ProjectID == value.ProjectID && rollback.ApplicationID == value.ApplicationID {
+			if rollback.Lifecycle == cutoverv1.RollbackQueued || rollback.Lifecycle == cutoverv1.RollbackValidating || rollback.Lifecycle == cutoverv1.RollbackApplying || rollback.Lifecycle == cutoverv1.RollbackDeploying || rollback.Lifecycle == cutoverv1.RollbackVerifying {
+				return cutoverv1.ApplicationCutoverRollback{}, false, Error{Code: cutoverv1.FailureRollbackAlreadyRunning, Status: 409, Message: "an active cutover rollback is already running for this application"}
+			}
+		}
+	}
+	if key != "" {
+		compoundKey := value.ProjectID + ":" + key
+		s.rollbackIdempotency[compoundKey] = rollbackIdempotencyRecord{rollbackID: value.ID, payloadHash: payload}
+	}
+	s.rollbacks[value.ID] = value
+	return value, false, nil
+}
+
+func (s *MemoryStore) GetRollback(_ context.Context, projectID, rollbackID string) (cutoverv1.ApplicationCutoverRollback, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rollback, ok := s.rollbacks[rollbackID]
+	if !ok || rollback.ProjectID != projectID {
+		return cutoverv1.ApplicationCutoverRollback{}, ErrNotFound
+	}
+	return rollback, nil
+}
+
+func (s *MemoryStore) ListRollbacks(_ context.Context, projectID, applicationID string) ([]cutoverv1.ApplicationCutoverRollback, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []cutoverv1.ApplicationCutoverRollback{}
+	for _, rollback := range s.rollbacks {
+		if rollback.ProjectID != projectID {
+			continue
+		}
+		if applicationID != "" && rollback.ApplicationID != applicationID {
+			continue
+		}
+		out = append(out, rollback)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].RequestedAt.Before(out[j].RequestedAt)
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateRollback(_ context.Context, value cutoverv1.ApplicationCutoverRollback) (cutoverv1.ApplicationCutoverRollback, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.rollbacks[value.ID]
+	if !ok || current.ProjectID != value.ProjectID {
+		return cutoverv1.ApplicationCutoverRollback{}, ErrNotFound
+	}
+	if current.Lifecycle == cutoverv1.RollbackSucceeded {
+		return cutoverv1.ApplicationCutoverRollback{}, errors.New("succeeded cutover rollback is immutable")
+	}
+	s.rollbacks[value.ID] = value
+	return value, nil
+}
+
+func (s *MemoryStore) HasActiveRollback(_ context.Context, projectID, applicationID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rollback := range s.rollbacks {
+		if rollback.ProjectID == projectID && rollback.ApplicationID == applicationID {
+			if rollback.Lifecycle == cutoverv1.RollbackQueued || rollback.Lifecycle == cutoverv1.RollbackValidating || rollback.Lifecycle == cutoverv1.RollbackApplying || rollback.Lifecycle == cutoverv1.RollbackDeploying || rollback.Lifecycle == cutoverv1.RollbackVerifying {
 				return true, nil
 			}
 		}

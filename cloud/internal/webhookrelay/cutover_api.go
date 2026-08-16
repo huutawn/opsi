@@ -135,6 +135,68 @@ func (s *Server) handleCutoverAPI(w http.ResponseWriter, r *http.Request, projec
 		return true
 	}
 
+	// POST /api/projects/{project}/applications/{application}/cutovers/{cutover}/rollbacks
+	// POST /api/projects/{project}/services/{service}/cutovers/{cutover}/rollbacks
+	if len(parts) == 7 && (parts[2] == "applications" || parts[2] == "services") && (parts[4] == "cutovers" || parts[4] == "application-cutovers") && (parts[6] == "rollbacks" || parts[6] == "cutover-rollbacks") && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "application", parts[3], "owner", "admin", "developer") {
+			return true
+		}
+		value, reused, err := s.Cutovers.Rollback(r.Context(), projectID, parts[3], parts[5], principal.UserID, r.Header.Get("Idempotency-Key"))
+		if err == nil && !reused {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CUTOVER_ROLLBACK_REQUESTED", "cutover_rollback", value.ID, "success", map[string]any{
+				"application_id":    value.ApplicationID,
+				"cutover_id":        value.CutoverID,
+				"source_binding_id": value.SourceBindingID,
+				"target_binding_id": value.TargetBindingID,
+			})
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CUTOVER_ROLLBACK_APPLY_STARTED", "cutover_rollback", value.ID, "success", map[string]any{
+				"application_id":            value.ApplicationID,
+				"pre_rollback_revision":     value.CurrentApplicationConfigRevision,
+				"resulting_config_revision": value.ResultingApplicationConfigRevision,
+			})
+			if value.DeploymentJobID != "" {
+				s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CUTOVER_ROLLBACK_DEPLOYMENT_STARTED", "cutover_rollback", value.ID, "success", map[string]any{
+					"application_id":    value.ApplicationID,
+					"deployment_job_id": value.DeploymentJobID,
+				})
+			}
+		}
+		writeCutoverResult(w, r, map[string]any{"rollback": value, "cutover_rollback": value, "reused": reused}, err, http.StatusAccepted)
+		return true
+	}
+
+	// GET /api/projects/{project}/applications/{application}/cutovers/{cutover}/rollbacks
+	// GET /api/projects/{project}/services/{service}/cutovers/{cutover}/rollbacks
+	if len(parts) == 7 && (parts[2] == "applications" || parts[2] == "services") && (parts[4] == "cutovers" || parts[4] == "application-cutovers") && (parts[6] == "rollbacks" || parts[6] == "cutover-rollbacks") && r.Method == http.MethodGet {
+		values, err := s.Cutovers.ListRollbacks(r.Context(), projectID, parts[3])
+		writeCutoverResult(w, r, map[string]any{"rollbacks": values, "cutover_rollbacks": values}, err, http.StatusOK)
+		return true
+	}
+
+	// GET /api/projects/{project}/applications/{application}/cutovers/{cutover}/rollbacks/{rollback}
+	// GET /api/projects/{project}/services/{service}/cutovers/{cutover}/rollbacks/{rollback}
+	if len(parts) == 8 && (parts[2] == "applications" || parts[2] == "services") && (parts[4] == "cutovers" || parts[4] == "application-cutovers") && (parts[6] == "rollbacks" || parts[6] == "cutover-rollbacks") && r.Method == http.MethodGet {
+		value, err := s.Cutovers.GetRollback(r.Context(), projectID, parts[7])
+		writeCutoverResult(w, r, map[string]any{"rollback": value, "cutover_rollback": value}, err, http.StatusOK)
+		return true
+	}
+
+	// GET /api/projects/{project}/application-cutover-rollbacks
+	// GET /api/projects/{project}/cutover-rollbacks
+	if len(parts) == 3 && (parts[2] == "application-cutover-rollbacks" || parts[2] == "cutover-rollbacks") && r.Method == http.MethodGet {
+		values, err := s.Cutovers.ListRollbacks(r.Context(), projectID, r.URL.Query().Get("application_id"))
+		writeCutoverResult(w, r, map[string]any{"rollbacks": values, "cutover_rollbacks": values}, err, http.StatusOK)
+		return true
+	}
+
+	// GET /api/projects/{project}/application-cutover-rollbacks/{rollback}
+	// GET /api/projects/{project}/cutover-rollbacks/{rollback}
+	if len(parts) == 4 && (parts[2] == "application-cutover-rollbacks" || parts[2] == "cutover-rollbacks") && r.Method == http.MethodGet {
+		value, err := s.Cutovers.GetRollback(r.Context(), projectID, parts[3])
+		writeCutoverResult(w, r, map[string]any{"rollback": value, "cutover_rollback": value}, err, http.StatusOK)
+		return true
+	}
+
 	return false
 }
 
@@ -255,4 +317,59 @@ func (s *Server) handleAgentCutoverResult(w http.ResponseWriter, r *http.Request
 	}
 	s.Registry.Audit(agent.OrgID, projectID, agent.ID, action, "cutover", value.ID, outcome, metadata)
 	writeJSON(w, http.StatusOK, map[string]any{"cutover": value, "application_cutover": value})
+}
+
+func (s *Server) handleAgentCutoverRollbackResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID, nodeID := r.URL.Query().Get("project_id"), nodeIDFromAgentPath(r.URL.Path)
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 6 {
+		http.NotFound(w, r)
+		return
+	}
+	var result cutoverv1.RollbackResult
+	if !decodeResourceJSON(w, r, &result) {
+		return
+	}
+	rollbackID := parts[len(parts)-2]
+	value, err := s.Cutovers.CompleteRollback(r.Context(), projectID, rollbackID, result)
+	if err != nil {
+		writeCutoverResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	action, outcome := "CUTOVER_ROLLBACK_FAILED", "failure"
+	metadata := map[string]any{
+		"application_id":    value.ApplicationID,
+		"cutover_id":        value.CutoverID,
+		"source_binding_id": value.SourceBindingID,
+		"target_binding_id": value.TargetBindingID,
+		"failure_code":      value.FailureCode,
+	}
+	if value.Lifecycle == cutoverv1.RollbackSucceeded {
+		action, outcome = "CUTOVER_ROLLBACK_SUCCEEDED", "success"
+		metadata = map[string]any{
+			"application_id":            value.ApplicationID,
+			"cutover_id":                value.CutoverID,
+			"source_binding_id":         value.SourceBindingID,
+			"target_binding_id":         value.TargetBindingID,
+			"source_resource_id":        value.SourceResourceID,
+			"target_resource_id":        value.TargetResourceID,
+			"deployment_job_id":         value.DeploymentJobID,
+			"resulting_config_revision": value.ResultingApplicationConfigRevision,
+			"resulting_config_hash":     value.ResultingApplicationConfigHash,
+			"evidence_hash":             value.EvidenceHash,
+			"workload_ready":            value.VerificationSummary.WorkloadReady,
+			"source_db_connected":       value.VerificationSummary.SourceDBConnected,
+			"target_preserved":          value.VerificationSummary.TargetAuthorityPreserved,
+		}
+	}
+	s.Registry.Audit(agent.OrgID, projectID, agent.ID, action, "cutover_rollback", value.ID, outcome, metadata)
+	writeJSON(w, http.StatusOK, map[string]any{"rollback": value, "cutover_rollback": value})
 }
