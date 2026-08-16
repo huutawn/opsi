@@ -214,6 +214,7 @@ func setupCutoverAPITestServer(t *testing.T) (*Server, string, string, string, s
 	_, _ = credAuthority.Ensure(ctx, targetResource.Runtime.Spec.CredentialID)
 	server.Resources.Credentials = credAuthority
 	server.Cutovers.Credentials = credAuthority
+	server.Cutovers.Resources = server.Resources
 
 	appDraft := app.Configuration.ServiceConfigurationDraft
 	appDraft.ResourceBindings = []serviceconfigurationv1.ResourceBinding{
@@ -915,5 +916,187 @@ func TestCutoverRollbackAPIEndToEndAndAudit(t *testing.T) {
 		if !actions[expectedAction] {
 			t.Fatalf("missing expected audit action %s: %+v", expectedAction, audits)
 		}
+	}
+}
+
+func TestCutoverFinalizeAPIEndToEndAndAudit(t *testing.T) {
+	server, projectID, appID, sourceBindingID, targetBindingID, nodeID, _ := setupCutoverAPITestServer(t)
+
+	// 1. Create and complete Cutover Review
+	reviewBody, _ := json.Marshal(cutoverv1.ReviewRequest{
+		SourceBindingID: sourceBindingID,
+		TargetBindingID: targetBindingID,
+	})
+	reviewResp := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+projectID+"/applications/"+appID+"/cutover-reviews", string(reviewBody), "rev-key-1")
+	if reviewResp.Code != http.StatusAccepted {
+		t.Fatalf("review failed: %d %s", reviewResp.Code, reviewResp.Body.String())
+	}
+	var revPayload struct {
+		Review cutoverv1.ApplicationCutoverReview `json:"review"`
+	}
+	_ = json.Unmarshal(reviewResp.Body.Bytes(), &revPayload)
+
+	// Agent claims and completes review
+	agentReq := httptest.NewRequest(http.MethodGet, "/v1/agents/"+nodeID+"/webhooks/next?project_id="+projectID+"&wait=0s", nil)
+	agentReq.Header.Set("Authorization", "Bearer agent-secret")
+	agentResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentResp, agentReq)
+	var leasePayload struct {
+		LeaseToken string `json:"lease_token"`
+	}
+	_ = json.Unmarshal(agentResp.Body.Bytes(), &leasePayload)
+
+	compReview, _ := json.Marshal(cutoverv1.ReviewResult{
+		Status:               cutoverv1.ReviewSucceeded,
+		LeaseToken:           leasePayload.LeaseToken,
+		SourceSQLPreflight:   "PASS",
+		TargetSQLPreflight:   "PASS",
+		TargetRoleAttributes: "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+		ValidationSummary: cutoverv1.ValidationSummary{
+			SourceSQLPreflight:   "PASS",
+			TargetSQLPreflight:   "PASS",
+			TargetRoleAttributes: "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+			SourceBindingReady:   true,
+			TargetBindingReady:   true,
+			TargetRestoreReady:   true,
+		},
+	})
+	revCompReq := httptest.NewRequest(http.MethodPost, "/v1/agents/"+nodeID+"/cutover-reviews/"+revPayload.Review.ID+"/result?project_id="+projectID, strings.NewReader(string(compReview)))
+	revCompReq.Header.Set("Authorization", "Bearer agent-secret")
+	revCompReq.Header.Set("Content-Type", "application/json")
+	revCompResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(revCompResp, revCompReq)
+	if revCompResp.Code != http.StatusOK {
+		t.Fatalf("complete review failed: %d %s", revCompResp.Code, revCompResp.Body.String())
+	}
+
+	// 2. Apply Cutover
+	applyBody, _ := json.Marshal(cutoverv1.ApplyRequest{
+		CutoverReviewID: revPayload.Review.ID,
+	})
+	applyResp := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers", string(applyBody), "apply-key-1")
+	if applyResp.Code != http.StatusAccepted {
+		t.Fatalf("apply cutover failed: %d %s", applyResp.Code, applyResp.Body.String())
+	}
+	var cutoverPayload struct {
+		Cutover cutoverv1.ApplicationCutover `json:"cutover"`
+	}
+	_ = json.Unmarshal(applyResp.Body.Bytes(), &cutoverPayload)
+	cutoverID := cutoverPayload.Cutover.ID
+
+	// Complete Cutover via Agent Result
+	compCutover, _ := json.Marshal(cutoverv1.CutoverApplyResult{
+		Status: "succeeded",
+		VerificationSummary: cutoverv1.CutoverVerificationSummary{
+			SourceSQLPreflight:       "PASS",
+			TargetSQLPreflight:       "PASS",
+			TargetRoleAttributes:     "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+			DeploymentReady:          true,
+			WorkloadReady:            true,
+			TargetDBConnected:        true,
+			RestoredDataVerified:     true,
+			TargetOnlyMarkerPresent:  true,
+			SourceOnlyMarkerAbsent:   true,
+			PostCutoverTargetWritten: true,
+			SourceRollbackPreserved:  true,
+		},
+	})
+	cutCompReq := httptest.NewRequest(http.MethodPost, "/v1/agents/"+nodeID+"/cutovers/"+cutoverID+"/result?project_id="+projectID, strings.NewReader(string(compCutover)))
+	cutCompReq.Header.Set("Authorization", "Bearer agent-secret")
+	cutCompReq.Header.Set("Content-Type", "application/json")
+	cutCompResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(cutCompResp, cutCompReq)
+	if cutCompResp.Code != http.StatusOK {
+		t.Fatalf("agent complete cutover failed: %d %s", cutCompResp.Code, cutCompResp.Body.String())
+	}
+
+	// 3. Request Finalization
+	fnResp := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers/"+cutoverID+"/finalize", "", "fn-key-1")
+	if fnResp.Code != http.StatusAccepted {
+		t.Fatalf("finalize cutover failed: %d %s", fnResp.Code, fnResp.Body.String())
+	}
+	var fnPayload struct {
+		Finalization cutoverv1.ApplicationCutoverFinalization `json:"finalization"`
+		Reused       bool                                     `json:"reused"`
+	}
+	if err := json.Unmarshal(fnResp.Body.Bytes(), &fnPayload); err != nil {
+		t.Fatalf("failed to unmarshal finalization: %v", err)
+	}
+	if fnPayload.Reused {
+		t.Fatal("expected reused=false on initial finalize")
+	}
+	finalization := fnPayload.Finalization
+	if finalization.Lifecycle != cutoverv1.FinalizationSucceeded {
+		t.Fatalf("expected succeeded finalization, got %+v", finalization)
+	}
+	if err := finalization.ValidateSucceeded(); err != nil {
+		t.Fatalf("finalization validation failed: %v", err)
+	}
+
+	// 4. Replay with same Idempotency-Key
+	replayResp := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers/"+cutoverID+"/finalize", "", "fn-key-1")
+	if replayResp.Code != http.StatusAccepted {
+		t.Fatalf("finalize replay failed: %d %s", replayResp.Code, replayResp.Body.String())
+	}
+	var replayPayload struct {
+		Finalization cutoverv1.ApplicationCutoverFinalization `json:"finalization"`
+		Reused       bool                                     `json:"reused"`
+	}
+	_ = json.Unmarshal(replayResp.Body.Bytes(), &replayPayload)
+	if !replayPayload.Reused || replayPayload.Finalization.ID != finalization.ID {
+		t.Fatalf("expected reused=true with same ID %s: %+v", finalization.ID, replayPayload)
+	}
+
+	// 5. Query GET routes
+	get1 := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers/"+cutoverID+"/finalizations", "", "")
+	if get1.Code != http.StatusOK || !strings.Contains(get1.Body.String(), finalization.ID) {
+		t.Fatalf("list finalizations failed: %d %s", get1.Code, get1.Body.String())
+	}
+
+	get2 := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers/"+cutoverID+"/finalizations/"+finalization.ID, "", "")
+	if get2.Code != http.StatusOK || !strings.Contains(get2.Body.String(), finalization.ID) {
+		t.Fatalf("get single finalization failed: %d %s", get2.Code, get2.Body.String())
+	}
+
+	get3 := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+projectID+"/application-cutover-finalizations", "", "")
+	if get3.Code != http.StatusOK || !strings.Contains(get3.Body.String(), finalization.ID) {
+		t.Fatalf("list project finalizations failed: %d %s", get3.Code, get3.Body.String())
+	}
+
+	get4 := requestResourceAPI(t, server, http.MethodGet, "/api/projects/"+projectID+"/application-cutover-finalizations/"+finalization.ID, "", "")
+	if get4.Code != http.StatusOK || !strings.Contains(get4.Body.String(), finalization.ID) {
+		t.Fatalf("get single project finalization failed: %d %s", get4.Code, get4.Body.String())
+	}
+
+	// 6. Verify SOURCE binding was revoked (deleted or transitioned out of Ready)
+	srcBinding, err := server.Resources.Store.GetBinding(context.Background(), projectID, sourceBindingID)
+	if err == nil && srcBinding.Lifecycle == resourcev1.LifecycleReady {
+		t.Fatalf("source binding must not be ready after finalization: %+v", srcBinding)
+	}
+
+	// 7. Verify TARGET binding remains Ready and unchanged
+	tgtBinding, err := server.Resources.Store.GetBinding(context.Background(), projectID, targetBindingID)
+	if err != nil || tgtBinding.Lifecycle != resourcev1.LifecycleReady {
+		t.Fatalf("target binding must remain ready: %+v err=%v", tgtBinding, err)
+	}
+
+	// 8. Verify Audits
+	audits, _ := server.Registry.ListAudit(projectID)
+	actions := map[string]bool{}
+	for _, a := range audits {
+		if a.ResourceID == finalization.ID {
+			actions[a.Action] = true
+		}
+	}
+	for _, expectedAction := range []string{"CUTOVER_FINALIZE_REQUESTED", "CUTOVER_FINALIZE_VALIDATED", "CUTOVER_SOURCE_BINDING_REVOKE_STARTED", "CUTOVER_FINALIZED"} {
+		if !actions[expectedAction] {
+			t.Fatalf("missing expected audit action %s: %+v", expectedAction, audits)
+		}
+	}
+
+	// 9. Verify subsequent rollback attempt on finalized cutover is rejected
+	rbResp := requestResourceAPI(t, server, http.MethodPost, "/api/projects/"+projectID+"/applications/"+appID+"/cutovers/"+cutoverID+"/rollbacks", "", "rb-post-fn")
+	if rbResp.Code != http.StatusBadRequest || !strings.Contains(rbResp.Body.String(), cutoverv1.FailureCutoverFinalized) {
+		t.Fatalf("expected rollback rejection with %q, got: %d %s", cutoverv1.FailureCutoverFinalized, rbResp.Code, rbResp.Body.String())
 	}
 }

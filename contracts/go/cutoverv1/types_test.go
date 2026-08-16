@@ -330,3 +330,70 @@ func TestApplicationCutoverRollbackEvidenceValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestApplicationCutoverFinalizationEvidenceValidation(t *testing.T) {
+	now := time.Now().UTC()
+	finalization := ApplicationCutoverFinalization{
+		SchemaVersion:             FinalizationSchemaVersion,
+		ID:                        "acfn-1",
+		ProjectID:                 "proj-1",
+		EnvironmentID:             "env-1",
+		ApplicationID:             "app-1",
+		CutoverID:                 "acut-1",
+		SourceBindingID:           "bind-source",
+		TargetBindingID:           "bind-target",
+		SourceResourceID:          "res-source",
+		TargetResourceID:          "res-target",
+		ApplicationConfigRevision: 2,
+		ApplicationConfigHash:     strings.Repeat("b", 64),
+		CutoverEvidenceHash:       strings.Repeat("c", 64),
+		Lifecycle:                 FinalizationSucceeded,
+		RequestedBy:               "user-1",
+		RequestedAt:               now,
+		CompletedAt:               &now,
+		VerificationSummary: FinalizationVerificationSummary{
+			TargetSQLPreflight:        "PASS",
+			TargetRoleAttributes:      "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+			TargetDBConnected:         true,
+			TargetOnlyMarkerPresent:   true,
+			PostCutoverMarkerPresent:  true,
+			SourceMarkerAbsent:        true,
+			SourceBindingRevoked:      true,
+			SourceCredentialRejected:  true,
+			SourceResourceRetained:    true,
+			PostFinalizeTargetWritten: true,
+		},
+	}
+	finalization.EvidenceHash = FinalizationEvidenceHash(finalization)
+
+	if err := finalization.ValidateSucceeded(); err != nil {
+		t.Fatalf("expected valid succeeded finalization: %v", err)
+	}
+
+	// Tampered evidence hash
+	badHash := finalization
+	badHash.EvidenceHash = "badhash"
+	if err := badHash.ValidateSucceeded(); err == nil {
+		t.Fatal("expected error with tampered evidence hash")
+	}
+
+	// Incomplete verification
+	unverified := finalization
+	unverified.VerificationSummary.SourceBindingRevoked = false
+	unverified.EvidenceHash = FinalizationEvidenceHash(unverified)
+	if err := unverified.ValidateSucceeded(); err == nil {
+		t.Fatal("expected error with incomplete verification")
+	}
+
+	// Check serialization security (no secrets)
+	data, err := json.Marshal(finalization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(data)
+	for _, forbidden := range []string{"password", "secret", "bearer", "token"} {
+		if strings.Contains(strings.ToLower(serialized), `"`+forbidden+`"`) {
+			t.Fatalf("forbidden field %q found in finalization JSON", forbidden)
+		}
+	}
+}

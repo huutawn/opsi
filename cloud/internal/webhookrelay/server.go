@@ -409,16 +409,20 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentRestoreResult(w, r)
 		return
 	}
-	if strings.Contains(r.URL.Path, "/cutover-reviews/") && strings.HasSuffix(r.URL.Path, "/result") {
+	if (strings.Contains(r.URL.Path, "/cutover-finalizations/") || strings.Contains(r.URL.Path, "/application-cutover-finalizations/")) && !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
+		s.handleAgentCutoverFinalizationResult(w, r)
+		return
+	}
+	if (strings.Contains(r.URL.Path, "/cutover-rollbacks/") || strings.Contains(r.URL.Path, "/application-cutover-rollbacks/")) && !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
+		s.handleAgentCutoverRollbackResult(w, r)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/cutover-reviews/") && (strings.HasSuffix(r.URL.Path, "/result") || !strings.HasSuffix(r.URL.Path, "/webhooks/next")) {
 		s.handleAgentCutoverReviewResult(w, r)
 		return
 	}
-	if (strings.Contains(r.URL.Path, "/cutovers/") || strings.Contains(r.URL.Path, "/application-cutovers/")) && strings.HasSuffix(r.URL.Path, "/result") {
+	if (strings.Contains(r.URL.Path, "/cutovers/") || strings.Contains(r.URL.Path, "/application-cutovers/")) && !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		s.handleAgentCutoverResult(w, r)
-		return
-	}
-	if (strings.Contains(r.URL.Path, "/cutover-rollbacks/") || strings.Contains(r.URL.Path, "/application-cutover-rollbacks/")) && strings.HasSuffix(r.URL.Path, "/result") {
-		s.handleAgentCutoverRollbackResult(w, r)
 		return
 	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {

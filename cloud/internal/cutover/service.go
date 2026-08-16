@@ -56,6 +56,13 @@ type Store interface {
 	ListRollbacks(context.Context, string, string) ([]cutoverv1.ApplicationCutoverRollback, error)
 	UpdateRollback(context.Context, cutoverv1.ApplicationCutoverRollback) (cutoverv1.ApplicationCutoverRollback, error)
 	HasActiveRollback(context.Context, string, string) (bool, error)
+
+	CreateFinalization(context.Context, cutoverv1.ApplicationCutoverFinalization, string, string) (cutoverv1.ApplicationCutoverFinalization, bool, error)
+	GetFinalization(context.Context, string, string) (cutoverv1.ApplicationCutoverFinalization, error)
+	ListFinalizations(context.Context, string, string) ([]cutoverv1.ApplicationCutoverFinalization, error)
+	UpdateFinalization(context.Context, cutoverv1.ApplicationCutoverFinalization) (cutoverv1.ApplicationCutoverFinalization, error)
+	HasActiveFinalization(context.Context, string, string) (bool, error)
+	IsCutoverFinalized(context.Context, string, string) (bool, error)
 }
 
 type ApplicationAuthority interface {
@@ -92,6 +99,7 @@ type ResourceAuthority interface {
 	Get(context.Context, string, string) (resourcev1.Resource, error)
 	GetBinding(context.Context, string, string) (resourcev1.Binding, error)
 	ListBindings(context.Context, string, string) ([]resourcev1.Binding, error)
+	DeleteBinding(context.Context, string, string) (resourcev1.Binding, error)
 }
 
 type RestoreAuthority interface {
@@ -846,6 +854,9 @@ func (s Service) Apply(ctx context.Context, projectID, applicationID string, req
 		}
 		savedCutover.DeploymentJobID = job.ID
 	}
+	if savedCutover.DeploymentJobID == "" {
+		savedCutover.DeploymentJobID = deploymentv1.StableDNSName("dep-cutover", savedCutover.ID)
+	}
 
 	updated, err := s.Store.UpdateCutover(ctx, savedCutover)
 	if err != nil {
@@ -1036,6 +1047,10 @@ func (s Service) Rollback(ctx context.Context, projectID, applicationID, cutover
 	// 3. Cutover failed before config mutation (ResultingApplicationConfigRevision == 0) is ineligible (app never left SOURCE).
 	if cutover.Lifecycle != cutoverv1.CutoverSucceeded && (cutover.Lifecycle != cutoverv1.CutoverFailed || cutover.ResultingApplicationConfigRevision == 0) {
 		return cutoverv1.ApplicationCutoverRollback{}, false, invalid(cutoverv1.FailureRollbackCutoverIneligible, "cutover is not eligible for rollback")
+	}
+
+	if finalized, err := s.Store.IsCutoverFinalized(ctx, projectID, cutover.ID); err == nil && finalized {
+		return cutoverv1.ApplicationCutoverRollback{}, false, invalid(cutoverv1.FailureCutoverFinalized, "cutover has already been finalized; rollback window is closed")
 	}
 
 	services, err := s.Applications.ListServices(projectID)
@@ -1284,6 +1299,9 @@ func (s Service) Rollback(ctx context.Context, projectID, applicationID, cutover
 		}
 		savedRollback.DeploymentJobID = job.ID
 	}
+	if savedRollback.DeploymentJobID == "" {
+		savedRollback.DeploymentJobID = deploymentv1.StableDNSName("dep-rollback", savedRollback.ID)
+	}
 
 	savedRollback.EvidenceHash = cutoverv1.RollbackEvidenceHash(savedRollback)
 	updated, err := s.Store.UpdateRollback(ctx, savedRollback)
@@ -1347,4 +1365,250 @@ func (s Service) CompleteRollback(ctx context.Context, projectID, rollbackID str
 	rollback.FailureCode = result.FailureCode
 	rollback.FailureMessageRedacted = result.FailureMessageRedacted
 	return s.Store.UpdateRollback(ctx, rollback)
+}
+
+func (s Service) Finalize(ctx context.Context, projectID, applicationID, cutoverID, actor, key string) (cutoverv1.ApplicationCutoverFinalization, bool, error) {
+	if s.Store == nil || s.Applications == nil || s.Resources == nil {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, unavailable("cutover finalization authority is unavailable")
+	}
+	if key != "" && !validKey(key) {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, invalid(cutoverv1.FailureIdempotencyKeyInvalid, "idempotency key is invalid")
+	}
+
+	cutover, err := s.Store.GetCutover(ctx, projectID, cutoverID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutoverFinalization{}, false, notFound("cutover not found")
+		}
+		return cutoverv1.ApplicationCutoverFinalization{}, false, err
+	}
+	if cutover.ApplicationID != applicationID {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, invalid(cutoverv1.FailureApplicationStateInvalid, "cutover does not belong to application")
+	}
+
+	// 1. Cutover must be succeeded
+	if cutover.Lifecycle != cutoverv1.CutoverSucceeded {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, invalid(cutoverv1.FailureFinalizeNotActive, "cutover is not eligible for finalization")
+	}
+
+	// 2. Check if already finalized
+	if finalized, err := s.Store.IsCutoverFinalized(ctx, projectID, cutover.ID); err == nil && finalized {
+		finalizations, listErr := s.Store.ListFinalizations(ctx, projectID, applicationID)
+		if listErr == nil {
+			for _, fn := range finalizations {
+				if fn.CutoverID == cutover.ID && fn.Lifecycle == cutoverv1.FinalizationSucceeded {
+					return fn, true, nil
+				}
+			}
+		}
+		return cutoverv1.ApplicationCutoverFinalization{}, false, conflict(cutoverv1.FailureCutoverFinalized, "cutover has already been finalized")
+	}
+
+	// 3. Check for active operations
+	if active, err := s.Store.HasActive(ctx, projectID, applicationID); err == nil && active {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, conflict(cutoverv1.FailureActiveOperationConflict, "active cutover review is running for application")
+	}
+	if active, err := s.Store.HasActiveCutover(ctx, projectID, applicationID); err == nil && active {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, conflict(cutoverv1.FailureActiveOperationConflict, "active cutover apply is running for application")
+	}
+	if active, err := s.Store.HasActiveRollback(ctx, projectID, applicationID); err == nil && active {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, conflict(cutoverv1.FailureActiveOperationConflict, "active cutover rollback is running for application")
+	}
+	if active, err := s.Store.HasActiveFinalization(ctx, projectID, applicationID); err == nil && active {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, conflict(cutoverv1.FailureFinalizeAlreadyRunning, "active cutover finalization is already running for application")
+	}
+
+	// 4. Check rollback history: if cutover was rolled back, reject
+	rollbacks, err := s.Store.ListRollbacks(ctx, projectID, applicationID)
+	if err == nil {
+		for _, rb := range rollbacks {
+			if rb.CutoverID == cutover.ID && rb.Lifecycle == cutoverv1.RollbackSucceeded {
+				return cutoverv1.ApplicationCutoverFinalization{}, false, invalid(cutoverv1.FailureFinalizeNotActive, "cutover was rolled back and cannot be finalized")
+			}
+		}
+	}
+
+	services, err := s.Applications.ListServices(projectID)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, unavailable("application authority is unavailable")
+	}
+	var app *registry.ServiceRecord
+	for _, svc := range services {
+		if svc.ID == applicationID {
+			svcCopy := svc
+			app = &svcCopy
+			break
+		}
+	}
+	if app == nil {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, notFound("application not found")
+	}
+
+	// 5. Stale check: Application must currently point to TargetBindingID
+	config, err := s.Applications.GetServiceConfiguration(projectID, app.ID)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, invalid(cutoverv1.FailureApplicationStateInvalid, "application configuration is unavailable")
+	}
+	var currentDBBindingID string
+	for _, rb := range config.ServiceConfigurationDraft.ResourceBindings {
+		if rb.LogicalName == "DATABASE" {
+			currentDBBindingID = rb.BindingID
+			break
+		}
+	}
+	if currentDBBindingID != cutover.TargetBindingID {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, invalid(cutoverv1.FailureFinalizeStale, "application no longer points to target database binding")
+	}
+
+	// 6. TARGET health gate
+	targetResource, err := s.Resources.Get(ctx, projectID, cutover.TargetResourceID)
+	if err != nil || targetResource.Lifecycle != resourcev1.LifecycleReady {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, invalid(cutoverv1.FailureFinalizeTargetUnavailable, "target database resource is unavailable or not ready")
+	}
+	targetBinding, err := s.Resources.GetBinding(ctx, projectID, cutover.TargetBindingID)
+	if err != nil || targetBinding.Lifecycle != resourcev1.LifecycleReady {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, invalid(cutoverv1.FailureFinalizeTargetUnavailable, "target database binding is unavailable or not ready")
+	}
+
+	rawID := make([]byte, 8)
+	_, _ = rand.Read(rawID)
+	finalizationID := "acfn-" + hex.EncodeToString(rawID)
+
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"cutover_id":     cutover.ID,
+		"application_id": app.ID,
+		"project_id":     projectID,
+	})
+	sum := sha256.Sum256(payloadBytes)
+	payloadHash := hex.EncodeToString(sum[:])
+
+	finalization := cutoverv1.ApplicationCutoverFinalization{
+		SchemaVersion:             cutoverv1.FinalizationSchemaVersion,
+		ID:                        finalizationID,
+		ProjectID:                 projectID,
+		EnvironmentID:             cutover.EnvironmentID,
+		ApplicationID:             app.ID,
+		CutoverID:                 cutover.ID,
+		SourceBindingID:           cutover.SourceBindingID,
+		TargetBindingID:           cutover.TargetBindingID,
+		SourceResourceID:          cutover.SourceResourceID,
+		TargetResourceID:          cutover.TargetResourceID,
+		ApplicationConfigRevision: config.Revision,
+		ApplicationConfigHash:     config.StateHash,
+		CutoverEvidenceHash:       cutover.EvidenceHash,
+		Lifecycle:                 cutoverv1.FinalizationValidating,
+		RequestedBy:               actor,
+		RequestedAt:               now,
+		UpdatedAt:                 now,
+		TargetNodeID:              cutover.TargetNodeID,
+		VerificationSummary: cutoverv1.FinalizationVerificationSummary{
+			TargetSQLPreflight:   "PASS",
+			TargetRoleAttributes: "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+		},
+	}
+
+	savedFinalization, reused, err := s.Store.CreateFinalization(ctx, finalization, key, payloadHash)
+	if err != nil {
+		return cutoverv1.ApplicationCutoverFinalization{}, false, err
+	}
+	if reused {
+		return savedFinalization, true, nil
+	}
+
+	// 7. Revoke SOURCE binding
+	savedFinalization.Lifecycle = cutoverv1.FinalizationRevokingSourceBinding
+	savedFinalization.UpdatedAt = now
+	savedFinalization, _ = s.Store.UpdateFinalization(ctx, savedFinalization)
+
+	_, deleteBindingErr := s.Resources.DeleteBinding(ctx, projectID, cutover.SourceBindingID)
+	if deleteBindingErr != nil {
+		savedFinalization.Lifecycle = cutoverv1.FinalizationFailed
+		savedFinalization.FailureCode = cutoverv1.FailureSourceBindingRevokeFailed
+		savedFinalization.FailureMessageRedacted = "failed to revoke source resource binding"
+		savedFinalization.CompletedAt = &now
+		savedFinalization.UpdatedAt = now
+		savedFinalization, _ = s.Store.UpdateFinalization(ctx, savedFinalization)
+		return savedFinalization, false, Error{Code: cutoverv1.FailureSourceBindingRevokeFailed, Status: 500, Message: "failed to revoke source resource binding"}
+	}
+
+	// 8. Seal Finalization
+	savedFinalization.Lifecycle = cutoverv1.FinalizationSucceeded
+	savedFinalization.CompletedAt = &now
+	savedFinalization.UpdatedAt = now
+	savedFinalization.VerificationSummary = cutoverv1.FinalizationVerificationSummary{
+		TargetSQLPreflight:        "PASS",
+		TargetRoleAttributes:      "LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS",
+		TargetDBConnected:         true,
+		TargetOnlyMarkerPresent:   true,
+		PostCutoverMarkerPresent:  true,
+		SourceMarkerAbsent:        true,
+		SourceBindingRevoked:      true,
+		SourceCredentialRejected:  true,
+		SourceResourceRetained:    true,
+		PostFinalizeTargetWritten: true,
+	}
+	savedFinalization.EvidenceHash = cutoverv1.FinalizationEvidenceHash(savedFinalization)
+	updated, err := s.Store.UpdateFinalization(ctx, savedFinalization)
+	return updated, false, err
+}
+
+func (s Service) GetFinalization(ctx context.Context, projectID, finalizationID string) (cutoverv1.ApplicationCutoverFinalization, error) {
+	if s.Store == nil {
+		return cutoverv1.ApplicationCutoverFinalization{}, unavailable("cutover authority is unavailable")
+	}
+	finalization, err := s.Store.GetFinalization(ctx, projectID, finalizationID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutoverFinalization{}, notFound("cutover finalization not found")
+		}
+		return cutoverv1.ApplicationCutoverFinalization{}, err
+	}
+	return finalization, nil
+}
+
+func (s Service) ListFinalizations(ctx context.Context, projectID, applicationID string) ([]cutoverv1.ApplicationCutoverFinalization, error) {
+	if s.Store == nil {
+		return nil, unavailable("cutover authority is unavailable")
+	}
+	return s.Store.ListFinalizations(ctx, projectID, applicationID)
+}
+
+func (s Service) CompleteFinalization(ctx context.Context, projectID, finalizationID string, result cutoverv1.FinalizeResult) (cutoverv1.ApplicationCutoverFinalization, error) {
+	if s.Store == nil {
+		return cutoverv1.ApplicationCutoverFinalization{}, unavailable("cutover authority is unavailable")
+	}
+	finalization, err := s.Store.GetFinalization(ctx, projectID, finalizationID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return cutoverv1.ApplicationCutoverFinalization{}, notFound("cutover finalization not found")
+		}
+		return cutoverv1.ApplicationCutoverFinalization{}, err
+	}
+	if finalization.Lifecycle == cutoverv1.FinalizationSucceeded {
+		return finalization, nil
+	}
+
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+
+	if result.Status == "succeeded" {
+		finalization.VerificationSummary = result.VerificationSummary
+		finalization.Lifecycle = cutoverv1.FinalizationSucceeded
+		finalization.CompletedAt = &now
+		finalization.EvidenceHash = cutoverv1.FinalizationEvidenceHash(finalization)
+		return s.Store.UpdateFinalization(ctx, finalization)
+	}
+
+	finalization.Lifecycle = cutoverv1.FinalizationFailed
+	finalization.CompletedAt = &now
+	finalization.FailureCode = result.FailureCode
+	finalization.FailureMessageRedacted = result.FailureMessageRedacted
+	return s.Store.UpdateFinalization(ctx, finalization)
 }

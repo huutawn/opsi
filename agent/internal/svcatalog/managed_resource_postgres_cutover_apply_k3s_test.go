@@ -84,10 +84,7 @@ func (a restoreAcceptanceAPI) requestStatusWithBearer(t *testing.T, method, path
 		}
 		payload = data
 	}
-	endpoint, err := url.JoinPath(a.baseURL, path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	endpoint := strings.TrimRight(a.baseURL, "/") + path
 	req, err := http.NewRequest(method, endpoint, strings.NewReader(string(payload)))
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +204,7 @@ func TestManagedResourceRealK3sPostgresCutoverApply(t *testing.T) {
 	}
 
 	// 5. Write post-backup marker on SOURCE PostgreSQL (to prove target isolation)
-	postBackupMarkerScript := `CREATE TABLE IF NOT EXISTS p07b3c2b1_source_post_backup_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b1_source_post_backup_marker(id) VALUES('source-post-backup-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b1_source_post_backup_marker;`
+	postBackupMarkerScript := psqlSQLScript(`CREATE TABLE IF NOT EXISTS p07b3c2b1_source_post_backup_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b1_source_post_backup_marker(id) VALUES('source-post-backup-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b1_source_post_backup_marker;`)
 	postMarkerOut, err := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), postBackupMarkerScript, *sourceBinding)
 	if err != nil || lastNonEmptyLine(string(postMarkerOut)) != "1" {
 		t.Fatalf("write source post-backup marker err=%v out=%q", err, postMarkerOut)
@@ -242,7 +239,7 @@ func TestManagedResourceRealK3sPostgresCutoverApply(t *testing.T) {
 	targetBinding := postgresBindingOperation(t, targetSpec, "binding-cutover-target-app", true)
 	_ = reconcilePostgresBindingK3s(t, reconciler, "target-binding-create-app", targetSpec, targetManagement, targetBinding)
 
-	targetOnlyMarkerScript := `CREATE TABLE IF NOT EXISTS p07b3c2b1_target_only_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b1_target_only_marker(id) VALUES('target-only-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b1_target_only_marker;`
+	targetOnlyMarkerScript := psqlSQLScript(`CREATE TABLE IF NOT EXISTS p07b3c2b1_target_only_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b1_target_only_marker(id) VALUES('target-only-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b1_target_only_marker;`)
 	targetMarkerOut, err := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), targetOnlyMarkerScript, *targetBinding)
 	if err != nil || lastNonEmptyLine(string(targetMarkerOut)) != "1" {
 		t.Fatalf("write target-only marker err=%v out=%q", err, targetMarkerOut)
@@ -313,17 +310,17 @@ func TestManagedResourceRealK3sPostgresCutoverApply(t *testing.T) {
 	if err != nil || strings.TrimSpace(targetCheckRows) != "128" {
 		t.Fatalf("target binding read failed: %q err=%v", targetCheckRows, err)
 	}
-	targetCheckMarker, err := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), "SELECT count(*) FROM p07b3c2b1_target_only_marker;", *targetBinding)
+	targetCheckMarker, err := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), psqlSQLScript("SELECT count(*) FROM p07b3c2b1_target_only_marker;"), *targetBinding)
 	if err != nil || lastNonEmptyLine(string(targetCheckMarker)) != "1" {
 		t.Fatalf("target only marker absent on target: %q err=%v", targetCheckMarker, err)
 	}
-	sourceCheckMarker, _ := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), "SELECT count(*) FROM pg_class WHERE relname='p07b3c2b1_source_post_backup_marker';", *targetBinding)
+	sourceCheckMarker, _ := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), psqlSQLScript("SELECT count(*) FROM pg_class WHERE relname='p07b3c2b1_source_post_backup_marker';"), *targetBinding)
 	if lastNonEmptyLine(string(sourceCheckMarker)) != "0" {
 		t.Fatalf("source post-backup marker leaked to target: %q", sourceCheckMarker)
 	}
 
 	// 13. Write post-cutover marker on TARGET through application binding
-	postCutoverMarkerScript := `CREATE TABLE IF NOT EXISTS p07b3c2b1_post_cutover_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b1_post_cutover_marker(id) VALUES('post-cutover-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b1_post_cutover_marker;`
+	postCutoverMarkerScript := psqlSQLScript(`CREATE TABLE IF NOT EXISTS p07b3c2b1_post_cutover_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b1_post_cutover_marker(id) VALUES('post-cutover-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b1_post_cutover_marker;`)
 	postCutoverOut, err := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), postCutoverMarkerScript, *targetBinding)
 	if err != nil || lastNonEmptyLine(string(postCutoverOut)) != "1" {
 		t.Fatalf("write post-cutover marker err=%v out=%q", err, postCutoverOut)
@@ -365,7 +362,7 @@ func TestManagedResourceRealK3sPostgresCutoverApply(t *testing.T) {
 	if err != nil || strings.TrimSpace(sourceRowsAfterCutover) != "128" {
 		t.Fatalf("source database became unreadable after cutover: %q err=%v", sourceRowsAfterCutover, err)
 	}
-	sourceMarkerAfterCutover, err := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), "SELECT count(*) FROM p07b3c2b1_source_post_backup_marker;", *sourceBinding)
+	sourceMarkerAfterCutover, err := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), psqlSQLScript("SELECT count(*) FROM p07b3c2b1_source_post_backup_marker;"), *sourceBinding)
 	if err != nil || lastNonEmptyLine(string(sourceMarkerAfterCutover)) != "1" {
 		t.Fatalf("source database marker missing after cutover: %q err=%v", sourceMarkerAfterCutover, err)
 	}

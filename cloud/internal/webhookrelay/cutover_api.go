@@ -197,6 +197,75 @@ func (s *Server) handleCutoverAPI(w http.ResponseWriter, r *http.Request, projec
 		return true
 	}
 
+	// POST /api/projects/{project}/applications/{application}/cutovers/{cutover}/finalize
+	// POST /api/projects/{project}/services/{service}/cutovers/{cutover}/finalize
+	if len(parts) == 7 && (parts[2] == "applications" || parts[2] == "services") && (parts[4] == "cutovers" || parts[4] == "application-cutovers") && (parts[6] == "finalize" || parts[6] == "finalizations") && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "application", parts[3], "owner", "admin", "developer") {
+			return true
+		}
+		value, reused, err := s.Cutovers.Finalize(r.Context(), projectID, parts[3], parts[5], principal.UserID, r.Header.Get("Idempotency-Key"))
+		if err == nil && !reused {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CUTOVER_FINALIZE_REQUESTED", "cutover_finalization", value.ID, "success", map[string]any{
+				"application_id":    value.ApplicationID,
+				"cutover_id":        value.CutoverID,
+				"source_binding_id": value.SourceBindingID,
+				"target_binding_id": value.TargetBindingID,
+			})
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CUTOVER_FINALIZE_VALIDATED", "cutover_finalization", value.ID, "success", map[string]any{
+				"application_id":              value.ApplicationID,
+				"cutover_id":                  value.CutoverID,
+				"application_config_revision": value.ApplicationConfigRevision,
+			})
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CUTOVER_SOURCE_BINDING_REVOKE_STARTED", "cutover_finalization", value.ID, "success", map[string]any{
+				"application_id":    value.ApplicationID,
+				"source_binding_id": value.SourceBindingID,
+			})
+			if value.Lifecycle == cutoverv1.FinalizationSucceeded {
+				s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CUTOVER_FINALIZED", "cutover_finalization", value.ID, "success", map[string]any{
+					"application_id":         value.ApplicationID,
+					"cutover_id":             value.CutoverID,
+					"source_binding_revoked": value.VerificationSummary.SourceBindingRevoked,
+					"source_retained":        value.VerificationSummary.SourceResourceRetained,
+					"evidence_hash":          value.EvidenceHash,
+				})
+			}
+		}
+		writeCutoverResult(w, r, map[string]any{"finalization": value, "application_cutover_finalization": value, "reused": reused}, err, http.StatusAccepted)
+		return true
+	}
+
+	// GET /api/projects/{project}/applications/{application}/cutovers/{cutover}/finalizations
+	// GET /api/projects/{project}/services/{service}/cutovers/{cutover}/finalizations
+	if len(parts) == 7 && (parts[2] == "applications" || parts[2] == "services") && (parts[4] == "cutovers" || parts[4] == "application-cutovers") && (parts[6] == "finalizations" || parts[6] == "finalize") && r.Method == http.MethodGet {
+		values, err := s.Cutovers.ListFinalizations(r.Context(), projectID, parts[3])
+		writeCutoverResult(w, r, map[string]any{"finalizations": values, "application_cutover_finalizations": values}, err, http.StatusOK)
+		return true
+	}
+
+	// GET /api/projects/{project}/applications/{application}/cutovers/{cutover}/finalizations/{finalization}
+	// GET /api/projects/{project}/services/{service}/cutovers/{cutover}/finalizations/{finalization}
+	if len(parts) == 8 && (parts[2] == "applications" || parts[2] == "services") && (parts[4] == "cutovers" || parts[4] == "application-cutovers") && (parts[6] == "finalizations" || parts[6] == "finalize") && r.Method == http.MethodGet {
+		value, err := s.Cutovers.GetFinalization(r.Context(), projectID, parts[7])
+		writeCutoverResult(w, r, map[string]any{"finalization": value, "application_cutover_finalization": value}, err, http.StatusOK)
+		return true
+	}
+
+	// GET /api/projects/{project}/application-cutover-finalizations
+	// GET /api/projects/{project}/cutover-finalizations
+	if len(parts) == 3 && (parts[2] == "application-cutover-finalizations" || parts[2] == "cutover-finalizations") && r.Method == http.MethodGet {
+		values, err := s.Cutovers.ListFinalizations(r.Context(), projectID, r.URL.Query().Get("application_id"))
+		writeCutoverResult(w, r, map[string]any{"finalizations": values, "application_cutover_finalizations": values}, err, http.StatusOK)
+		return true
+	}
+
+	// GET /api/projects/{project}/application-cutover-finalizations/{finalization}
+	// GET /api/projects/{project}/cutover-finalizations/{finalization}
+	if len(parts) == 4 && (parts[2] == "application-cutover-finalizations" || parts[2] == "cutover-finalizations") && r.Method == http.MethodGet {
+		value, err := s.Cutovers.GetFinalization(r.Context(), projectID, parts[3])
+		writeCutoverResult(w, r, map[string]any{"finalization": value, "application_cutover_finalization": value}, err, http.StatusOK)
+		return true
+	}
+
 	return false
 }
 
@@ -277,7 +346,7 @@ func (s *Server) handleAgentCutoverResult(w http.ResponseWriter, r *http.Request
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 6 {
+	if len(parts) < 5 {
 		http.NotFound(w, r)
 		return
 	}
@@ -285,7 +354,10 @@ func (s *Server) handleAgentCutoverResult(w http.ResponseWriter, r *http.Request
 	if !decodeResourceJSON(w, r, &result) {
 		return
 	}
-	cutoverID := parts[len(parts)-2]
+	cutoverID := parts[len(parts)-1]
+	if cutoverID == "result" && len(parts) >= 6 {
+		cutoverID = parts[len(parts)-2]
+	}
 	value, err := s.Cutovers.CompleteCutover(r.Context(), projectID, cutoverID, result)
 	if err != nil {
 		writeCutoverResult(w, r, value, err, http.StatusOK)
@@ -330,7 +402,7 @@ func (s *Server) handleAgentCutoverRollbackResult(w http.ResponseWriter, r *http
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 6 {
+	if len(parts) < 5 {
 		http.NotFound(w, r)
 		return
 	}
@@ -338,7 +410,10 @@ func (s *Server) handleAgentCutoverRollbackResult(w http.ResponseWriter, r *http
 	if !decodeResourceJSON(w, r, &result) {
 		return
 	}
-	rollbackID := parts[len(parts)-2]
+	rollbackID := parts[len(parts)-1]
+	if rollbackID == "result" && len(parts) >= 6 {
+		rollbackID = parts[len(parts)-2]
+	}
 	value, err := s.Cutovers.CompleteRollback(r.Context(), projectID, rollbackID, result)
 	if err != nil {
 		writeCutoverResult(w, r, value, err, http.StatusOK)
@@ -372,4 +447,59 @@ func (s *Server) handleAgentCutoverRollbackResult(w http.ResponseWriter, r *http
 	}
 	s.Registry.Audit(agent.OrgID, projectID, agent.ID, action, "cutover_rollback", value.ID, outcome, metadata)
 	writeJSON(w, http.StatusOK, map[string]any{"rollback": value, "cutover_rollback": value})
+}
+
+func (s *Server) handleAgentCutoverFinalizationResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID, nodeID := r.URL.Query().Get("project_id"), nodeIDFromAgentPath(r.URL.Path)
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 5 {
+		http.NotFound(w, r)
+		return
+	}
+	var result cutoverv1.FinalizeResult
+	if !decodeResourceJSON(w, r, &result) {
+		return
+	}
+	finalizationID := parts[len(parts)-1]
+	if finalizationID == "result" && len(parts) >= 6 {
+		finalizationID = parts[len(parts)-2]
+	}
+	value, err := s.Cutovers.CompleteFinalization(r.Context(), projectID, finalizationID, result)
+	if err != nil {
+		writeCutoverResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	action, outcome := "CUTOVER_FINALIZE_FAILED", "failure"
+	metadata := map[string]any{
+		"application_id":    value.ApplicationID,
+		"cutover_id":        value.CutoverID,
+		"source_binding_id": value.SourceBindingID,
+		"target_binding_id": value.TargetBindingID,
+		"failure_code":      value.FailureCode,
+	}
+	if value.Lifecycle == cutoverv1.FinalizationSucceeded {
+		action, outcome = "CUTOVER_FINALIZED", "success"
+		metadata = map[string]any{
+			"application_id":         value.ApplicationID,
+			"cutover_id":             value.CutoverID,
+			"source_binding_id":      value.SourceBindingID,
+			"target_binding_id":      value.TargetBindingID,
+			"source_resource_id":     value.SourceResourceID,
+			"target_resource_id":     value.TargetResourceID,
+			"source_binding_revoked": value.VerificationSummary.SourceBindingRevoked,
+			"source_retained":        value.VerificationSummary.SourceResourceRetained,
+			"evidence_hash":          value.EvidenceHash,
+			"target_connected":       value.VerificationSummary.TargetDBConnected,
+		}
+	}
+	s.Registry.Audit(agent.OrgID, projectID, agent.ID, action, "cutover_finalization", value.ID, outcome, metadata)
+	writeJSON(w, http.StatusOK, map[string]any{"finalization": value, "application_cutover_finalization": value})
 }

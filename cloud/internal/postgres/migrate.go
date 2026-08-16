@@ -633,5 +633,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateP07B3C2B2B1CutoverApply(ctx, db); err != nil {
 		return err
 	}
-	return MigrateP07B3C2B2B2CutoverRollback(ctx, db)
+	if err := MigrateP07B3C2B2B2CutoverRollback(ctx, db); err != nil {
+		return err
+	}
+	return MigrateP07B3C2B2CCutoverFinalize(ctx, db)
 }

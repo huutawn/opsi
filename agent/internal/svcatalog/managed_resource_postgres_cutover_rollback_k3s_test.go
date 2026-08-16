@@ -172,7 +172,7 @@ func TestManagedResourceRealK3sPostgresCutoverRollback(t *testing.T) {
 	}
 
 	// 5. Write post-backup marker on SOURCE PostgreSQL
-	postBackupMarkerScript := `CREATE TABLE IF NOT EXISTS p07b3c2b2_source_post_backup_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b2_source_post_backup_marker(id) VALUES('source-post-backup-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b2_source_post_backup_marker;`
+	postBackupMarkerScript := psqlSQLScript(`CREATE TABLE IF NOT EXISTS p07b3c2b2_source_post_backup_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b2_source_post_backup_marker(id) VALUES('source-post-backup-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b2_source_post_backup_marker;`)
 	postMarkerOut, err := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), postBackupMarkerScript, *sourceBinding)
 	if err != nil || lastNonEmptyLine(string(postMarkerOut)) != "1" {
 		t.Fatalf("write source post-backup marker err=%v out=%q", err, postMarkerOut)
@@ -207,7 +207,7 @@ func TestManagedResourceRealK3sPostgresCutoverRollback(t *testing.T) {
 	targetBinding := postgresBindingOperation(t, targetSpec, "binding-cutover-target-rb", true)
 	_ = reconcilePostgresBindingK3s(t, reconciler, "target-binding-create-rb", targetSpec, targetManagement, targetBinding)
 
-	targetOnlyMarkerScript := `CREATE TABLE IF NOT EXISTS p07b3c2b2_target_only_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b2_target_only_marker(id) VALUES('target-only-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b2_target_only_marker;`
+	targetOnlyMarkerScript := psqlSQLScript(`CREATE TABLE IF NOT EXISTS p07b3c2b2_target_only_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b2_target_only_marker(id) VALUES('target-only-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b2_target_only_marker;`)
 	targetMarkerOut, err := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), targetOnlyMarkerScript, *targetBinding)
 	if err != nil || lastNonEmptyLine(string(targetMarkerOut)) != "1" {
 		t.Fatalf("write target-only marker err=%v out=%q", err, targetMarkerOut)
@@ -276,7 +276,7 @@ func TestManagedResourceRealK3sPostgresCutoverRollback(t *testing.T) {
 		t.Fatalf("target application rollout readiness=%+v err=%v", evidence, err)
 	}
 
-	postCutoverMarkerScript := `CREATE TABLE IF NOT EXISTS p07b3c2b2_post_cutover_target_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b2_post_cutover_target_marker(id) VALUES('target-post-cutover-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b2_post_cutover_target_marker;`
+	postCutoverMarkerScript := psqlSQLScript(`CREATE TABLE IF NOT EXISTS p07b3c2b2_post_cutover_target_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b2_post_cutover_target_marker(id) VALUES('target-post-cutover-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b2_post_cutover_target_marker;`)
 	postCutoverOut, err := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), postCutoverMarkerScript, *targetBinding)
 	if err != nil || lastNonEmptyLine(string(postCutoverOut)) != "1" {
 		t.Fatalf("write post-cutover marker err=%v out=%q", err, postCutoverOut)
@@ -317,11 +317,19 @@ func TestManagedResourceRealK3sPostgresCutoverRollback(t *testing.T) {
 	if err := (deploy.KubernetesWorkloadSecretEnsurer{Runner: runner, KubectlPath: "kubectl"}).Ensure(context.Background(), sourceAppCommand); err != nil {
 		t.Fatal(err)
 	}
-	sourcePlan, err := adapter.PrepareRollout(context.Background(), sourceAppSnapshot)
-	if err != nil {
-		t.Fatal(err)
+	var sourcePlan deploy.RolloutPlan
+	for attempt := 0; attempt < 10; attempt++ {
+		sourcePlan, err = adapter.PrepareRollout(context.Background(), sourceAppSnapshot)
+		if err != nil {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		if _, err = adapter.ApplyRollout(context.Background(), sourcePlan); err == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	if _, err := adapter.ApplyRollout(context.Background(), sourcePlan); err != nil {
+	if err != nil {
 		t.Fatal(err)
 	}
 	if evidence, _, err := adapter.ObserveReadiness(context.Background(), sourcePlan); err != nil || !evidence.RuntimeReady {
@@ -336,21 +344,21 @@ func TestManagedResourceRealK3sPostgresCutoverRollback(t *testing.T) {
 	if err != nil || strings.TrimSpace(sourceCheckRows) != "128" {
 		t.Fatalf("source binding read failed: %q err=%v", sourceCheckRows, err)
 	}
-	sourceCheckMarker, err := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), "SELECT count(*) FROM p07b3c2b2_source_post_backup_marker;", *sourceBinding)
+	sourceCheckMarker, err := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), psqlSQLScript("SELECT count(*) FROM p07b3c2b2_source_post_backup_marker;"), *sourceBinding)
 	if err != nil || lastNonEmptyLine(string(sourceCheckMarker)) != "1" {
 		t.Fatalf("source post-backup marker absent on source: %q err=%v", sourceCheckMarker, err)
 	}
-	targetOnlyOnSource, _ := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), "SELECT count(*) FROM pg_class WHERE relname='p07b3c2b2_target_only_marker';", *sourceBinding)
+	targetOnlyOnSource, _ := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), psqlSQLScript("SELECT count(*) FROM pg_class WHERE relname='p07b3c2b2_target_only_marker';"), *sourceBinding)
 	if lastNonEmptyLine(string(targetOnlyOnSource)) != "0" {
 		t.Fatalf("target only marker unexpectedly found on source: %q", targetOnlyOnSource)
 	}
-	postCutoverOnSource, _ := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), "SELECT count(*) FROM pg_class WHERE relname='p07b3c2b2_post_cutover_target_marker';", *sourceBinding)
+	postCutoverOnSource, _ := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), psqlSQLScript("SELECT count(*) FROM pg_class WHERE relname='p07b3c2b2_post_cutover_target_marker';"), *sourceBinding)
 	if lastNonEmptyLine(string(postCutoverOnSource)) != "0" {
 		t.Fatalf("post-cutover marker unexpectedly found on source: %q", postCutoverOnSource)
 	}
 
 	// 16. Write post-rollback marker to SOURCE
-	postRollbackMarkerScript := `CREATE TABLE IF NOT EXISTS p07b3c2b2_post_rollback_source_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b2_post_rollback_source_marker(id) VALUES('source-post-rollback-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b2_post_rollback_source_marker;`
+	postRollbackMarkerScript := psqlSQLScript(`CREATE TABLE IF NOT EXISTS p07b3c2b2_post_rollback_source_marker (id text primary key, marked_at timestamptz default now()); INSERT INTO p07b3c2b2_post_rollback_source_marker(id) VALUES('source-post-rollback-marker') ON CONFLICT DO NOTHING; SELECT count(*) FROM p07b3c2b2_post_rollback_source_marker;`)
 	postRollbackOut, err := reconciler.postgresBindingExec(context.Background(), sourceSpec, []byte(sourceBinding.Credential.Password+"\n"), postRollbackMarkerScript, *sourceBinding)
 	if err != nil || lastNonEmptyLine(string(postRollbackOut)) != "1" {
 		t.Fatalf("write post-rollback source marker err=%v out=%q", err, postRollbackOut)
@@ -391,7 +399,7 @@ func TestManagedResourceRealK3sPostgresCutoverRollback(t *testing.T) {
 	if err != nil || strings.TrimSpace(targetRowsAfterRollback) != "128" {
 		t.Fatalf("target database became unreadable after rollback: %q err=%v", targetRowsAfterRollback, err)
 	}
-	targetMarkerAfterRollback, err := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), "SELECT count(*) FROM p07b3c2b2_target_only_marker;", *targetBinding)
+	targetMarkerAfterRollback, err := reconciler.postgresBindingExec(context.Background(), targetSpec, []byte(targetBinding.Credential.Password+"\n"), psqlSQLScript("SELECT count(*) FROM p07b3c2b2_target_only_marker;"), *targetBinding)
 	if err != nil || lastNonEmptyLine(string(targetMarkerAfterRollback)) != "1" {
 		t.Fatalf("target database marker missing after rollback: %q err=%v", targetMarkerAfterRollback, err)
 	}

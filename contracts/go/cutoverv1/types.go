@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -65,6 +66,14 @@ const (
 	FailureRollbackTargetVerificationFailed = "ROLLBACK_TARGET_VERIFICATION_FAILED"
 	FailureRollbackCutoverIneligible        = "ROLLBACK_CUTOVER_INELIGIBLE"
 	FailureRollbackAlreadyRunning           = "ROLLBACK_ALREADY_RUNNING"
+
+	FailureFinalizeStale                = "CUTOVER_FINALIZE_STALE"
+	FailureFinalizeTargetUnavailable    = "CUTOVER_FINALIZE_TARGET_UNAVAILABLE"
+	FailureFinalizeNotActive            = "CUTOVER_FINALIZE_NOT_ACTIVE"
+	FailureFinalizeAlreadyRunning       = "CUTOVER_FINALIZE_ALREADY_RUNNING"
+	FailureSourceBindingRevokeFailed    = "CUTOVER_SOURCE_BINDING_REVOKE_FAILED"
+	FailureFinalizeVerificationFailed   = "CUTOVER_FINALIZE_VERIFICATION_FAILED"
+	FailureCutoverFinalized             = "CUTOVER_FINALIZED"
 )
 
 const (
@@ -233,6 +242,22 @@ func ValidFailure(code string) bool {
 		FailureDeploymentFailed,
 		FailureApplicationHealthFailed,
 		FailureTargetVerificationFailed,
+		FailureRollbackSourceUnavailable,
+		FailureRollbackStaleApplication,
+		FailureRollbackConfigApplyFailed,
+		FailureRollbackDeploymentFailed,
+		FailureRollbackApplicationHealthFailed,
+		FailureRollbackSourceVerificationFailed,
+		FailureRollbackTargetVerificationFailed,
+		FailureRollbackCutoverIneligible,
+		FailureRollbackAlreadyRunning,
+		FailureFinalizeStale,
+		FailureFinalizeTargetUnavailable,
+		FailureFinalizeNotActive,
+		FailureFinalizeAlreadyRunning,
+		FailureSourceBindingRevokeFailed,
+		FailureFinalizeVerificationFailed,
+		FailureCutoverFinalized,
 	} {
 		if strings.TrimSpace(code) == value {
 			return true
@@ -492,6 +517,13 @@ type RollbackApplyResult struct {
 	Reused   bool                       `json:"reused"`
 }
 
+func formatTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 func RollbackEvidenceHash(r ApplicationCutoverRollback) string {
 	summary, _ := json.Marshal(r.VerificationSummary)
 	warnings, _ := json.Marshal(r.Warnings)
@@ -515,9 +547,9 @@ func RollbackEvidenceHash(r ApplicationCutoverRollback) string {
 		r.DeploymentJobID,
 		r.Lifecycle,
 		r.RequestedBy,
-		r.RequestedAt,
-		r.AppliedAt,
-		r.CompletedAt,
+		r.RequestedAt.UTC().Format(time.RFC3339),
+		formatTime(r.AppliedAt),
+		formatTime(r.CompletedAt),
 		r.TargetNodeID,
 		r.FailureCode,
 		r.FailureMessageRedacted,
@@ -529,28 +561,146 @@ func RollbackEvidenceHash(r ApplicationCutoverRollback) string {
 }
 
 func (r ApplicationCutoverRollback) ValidateSucceeded() error {
-	if r.SchemaVersion != RollbackSchemaVersion ||
-		r.ID == "" ||
-		r.ProjectID == "" ||
-		r.EnvironmentID == "" ||
-		r.ApplicationID == "" ||
-		r.CutoverID == "" ||
-		r.SourceBindingID == "" ||
-		r.TargetBindingID == "" ||
-		r.SourceResourceID == "" ||
-		r.TargetResourceID == "" ||
-		r.SourceBindingID == r.TargetBindingID ||
-		r.SourceResourceID == r.TargetResourceID ||
-		r.ResultingApplicationConfigRevision <= r.CurrentApplicationConfigRevision ||
-		r.DeploymentJobID == "" ||
-		r.Lifecycle != RollbackSucceeded ||
-		r.CompletedAt == nil ||
-		!r.VerificationSummary.WorkloadReady ||
-		!r.VerificationSummary.SourceDBConnected ||
-		!r.VerificationSummary.TargetAuthorityPreserved ||
-		r.EvidenceHash == "" ||
-		r.EvidenceHash != RollbackEvidenceHash(r) {
-		return errors.New("cutover rollback evidence is invalid")
+	if r.SchemaVersion != RollbackSchemaVersion {
+		return fmt.Errorf("invalid schema_version: %s", r.SchemaVersion)
+	}
+	if r.ID == "" || r.ProjectID == "" || r.EnvironmentID == "" || r.ApplicationID == "" || r.CutoverID == "" || r.SourceBindingID == "" || r.TargetBindingID == "" || r.SourceResourceID == "" || r.TargetResourceID == "" {
+		return errors.New("missing required IDs")
+	}
+	if r.SourceBindingID == r.TargetBindingID || r.SourceResourceID == r.TargetResourceID {
+		return errors.New("source and target are identical")
+	}
+	if r.ResultingApplicationConfigRevision <= r.CurrentApplicationConfigRevision {
+		return fmt.Errorf("invalid config revision: %d <= %d", r.ResultingApplicationConfigRevision, r.CurrentApplicationConfigRevision)
+	}
+	if r.DeploymentJobID == "" {
+		return errors.New("missing deployment_job_id")
+	}
+	if r.Lifecycle != RollbackSucceeded {
+		return fmt.Errorf("lifecycle is %s", r.Lifecycle)
+	}
+	if r.CompletedAt == nil {
+		return errors.New("completed_at is nil")
+	}
+	if !r.VerificationSummary.WorkloadReady || !r.VerificationSummary.SourceDBConnected || !r.VerificationSummary.TargetAuthorityPreserved {
+		return fmt.Errorf("verification summary incomplete: %+v", r.VerificationSummary)
+	}
+	if r.EvidenceHash == "" || r.EvidenceHash != RollbackEvidenceHash(r) {
+		return fmt.Errorf("evidence hash mismatch: got %s, calculated %s", r.EvidenceHash, RollbackEvidenceHash(r))
+	}
+	return nil
+}
+
+const FinalizationSchemaVersion = "opsi.cutover_finalization/v1"
+
+const (
+	FinalizationQueued                 = "queued"
+	FinalizationValidating             = "validating"
+	FinalizationRevokingSourceBinding  = "revoking_source_binding"
+	FinalizationVerifying              = "verifying"
+	FinalizationSucceeded              = "succeeded"
+	FinalizationFailed                 = "failed"
+)
+
+type FinalizationVerificationSummary struct {
+	TargetSQLPreflight        string `json:"target_sql_preflight"`
+	TargetRoleAttributes      string `json:"target_role_attributes"`
+	TargetDBConnected         bool   `json:"target_db_connected"`
+	TargetOnlyMarkerPresent   bool   `json:"target_only_marker_present"`
+	PostCutoverMarkerPresent  bool   `json:"post_cutover_marker_present"`
+	SourceMarkerAbsent        bool   `json:"source_marker_absent"`
+	SourceBindingRevoked      bool   `json:"source_binding_revoked"`
+	SourceCredentialRejected  bool   `json:"source_credential_rejected"`
+	SourceResourceRetained    bool   `json:"source_resource_retained"`
+	PostFinalizeTargetWritten bool   `json:"post_finalize_target_written"`
+}
+
+type ApplicationCutoverFinalization struct {
+	SchemaVersion             string                          `json:"schema_version"`
+	ID                        string                          `json:"id"`
+	ProjectID                 string                          `json:"project_id"`
+	EnvironmentID             string                          `json:"environment_id"`
+	ApplicationID             string                          `json:"application_id"`
+	CutoverID                 string                          `json:"cutover_id"`
+	SourceBindingID           string                          `json:"source_binding_id"`
+	TargetBindingID           string                          `json:"target_binding_id"`
+	SourceResourceID          string                          `json:"source_resource_id"`
+	TargetResourceID          string                          `json:"target_resource_id"`
+	ApplicationConfigRevision uint64                          `json:"application_config_revision"`
+	ApplicationConfigHash     string                          `json:"application_config_hash"`
+	CutoverEvidenceHash       string                          `json:"cutover_evidence_hash"`
+	Lifecycle                 string                          `json:"lifecycle"`
+	RequestedBy               string                          `json:"requested_by"`
+	RequestedAt               time.Time                       `json:"requested_at"`
+	CompletedAt               *time.Time                      `json:"completed_at,omitempty"`
+	UpdatedAt                 time.Time                       `json:"updated_at"`
+	TargetNodeID              string                          `json:"target_node_id,omitempty"`
+	FailureCode               string                          `json:"failure_code,omitempty"`
+	FailureMessageRedacted    string                          `json:"failure_message_redacted,omitempty"`
+	VerificationSummary       FinalizationVerificationSummary `json:"verification_summary"`
+	EvidenceHash              string                          `json:"evidence_hash,omitempty"`
+}
+
+type FinalizeRequest struct {
+	CutoverID string `json:"cutover_id,omitempty"`
+}
+
+type FinalizeResult struct {
+	Status                 string                          `json:"status"`
+	FailureCode            string                          `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                          `json:"failure_message_redacted,omitempty"`
+	VerificationSummary    FinalizationVerificationSummary `json:"verification_summary"`
+}
+
+func FinalizationEvidenceHash(f ApplicationCutoverFinalization) string {
+	summary, _ := json.Marshal(f.VerificationSummary)
+	data, _ := json.Marshal([]any{
+		f.SchemaVersion,
+		f.ID,
+		f.ProjectID,
+		f.EnvironmentID,
+		f.ApplicationID,
+		f.CutoverID,
+		f.SourceBindingID,
+		f.TargetBindingID,
+		f.SourceResourceID,
+		f.TargetResourceID,
+		f.ApplicationConfigRevision,
+		f.ApplicationConfigHash,
+		f.CutoverEvidenceHash,
+		f.Lifecycle,
+		f.RequestedBy,
+		f.TargetNodeID,
+		f.FailureCode,
+		f.FailureMessageRedacted,
+		string(summary),
+	})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (f ApplicationCutoverFinalization) ValidateSucceeded() error {
+	if f.SchemaVersion != FinalizationSchemaVersion ||
+		f.ID == "" ||
+		f.ProjectID == "" ||
+		f.EnvironmentID == "" ||
+		f.ApplicationID == "" ||
+		f.CutoverID == "" ||
+		f.SourceBindingID == "" ||
+		f.TargetBindingID == "" ||
+		f.SourceResourceID == "" ||
+		f.TargetResourceID == "" ||
+		f.SourceBindingID == f.TargetBindingID ||
+		f.SourceResourceID == f.TargetResourceID ||
+		f.CutoverEvidenceHash == "" ||
+		f.Lifecycle != FinalizationSucceeded ||
+		f.CompletedAt == nil ||
+		!f.VerificationSummary.TargetDBConnected ||
+		!f.VerificationSummary.SourceBindingRevoked ||
+		!f.VerificationSummary.SourceResourceRetained ||
+		f.EvidenceHash == "" ||
+		f.EvidenceHash != FinalizationEvidenceHash(f) {
+		return errors.New("cutover finalization evidence is invalid")
 	}
 	return nil
 }

@@ -85,6 +85,14 @@ func (r testResourceAuthority) ListBindings(_ context.Context, projectID, enviro
 	return out, nil
 }
 
+func (r testResourceAuthority) DeleteBinding(_ context.Context, projectID, bindingID string) (resourcev1.Binding, error) {
+	if b, ok := r.bindings[bindingID]; ok && b.ProjectID == projectID {
+		delete(r.bindings, bindingID)
+		return b, nil
+	}
+	return resourcev1.Binding{}, ErrNotFound
+}
+
 type testRestoreAuthority struct {
 	restores map[string]restorev1.Restore
 }
