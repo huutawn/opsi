@@ -15,6 +15,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/cloudrunner"
 	"github.com/opsi-dev/opsi/agent/internal/config"
+	cutoveragent "github.com/opsi-dev/opsi/agent/internal/cutover"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/incident"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
@@ -568,6 +569,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			ManagedResources:    svcatalog.ManagedResourceReconciler{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			Backups:             backupagent.Executor{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			Restores:            restoreagent.Executor{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
+			Cutovers:            cutoveragent.Executor{KubectlPath: firstNonEmpty(cfg.Telemetry.KubectlPath, cfg.Secret.KubectlPath, "kubectl")},
 			PollInterval:        pollInterval,
 			LongPollWait:        longPollWait,
 			HeartbeatInterval:   heartbeatInterval,

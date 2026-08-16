@@ -26,6 +26,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	restoreagent "github.com/opsi-dev/opsi/agent/internal/restore"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
@@ -539,6 +540,8 @@ func (c *restoreAcceptanceCloudClient) PollJob(ctx context.Context, nodeID strin
 		id = job.RestoreReview.Review.ID
 	case job.Restore != nil:
 		id = job.Restore.Restore.ID
+	case job.CutoverReview != nil:
+		id = job.CutoverReview.Review.ID
 	}
 	if id != "" {
 		c.mu.Lock()
@@ -760,6 +763,46 @@ func (a restoreAcceptanceAPI) waitReviewOutcome(t *testing.T, id string, timeout
 	}
 	t.Fatalf("Cloud restore review timed out id=%s", id)
 	return value
+}
+
+func (a restoreAcceptanceAPI) createCutoverReview(t *testing.T, appID, sourceBindingID, targetBindingID, key string) (cutoverv1.ApplicationCutoverReview, string) {
+	t.Helper()
+	status, body := a.requestStatus(t, http.MethodPost, "/api/projects/"+url.PathEscape(a.projectID)+"/applications/"+url.PathEscape(appID)+"/cutover-reviews", key, cutoverv1.ReviewRequest{
+		SourceBindingID: sourceBindingID,
+		TargetBindingID: targetBindingID,
+	})
+	if status != http.StatusAccepted {
+		t.Fatalf("create cutover review status=%d body=%s", status, body)
+	}
+	var resp struct {
+		Review cutoverv1.ApplicationCutoverReview `json:"review"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp.Review, body
+}
+
+func (a restoreAcceptanceAPI) waitCutoverReview(t *testing.T, id string, timeout time.Duration) (cutoverv1.ApplicationCutoverReview, []string) {
+	t.Helper()
+	var value cutoverv1.ApplicationCutoverReview
+	lifecycle := []string{cutoverv1.ReviewQueued}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		a.request(t, http.MethodGet, "/api/projects/"+url.PathEscape(a.projectID)+"/application-cutover-reviews/"+url.PathEscape(id), "", nil, http.StatusOK, &value)
+		if len(lifecycle) == 0 || lifecycle[len(lifecycle)-1] != value.Lifecycle {
+			lifecycle = append(lifecycle, value.Lifecycle)
+		}
+		if value.Lifecycle == cutoverv1.ReviewSucceeded || value.Lifecycle == cutoverv1.ReviewFailed {
+			if value.Lifecycle != cutoverv1.ReviewSucceeded {
+				t.Fatalf("Cloud cutover review failed id=%s code=%s msg=%s", id, value.FailureCode, value.FailureMessageRedacted)
+			}
+			return value, lifecycle
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("Cloud cutover review timed out id=%s lifecycle=%v", id, lifecycle)
+	return value, lifecycle
 }
 
 func (a restoreAcceptanceAPI) waitRestore(t *testing.T, id string, timeout time.Duration) (restorev1.Restore, []string) {

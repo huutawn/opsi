@@ -22,6 +22,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
@@ -30,6 +31,7 @@ import (
 	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
@@ -45,6 +47,7 @@ type Server struct {
 	Resources               resource.Service
 	Backups                 backupdomain.Service
 	Restores                restoredomain.Service
+	Cutovers                cutoverdomain.Service
 	BuildJobs               buildjob.Service
 	BuildRecords            buildrecord.Service
 	RegistryPullCredentials RegistryPullCredentialProvider
@@ -105,6 +108,7 @@ func NewServer(cfg Config) *Server {
 	restoreService.Resources = resourceService
 	restoreService.Backups = backupService
 	restoreService.Artifacts = backupService.Artifacts
+	cutoverService := cutoverdomain.Service{Store: cutoverdomain.NewMemoryStore(), Applications: registryService, Resources: resourceService, Restores: restoreService, Backups: backupService, Credentials: resourceService.Credentials}
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
 	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor, Registry: cfg.BuildRegistry}
@@ -116,6 +120,7 @@ func NewServer(cfg Config) *Server {
 		Resources:               resourceService,
 		Backups:                 backupService,
 		Restores:                restoreService,
+		Cutovers:                cutoverService,
 		BuildJobs:               buildJobService,
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
@@ -399,6 +404,10 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentRestoreResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/cutover-reviews/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentCutoverReviewResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -462,6 +471,29 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	if ok {
 		s.observer.Inc("agent_jobs_leased_total")
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "restore", "lease_token": restoreLease.LeaseToken, "restore": restoreLease.Restore, "backup": restoreLease.Backup, "target_spec": restoreLease.TargetSpec, "store": restoreLease.Store, "credential": restoreLease.Credential})
+		return
+	}
+	cutoverLease, ok, err := s.Cutovers.LeaseReview(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeCutoverResult(w, r, cutoverLease, err, http.StatusOK)
+		return
+	}
+	if cutoverLease.Review.Lifecycle == cutoverv1.ReviewFailed {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "CUTOVER_REVIEW_FAILED", "cutover_review", cutoverLease.Review.ID, "failure", map[string]any{"application_id": cutoverLease.Review.ApplicationID, "failure_code": cutoverLease.Review.FailureCode})
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"kind":                         "cutover_review",
+			"lease_token":                  cutoverLease.LeaseToken,
+			"cutover_review_lease":         cutoverLease,
+			"review":                       cutoverLease.Review,
+			"source_spec":                  cutoverLease.SourceSpec,
+			"target_spec":                  cutoverLease.TargetSpec,
+			"source_credential":            cutoverLease.SourceCredential,
+			"target_credential":            cutoverLease.TargetCredential,
+			"target_management_credential": cutoverLease.TargetManagementCredential,
+		})
 		return
 	}
 	backupLease, ok, err := s.Backups.Lease(r.Context(), projectID, nodeID)

@@ -54,7 +54,7 @@ verify-postgres:
 		for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do docker exec "$$container" pg_isready -U opsi -d opsi >/dev/null 2>&1 && break; test "$$attempt" -eq 12 || sleep 1; done; \
 		port="$$(docker port "$$container" 5432/tcp | awk -F: '{print $$2}')"; dsn="postgres://opsi:opsi@127.0.0.1:$$port/opsi?sslmode=disable"; \
 	fi; \
-	cd cloud; OPSI_TEST_DATABASE_URL="$$dsn" OPSI_REQUIRE_POSTGRES_TESTS=1 GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test -tags postgresintegration -p 1 ./internal/postgres ./internal/actiondevice ./internal/buildjob ./internal/registry ./internal/resource ./internal/backup ./internal/restore ./internal/adminbootstrap ./internal/webhookrelay -run 'Test(Postgres|R5012)' -count=1
+	cd cloud; OPSI_TEST_DATABASE_URL="$$dsn" OPSI_REQUIRE_POSTGRES_TESTS=1 GOCACHE=$(GOCACHE) GOTOOLCHAIN=$(GOTOOLCHAIN) go test -tags postgresintegration -p 1 ./internal/postgres ./internal/actiondevice ./internal/buildjob ./internal/registry ./internal/resource ./internal/backup ./internal/restore ./internal/cutover ./internal/adminbootstrap ./internal/webhookrelay -run 'Test(Postgres|R5012)' -count=1
 
 verify-buildpacks-e2e:
 	$(RUN) ./scripts/e2e/verify-buildpacks.sh

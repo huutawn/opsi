@@ -20,6 +20,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/postgres"
@@ -118,9 +119,11 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.Registry = postgresRegistry
 		relay.Backups.Store = backupdomain.PostgresStore{DB: db}
 		relay.Restores.Store = restoredomain.PostgresStore{DB: db}
+		relay.Cutovers.Store = cutoverdomain.PostgresStore{DB: db}
 		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry}
 		relay.Backups.Resources = relay.Resources
 		relay.Restores.Resources, relay.Restores.Backups, relay.Restores.Artifacts = relay.Resources, relay.Backups, relay.Backups.Artifacts
+		relay.Cutovers.Applications, relay.Cutovers.Resources, relay.Cutovers.Restores, relay.Cutovers.Backups, relay.Cutovers.Credentials = postgresRegistry, relay.Resources, relay.Restores, relay.Backups, relay.Resources.Credentials
 		relay.Resources.Operations = []resource.ActiveOperationAuthority{relay.Backups, relay.Restores}
 		if cfg.BootstrapSecretKey != "" {
 			credentialVault, vaultErr := webhookrelay.NewPostgresManagedResourceCredentialVault(db, cfg.BootstrapSecretKey)
@@ -130,6 +133,7 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 			relay.Resources.Credentials = credentialVault
 			relay.Backups.Resources = relay.Resources
 			relay.Restores.Resources = relay.Resources
+			relay.Cutovers.Credentials = credentialVault
 		}
 		relay.BuildJobs.Store = buildjob.PostgresStore{DB: db}
 		relay.BuildJobs.Sources = postgresRegistry

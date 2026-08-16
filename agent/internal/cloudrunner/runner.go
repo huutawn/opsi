@@ -12,6 +12,7 @@ import (
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	"github.com/opsi-dev/opsi/agent/internal/nodelifecycle"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
@@ -64,6 +65,7 @@ type Runner struct {
 	ManagedResources    ManagedResourceReconciler
 	Backups             BackupExecutor
 	Restores            RestoreExecutor
+	Cutovers            CutoverExecutor
 	BackupHeartbeat     time.Duration
 	NodeID              string
 	Version             string
@@ -89,9 +91,17 @@ type RestoreExecutor interface {
 	Execute(context.Context, restorev1.Lease) restorev1.Result
 }
 
+type CutoverExecutor interface {
+	Review(context.Context, cutoverv1.ReviewLease) cutoverv1.ReviewResult
+}
+
 type restoreCloudClient interface {
 	CompleteRestoreReview(context.Context, string, string, restorev1.ReviewResult) error
 	CompleteRestore(context.Context, string, string, restorev1.Result) error
+}
+
+type cutoverCloudClient interface {
+	CompleteCutoverReview(context.Context, string, string, cutoverv1.ReviewResult) error
 }
 
 type NodeLifecycleExecutor interface {
@@ -192,7 +202,36 @@ func (r Runner) jobLoop(ctx context.Context) error {
 		if lease != nil && lease.Restore != nil {
 			r.handleRestore(ctx, *lease.Restore)
 		}
+		if lease != nil && lease.CutoverReview != nil {
+			r.handleCutoverReview(ctx, *lease.CutoverReview)
+		}
 		timer.Reset(r.PollInterval)
+	}
+}
+
+func (r Runner) handleCutoverReview(ctx context.Context, lease cutoverv1.ReviewLease) {
+	client, ok := r.Client.(cutoverCloudClient)
+	if !ok {
+		return
+	}
+	result := cutoverv1.ReviewResult{
+		Status:                 cutoverv1.ReviewFailed,
+		LeaseToken:             lease.LeaseToken,
+		FailureCode:            cutoverv1.FailureTargetInvalid,
+		FailureMessageRedacted: "cutover executor is unavailable",
+	}
+	if r.Cutovers != nil {
+		result = r.Cutovers.Review(ctx, lease)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := client.CompleteCutoverReview(ctx, r.NodeID, lease.Review.ID, result); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
 	}
 }
 

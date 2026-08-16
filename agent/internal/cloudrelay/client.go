@@ -14,6 +14,7 @@ import (
 	"time"
 
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
@@ -44,6 +45,7 @@ type JobLease struct {
 	Backup          *backupv1.Lease        `json:"backup_lease,omitempty"`
 	RestoreReview   *restorev1.ReviewLease `json:"restore_review_lease,omitempty"`
 	Restore         *restorev1.Lease       `json:"restore_lease,omitempty"`
+	CutoverReview   *cutoverv1.ReviewLease `json:"cutover_review_lease,omitempty"`
 }
 
 type ManagedResourceLease struct {
@@ -200,6 +202,12 @@ func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) 
 			return nil, err
 		}
 		return &JobLease{Kind: kind.Kind, Restore: &lease}, nil
+	case "cutover_review":
+		var lease cutoverv1.ReviewLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, CutoverReview: &lease}, nil
 	default:
 		return nil, nil
 	}
@@ -207,6 +215,10 @@ func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) 
 
 func (c Client) CompleteRestoreReview(ctx context.Context, nodeID, reviewID string, result restorev1.ReviewResult) error {
 	return c.completeRestore(ctx, nodeID, "restore-reviews", reviewID, result)
+}
+
+func (c Client) CompleteCutoverReview(ctx context.Context, nodeID, reviewID string, result cutoverv1.ReviewResult) error {
+	return c.completeRestore(ctx, nodeID, "cutover-reviews", reviewID, result)
 }
 
 func (c Client) CompleteRestore(ctx context.Context, nodeID, restoreID string, result restorev1.Result) error {
