@@ -13,7 +13,8 @@ test("workspace and project navigation keep one authoritative route model", () =
   assert.deepEqual(normalizeRoute({ projectID: "proj-1" }), { projectID: "proj-1", view: "topology", tab: "" });
   assert.equal(routeHref({ projectID: "proj-1" }), "/?project=proj-1&view=topology");
   assert.deepEqual(parseRoute("?project=proj-1&view=overview"), { projectID: "proj-1", view: "overview", tab: "" });
-  assert.deepEqual(parseRoute("?project=proj-1&view=observability&tab=logs"), { projectID: "proj-1", view: "observability", tab: "logs" });
+  assert.deepEqual(parseRoute("?project=proj-1&view=observability&tab=applications"), { projectID: "proj-1", view: "observability", tab: "applications" });
+  assert.deepEqual(normalizeRoute({ projectID: "proj-1", view: "observability", tab: "logs" }), { projectID: "proj-1", view: "observability", tab: "logs" });
   assert.deepEqual(parseRoute("?project=proj-1&view=infrastructure&tab=resources"), { projectID: "proj-1", view: "infrastructure", tab: "resources" });
   assert.equal(routeHref({ projectID: "proj-1", view: "delivery", tab: "builds" }), "/?project=proj-1&view=delivery&tab=builds");
   assert.equal(routeHref({ projectID: "proj-1", view: "infrastructure", tab: "resources" }), "/?project=proj-1&view=infrastructure&tab=resources");
@@ -35,6 +36,6 @@ test("workspace and project navigation keep one authoritative route model", () =
 test("capabilities remain reachable through one grouped route model", () => {
   assert.equal(Object.values(groupedTabs).flat().length, 18);
   assert.deepEqual(groupedTabs.infrastructure.map((item) => item.id), ["servers", "resources", "storage"]);
-  assert.deepEqual(groupedTabs.observability.map((item) => item.id), ["health", "metrics", "logs", "incidents"]);
+  assert.deepEqual(groupedTabs.observability.map((item) => item.id), ["overview", "applications", "servers", "resources"]);
   assert.deepEqual(groupedTabs.security.map((item) => item.id), ["secrets", "audit"]);
 });

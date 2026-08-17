@@ -30,8 +30,73 @@ const tabViewMap: Record<string, Record<string, (props: { console: ConsoleContro
     nodes: InfrastructureView,
     bootstrap: InfrastructureView,
   },
-  observability: { health: ObservabilityView, metrics: ObservabilityView, logs: ObservabilityView, incidents: ObservabilityView },
+  observability: {
+    overview: ObservabilityView,
+    applications: ObservabilityView,
+    servers: ObservabilityView,
+    resources: ObservabilityView,
+    // backward-compatibility mappings
+    health: ObservabilityView,
+    metrics: ObservabilityView,
+    logs: ObservabilityView,
+    incidents: ObservabilityView,
+  },
   security: { secrets: SecurityView, audit: SecurityView },
+};
+
+const legacyTabGroups: Record<string, Record<string, ReadonlyArray<{ id: string; label: string }>>> = {
+  infrastructure: {
+    topology: [
+      { id: "topology", label: "Topology" },
+      { id: "runtimes", label: "Runtimes" },
+      { id: "nodes", label: "Nodes" },
+      { id: "bootstrap", label: "Bootstrap" },
+    ],
+    runtimes: [
+      { id: "topology", label: "Topology" },
+      { id: "runtimes", label: "Runtimes" },
+      { id: "nodes", label: "Nodes" },
+      { id: "bootstrap", label: "Bootstrap" },
+    ],
+    nodes: [
+      { id: "topology", label: "Topology" },
+      { id: "runtimes", label: "Runtimes" },
+      { id: "nodes", label: "Nodes" },
+      { id: "bootstrap", label: "Bootstrap" },
+    ],
+    bootstrap: [
+      { id: "topology", label: "Topology" },
+      { id: "runtimes", label: "Runtimes" },
+      { id: "nodes", label: "Nodes" },
+      { id: "bootstrap", label: "Bootstrap" },
+    ],
+  },
+  observability: {
+    health: [
+      { id: "health", label: "Health" },
+      { id: "metrics", label: "Metrics" },
+      { id: "logs", label: "Logs" },
+      { id: "incidents", label: "Incidents" },
+    ],
+    metrics: [
+      { id: "health", label: "Health" },
+      { id: "metrics", label: "Metrics" },
+      { id: "logs", label: "Logs" },
+      { id: "incidents", label: "Incidents" },
+    ],
+    logs: [
+      { id: "health", label: "Health" },
+      { id: "metrics", label: "Metrics" },
+      { id: "logs", label: "Logs" },
+      { id: "incidents", label: "Incidents" },
+    ],
+    incidents: [
+      { id: "health", label: "Health" },
+      { id: "metrics", label: "Metrics" },
+      { id: "logs", label: "Logs" },
+      { id: "incidents", label: "Incidents" },
+    ],
+  },
 };
 
 export function routeView(route: ConsoleRoute, console: ConsoleController) {
@@ -42,7 +107,7 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
   if (CoreView) return <CoreView console={console} />;
   const View = tabViewMap[route.view]?.[route.tab] ?? tabViewMap[route.view]?.[groupedTabs[route.view as keyof typeof groupedTabs]?.[0]?.id ?? ""];
   if (!View) return null;
-  const tabs = groupedTabs[route.view as keyof typeof groupedTabs];
+  const tabs = legacyTabGroups[route.view]?.[route.tab] ?? groupedTabs[route.view as keyof typeof groupedTabs];
   const label = `${groupedTitle(route.view)} sections`;
   return (
     <section className="groupedPage">
@@ -56,10 +121,10 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
       <Tabs
         items={tabs.map((tab) => ({ ...tab, href: routeHref({ ...route, tab: tab.id }) }))}
         label={label}
-        onSelect={(event, tab) => {
+        onSelect={(event, tabId) => {
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
-          console.navigate({ tab });
+          console.navigate({ ...route, tab: tabId });
         }}
         selected={route.tab}
       />
@@ -78,7 +143,7 @@ function groupedDescription(view: string) {
   const descriptions: Record<string, string> = {
     delivery: "Commit, artifact, rollout, and exposure evidence.",
     infrastructure: "Factual server execution capacity, managed resources, and persistent database storage.",
-    observability: "Health, telemetry, logs, incidents, and support evidence.",
+    observability: "Factual runtime health, application diagnostics, server telemetry, and managed resource readiness.",
     security: "Protected secret flows and audit history.",
   };
   return descriptions[view] ?? "";

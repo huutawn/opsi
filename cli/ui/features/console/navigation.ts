@@ -22,10 +22,10 @@ export const groupedTabs = {
     { id: "storage", label: "Retained Storage" },
   ],
   observability: [
-    { id: "health", label: "Health" },
-    { id: "metrics", label: "Metrics" },
-    { id: "logs", label: "Logs" },
-    { id: "incidents", label: "Incidents" },
+    { id: "overview", label: "Overview" },
+    { id: "applications", label: "Applications" },
+    { id: "servers", label: "Servers" },
+    { id: "resources", label: "Managed Resources" },
   ],
   security: [
     { id: "secrets", label: "Secrets" },
@@ -78,6 +78,11 @@ export function defaultTab(view: ConsoleView) {
   return view in groupedTabs ? groupedTabs[view as keyof typeof groupedTabs][0].id : "";
 }
 
+const legacyTabs: Record<string, string[]> = {
+  infrastructure: ["topology", "runtimes", "nodes", "bootstrap"],
+  observability: ["health", "metrics", "logs", "incidents"],
+};
+
 export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {
   const projectID = route.projectID ?? "";
   let view = route.view ?? (projectID ? "topology" : "home");
@@ -95,8 +100,11 @@ export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {
   }
 
   const tabs = view in groupedTabs ? groupedTabs[view as keyof typeof groupedTabs] : [];
-  const tab = tabs.some((item) => item.id === route.tab) ? route.tab ?? "" : defaultTab(view);
-  return { projectID, view, tab, ...compactViewState(view, route) };
+  const tab = route.tab ?? "";
+  const isKnownTab = tabs.some((item) => item.id === tab) || (legacyTabs[view]?.includes(tab) ?? false);
+  const validTab = isKnownTab ? tab : defaultTab(view);
+
+  return { projectID, view, tab: validTab, ...compactViewState(view, route) };
 }
 
 export function parseRoute(search: string): ConsoleRoute {
@@ -174,7 +182,7 @@ function compactViewState(view: ConsoleView, route: Partial<ConsoleRoute>) {
       : view === "infrastructure"
         ? ["runtime", "node", "session", "service", "topology", "topologyMode", "resource", "server", "storage"] as const
         : view === "observability"
-          ? ["service", "incident", "status", "level", "query", "cursor", "window"] as const
+          ? ["service", "server", "resource", "node", "incident", "status", "level", "query", "cursor", "window"] as const
           : view === "services"
             ? ["service"] as const
           : [] as const;
