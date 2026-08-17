@@ -1,31 +1,28 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
 import { Empty, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { AuditList } from "@/features/security/audit-tab";
 
 export function AccessTab({ console }: { console: ConsoleController }) {
-  const services = console.state.services.filter((item) => item.type === "application");
-  const agentUnavailable = console.session?.agent_connected !== "ok";
-  const [operation, setOperation] = useState<"create" | "rotate" | "reveal" | "totp">("create");
-  const [serviceID, setServiceID] = useState("");
-
   const session = console.session;
   const project = console.state.project;
+  const nodes = console.state.nodes ?? [];
+  const sessions = console.state.sessions ?? [];
+  const services = console.state.services.filter((item) => item.type === "application");
 
-  function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!serviceID && operation !== "totp") return;
-    if (operation === "create") void console.actions.secretCreate(event);
-    else if (operation === "rotate") void console.actions.secretRotate(event);
-    else if (operation === "reveal") void console.actions.secretReveal(event);
-    else console.actions.setupTOTP();
-  }
-
-  const secretAuditEvents = useMemo(() => {
-    return console.state.audit.filter(
-      (item) => item.resource_type === "secret" || item.action.startsWith("SECRET_") || item.action.startsWith("PAT_"),
+  const accessAuditEvents = useMemo(() => {
+    return (console.state.audit ?? []).filter(
+      (item) =>
+        item.resource_type === "secret" ||
+        item.action.startsWith("AUTH_") ||
+        item.action.startsWith("PAT_") ||
+        item.action.startsWith("RBAC_") ||
+        item.action.startsWith("SECRET_") ||
+        item.action.startsWith("RESOURCE_BINDING_") ||
+        item.action.startsWith("AGENT_") ||
+        item.action.startsWith("ADMIN_BOOTSTRAP"),
     );
   }, [console.state.audit]);
 
@@ -34,9 +31,9 @@ export function AccessTab({ console }: { console: ConsoleController }) {
       <section className="securitySection" aria-labelledby="access-id-title">
         <div className="sectionHeading">
           <div>
-            <p className="eyebrow">Identity & Session</p>
+            <p className="eyebrow">Identity & Authority Context</p>
             <h2 id="access-id-title">Access & Identities</h2>
-            <p>Authenticated identity, role boundaries, and runtime execution authorities.</p>
+            <p>Factual authenticated identities, project access scopes, machine/agent authorities, and credential status.</p>
           </div>
           <StatusBadge value={console.session?.authenticated ? "ready" : "unavailable"} />
         </div>
@@ -46,19 +43,19 @@ export function AccessTab({ console }: { console: ConsoleController }) {
             <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Authenticated Session</h3>
             <dl className="reviewFacts">
               <div>
-                <dt>Actor</dt>
+                <dt>Signed in actor</dt>
                 <dd>{session?.user_id || "Human actor"}</dd>
               </div>
               <div>
-                <dt>Role scope</dt>
+                <dt>Assigned role</dt>
                 <dd><b>{session?.role ? session.role.toUpperCase() : "OPERATOR"}</b></dd>
               </div>
               <div>
-                <dt>Organization</dt>
+                <dt>Organization scope</dt>
                 <dd><code>{session?.org_id || "default"}</code></dd>
               </div>
               <div>
-                <dt>Project</dt>
+                <dt>Project scope</dt>
                 <dd>{project?.name || "None"} (<code>{project?.id || "none"}</code>)</dd>
               </div>
             </dl>
@@ -68,232 +65,196 @@ export function AccessTab({ console }: { console: ConsoleController }) {
             <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Authority Connections</h3>
             <dl className="reviewFacts">
               <div>
-                <dt>Cloud API</dt>
+                <dt>Cloud control plane</dt>
                 <dd><StatusBadge value={session?.cloud_connected === "ok" ? "ready" : "unavailable"} /></dd>
               </div>
               <div>
-                <dt>Node Agent</dt>
+                <dt>Node agent state</dt>
                 <dd><StatusBadge value={session?.agent_connected === "ok" ? "ready" : "unavailable"} /></dd>
               </div>
               <div>
-                <dt>Keyring PAT</dt>
+                <dt>OS keychain PAT</dt>
                 <dd>Stored securely in OS Keychain</dd>
               </div>
               <div>
-                <dt>Secret Reveal Policy</dt>
-                <dd>Explicit review with TTL auto-hide</dd>
+                <dt>Surface policy</dt>
+                <dd>Read-only access center; zero credentials exposed</dd>
               </div>
             </dl>
           </div>
         </div>
       </section>
 
-      <section className="securitySection" aria-labelledby="secrets-title">
+      <section className="securitySection" aria-labelledby="machine-auth-title">
         <div className="sectionHeading">
           <div>
-            <p className="eyebrow">Protected operations</p>
-            <h2 id="secrets-title">Secrets</h2>
-            <p>Metadata and inventory are not available from the Local API. Mutations remain explicit and Agent-backed.</p>
+            <p className="eyebrow">Execution identities</p>
+            <h2 id="machine-auth-title">Connected Nodes & Machine Authorities</h2>
+            <p>Active runtime agents executing workloads with scoped machine credentials.</p>
           </div>
-          <StatusBadge value={agentUnavailable ? "unavailable" : "ready"} />
+          <span className="categoryPill">{nodes.length} node(s)</span>
         </div>
 
-        <form className="securityOperation" onSubmit={submit}>
-          <label>
-            Operation
-            <select
-              className="select"
-              onChange={(event) => setOperation(event.target.value as typeof operation)}
-              value={operation}
-            >
-              <option value="create">Create</option>
-              <option value="rotate">Rotate</option>
-              <option value="reveal">Reveal</option>
-              <option value="totp">Set up TOTP</option>
-            </select>
-          </label>
-
-          {operation === "totp" ? (
-            <p className="operationTarget">
-              <b>Target</b>
-              <span>Project TOTP fallback for {console.state.project?.name || "the selected project"}</span>
-            </p>
-          ) : (
-            <>
-              <label>
-                Service
-                <select
-                  className="select"
-                  name="service_id"
-                  onChange={(event) => setServiceID(event.target.value)}
-                  required
-                  value={serviceID}
-                >
-                  <option value="">Choose a service…</option>
-                  {services.map((service) => (
-                    <option key={service.id} value={service.id}>
-                      {service.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Secret name
-                <input autoComplete="off" className="field" name="name" placeholder="Choose explicitly" required />
-              </label>
-              <label>
-                Namespace
-                <input autoComplete="off" className="field" name="namespace" placeholder="Choose explicitly" required />
-              </label>
-            </>
-          )}
-
-          {operation === "rotate" || operation === "reveal" ? <SecondFactorFields /> : null}
-
-          <div className="securityReview">
-            <span>Target and second-factor values are reviewed before submission. Secret values never appear in the review.</span>
-            <button
-              className="primary"
-              disabled={agentUnavailable || (operation !== "totp" && !services.length) || console.state.busy.startsWith("secret-")}
-              type="submit"
-            >
-              Review {operation === "totp" ? "TOTP setup" : operation}
-            </button>
+        {nodes.length ? (
+          <div style={{ display: "grid", gap: 8, marginTop: 14 }}>
+            {nodes.map((node) => (
+              <div
+                key={node.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: 12,
+                  padding: "10px 14px",
+                  border: "1px solid var(--line)",
+                  borderRadius: 6,
+                  background: "var(--surface)",
+                }}
+              >
+                <div>
+                  <strong style={{ fontSize: 13 }}>{node.name || node.id}</strong>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                    Role: <b>{node.role}</b> {node.last_seen_at ? `· Last seen ${node.last_seen_at}` : ""}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <StatusBadge value={node.status} />
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => console.navigate({ view: "infrastructure", tab: "servers", server: node.id })}
+                    style={{ fontSize: 11, padding: "4px 8px" }}
+                  >
+                    Open Server &rarr;
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
-        </form>
-
-        {agentUnavailable ? (
-          <p className="truthCallout" role="status">
-            <b>Agent unavailable.</b> Secret mutations are disabled; loaded audit history remains available.
-          </p>
-        ) : null}
-        <p className="capabilityNote">Secret metadata/listing is a backend capability gap. No inventory is shown or implied.</p>
+        ) : (
+          <Empty text="No connected nodes or machine identities reported." />
+        )}
       </section>
 
-      {console.state.secretReveal || console.state.totpSetup ? (
-        <ProtectedResult console={console} onClose={console.actions.hideSensitive} />
-      ) : null}
+      <section className="securitySection" aria-labelledby="bootstrap-auth-title">
+        <div className="sectionHeading">
+          <div>
+            <p className="eyebrow">Bootstrap identities</p>
+            <h2 id="bootstrap-auth-title">Server Bootstrap Sessions</h2>
+            <p>Ephemeral bootstrap credential records and node joining status.</p>
+          </div>
+          <span className="categoryPill">{sessions.length} session(s)</span>
+        </div>
 
-      <section className="securitySection" aria-labelledby="secret-audit-title">
+        {sessions.length ? (
+          <div style={{ display: "grid", gap: 8, marginTop: 14 }}>
+            {sessions.map((sess) => (
+              <div
+                key={sess.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: 12,
+                  padding: "10px 14px",
+                  border: "1px solid var(--line)",
+                  borderRadius: 6,
+                  background: "var(--surface)",
+                }}
+              >
+                <div>
+                  <code style={{ fontSize: 12 }}>{sess.id}</code>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                    Host: {sess.public_host || "unspecified"} · Role: <b>{sess.role}</b>
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <StatusBadge value={sess.status} />
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => console.navigate({ view: "infrastructure", tab: "servers", session: sess.id })}
+                    style={{ fontSize: 11, padding: "4px 8px" }}
+                  >
+                    Open Bootstrap &rarr;
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Empty text="No active or recent bootstrap sessions." />
+        )}
+      </section>
+
+      <section className="securitySection" aria-labelledby="service-binding-title">
+        <div className="sectionHeading">
+          <div>
+            <p className="eyebrow">Workload Credential Scope</p>
+            <h2 id="service-binding-title">Application Credential Status</h2>
+            <p>Application workload permissions operate with least-privilege PostgreSQL roles. Credential mutation is managed canonically in Infrastructure and Delivery.</p>
+          </div>
+        </div>
+
+        {services.length ? (
+          <div style={{ display: "grid", gap: 8, marginTop: 14 }}>
+            {services.map((svc) => (
+              <div
+                key={svc.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: 12,
+                  padding: "10px 14px",
+                  border: "1px solid var(--line)",
+                  borderRadius: 6,
+                  background: "var(--surface)",
+                }}
+              >
+                <div>
+                  <strong style={{ fontSize: 13 }}>{svc.name}</strong>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                    Type: <b>{svc.type}</b> · Replicas: {svc.replicas ?? 1} · Source: {svc.source_type || "managed"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <StatusBadge value={svc.status} />
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => console.navigate({ view: "services", service: svc.id })}
+                    style={{ fontSize: 11, padding: "4px 8px" }}
+                  >
+                    Open Application &rarr;
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Empty text="No application services configured." />
+        )}
+      </section>
+
+      <section className="securitySection" aria-labelledby="access-audit-title">
         <div className="sectionHeading">
           <div>
             <p className="eyebrow">Loaded history</p>
-            <h2 id="secret-audit-title">Secret audit</h2>
+            <h2 id="access-audit-title">Access & Credential Audit</h2>
+            <p>Chronological record of authentication events, role checks, and credential lifecycles.</p>
           </div>
+          <span className="categoryPill">{accessAuditEvents.length} event(s)</span>
         </div>
-        {secretAuditEvents.length ? (
-          <AuditList rows={secretAuditEvents} />
+        {accessAuditEvents.length ? (
+          <AuditList rows={accessAuditEvents} />
         ) : (
-          <Empty text="No secret audit events were returned." />
+          <Empty text="No access or credential audit events were returned in loaded history." />
         )}
       </section>
     </div>
-  );
-}
-
-export function SecondFactorFields() {
-  const [method, setMethod] = useState<"otp" | "totp">("otp");
-  return (
-    <fieldset className="secondFactor">
-      <legend>Second factor</legend>
-      <label>
-        Method
-        <select
-          className="select"
-          name="second_factor_method"
-          onChange={(event) => setMethod(event.target.value as typeof method)}
-          value={method}
-        >
-          <option value="otp">One-time approval code</option>
-          <option value="totp">TOTP code</option>
-        </select>
-      </label>
-      {method === "otp" ? (
-        <>
-          <label>
-            OTP request ID
-            <input autoComplete="off" className="field" name="otp_request_id" required />
-          </label>
-          <label>
-            OTP code
-            <input autoComplete="one-time-code" className="field" name="otp_code" required />
-          </label>
-        </>
-      ) : (
-        <label>
-          TOTP code
-          <input autoComplete="one-time-code" className="field" name="totp_code" required />
-        </label>
-      )}
-    </fieldset>
-  );
-}
-
-export function ProtectedResult({ console, onClose }: { console: ConsoleController; onClose: () => void }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const returnFocus = useRef<HTMLElement | null>(null);
-  const result = console.state.secretReveal;
-  const totp = console.state.totpSetup;
-  const ttl = result?.ttl_seconds ?? totp?.ttl_seconds ?? 0;
-  const [isOpen, setIsOpen] = useState(false);
-  const [remaining, setRemaining] = useState(ttl);
-
-  useEffect(() => {
-    returnFocus.current = document.activeElement as HTMLElement | null;
-    const element = dialog.current;
-    element?.showModal();
-    const frame = window.requestAnimationFrame(() => setIsOpen(true));
-    const timer = window.setInterval(() => setRemaining((value) => Math.max(0, value - 1)), 1000);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.clearInterval(timer);
-      if (element?.open) element.close();
-      const target = returnFocus.current?.isConnected
-        ? returnFocus.current
-        : document.querySelector<HTMLElement>(".securityReview button:not(:disabled)");
-      target?.focus();
-    };
-  }, []);
-
-  function hide() {
-    dialog.current?.close();
-    onClose();
-  }
-
-  useEffect(() => {
-    if (remaining === 0) hide();
-  }, [remaining]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <dialog
-      aria-labelledby="protected-result-title"
-      aria-modal="true"
-      className="protectedDialog"
-      onCancel={(event) => {
-        event.preventDefault();
-        hide();
-      }}
-      ref={dialog}
-    >
-      <p className="eyebrow">Protected result</p>
-      <h2 id="protected-result-title">Sensitive content</h2>
-      <p className="warning">Do not copy or record this value. It is visible only while this protected surface is open.</p>
-      <p role="status">Automatically hides in {remaining}s.</p>
-      {isOpen && result ? (
-        <div className="protectedValue">
-          <p>Secret value</p>
-          <pre>{`username: ${result.username ?? "Not reported"}\npassword: ${result.password ?? "Not reported"}`}</pre>
-        </div>
-      ) : null}
-      {isOpen && totp ? (
-        <div className="protectedValue">
-          <p>TOTP setup URI and secret</p>
-          <pre>{`${totp.uri}\nsecret: ${totp.secret}`}</pre>
-        </div>
-      ) : null}
-      <button onClick={hide} type="button">
-        Hide now
-      </button>
-    </dialog>
   );
 }

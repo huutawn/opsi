@@ -41,7 +41,7 @@ const tabViewMap: Record<string, Record<string, (props: { console: ConsoleContro
     logs: ObservabilityView,
     incidents: ObservabilityView,
   },
-  security: { secrets: SecurityView, audit: SecurityView },
+  security: { overview: SecurityView, audit: SecurityView, access: SecurityView, secrets: SecurityView },
 };
 
 const legacyTabGroups: Record<string, Record<string, ReadonlyArray<{ id: string; label: string }>>> = {
@@ -151,7 +151,7 @@ function groupedDescription(view: string) {
     delivery: "Commit, artifact, rollout, and exposure evidence.",
     infrastructure: "Factual server execution capacity, managed resources, and persistent database storage.",
     observability: "Factual runtime health, application diagnostics, server telemetry, and managed resource readiness.",
-    security: "Protected secret flows and audit history.",
+    security: "Security visibility, authenticated identity boundaries, safe credential status, and audit history.",
   };
   return descriptions[view] ?? "";
 }

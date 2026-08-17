@@ -270,7 +270,7 @@ test("security error mapping produces actionable guidance for recognized codes",
   assert.match(binding.message, /Active Resource Binding/i);
 });
 
-test("deriveSecuritySummary aggregates factual summary counts accurately", () => {
+test("deriveSecuritySummary aggregates factual summary counts accurately without synthetic compliance scoring", () => {
   const events = [
     { id: "a1", actor_type: "human", actor_user_id: "dev", action: "RBAC_DENIED", resource_type: "bootstrap_session", resource_id: "boot-1", result: "denied", created_at: "2026-08-01T10:00:00Z" },
     { id: "a2", actor_type: "human", actor_user_id: "owner", action: "RESOURCE_DELETED", resource_type: "resource", resource_id: "res-pg", result: "success", created_at: "2026-08-01T10:05:00Z" },
@@ -286,4 +286,11 @@ test("deriveSecuritySummary aggregates factual summary counts accurately", () =>
   assert.equal(summary.recentDeniedEvents.length, 1);
   assert.equal(summary.recentHighImpactEvents.length, 2);
   assert.equal(summary.scopedRoleSafety.length, 6);
+
+  // Assert no compliance score, risk score, or percentage is synthesized
+  assert.equal("score" in summary, false);
+  assert.equal("complianceScore" in summary, false);
+  assert.equal("riskScore" in summary, false);
+  assert.equal("percentage" in summary, false);
+  assert.equal("grade" in summary, false);
 });

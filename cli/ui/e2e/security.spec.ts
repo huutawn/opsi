@@ -5,7 +5,7 @@ test.beforeEach(async ({ page }) => watchConsoleErrors(page));
 test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Security & Audit Center loads canonical overview, audit explorer, and access identities", async ({ page }) => {
-  await mockSecurityAPI(page, "default");
+  await mockSecurityAPI(page);
   await page.setViewportSize({ width: 1440, height: 900 });
 
   // 1. Security Overview route loads directly with deep-link state
@@ -19,21 +19,28 @@ test("Security & Audit Center loads canonical overview, audit explorer, and acce
   await expect(page.getByText("PostgreSQL Scoped Role Safeguards")).toBeVisible();
   await expect(page.getByText("NOSUPERUSER")).toBeVisible();
   await expect(page.getByText("NOBYPASSRLS")).toBeVisible();
+  await expect(page.getByText("Break-Glass & Safety Policy")).toBeVisible();
   await page.screenshot({ fullPage: true, path: "../../.tmp/ui-p09b/security-overview-1440x900.png" });
 
-  // 2. Audit Tab loads and renders factual actor, target, timestamp, and outcome
+  // 2. Proves NO synthetic compliance score, security score, risk score, grade, or percentage exists
+  await expect(page.locator("body")).not.toContainText(/compliance score/i);
+  await expect(page.locator("body")).not.toContainText(/security score/i);
+  await expect(page.locator("body")).not.toContainText(/risk score/i);
+  await expect(page.locator("body")).not.toContainText(/compliance grade/i);
+
+  // 3. Audit Tab loads and renders factual actor, target, timestamp, and outcome
   await page.getByRole("tab", { name: "Audit", exact: true }).click();
   await expect(page).toHaveURL(/view=security&tab=audit/);
   await expect(page.getByRole("heading", { name: "Audit", exact: true })).toBeVisible();
   await expect(page.getByText("7 loaded event(s)")).toBeVisible();
 
-  // 3. Actor and outcome visibility (Human vs Machine)
+  // 4. Actor and outcome visibility (Human vs Machine)
   await expect(page.getByRole("button", { name: /Human actor/ }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: /Machine actor/ }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: /cloud worker/ }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: /CUTOVER_FINALIZED/ })).toBeVisible();
 
-  // 4. Requested vs Succeeded remain distinct without conflation
+  // 5. Requested vs Succeeded remain distinct without conflation
   const requestedBtn = page.getByRole("button", { name: /CUTOVER_FINALIZE_REQUESTED/ });
   await expect(requestedBtn).toBeVisible();
   await expect(requestedBtn.locator(".status")).toHaveText(/requested/i);
@@ -42,10 +49,10 @@ test("Security & Audit Center loads canonical overview, audit explorer, and acce
   await expect(finalizedBtn).toBeVisible();
   await expect(finalizedBtn.locator(".status")).toHaveText(/succeeded|success/i);
 
-  // 5. High-impact operations are clearly identifiable with badge
+  // 6. High-impact operations are clearly identifiable with badge
   await expect(page.locator(".auditList").getByText("HIGH IMPACT").first()).toBeVisible();
 
-  // 6. Selected event detail contains safe metadata and absent secret fields
+  // 7. Selected event detail contains safe metadata and absent secret fields
   await requestedBtn.click();
   const drawer = page.locator(".auditDetail");
   await expect(drawer).toBeVisible();
@@ -57,28 +64,28 @@ test("Security & Audit Center loads canonical overview, audit explorer, and acce
   await expect(drawer.getByText("pvc-uid-999")).toBeVisible();
   await expect(drawer.getByText("digest-safe-hash")).toBeVisible();
 
-  // 7. Secret-like payload fields absent from browser DOM
+  // 8. Secret-like payload fields absent from browser DOM
   await expect(page.locator("body")).not.toContainText("SUPER_SECRET_PAYLOAD_CANARY");
   await expect(page.locator("body")).not.toContainText("postgres://user:secretpassword@");
   await expect(page.locator("body")).not.toContainText("PRIVATE_KEY_CANARY");
 
-  // 8. Denied event represented accurately
+  // 9. Denied event represented accurately
   const deniedBtn = page.getByRole("button", { name: /RBAC_DENIED/ });
   await expect(deniedBtn).toBeVisible();
   await expect(deniedBtn.locator(".status")).toHaveText(/denied/i);
   await deniedBtn.click();
   await expect(drawer.getByRole("heading", { name: "RBAC_DENIED" })).toBeVisible();
 
-  // 9. Filtering works factually
-  await page.getByLabel("Actor, action, or resource").fill("cutover");
+  // 10. Filtering works factually
+  await page.getByLabel("Search audit trail").fill("cutover");
   await expect(page.getByRole("button", { name: /CUTOVER_/ })).toHaveCount(2);
-  await page.getByLabel("Actor, action, or resource").fill("");
+  await page.getByLabel("Search audit trail").fill("");
 
-  await page.getByRole("combobox", { name: "Result" }).selectOption("denied");
+  await page.getByRole("combobox", { name: "Outcome" }).selectOption("denied");
   await expect(page.getByRole("button", { name: /RBAC_DENIED/ })).toHaveCount(1);
-  await page.getByRole("combobox", { name: "Result" }).selectOption("");
+  await page.getByRole("combobox", { name: "Outcome" }).selectOption("");
 
-  // 10. Cross-surface links work
+  // 11. Cross-surface links work
   const serviceEventBtn = page.getByRole("button", { name: /SERVICE_CREATED/ });
   await expect(serviceEventBtn).toBeVisible();
   await serviceEventBtn.click();
@@ -87,19 +94,37 @@ test("Security & Audit Center loads canonical overview, audit explorer, and acce
   await crossLink.click();
   await expect(page).toHaveURL(/view=services/);
 
-  // Return to Security
+  // 12. Access Tab loads in strictly read-only mode
   await page.goto("/?project=proj-1&view=security&tab=access");
   await expect(page.getByRole("heading", { name: "Access & Identities", exact: true })).toBeVisible();
   await expect(page.getByText("Authenticated Session")).toBeVisible();
   await expect(page.getByText("Authority Connections")).toBeVisible();
-  await expect(page.getByText("Secrets", { exact: true })).toBeVisible();
+  await expect(page.getByText("Connected Nodes & Machine Authorities")).toBeVisible();
+  await expect(page.getByText("Server Bootstrap Sessions")).toBeVisible();
+  await expect(page.getByText("Application Credential Status")).toBeVisible();
 
-  // 11. No destructive action buttons duplicated in Security
+  // 13. Strictly NO Reveal / Rotate / Create Secret / TOTP controls exist
+  await expect(page.getByRole("button", { name: /Reveal Secret/i })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Rotate Secret/i })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Create Secret/i })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Set up TOTP/i })).toHaveCount(0);
+  await expect(page.getByRole("combobox", { name: /Operation/i })).toHaveCount(0);
+  await expect(page.getByLabel(/TOTP code/i)).toHaveCount(0);
+  await expect(page.getByLabel(/OTP code/i)).toHaveCount(0);
+  await expect(page.getByLabel(/Secret name/i)).toHaveCount(0);
+
+  // 14. Access tab cross-links work
+  await expect(page.getByRole("button", { name: /Open Server/i }).first()).toBeVisible();
+  await page.getByRole("button", { name: /Open Server/i }).first().click();
+  await expect(page).toHaveURL(/view=infrastructure&tab=servers/);
+
+  // 15. No destructive action buttons duplicated in Security
+  await page.goto("/?project=proj-1&view=security&tab=access");
   await expect(page.getByRole("button", { name: /Delete Server/i })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Destroy Storage/i })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Delete Resource/i })).toHaveCount(0);
 
-  // 12. Responsive viewports without horizontal overflow
+  // 16. Responsive viewports without horizontal overflow
   for (const viewport of [
     { width: 1440, height: 900 },
     { width: 1024, height: 768 },
@@ -160,7 +185,13 @@ async function mockSecurityAPI(page: Page) {
       });
     }
     if (path.endsWith("/deployments")) return json(route, { deployments: [] });
-    if (path.endsWith("/bootstrap-sessions")) return json(route, { sessions: [] });
+    if (path.endsWith("/bootstrap-sessions")) {
+      return json(route, {
+        sessions: [
+          { id: "boot-1", status: "installing", public_host: "203.0.113.10", role: "worker", attempt_count: 1, max_attempts: 3, created_at: "2026-08-01T08:00:00Z" },
+        ],
+      });
+    }
     if (path.endsWith("/audit")) {
       return json(route, { events: factualAuditFixture });
     }
@@ -168,7 +199,7 @@ async function mockSecurityAPI(page: Page) {
       return json(route, {
         generated_at: "2026-08-01T10:00:00Z",
         readiness: { project_id: projectID, status: "ready", can_deploy: true },
-        counts: { nodes: 1, healthy_nodes: 1, services: 2, deployment_jobs: 0, failed_deployments: 0, bootstrap_sessions: 0, open_bootstrap_jobs: 0, audit_events: factualAuditFixture.length },
+        counts: { nodes: 1, healthy_nodes: 1, services: 2, deployment_jobs: 0, failed_deployments: 0, bootstrap_sessions: 1, open_bootstrap_jobs: 1, audit_events: factualAuditFixture.length },
         dashboard: { title: "Security", datasource: "local", refresh: "30s", panels: [] },
         signals: [],
         active_alerts: [],
