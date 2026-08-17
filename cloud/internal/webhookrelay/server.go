@@ -74,6 +74,7 @@ type Server struct {
 	authMu                  sync.Mutex
 	oauthStates             map[string]oauthState
 	authGrants              map[string]authGrant
+	authSelectionGrants     map[string]authGrant
 	installationClaimGrants map[string]installationClaimGrant
 	now                     func() time.Time
 	random                  io.Reader
@@ -137,6 +138,7 @@ func NewServer(cfg Config) *Server {
 		buildRecordSlots:        make(chan struct{}, buildRecordMaxConcurrency),
 		oauthStates:             map[string]oauthState{},
 		authGrants:              map[string]authGrant{},
+		authSelectionGrants:     map[string]authGrant{},
 		installationClaimGrants: map[string]installationClaimGrant{},
 		random:                  rand.Reader,
 	}
@@ -217,6 +219,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/auth/browser/start", s.handleBrowserAuthStart)
 	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)
 	mux.HandleFunc("/v1/auth/browser/redeem", s.handleBrowserAuthRedeem)
+	mux.HandleFunc("/v1/auth/browser/select-project", s.handleBrowserAuthSelectProject)
 	mux.HandleFunc("/v1/projects/{project_id}/github/installations/{installation_id}/claim/start", s.handleInstallationClaimStart)
 	mux.HandleFunc("/v1/github/installations/claim/redeem", s.handleInstallationClaimRedeem)
 	mux.HandleFunc("/v1/projects/{project_id}/github/installations", s.handleGitHubInstallationsAPI)

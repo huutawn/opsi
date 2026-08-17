@@ -139,7 +139,11 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	}
 	agentResolver := newAgentConfigResolver(cfg, configPath)
 	localSession := newLocalSessionToken()
-	authFlow := &localAuthFlow{states: map[string]time.Time{}, installationClaims: map[string]time.Time{}}
+	authFlow := &localAuthFlow{
+		states:             map[string]time.Time{},
+		installationClaims: map[string]time.Time{},
+		selections:         map[string]localSelectionState{},
+	}
 	routes := http.NewServeMux()
 	routes.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -153,6 +157,99 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	})
 	routes.HandleFunc("/api/local/session/callback", func(w http.ResponseWriter, r *http.Request) {
 		completeLocalBrowserLogin(w, r, cfg, factory, authFlow)
+	})
+	routes.HandleFunc("/api/local/session/selection", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+			return
+		}
+		selectionID := strings.TrimSpace(r.URL.Query().Get("selection_id"))
+		if selectionID == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "SELECTION_ID_REQUIRED", "selection_id is required")
+			return
+		}
+		state, ok := authFlow.getSelection(selectionID)
+		if !ok {
+			writeLocalError(w, r, http.StatusUnauthorized, "AUTH_SESSION_EXPIRED", "The project selection session has expired. Start a new sign-in.")
+			return
+		}
+		writeLocalJSON(w, http.StatusOK, map[string]any{
+			"selection_id": selectionID,
+			"projects":     state.Projects,
+		})
+	})
+	routes.HandleFunc("/api/local/session/select-project", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+			return
+		}
+		var body struct {
+			SelectionID string `json:"selection_id"`
+			ProjectID   string `json:"project_id"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+			writeLocalError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+			return
+		}
+		body.SelectionID = strings.TrimSpace(body.SelectionID)
+		body.ProjectID = strings.TrimSpace(body.ProjectID)
+		if body.SelectionID == "" || body.ProjectID == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "selection_id and project_id are required")
+			return
+		}
+		state, ok := authFlow.getSelection(body.SelectionID)
+		if !ok {
+			writeLocalError(w, r, http.StatusUnauthorized, "AUTH_SESSION_EXPIRED", "The project selection session has expired. Start a new sign-in.")
+			return
+		}
+		payload, _ := json.Marshal(map[string]string{
+			"selection_token": state.CloudSelectionToken,
+			"project_id":      body.ProjectID,
+		})
+		resp, err := postCloudJSON(r.Context(), cfg.CloudURL, "/v1/auth/browser/select-project", "", payload)
+		if err != nil {
+			writeLocalError(w, r, http.StatusBadGateway, "AUTH_SELECT_PROJECT_FAILED", "Cloud auth project selection is unavailable")
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			var errPayload struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&errPayload)
+			code := errPayload.Error.Code
+			if code == "" {
+				code = "AUTH_SELECT_PROJECT_FAILED"
+			}
+			msg := errPayload.Error.Message
+			if msg == "" {
+				msg = "Cloud rejected the selected project"
+			}
+			writeLocalError(w, r, resp.StatusCode, code, msg)
+			return
+		}
+		var out struct {
+			Token   string               `json:"token"`
+			Session localSessionIdentity `json:"session"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.Token == "" || out.Session.ProjectID == "" || out.Session.OrgID == "" {
+			writeLocalError(w, r, http.StatusBadGateway, "AUTH_SELECT_PROJECT_FAILED", "Cloud auth response was invalid")
+			return
+		}
+		store, err := storeFromFactory(factory)
+		if err != nil || store.SetPAT(out.Token) != nil {
+			writeLocalError(w, r, http.StatusInternalServerError, "LOCAL_CREDENTIAL_STORE_FAILED", "could not store credential in OS keychain")
+			return
+		}
+		authFlow.deleteSelection(body.SelectionID)
+		authFlow.setSession(out.Session)
+		writeLocalJSON(w, http.StatusOK, map[string]any{
+			"authenticated": true,
+			"session":       out.Session,
+		})
 	})
 	routes.HandleFunc("/api/local/github/installations/claim/callback", func(w http.ResponseWriter, r *http.Request) {
 		completeLocalInstallationClaim(w, r, cfg, factory, authFlow)
@@ -418,10 +515,17 @@ func writeLocalAPIError(w http.ResponseWriter, r *http.Request, status int, code
 	}})
 }
 
+type localSelectionState struct {
+	CloudSelectionToken string
+	Projects            []map[string]any
+	ExpiresAt           time.Time
+}
+
 type localAuthFlow struct {
 	mu                 sync.Mutex
 	states             map[string]time.Time
 	installationClaims map[string]time.Time
+	selections         map[string]localSelectionState
 	currentSession     localSessionIdentity
 }
 
@@ -446,6 +550,41 @@ func (f *localAuthFlow) setSession(session localSessionIdentity) {
 
 func (f *localAuthFlow) clearSession() {
 	f.setSession(localSessionIdentity{})
+}
+
+func (f *localAuthFlow) setSelection(id, cloudToken string, projects []map[string]any, expiresAt time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.selections == nil {
+		f.selections = map[string]localSelectionState{}
+	}
+	f.selections[id] = localSelectionState{
+		CloudSelectionToken: cloudToken,
+		Projects:            projects,
+		ExpiresAt:           expiresAt,
+	}
+}
+
+func (f *localAuthFlow) getSelection(id string) (localSelectionState, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.selections == nil {
+		return localSelectionState{}, false
+	}
+	state, ok := f.selections[id]
+	if !ok || time.Now().UTC().After(state.ExpiresAt) {
+		delete(f.selections, id)
+		return localSelectionState{}, false
+	}
+	return state, true
+}
+
+func (f *localAuthFlow) deleteSelection(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.selections != nil {
+		delete(f.selections, id)
+	}
 }
 
 func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.Config, flow *localAuthFlow) {
@@ -530,10 +669,27 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	var out struct {
-		Token   string               `json:"token"`
-		Session localSessionIdentity `json:"session"`
+		Status         string               `json:"status"`
+		SelectionToken string               `json:"selection_token"`
+		Projects       []map[string]any     `json:"projects"`
+		Token          string               `json:"token"`
+		Session        localSessionIdentity `json:"session"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.Token == "" || out.Session.ProjectID == "" || out.Session.OrgID == "" {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "AUTH_REDEEM_FAILED", "Cloud auth response was invalid")
+		return
+	}
+	if out.Status == "select_project" || (out.SelectionToken != "" && len(out.Projects) > 0) {
+		selectionID := newLocalSessionToken()
+		flow.setSelection(selectionID, out.SelectionToken, out.Projects, time.Now().UTC().Add(5*time.Minute))
+		query := url.Values{
+			"auth":         []string{"select_project"},
+			"selection_id": []string{selectionID},
+		}
+		http.Redirect(w, r, "/?"+query.Encode(), http.StatusFound)
+		return
+	}
+	if out.Token == "" || out.Session.ProjectID == "" || out.Session.OrgID == "" {
 		writeLocalError(w, r, http.StatusBadGateway, "AUTH_REDEEM_FAILED", "Cloud auth response was invalid")
 		return
 	}

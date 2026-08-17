@@ -41,6 +41,7 @@ type oauthStatePurpose string
 const (
 	oauthPurposeLogin             oauthStatePurpose = "login"
 	oauthPurposeInstallationClaim oauthStatePurpose = "installation_claim"
+	oauthPurposeProjectSelect     oauthStatePurpose = "project_select"
 )
 
 type oauthState struct {
@@ -58,6 +59,10 @@ type authGrant struct {
 	Purpose   oauthStatePurpose
 	Token     string
 	Session   auth.VerifyResult
+	UserID    string
+	Provider  string
+	Subject   string
+	Projects  []auth.OAuthProjectCandidate
 	ExpiresAt time.Time
 }
 
@@ -220,34 +225,103 @@ func (s *Server) completeBrowserLogin(w http.ResponseWriter, r *http.Request, pe
 		redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
 		return
 	}
-	issued, err := s.Auth.IssuePATForOAuth(r.Context(), githubProvider, subject, pending.ProjectID, 90*24*time.Hour)
-	if err != nil {
-		s.auditAuth("", "", pending.ProjectID, "token_issued", "failure", map[string]any{
-			"provider": githubProvider,
-			"reason":   "identity_or_membership_not_found",
-		})
-		switch {
-		case errors.Is(err, auth.ErrOAuthIdentity):
-			redirectBrowserAuthError(w, r, pending, "GITHUB_ACCOUNT_UNLINKED")
-		case errors.Is(err, auth.ErrNoMembership):
-			redirectBrowserAuthError(w, r, pending, "OPSI_MEMBERSHIP_REQUIRED")
-		case errors.Is(err, auth.ErrProjectChoice):
-			redirectBrowserAuthError(w, r, pending, "PROJECT_SELECTION_REQUIRED")
-		default:
-			redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
+	if pending.ProjectID != "" {
+		issued, err := s.Auth.IssuePATForOAuth(r.Context(), githubProvider, subject, pending.ProjectID, 90*24*time.Hour)
+		if err != nil {
+			s.auditAuth("", "", pending.ProjectID, "token_issued", "failure", map[string]any{
+				"provider": githubProvider,
+				"reason":   "identity_or_membership_not_found",
+			})
+			switch {
+			case errors.Is(err, auth.ErrOAuthIdentity):
+				redirectBrowserAuthError(w, r, pending, "GITHUB_ACCOUNT_UNLINKED")
+			case errors.Is(err, auth.ErrNoMembership):
+				redirectBrowserAuthError(w, r, pending, "OPSI_MEMBERSHIP_REQUIRED")
+			case errors.Is(err, auth.ErrProjectChoice):
+				redirectBrowserAuthError(w, r, pending, "PROJECT_SELECTION_REQUIRED")
+			default:
+				redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
+			}
+			return
 		}
+
+		s.authMu.Lock()
+		s.authGrants[grantCode] = authGrant{
+			Purpose:   oauthPurposeLogin,
+			Token:     issued.Token,
+			Session:   issued.Session,
+			ExpiresAt: s.clock().Add(authGrantTTL),
+		}
+		s.authMu.Unlock()
+		s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": githubProvider})
+
+		callback, _ := url.Parse(pending.LocalCallback)
+		query := callback.Query()
+		query.Set("code", grantCode)
+		query.Set("state", pending.LocalState)
+		callback.RawQuery = query.Encode()
+		http.Redirect(w, r, callback.String(), http.StatusFound)
+		return
+	}
+
+	userID, err := s.Auth.ResolveOAuthUser(r.Context(), githubProvider, subject)
+	if err != nil {
+		s.auditAuth("", "", "", "token_issued", "failure", map[string]any{
+			"provider": githubProvider,
+			"reason":   "oauth_identity_not_linked",
+		})
+		redirectBrowserAuthError(w, r, pending, "GITHUB_ACCOUNT_UNLINKED")
+		return
+	}
+	projects, err := s.Auth.UserProjects(r.Context(), userID)
+	if err != nil {
+		redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
+		return
+	}
+	if len(projects) == 0 {
+		s.auditAuth("", userID, "", "token_issued", "failure", map[string]any{
+			"provider": githubProvider,
+			"reason":   "no_memberships",
+		})
+		redirectBrowserAuthError(w, r, pending, "OPSI_MEMBERSHIP_REQUIRED")
+		return
+	}
+	if len(projects) == 1 {
+		issued, err := s.Auth.IssuePATForOAuth(r.Context(), githubProvider, subject, projects[0].ID, 90*24*time.Hour)
+		if err != nil {
+			redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
+			return
+		}
+		s.authMu.Lock()
+		s.authGrants[grantCode] = authGrant{
+			Purpose:   oauthPurposeLogin,
+			Token:     issued.Token,
+			Session:   issued.Session,
+			ExpiresAt: s.clock().Add(authGrantTTL),
+		}
+		s.authMu.Unlock()
+		s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": githubProvider})
+
+		callback, _ := url.Parse(pending.LocalCallback)
+		query := callback.Query()
+		query.Set("code", grantCode)
+		query.Set("state", pending.LocalState)
+		callback.RawQuery = query.Encode()
+		http.Redirect(w, r, callback.String(), http.StatusFound)
 		return
 	}
 
 	s.authMu.Lock()
 	s.authGrants[grantCode] = authGrant{
-		Purpose:   oauthPurposeLogin,
-		Token:     issued.Token,
-		Session:   issued.Session,
+		Purpose:   oauthPurposeProjectSelect,
+		UserID:    userID,
+		Provider:  githubProvider,
+		Subject:   subject,
+		Projects:  projects,
 		ExpiresAt: s.clock().Add(authGrantTTL),
 	}
 	s.authMu.Unlock()
-	s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": githubProvider})
+	s.auditAuth("", userID, "", "project_selection_required", "pending", map[string]any{"provider": githubProvider, "candidate_count": len(projects)})
 
 	callback, _ := url.Parse(pending.LocalCallback)
 	query := callback.Query()
@@ -435,11 +509,97 @@ func (s *Server) handleBrowserAuthRedeem(w http.ResponseWriter, r *http.Request)
 		delete(s.authGrants, request.Code)
 	}
 	s.authMu.Unlock()
-	if !ok || grant.Purpose != oauthPurposeLogin || !s.clock().Before(grant.ExpiresAt) {
+	if !ok || !s.clock().Before(grant.ExpiresAt) {
 		writeError(w, http.StatusUnauthorized, "auth grant expired or invalid")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"token": grant.Token, "session": grant.Session})
+	if grant.Purpose == oauthPurposeProjectSelect {
+		selectionToken, err := secureRandomValue(s.randomSource(), secureTokenBytes)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "auth state generation failed")
+			return
+		}
+		s.authMu.Lock()
+		s.authSelectionGrants[selectionToken] = authGrant{
+			Purpose:   oauthPurposeProjectSelect,
+			UserID:    grant.UserID,
+			Provider:  grant.Provider,
+			Subject:   grant.Subject,
+			Projects:  grant.Projects,
+			ExpiresAt: s.clock().Add(5 * time.Minute),
+		}
+		s.authMu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":          "select_project",
+			"selection_token": selectionToken,
+			"projects":        grant.Projects,
+		})
+		return
+	}
+	if grant.Purpose != oauthPurposeLogin {
+		writeError(w, http.StatusUnauthorized, "auth grant expired or invalid")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "authenticated", "token": grant.Token, "session": grant.Session})
+}
+
+func (s *Server) handleBrowserAuthSelectProject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		SelectionToken string `json:"selection_token"`
+		ProjectID      string `json:"project_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, githubResponseLimit)).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid project selection request")
+		return
+	}
+	request.ProjectID = strings.TrimSpace(request.ProjectID)
+	if request.SelectionToken == "" || request.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, "selection_token and project_id are required")
+		return
+	}
+	s.authMu.Lock()
+	grant, ok := s.authSelectionGrants[request.SelectionToken]
+	if ok && s.clock().Before(grant.ExpiresAt) {
+		delete(s.authSelectionGrants, request.SelectionToken)
+	} else {
+		ok = false
+	}
+	s.authMu.Unlock()
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "auth selection state expired or invalid")
+		return
+	}
+	allowed := false
+	for _, p := range grant.Projects {
+		if p.ID == request.ProjectID {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		s.auditAuth("", grant.UserID, request.ProjectID, "token_issued", "failure", map[string]any{
+			"provider": grant.Provider,
+			"reason":   "unauthorized_project_selection",
+		})
+		writeError(w, http.StatusForbidden, "selected project is not accessible to this user")
+		return
+	}
+
+	issued, err := s.Auth.IssuePATForOAuth(r.Context(), grant.Provider, grant.Subject, request.ProjectID, 90*24*time.Hour)
+	if err != nil {
+		s.auditAuth("", grant.UserID, request.ProjectID, "token_issued", "failure", map[string]any{
+			"provider": grant.Provider,
+			"reason":   "token_issue_failed",
+		})
+		writeError(w, http.StatusForbidden, "could not issue token for selected project")
+		return
+	}
+	s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": grant.Provider})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "authenticated", "token": issued.Token, "session": issued.Session})
 }
 
 func (s *Server) exchangeGitHubUser(ctx context.Context, code, verifier string) (string, error) {

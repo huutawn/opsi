@@ -186,3 +186,34 @@ func TestResolveOAuthUserIsReadOnlyAndRequiresPrelinkedIdentity(t *testing.T) {
 		t.Fatalf("missing identity err=%v", err)
 	}
 }
+
+func TestUserProjectsReturnsAccessibleCandidates(t *testing.T) {
+	store := &MemoryStore{
+		Candidates: []Candidate{
+			{ID: "c1", UserID: "user-1", ProjectID: "proj-1", Role: "Owner"},
+			{ID: "c2", UserID: "user-1", ProjectID: "proj-2", Role: "Developer"},
+			{ID: "c3", UserID: "user-2", ProjectID: "proj-3", Role: "Viewer"},
+		},
+		OAuthIdentities: map[string]string{"github\x0012345": "user-1"},
+	}
+	service := Service{Store: store}
+	projects, err := service.UserProjects(context.Background(), "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(projects))
+	}
+	if projects[0].ID != "proj-1" || projects[0].Role != "owner" || projects[1].ID != "proj-2" || projects[1].Role != "developer" {
+		t.Fatalf("unexpected projects: %+v", projects)
+	}
+
+	// Unknown user returns empty slice
+	emptyProjects, err := service.UserProjects(context.Background(), "unknown-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emptyProjects) != 0 {
+		t.Fatalf("expected 0 projects, got %d", len(emptyProjects))
+	}
+}

@@ -900,3 +900,141 @@ func TestGitHubUserResponseLimit(t *testing.T) {
 		t.Fatal("oversized GitHub user response was accepted")
 	}
 }
+
+func TestBrowserAuthMultiProjectSelectionFlow(t *testing.T) {
+	transport := successfulGitHubTransport(t)
+	server := configuredGitHubServer()
+	p1, _ := server.Registry.CreateProject("org", "Project Alpha", "alpha", "user-multi", "key-1")
+	p2, _ := server.Registry.CreateProject("org", "Project Beta", "beta", "user-multi", "key-2")
+	pOther, _ := server.Registry.CreateProject("org", "Project Other", "other", "other-user", "key-3")
+
+	store := &auth.MemoryStore{
+		Candidates: []auth.Candidate{
+			{ID: "c1", UserID: "user-multi", Email: "multi@example.test", OrgID: "org", ProjectID: p1.ID, Role: "Owner"},
+			{ID: "c2", UserID: "user-multi", Email: "multi@example.test", OrgID: "org", ProjectID: p2.ID, Role: "Developer"},
+			{ID: "c3", UserID: "other-user", Email: "other@example.test", OrgID: "org", ProjectID: pOther.ID, Role: "Owner"},
+		},
+		OAuthIdentities: map[string]string{githubProvider + "\x00" + testGitHubUserID: "user-multi"},
+	}
+	server.Auth = &auth.Service{Store: store}
+	server.HTTPClient = newGitHubHTTPClient()
+	server.HTTPClient.Transport = transport
+
+	// Start auth without project specified
+	_, authURL, _ := startBrowserAuth(t, server, "")
+	state := authURL.Query().Get("state")
+
+	// Callback from GitHub
+	callbackResp := callbackRequest(server, state, "valid-github-code")
+	if callbackResp.Code != http.StatusFound {
+		t.Fatalf("callback status=%d body=%s", callbackResp.Code, callbackResp.Body.String())
+	}
+	redirectLocation, _ := url.Parse(callbackResp.Header().Get("Location"))
+	grantCode := redirectLocation.Query().Get("code")
+	if grantCode == "" {
+		t.Fatalf("missing grant code in redirect: %s", callbackResp.Header().Get("Location"))
+	}
+
+	// Redeem grant code
+	redeemReq := httptest.NewRequest(http.MethodPost, "/v1/auth/browser/redeem", strings.NewReader(`{"code":"`+grantCode+`"}`))
+	redeemResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(redeemResp, redeemReq)
+	if redeemResp.Code != http.StatusOK {
+		t.Fatalf("redeem status=%d body=%s", redeemResp.Code, redeemResp.Body.String())
+	}
+	var redeemOut struct {
+		Status         string                      `json:"status"`
+		SelectionToken string                      `json:"selection_token"`
+		Projects       []auth.OAuthProjectCandidate `json:"projects"`
+		Token          string                      `json:"token"`
+	}
+	if err := json.Unmarshal(redeemResp.Body.Bytes(), &redeemOut); err != nil {
+		t.Fatal(err)
+	}
+	if redeemOut.Status != "select_project" || redeemOut.SelectionToken == "" {
+		t.Fatalf("expected select_project status, got: %#v", redeemOut)
+	}
+	if len(redeemOut.Projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(redeemOut.Projects))
+	}
+	if redeemOut.Token != "" {
+		t.Fatalf("security violation: raw token present in selection DTO")
+	}
+
+	// Test cross-project authorization bypass rejection
+	unauthReq := httptest.NewRequest(http.MethodPost, "/v1/auth/browser/select-project", strings.NewReader(`{"selection_token":"`+redeemOut.SelectionToken+`","project_id":"`+pOther.ID+`"}`))
+	unauthResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthResp, unauthReq)
+	if unauthResp.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for unauthorized project, got: %d body=%s", unauthResp.Code, unauthResp.Body.String())
+	}
+
+	// Selection token is single-use: re-selecting with the same selection_token should fail with 401
+	retryReq := httptest.NewRequest(http.MethodPost, "/v1/auth/browser/select-project", strings.NewReader(`{"selection_token":"`+redeemOut.SelectionToken+`","project_id":"`+p1.ID+`"}`))
+	retryResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(retryResp, retryReq)
+	if retryResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for consumed selection token, got: %d", retryResp.Code)
+	}
+
+	// Test successful selection with fresh flow
+	_, authURL2, _ := startBrowserAuth(t, server, "")
+	state2 := authURL2.Query().Get("state")
+	callbackResp2 := callbackRequest(server, state2, "valid-github-code")
+	grantCode2 := urlQuery(callbackResp2.Header().Get("Location"), "code")
+
+	redeemReq2 := httptest.NewRequest(http.MethodPost, "/v1/auth/browser/redeem", strings.NewReader(`{"code":"`+grantCode2+`"}`))
+	redeemResp2 := httptest.NewRecorder()
+	server.Handler().ServeHTTP(redeemResp2, redeemReq2)
+	var redeemOut2 struct {
+		SelectionToken string `json:"selection_token"`
+	}
+	_ = json.Unmarshal(redeemResp2.Body.Bytes(), &redeemOut2)
+
+	selectReq := httptest.NewRequest(http.MethodPost, "/v1/auth/browser/select-project", strings.NewReader(`{"selection_token":"`+redeemOut2.SelectionToken+`","project_id":"`+p2.ID+`"}`))
+	selectResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(selectResp, selectReq)
+	if selectResp.Code != http.StatusOK {
+		t.Fatalf("select project status=%d body=%s", selectResp.Code, selectResp.Body.String())
+	}
+	var selectOut struct {
+		Status  string            `json:"status"`
+		Token   string            `json:"token"`
+		Session auth.VerifyResult `json:"session"`
+	}
+	if err := json.Unmarshal(selectResp.Body.Bytes(), &selectOut); err != nil {
+		t.Fatal(err)
+	}
+	if selectOut.Status != "authenticated" || selectOut.Token == "" || selectOut.Session.ProjectID != p2.ID {
+		t.Fatalf("unexpected select output: %#v", selectOut)
+	}
+}
+
+func TestBrowserAuthZeroProjectsReturnsMembershipRequired(t *testing.T) {
+	transport := successfulGitHubTransport(t)
+	server := configuredGitHubServer()
+	store := &auth.MemoryStore{
+		Candidates:      []auth.Candidate{},
+		OAuthIdentities: map[string]string{githubProvider + "\x00" + testGitHubUserID: "user-zero"},
+	}
+	server.Auth = &auth.Service{Store: store}
+	server.HTTPClient = newGitHubHTTPClient()
+	server.HTTPClient.Transport = transport
+
+	_, authURL, _ := startBrowserAuth(t, server, "")
+	state := authURL.Query().Get("state")
+
+	callbackResp := callbackRequest(server, state, "valid-github-code")
+	if callbackResp.Code != http.StatusFound {
+		t.Fatalf("callback status=%d", callbackResp.Code)
+	}
+	errCode := urlQuery(callbackResp.Header().Get("Location"), "error")
+	if errCode != "OPSI_MEMBERSHIP_REQUIRED" {
+		t.Fatalf("expected error OPSI_MEMBERSHIP_REQUIRED, got: %s", errCode)
+	}
+}
+
+func urlQuery(rawURL, key string) string {
+	parsed, _ := url.Parse(rawURL)
+	return parsed.Query().Get(key)
+}

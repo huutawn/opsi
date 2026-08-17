@@ -66,6 +66,17 @@ type OAuthStore interface {
 	OAuthUser(ctx context.Context, provider, subject string) (string, error)
 }
 
+type OAuthProjectCandidate struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug,omitempty"`
+	Role string `json:"role"`
+}
+
+type ProjectStore interface {
+	UserProjectCandidates(ctx context.Context, userID string) ([]OAuthProjectCandidate, error)
+}
+
 type IssueResult struct {
 	Token     string       `json:"token,omitempty"`
 	Session   VerifyResult `json:"session"`
@@ -188,6 +199,16 @@ func (s Service) ResolveOAuthUser(ctx context.Context, provider, subject string)
 		return "", ErrOAuthIdentity
 	}
 	return userID, nil
+}
+
+func (s Service) UserProjects(ctx context.Context, userID string) ([]OAuthProjectCandidate, error) {
+	if s.Store == nil || userID == "" {
+		return nil, ErrOAuthIdentity
+	}
+	if store, ok := s.Store.(ProjectStore); ok {
+		return store.UserProjectCandidates(ctx, userID)
+	}
+	return nil, nil
 }
 
 func (s Service) RotatePAT(ctx context.Context, token, projectID string, ttl time.Duration) (IssueResult, VerifyResult, error) {
@@ -329,6 +350,26 @@ func (s MemoryStore) OAuthUser(_ context.Context, provider, subject string) (str
 		return userID, nil
 	}
 	return "", ErrOAuthIdentity
+}
+
+func (s MemoryStore) UserProjectCandidates(_ context.Context, userID string) ([]OAuthProjectCandidate, error) {
+	seen := map[string]struct{}{}
+	var projects []OAuthProjectCandidate
+	for _, candidate := range s.Candidates {
+		if candidate.UserID != userID || candidate.ProjectID == "" {
+			continue
+		}
+		if _, exists := seen[candidate.ProjectID]; exists {
+			continue
+		}
+		seen[candidate.ProjectID] = struct{}{}
+		projects = append(projects, OAuthProjectCandidate{
+			ID:   candidate.ProjectID,
+			Name: candidate.ProjectID,
+			Role: normalizeRole(candidate.Role),
+		})
+	}
+	return projects, nil
 }
 
 func normalizeRole(role string) string {

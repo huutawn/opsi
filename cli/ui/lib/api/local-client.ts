@@ -150,12 +150,35 @@ export type RepositoryCDPlan = {
   explanation: string;
 };
 
+export type SelectableProject = {
+  id: string;
+  name: string;
+  slug?: string;
+  role: string;
+};
+
+export type SelectionResponse = {
+  selection_id: string;
+  projects: SelectableProject[];
+};
+
 export class LocalClient {
   private localSession = "";
 
   async session(projectID?: string) {
     const query = projectID ? `?verify=1&project_id=${encodeURIComponent(projectID)}` : "?verify=1";
     return this.call<LocalSessionStatus>(`/api/local/session${query}`);
+  }
+
+  getSelectableProjects(selectionID: string) {
+    return this.call<SelectionResponse>(`/api/local/session/selection?selection_id=${encodeURIComponent(selectionID)}`);
+  }
+
+  selectProject(selectionID: string, projectID: string) {
+    return this.call<{ authenticated: boolean; session: LocalSessionStatus }>("/api/local/session/select-project", {
+      method: "POST",
+      body: JSON.stringify({ selection_id: selectionID, project_id: projectID }),
+    });
   }
 
   startLogin(projectID?: string) {

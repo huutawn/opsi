@@ -71,6 +71,29 @@ ORDER BY p.created_at DESC`, orgID)
 	return candidates, rows.Err()
 }
 
+func (s PostgresStore) UserProjectCandidates(ctx context.Context, userID string) ([]OAuthProjectCandidate, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT pr.id, pr.name, COALESCE(pr.slug, ''), m.role
+FROM project_memberships m
+JOIN projects pr ON pr.id = m.project_id
+WHERE m.user_id = $1
+ORDER BY m.created_at, pr.name`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projects []OAuthProjectCandidate
+	for rows.Next() {
+		var p OAuthProjectCandidate
+		if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.Role); err != nil {
+			return nil, err
+		}
+		p.Role = normalizeRole(p.Role)
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
+}
+
 func (s PostgresStore) IssuePATForUser(ctx context.Context, userID, projectID, tokenHash string, expiresAt time.Time) (Candidate, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT u.id, u.email, COALESCE(pr.org_id, ''), m.project_id, m.role

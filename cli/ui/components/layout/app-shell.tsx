@@ -6,7 +6,7 @@ import type { ConsoleController } from "@/features/console/types";
 import { ContextHeader } from "@/components/layout/context-header";
 import { Sidebar } from "@/components/navigation/sidebar";
 import { useConsoleState } from "@/hooks/use-console-state";
-import { LocalClient } from "@/lib/api/local-client";
+import { LocalClient, type SelectableProject } from "@/lib/api/local-client";
 import { currentEnvironment } from "@/lib/presentation/infrastructure/model";
 
 export function AppShell() {
@@ -120,18 +120,172 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
   const client = useMemo(() => new LocalClient(), []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(() => authErrorMessage(callbackErrorCode()));
+  const [selectionID, setSelectionID] = useState(() => callbackSelectionID());
+  const [projects, setProjects] = useState<SelectableProject[] | null>(null);
+  const [selectedProject, setSelectedProject] = useState<string>("");
+  const [loadingProjects, setLoadingProjects] = useState(() => Boolean(callbackSelectionID()));
+
   useEffect(() => {
+    if (!selectionID) {
+      const params = new URLSearchParams(window.location.search);
+      if (!params.has("auth") && !params.has("auth_error")) return;
+      params.delete("auth"); params.delete("auth_error");
+      const query = params.toString();
+      window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+      return;
+    }
+    let ignore = false;
+    client.getSelectableProjects(selectionID)
+      .then((res) => {
+        if (ignore) return;
+        setProjects(res.projects);
+        if (res.projects && res.projects.length > 0) {
+          setSelectedProject(res.projects[0].id);
+        }
+      })
+      .catch((cause) => {
+        if (ignore) return;
+        setError((cause as Error).message || "The project selection session has expired. Start a new sign-in.");
+        setSelectionID("");
+      })
+      .finally(() => {
+        if (!ignore) {
+          setLoadingProjects(false);
+        }
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [client, selectionID]);
+
+  async function signIn() {
+    setBusy(true);
+    setError("");
+    try {
+      const projectID = new URLSearchParams(window.location.search).get("project") || undefined;
+      const next = await client.startLogin(projectID);
+      window.location.assign(next.auth_url);
+    } catch (cause) {
+      setBusy(false);
+      setError((cause as Error).message || "Opsi sign-in is unavailable.");
+    }
+  }
+
+  async function completeSelection() {
+    if (!selectionID || !selectedProject) return;
+    setBusy(true);
+    setError("");
+    try {
+      await client.selectProject(selectionID, selectedProject);
+      window.location.assign(`/?auth=ok&project=${encodeURIComponent(selectedProject)}`);
+    } catch (cause) {
+      setBusy(false);
+      setError((cause as Error).message || "Failed to select project. Please try again.");
+    }
+  }
+
+  function cancelSelection() {
+    setSelectionID("");
+    setProjects(null);
+    setSelectedProject("");
     const params = new URLSearchParams(window.location.search);
-    if (!params.has("auth") && !params.has("auth_error")) return;
-    params.delete("auth"); params.delete("auth_error");
+    params.delete("auth");
+    params.delete("selection_id");
     const query = params.toString();
     window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
-  }, []);
-  async function signIn() { setBusy(true); setError(""); try { const projectID = new URLSearchParams(window.location.search).get("project") || undefined; const next = await client.startLogin(projectID); window.location.assign(next.auth_url); } catch (cause) { setBusy(false); setError((cause as Error).message || "Opsi sign-in is unavailable."); } }
-  return <main className="authGate"><section className="authGateCard" aria-labelledby="authGateTitle"><div className="authMark" aria-hidden="true">O</div><p className="eyebrow">Opsi</p><h1 id="authGateTitle">{checking ? "Checking your session" : "Sign in to Opsi"}</h1><p className="authGateText">{checking ? "Opsi is checking the local keychain and Cloud connection." : "Continue with the GitHub account linked to your Opsi workspace."}</p>{error ? <div className="authGateError" role="alert"><b>Sign-in failed.</b> {error} Start a new sign-in when ready.</div> : null}{!error && message ? <p className="authGateHint">{message}</p> : null}{!checking ? <button className="primary authGateButton" disabled={busy} onClick={() => void signIn()} type="button">{busy ? "Opening GitHub…" : "Continue with GitHub"}</button> : null}<p className="authGatePrivacy">The resulting PAT stays in your OS keychain.</p></section></main>;
+  }
+
+  if (selectionID && (loadingProjects || projects)) {
+    return (
+      <main className="authGate">
+        <section className="authGateCard" aria-labelledby="projectSelectTitle">
+          <div className="authMark" aria-hidden="true">O</div>
+          <p className="eyebrow">Opsi</p>
+          <h1 id="projectSelectTitle">Choose a project</h1>
+          <p className="authGateText">Select a project to complete sign-in with your GitHub account.</p>
+          {error ? <div className="authGateError" role="alert"><b>Selection failed.</b> {error}</div> : null}
+          {loadingProjects ? (
+            <p aria-live="polite" className="authGateHint" role="status">Loading accessible projects…</p>
+          ) : projects && projects.length > 0 ? (
+            <form className="projectSelectForm" onSubmit={(e) => { e.preventDefault(); void completeSelection(); }}>
+              <fieldset className="projectSelectList" role="radiogroup" aria-label="Available projects">
+                {projects.map((p) => (
+                  <label key={p.id} className={`projectSelectItem ${selectedProject === p.id ? "selected" : ""}`}>
+                    <input
+                      type="radio"
+                      name="project"
+                      value={p.id}
+                      checked={selectedProject === p.id}
+                      onChange={() => setSelectedProject(p.id)}
+                    />
+                    <div className="projectSelectInfo">
+                      <span className="projectSelectName">{p.name || p.id}</span>
+                      <span className="projectSelectMeta">
+                        <code className="projectSelectID">{p.id}</code>
+                        {p.role ? <span className="projectSelectRole">{p.role}</span> : null}
+                      </span>
+                    </div>
+                  </label>
+                ))}
+              </fieldset>
+              <div className="projectSelectActions">
+                <button
+                  className="primary authGateButton"
+                  disabled={busy || !selectedProject}
+                  type="submit"
+                >
+                  {busy ? "Signing in…" : "Continue"}
+                </button>
+                <button
+                  className="authGateCancelButton"
+                  disabled={busy}
+                  onClick={cancelSelection}
+                  type="button"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div>
+              <p className="authGateHint">No accessible projects found.</p>
+              <button className="authGateCancelButton" onClick={cancelSelection} type="button">Back to sign-in</button>
+            </div>
+          )}
+          <p className="authGatePrivacy">The resulting PAT stays in your OS keychain.</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="authGate">
+      <section className="authGateCard" aria-labelledby="authGateTitle">
+        <div className="authMark" aria-hidden="true">O</div>
+        <p className="eyebrow">Opsi</p>
+        <h1 id="authGateTitle">{checking ? "Checking your session" : "Sign in to Opsi"}</h1>
+        <p className="authGateText">
+          {checking ? "Opsi is checking the local keychain and Cloud connection." : "Continue with the GitHub account linked to your Opsi workspace."}
+        </p>
+        {error ? <div className="authGateError" role="alert"><b>Sign-in failed.</b> {error} Start a new sign-in when ready.</div> : null}
+        {!error && message ? <p className="authGateHint">{message}</p> : null}
+        {!checking ? (
+          <button className="primary authGateButton" disabled={busy} onClick={() => void signIn()} type="button">
+            {busy ? "Opening GitHub…" : "Continue with GitHub"}
+          </button>
+        ) : null}
+        <p className="authGatePrivacy">The resulting PAT stays in your OS keychain.</p>
+      </section>
+    </main>
+  );
 }
 
 function callbackErrorCode() { return typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("auth_error") || ""; }
+function callbackSelectionID() {
+  if (typeof window === "undefined") return "";
+  const params = new URLSearchParams(window.location.search);
+  return params.get("auth") === "select_project" ? (params.get("selection_id") || "") : "";
+}
 function latestUpdate(console: ConsoleController) {
   const deployments = Array.isArray(console.state.deployments) ? console.state.deployments : [];
   const nodes = Array.isArray(console.state.nodes) ? console.state.nodes : [];
@@ -139,7 +293,15 @@ function latestUpdate(console: ConsoleController) {
     ?? nodes.map((item) => item.last_seen_at).filter((value): value is string => Boolean(value)).sort().at(-1);
 }
 function authErrorMessage(code: string) {
-  return ({ GITHUB_ACCOUNT_UNLINKED: "This GitHub account is not linked to an Opsi user.", OPSI_MEMBERSHIP_REQUIRED: "This account has no active Opsi project membership.", PROJECT_SELECTION_REQUIRED: "This account needs an explicit project selection.", GITHUB_AUTH_DENIED: "GitHub authorization was cancelled.", AUTH_SESSION_EXPIRED: "The sign-in request expired.", AUTH_UNAVAILABLE: "Opsi sign-in is temporarily unavailable.", GITHUB_AUTH_FAILED: "GitHub sign-in failed." } as Record<string, string>)[code] ?? "";
+  return ({
+    GITHUB_ACCOUNT_UNLINKED: "This GitHub account is not linked to an Opsi user.",
+    OPSI_MEMBERSHIP_REQUIRED: "No Opsi projects are available for this account.",
+    PROJECT_SELECTION_REQUIRED: "This account needs an explicit project selection.",
+    GITHUB_AUTH_DENIED: "GitHub authorization was cancelled.",
+    AUTH_SESSION_EXPIRED: "The sign-in request expired.",
+    AUTH_UNAVAILABLE: "Opsi sign-in is temporarily unavailable.",
+    GITHUB_AUTH_FAILED: "GitHub sign-in failed.",
+  } as Record<string, string>)[code] ?? "";
 }
 
 function focusableElements(root: HTMLElement | null | undefined) {
