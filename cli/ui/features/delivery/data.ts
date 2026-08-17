@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LocalClient } from "@/lib/api/local-client";
 import type {
+  BuildJob,
   BuildRecord,
   BuildRecordList,
   DeploymentJob,
@@ -14,6 +15,8 @@ import type {
   ServiceRecord,
   TopologyPlan,
 } from "@/lib/contracts/registry";
+import { terminalBuild } from "@/lib/presentation/build";
+import { isTerminal } from "@/lib/presentation/delivery/model";
 
 export type DeliverySource = "ready" | "loading" | "unavailable";
 
@@ -21,6 +24,8 @@ export type DeliveryData = {
   services: ServiceRecord[];
   builds: BuildRecord[];
   buildResults: BuildRecordList;
+  buildJobs: Record<string, BuildJob[]>;
+  buildJobsError: string;
   deployments: DeploymentJob[];
   exposures: DeploymentJob[];
   bindings: GitHubBinding[];
@@ -39,6 +44,8 @@ export type DeliveryData = {
   exposureError: string;
   hasLoaded: boolean;
   loadBuilds: (filters?: { serviceKey?: string; repositoryID?: string; sha?: string; status?: string; cursor?: string }) => Promise<void>;
+  loadBuildJobs: (targetServices?: ServiceRecord[]) => Promise<void>;
+  createBuild: (service: ServiceRecord, idempotencyKey: string) => Promise<BuildJob>;
   refreshDeployments: () => Promise<void>;
   mergeDeployment: (job: DeploymentJob) => void;
 };
@@ -46,6 +53,10 @@ export type DeliveryData = {
 export function useDeliveryData(projectID: string, services: ServiceRecord[], initialDeployments: DeploymentJob[]): DeliveryData {
   const client = useMemo(() => new LocalClient(), []);
   const [state, setState] = useState(() => emptyState(services, initialDeployments));
+  const [buildJobs, setBuildJobs] = useState<Record<string, BuildJob[]>>({});
+  const [buildJobsError, setBuildJobsError] = useState("");
+  const sequence = useRef(0);
+  const applications = useMemo(() => services.filter((s) => s.type === "application"), [services]);
 
   const loadBuilds = useCallback(async (filters = {}) => {
     if (!projectID) return;
@@ -56,6 +67,26 @@ export function useDeliveryData(projectID: string, services: ServiceRecord[], in
     } catch (error) {
       setState((current) => ({ ...current, buildState: "unavailable", buildError: message(error, "BuildRecord inventory is unavailable.") }));
     }
+  }, [client, projectID]);
+
+  const loadBuildJobs = useCallback(async (targetServices: ServiceRecord[] = applications) => {
+    if (!projectID || targetServices.length === 0) return;
+    const current = ++sequence.current;
+    const results = await Promise.allSettled(
+      targetServices.map(async (service) => [service.id, (await client.buildJobs(projectID, service.id)).build_jobs ?? []] as const)
+    );
+    if (current !== sequence.current) return;
+    setBuildJobs(Object.fromEntries(results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []))));
+    setBuildJobsError(results.some((result) => result.status === "rejected") ? "Some BuildJob histories are unavailable; loaded factual state is preserved." : "");
+  }, [applications, client, projectID]);
+
+  const createBuild = useCallback(async (service: ServiceRecord, idempotencyKey: string) => {
+    const job = await client.createBuildJob(projectID, service.id, idempotencyKey);
+    setBuildJobs((current) => ({
+      ...current,
+      [service.id]: [job, ...(current[service.id] ?? []).filter((item) => item.id !== job.id)],
+    }));
+    return job;
   }, [client, projectID]);
 
   const refreshDeployments = useCallback(async () => {
@@ -117,11 +148,45 @@ export function useDeliveryData(projectID: string, services: ServiceRecord[], in
     return () => { active = false; };
   }, [client, initialDeployments, projectID, services]);
 
+  // Initial load of build jobs
+  useEffect(() => {
+    const current = sequence.current;
+    queueMicrotask(() => void loadBuildJobs());
+    return () => { sequence.current = Math.max(sequence.current, current + 1); };
+  }, [loadBuildJobs]);
+
+  // Active polling when builds or deployments are running
+  const hasActiveBuilds = Object.values(buildJobs).flat().some((job) => !terminalBuild(job));
+  const hasActiveDeployments = state.deployments.some((job) => !isTerminal(job.rollout_state || job.status));
+  const isPollingActive = hasActiveBuilds || hasActiveDeployments;
+
+  useEffect(() => {
+    if (!isPollingActive) return;
+    const timer = window.setInterval(() => {
+      if (hasActiveBuilds) {
+        void loadBuildJobs().then(() => loadBuilds());
+      }
+      if (hasActiveDeployments) {
+        void refreshDeployments();
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveBuilds, hasActiveDeployments, isPollingActive, loadBuildJobs, loadBuilds, refreshDeployments]);
+
   const mergeDeployment = useCallback((job: DeploymentJob) => {
     setState((current) => ({ ...current, deployments: mergeByID(current.deployments, job) }));
   }, []);
 
-  return { ...state, loadBuilds, refreshDeployments, mergeDeployment };
+  return {
+    ...state,
+    buildJobs,
+    buildJobsError,
+    loadBuilds,
+    loadBuildJobs,
+    createBuild,
+    refreshDeployments,
+    mergeDeployment,
+  };
 }
 
 function emptyState(services: ServiceRecord[], deployments: DeploymentJob[]) {
