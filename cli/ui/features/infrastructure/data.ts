@@ -29,7 +29,7 @@ export function useInfrastructureData(console: ConsoleController) {
   const refreshBootstrap = useRef(console.actions.refreshBootstrap);
   const pollingScope = useRef("");
   useEffect(() => { refreshBootstrap.current = console.actions.refreshBootstrap; }, [console.actions.refreshBootstrap]);
-  const scope = `${projectID}:${console.route.tab}`;
+  const scope = `${projectID}:${console.route.view}:${console.route.tab}`;
   useEffect(() => {
     pollingScope.current = scope;
     return () => { if (pollingScope.current === scope) pollingScope.current = ""; };
@@ -100,8 +100,9 @@ export function useInfrastructureData(console: ConsoleController) {
   const currentFacts = consoleFacts?.project_id === projectID ? consoleFacts : data.facts;
   const factualServerReady = currentFacts ? serverLifecycle(currentFacts, []).status === "Ready" : false;
   const activeBootstrapID = factualServerReady ? "" : latestActiveBootstrap(console.state.sessions)?.id ?? "";
+  const isTopologyActive = console.route.view === "topology" || (console.route.view === "infrastructure" && console.route.tab === "topology");
   useEffect(() => {
-    if (!projectID || console.route.tab !== "topology" || !activeBootstrapID) return;
+    if (!projectID || !isTopologyActive || !activeBootstrapID) return;
     let disposed = false;
     let inFlight = false;
     let timer = 0;
@@ -127,7 +128,7 @@ export function useInfrastructureData(console: ConsoleController) {
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [activeBootstrapID, console.route.tab, load, projectID, scope]);
+  }, [activeBootstrapID, isTopologyActive, load, projectID, scope]);
 
   return { data, source, error, load };
 }

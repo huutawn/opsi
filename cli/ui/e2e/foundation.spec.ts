@@ -19,38 +19,38 @@ test("workspace, grouped navigation, restoration, and back-forward behavior", as
   await expect(page.locator(".projectRow .status").first()).toHaveText("Healthy");
   await expect(page.locator(".projectRow").filter({ hasText: "Payments" }).locator(".status").first()).toHaveText("Degraded");
   await page.getByRole("link", { name: /Checkout Platform/ }).click();
-  await expect(page).toHaveURL(/view=infrastructure&tab=topology/);
+  await expect(page).toHaveURL(/view=topology/);
   await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Topology");
   await expect(page.getByRole("link", { name: "Overview" })).toBeVisible();
-  for (const destination of ["Topology", "Overview", "Services", "Delivery", "Observability", "Security"]) await expect(page.getByRole("link", { name: destination, exact: true })).toBeVisible();
+  for (const destination of ["Topology", "Overview", "Services", "Infrastructure", "Delivery", "Observability", "Security"]) await expect(page.getByRole("link", { name: destination, exact: true })).toBeVisible();
   await expect(page.locator(".navSection a").first()).toHaveText("Topology");
-  await expect(page.locator(".navSection a")).toHaveCount(6);
+  await expect(page.locator(".navSection a")).toHaveCount(7);
   await expect(page.getByLabel("Current environment")).toHaveValue("env-1");
   await expect(page.getByRole("link", { name: "Topology", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.getByLabel("Switch project")).toBeVisible();
 
   await page.getByRole("link", { name: "Observability", exact: true }).click();
-  await page.getByRole("tab", { name: "Health", exact: true }).focus();
+  await page.getByRole("tab", { name: "Overview", exact: true }).focus();
   await page.keyboard.press("ArrowRight");
-  await expect(page.getByRole("tab", { name: "Metrics", exact: true })).toBeFocused();
+  await expect(page.getByRole("tab", { name: "Applications", exact: true })).toBeFocused();
   await page.keyboard.press("Space");
-  await expect(page).toHaveURL(/view=observability&tab=metrics/);
-  await page.getByRole("tab", { name: "Logs", exact: true }).click();
-  await expect(page).toHaveURL(/view=observability&tab=logs/);
+  await expect(page).toHaveURL(/view=observability&tab=applications/);
+  await page.getByRole("tab", { name: "Servers", exact: true }).click();
+  await expect(page).toHaveURL(/view=observability&tab=servers/);
   await page.reload();
-  await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Servers", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.getByRole("link", { name: "Security", exact: true }).click();
-  await expect(page).toHaveURL(/view=security&tab=secrets/);
+  await expect(page).toHaveURL(/view=security&tab=overview/);
   await page.goBack();
-  await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Servers", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.goForward();
-  await expect(page.getByRole("tab", { name: "Secrets", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
 });
 
 test("factual shell preserves environment and deep-link state through refresh and keyboard project switching", async ({ page }) => {
   await mockLocalAPI(page, "healthy");
-  await page.goto("/?project=proj-1&view=observability&tab=logs&environment=env-1&query=timeout&window=1h");
-  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Logs");
+  await page.goto("/?project=proj-1&view=observability&tab=servers&environment=env-1");
+  await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Servers");
   await expect(page.getByLabel("Current environment")).toHaveValue("env-1");
   await expect(page.getByRole("link", { name: "Observability", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("link", { name: "Delivery", exact: true })).toHaveAttribute("href", /environment=env-1/);
@@ -60,7 +60,7 @@ test("factual shell preserves environment and deep-link state through refresh an
   await expect(page).toHaveURL(deepLink);
   await page.reload();
   await expect(page).toHaveURL(deepLink);
-  await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Servers", exact: true })).toHaveAttribute("aria-selected", "true");
 
   const switcher = page.getByLabel("Switch project");
   await switcher.focus();
@@ -68,10 +68,10 @@ test("factual shell preserves environment and deep-link state through refresh an
   await expect(page.locator(".projectSwitcher")).toHaveAttribute("open", "");
   await page.getByRole("link", { name: /Payments/ }).focus();
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/project=proj-2&view=infrastructure&tab=topology/);
+  await expect(page).toHaveURL(/project=proj-2&view=topology/);
   await expect(page.locator(".breadcrumb")).toHaveText("Projects/Payments/Production/Topology");
 
-  await page.goto("/?project=proj-1&view=infrastructure&tab=topology&environment=env-1&topology=topo-1&topologyMode=live");
+  await page.goto("/?project=proj-1&view=topology&environment=env-1&topology=topo-1&topologyMode=live");
   await page.reload();
   await expect(page).toHaveURL(/topology=topo-1/);
   await expect(page).toHaveURL(/topologyMode=live/);

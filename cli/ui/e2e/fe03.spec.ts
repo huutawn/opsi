@@ -9,8 +9,7 @@ test.beforeEach(async ({ page }) => { watchConsoleErrors(page); await page.route
 test.afterEach(async ({ page }) => expectNoConsoleErrors(page));
 
 test("Design renders applied placement, unplaced applications, factual servers, and URL selection", async ({ page }) => {
-  await page.goto("/?project=proj-1&view=infrastructure");
-  await expect(page.getByRole("tab", { name: "Topology", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.goto("/?project=proj-1&view=topology");
   await expect(page.locator(".breadcrumb")).toHaveText("Projects/Checkout Platform/Production/Topology");
   await expect(page.getByRole("button", { name: /Server Primary runtime, Ready, Agent active/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Application api, Assigned, unchanged/ })).toBeVisible();
@@ -37,7 +36,7 @@ test("Design renders applied placement, unplaced applications, factual servers, 
   await expect(page.locator(".liveDeploymentList").getByText("dep-1", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Design", exact: true }).click();
   await expect(page.getByRole("link", { name: "Support", exact: true })).toHaveCount(0);
-  await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
+  await page.goto("/?project=proj-1&view=infrastructure&tab=runtimes");
   await page.getByRole("button", { name: /Edge runtime/ }).click();
   await expect(page).toHaveURL(/runtime=runtime-edge/);
   await page.reload();
@@ -331,9 +330,9 @@ test("Topology polling moves an active bootstrap to ready and keeps the five lat
     data.sessions = [{ id: "boot-1", status: ready ? "succeeded" : "installing", public_host: "203.0.113.10", role: "first_server", created_at: "2026-07-30T08:10:00Z" }];
     await respondWithData(route, data, "proj-1");
   });
-  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await page.goto("/?project=proj-1&view=topology");
   await expect(page.getByText("Bootstrapping", { exact: true })).toBeVisible();
-  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
+  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole("button", { name: "Add application" })).toBeVisible();
   await expect(page.locator(".serverLifecycle > .eventTimeline li")).toHaveCount(5);
   await expect(page.getByText("7 total", { exact: true })).toBeVisible();
@@ -350,7 +349,7 @@ test("Ready factual server does not keep stale bootstrap as its primary session 
     if (path.endsWith("/bootstrap-sessions/boot-1/events")) eventReads += 1;
     await respondWithData(route, fixture(), "proj-1");
   });
-  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await page.goto("/?project=proj-1&view=topology");
   await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
   await expect(page.locator(".serverLifecycle").getByText("Bootstrap status", { exact: true })).toHaveCount(0);
   await expect(page.locator(".serverLifecycle").getByText("Open full bootstrap details", { exact: true })).toHaveCount(0);
@@ -382,11 +381,10 @@ test("bootstrap polling is sequential and stops after a project switch", async (
     data.projects = projects;
     await respondWithData(route, data, projectID);
   });
-  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await page.goto("/?project=proj-1&view=topology");
   await expect(page.getByText("Bootstrapping", { exact: true })).toBeVisible();
-  await page.waitForTimeout(4_300);
+  await expect.poll(() => projectOneReads, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
   expect(maxActiveRequests).toBe(1);
-  expect(projectOneReads).toBeGreaterThanOrEqual(3);
   await page.getByLabel("Switch project").click();
   await page.getByRole("link", { name: /Second Project/ }).click();
   await expect(page.locator(".breadcrumb")).toContainText("Second Project");

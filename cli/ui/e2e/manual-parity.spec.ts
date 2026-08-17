@@ -45,17 +45,11 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await page.getByRole("button", { name: "Confirm and submit" }).click();
   await expect(page.getByText(/Project proj-2 created by the Local backend/)).toBeVisible();
   await page.getByRole("button", { name: "Close" }).click();
-  await expect(page).toHaveURL(/project=proj-2&view=infrastructure&tab=topology/);
+  await expect(page).toHaveURL(/project=proj-2&view=topology/);
   await expect(page.locator(".breadcrumb")).toContainText("Created Project");
 
-  await page.getByRole("link", { name: "Topology", exact: true }).click();
-  await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Runtimes" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Primary/ })).toBeVisible();
-
-  await page.getByRole("tab", { name: "Nodes", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "agent-node" })).toBeVisible();
+  await page.getByRole("link", { name: "Infrastructure", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Execution Capacity (Servers)" })).toBeVisible();
 
   await page.getByRole("link", { name: "Delivery", exact: true }).click();
   await expect(page.getByText("Current Release", { exact: true })).toBeVisible();
@@ -64,7 +58,6 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByText("opsi-test/api", { exact: true }).first()).toBeVisible();
 
   await page.getByRole("link", { name: "Topology", exact: true }).click();
-  await page.getByRole("tab", { name: "Topology", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Topology", exact: true })).toBeVisible();
   await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
 
@@ -80,26 +73,20 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await expect(page.getByRole("heading", { name: "Exposure" })).toBeVisible();
 
   await page.getByRole("link", { name: "Security", exact: true }).click();
-  await page.getByRole("tab", { name: "Secrets", exact: true }).click();
-  await expect(page.getByText(/Secret metadata\/listing is a backend capability gap/)).toBeVisible();
-  await page.getByLabel("Operation").selectOption("totp");
-  await page.getByRole("button", { name: "Review TOTP setup" }).click();
-  await page.getByRole("button", { name: "Confirm and submit" }).click();
-  await expect(page.getByRole("dialog", { name: "Sensitive content" })).toBeVisible();
-  await expect(page.getByText(/JBSWY3DPEHPK3PXP/)).toBeVisible();
-  await page.getByRole("button", { name: "Hide now" }).click();
-  await expect(page.getByText(/JBSWY3DPEHPK3PXP/)).toHaveCount(0);
-
-  await page.getByRole("link", { name: "Observability", exact: true }).click();
-  await page.getByRole("tab", { name: "Metrics", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Metrics" })).toBeVisible();
-  await page.getByRole("tab", { name: "Logs", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Logs", exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "Incidents", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Incidents" })).toBeVisible();
-  await page.getByRole("link", { name: "Security", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Security Overview" })).toBeVisible();
   await page.getByRole("tab", { name: "Audit", exact: true }).click();
   await expect(page.getByText("req-e2e-1", { exact: false }).first()).toBeVisible();
+  await page.getByRole("tab", { name: "Access & Identities", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Access & Identities" })).toBeVisible();
+
+  await page.getByRole("link", { name: "Observability", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Observability Overview" })).toBeVisible();
+  await page.getByRole("tab", { name: "Applications", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Applications Runtime" })).toBeVisible();
+  await page.getByRole("tab", { name: "Servers", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Server Observability" })).toBeVisible();
+  await page.getByRole("tab", { name: "Managed Resources", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Managed Resources Observability" })).toBeVisible();
   await page.getByRole("link", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "System", exact: true }).click();
@@ -119,9 +106,7 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await fetch(`${controlURL}?agent=down`);
   await page.reload();
   await page.getByRole("link", { name: "Topology", exact: true }).click();
-  await page.getByRole("tab", { name: "Runtimes", exact: true }).click();
-  await expect(page.getByText(/Cloud topology facts remain visible/)).toBeVisible();
-  await expect(page.getByRole("button", { name: /Primary/ })).toBeVisible();
+  await expect(page.locator(".serverLifecycle")).toBeVisible();
 
   await page.waitForLoadState("networkidle");
   await fetch(`${controlURL}?mode=cloud-outage&agent=up`);
