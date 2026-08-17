@@ -43,7 +43,7 @@ func (r ManagedResourceReconciler) destroyRetainedStorage(ctx context.Context, s
 		if err := retainedPVMatches(pv, spec); err != nil {
 			return nil, "failed", err
 		}
-		if _, err := r.run(ctx, nil, "delete", "persistentvolumeclaim", spec.PVCName, "-n", spec.Namespace, "--wait=true", "--timeout=2m"); err != nil {
+		if _, err := r.run(ctx, nil, "delete", "persistentvolumeclaim", spec.PVCName, "-n", spec.Namespace, "--wait=true", "--timeout=2m", "--ignore-not-found"); err != nil {
 			return nil, "failed", managedResourceError{resourcev1.FailureStorageDeleteFailed, "Kubernetes PVC deletion failed"}
 		}
 	}

@@ -156,7 +156,7 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 		if !exactManagedResourceOwnership(current, spec) {
 			return nil, errors.New("refusing to delete Kubernetes object with different Opsi managed-resource ownership")
 		}
-		if _, err := r.run(ctx, nil, "delete", kind, name, "-n", managedResourceNamespace(spec), "--wait=true", "--timeout=2m"); err != nil {
+		if _, err := r.run(ctx, nil, "delete", kind, name, "-n", managedResourceNamespace(spec), "--wait=true", "--timeout=2m", "--ignore-not-found"); err != nil {
 			return nil, err
 		}
 	}
