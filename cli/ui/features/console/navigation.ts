@@ -28,8 +28,9 @@ export const groupedTabs = {
     { id: "resources", label: "Managed Resources" },
   ],
   security: [
-    { id: "secrets", label: "Secrets" },
+    { id: "overview", label: "Overview" },
     { id: "audit", label: "Audit" },
+    { id: "access", label: "Access & Identities" },
   ],
   settings: [
     { id: "general", label: "General" },
@@ -81,6 +82,7 @@ export function defaultTab(view: ConsoleView) {
 const legacyTabs: Record<string, string[]> = {
   infrastructure: ["topology", "runtimes", "nodes", "bootstrap"],
   observability: ["health", "metrics", "logs", "incidents"],
+  security: ["secrets"],
 };
 
 export function normalizeRoute(route: Partial<ConsoleRoute>): ConsoleRoute {

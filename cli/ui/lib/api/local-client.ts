@@ -82,6 +82,8 @@ export type LocalSessionStatus = {
   local_session?: string;
   org_id?: string;
   project_id?: string;
+  role?: string;
+  user_id?: string;
   capabilities?: string[];
 };
 

@@ -97,6 +97,13 @@ const legacyTabGroups: Record<string, Record<string, ReadonlyArray<{ id: string;
       { id: "incidents", label: "Incidents" },
     ],
   },
+  security: {
+    secrets: [
+      { id: "overview", label: "Overview" },
+      { id: "audit", label: "Audit" },
+      { id: "access", label: "Access & Identities" },
+    ],
+  },
 };
 
 export function routeView(route: ConsoleRoute, console: ConsoleController) {
@@ -105,7 +112,7 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
   if (route.view === "settings") return <SettingsView console={console} />;
   const CoreView = coreViewMap[route.view as keyof typeof coreViewMap];
   if (CoreView) return <CoreView console={console} />;
-  const View = tabViewMap[route.view]?.[route.tab] ?? tabViewMap[route.view]?.[groupedTabs[route.view as keyof typeof groupedTabs]?.[0]?.id ?? ""];
+  const View = (route.view === "security" ? SecurityView : undefined) ?? tabViewMap[route.view]?.[route.tab] ?? tabViewMap[route.view]?.[groupedTabs[route.view as keyof typeof groupedTabs]?.[0]?.id ?? ""];
   if (!View) return null;
   const tabs = legacyTabGroups[route.view]?.[route.tab] ?? groupedTabs[route.view as keyof typeof groupedTabs];
   const label = `${groupedTitle(route.view)} sections`;

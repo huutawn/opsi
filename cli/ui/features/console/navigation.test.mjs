@@ -34,8 +34,8 @@ test("workspace and project navigation keep one authoritative route model", () =
 });
 
 test("capabilities remain reachable through one grouped route model", () => {
-  assert.equal(Object.values(groupedTabs).flat().length, 18);
+  assert.equal(Object.values(groupedTabs).flat().length, 19);
   assert.deepEqual(groupedTabs.infrastructure.map((item) => item.id), ["servers", "resources", "storage"]);
   assert.deepEqual(groupedTabs.observability.map((item) => item.id), ["overview", "applications", "servers", "resources"]);
-  assert.deepEqual(groupedTabs.security.map((item) => item.id), ["secrets", "audit"]);
+  assert.deepEqual(groupedTabs.security.map((item) => item.id), ["overview", "audit", "access"]);
 });
