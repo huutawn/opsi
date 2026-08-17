@@ -15,6 +15,7 @@ import {
   cutoverLifecyclePresentation,
   cutoverWarningExplanation,
   formatBytes,
+  formatResourceEngine,
   POSTGRES_STORAGE_POLICY,
   POSTGRES_VERSION,
   resourceCatalogItem,
@@ -26,7 +27,7 @@ import {
   serverLifecyclePresentation,
 } from "../../lib/presentation/resources/model.ts";
 
-test("infrastructure catalog exposes implemented capabilities and excludes deferred RabbitMQ", () => {
+test("infrastructure catalog exposes implemented capabilities truthfully without advertising PostgreSQL 16", () => {
   const catalog = resourceTypeCatalog();
   assert.equal(catalog.length, 3);
   assert.deepEqual(
@@ -35,8 +36,14 @@ test("infrastructure catalog exposes implemented capabilities and excludes defer
   );
   assert.equal(catalog.some((item) => item.type === "rabbitmq"), false);
 
+  // Canonical supported PostgreSQL version is 18.6, never 16
+  assert.equal(POSTGRES_VERSION, "18.6");
+  assert.equal(catalog.some((item) => item.displayName.includes("16")), false);
+  assert.equal(catalog.some((item) => item.description.includes("16")), false);
+
   const pg = resourceCatalogItem("postgres");
   assert.ok(pg);
+  assert.equal(pg.displayName, "PostgreSQL");
   assert.equal(pg.stateful, true);
   assert.equal(pg.storageRequired, true);
   assert.equal(pg.defaultPort, 5432);
@@ -44,15 +51,54 @@ test("infrastructure catalog exposes implemented capabilities and excludes defer
 
   const valkey = resourceCatalogItem("redis");
   assert.ok(valkey);
+  assert.equal(valkey.displayName, "Valkey");
   assert.equal(valkey.stateful, false);
   assert.equal(valkey.storageRequired, false);
   assert.equal(valkey.defaultPort, 6379);
 
   const nats = resourceCatalogItem("nats");
   assert.ok(nats);
+  assert.equal(nats.displayName, "NATS");
   assert.equal(nats.stateful, false);
   assert.equal(nats.storageRequired, false);
   assert.equal(nats.defaultPort, 4222);
+});
+
+test("resource engine and version presentation prefers API and runtime facts without fabricating versions", () => {
+  // PostgreSQL with explicit runtime spec version (e.g. 18.6)
+  const pgWithRuntime = {
+    type: "postgres",
+    runtime: { spec: { version: "18.6" } },
+  };
+  assert.equal(formatResourceEngine(pgWithRuntime), "PostgreSQL 18.6");
+
+  // PostgreSQL with managed spec version
+  const pgWithManaged = {
+    type: "postgres",
+    managed: { version: "18.6" },
+  };
+  assert.equal(formatResourceEngine(pgWithManaged), "PostgreSQL 18.6");
+
+  // PostgreSQL with Debian packaging version string
+  const pgWithDebian = {
+    type: "postgres",
+    runtime: { spec: { version: "18.6 (Debian 18.6-1.pgdg12+2)" } },
+  };
+  assert.equal(formatResourceEngine(pgWithDebian), "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2)");
+
+  // PostgreSQL without version in API: must NOT fabricate "PostgreSQL 16" or any other version
+  const pgNoVersion = {
+    type: "postgres",
+  };
+  assert.equal(formatResourceEngine(pgNoVersion), "PostgreSQL");
+
+  // Valkey / Redis
+  assert.equal(formatResourceEngine({ type: "redis", managed: { version: "7.2" } }), "Valkey (7.2)");
+  assert.equal(formatResourceEngine({ type: "redis" }), "Valkey");
+
+  // NATS
+  assert.equal(formatResourceEngine({ type: "nats", managed: { version: "2.10" } }), "NATS (2.10)");
+  assert.equal(formatResourceEngine({ type: "nats" }), "NATS");
 });
 
 test("resource and server lifecycle presentation map factual states truthfully", () => {
@@ -409,6 +455,8 @@ test("compileResourceOperations aggregates durable events chronologically", () =
   assert.equal(ops.length, 3);
   // Sort order is descending: backup (10:32) -> binding (10:15) -> provision (10:00)
   assert.equal(ops[0].type, "backup");
+  assert.equal(ops[0].details?.includes("PostgreSQL 16"), false);
+  assert.equal(ops[0].details?.includes("PostgreSQL"), true);
   assert.equal(ops[1].type, "binding");
   assert.equal(ops[2].type, "provision");
 });

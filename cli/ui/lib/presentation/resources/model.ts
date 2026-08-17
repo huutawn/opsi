@@ -26,7 +26,7 @@ export type ResourceCatalogItem = {
   defaultStorageBytes?: number;
 };
 
-export const POSTGRES_VERSION = "16";
+export const POSTGRES_VERSION = "18.6";
 export const POSTGRES_STORAGE_POLICY = "standard";
 
 export function resourceTypeCatalog(): ResourceCatalogItem[] {
@@ -34,7 +34,7 @@ export function resourceTypeCatalog(): ResourceCatalogItem[] {
     {
       type: "postgres",
       name: "postgresql",
-      displayName: "PostgreSQL 16",
+      displayName: "PostgreSQL",
       description: "Dedicated relational database instance with persistent volume storage.",
       category: "database",
       defaultPort: 5432,
@@ -48,7 +48,7 @@ export function resourceTypeCatalog(): ResourceCatalogItem[] {
     {
       type: "redis",
       name: "valkey",
-      displayName: "Valkey / Redis",
+      displayName: "Valkey",
       description: "High-performance in-memory key-value cache and data structure store.",
       category: "cache",
       defaultPort: 6379,
@@ -61,7 +61,7 @@ export function resourceTypeCatalog(): ResourceCatalogItem[] {
     {
       type: "nats",
       name: "nats",
-      displayName: "NATS Messaging",
+      displayName: "NATS",
       description: "Lightweight, secure, and performant pub/sub message broker.",
       category: "messaging",
       defaultPort: 4222,
@@ -72,6 +72,24 @@ export function resourceTypeCatalog(): ResourceCatalogItem[] {
       defaultMemoryBytes: 256 * 1024 * 1024,
     },
   ];
+}
+
+export function formatResourceEngine(resource: {
+  type: string;
+  runtime?: { spec?: { version?: string } };
+  managed?: { version?: string };
+}): string {
+  const version = resource.runtime?.spec?.version || resource.managed?.version;
+  if (resource.type === "postgres") {
+    return version ? `PostgreSQL ${version}` : "PostgreSQL";
+  }
+  if (resource.type === "redis") {
+    return version ? `Valkey (${version})` : "Valkey";
+  }
+  if (resource.type === "nats") {
+    return version ? `NATS (${version})` : "NATS";
+  }
+  return version ? `${resource.type.toUpperCase()} ${version}` : resource.type.toUpperCase();
 }
 
 export function resourceCatalogItem(type: string): ResourceCatalogItem | undefined {
@@ -529,6 +547,9 @@ export function compileResourceOperations(
   // Backups events
   for (const bk of backups.filter((item) => item.source_resource_id === resource.id)) {
     const bkPres = backupLifecyclePresentation(bk.lifecycle);
+    const versionLabel = bk.source_postgres_version
+      ? (bk.source_postgres_version.toLowerCase().includes("postgres") ? bk.source_postgres_version : `PostgreSQL ${bk.source_postgres_version}`)
+      : "PostgreSQL";
     events.push({
       id: `backup-${bk.id}`,
       type: "backup",
@@ -536,7 +557,7 @@ export function compileResourceOperations(
       lifecycle: bkPres.label,
       tone: bkPres.tone,
       timestamp: bk.completed_at || bk.started_at || bk.created_at,
-      details: `Backup ${bk.id} · ${bk.source_database} · ${bk.source_postgres_version || "PostgreSQL 16"}`,
+      details: `Backup ${bk.id} · ${bk.source_database} · ${versionLabel}`,
       failureCode: bk.failure_code,
       failureMessage: bk.failure_message_redacted,
     });

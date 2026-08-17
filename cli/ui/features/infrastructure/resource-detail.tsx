@@ -21,6 +21,7 @@ import {
   compileResourceOperations,
   cutoverLifecyclePresentation,
   formatBytes,
+  formatResourceEngine,
   resourceErrorExplanation,
   resourceLifecyclePresentation,
   restoreLifecyclePresentation,
@@ -268,7 +269,7 @@ export function ResourceDetail({
               </div>
               <div>
                 <dt>Engine & Version</dt>
-                <dd>{resource.type === "postgres" ? "PostgreSQL 16" : resource.type.toUpperCase()}</dd>
+                <dd>{formatResourceEngine(resource)}</dd>
               </div>
               <div>
                 <dt>CPU Allocation</dt>
@@ -503,7 +504,7 @@ export function ResourceDetail({
                     <div className="backupCardHeader">
                       <div>
                         <strong>Backup {bk.id}</strong>
-                        <small>{bk.source_database} · {bk.source_postgres_version || "PG 16"}</small>
+                        <small>{bk.source_database} · {bk.source_postgres_version ? (bk.source_postgres_version.toLowerCase().includes("postgres") ? bk.source_postgres_version : `PostgreSQL ${bk.source_postgres_version}`) : "PostgreSQL"}</small>
                       </div>
                       <span className={`statusTag ${bkPres.tone}`}>{bkPres.label}</span>
                     </div>
