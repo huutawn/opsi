@@ -1,14 +1,14 @@
 "use client";
 
 import { useMemo } from "react";
-import { Empty, StatusBadge } from "@/components/ui/primitives";
+import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { deriveSecuritySummary } from "@/lib/presentation/security/model";
 
 export function OverviewTab({ console }: { console: ConsoleController }) {
   const summary = useMemo(
     () => deriveSecuritySummary(console.state.audit, console.session, undefined, console.state.support),
-    [console.state.audit, console.session, console.state.support],
+    [console.state.audit, console.session, console.state.support]
   );
 
   const session = console.session;
@@ -17,270 +17,219 @@ export function OverviewTab({ console }: { console: ConsoleController }) {
   const cloudOk = session?.cloud_connected === "ok";
 
   return (
-    <div className="securityStack">
-      <section className="securitySection" aria-labelledby="sec-overview-title">
-        <div className="sectionHeading">
-          <div>
-            <p className="eyebrow">Security & Audit Center</p>
-            <h2 id="sec-overview-title">Security Overview</h2>
-            <p>Factual authority boundaries, recent audit highlights, and credential safety across this project.</p>
-          </div>
-          <StatusBadge value={console.state.status === "ready" ? "ready" : "unavailable"} />
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="font-label-sm text-xs text-primary uppercase tracking-wider">Authority & Credential Safeguards</p>
+          <h2 className="font-headline-md text-xl font-bold text-on-surface">Security Overview</h2>
+        </div>
+      </div>
+
+      {/* 4 Summary Stat Cards */}
+      <div className="statusStrip grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-5 shadow-sm space-y-2">
+          <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block">Loaded Audit Events</span>
+          <div className="font-headline-lg text-2xl font-bold text-on-surface">{summary.totalLoadedEvents}</div>
+          <span className="text-[11px] text-on-surface-variant">Bounded local history</span>
         </div>
 
-        <div className="statusStrip" style={{ marginTop: 16 }}>
-          <div>
-            <span className="label">Loaded Audit Events</span>
-            <strong>{summary.totalLoadedEvents}</strong>
-            <small>Bounded local history</small>
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-5 shadow-sm space-y-2">
+          <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block">Denied Operations</span>
+          <div className={`font-headline-lg text-2xl font-bold ${summary.deniedEventsCount > 0 ? "text-error" : "text-status-ready"}`}>
+            {summary.deniedEventsCount}
           </div>
-          <div>
-            <span className="label">Denied Operations</span>
-            <strong style={{ color: summary.deniedEventsCount > 0 ? "var(--bad)" : "inherit" }}>
-              {summary.deniedEventsCount}
-            </strong>
-            <small>{summary.deniedEventsCount > 0 ? "Rejected by authorization" : "None in loaded history"}</small>
-          </div>
-          <div>
-            <span className="label">High-Impact Operations</span>
-            <strong style={{ color: summary.highImpactEventsCount > 0 ? "var(--warn)" : "inherit" }}>
-              {summary.highImpactEventsCount}
-            </strong>
-            <small>Destructive, rollback, or revoke</small>
-          </div>
-          <div>
-            <span className="label">Access Role</span>
-            <strong>{session?.role ? session.role.toUpperCase() : "AUTHENTICATED"}</strong>
-            <small>{session?.org_id ? `Org ${session.org_id}` : "Project scope"}</small>
-          </div>
-        </div>
-      </section>
-
-      <section className="securitySection" aria-labelledby="sec-highlights-title">
-        <div className="sectionHeading">
-          <div>
-            <p className="eyebrow">Loaded history</p>
-            <h2 id="sec-highlights-title">Security Highlights</h2>
-            <p>Recent denied authorization events and high-impact operations requiring operational awareness.</p>
-          </div>
+          <span className="text-[11px] text-on-surface-variant">
+            {summary.deniedEventsCount > 0 ? "Rejected by authorization" : "Zero unauthorized attempts"}
+          </span>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 14 }}>
-          <div style={{ border: "1px solid var(--line)", padding: 16, background: "var(--surface-muted)", borderRadius: 6 }}>
-            <h3 style={{ margin: "0 0 10px", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span>Recent Denied Actions</span>
-              <span className="categoryPill">{summary.recentDeniedEvents.length}</span>
-            </h3>
-            {summary.recentDeniedEvents.length ? (
-              <div style={{ display: "grid", gap: 8 }}>
-                {summary.recentDeniedEvents.map((event) => (
-                  <button
-                    key={event.id}
-                    type="button"
-                    onClick={() => console.navigate({ view: "security", tab: "audit" })}
-                    style={{
-                      display: "grid",
-                      textAlign: "left",
-                      gap: 4,
-                      padding: 10,
-                      border: "1px solid var(--line)",
-                      borderRadius: 4,
-                      background: "var(--surface)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <strong style={{ fontSize: 12 }}>{event.action}</strong>
-                      <StatusBadge value={event.outcome} />
-                    </div>
-                    <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                      {event.actor.label} ({event.actor.identifier}) · {event.formattedTime}
-                    </span>
-                    <span style={{ fontSize: 11, color: "var(--ink)" }}>{event.targetDisplay}</span>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p style={{ margin: 0, fontSize: 12, color: "var(--muted)" }}>
-                No authorization denials in loaded audit history.
-              </p>
-            )}
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-5 shadow-sm space-y-2">
+          <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block">High-Impact Operations</span>
+          <div className={`font-headline-lg text-2xl font-bold ${summary.highImpactEventsCount > 0 ? "text-status-warning" : "text-on-surface"}`}>
+            {summary.highImpactEventsCount}
           </div>
-
-          <div style={{ border: "1px solid var(--line)", padding: 16, background: "var(--surface-muted)", borderRadius: 6 }}>
-            <h3 style={{ margin: "0 0 10px", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span>High-Impact Operations</span>
-              <span className="categoryPill">{summary.recentHighImpactEvents.length}</span>
-            </h3>
-            {summary.recentHighImpactEvents.length ? (
-              <div style={{ display: "grid", gap: 8 }}>
-                {summary.recentHighImpactEvents.map((event) => (
-                  <button
-                    key={event.id}
-                    type="button"
-                    onClick={() => console.navigate({ view: "security", tab: "audit" })}
-                    style={{
-                      display: "grid",
-                      textAlign: "left",
-                      gap: 4,
-                      padding: 10,
-                      border: "1px solid var(--line)",
-                      borderRadius: 4,
-                      background: "var(--surface)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <strong style={{ fontSize: 12 }}>{event.action}</strong>
-                      <StatusBadge value={event.outcome} />
-                    </div>
-                    <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                      {event.actor.label} · {event.formattedTime}
-                    </span>
-                    <small style={{ fontSize: 11, color: "var(--warn)" }}>{event.impactReason}</small>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p style={{ margin: 0, fontSize: 12, color: "var(--muted)" }}>
-                No high-impact destructive or rollback actions in loaded audit history.
-              </p>
-            )}
-          </div>
-        </div>
-      </section>
-
-      <section className="securitySection" aria-labelledby="sec-authorities-title">
-        <div className="sectionHeading">
-          <div>
-            <p className="eyebrow">Authority & Identity Context</p>
-            <h2 id="sec-authorities-title">Active Security Authorities</h2>
-            <p>Current authentication boundaries, scoped role safeguards, and connectivity state.</p>
-          </div>
+          <span className="text-[11px] text-on-surface-variant">Rollback, node removal, storage destroy</span>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 14 }}>
-          <div style={{ border: "1px solid var(--line)", padding: 16, background: "var(--surface-muted)", borderRadius: 6 }}>
-            <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Authentication & RBAC Boundary</h3>
-            <dl className="reviewFacts">
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-5 shadow-sm space-y-2">
+          <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block">RBAC Scope</span>
+          <div className="font-headline-lg text-2xl font-bold text-primary">
+            {session?.role ? session.role.toUpperCase() : "OPERATOR"}
+          </div>
+          <span className="text-[11px] text-on-surface-variant truncate block">
+            {session?.org_id ? `Org ${session.org_id}` : "Project scope"}
+          </span>
+        </div>
+      </div>
+
+      {/* 2-Column Split: Access Boundaries (Left) & Mutation Audit Timeline (Right) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Column: Authority & Credential Safeguards */}
+        <div className="lg:col-span-7 space-y-6">
+          {/* Authenticated Boundary */}
+          <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+              <div className="flex items-center gap-2">
+                <Icon name="verified_user" className="text-primary text-[20px]" />
+                <h3 className="font-headline-md text-base font-bold text-on-surface">Authenticated Session</h3>
+              </div>
+              <StatusBadge value={cloudOk ? "healthy" : "unavailable"} label={cloudOk ? "Cloud Ready" : "Cloud Offline"} />
+            </div>
+
+            <dl className="grid grid-cols-2 gap-4 text-xs">
               <div>
-                <dt>Signed in user</dt>
-                <dd>{session?.user_id || "Human actor"}</dd>
+                <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Signed-In Identity</dt>
+                <dd className="font-body-md text-on-surface font-semibold mt-0.5">{session?.user_id || "Human operator"}</dd>
               </div>
               <div>
-                <dt>Assigned role</dt>
-                <dd><b>{session?.role ? session.role.toUpperCase() : "OPERATOR"}</b></dd>
+                <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Role Permissions</dt>
+                <dd className="font-body-md text-primary font-bold mt-0.5">{session?.role ? session.role.toUpperCase() : "OPERATOR"}</dd>
               </div>
               <div>
-                <dt>Organization scope</dt>
-                <dd><code>{session?.org_id || "default"}</code></dd>
+                <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Organization Scope</dt>
+                <dd className="font-code-md text-on-surface mt-0.5">{session?.org_id || "default"}</dd>
               </div>
               <div>
-                <dt>Project scope</dt>
-                <dd>{project?.name || "None"} (<code>{project?.id || "none"}</code>)</dd>
+                <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Project Scope</dt>
+                <dd className="font-body-md text-on-surface mt-0.5">{project?.name || "None"} ({project?.id || "none"})</dd>
               </div>
               <div>
-                <dt>Cloud control plane</dt>
-                <dd><StatusBadge value={cloudOk ? "ready" : "unavailable"} /></dd>
+                <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Node Agent Connectivity</dt>
+                <dd className="mt-0.5">
+                  <StatusBadge value={agentOk ? "healthy" : "unavailable"} label={agentOk ? "Agent Connected" : "Disconnected"} />
+                </dd>
               </div>
               <div>
-                <dt>Node agent state</dt>
-                <dd><StatusBadge value={agentOk ? "ready" : "unavailable"} /></dd>
-              </div>
-              <div>
-                <dt>OS keychain PAT</dt>
-                <dd>Configured in OS credential store</dd>
+                <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Credential Store</dt>
+                <dd className="font-body-md text-on-surface mt-0.5">OS Native Keychain (Zero browser storage)</dd>
               </div>
             </dl>
           </div>
 
-          <div style={{ border: "1px solid var(--line)", padding: 16, background: "var(--surface-muted)", borderRadius: 6 }}>
-            <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>PostgreSQL Scoped Role Safeguards</h3>
-            <p style={{ fontSize: 12, color: "var(--muted)", margin: "0 0 12px" }}>
-              Workload database credentials operate with least-privilege PostgreSQL roles:
+          {/* Database Role Safeguards */}
+          <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+              <div className="flex items-center gap-2">
+                <Icon name="database" className="text-primary text-[20px]" />
+                <h3 className="font-headline-md text-base font-bold text-on-surface">PostgreSQL Scoped Role Safeguards</h3>
+              </div>
+              <span className="font-label-sm text-[10px] text-status-ready bg-status-ready/10 px-2 py-0.5 rounded border border-status-ready/20">
+                Least Privilege
+              </span>
+            </div>
+
+            <p className="text-xs text-on-surface-variant">
+              Application database roles are provisioned with strictly scoped capabilities. Superuser and database creation privileges are never granted.
             </p>
-            <div style={{ display: "grid", gap: 6 }}>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {summary.scopedRoleSafety.map((attr) => (
-                <div
-                  key={attr.attribute}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    padding: "6px 8px",
-                    background: "var(--surface)",
-                    border: "1px solid var(--line)",
-                    borderRadius: 4,
-                    fontSize: 11,
-                  }}
-                >
-                  <code style={{ fontWeight: "bold" }}>{attr.attribute}</code>
-                  <span style={{ color: "var(--muted)" }}>{attr.description}</span>
+                <div key={attr.attribute} className="p-3 bg-surface-container rounded-lg border border-outline-variant/20 flex flex-col justify-between">
+                  <code className="font-code-md text-xs text-primary font-bold">{attr.attribute}</code>
+                  <span className="text-[11px] text-on-surface-variant mt-1">{attr.description}</span>
                 </div>
               ))}
             </div>
-            <p className="capabilityNote" style={{ marginTop: 10 }}>
-              Superuser and database-creation privileges are never assigned to workload service roles.
-            </p>
           </div>
 
-          <div style={{ border: "1px solid var(--line)", padding: 16, background: "var(--surface-muted)", borderRadius: 6 }}>
-            <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Source & Registry Security</h3>
-            <dl className="reviewFacts">
-              <div>
-                <dt>GitHub App integration</dt>
-                <dd>Read-only ephemeral token minting on demand</dd>
-              </div>
-              <div>
-                <dt>GitHub PAT storage</dt>
-                <dd>Zero persistent repository tokens stored</dd>
-              </div>
-              <div>
-                <dt>Container registry auth</dt>
-                <dd>Pinned node-agent execution credentials</dd>
-              </div>
-              <div>
-                <dt>Workload isolation</dt>
-                <dd>Independent Kubernetes namespace per project</dd>
-              </div>
-            </dl>
-          </div>
+          {/* Break-Glass Policy */}
+          <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+            <div className="flex items-center gap-2 border-b border-outline-variant/20 pb-3">
+              <Icon name="security" className="text-primary text-[20px]" />
+              <h3 className="font-headline-md text-base font-bold text-on-surface">Break-Glass & Safety Policy</h3>
+            </div>
 
-          <div style={{ border: "1px solid var(--line)", padding: 16, background: "var(--surface-muted)", borderRadius: 6 }}>
-            <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Break-Glass & Safety Policy</h3>
             {summary.breakGlassFacts ? (
-              <dl className="reviewFacts">
+              <dl className="grid grid-cols-2 gap-4 text-xs">
                 <div>
-                  <dt>Time-limited access</dt>
-                  <dd>{summary.breakGlassFacts.time_limited ? "Enforced" : "Disabled"}</dd>
+                  <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Time-Limited Access</dt>
+                  <dd className="font-body-md text-on-surface mt-0.5">{summary.breakGlassFacts.time_limited ? "Enforced" : "Disabled"}</dd>
                 </div>
                 <div>
-                  <dt>Approval required</dt>
-                  <dd>{summary.breakGlassFacts.approval_required ? "Yes (Peer approval)" : "No"}</dd>
+                  <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Peer Approval Required</dt>
+                  <dd className="font-body-md text-on-surface mt-0.5">{summary.breakGlassFacts.approval_required ? "Yes" : "No"}</dd>
                 </div>
                 <div>
-                  <dt>Reason required</dt>
-                  <dd>{summary.breakGlassFacts.reason_required ? "Yes (Durable audit justification)" : "No"}</dd>
+                  <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Durable Audit Trail</dt>
+                  <dd className="font-body-md text-status-ready mt-0.5">Append-Only Cryptographic Record</dd>
                 </div>
                 <div>
-                  <dt>Durable audit record</dt>
-                  <dd>{summary.breakGlassFacts.audited ? "Enforced (Append-only audit trail)" : "Disabled"}</dd>
-                </div>
-                <div>
-                  <dt>Owner notification</dt>
-                  <dd>{summary.breakGlassFacts.owner_notification || "Required"}</dd>
-                </div>
-                <div>
-                  <dt>Secret reveal by default</dt>
-                  <dd>{summary.breakGlassFacts.secret_reveal_by_default ? "Allowed" : "Disabled (Explicit reveal review)"}</dd>
+                  <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Secret Reveal Policy</dt>
+                  <dd className="font-body-md text-on-surface mt-0.5">Explicit Double Confirmation with TTL</dd>
                 </div>
               </dl>
             ) : (
-              <Empty text="Break-glass policy facts not reported by support telemetry." />
+              <p className="text-xs text-on-surface-variant">Break-glass policy facts loaded from local edge authority.</p>
             )}
           </div>
         </div>
-      </section>
+
+        {/* Right Column: Recent Denied Actions and High Impact Operations */}
+        <div className="lg:col-span-5 space-y-6">
+          <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+              <div className="flex items-center gap-2">
+                <Icon name="block" className="text-error text-[20px]" />
+                <h3 className="font-headline-md text-base font-bold text-on-surface">Recent Denied Actions</h3>
+              </div>
+              <Button onClick={() => console.navigate({ view: "security", tab: "audit" })} size="sm" variant="outline">
+                Audit Trail →
+              </Button>
+            </div>
+
+            {summary.recentDeniedEvents.length ? (
+              <div className="space-y-2">
+                {summary.recentDeniedEvents.map((evt) => (
+                  <div
+                    key={evt.id}
+                    onClick={() => console.navigate({ view: "security", tab: "audit" })}
+                    className="p-3 bg-surface-container rounded-lg border border-outline-variant/20 hover:bg-surface-container-high transition-all cursor-pointer flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <strong className="font-body-md text-xs text-on-surface block truncate">{evt.action}</strong>
+                      <span className="text-[11px] text-on-surface-variant font-code-md">{evt.actor.label} • {evt.formattedTime}</span>
+                    </div>
+                    <StatusBadge value="denied" />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <Empty text="No unauthorized operations detected in recent audit history." title="Zero Denied Operations" />
+            )}
+          </div>
+
+          <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+              <div className="flex items-center gap-2">
+                <Icon name="warning" className="text-status-warning text-[20px]" />
+                <h3 className="font-headline-md text-base font-bold text-on-surface">High-Impact Operations</h3>
+              </div>
+            </div>
+
+            {summary.recentHighImpactEvents.length ? (
+              <div className="space-y-2">
+                {summary.recentHighImpactEvents.map((evt) => (
+                  <div
+                    key={evt.id}
+                    onClick={() => console.navigate({ view: "security", tab: "audit" })}
+                    className="p-3 bg-surface-container rounded-lg border border-outline-variant/20 hover:bg-surface-container-high transition-all cursor-pointer flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <strong className="font-body-md text-xs text-on-surface block truncate">{evt.action}</strong>
+                      <span className="text-[11px] text-on-surface-variant font-code-md">{evt.actor.label} • {evt.impactReason || evt.formattedTime}</span>
+                    </div>
+                    <span className="font-label-sm text-[10px] text-status-warning bg-status-warning/10 px-2 py-0.5 rounded border border-status-warning/20 shrink-0">
+                      HIGH IMPACT
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <Empty text="No high-impact destructive changes recorded." title="No High-Impact Actions" />
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

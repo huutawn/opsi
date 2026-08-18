@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { Empty, StatusBadge } from "@/components/ui/primitives";
+import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { AuditList } from "@/features/security/audit-tab";
 
@@ -22,239 +22,214 @@ export function AccessTab({ console }: { console: ConsoleController }) {
         item.action.startsWith("SECRET_") ||
         item.action.startsWith("RESOURCE_BINDING_") ||
         item.action.startsWith("AGENT_") ||
-        item.action.startsWith("ADMIN_BOOTSTRAP"),
+        item.action.startsWith("ADMIN_BOOTSTRAP")
     );
   }, [console.state.audit]);
 
   return (
-    <div className="securityStack">
-      <section className="securitySection" aria-labelledby="access-id-title">
-        <div className="sectionHeading">
-          <div>
-            <p className="eyebrow">Identity & Authority Context</p>
-            <h2 id="access-id-title">Access & Identities</h2>
-            <p>Factual authenticated identities, project access scopes, machine/agent authorities, and credential status.</p>
+    <div className="space-y-6">
+      <div className="border-b border-outline-variant/20 pb-4">
+        <h2 className="font-headline-lg text-xl font-bold text-on-surface">Access & Identities</h2>
+        <p className="text-xs text-on-surface-variant mt-1">Factual authenticated identities, project access scopes, machine/agent authorities, and credential status.</p>
+      </div>
+
+      {/* Session and Authority Header Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+            <div className="flex items-center gap-2">
+              <Icon name="person" className="text-primary text-[20px]" />
+              <h3 className="font-headline-md text-base font-bold text-on-surface">Authenticated Session</h3>
+            </div>
+            <StatusBadge value={session?.authenticated ? "healthy" : "unavailable"} />
           </div>
-          <StatusBadge value={console.session?.authenticated ? "ready" : "unavailable"} />
+
+          <dl className="grid grid-cols-2 gap-4 text-xs">
+            <div>
+              <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">User Identity</dt>
+              <dd className="font-body-md text-on-surface font-semibold mt-0.5">{session?.user_id || "Human operator"}</dd>
+            </div>
+            <div>
+              <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Role Scope</dt>
+              <dd className="font-body-md text-primary font-bold mt-0.5">{session?.role ? session.role.toUpperCase() : "OPERATOR"}</dd>
+            </div>
+            <div>
+              <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Organization</dt>
+              <dd className="font-code-md text-on-surface mt-0.5">{session?.org_id || "default"}</dd>
+            </div>
+            <div>
+              <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Project Target</dt>
+              <dd className="font-body-md text-on-surface mt-0.5">{project?.name || "None"} ({project?.id || "none"})</dd>
+            </div>
+          </dl>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, marginTop: 14 }}>
-          <div style={{ border: "1px solid var(--line)", padding: 16, background: "var(--surface-muted)", borderRadius: 6 }}>
-            <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Authenticated Session</h3>
-            <dl className="reviewFacts">
-              <div>
-                <dt>Signed in actor</dt>
-                <dd>{session?.user_id || "Human actor"}</dd>
-              </div>
-              <div>
-                <dt>Assigned role</dt>
-                <dd><b>{session?.role ? session.role.toUpperCase() : "OPERATOR"}</b></dd>
-              </div>
-              <div>
-                <dt>Organization scope</dt>
-                <dd><code>{session?.org_id || "default"}</code></dd>
-              </div>
-              <div>
-                <dt>Project scope</dt>
-                <dd>{project?.name || "None"} (<code>{project?.id || "none"}</code>)</dd>
-              </div>
-            </dl>
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+            <div className="flex items-center gap-2">
+              <Icon name="hub" className="text-primary text-[20px]" />
+              <h3 className="font-headline-md text-base font-bold text-on-surface">Authority Connections</h3>
+            </div>
+            <span className="font-label-sm text-xs text-status-ready font-semibold">Verified</span>
           </div>
 
-          <div style={{ border: "1px solid var(--line)", padding: 16, background: "var(--surface-muted)", borderRadius: 6 }}>
-            <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Authority Connections</h3>
-            <dl className="reviewFacts">
-              <div>
-                <dt>Cloud control plane</dt>
-                <dd><StatusBadge value={session?.cloud_connected === "ok" ? "ready" : "unavailable"} /></dd>
-              </div>
-              <div>
-                <dt>Node agent state</dt>
-                <dd><StatusBadge value={session?.agent_connected === "ok" ? "ready" : "unavailable"} /></dd>
-              </div>
-              <div>
-                <dt>OS keychain PAT</dt>
-                <dd>Stored securely in OS Keychain</dd>
-              </div>
-              <div>
-                <dt>Surface policy</dt>
-                <dd>Read-only access center; zero credentials exposed</dd>
-              </div>
-            </dl>
-          </div>
+          <dl className="grid grid-cols-2 gap-4 text-xs">
+            <div>
+              <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Cloud Control Plane</dt>
+              <dd className="mt-0.5"><StatusBadge value={session?.cloud_connected === "ok" ? "healthy" : "unavailable"} /></dd>
+            </div>
+            <div>
+              <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Node Agent Link</dt>
+              <dd className="mt-0.5"><StatusBadge value={session?.agent_connected === "ok" ? "healthy" : "unavailable"} /></dd>
+            </div>
+            <div>
+              <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Local PAT Store</dt>
+              <dd className="font-body-md text-on-surface mt-0.5">OS Native Keychain</dd>
+            </div>
+            <div>
+              <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Policy Enforcement</dt>
+              <dd className="font-body-md text-on-surface mt-0.5">Read-only Center (Zero secret exposure)</dd>
+            </div>
+          </dl>
         </div>
-      </section>
+      </div>
 
-      <section className="securitySection" aria-labelledby="machine-auth-title">
-        <div className="sectionHeading">
-          <div>
-            <p className="eyebrow">Execution identities</p>
-            <h2 id="machine-auth-title">Connected Nodes & Machine Authorities</h2>
-            <p>Active runtime agents executing workloads with scoped machine credentials.</p>
+      {/* Connected Nodes & Machine Authorities */}
+      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+        <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+          <div className="flex items-center gap-2">
+            <Icon name="dns" className="text-primary text-[20px]" />
+            <h3 className="font-headline-md text-base font-bold text-on-surface">Connected Nodes & Machine Authorities</h3>
           </div>
-          <span className="categoryPill">{nodes.length} node(s)</span>
+          <span className="text-xs text-on-surface-variant font-code-md">{nodes.length} nodes</span>
         </div>
 
         {nodes.length ? (
-          <div style={{ display: "grid", gap: 8, marginTop: 14 }}>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {nodes.map((node) => (
               <div
                 key={node.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  flexWrap: "wrap",
-                  gap: 12,
-                  padding: "10px 14px",
-                  border: "1px solid var(--line)",
-                  borderRadius: 6,
-                  background: "var(--surface)",
-                }}
+                className="p-4 bg-surface-container rounded-xl border border-outline-variant/20 flex items-center justify-between gap-3"
               >
                 <div>
-                  <strong style={{ fontSize: 13 }}>{node.name || node.id}</strong>
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                    Role: <b>{node.role}</b> {node.last_seen_at ? `· Last seen ${node.last_seen_at}` : ""}
-                  </div>
+                  <strong className="font-body-md text-sm text-on-surface block">{node.name || node.id}</strong>
+                  <span className="text-xs text-on-surface-variant">
+                    Role: {node.role} {node.last_seen_at ? `• Seen ${node.last_seen_at}` : ""}
+                  </span>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div className="flex items-center gap-2">
                   <StatusBadge value={node.status} />
-                  <button
-                    type="button"
-                    className="secondary"
+                  <Button
                     onClick={() => console.navigate({ view: "infrastructure", tab: "servers", server: node.id })}
-                    style={{ fontSize: 11, padding: "4px 8px" }}
+                    size="sm"
+                    variant="outline"
                   >
-                    Open Server &rarr;
-                  </button>
+                    Open Server →
+                  </Button>
                 </div>
               </div>
             ))}
           </div>
         ) : (
-          <Empty text="No connected nodes or machine identities reported." />
+          <Empty text="No connected node identities reported in active inventory." title="No Nodes Connected" />
         )}
-      </section>
+      </div>
 
-      <section className="securitySection" aria-labelledby="bootstrap-auth-title">
-        <div className="sectionHeading">
-          <div>
-            <p className="eyebrow">Bootstrap identities</p>
-            <h2 id="bootstrap-auth-title">Server Bootstrap Sessions</h2>
-            <p>Ephemeral bootstrap credential records and node joining status.</p>
+      {/* Server Bootstrap Sessions */}
+      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+        <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+          <div className="flex items-center gap-2">
+            <Icon name="terminal" className="text-primary text-[20px]" />
+            <h3 className="font-headline-md text-base font-bold text-on-surface">Server Bootstrap Sessions</h3>
           </div>
-          <span className="categoryPill">{sessions.length} session(s)</span>
+          <span className="text-xs text-on-surface-variant font-code-md">{sessions.length} sessions</span>
         </div>
 
         {sessions.length ? (
-          <div style={{ display: "grid", gap: 8, marginTop: 14 }}>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {sessions.map((sess) => (
               <div
                 key={sess.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  flexWrap: "wrap",
-                  gap: 12,
-                  padding: "10px 14px",
-                  border: "1px solid var(--line)",
-                  borderRadius: 6,
-                  background: "var(--surface)",
-                }}
+                className="p-4 bg-surface-container rounded-xl border border-outline-variant/20 flex items-center justify-between gap-3"
               >
                 <div>
-                  <code style={{ fontSize: 12 }}>{sess.id}</code>
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                    Host: {sess.public_host || "unspecified"} · Role: <b>{sess.role}</b>
-                  </div>
+                  <strong className="font-body-md text-sm text-on-surface block">{sess.public_host || sess.id}</strong>
+                  <span className="text-xs text-on-surface-variant">
+                    Role: {sess.role} • Attempts: {sess.attempt_count}/{sess.max_attempts}
+                  </span>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div className="flex items-center gap-2">
                   <StatusBadge value={sess.status} />
-                  <button
-                    type="button"
-                    className="secondary"
+                  <Button
                     onClick={() => console.navigate({ view: "infrastructure", tab: "servers", session: sess.id })}
-                    style={{ fontSize: 11, padding: "4px 8px" }}
+                    size="sm"
+                    variant="outline"
                   >
-                    Open Bootstrap &rarr;
-                  </button>
+                    Open Session →
+                  </Button>
                 </div>
               </div>
             ))}
           </div>
         ) : (
-          <Empty text="No active or recent bootstrap sessions." />
+          <Empty text="No active or pending server bootstrap sessions." title="No Bootstrap Sessions" />
         )}
-      </section>
+      </div>
 
-      <section className="securitySection" aria-labelledby="service-binding-title">
-        <div className="sectionHeading">
-          <div>
-            <p className="eyebrow">Workload Credential Scope</p>
-            <h2 id="service-binding-title">Application Credential Status</h2>
-            <p>Application workload permissions operate with least-privilege PostgreSQL roles. Credential mutation is managed canonically in Infrastructure and Delivery.</p>
+      {/* Application Credential Status */}
+      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+        <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+          <div className="flex items-center gap-2">
+            <Icon name="layers" className="text-primary text-[20px]" />
+            <h3 className="font-headline-md text-base font-bold text-on-surface">Application Credential Status</h3>
           </div>
         </div>
 
         {services.length ? (
-          <div style={{ display: "grid", gap: 8, marginTop: 14 }}>
+          <div className="space-y-2">
             {services.map((svc) => (
               <div
                 key={svc.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  flexWrap: "wrap",
-                  gap: 12,
-                  padding: "10px 14px",
-                  border: "1px solid var(--line)",
-                  borderRadius: 6,
-                  background: "var(--surface)",
-                }}
+                className="p-4 bg-surface-container rounded-xl border border-outline-variant/20 flex items-center justify-between gap-3"
               >
                 <div>
-                  <strong style={{ fontSize: 13 }}>{svc.name}</strong>
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                    Type: <b>{svc.type}</b> · Replicas: {svc.replicas ?? 1} · Source: {svc.source_type || "managed"}
-                  </div>
+                  <strong className="font-body-md text-sm text-on-surface block">{svc.name}</strong>
+                  <span className="text-xs text-on-surface-variant">Type: {svc.type} • Replicas: {svc.replicas ?? 1}</span>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div className="flex items-center gap-2">
                   <StatusBadge value={svc.status} />
-                  <button
-                    type="button"
-                    className="secondary"
+                  <Button
                     onClick={() => console.navigate({ view: "services", service: svc.id })}
-                    style={{ fontSize: 11, padding: "4px 8px" }}
+                    size="sm"
+                    variant="outline"
                   >
-                    Open Application &rarr;
-                  </button>
+                    Open Application →
+                  </Button>
                 </div>
               </div>
             ))}
           </div>
         ) : (
-          <Empty text="No application services configured." />
+          <Empty text="No application services configured." title="No Services" />
         )}
-      </section>
+      </div>
 
-      <section className="securitySection" aria-labelledby="access-audit-title">
-        <div className="sectionHeading">
-          <div>
-            <p className="eyebrow">Loaded history</p>
-            <h2 id="access-audit-title">Access & Credential Audit</h2>
-            <p>Chronological record of authentication events, role checks, and credential lifecycles.</p>
+      {/* Access & Credential Audit Timeline */}
+      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+        <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+          <div className="flex items-center gap-2">
+            <Icon name="history" className="text-primary text-[20px]" />
+            <h3 className="font-headline-md text-base font-bold text-on-surface">Access & Credential Audit</h3>
           </div>
-          <span className="categoryPill">{accessAuditEvents.length} event(s)</span>
+          <span className="text-xs text-on-surface-variant">{accessAuditEvents.length} events</span>
         </div>
+
         {accessAuditEvents.length ? (
           <AuditList rows={accessAuditEvents} />
         ) : (
-          <Empty text="No access or credential audit events were returned in loaded history." />
+          <Empty text="No access or credential audit events in loaded history." title="No Access Events" />
         )}
-      </section>
+      </div>
     </div>
   );
 }

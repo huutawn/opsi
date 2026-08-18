@@ -60,7 +60,7 @@ test("Security Center preserves safe cross-surface links without destructive act
   // Links to canonical surfaces
   assert.match(accessSource, /console\.navigate\(\{ view: "infrastructure", tab: "servers"/);
   assert.match(accessSource, /console\.navigate\(\{ view: "services", service:/);
-  assert.match(auditSource, /console\.navigate\(item\.crossLink/);
+  assert.match(auditSource, /console\.navigate\((?:selectedRow|item)\.crossLink/);
 
   // No duplicated destructive action triggers
   for (const fileSource of [accessSource, auditSource]) {

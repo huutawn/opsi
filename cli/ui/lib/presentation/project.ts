@@ -164,7 +164,24 @@ export function deriveAttention(data: {
   }
   for (const [source, availability] of Object.entries(data.sources)) {
     if (availability === "unavailable") {
-      items.push({ id: `source-${source}`, status: "unavailable", title: `${sourceLabel(source)} unavailable`, detail: "The Local API did not receive this source.", target: source === "builds" ? { view: "delivery", tab: "builds" } : source === "runtime" ? { view: "infrastructure", tab: "runtime" } : { view: "observability", tab: source === "incidents" ? "incidents" : "health" } });
+      const title =
+        source === "runtime"
+          ? "Agent unavailable"
+          : source === "incidents"
+            ? "Incident source missing"
+            : `${sourceLabel(source)} unavailable`;
+      items.push({
+        id: `source-${source}`,
+        status: "unavailable",
+        title,
+        detail: "The Local API did not receive this source.",
+        target:
+          source === "builds"
+            ? { view: "delivery", tab: "builds" }
+            : source === "runtime"
+              ? { view: "infrastructure", tab: "runtime" }
+              : { view: "observability", tab: source === "incidents" ? "incidents" : "health" },
+      });
     }
   }
   return items.slice(0, 8);

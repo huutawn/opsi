@@ -1,6 +1,6 @@
 "use client";
 
-import { Empty } from "@/components/ui/primitives";
+import { Button, Empty, Icon } from "@/components/ui/primitives";
 import { DeliveryStatus, Evidence, ServiceFilter, displayTime, short, type DeliveryViewProps } from "@/features/delivery/shared";
 import { deriveCurrentDeliveryState, derivePipeline, type PipelineStage } from "@/lib/presentation/delivery/model";
 import { terminalBuild } from "@/lib/presentation/build";
@@ -13,61 +13,55 @@ export function PipelineView({ console, data, selectedService }: DeliveryViewPro
   if (!selectedService) {
     const applications = data.services.filter((s) => s.type === "application");
     return (
-      <div className="deliveryPage">
-        <div className="deliveryToolbar">
-          <ServiceFilter console={console} services={data.services} selected={selectedService} />
-          <p aria-live="polite">{data.sourceError || data.buildError || data.deploymentError || "Project-wide delivery overview."}</p>
+      <div className="space-y-6">
+        <div className="flex items-center justify-between gap-4 bg-surface-container-low p-4 rounded-xl border border-outline-variant/20">
+          <ServiceFilter console={console} selected={selectedService} services={data.services} />
+          <p className="text-xs text-on-surface-variant">{data.sourceError || data.buildError || data.deploymentError || "Project-wide delivery overview."}</p>
         </div>
         {applications.length === 0 ? (
           <Empty title="No delivery service" text="Add an application service, then bind it to a repository before Delivery can show a causal pipeline." />
         ) : (
-          <div className="deliverySplit">
-            <section className="deliverySection">
-              <div className="sectionHeading">
-                <div>
-                  <p className="eyebrow">Project Applications</p>
-                  <h2>Delivery Overview</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {applications.map((service) => {
+              const state = deriveCurrentDeliveryState({
+                service,
+                deployments: data.deployments,
+                builds: data.builds,
+                buildJobs: data.buildJobs[service.id] ?? [],
+                placement: data.placement,
+              });
+              return (
+                <div
+                  key={service.id}
+                  className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm hover:shadow-md transition-all cursor-pointer flex flex-col justify-between space-y-4"
+                  onClick={() => console.navigate({ service: service.id, tab: "pipeline" })}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center text-primary border border-outline-variant/20">
+                        <Icon name="rocket_launch" className="text-[20px]" />
+                      </div>
+                      <div>
+                        <h3 className="font-headline-md text-base font-bold text-on-surface">{service.name}</h3>
+                        <span className="font-code-md text-[11px] text-on-surface-variant">{state.runtimeLabel}</span>
+                      </div>
+                    </div>
+                    <DeliveryStatus status={state.rolloutState} />
+                  </div>
+
+                  <div className="bg-surface-container-highest/60 p-3.5 rounded-lg border border-outline-variant/20 space-y-1 text-xs font-code-md">
+                    <div className="text-on-surface-variant truncate">Digest: {short(state.deployedDigest || "No artifact deployed", 24)}</div>
+                    <div className="text-[11px] text-on-surface-variant/80">
+                      {state.lastSuccessfulAt ? `Last deployed: ${displayTime(state.lastSuccessfulAt)}` : "Never deployed"}
+                    </div>
+                  </div>
+
+                  <Button size="sm" variant="outline" className="w-full">
+                    View Pipeline →
+                  </Button>
                 </div>
-                <span>{applications.length} applications</span>
-              </div>
-              <ol className="rolloutList">
-                {applications.map((service) => {
-                  const state = deriveCurrentDeliveryState({
-                    service,
-                    deployments: data.deployments,
-                    builds: data.builds,
-                    buildJobs: data.buildJobs[service.id] ?? [],
-                    placement: data.placement,
-                  });
-                  return (
-                    <li key={service.id}>
-                      <button onClick={() => console.navigate({ service: service.id, tab: "pipeline" })} type="button">
-                        <DeliveryStatus status={state.rolloutState} />
-                        <span>
-                          <strong>{service.name}</strong>
-                          <small>
-                            {state.runtimeLabel} · {state.lastSuccessfulAt ? `Last deployed ${displayTime(state.lastSuccessfulAt)}` : "Never deployed"}
-                          </small>
-                        </span>
-                        <code>{short(state.deployedDigest || "No artifact deployed", 20)}</code>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ol>
-            </section>
-            <section className="deliverySection">
-              <div className="sectionHeading">
-                <div>
-                  <p className="eyebrow">Operational Guidance</p>
-                  <h2>Delivery Status</h2>
-                </div>
-              </div>
-              <div className="nextAction">
-                <strong>Application-centric delivery</strong>
-                <p>Select any application to inspect its end-to-end source, build, immutable artifact, deployment, and live verification pipeline.</p>
-              </div>
-            </section>
+              );
+            })}
           </div>
         )}
       </div>
@@ -129,86 +123,97 @@ export function PipelineView({ console, data, selectedService }: DeliveryViewPro
   }
 
   return (
-    <div className="deliveryPage">
-      <div className="deliveryToolbar">
-        <ServiceFilter console={console} services={data.services} selected={selectedService} />
-        <p aria-live="polite">{data.sourceError || data.buildError || data.deploymentError || "Factual state loaded through the Local API."}</p>
-        <div style={{ display: "flex", gap: "8px" }}>
-          <button className="secondaryAction" disabled={!canBuild} onClick={triggerBuild} type="button">
+    <div className="space-y-6">
+      {/* Service Filter & Quick Action Bar */}
+      <div className="flex flex-col md:flex-row items-center justify-between gap-4 bg-surface-container-low p-4 rounded-xl border border-outline-variant/20 shadow-sm">
+        <ServiceFilter console={console} selected={selectedService} services={data.services} />
+        <div className="flex flex-wrap items-center gap-3">
+          <Button disabled={!canBuild} onClick={triggerBuild} size="sm" variant="secondary">
+            <Icon name="build" className="text-[16px]" />
             Build Application
-          </button>
+          </Button>
           {deliveryState.canDeployNewerBuild && deliveryState.newerAcceptedBuild ? (
-            <button
-              className="primary"
-              onClick={() => console.navigate({ tab: "deployments", service: selectedService.id, build: deliveryState.newerAcceptedBuild?.id })}
-              type="button"
+            <Button
+              onClick={() =>
+                console.navigate({
+                  tab: "deployments",
+                  service: selectedService.id,
+                  build: deliveryState.newerAcceptedBuild?.id,
+                })
+              }
+              size="sm"
+              variant="primary"
             >
+              <Icon name="rocket_launch" className="text-[16px]" />
               Deploy Newer Build
-            </button>
+            </Button>
           ) : null}
           {deliveryState.rollbackCandidate?.isEligible && deliveryState.currentDeployment ? (
-            <button onClick={() => console.actions.rollback(deliveryState.currentDeployment!.id)} type="button">
+            <Button onClick={() => console.actions.rollback(deliveryState.currentDeployment!.id)} size="sm" variant="danger">
+              <Icon name="undo" className="text-[16px]" />
               Rollback
-            </button>
+            </Button>
           ) : null}
         </div>
       </div>
 
       {activeOp ? (
-        <div className="truthCallout" role="status" style={{ borderLeftColor: "var(--blue)", background: "var(--blue-bg)" }}>
-          <strong>Active {activeOp.type.toUpperCase()}: {activeOp.id}</strong>
-          <p>Status: {activeOp.status}. Progress is durably recorded and monitored across page refreshes.</p>
+        <div className="bg-status-progress/10 border border-status-progress/30 p-4 rounded-xl text-status-progress text-xs flex items-center gap-3" role="status">
+          <Icon name="sync" className="animate-spin text-[20px] shrink-0" />
+          <div>
+            <strong>Active {activeOp.type.toUpperCase()}: {activeOp.id}</strong>
+            <p className="text-on-surface-variant mt-0.5">Status: {activeOp.status}. Execution is monitored and durable across reloads.</p>
+          </div>
         </div>
       ) : null}
 
-      <section className="releaseSummary" aria-labelledby="current-release-title">
-        <div>
-          <p className="eyebrow">Current Release</p>
-          <h2 id="current-release-title">{selectedService.name}</h2>
-          <p>
-            {release
-              ? `${release.environment_id || "Environment not reported"} · ${release.rollout_state || release.status}`
-              : "No factual current release"}
-          </p>
+      {/* Current Release Card */}
+      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+        <div className="flex items-start justify-between border-b border-outline-variant/20 pb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center text-primary border border-outline-variant/20">
+              <Icon name="check_circle" className="text-[22px] text-status-ready" />
+            </div>
+            <div>
+              <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Current Release</span>
+              <h2 className="font-headline-md text-xl font-bold text-on-surface">{selectedService.name}</h2>
+            </div>
+          </div>
+          <span className="font-code-md text-xs text-on-surface-variant">
+            {release ? `${release.environment_id || "Production"} • ${release.rollout_state || release.status}` : "No factual release"}
+          </span>
         </div>
-        <dl>
+
+        <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
           <Evidence
             label="Source SHA"
+            mono
             value={
               release?.snapshot?.authority.build_record.workload.sha ? (
-                <code
-                  aria-label={`Source SHA ${release.snapshot.authority.build_record.workload.sha}`}
-                  title={release.snapshot.authority.build_record.workload.sha}
-                >
-                  {short(release.snapshot.authority.build_record.workload.sha, 16)}
-                </code>
+                <code>{short(release.snapshot.authority.build_record.workload.sha, 16)}</code>
               ) : undefined
             }
-            mono
           />
           <Evidence
-            label="Immutable digest"
-            value={
-              releaseDigest ? (
-                <code aria-label={`Immutable digest ${releaseDigest}`} title={releaseDigest}>
-                  {short(releaseDigest, 22)}
-                </code>
-              ) : undefined
-            }
+            label="Immutable Digest"
             mono
+            value={releaseDigest ? <code>{short(releaseDigest, 22)}</code> : undefined}
           />
-          <Evidence label="Runtime verification" value={pipeline.stages.verify.label} />
+          <Evidence label="Runtime Verification" value={pipeline.stages.verify.label} />
           <Evidence
             label="Exposure"
-            value={release?.exposure_spec ? `${release.exposure_spec.hostname}${release.exposure_spec.path}` : "Not configured"}
+            value={release?.exposure_spec ? `${release.exposure_spec.hostname}${release.exposure_spec.path}` : "Internal Only"}
           />
         </dl>
-      </section>
+      </div>
 
-      <ol className="stageRail" aria-label="Immutable delivery pipeline">
-        {stages.map(([key, stage], index) => (
-          <li data-status={stage.status} key={key}>
+      {/* 5-Step Pipeline Stage Rail */}
+      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+        <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block">Delivery Pipeline Track</span>
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+          {stages.map(([key, stage], index) => (
             <button
+              key={key}
               onClick={() =>
                 console.navigate({
                   tab: stage.targetTab,
@@ -217,86 +222,84 @@ export function PipelineView({ console, data, selectedService }: DeliveryViewPro
                   deployment: pipeline.linkedDeployment?.id,
                 })
               }
+              className="p-4 rounded-xl bg-surface-container border border-outline-variant/20 hover:border-outline-variant/50 transition-all text-left flex flex-col justify-between space-y-3 cursor-pointer"
               type="button"
             >
-              <span className="stageIndex" aria-hidden="true">
-                {index + 1}
-              </span>
-              <span>
-                <small>{key}</small>
-                <strong>{stage.label}</strong>
-                <em>{stage.explanation}</em>
-              </span>
-              <DeliveryStatus status={stage.status} />
+              <div className="flex items-center justify-between">
+                <span className="w-6 h-6 rounded-full bg-surface-container-high text-primary flex items-center justify-center font-bold text-xs">
+                  {index + 1}
+                </span>
+                <DeliveryStatus status={stage.status} />
+              </div>
+              <div>
+                <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">{key}</span>
+                <strong className="font-body-md text-sm font-semibold text-on-surface block mt-0.5">{stage.label}</strong>
+                <p className="text-[11px] text-on-surface-variant line-clamp-2 mt-1">{stage.explanation}</p>
+              </div>
             </button>
-          </li>
-        ))}
-      </ol>
+          ))}
+        </div>
+      </div>
 
-      <div className="deliverySplit">
-        <section className="deliverySection">
-          <div className="sectionHeading">
-            <div>
-              <p className="eyebrow">Rollout Timeline</p>
-              <h2>Active & Recent Rollouts</h2>
-            </div>
+      {/* Rollout History & Next Action Split */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="lg:col-span-7 bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+            <span className="font-headline-md text-sm font-bold text-on-surface">Recent Rollouts</span>
+            <span className="text-xs text-on-surface-variant">{recent.length} deployments</span>
           </div>
+
           {recent.length ? (
-            <ol className="rolloutList">
+            <div className="space-y-3">
               {recent.map((job) => (
-                <li key={job.id}>
-                  <button
-                    aria-pressed={console.route.deployment === job.id}
-                    onClick={() => console.navigate({ tab: "deployments", deployment: job.id, service: selectedService.id })}
-                    type="button"
-                  >
+                <div
+                  key={job.id}
+                  onClick={() => console.navigate({ tab: "deployments", deployment: job.id, service: selectedService.id })}
+                  className="p-3.5 bg-surface-container rounded-xl border border-outline-variant/20 hover:border-outline-variant/50 transition-all cursor-pointer flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
                     <DeliveryStatus status={job.rollout_state || job.status} />
-                    <span>
-                      <strong>{job.rollout_state || job.status}</strong>
-                      <small>
-                        {displayTime(job.updated_at || job.created_at)} · attempt {job.attempt_count ?? 0}
-                      </small>
-                    </span>
-                    <code>{short(job.desired_digest || job.snapshot?.image.digest, 20)}</code>
-                  </button>
-                </li>
+                    <div className="min-w-0">
+                      <strong className="font-body-md text-sm text-on-surface block truncate">{job.rollout_state || job.status}</strong>
+                      <span className="text-[11px] text-on-surface-variant">
+                        {displayTime(job.updated_at || job.created_at)} • Attempt {job.attempt_count ?? 1}
+                      </span>
+                    </div>
+                  </div>
+                  <code className="font-code-md text-[11px] text-on-surface-variant bg-surface-container-highest px-2 py-1 rounded">
+                    {short(job.desired_digest || job.snapshot?.image.digest, 16)}
+                  </code>
+                </div>
               ))}
-            </ol>
+            </div>
           ) : (
-            <Empty title="No rollout observed" text="A successful BuildRecord does not imply that a DeploymentJob exists." />
+            <Empty text="No rollouts observed yet for this service." title="No Rollouts" />
           )}
-        </section>
-        <section className="deliverySection">
-          <div className="sectionHeading">
-            <div>
-              <p className="eyebrow">Next Action</p>
-              <h2>Blockers & Release History</h2>
+        </div>
+
+        <div className="lg:col-span-5 bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+          <span className="font-headline-md text-sm font-bold text-on-surface">Action Guidance</span>
+          <div className="bg-surface-container p-4 rounded-xl border border-outline-variant/20 space-y-2">
+            <div className="flex items-center gap-2">
+              <DeliveryStatus status={pipeline.stages.verify.status} />
+              <strong className="font-body-md text-sm text-on-surface">{pipeline.stages.verify.nextAction}</strong>
             </div>
+            <p className="text-xs text-on-surface-variant leading-relaxed">{pipeline.stages.verify.explanation}</p>
           </div>
-          <div className="nextAction">
-            <DeliveryStatus status={pipeline.stages.verify.status} />
-            <strong>{pipeline.stages.verify.nextAction}</strong>
-            <p>{pipeline.stages.verify.explanation}</p>
-          </div>
-          {pipeline.unlinkedDeployments.length ? (
-            <div className="truthCallout">
-              <strong>Unlinked historical record</strong>
-              <p>
-                {pipeline.unlinkedDeployments.length} deployment record(s) lack canonical BuildRecord identity and are not correlated
-                heuristically.
-              </p>
-            </div>
-          ) : null}
+
           {deliveryState.canDeployNewerBuild && deliveryState.newerAcceptedBuild ? (
-            <div className="truthCallout" style={{ borderLeftColor: "var(--ok)", background: "var(--ok-bg)" }}>
-              <strong>Newer accepted build available</strong>
-              <p>
-                BuildRecord <code>{short(deliveryState.newerAcceptedBuild.id, 16)}</code> with digest{" "}
-                <code>{short(deliveryState.newerAcceptedBuild.build.oci_digest, 16)}</code> is accepted and ready to deploy.
+            <div className="bg-status-ready/10 border border-status-ready/30 p-4 rounded-xl space-y-2">
+              <div className="flex items-center gap-2 text-status-ready font-bold text-xs">
+                <Icon name="check_circle" className="text-[16px]" />
+                <span>Newer Accepted Build Available</span>
+              </div>
+              <p className="text-xs text-on-surface-variant font-code-md">
+                BuildRecord {short(deliveryState.newerAcceptedBuild.id, 16)} with digest{" "}
+                {short(deliveryState.newerAcceptedBuild.build.oci_digest, 16)} is ready to deploy.
               </p>
             </div>
           ) : null}
-        </section>
+        </div>
       </div>
     </div>
   );

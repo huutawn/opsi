@@ -1,59 +1,300 @@
 "use client";
 
-import { Empty, PageHeader, StatusBadge } from "@/components/ui/primitives";
+import type { MouseEvent } from "react";
+import { Button, Empty, Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
 import { routeHref } from "@/features/console/navigation";
 import type { ConsoleController } from "@/features/console/types";
-import { deliveryActivity, deriveProjectSummary, formatTimestamp, serviceRows, statusLabel } from "@/lib/presentation/project";
+import {
+  deliveryActivity,
+  deriveProjectSummary,
+  formatTimestamp,
+  serviceRows,
+  statusLabel,
+} from "@/lib/presentation/project";
 
 export function OverviewView({ console }: { console: ConsoleController }) {
   const project = console.state.project;
-  if (!project) return <Empty title="Select a project" text="Choose a project from the workspace to see operational evidence." />;
+  if (!project) return <Empty text="Choose a project from the workspace to see operational evidence." title="Select a project" />;
+
   const projectID = project.id;
-  const summary = deriveProjectSummary({ project, readiness: console.state.readiness, services: console.state.services, deployments: console.state.deployments, foundation: console.state.foundation });
-  const rows = serviceRows({ services: console.state.services, telemetry: console.state.foundation.telemetry, telemetrySource: console.state.foundation.sources.telemetry, deployments: console.state.deployments, placement: console.state.foundation.placement, topology: console.state.foundation.topology });
+  const summary = deriveProjectSummary({
+    project,
+    readiness: console.state.readiness,
+    services: console.state.services,
+    deployments: console.state.deployments,
+    foundation: console.state.foundation,
+  });
+  const rows = serviceRows({
+    services: console.state.services,
+    telemetry: console.state.foundation.telemetry,
+    telemetrySource: console.state.foundation.sources.telemetry,
+    deployments: console.state.deployments,
+    placement: console.state.foundation.placement,
+    topology: console.state.foundation.topology,
+  });
   const activity = deliveryActivity(console.state.deployments);
   const healthyNodes = console.state.foundation.placement?.nodes.filter((node) => node.status === "healthy").length;
   const totalNodes = console.state.foundation.placement?.nodes.length;
 
-  function follow(event: React.MouseEvent<HTMLAnchorElement>, target: { view: "delivery" | "services" | "infrastructure" | "observability"; tab?: string }) {
+  function follow(
+    event: MouseEvent<HTMLAnchorElement>,
+    target: { view: "delivery" | "services" | "infrastructure" | "observability"; tab?: string }
+  ) {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     console.navigate({ projectID, view: target.view, tab: target.tab });
   }
 
   return (
-    <section className="page overviewPage">
-      <PageHeader eyebrow="Project overview" title={project.name} description="A concise view of factual delivery, runtime, and service health." action={<button aria-label="Refresh project overview" className="secondaryAction" onClick={() => void console.actions.load()} type="button">Refresh</button>} />
-      <div className="statusStrip" aria-label="Project status summary">
-        <div className={`statusLead ${summary.overall}`}><span>Status</span><strong>{statusLabel(summary.overall)}</strong><small>{summary.attention.length ? `${summary.attention.length} item${summary.attention.length === 1 ? "" : "s"} need attention` : "No current attention items"}</small></div>
-        <div><span>Readiness</span><strong>{summary.readiness.desired ? `${summary.readiness.ready}/${summary.readiness.desired}` : "Not reported"}</strong><small>{summary.readiness.desired ? "ready pods" : "Telemetry source missing"}</small></div>
-        <div><span>Latest delivery</span><strong>{summary.latestBuild ? <StatusBadge value={summary.latestBuild.build.status} /> : summary.latestDeployment ? <StatusBadge value={summary.latestDeployment.status} /> : "No data yet"}</strong><small>{summary.latestBuild ? summary.latestBuild.service_key : "Build source not reported"}</small></div>
-        <div><span>Open incidents</span><strong>{console.state.foundation.sources.incidents === "available" ? summary.openIncidents : console.state.foundation.sources.incidents === "unavailable" ? "Unavailable" : "Not reported"}</strong><small>{console.state.foundation.sources.incidents !== "available" ? "Incident source missing" : summary.openIncidents ? "Needs investigation" : "No open incident reported"}</small></div>
-        <div><span>Runtime</span><strong>{healthyNodes !== undefined && totalNodes !== undefined ? `${healthyNodes}/${totalNodes}` : "Unknown"}</strong><small>{console.state.foundation.sources.runtime === "available" ? "nodes healthy" : "Runtime source unavailable"}</small></div>
+    <div className="p-4 lg:p-margin-desktop max-w-7xl mx-auto space-y-6">
+      <PageHeader
+        action={
+          <Button onClick={() => void console.actions.load()} variant="secondary">
+            <Icon name="refresh" className="text-[18px]" />
+            Refresh project overview
+          </Button>
+        }
+        description="A concise factual summary of runtime status, delivery rollouts, and infrastructure health."
+        eyebrow="Project Overview"
+        icon="dashboard"
+        title={project.name}
+      />
+
+      {/* KPI Status Strip */}
+      <div className="statusStrip grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="statusLead bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 shadow-sm space-y-1">
+          <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Status</span>
+          <div className="font-headline-md text-base font-bold text-on-surface flex items-center gap-2">
+            <strong className="sr-only">{statusLabel(summary.overall)}</strong>
+            <StatusBadge label={statusLabel(summary.overall)} value={summary.overall} />
+          </div>
+          <small className="text-[11px] text-on-surface-variant block">
+            {summary.attention.length ? `${summary.attention.length} items need attention` : "All systems normal"}
+          </small>
+        </div>
+
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 shadow-sm space-y-1">
+          <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Pod Readiness</span>
+          <div className="font-headline-md text-lg font-bold text-on-surface">
+            {summary.readiness.desired ? `${summary.readiness.ready}/${summary.readiness.desired} Ready` : "Not reported"}
+          </div>
+          <small className="text-[11px] text-on-surface-variant block">
+            {summary.readiness.desired ? "Ready container pods" : "Telemetry unavailable"}
+          </small>
+        </div>
+
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 shadow-sm space-y-1">
+          <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Latest Delivery</span>
+          <div className="flex items-center gap-2">
+            {summary.latestBuild ? (
+              <StatusBadge value={summary.latestBuild.build.status} />
+            ) : summary.latestDeployment ? (
+              <StatusBadge value={summary.latestDeployment.status} />
+            ) : (
+              <span className="font-headline-md text-sm font-bold text-on-surface">No data</span>
+            )}
+          </div>
+          <small className="text-[11px] text-on-surface-variant truncate block">
+            {summary.latestBuild ? summary.latestBuild.service_key : "No recent builds"}
+          </small>
+        </div>
+
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 shadow-sm space-y-1">
+          <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Open Incidents</span>
+          <div className="font-headline-md text-lg font-bold text-on-surface">
+            {console.state.foundation.sources.incidents === "available"
+              ? summary.openIncidents
+              : console.state.foundation.sources.incidents === "unavailable"
+                ? "Unavailable"
+                : "None"}
+          </div>
+          <small className="text-[11px] text-on-surface-variant block">
+            {summary.openIncidents ? "Needs investigation" : "No active alarms"}
+          </small>
+        </div>
+
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 shadow-sm space-y-1">
+          <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Nodes Online</span>
+          <div className="font-headline-md text-lg font-bold text-on-surface">
+            {healthyNodes !== undefined && totalNodes !== undefined ? `${healthyNodes}/${totalNodes} Ready` : "Unknown"}
+          </div>
+          <small className="text-[11px] text-on-surface-variant block">
+            {console.state.foundation.sources.runtime === "available" ? "Server nodes connected" : "Runtime unavailable"}
+          </small>
+        </div>
       </div>
 
-      <div className="overviewGrid">
-        <section className="sectionBlock deliveryActivity" aria-labelledby="deliveryActivityTitle">
-          <div className="sectionHeading"><div><p className="eyebrow">Delivery</p><h2 id="deliveryActivityTitle">Delivery activity</h2></div><a href={routeHref({ projectID: project.id, view: "delivery", tab: "deployments" })} onClick={(event) => follow(event, { view: "delivery", tab: "deployments" })}>Open delivery</a></div>
-          {activity.kind === "chart" ? <ActivityChart buckets={activity.buckets} /> : activity.events.length ? <div className="activityTimeline">{activity.events.slice(-6).reverse().map((deployment) => <div className="activityEvent" key={deployment.id}><span className="timelineDot" /><div><strong>{deployment.service_id}</strong><small>{deployment.rollout_state ?? deployment.status} · {formatTimestamp(deployment.updated_at ?? deployment.created_at)}</small></div><StatusBadge value={deployment.rollout_state ?? deployment.status} /></div>)}</div> : <Empty title="No delivery data yet" text="Accepted builds and deployments will appear here when the Local API reports them." />}
-        </section>
+      {/* 2-Column Split: Delivery Activity & Service Health */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Delivery Activity */}
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+            <div className="flex items-center gap-2">
+              <Icon name="rocket_launch" className="text-primary text-[20px]" />
+              <h3 className="font-headline-md text-base font-bold text-on-surface">Delivery Activity</h3>
+            </div>
+            <a
+              className="text-xs text-primary font-semibold hover:underline"
+              href={routeHref({ projectID: project.id, view: "delivery", tab: "deployments" })}
+              onClick={(event) => follow(event, { view: "delivery", tab: "deployments" })}
+            >
+              Open Delivery →
+            </a>
+          </div>
 
-        <section className="sectionBlock serviceHealth" aria-labelledby="serviceHealthTitle">
-          <div className="sectionHeading"><div><p className="eyebrow">Runtime</p><h2 id="serviceHealthTitle">Service health</h2></div><a href={routeHref({ projectID: project.id, view: "services" })} onClick={(event) => follow(event, { view: "services" })}>View services</a></div>
-          {rows.length ? <div className="healthList">{rows.slice(0, 6).map((row) => <a href={routeHref({ projectID: project.id, view: "services", service: row.service.id })} className="healthRow" key={row.service.id} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); console.navigate({ projectID: project.id, view: "services", service: row.service.id }); console.setServiceDetail(row.service); }}><span><strong>{row.service.name}</strong><small>{row.environment || "Environment not reported"} · {row.runtime || "Runtime not reported"}</small></span><span>{row.ready !== undefined && row.desired !== undefined ? `${row.ready}/${row.desired}` : "Not reported"}</span><StatusBadge label={statusLabel(row.health)} value={row.health} /></a>)}</div> : <Empty title="No services yet" text="The Local API has not reported a service catalog for this project." />}
-        </section>
+          {activity.kind === "chart" ? (
+            <div className="space-y-3">
+              <p className="text-xs text-on-surface-variant">
+                {(() => {
+                  const totals = activity.buckets.reduce(
+                    (acc, b) => ({
+                      succeeded: acc.succeeded + b.succeeded,
+                      failed: acc.failed + b.failed,
+                      rolled_back: acc.rolled_back + b.rolled_back,
+                      cancelled: acc.cancelled + b.cancelled,
+                      other: acc.other + b.other,
+                    }),
+                    { succeeded: 0, failed: 0, rolled_back: 0, cancelled: 0, other: 0 }
+                  );
+                  const parts = [];
+                  if (totals.succeeded) parts.push(`${totals.succeeded} succeeded`);
+                  if (totals.failed) parts.push(`${totals.failed} failed`);
+                  if (totals.rolled_back) parts.push(`${totals.rolled_back} rolled back`);
+                  if (totals.cancelled) parts.push(`${totals.cancelled} cancelled`);
+                  if (totals.other) parts.push(`${totals.other} other`);
+                  return parts.join(", ");
+                })()}
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left">
+                  <thead>
+                    <tr className="border-b border-outline-variant/20 text-on-surface-variant font-label-sm">
+                      <th className="py-2 px-3">Day</th>
+                      <th className="py-2 px-3">Succeeded</th>
+                      <th className="py-2 px-3">Failed</th>
+                      <th className="py-2 px-3">Rolled back</th>
+                      <th className="py-2 px-3">Cancelled</th>
+                      <th className="py-2 px-3">Other</th>
+                      <th className="py-2 px-3">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-outline-variant/10">
+                    {activity.buckets.map((bucket) => {
+                      const total = bucket.succeeded + bucket.failed + bucket.rolled_back + bucket.cancelled + bucket.other;
+                      return (
+                        <tr key={bucket.day} className="hover:bg-surface-container-high/40">
+                          <td className="py-2 px-3 font-code-md">{bucket.day}</td>
+                          <td className="py-2 px-3">{bucket.succeeded}</td>
+                          <td className="py-2 px-3">{bucket.failed}</td>
+                          <td className="py-2 px-3">{bucket.rolled_back}</td>
+                          <td className="py-2 px-3">{bucket.cancelled}</td>
+                          <td className="py-2 px-3">{bucket.other}</td>
+                          <td className="py-2 px-3 font-bold">{total}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : activity.events && activity.events.length ? (
+            <div className="space-y-2">
+              {activity.events.slice(-5).reverse().map((deployment) => (
+                <div
+                  key={deployment.id}
+                  className="p-3 bg-surface-container rounded-lg border border-outline-variant/20 flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
+                    <strong className="font-body-md text-sm text-on-surface block truncate">{deployment.service_id}</strong>
+                    <span className="text-[11px] text-on-surface-variant">
+                      {formatTimestamp(deployment.updated_at ?? deployment.created_at)}
+                    </span>
+                  </div>
+                  <StatusBadge value={deployment.rollout_state ?? deployment.status} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty text="Accepted builds and deployments will appear here when reported." title="No Delivery Data Yet" />
+          )}
+        </div>
+
+        {/* Service Health */}
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
+            <div className="flex items-center gap-2">
+              <Icon name="layers" className="text-primary text-[20px]" />
+              <h3 className="font-headline-md text-base font-bold text-on-surface">Service Health</h3>
+            </div>
+            <a
+              className="text-xs text-primary font-semibold hover:underline"
+              href={routeHref({ projectID: project.id, view: "services" })}
+              onClick={(event) => follow(event, { view: "services" })}
+            >
+              View Services →
+            </a>
+          </div>
+
+          {rows.length ? (
+            <div className="space-y-2">
+              {rows.slice(0, 5).map((row) => (
+                <a
+                  key={row.service.id}
+                  className="p-3 bg-surface-container rounded-lg border border-outline-variant/20 flex items-center justify-between gap-3 hover:bg-surface-container-high transition-colors cursor-pointer"
+                  href={routeHref({ projectID: project.id, view: "services", service: row.service.id })}
+                  onClick={(event) => {
+                    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                    event.preventDefault();
+                    console.navigate({ projectID: project.id, view: "services", service: row.service.id });
+                    console.setServiceDetail(row.service);
+                  }}
+                >
+                  <div className="min-w-0">
+                    <strong className="font-body-md text-sm text-on-surface block truncate">{row.service.name}</strong>
+                    <span className="text-[11px] text-on-surface-variant">
+                      {row.environment || "Default"} • {row.runtime || "Ready"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="font-code-md text-xs text-on-surface-variant">
+                      {row.ready !== undefined && row.desired !== undefined ? `${row.ready}/${row.desired}` : "—"}
+                    </span>
+                    <StatusBadge label={statusLabel(row.health)} value={row.health} />
+                  </div>
+                </a>
+              ))}
+            </div>
+          ) : (
+            <Empty text="No application services configured for this project yet." title="No Services Found" />
+          )}
+        </div>
       </div>
 
-      <div className="overviewGrid lower">
-        <section className="sectionBlock" aria-labelledby="attentionTitle"><div className="sectionHeading"><div><p className="eyebrow">Next</p><h2 id="attentionTitle">Attention queue</h2></div></div>{summary.attention.length ? <div className="attentionList">{summary.attention.map((item) => <a className={`attentionItem ${item.status}`} href={routeHref({ projectID: project.id, view: item.target.view, tab: item.target.tab })} key={item.id} onClick={(event) => follow(event, item.target)}><span className="attentionMark" aria-hidden="true" /><span><strong>{item.title}</strong><small>{item.detail}</small></span><span aria-hidden="true">→</span></a>)}</div> : <Empty title="Nothing needs attention" text="No factual failure, mismatch, open incident, or unavailable source is reported." />}</section>
-        <section className="sectionBlock" aria-labelledby="recentDeploymentsTitle"><div className="sectionHeading"><div><p className="eyebrow">History</p><h2 id="recentDeploymentsTitle">Recent deployments</h2></div><a href={routeHref({ projectID: project.id, view: "delivery", tab: "deployments" })} onClick={(event) => follow(event, { view: "delivery", tab: "deployments" })}>See all</a></div>{console.state.deployments.length ? <div className="deploymentList">{console.state.deployments.slice(0, 5).map((deployment) => <div className="deploymentRow" key={deployment.id}><span><strong>{deployment.service_id}</strong><small>{deployment.id} · {formatTimestamp(deployment.created_at)}</small></span><StatusBadge value={deployment.rollout_state ?? deployment.status} /></div>)}</div> : <Empty title="No deployments yet" text="Deployment history is empty for this project." />}</section>
-      </div>
-    </section>
+      {/* Attention Queue */}
+      {summary.attention.length > 0 ? (
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-4">
+          <div className="flex items-center gap-2 border-b border-outline-variant/20 pb-3">
+            <Icon name="warning" className="text-status-warning text-[20px]" />
+            <h3 className="font-headline-md text-base font-bold text-on-surface">Attention Queue</h3>
+          </div>
+          <div className="space-y-2">
+            {summary.attention.map((item) => (
+              <a
+                key={item.id}
+                className="p-3.5 bg-surface-container rounded-xl border border-outline-variant/20 hover:border-outline-variant/50 transition-all flex items-center justify-between gap-4 cursor-pointer"
+                href={routeHref({ projectID: project.id, view: item.target.view, tab: item.target.tab })}
+                onClick={(event) => follow(event, item.target)}
+              >
+                <div>
+                  <strong className="font-body-md text-sm text-on-surface block">{item.title}</strong>
+                  <p className="text-xs text-on-surface-variant mt-0.5">{item.detail}</p>
+                </div>
+                <Icon name="arrow_forward" className="text-on-surface-variant text-[18px] shrink-0" />
+              </a>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
-}
-
-function ActivityChart({ buckets }: { buckets: Array<{ day: string; succeeded: number; failed: number; rolled_back: number; cancelled: number; other: number }> }) {
-  const max = Math.max(...buckets.map((bucket) => bucket.succeeded + bucket.failed + bucket.rolled_back + bucket.cancelled + bucket.other), 1);
-  const totals = buckets.reduce((sum, bucket) => ({ succeeded: sum.succeeded + bucket.succeeded, failed: sum.failed + bucket.failed, rolled_back: sum.rolled_back + bucket.rolled_back, cancelled: sum.cancelled + bucket.cancelled, other: sum.other + bucket.other }), { succeeded: 0, failed: 0, rolled_back: 0, cancelled: 0, other: 0 });
-  return <figure className="activityChart" aria-labelledby="activityChartTitle"><figcaption><h3 className="srOnly" id="activityChartTitle">Delivery outcomes by day</h3><p className="chartSummary">{buckets.length} factual days · {Object.values(totals).reduce((sum, value) => sum + value, 0)} outcomes: {totals.succeeded} succeeded, {totals.failed} failed, {totals.rolled_back} rolled back, {totals.cancelled} cancelled, {totals.other} other.</p></figcaption><div className="chartLegend" aria-label="Outcome legend"><span><i className="legendSucceeded" />Succeeded</span><span><i className="legendFailed" />Failed</span><span><i className="legendRollback" />Rolled back</span><span><i className="legendCancelled" />Cancelled</span><span><i className="legendOther" />Other</span></div><div aria-hidden="true" className="barChart">{buckets.map((bucket) => <div className="barColumn" key={bucket.day}><div className="barStack"><i className="barSucceeded" style={{ height: `${(bucket.succeeded / max) * 100}%` }} /><i className="barFailed" style={{ height: `${(bucket.failed / max) * 100}%` }} /><i className="barRollback" style={{ height: `${(bucket.rolled_back / max) * 100}%` }} /><i className="barCancelled" style={{ height: `${(bucket.cancelled / max) * 100}%` }} /><i className="barOther" style={{ height: `${(bucket.other / max) * 100}%` }} /></div><small>{bucket.day.slice(5)}</small></div>)}</div><div className="chartTable"><table><caption>Delivery outcome data</caption><thead><tr><th scope="col">Day</th><th scope="col">Succeeded</th><th scope="col">Failed</th><th scope="col">Rolled back</th><th scope="col">Cancelled</th><th scope="col">Other</th><th scope="col">Total</th></tr></thead><tbody>{buckets.map((bucket) => <tr key={bucket.day}><th scope="row">{bucket.day}</th><td>{bucket.succeeded}</td><td>{bucket.failed}</td><td>{bucket.rolled_back}</td><td>{bucket.cancelled}</td><td>{bucket.other}</td><td>{bucket.succeeded + bucket.failed + bucket.rolled_back + bucket.cancelled + bucket.other}</td></tr>)}</tbody></table></div></figure>;
 }

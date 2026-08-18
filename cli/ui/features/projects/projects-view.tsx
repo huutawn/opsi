@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
-import { Empty, PageHeader, StatusBadge } from "@/components/ui/primitives";
+import { useMemo, useRef, useState, type MouseEvent } from "react";
+import { Button, Empty, Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
 import { routeHref } from "@/features/console/navigation";
 import type { ConsoleController } from "@/features/console/types";
 import { formatTimestamp, shortIdentifier, statusLabel, type PresentationStatus } from "@/lib/presentation/project";
@@ -10,87 +10,269 @@ export function ProjectsView({ console }: { console: ConsoleController }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  const rows = useMemo(() => console.state.projects.map((project) => ({
-    project,
-    entry: console.projectSummaries[project.id],
-  })).filter(({ project, entry }) => {
-    const matchesQuery = `${project.name} ${project.slug}`.toLowerCase().includes(query.trim().toLowerCase());
-    const status = entry?.summary?.overall ?? (entry?.status === "error" ? "unavailable" : "unknown");
-    return matchesQuery && (statusFilter === "all" || status === statusFilter);
-  }), [console.projectSummaries, console.state.projects, query, statusFilter]);
 
-  function openProject(event: React.MouseEvent<HTMLAnchorElement>, projectID: string) {
+  const rows = useMemo(
+    () =>
+      console.state.projects
+        .map((project) => ({
+          project,
+          entry: console.projectSummaries[project.id],
+        }))
+        .filter(({ project, entry }) => {
+          const matchesQuery = `${project.name} ${project.slug}`.toLowerCase().includes(query.trim().toLowerCase());
+          const status = entry?.summary?.overall ?? (entry?.status === "error" ? "unavailable" : "unknown");
+          return matchesQuery && (statusFilter === "all" || status === statusFilter);
+        }),
+    [console.projectSummaries, console.state.projects, query, statusFilter]
+  );
+
+  function openProject(event: MouseEvent<HTMLAnchorElement>, projectID: string) {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     console.setProjectID(projectID);
   }
 
   return (
-    <section className="page projectsPage">
+    <div className="p-4 lg:p-margin-desktop max-w-7xl mx-auto space-y-6">
       <PageHeader
-        action={<button className="primary" onClick={() => dialog.current?.showModal()} type="button">New project</button>}
+        action={
+          <Button onClick={() => dialog.current?.showModal()} variant="primary">
+            <Icon name="add" className="text-[18px]" />
+            New project
+          </Button>
+        }
+        description="Choose the project that needs your attention. Operational facts are loaded directly through Local Edge."
         eyebrow="Workspace"
+        icon="folder"
         title="Projects"
-        description="Choose the project that needs your attention. Missing operational sources stay explicitly unreported."
       />
-      <div className="projectFilters" role="search">
-        <label><span>Search projects</span><input autoComplete="off" className="field" name="project_search" onChange={(event) => setQuery(event.target.value)} placeholder="Search by name or slug…" type="search" value={query} /></label>
-        <label><span>Status</span><select className="select" name="status_filter" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}><option value="all">All statuses</option><option value="healthy">Healthy</option><option value="degraded">Degraded</option><option value="failed">Failed</option><option value="unavailable">Unavailable</option><option value="unknown">Not reported</option></select></label>
+
+      {/* Filter and Search Bar */}
+      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 shadow-sm flex flex-col md:flex-row items-center gap-4">
+        <div className="relative flex-1 w-full">
+          <Icon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-[20px] pointer-events-none" />
+          <input
+            aria-label="Search projects"
+            className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg py-2.5 pl-10 pr-4 text-xs font-body-md text-on-surface focus:outline-none focus:border-primary/50"
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search by project name or slug…"
+            type="search"
+            value={query}
+          />
+        </div>
+
+        <select
+          aria-label="Status"
+          className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs rounded-lg py-2.5 px-3 focus:outline-none focus:border-primary/50 cursor-pointer w-full md:w-auto"
+          onChange={(event) => setStatusFilter(event.target.value)}
+          value={statusFilter}
+        >
+          <option value="all">All Statuses</option>
+          <option value="healthy">Healthy</option>
+          <option value="degraded">Degraded</option>
+          <option value="failed">Failed</option>
+          <option value="unavailable">Unavailable</option>
+          <option value="unknown">Not Reported</option>
+        </select>
       </div>
+
       {console.state.projects.length === 0 ? (
-        <Empty action={<button className="primary" onClick={() => dialog.current?.showModal()} type="button">Create project</button>} title="No projects yet" text="Create a project to connect services, runtime, and delivery evidence." />
+        <Empty
+          action={
+            <Button onClick={() => dialog.current?.showModal()} variant="primary">
+              <Icon name="add" className="text-[18px]" />
+              Create First Project
+            </Button>
+          }
+          text="Create a project to connect services, runtime nodes, and delivery evidence."
+          title="No Projects Yet"
+        />
       ) : rows.length === 0 ? (
-        <Empty title="No matching projects" text="Clear the search or status filter to see the workspace again." />
+        <Empty text="Clear the search or status filter to see the projects list." title="No Matching Projects" />
       ) : (
-        <div className="projectList">
-          <div className="projectListHeader" aria-hidden="true"><span>Project</span><span>Health</span><span>Runtime</span><span>Services</span><span>Latest delivery</span><span>Incidents</span><span>Last changed</span></div>
-          {rows.map(({ project, entry }) => {
-            const summary = entry?.summary;
-            const status = summary?.overall ?? (entry?.status === "error" ? "unavailable" : "unknown");
-            const delivery = summary?.latestBuild?.build.status ?? summary?.latestDeployment?.rollout_state ?? summary?.latestDeployment?.status;
-            const deliveryIdentity = summary?.latestBuild
-              ? `${shortIdentifier(summary.latestBuild.workload.sha, 9)} · ${shortIdentifier(summary.latestBuild.build.oci_digest, 15)}`
-              : summary?.latestDeployment ? shortIdentifier(summary.latestDeployment.current_digest ?? summary.latestDeployment.desired_digest, 15) : "Not reported by Local API";
-            const freshness = entry?.refreshing
-              ? "Refreshing"
-              : entry?.stale ? "Stale — retry Refresh current data"
-                : entry?.status === "error" ? "Source unavailable — retry Refresh current data" : "";
-            return (
-              <a className="projectRow" href={routeHref({ projectID: project.id })} key={project.id} onClick={(event) => openProject(event, project.id)}>
-                <span className="projectIdentity"><strong title={project.name}>{project.name}</strong><small>{project.status || "Lifecycle not reported"} · {entry?.environment || "Environment not reported by Local API"} · <code>{project.slug}</code></small></span>
-                <span data-label="Health"><span className="projectHealth">{entry?.status === "loading" ? <span role="status">Loading…</span> : <StatusBadge label={statusLabel(status as PresentationStatus)} value={status} />}{freshness ? <small role="status" title={entry?.error}>{freshness}</small> : null}</span></span>
-                <span data-label="Runtime">{entry?.status === "loading" ? "Loading…" : entry?.runtimeStatus ? <StatusBadge label={statusLabel(entry.runtimeStatus)} value={entry.runtimeStatus} /> : "Not reported by Local API"}</span>
-                <span data-label="Services">{entry?.status === "loading" ? "Loading…" : summary ? summary.serviceCount : "Not reported by Local API"}</span>
-                <span data-label="Latest delivery" className="projectDelivery">{entry?.status === "loading" ? "Loading…" : <>{delivery ? <StatusBadge value={delivery} /> : null}<small>{deliveryIdentity}</small></>}</span>
-                <span data-label="Incidents">{entry?.status === "loading" ? "Loading…" : summary ? `${summary.openIncidents} open` : "Not reported by Local API"}</span>
-                <span data-label="Last changed">{entry?.status === "loading" ? "Loading…" : summary?.updatedAt ? formatTimestamp(summary.updatedAt) : "Not reported by Local API"}</span>
-              </a>
-            );
-          })}
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-outline-variant/20 bg-surface-container text-on-surface-variant uppercase font-label-sm text-[10px]">
+                  <th className="py-3.5 px-4">Project</th>
+                  <th className="py-3.5 px-4">Health</th>
+                  <th className="py-3.5 px-4">Runtime</th>
+                  <th className="py-3.5 px-4">Services</th>
+                  <th className="py-3.5 px-4">Latest Delivery</th>
+                  <th className="py-3.5 px-4">Incidents</th>
+                  <th className="py-3.5 px-4">Last Changed</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-outline-variant/10">
+                {rows.map(({ project, entry }) => {
+                  const summary = entry?.summary;
+                  const status = summary?.overall ?? (entry?.status === "error" ? "unavailable" : "unknown");
+                  const delivery = summary?.latestBuild?.build.status ?? summary?.latestDeployment?.rollout_state ?? summary?.latestDeployment?.status;
+                  const deliveryIdentity = summary?.latestBuild
+                    ? `${shortIdentifier(summary.latestBuild.workload.sha, 9)} • ${shortIdentifier(summary.latestBuild.build.oci_digest, 15)}`
+                    : summary?.latestDeployment
+                      ? shortIdentifier(summary.latestDeployment.current_digest ?? summary.latestDeployment.desired_digest, 15)
+                      : "No delivery";
+
+                  return (
+                    <tr
+                      key={project.id}
+                      className="projectRow hover:bg-surface-container-high/50 transition-colors cursor-pointer"
+                      onClick={() => console.setProjectID(project.id)}
+                    >
+                      <td className="py-3.5 px-4">
+                        <a
+                          className="flex flex-col group font-body-md text-sm text-on-surface font-semibold hover:text-primary transition-colors cursor-pointer"
+                          href={routeHref({ projectID: project.id, view: "topology" })}
+                          onClick={(event) => openProject(event, project.id)}
+                        >
+                          <strong className="block" title={project.name}>{project.name}</strong>
+                          <span className="font-code-md text-[11px] text-on-surface-variant group-hover:text-primary/80 font-normal">
+                            {project.status || "active"} • <code>{project.slug}</code>
+                          </span>
+                          {entry?.refreshing ? (
+                            <span className="text-[10px] text-status-progress font-code-md font-semibold">Refreshing</span>
+                          ) : entry?.stale ? (
+                            <span className="text-[10px] text-status-warning font-code-md font-semibold">Stale — retry Refresh current data</span>
+                          ) : null}
+                        </a>
+                      </td>
+                      <td className="py-3.5 px-4" data-label="Health">
+                        <StatusBadge label={statusLabel(status as PresentationStatus)} value={status} />
+                      </td>
+                      <td className="py-3.5 px-4 font-code-md" data-label="Runtime">
+                        {entry?.status === "loading" ? "Loading…" : entry?.runtimeStatus ? (
+                          <StatusBadge label={statusLabel(entry.runtimeStatus)} value={entry.runtimeStatus} />
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 font-body-md text-on-surface font-medium" data-label="Services">
+                        {entry?.status === "loading" ? "…" : summary ? summary.serviceCount : "0"}
+                      </td>
+                      <td className="py-3.5 px-4" data-label="Latest Delivery">
+                        <div className="flex flex-col">
+                          {delivery ? <StatusBadge value={delivery} /> : <span className="text-on-surface-variant">—</span>}
+                          <small className="font-code-md text-[10px] text-on-surface-variant truncate max-w-[160px] mt-0.5">
+                            {deliveryIdentity}
+                          </small>
+                        </div>
+                      </td>
+                      <td className="py-3.5 px-4 font-body-md text-on-surface" data-label="Incidents">
+                        {summary ? (
+                          <span className={summary.openIncidents > 0 ? "text-status-warning font-bold" : "text-on-surface-variant"}>
+                            {summary.openIncidents} open
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 text-on-surface-variant font-code-md text-[11px]">
+                        {summary?.updatedAt ? formatTimestamp(summary.updatedAt) : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
-      <dialog aria-labelledby="createProjectTitle" className="nativeDialog" ref={dialog}>
-        <form method="dialog"><button aria-label="Close create project dialog" className="iconButton dialogClose" type="submit"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button></form>
-        <p className="eyebrow">Workspace</p>
-        <h2 id="createProjectTitle">Create project</h2>
-        <p>Review creates the durable Cloud project through the Local API.</p>
-        <form className="form" onSubmit={(event) => { dialog.current?.close(); void console.actions.createProject(event); }}>
-          <label>Name<input autoComplete="off" className="field" name="name" placeholder="Checkout platform…" required /></label>
-          <label>Slug<input autoComplete="off" className="field" name="slug" pattern="(?:[a-z0-9]|-)+" placeholder="checkout-platform…" required spellCheck={false} /></label>
-          <div className="modalActions span2"><button onClick={() => dialog.current?.close()} type="button">Cancel</button><button className="primary" disabled={console.state.busy === "project"} type="submit">Review project</button></div>
+
+      {/* Modal Dialog for New Project */}
+      <dialog aria-labelledby="createProjectTitle" aria-label="Create project" className="fixed inset-0 m-auto bg-surface-container-low border border-outline-variant/20 rounded-2xl p-6 shadow-2xl backdrop:bg-black/60 max-w-md w-full" ref={dialog}>
+        <div className="flex items-center justify-between border-b border-outline-variant/20 pb-4 mb-4">
+          <h2 className="font-headline-md text-lg font-bold text-on-surface" id="createProjectTitle">Create project</h2>
+          <button aria-label="Close dialog" className="text-on-surface-variant hover:text-on-surface cursor-pointer" onClick={() => dialog.current?.close()} type="button">
+            <Icon name="close" className="text-[20px]" />
+          </button>
+        </div>
+
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            dialog.current?.close();
+            void console.actions.createProject(event);
+          }}
+        >
+          <div>
+            <label className="font-label-sm text-xs text-on-surface font-semibold block mb-1.5">
+              Name
+              <input
+                autoComplete="off"
+                className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg p-2.5 text-xs text-on-surface focus:outline-none focus:border-primary/50 mt-1 font-normal"
+                name="name"
+                placeholder="e.g. Checkout Platform"
+                required
+              />
+            </label>
+          </div>
+
+          <div>
+            <label className="font-label-sm text-xs text-on-surface font-semibold block mb-1.5">
+              Slug
+              <input
+                autoComplete="off"
+                className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg p-2.5 text-xs text-on-surface focus:outline-none focus:border-primary/50 font-code-md mt-1 font-normal"
+                name="slug"
+                pattern="(?:[a-z0-9]|-)+"
+                placeholder="e.g. checkout-platform"
+                required
+                spellCheck={false}
+              />
+            </label>
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-4 border-t border-outline-variant/20">
+            <Button onClick={() => dialog.current?.close()} type="button" variant="secondary">
+              Cancel
+            </Button>
+            <Button disabled={console.state.busy === "project"} type="submit" variant="primary">
+              Review project
+            </Button>
+          </div>
         </form>
       </dialog>
-    </section>
+    </div>
   );
 }
 
 export function WorkspaceHomeView({ console }: { console: ConsoleController }) {
   const degraded = console.session?.cloud_connected !== "ok";
-  return <section className="page workspaceHome">
-    <PageHeader eyebrow="Workspace" title="Home" description="Choose a project or review the Local workspace connection before making changes." action={<button className="primary" onClick={() => console.navigate({ view: "projects" })} type="button">Browse projects</button>} />
-    <div className="workspaceSummary">
-      <section aria-labelledby="workspace-projects"><p className="eyebrow">Projects</p><h2 id="workspace-projects">{console.state.projects.length} available</h2><p>Project navigation appears only after a project is selected.</p></section>
-      <section aria-labelledby="workspace-cloud"><p className="eyebrow">Cloud source</p><h2 id="workspace-cloud">{degraded ? "Unavailable" : "Connected"}</h2><p>{degraded ? "Previously loaded factual data remains visible where available." : "Project history is available through the Local API."}</p></section>
+
+  return (
+    <div className="p-4 lg:p-margin-desktop max-w-7xl mx-auto space-y-6">
+      <PageHeader
+        action={
+          <Button onClick={() => console.navigate({ view: "projects" })} variant="primary">
+            <Icon name="folder" className="text-[18px]" />
+            Browse Projects
+          </Button>
+        }
+        description="Choose a project or review the Local workspace connection before inspecting live operations."
+        eyebrow="Workspace"
+        icon="home"
+        title="Workspace Home"
+      />
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-2">
+          <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block">Available Projects</span>
+          <div className="font-headline-lg text-3xl font-bold text-on-surface">{console.state.projects.length}</div>
+          <p className="text-xs text-on-surface-variant">Project navigation appears after selecting a project context.</p>
+        </div>
+
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm space-y-2">
+          <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider block">Cloud Control Plane</span>
+          <div className={`font-headline-lg text-3xl font-bold ${degraded ? "text-error" : "text-status-ready"}`}>
+            {degraded ? "Unavailable" : "Connected"}
+          </div>
+          <p className="text-xs text-on-surface-variant">
+            {degraded ? "Previously loaded factual records remain visible where available." : "Local Edge connection verified."}
+          </p>
+        </div>
+      </div>
     </div>
-  </section>;
+  );
 }

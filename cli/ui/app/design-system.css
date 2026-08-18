@@ -518,3 +518,337 @@ button.auditRow[aria-pressed="true"] {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* Topology and Infrastructure Canvas Layout */
+.designWorkspace,
+.liveWorkspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--opsi-space-4);
+  border: var(--opsi-border);
+  border-radius: var(--opsi-radius);
+  background: var(--opsi-surface-lowest);
+  min-height: 580px;
+  overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .designWorkspace,
+  .liveWorkspace {
+    grid-template-columns: 1fr;
+  }
+}
+
+.canvasStage,
+.liveCanvasStage {
+  display: flex;
+  flex-direction: column;
+  min-height: 580px;
+  min-width: 0;
+  position: relative;
+}
+
+.canvasStageHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--opsi-space-3) var(--opsi-space-4);
+  border-bottom: var(--opsi-border);
+  background: var(--opsi-surface-container);
+}
+
+.canvasLegend {
+  display: flex;
+  align-items: center;
+  gap: var(--opsi-space-3);
+  font-size: var(--opsi-text-xs);
+  color: var(--opsi-on-surface-variant);
+}
+
+.canvasLegend span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.canvasLegend i {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--opsi-radius-sm);
+  display: inline-block;
+}
+
+.canvasLegend i[data-kind="server"] {
+  background: var(--opsi-outline);
+}
+
+.canvasLegend i[data-kind="application"] {
+  background: var(--opsi-secondary);
+}
+
+.canvasLegend i[data-kind="draft"] {
+  background: var(--opsi-warning);
+}
+
+.topologyFlow,
+.liveTopologyFlow {
+  flex: 1;
+  width: 100%;
+  height: 560px;
+  min-height: 560px;
+  position: relative;
+  background: var(--opsi-surface-lowest);
+}
+
+.canvasInspector,
+.liveInspector {
+  border-left: var(--opsi-border);
+  background: var(--opsi-surface-container);
+  padding: var(--opsi-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--opsi-space-4);
+  overflow-y: auto;
+  max-height: 720px;
+}
+
+.inspectorHeading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--opsi-space-2);
+}
+
+.canvasPath {
+  font-family: var(--opsi-font-mono);
+  font-size: var(--opsi-text-xs);
+  color: var(--opsi-on-surface-variant);
+  margin-bottom: 2px;
+}
+
+.canvasNodeKind {
+  font-size: var(--opsi-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--opsi-outline);
+}
+
+.inspectorSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--opsi-space-2);
+}
+
+.inspectorSection h4 {
+  font-size: var(--opsi-text-xs);
+  font-family: var(--opsi-font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--opsi-on-surface-variant);
+  margin-bottom: var(--opsi-space-1);
+}
+
+.inspectorSection dl {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--opsi-space-2);
+}
+
+.inspectorSection dl > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--opsi-space-1) 0;
+  border-bottom: 1px solid var(--opsi-outline-variant);
+  font-size: var(--opsi-text-xs);
+}
+
+.inspectorSection dt {
+  color: var(--opsi-on-surface-variant);
+}
+
+.inspectorSection dd {
+  color: var(--opsi-on-surface);
+  font-family: var(--opsi-font-mono);
+  font-weight: 500;
+}
+
+.topologyResourceNode {
+  background: var(--opsi-surface-high);
+  border: var(--opsi-border);
+  border-radius: var(--opsi-radius);
+  padding: var(--opsi-space-2) var(--opsi-space-3);
+  color: var(--opsi-on-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  user-select: none;
+}
+
+.topologyResourceNode:hover {
+  border-color: var(--opsi-outline);
+}
+
+.topologyResourceNode[aria-pressed="true"],
+.topologyResourceNode.selected {
+  border-color: var(--opsi-secondary);
+  box-shadow: 0 0 0 1px var(--opsi-secondary);
+}
+
+.topologyResourceNode[data-draft-state="pending-removal"] {
+  border-style: dashed;
+  border-color: var(--opsi-error);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.topologyResourceNode[data-draft-state="pending-addition"],
+.topologyResourceNode[data-draft-state="pending-change"] {
+  border-color: var(--opsi-warning);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.canvasUnplacedGroup {
+  background: var(--opsi-surface-low);
+  border: 1px dashed var(--opsi-outline);
+  border-radius: var(--opsi-radius);
+  padding: var(--opsi-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--opsi-space-1);
+  color: var(--opsi-on-surface-variant);
+  user-select: none;
+}
+
+.canvasUnplacedGroup[aria-pressed="true"] {
+  border-color: var(--opsi-secondary);
+}
+
+.resourceNodeHeading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: var(--opsi-text-xs);
+  color: var(--opsi-on-surface-variant);
+}
+
+.resourceBadge {
+  font-size: 10px;
+  font-family: var(--opsi-font-mono);
+  padding: 1px 4px;
+  border-radius: var(--opsi-radius-pill);
+  background: var(--opsi-surface-lowest);
+  border: 1px solid var(--opsi-outline-variant);
+}
+
+.resourceContext {
+  font-size: var(--opsi-text-xs);
+  color: var(--opsi-on-surface-variant);
+}
+
+.resourceFacts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px 8px;
+  margin-top: 4px;
+  font-size: 10px;
+}
+
+.resourceFacts > div {
+  display: flex;
+  justify-content: space-between;
+}
+
+.resourceFacts dt {
+  color: var(--opsi-on-surface-variant);
+}
+
+.resourceFacts dd {
+  color: var(--opsi-on-surface);
+  font-family: var(--opsi-font-mono);
+}
+
+.designActionBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--opsi-space-3) var(--opsi-space-4);
+  background: var(--opsi-surface-container);
+  border: var(--opsi-border);
+  border-radius: var(--opsi-radius);
+  margin-bottom: var(--opsi-space-3);
+}
+
+.designChangeState {
+  display: flex;
+  align-items: center;
+  gap: var(--opsi-space-2);
+}
+
+.designSupportingFacts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--opsi-space-4);
+  margin-top: var(--opsi-space-4);
+}
+
+@media (max-width: 768px) {
+  .designSupportingFacts {
+    grid-template-columns: 1fr;
+  }
+}
+
+.topologyMode button,
+.designActions button,
+.liveOverviewStatus button,
+.connectServerDialog button,
+.connectServerDialog summary,
+.placementDialog button,
+.placementDialog summary,
+.iconButton {
+  min-width: 40px;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.topologyMode {
+  display: inline-flex;
+  align-items: center;
+  background: var(--opsi-surface-container-high);
+  border-radius: var(--opsi-radius);
+  padding: 2px;
+}
+
+.topologyMode button {
+  padding: 6px 16px;
+  border-radius: var(--opsi-radius);
+  border: none;
+  background: transparent;
+  color: var(--opsi-on-surface-variant);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.topologyMode button[aria-pressed="true"] {
+  background: var(--opsi-surface-container-lowest);
+  color: var(--opsi-on-surface);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.connectServerDialog summary,
+.placementDialog summary {
+  cursor: pointer;
+  padding: 8px 0;
+}
+
+button,
+input,
+select,
+textarea {
+  min-height: 40px;
+  box-sizing: border-box;
+}

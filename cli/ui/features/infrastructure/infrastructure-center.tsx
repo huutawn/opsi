@@ -7,7 +7,6 @@ import {
   formatBytes,
   retainedStorageLifecyclePresentation,
   resourceLifecyclePresentation,
-  serverLifecyclePresentation,
 } from "@/lib/presentation/resources/model";
 import { serverStatus } from "@/lib/presentation/infrastructure/model";
 import { useInfrastructureCenterData } from "./center-data";
@@ -16,67 +15,87 @@ import { ResourceDetail } from "./resource-detail";
 import { ServerDetail } from "./server-detail";
 import { DestroyStorageDialog } from "./destroy-storage-dialog";
 import { BootstrapDialog } from "./infrastructure-view";
+import { Button, Empty, Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
 
 export function InfrastructureCenterView({ console }: { console: ConsoleController }) {
   const projectID = console.state.project?.id ?? "";
   const environmentID = console.route.environment ?? "";
-  const { data, error, loading, reload } = useInfrastructureCenterData(console);
+  const { data, error, reload } = useInfrastructureCenterData(console);
 
   const [activeTab, setActiveTab] = useState<"servers" | "resources" | "storage">(
     console.route.tab === "storage"
       ? "storage"
       : console.route.tab === "resources"
       ? "resources"
-      : "servers",
+      : "servers"
   );
 
   const [showAddResource, setShowAddResource] = useState(false);
   const [showAddServer, setShowAddServer] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [selectedResourceID, setSelectedResourceID] = useState<string>(
-    (console.route as { resource?: string }).resource ?? "",
+    (console.route as { resource?: string }).resource ?? ""
   );
   const [selectedNodeID, setSelectedNodeID] = useState<string>(
     (console.route as { server?: string; node?: string }).server ??
       (console.route as { server?: string; node?: string }).node ??
-      "",
+      (data.nodes[0]?.id ?? "")
   );
   const [destroyingStorage, setDestroyingStorage] = useState<RetainedStorage | null>(null);
 
   const selectedResource = data.resources.find((r) => r.id === selectedResourceID) ?? null;
-  const selectedNode = data.nodes.find((n) => n.id === selectedNodeID) ?? null;
+  const effectiveNodeID = selectedNodeID || data.nodes[0]?.id || "";
+  const selectedNode = data.nodes.find((n) => n.id === effectiveNodeID) ?? null;
 
   function handleTabChange(tab: "servers" | "resources" | "storage") {
     setActiveTab(tab);
     console.navigate({ view: "infrastructure", tab });
   }
 
-  return (
-    <div className="infrastructureCenter">
-      <header className="pageHeader">
-        <div>
-          <p className="eyebrow">Production Control · Factual Infrastructure</p>
-          <h1>Infrastructure Resource Center</h1>
-          <p className="subtitle">
-            Inspect and operate physical/VM server capacity, cloud-managed resources, and persistent database storage.
-          </p>
-        </div>
-        <div className="pageHeaderActions">
-          {activeTab === "servers" ? (
-            <button className="primary" onClick={() => setShowAddServer(true)} type="button">
-              + Add Server
-            </button>
-          ) : activeTab === "resources" ? (
-            <button className="primary" onClick={() => setShowAddResource(true)} type="button">
-              + Add Managed Resource
-            </button>
-          ) : null}
-        </div>
-      </header>
+  const filteredNodes = data.nodes.filter((node) => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      (node.name && node.name.toLowerCase().includes(q)) ||
+      (node.public_host && node.public_host.toLowerCase().includes(q)) ||
+      node.id.toLowerCase().includes(q)
+    );
+  });
 
-      <nav aria-label="Infrastructure sections" className="consoleTabs">
+  return (
+    <div className="p-4 lg:p-margin-desktop max-w-7xl mx-auto space-y-6">
+      {/* Header */}
+      <PageHeader
+        action={
+          <div className="flex items-center gap-3">
+            {activeTab === "servers" ? (
+              <Button onClick={() => setShowAddServer(true)} variant="primary">
+                <Icon name="add" className="text-[18px]" />
+                Connect Server
+              </Button>
+            ) : activeTab === "resources" ? (
+              <Button onClick={() => setShowAddResource(true)} variant="primary">
+                <Icon name="add" className="text-[18px]" />
+                Add Managed Resource
+              </Button>
+            ) : null}
+          </div>
+        }
+        description="Inspect and operate execution capacity, cloud-managed resources, and persistent storage."
+        eyebrow="Infrastructure Resource Center"
+        icon="dns"
+        title="Infrastructure"
+      />
+
+      {/* Tabs */}
+      <nav aria-label="Infrastructure sections" className="flex items-center gap-8 border-b border-outline-variant/20 overflow-x-auto">
         <button
           aria-selected={activeTab === "servers"}
-          className={activeTab === "servers" ? "active" : ""}
+          className={`font-body-md text-sm pb-2.5 -mb-px border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+            activeTab === "servers"
+              ? "font-bold text-primary border-primary"
+              : "font-medium text-on-surface-variant hover:text-on-surface border-transparent"
+          }`}
           onClick={() => handleTabChange("servers")}
           role="tab"
           type="button"
@@ -85,7 +104,11 @@ export function InfrastructureCenterView({ console }: { console: ConsoleControll
         </button>
         <button
           aria-selected={activeTab === "resources"}
-          className={activeTab === "resources" ? "active" : ""}
+          className={`font-body-md text-sm pb-2.5 -mb-px border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+            activeTab === "resources"
+              ? "font-bold text-primary border-primary"
+              : "font-medium text-on-surface-variant hover:text-on-surface border-transparent"
+          }`}
           onClick={() => handleTabChange("resources")}
           role="tab"
           type="button"
@@ -94,7 +117,11 @@ export function InfrastructureCenterView({ console }: { console: ConsoleControll
         </button>
         <button
           aria-selected={activeTab === "storage"}
-          className={activeTab === "storage" ? "active" : ""}
+          className={`font-body-md text-sm pb-2.5 -mb-px border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+            activeTab === "storage"
+              ? "font-bold text-primary border-primary"
+              : "font-medium text-on-surface-variant hover:text-on-surface border-transparent"
+          }`}
           onClick={() => handleTabChange("storage")}
           role="tab"
           type="button"
@@ -104,258 +131,258 @@ export function InfrastructureCenterView({ console }: { console: ConsoleControll
       </nav>
 
       {error ? (
-        <div className="truthCallout warning" role="alert">
-          <b>Authority Warning:</b>
-          <p>{error}</p>
+        <div className="bg-status-warning/10 border border-status-warning/30 p-4 rounded-xl text-status-warning text-xs flex items-center gap-2" role="alert">
+          <Icon name="warning" className="text-[18px] shrink-0" />
+          <span>{error}</span>
         </div>
       ) : null}
 
-      {loading && data.nodes.length === 0 && data.resources.length === 0 ? (
-        <div className="centerLoading">
-          <p>Loading factual infrastructure resources from Cloud authority…</p>
-        </div>
-      ) : null}
-
+      {/* Tab 1: Servers Master-Detail View */}
       {activeTab === "servers" ? (
-        <section aria-labelledby="servers-heading" className="centerSection">
-          <div className="sectionHeader">
-            <div>
-              <h2 id="servers-heading">Execution Capacity (Servers)</h2>
-              <p>Physical machines and virtual compute nodes connected via Local Edge agent.</p>
+        data.nodes.length === 0 ? (
+          <Empty
+            action={
+              <Button onClick={() => setShowAddServer(true)} variant="primary">
+                <Icon name="add" className="text-[18px]" />
+                Connect First Server
+              </Button>
+            }
+            text="Connect physical or virtual compute nodes via one-time bootstrap token."
+            title="No Servers Connected"
+          />
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Left Column: Server Nodes Master List */}
+            <div className="lg:col-span-4 bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 flex flex-col gap-4 shadow-sm">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="font-headline-md text-sm font-semibold text-on-surface">Execution Capacity (Servers)</h2>
+                <Button onClick={() => setShowAddServer(true)} size="sm" variant="outline">
+                  <Icon name="add" className="text-[16px]" />
+                  Connect
+                </Button>
+              </div>
+
+              <div className="relative">
+                <Icon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-[18px] pointer-events-none" />
+                <input
+                  className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg py-2 pl-9 pr-3 text-xs font-body-md text-on-surface focus:outline-none focus:border-primary/50"
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Filter nodes..."
+                  type="text"
+                  value={searchQuery}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2 max-h-[600px] overflow-y-auto">
+                {filteredNodes.map((node) => {
+                  const factNode = data.facts?.nodes.find((fn) => fn.id === node.id);
+                  const agent = data.facts?.agents.find((a) => a.node_id === node.id || (factNode && a.runtime_id === factNode.runtime_id));
+                  const runtime = data.facts?.runtimes.find((r) => factNode && r.id === factNode.runtime_id);
+                  const status = serverStatus(
+                    factNode ? [factNode] : [{ id: node.id, project_id: projectID, runtime_id: "", status: node.status, cpu_cores: node.cpu_cores, memory_mb: node.memory_mb }],
+                    agent ? [agent] : [],
+                    runtime?.status
+                  );
+                  const isSelected = (selectedNode?.id ?? "") === node.id;
+
+                  return (
+                    <div
+                      key={node.id}
+                      onClick={() => setSelectedNodeID(node.id)}
+                      className={`p-3.5 rounded-xl border cursor-pointer transition-all flex flex-col gap-2 ${
+                        isSelected
+                          ? "bg-primary-container/80 border-primary text-on-surface shadow-sm"
+                          : "bg-surface-container border-outline-variant/20 hover:bg-surface-container-high"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${
+                              status === "Ready" ? "bg-status-ready" : status === "Offline" ? "bg-status-failed" : "bg-status-warning animate-pulse"
+                            }`}
+                          />
+                          <span className="font-body-md text-sm font-semibold text-on-surface truncate">
+                            {node.name || node.public_host || `node-${node.id.slice(0, 8)}`}
+                          </span>
+                        </div>
+                        <StatusBadge value={status === "Ready" ? "healthy" : status === "Offline" ? "failed" : "in_progress"} label={status} />
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] font-code-md text-on-surface-variant">
+                        <span>{node.public_host || "127.0.0.1"}</span>
+                        <span>{node.cpu_cores ? `${node.cpu_cores} vCPU` : "—"} • {node.memory_mb ? `${node.memory_mb} MB` : "—"}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Right Column: Detailed Node Inspector */}
+            <div className="lg:col-span-8">
+              {selectedNode ? (
+                <ServerDetail
+                  diagnostics={console.state.nodeDetail}
+                  facts={data.facts}
+                  node={selectedNode}
+                  onClose={() => {}}
+                  onDrain={(node) => console.actions.nodeAction(node.id, "drain")}
+                  onOffline={(node) => console.actions.nodeAction(node.id, "offline")}
+                  onRemove={(node) => console.actions.nodeAction(node.id, "remove")}
+                  onRetryBootstrap={(sessionID) => console.actions.retryBootstrap(sessionID, reload)}
+                  services={data.services}
+                  sessions={data.sessions}
+                />
+              ) : (
+                <Empty text="Select a server node from the list to view telemetry and assigned workloads." title="No Server Selected" />
+              )}
             </div>
           </div>
-
-          {data.nodes.length === 0 ? (
-            <div className="emptyStateCard">
-              <div className="emptyStateIcon">🖥️</div>
-              <h3>No servers connected</h3>
-              <p>Connect your first physical or virtual server to start deploying workloads.</p>
-              <button className="primary" onClick={() => setShowAddServer(true)} type="button">
-                Connect Server
-              </button>
-            </div>
-          ) : (
-            <div className="resourceGrid">
-              {data.nodes.map((node) => {
-                const factNode = data.facts?.nodes.find((fn) => fn.id === node.id);
-                const agent = data.facts?.agents.find((a) => a.node_id === node.id || (factNode && a.runtime_id === factNode.runtime_id));
-                const runtime = data.facts?.runtimes.find((r) => factNode && r.id === factNode.runtime_id);
-                const status = serverStatus(
-                  factNode ? [factNode] : [{ id: node.id, project_id: projectID, runtime_id: "", status: node.status, cpu_cores: node.cpu_cores, memory_mb: node.memory_mb }],
-                  agent ? [agent] : [],
-                  runtime?.status,
-                );
-                const pres = serverLifecyclePresentation(status);
-
-                return (
-                  <article
-                    className={`resourceCard ${selectedNodeID === node.id ? "selected" : ""}`}
-                    key={node.id}
-                    onClick={() => setSelectedNodeID(node.id)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div className="cardHeader">
-                      <div>
-                        <span className="cardKind">Server Node</span>
-                        <h3>{node.name || node.public_host || `Server ${node.id.slice(0, 8)}`}</h3>
-                      </div>
-                      <span className={`statusTag ${pres.statusValue}`}>{pres.label}</span>
-                    </div>
-
-                    <dl className="cardFacts">
-                      <div>
-                        <dt>Host / IP</dt>
-                        <dd>{node.public_host || "127.0.0.1"}</dd>
-                      </div>
-                      <div>
-                        <dt>Capacity</dt>
-                        <dd>
-                          {node.cpu_cores ? `${node.cpu_cores} CPU` : "—"} · {node.memory_mb ? `${node.memory_mb} MiB` : "—"}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Agent Connectivity</dt>
-                        <dd className={agent?.status === "active" ? "statusPass" : "statusNeutral"}>
-                          {agent ? `${agent.status}` : "Disconnected"}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>K3s Status</dt>
-                        <dd>{node.k3s_status || node.status || "Ready"}</dd>
-                      </div>
-                    </dl>
-
-                    <div className="cardFooter">
-                      <small>ID: <code>{node.id}</code></small>
-                      <span className="cardActionLink">Inspect Server →</span>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
+        )
       ) : null}
 
+      {/* Tab 2: Managed Resources Grid */}
       {activeTab === "resources" ? (
-        <section aria-labelledby="resources-heading" className="centerSection">
-          <div className="sectionHeader">
-            <div>
-              <h2 id="resources-heading">Managed Resources</h2>
-              <p>PostgreSQL, Valkey, and NATS instances provisioned and monitored by Cloud.</p>
-            </div>
-          </div>
+        data.resources.length === 0 ? (
+          <Empty
+            action={
+              <Button onClick={() => setShowAddResource(true)} variant="primary">
+                <Icon name="add" className="text-[18px]" />
+                Provision Managed Resource
+              </Button>
+            }
+            text="Provision PostgreSQL 18.6, Valkey, or NATS instances managed by Cloud authority."
+            title="No Managed Resources"
+          />
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            {data.resources.map((res) => {
+              const pres = resourceLifecyclePresentation(res.lifecycle);
+              const bindingsCount = data.bindings.filter((b) => b.target.id === res.id).length;
+              const isPostgres = res.type === "postgres";
 
-          {data.resources.length === 0 ? (
-            <div className="emptyStateCard">
-              <div className="emptyStateIcon">🗄️</div>
-              <h3>No managed resources provisioned</h3>
-              <p>Provision managed databases, caches, or messaging instances for your project.</p>
-              <button className="primary" onClick={() => setShowAddResource(true)} type="button">
-                + Provision First Resource
-              </button>
-            </div>
-          ) : (
-            <div className="resourceGrid">
-              {data.resources.map((res) => {
-                const pres = resourceLifecyclePresentation(res.lifecycle);
-                const bindingsCount = data.bindings.filter((b) => b.target.id === res.id).length;
-                const isPostgres = res.type === "postgres";
-
-                return (
-                  <article
-                    className={`resourceCard ${selectedResourceID === res.id ? "selected" : ""}`}
-                    key={res.id}
-                    onClick={() => setSelectedResourceID(res.id)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div className="cardHeader">
-                      <div>
-                        <span className="cardKind">{res.type.toUpperCase()}</span>
-                        <h3>{res.name}</h3>
+              return (
+                <article
+                  className="flex flex-col bg-surface-container-low rounded-xl shadow-md hover:shadow-lg transition-all group overflow-hidden border border-outline-variant/20 border-t-4 border-primary"
+                  key={res.id}
+                >
+                  <div className="p-6 flex-1 flex flex-col justify-between space-y-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-primary">
+                          <Icon name={isPostgres ? "database" : res.type === "valkey" ? "memory" : "hub"} className="text-[22px]" />
+                        </div>
+                        <div>
+                          <h3
+                            className="font-headline-md text-base font-bold text-on-surface group-hover:text-primary transition-colors cursor-pointer"
+                            onClick={() => setSelectedResourceID(res.id)}
+                          >
+                            {res.name}
+                          </h3>
+                          <span className="font-label-sm text-[11px] text-on-surface-variant uppercase tracking-wider block">
+                            {res.type} {res.managed?.version || (res.type === "postgres" ? "18.6" : "")}
+                          </span>
+                        </div>
                       </div>
-                      <span className={`statusTag ${pres.tone}`}>{pres.label}</span>
+                      <StatusBadge value={pres.tone === "ready" ? "healthy" : pres.tone === "failed" ? "failed" : "in_progress"} label={pres.label} />
                     </div>
 
-                    <dl className="cardFacts">
+                    <div className="bg-surface-container-highest/60 p-3.5 rounded-lg border border-outline-variant/20 grid grid-cols-2 gap-3 text-xs">
                       <div>
-                        <dt>Environment</dt>
-                        <dd>{res.environment_id || "Default"}</dd>
+                        <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Active Bindings</span>
+                        <span className="font-body-md text-on-surface font-medium">{bindingsCount} apps</span>
                       </div>
                       <div>
-                        <dt>Active Bindings</dt>
-                        <dd>{bindingsCount} {bindingsCount === 1 ? "application" : "applications"}</dd>
-                      </div>
-                      <div>
-                        <dt>CPU / Memory</dt>
-                        <dd>
-                          {res.managed?.cpu_millicores ? `${res.managed.cpu_millicores}m` : "—"} ·{" "}
-                          {formatBytes(res.managed?.memory_bytes)}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Runtime Readiness</dt>
-                        <dd className={res.runtime?.evidence?.workload_ready ? "statusPass" : "statusNeutral"}>
-                          {res.runtime?.evidence?.workload_ready ? "Workload Ready" : "Provisioning / Pending"}
-                        </dd>
+                        <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">CPU / RAM</span>
+                        <span className="font-body-md text-on-surface font-medium">
+                          {res.managed?.cpu_millicores ? `${res.managed.cpu_millicores}m` : "250m"} • {formatBytes(res.managed?.memory_bytes || 268435456)}
+                        </span>
                       </div>
                       {isPostgres ? (
-                        <div>
-                          <dt>Persistent Storage</dt>
-                          <dd>
-                            {formatBytes(res.managed?.storage?.size_bytes)} ({res.runtime?.evidence?.storage_retained ? "Retained" : "Bound"})
-                          </dd>
+                        <div className="col-span-2">
+                          <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Persistent Storage</span>
+                          <span className="font-body-md text-on-surface font-medium">
+                            {formatBytes(res.managed?.storage?.size_bytes || 10737418240)} ({res.runtime?.evidence?.storage_retained ? "Retained" : "Bound"})
+                          </span>
                         </div>
                       ) : null}
-                    </dl>
-
-                    <div className="cardFooter">
-                      <small>ID: <code>{res.id}</code></small>
-                      <span className="cardActionLink">Inspect Resource →</span>
                     </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
-      ) : null}
+                  </div>
 
-      {activeTab === "storage" ? (
-        <section aria-labelledby="storage-heading" className="centerSection">
-          <div className="sectionHeader">
-            <div>
-              <h2 id="storage-heading">Retained Storage Inventory</h2>
-              <p>Persistent database volumes retained following PostgreSQL resource deletion.</p>
-            </div>
+                  <div className="bg-surface-container px-6 py-3 border-t border-outline-variant/20 flex items-center justify-between">
+                    <span className="font-code-md text-[11px] text-on-surface-variant truncate max-w-[180px]">ID: {res.id}</span>
+                    <Button onClick={() => setSelectedResourceID(res.id)} size="sm" variant="outline">
+                      Inspect & Operations →
+                    </Button>
+                  </div>
+                </article>
+              );
+            })}
           </div>
-
-          {data.retainedStorages.length === 0 ? (
-            <div className="emptyStateCard">
-              <div className="emptyStateIcon">💾</div>
-              <h3>No retained storage records</h3>
-              <p>When stateful PostgreSQL resources are deleted, their persistent data volumes are safely preserved here.</p>
-            </div>
-          ) : (
-            <div className="resourceGrid">
-              {data.retainedStorages.map((storage) => {
-                const pres = retainedStorageLifecyclePresentation(storage.lifecycle);
-
-                return (
-                  <article className="resourceCard storageCard" key={storage.id}>
-                    <div className="cardHeader">
-                      <div>
-                        <span className="cardKind">Persistent Volume Claim</span>
-                        <h3>{storage.pvc_name}</h3>
-                        <small className="storageSource">Original Resource: {storage.resource_name}</small>
-                      </div>
-                      <span className={`statusTag ${pres.tone}`}>{pres.label}</span>
-                    </div>
-
-                    <dl className="cardFacts">
-                      <div>
-                        <dt>Storage Size</dt>
-                        <dd>{storage.actual_size || formatBytes(storage.requested_bytes)}</dd>
-                      </div>
-                      <div>
-                        <dt>Storage Class</dt>
-                        <dd>{storage.storage_class}</dd>
-                      </div>
-                      <div>
-                        <dt>Retained Date</dt>
-                        <dd>{storage.retained_at}</dd>
-                      </div>
-                      <div>
-                        <dt>PVC UID</dt>
-                        <dd><code>{storage.pvc_uid || "Not reported"}</code></dd>
-                      </div>
-                    </dl>
-
-                    <div className="cardFooter">
-                      <small>Storage ID: <code>{storage.id}</code></small>
-                      {storage.lifecycle === "retained" ? (
-                        <button
-                          className="secondary destructive"
-                          onClick={() => setDestroyingStorage(storage)}
-                          type="button"
-                        >
-                          Review & Destroy Storage
-                        </button>
-                      ) : (
-                        <span className="statusTag neutral">{storage.lifecycle}</span>
-                      )}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
+        )
       ) : null}
 
-      {/* Selected Resource Drawer/Panel */}
+      {/* Tab 3: Retained Storage Inventory */}
+      {activeTab === "storage" ? (
+        data.retainedStorages.length === 0 ? (
+          <Empty
+            text="When stateful PostgreSQL resources are deleted, persistent data volumes are retained here for disaster recovery and safe cleanup."
+            title="No Retained Storage Volumes"
+          />
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            {data.retainedStorages.map((storage) => {
+              const pres = retainedStorageLifecyclePresentation(storage.lifecycle);
+              return (
+                <article
+                  className="flex flex-col bg-surface-container-low rounded-xl shadow-md p-6 border border-outline-variant/20 justify-between space-y-4"
+                  key={storage.id}
+                >
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider block">Persistent Volume Claim</span>
+                        <h3 className="font-headline-md text-base font-bold text-on-surface">{storage.pvc_name}</h3>
+                        <small className="text-xs text-on-surface-variant block mt-0.5">Origin: {storage.resource_name}</small>
+                      </div>
+                      <StatusBadge value={pres.tone === "ready" ? "healthy" : "warning"} label={pres.label} />
+                    </div>
+
+                    <dl className="bg-surface-container-highest/60 p-3.5 rounded-lg border border-outline-variant/20 grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Storage Size</dt>
+                        <dd className="font-body-md text-on-surface font-semibold">{storage.actual_size || formatBytes(storage.requested_bytes)}</dd>
+                      </div>
+                      <div>
+                        <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Storage Class</dt>
+                        <dd className="font-body-md text-on-surface font-semibold">{storage.storage_class}</dd>
+                      </div>
+                      <div className="col-span-2">
+                        <dt className="font-label-sm text-[10px] text-on-surface-variant uppercase">Retained Timestamp</dt>
+                        <dd className="font-code-md text-on-surface-variant">{storage.retained_at}</dd>
+                      </div>
+                    </dl>
+                  </div>
+
+                  <div className="pt-3 border-t border-outline-variant/20 flex items-center justify-between">
+                    <span className="font-code-md text-[10px] text-on-surface-variant truncate max-w-[140px]">ID: {storage.id}</span>
+                    {storage.lifecycle === "retained" ? (
+                      <Button onClick={() => setDestroyingStorage(storage)} size="sm" variant="danger">
+                        Review & Destroy Storage
+                      </Button>
+                    ) : (
+                      <span className="font-label-sm text-xs text-on-surface-variant">{storage.lifecycle}</span>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )
+      ) : null}
+
+      {/* Selected Resource Drawer */}
       {selectedResource ? (
         <ResourceDetail
           allResources={data.resources}
@@ -374,22 +401,6 @@ export function InfrastructureCenterView({ console }: { console: ConsoleControll
         />
       ) : null}
 
-      {/* Selected Server Drawer/Panel */}
-      {selectedNode ? (
-        <ServerDetail
-          diagnostics={console.state.nodeDetail}
-          facts={data.facts}
-          node={selectedNode}
-          onClose={() => setSelectedNodeID("")}
-          onDrain={(node) => console.actions.nodeAction(node.id, "drain")}
-          onOffline={(node) => console.actions.nodeAction(node.id, "offline")}
-          onRemove={(node) => console.actions.nodeAction(node.id, "remove")}
-          onRetryBootstrap={(sessionID) => console.actions.retryBootstrap(sessionID, reload)}
-          services={data.services}
-          sessions={data.sessions}
-        />
-      ) : null}
-
       {/* Add Resource Dialog */}
       {showAddResource ? (
         <AddResourceDialog
@@ -403,7 +414,7 @@ export function InfrastructureCenterView({ console }: { console: ConsoleControll
         />
       ) : null}
 
-      {/* Add Server Dialog (reusing BootstrapDialog) */}
+      {/* Add Server Dialog */}
       {showAddServer ? (
         <BootstrapDialog
           console={console}
@@ -412,7 +423,7 @@ export function InfrastructureCenterView({ console }: { console: ConsoleControll
         />
       ) : null}
 
-      {/* Destroy Retained Storage Modal */}
+      {/* Destroy Storage Modal */}
       {destroyingStorage ? (
         <DestroyStorageDialog
           onClose={() => setDestroyingStorage(null)}
