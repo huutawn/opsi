@@ -10,6 +10,7 @@ import { OverviewView } from "@/features/overview/overview-view";
 import { ProjectsView, WorkspaceHomeView } from "@/features/projects/projects-view";
 import { Tabs, tabPanelProps } from "@/components/navigation/tabs";
 import { ServicesView } from "@/features/services/services-view";
+import { Button, Icon } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 
 export const coreViewMap = {
@@ -117,13 +118,26 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
   const tabs = legacyTabGroups[route.view]?.[route.tab] ?? groupedTabs[route.view as keyof typeof groupedTabs];
   const label = `${groupedTitle(route.view)} sections`;
   return (
-    <section className="groupedPage">
-      <div className="groupedHeader">
+    <div className="p-4 lg:p-margin-desktop max-w-7xl mx-auto space-y-6">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <p className="eyebrow">Project workspace</p>
-          <h1>{groupedTitle(route.view)}</h1>
-          <p>{groupedDescription(route.view)}</p>
+          <h1 className="font-headline-lg text-headline-lg font-semibold text-on-surface">
+            {groupedTitle(route.view)}
+          </h1>
+          <p className="font-body-md text-sm text-on-surface-variant mt-1">
+            {groupedDescription(route.view)}
+          </p>
         </div>
+        {route.view === "delivery" && (
+          <Button
+            onClick={() => console.navigate({ view: "services" })}
+            size="md"
+            variant="primary"
+          >
+            <Icon name="rocket_launch" className="text-[18px]" />
+            New Deployment
+          </Button>
+        )}
       </div>
       <Tabs
         items={tabs.map((tab) => ({ ...tab, href: routeHref({ ...route, tab: tab.id }) }))}
@@ -138,7 +152,7 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
       <div {...tabPanelProps(label, route.tab)}>
         <View console={console} />
       </div>
-    </section>
+    </div>
   );
 }
 

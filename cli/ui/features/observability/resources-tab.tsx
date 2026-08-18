@@ -1,11 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { Empty, StatusBadge, Surface } from "@/components/ui/primitives";
+import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import { routeHref } from "@/features/console/navigation";
 import type { ConsoleController } from "@/features/console/types";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
-import { Fact } from "@/features/observability/shared";
 import type { ResourceRuntimeSummary } from "@/lib/presentation/observability/model";
 import { formatBytes } from "@/lib/presentation/resources/model";
 
@@ -30,94 +29,100 @@ export function ResourcesTab({
   }
 
   return (
-    <div className="observabilityStack" data-testid="observability-resources">
-      <div className="observabilityHero">
+    <div className="space-y-6" data-testid="observability-resources">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <p className="eyebrow">Data Services & In-Memory Infrastructure</p>
-          <h2>Managed Resources Observability</h2>
-          <p>
-            Factual operational readiness for PostgreSQL databases, Valkey caching layers, and NATS event brokers.
+          <p className="font-label-sm text-xs text-primary uppercase tracking-wider">Data Services & Cache</p>
+          <h2 className="font-headline-md text-xl font-bold text-on-surface">Managed Resources Observability</h2>
+          <p className="text-xs text-on-surface-variant mt-0.5">
+            Operational readiness for PostgreSQL, Valkey, and NATS.
           </p>
         </div>
-        <div className="heroStatus">
-          <button
-            className="secondaryAction"
+        <div>
+          <Button
             disabled={model.data.sources.resources === "loading"}
             onClick={() => void model.load()}
-            type="button"
+            size="sm"
+            variant="secondary"
           >
+            <Icon name="refresh" className="text-[16px]" />
             Refresh Resources
-          </button>
+          </Button>
         </div>
       </div>
 
       {resources.length > 0 ? (
-        <div className="tableWrap">
-          <table className="dataTable" aria-label="Managed resources runtime inventory">
-            <thead>
-              <tr>
-                <th scope="col">Resource</th>
-                <th scope="col">Engine</th>
-                <th scope="col">Version</th>
-                <th scope="col">Readiness</th>
-                <th scope="col">Bound Applications</th>
-                <th scope="col">Server</th>
-                <th scope="col">Storage</th>
-                <th scope="col"><span className="srOnly">Actions</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              {resources.map((res) => {
-                const isSelected = selectedResource?.id === res.id;
-                return (
-                  <tr
-                    className={isSelected ? "selectedRow" : ""}
-                    key={res.id}
-                    onClick={() => selectResource(res)}
-                    style={{ cursor: "pointer" }}
-                    data-testid={`resource-row-${res.name}`}
-                  >
-                    <td>
-                      <strong>{res.name}</strong>
-                    </td>
-                    <td>
-                      <span className="typePill">{res.typeLabel}</span>
-                    </td>
-                    <td>
-                      <span className="mono">{res.version || "Not reported"}</span>
-                    </td>
-                    <td>
-                      <StatusBadge
-                        label={res.statusLabel}
-                        value={res.status === "ready" ? "healthy" : res.status === "degraded" ? "degraded" : res.status === "failed" ? "failed" : "unknown"}
-                      />
-                    </td>
-                    <td>
-                      <span>{res.applicationBindingCount} bound</span>
-                    </td>
-                    <td>
-                      <span>{res.serverPlacement}</span>
-                    </td>
-                    <td>
-                      <span>{res.storageBytes ? formatBytes(res.storageBytes) : res.persistentStorage ? "Persistent" : "In-memory"}</span>
-                    </td>
-                    <td>
-                      <button
-                        className="textButton"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          selectResource(res);
-                        }}
-                        type="button"
-                      >
-                        Inspect
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-2xl overflow-hidden shadow-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse" aria-label="Managed resources runtime inventory">
+              <thead>
+                <tr className="bg-surface-container/60 border-b border-outline-variant/20 text-[11px] font-label-sm uppercase tracking-wider text-on-surface-variant">
+                  <th className="py-3 px-4 font-semibold">Resource</th>
+                  <th className="py-3 px-4 font-semibold">Engine</th>
+                  <th className="py-3 px-4 font-semibold">Version</th>
+                  <th className="py-3 px-4 font-semibold">Readiness</th>
+                  <th className="py-3 px-4 font-semibold">Bound Apps</th>
+                  <th className="py-3 px-4 font-semibold">Server</th>
+                  <th className="py-3 px-4 font-semibold">Storage</th>
+                  <th className="py-3 px-4 text-right"><span className="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-outline-variant/15 text-xs text-on-surface">
+                {resources.map((res) => {
+                  const isSelected = selectedResource?.id === res.id;
+                  return (
+                    <tr
+                      className={`hover:bg-surface-container/60 transition-colors cursor-pointer ${
+                        isSelected ? "bg-primary-container/30 ring-1 ring-inset ring-primary/40" : ""
+                      }`}
+                      key={res.id}
+                      onClick={() => selectResource(res)}
+                      data-testid={`resource-row-${res.name}`}
+                    >
+                      <td className="py-3.5 px-4 font-semibold text-on-surface font-body-md">
+                        {res.name}
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <span className="bg-surface-container px-2 py-0.5 rounded text-[11px] font-medium border border-outline-variant/20">
+                          {res.typeLabel}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 font-code-md text-on-surface-variant">
+                        {res.version || "Not reported"}
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <StatusBadge
+                          label={res.statusLabel}
+                          value={res.status === "ready" ? "healthy" : res.status === "degraded" ? "degraded" : res.status === "failed" ? "failed" : "unknown"}
+                        />
+                      </td>
+                      <td className="py-3.5 px-4 font-semibold">
+                        {res.applicationBindingCount} bound
+                      </td>
+                      <td className="py-3.5 px-4 font-code-md text-on-surface-variant">
+                        {res.serverPlacement}
+                      </td>
+                      <td className="py-3.5 px-4 font-code-md text-on-surface-variant">
+                        {res.storageBytes ? formatBytes(res.storageBytes) : res.persistentStorage ? "Persistent" : "In-memory"}
+                      </td>
+                      <td className="py-3.5 px-4 text-right">
+                        <Button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            selectResource(res);
+                          }}
+                          size="sm"
+                          variant="ghost"
+                        >
+                          Inspect →
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <Empty
@@ -128,7 +133,7 @@ export function ResourcesTab({
 
       {/* Resource Detail Drawer */}
       {selectedResource ? (
-        <ResourceDetailSurface
+        <ResourceDetailDrawer
           console={console}
           detailTab={detailTab}
           onClose={() => selectResource(null)}
@@ -141,7 +146,7 @@ export function ResourcesTab({
   );
 }
 
-function ResourceDetailSurface({
+function ResourceDetailDrawer({
   console,
   detailTab,
   onClose,
@@ -157,128 +162,156 @@ function ResourceDetailSurface({
   resource: ResourceRuntimeSummary;
 }) {
   return (
-    <div className="modalBackdrop" onClick={onClose} role="presentation">
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end" onClick={onClose} role="presentation">
       <section
         aria-label={`Resource diagnostics for ${resource.name}`}
         aria-modal="true"
-        className="diagnosticDrawer"
+        className="w-full max-w-2xl h-full bg-surface-container-low border-l border-outline-variant/30 shadow-2xl flex flex-col text-on-surface overflow-hidden"
         data-testid="resource-detail-drawer"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
       >
-        <header className="drawerHeader">
+        {/* Header */}
+        <header className="p-6 border-b border-outline-variant/20 flex items-start justify-between gap-4 bg-surface-container/50">
           <div>
-            <p className="eyebrow">Managed Resource Diagnostics · {resource.typeLabel}</p>
-            <h2>{resource.name}</h2>
-            <div className="drawerBadges">
+            <span className="font-label-sm text-xs text-primary font-bold uppercase tracking-wider block mb-1">
+              Managed Resource Diagnostics • {resource.typeLabel}
+            </span>
+            <h2 className="font-headline-md text-2xl font-bold text-on-surface">{resource.name}</h2>
+            <div className="flex items-center gap-2 mt-2">
               <StatusBadge
                 label={`Status: ${resource.statusLabel}`}
                 value={resource.status === "ready" ? "healthy" : resource.status === "degraded" ? "degraded" : resource.status === "failed" ? "failed" : "unknown"}
               />
-              <span className="infoBadge">Engine: {resource.typeLabel} {resource.version ? `v${resource.version}` : ""}</span>
+              <span className="text-xs px-2.5 py-0.5 rounded-md bg-surface-container-high font-mono text-on-surface-variant">
+                Engine: {resource.typeLabel} {resource.version ? `v${resource.version}` : ""}
+              </span>
             </div>
           </div>
-          <div className="drawerHeaderActions">
-            <a
-              className="secondaryAction textLink"
-              href={routeHref({ projectID, view: "infrastructure", tab: "resources", resource: resource.id })}
-              onClick={(e) => {
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                e.preventDefault();
-                console.navigate({ projectID, view: "infrastructure", tab: "resources", resource: resource.id });
-              }}
+
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={() => console.navigate({ projectID, view: "infrastructure", tab: "resources", resource: resource.id })}
+              size="sm"
+              variant="outline"
             >
-              Open in Infrastructure
-            </a>
-            <button aria-label="Close diagnostics" className="closeButton" onClick={onClose} type="button">
-              ✕
+              Infrastructure
+            </Button>
+            <button
+              aria-label="Close diagnostics"
+              className="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors cursor-pointer"
+              onClick={onClose}
+              type="button"
+            >
+              <Icon name="close" className="text-[20px]" />
             </button>
           </div>
         </header>
 
-        <nav aria-label="Resource sections" className="consoleTabs drawerTabs">
-          <button
-            aria-selected={detailTab === "overview"}
-            className={detailTab === "overview" ? "active" : ""}
-            onClick={() => onTabChange("overview")}
-            role="tab"
-            type="button"
-          >
-            Overview
-          </button>
-          <button
-            aria-selected={detailTab === "runtime"}
-            className={detailTab === "runtime" ? "active" : ""}
-            onClick={() => onTabChange("runtime")}
-            role="tab"
-            type="button"
-          >
-            Runtime
-          </button>
-          <button
-            aria-selected={detailTab === "applications"}
-            className={detailTab === "applications" ? "active" : ""}
-            onClick={() => onTabChange("applications")}
-            role="tab"
-            type="button"
-          >
-            Bound Applications ({resource.applicationBindingCount})
-          </button>
+        {/* Tabs */}
+        <nav aria-label="Resource sections" className="flex items-center gap-1 border-b border-outline-variant/20 px-6 pt-2 bg-surface-container/20">
+          {(["overview", "runtime", "applications"] as const).map((t) => {
+            const active = detailTab === t;
+            return (
+              <button
+                aria-selected={active}
+                className={`px-4 py-2.5 text-xs font-label-sm uppercase font-bold border-b-2 transition-all cursor-pointer ${
+                  active ? "border-primary text-primary" : "border-transparent text-on-surface-variant hover:text-on-surface"
+                }`}
+                key={t}
+                onClick={() => onTabChange(t)}
+                role="tab"
+                type="button"
+              >
+                {t === "applications" ? `Bound Applications (${resource.applicationBindingCount})` : t}
+              </button>
+            );
+          })}
         </nav>
 
-        <div className="drawerContent">
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {detailTab === "overview" ? (
-            <div className="drawerSectionStack">
-              <Surface title="Resource Identity & Engine">
-                <dl className="evidenceGrid">
-                  <Fact label="Resource Name" value={resource.name} />
-                  <Fact label="Resource ID" value={resource.id} />
-                  <Fact label="Engine" value={resource.typeLabel} />
-                  <Fact label="Engine Version" value={resource.version || "Not reported"} />
-                  <Fact label="Readiness Status" value={resource.statusLabel} />
-                  <Fact label="Server Placement" value={resource.serverPlacement} />
-                </dl>
-              </Surface>
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 bg-surface-container p-4 rounded-2xl border border-outline-variant/15 text-xs">
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Resource Name</span>
+                  <strong className="text-on-surface font-semibold block">{resource.name}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Resource ID</span>
+                  <strong className="text-on-surface font-code-md truncate block">{resource.id}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Engine</span>
+                  <strong className="text-on-surface">{resource.typeLabel}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Engine Version</span>
+                  <strong className="text-on-surface font-code-md">{resource.version || "Not reported"}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Readiness</span>
+                  <strong className="text-on-surface">{resource.statusLabel}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Server Placement</span>
+                  <strong className="text-on-surface font-code-md">{resource.serverPlacement}</strong>
+                </div>
+              </div>
 
               {resource.type.toLowerCase().includes("postgres") ? (
-                <Surface title="PostgreSQL Safe Runtime Facts">
-                  <dl className="evidenceGrid">
-                    <Fact label="Service Readiness" value={resource.statusLabel} />
-                    <Fact label="PostgreSQL Version" value={resource.version || "16"} />
-                    <Fact label="Volume Mount" value={resource.persistentStorage ? "Mounted persistent volume" : "Ephemeral"} />
-                    <Fact label="Credentials Safety" value="Passwords & connection strings protected; never exposed in Observability." />
-                  </dl>
-                </Surface>
+                <div className="bg-surface-container/60 p-4 rounded-2xl border border-outline-variant/15 space-y-2 text-xs">
+                  <h3 className="font-headline-md text-sm font-bold text-on-surface">PostgreSQL Safety</h3>
+                  <p className="text-on-surface-variant">
+                    Volume Mount: {resource.persistentStorage ? "Mounted persistent volume" : "Ephemeral"}
+                  </p>
+                  <p className="text-on-surface-variant text-[11px]">
+                    Credentials Safety: Passwords & connection strings protected; never exposed in Observability.
+                  </p>
+                </div>
               ) : null}
             </div>
           ) : detailTab === "runtime" ? (
-            <div className="drawerSectionStack">
-              <Surface title="Allocated Capacity">
-                <dl className="evidenceGrid">
-                  <Fact label="Allocated CPU" value={resource.allocatedCPU !== undefined ? `${resource.allocatedCPU} cores` : "Standard profile"} />
-                  <Fact label="Allocated Memory" value={resource.allocatedMemoryBytes ? formatBytes(resource.allocatedMemoryBytes) : "Standard profile"} />
-                  <Fact label="Storage Size" value={resource.storageBytes ? formatBytes(resource.storageBytes) : resource.persistentStorage ? "Persistent storage" : "In-memory / Ephemeral"} />
-                  <Fact label="Last Operation" value={resource.lastOperation || "Normal operation"} />
-                  {resource.lastFailure ? <Fact label="Last Failure Detail" value={resource.lastFailure} /> : null}
-                </dl>
-              </Surface>
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 gap-3 bg-surface-container p-4 rounded-2xl border border-outline-variant/15 text-xs">
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Allocated CPU</span>
+                  <strong className="text-on-surface font-code-md text-base">{resource.allocatedCPU !== undefined ? `${resource.allocatedCPU} cores` : "Standard profile"}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Allocated Memory</span>
+                  <strong className="text-on-surface font-code-md text-base">{resource.allocatedMemoryBytes ? formatBytes(resource.allocatedMemoryBytes) : "Standard profile"}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Storage Size</span>
+                  <strong className="text-on-surface font-code-md">{resource.storageBytes ? formatBytes(resource.storageBytes) : resource.persistentStorage ? "Persistent storage" : "In-memory"}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Last Operation</span>
+                  <strong className="text-on-surface">{resource.lastOperation || "Normal operation"}</strong>
+                </div>
+              </div>
             </div>
           ) : (
-            <div className="drawerSectionStack">
-              <Surface title="Bound Applications">
-                {resource.boundServiceKeys.length > 0 ? (
-                  <ul className="compactList">
+            <div className="space-y-4">
+              {resource.boundServiceKeys.length > 0 ? (
+                <div className="bg-surface-container rounded-2xl border border-outline-variant/15 p-4 space-y-2">
+                  <h3 className="font-headline-md text-sm font-bold text-on-surface mb-3">Bound Applications</h3>
+                  <ul className="divide-y divide-outline-variant/15 text-xs">
                     {resource.boundServiceKeys.map((svcKey) => (
-                      <li key={svcKey}>
-                        <strong>{svcKey}</strong>
-                        <small>Bound to {resource.name} ({resource.typeLabel})</small>
+                      <li className="py-2.5 flex items-center justify-between" key={svcKey}>
+                        <strong className="text-on-surface font-semibold">{svcKey}</strong>
+                        <span className="text-on-surface-variant font-code-md">Bound to {resource.name} ({resource.typeLabel})</span>
                       </li>
                     ))}
                   </ul>
-                ) : (
-                  <Empty title="No bound applications" text="No applications are currently connected to this managed resource." />
-                )}
-              </Surface>
+                </div>
+              ) : (
+                <div className="p-8 text-center text-xs text-on-surface-variant bg-surface-container rounded-2xl border border-outline-variant/15">
+                  No applications are currently connected to this managed resource.
+                </div>
+              )}
             </div>
           )}
         </div>

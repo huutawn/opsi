@@ -1,19 +1,123 @@
-import { Empty, StatusBadge, Surface } from "@/components/ui/primitives";
+"use client";
+
+import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
 
 export function MetricsTab({ console, model }: { console: ConsoleController; model: ObservabilityModel }) {
   const telemetry = model.data.telemetry;
   const agentUnavailable = console.session?.agent_connected !== "ok" || model.data.sources.telemetry === "unavailable";
-  return <div className="observabilityStack"><div className="observabilityHero"><div><p className="eyebrow">Factual comparisons</p><h2>Metrics</h2><p>Bars compare reported values. No denominator, timestamp, or sample index is presented as something it is not.</p></div><button disabled={model.data.sources.telemetry === "loading"} onClick={() => void model.load()} type="button">Refresh metrics</button></div>{agentUnavailable ? <p className="truthCallout"><b>Agent telemetry unavailable</b><br />Cloud service inventory remains available; metric values are not inferred as zero.</p> : null}{telemetry.length ? <><Comparison title="Readiness comparison" rows={telemetry.map((item) => ({ label: item.service_id, value: item.ready_pods, suffix: `${item.ready_pods}/${item.pod_count} ready`, status: item.ready_pods < item.pod_count ? "degraded" : "healthy" }))} /><Comparison title="Restarts" rows={telemetry.map((item) => ({ label: item.service_id, value: item.restart_count ?? null, suffix: item.restart_count === undefined ? "Unknown" : String(item.restart_count), status: metricStatus(item.restart_count) }))} /><Comparison title="Recent errors" rows={telemetry.map((item) => ({ label: item.service_id, value: item.recent_error_count ?? null, suffix: item.recent_error_count === undefined ? "Unknown" : String(item.recent_error_count), status: metricStatus(item.recent_error_count) }))} /><Comparison title="CPU by service" rows={telemetry.map((item) => ({ label: item.service_id, value: item.cpu_cores ?? null, suffix: item.cpu_cores === undefined ? "Unknown" : `${item.cpu_cores} cores`, status: "unknown" }))} /><Comparison title="Memory by service" rows={telemetry.map((item) => ({ label: item.service_id, value: item.memory_bytes ?? null, suffix: item.memory_bytes === undefined ? "Unknown" : `${item.memory_bytes} bytes`, status: "unknown" }))} /></> : <Empty title="No metric series" text="The Agent returned no service samples. A blank chart is not rendered." />}{console.state.support?.dashboard.panels.map((panel) => panel.series.length ? <Comparison key={panel.id} title={panel.title} note={`${panel.description || panel.query}${panel.series.some((series) => (series.points?.length ?? 0) > 0) ? " · Recent ordered samples — timestamps not reported. No time axis is drawn." : ""}`} rows={panel.series.map((series) => ({ label: series.name, value: series.value, suffix: formatPanelValue(series.value, panel.unit), status: series.status }))} /> : <Surface key={panel.id} title={panel.title}><Empty text="No samples for this panel." /></Surface>)}</div>;
+
+  return (
+    <div className="space-y-6" data-testid="observability-metrics">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <p className="font-label-sm text-xs text-primary uppercase tracking-wider">Factual Metrics</p>
+          <h2 className="font-headline-md text-xl font-bold text-on-surface">Service Metrics</h2>
+          <p className="text-xs text-on-surface-variant mt-0.5">
+            Resource usage, restart counters, and reported telemetry metrics.
+          </p>
+        </div>
+        <Button
+          disabled={model.data.sources.telemetry === "loading"}
+          onClick={() => void model.load()}
+          size="sm"
+          variant="secondary"
+        >
+          <Icon name="refresh" className="text-[16px]" />
+          Refresh Metrics
+        </Button>
+      </div>
+
+      {agentUnavailable ? (
+        <div className="p-4 bg-status-warning/10 border border-status-warning/30 rounded-xl text-status-warning text-xs space-y-1">
+          <b>Agent telemetry unavailable</b>
+          <p className="text-on-surface-variant text-[11px]">
+            Cloud service inventory remains available; metric values are not inferred as zero.
+          </p>
+        </div>
+      ) : null}
+
+      {telemetry.length ? (
+        <div className="space-y-6">
+          <Comparison title="Readiness comparison" rows={telemetry.map((item) => ({ label: item.service_id, value: item.ready_pods, suffix: `${item.ready_pods}/${item.pod_count} ready`, status: item.ready_pods < item.pod_count ? "degraded" : "healthy" }))} />
+          <Comparison title="Restarts" rows={telemetry.map((item) => ({ label: item.service_id, value: item.restart_count ?? null, suffix: item.restart_count === undefined ? "Unknown" : String(item.restart_count), status: metricStatus(item.restart_count) }))} />
+          <Comparison title="Recent errors" rows={telemetry.map((item) => ({ label: item.service_id, value: item.recent_error_count ?? null, suffix: item.recent_error_count === undefined ? "Unknown" : String(item.recent_error_count), status: metricStatus(item.recent_error_count) }))} />
+          <Comparison title="CPU by service" rows={telemetry.map((item) => ({ label: item.service_id, value: item.cpu_cores ?? null, suffix: item.cpu_cores === undefined ? "Unknown" : `${item.cpu_cores} cores`, status: "unknown" }))} />
+          <Comparison title="Memory by service" rows={telemetry.map((item) => ({ label: item.service_id, value: item.memory_bytes ?? null, suffix: item.memory_bytes === undefined ? "Unknown" : `${item.memory_bytes} bytes`, status: "unknown" }))} />
+        </div>
+      ) : (
+        <Empty title="No metric series" text="The Agent returned no service samples. A blank chart is not rendered." />
+      )}
+
+      {console.state.support?.dashboard.panels.map((panel) =>
+        panel.series.length ? (
+          <Comparison
+            key={panel.id}
+            note={`${panel.description || panel.query}${
+              panel.series.some((series) => (series.points?.length ?? 0) > 0)
+                ? " · Recent ordered samples — timestamps not reported. No time axis is drawn."
+                : ""
+            }`}
+            rows={panel.series.map((series) => ({
+              label: series.name,
+              value: series.value,
+              suffix: panel.unit ? `${series.value} ${panel.unit}` : String(series.value),
+              status: series.status,
+            }))}
+            title={panel.title}
+          />
+        ) : (
+          <div className="bg-surface-container-low border border-outline-variant/20 rounded-2xl p-5 shadow-sm space-y-2" key={panel.id}>
+            <h3 className="font-headline-md text-sm font-bold text-on-surface">{panel.title}</h3>
+            <Empty text="No samples for this panel." />
+          </div>
+        ),
+      )}
+    </div>
+  );
 }
 
-function metricStatus(value?: number) { return value === undefined ? "unknown" : value > 0 ? "degraded" : "healthy"; }
+function metricStatus(value?: number) {
+  return value === undefined ? "unknown" : value > 0 ? "degraded" : "healthy";
+}
 
-function Comparison({ title, rows, note }: { title: string; rows: Array<{ label: string; value: number | null; suffix: string; status: string }>; note?: string }) {
+function Comparison({
+  title,
+  rows,
+  note,
+}: {
+  title: string;
+  rows: Array<{ label: string; value: number | null; suffix: string; status: string }>;
+  note?: string;
+}) {
   const known = rows.map((row) => row.value).filter((value): value is number => value !== null && Number.isFinite(value));
   const max = Math.max(1, ...known);
-  return <Surface title={title}>{note ? <p className="notice">{note}</p> : null}<p className="chartSummary">Accessible summary: {rows.map((row) => `${row.label} ${row.suffix}`).join("; ")}</p><div className="comparisonChart" role="img" aria-label={`${title}: ${rows.map((row) => `${row.label} ${row.suffix}`).join(", ")}`}>{rows.map((row) => <div className="comparisonRow" key={row.label}><span>{row.label}</span><div className="comparisonTrack"><i style={{ width: row.value === null ? "0%" : `${Math.max(3, (row.value / max) * 100)}%` }} /></div><b><StatusBadge value={row.status} /> {row.suffix}</b></div>)}</div><div className="tableWrap"><table><caption className="srOnly">{title} data</caption><thead><tr><th>Service</th><th>Reported value</th></tr></thead><tbody>{rows.map((row) => <tr key={row.label}><th scope="row">{row.label}</th><td>{row.suffix}</td></tr>)}</tbody></table></div></Surface>;
-}
 
-function formatPanelValue(value: number, unit: string) { return unit ? `${value} ${unit}` : String(value); }
+  return (
+    <div className="bg-surface-container-low border border-outline-variant/20 rounded-2xl p-5 shadow-sm space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="font-headline-md text-sm font-bold text-on-surface">{title}</h3>
+        {note ? <span className="text-xs text-on-surface-variant font-code-md">{note}</span> : null}
+      </div>
+
+      <div className="space-y-3" role="img" aria-label={`${title}: ${rows.map((row) => `${row.label} ${row.suffix}`).join(", ")}`}>
+        {rows.map((row) => (
+          <div className="flex items-center gap-4 text-xs" key={row.label}>
+            <span className="w-32 font-semibold text-on-surface truncate font-code-md">{row.label}</span>
+            <div className="flex-1 bg-surface-container rounded-full h-3 overflow-hidden border border-outline-variant/20">
+              <div
+                className="bg-primary h-full rounded-full transition-all duration-300"
+                style={{ width: row.value === null ? "0%" : `${Math.max(3, (row.value / max) * 100)}%` }}
+              />
+            </div>
+            <div className="flex items-center gap-2 w-32 justify-end font-code-md text-on-surface-variant">
+              <StatusBadge value={row.status} />
+              <span>{row.suffix}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

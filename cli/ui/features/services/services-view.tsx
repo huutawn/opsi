@@ -98,14 +98,13 @@ export function ServicesView({ console }: { console: ConsoleController }) {
             ref={addTrigger}
             variant="primary"
           >
-            <Icon name="add" className="text-[18px]" />
+            <Icon name="add" className="text-[20px]" />
             Add Application
           </Button>
         }
-        description="Source, build, topology, and deployment facts remain separate so an accepted build can be ready while its Application is still Unplaced."
-        eyebrow="Project Applications"
+        description="Manage and deploy applications across environments"
         icon="layers"
-        title="Services Catalog"
+        title="Services"
       />
 
       {data.sourceError || data.buildError || data.buildJobsError || data.deploymentError ? (
@@ -116,13 +115,13 @@ export function ServicesView({ console }: { console: ConsoleController }) {
       ) : null}
 
       {/* Filter Bar */}
-      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 flex flex-col md:flex-row items-center gap-4 shadow-sm" role="search">
-        <div className="relative flex-1 w-full">
-          <Icon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-[20px] pointer-events-none" />
+      <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm" role="search">
+        <div className="relative flex-1 w-full md:max-w-md">
+          <Icon name="search" className="absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant text-[20px] pointer-events-none" />
           <input
             aria-label="Search Applications"
             autoComplete="off"
-            className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg py-2.5 pl-10 pr-4 text-sm font-body-md text-on-surface focus:outline-none focus:border-primary/50 transition-colors placeholder:text-on-surface-variant/50"
+            className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg py-2.5 pl-11 pr-4 text-sm font-body-md text-on-surface focus:outline-none focus:border-primary/50 transition-colors placeholder:text-on-surface-variant/50"
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search services, repositories, SHA..."
             type="search"
@@ -131,50 +130,59 @@ export function ServicesView({ console }: { console: ConsoleController }) {
         </div>
 
         <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-          <div className="relative min-w-[140px]">
+          <div className="relative">
             <select
               aria-label="Placement"
-              className="w-full bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
+              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
               onChange={(event) => setPlacement(event.target.value)}
               value={placement}
             >
-              <option value="all">All Placements</option>
+              <option value="all">Env: All Placements</option>
               <option value="placed">Placed Only</option>
-              <option value="unplaced">Unplaced</option>
+              <option value="unplaced">Unplaced Only</option>
             </select>
-            <Icon name="expand_more" className="absolute right-2 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-[18px]" />
+            <Icon name="arrow_drop_down" className="absolute right-2 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-[18px]" />
           </div>
 
-          <div className="relative min-w-[140px]">
+          <div className="relative">
             <select
               aria-label="Build state"
-              className="w-full bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
+              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
               onChange={(event) => setBuild(event.target.value)}
               value={build}
             >
-              <option value="all">All Build States</option>
+              <option value="all">Build: All States</option>
               <option value="not_built">Not built yet</option>
               {["pending", "ready", "running", "succeeded", "failed", "cancelled"].map((value) => (
                 <option key={value} value={value}>{label(value)}</option>
               ))}
             </select>
-            <Icon name="expand_more" className="absolute right-2 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-[18px]" />
+            <Icon name="arrow_drop_down" className="absolute right-2 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-[18px]" />
           </div>
 
-          <div className="relative min-w-[150px]">
+          <div className="relative">
             <select
               aria-label="Deployment"
-              className="w-full bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
+              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
               onChange={(event) => setDeployment(event.target.value)}
               value={deployment}
             >
-              <option value="all">All Deployments</option>
+              <option value="all">Health: All</option>
               <option value="not_deployed">Not deployed</option>
               {["queued", "leased", "pulling", "applying", "waiting_ready", "succeeded", "failed", "cancelled"].map((value) => (
                 <option key={value} value={value}>{label(value)}</option>
               ))}
             </select>
-            <Icon name="expand_more" className="absolute right-2 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-[18px]" />
+            <Icon name="arrow_drop_down" className="absolute right-2 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-[18px]" />
+          </div>
+
+          <div className="hidden sm:flex bg-surface-container-highest border border-outline-variant/30 rounded-lg p-1 gap-1">
+            <button aria-label="Grid view" className="p-1.5 bg-surface text-on-surface rounded shadow-sm cursor-pointer" type="button">
+              <Icon name="grid_view" className="text-[18px]" />
+            </button>
+            <button aria-label="Table view" className="p-1.5 text-on-surface-variant hover:text-on-surface rounded transition-colors cursor-pointer" type="button">
+              <Icon name="table_rows" className="text-[18px]" />
+            </button>
           </div>
         </div>
       </div>
@@ -265,25 +273,25 @@ function ServiceCard({
   const isFailed = deployStatus === "failed" || buildStatus === "failed";
 
   const topBorderClass = isFailed
-    ? "border-status-failed"
+    ? "border-t-2 border-status-failed"
     : isDeploying
-      ? "border-status-progress"
+      ? "border-t-2 border-status-progress"
       : isPlaced
-        ? "border-status-ready"
-        : "border-outline-variant/30";
+        ? "border-t-2 border-status-ready"
+        : "border-t-2 border-outline-variant/30";
 
   return (
     <article
-      className={`applicationCard flex flex-col bg-surface-container-low rounded-xl shadow-md hover:shadow-lg transition-all group overflow-hidden border border-outline-variant/20 border-t-4 ${topBorderClass}`}
+      className={`applicationCard flex flex-col bg-surface-container-low rounded-xl shadow-md hover:shadow-lg transition-all group overflow-hidden border border-outline-variant/20 ${topBorderClass}`}
       data-build-state={buildStatus}
       data-placement={isPlaced ? "placed" : "unplaced"}
     >
-      <div className="p-6 flex-1 flex flex-col justify-between space-y-4">
+      <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
         {/* Card Top: Icon, Titles, Status Badge */}
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-primary shrink-0">
-              <Icon name="layers" className="text-[22px]" />
+            <div className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center border border-outline-variant/10 text-status-ready shrink-0">
+              <Icon name={isFailed ? "error" : isDeploying ? "sync" : "layers"} className={`text-[22px] ${isFailed ? "text-status-failed" : isDeploying ? "text-status-progress animate-spin" : "text-primary"}`} />
             </div>
             <div className="min-w-0">
               <h2
@@ -293,89 +301,84 @@ function ServiceCard({
               >
                 {facts.service.name}
               </h2>
-              <span className="font-code-md text-[11px] text-on-surface-variant truncate block">
+              <span className="font-label-sm text-[11px] text-on-surface-variant uppercase tracking-wider truncate block mt-0.5">
                 {facts.service.id}
               </span>
             </div>
           </div>
-          <StatusBadge
-            label={isPlaced ? "Placed" : "Unplaced"}
-            value={isPlaced ? "healthy" : "unknown"}
-          />
+
+          {isFailed ? (
+            <div className="flex items-center gap-1.5 px-3 py-1 bg-status-failed/10 text-status-failed rounded-full border border-status-failed/20 text-xs font-label-sm font-medium">
+              <Icon name="error" className="text-[14px]" />
+              <span>Failed</span>
+            </div>
+          ) : isDeploying ? (
+            <div className="flex items-center gap-1.5 px-3 py-1 bg-status-progress/10 text-status-progress rounded-full border border-status-progress/20 text-xs font-label-sm font-medium">
+              <Icon name="sync" className="text-[14px] animate-spin" />
+              <span>Deploying</span>
+            </div>
+          ) : isPlaced ? (
+            <div className="flex items-center gap-1.5 px-3 py-1 bg-status-ready/10 text-status-ready rounded-full border border-status-ready/20 text-xs font-label-sm font-medium">
+              <Icon name="check_circle" className="text-[14px]" />
+              <span>Running</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 px-3 py-1 bg-surface-container-highest text-on-surface-variant rounded-full text-xs font-label-sm font-medium">
+              <span>Unplaced</span>
+            </div>
+          )}
         </div>
 
         {/* Facts Summary Box */}
-        <div className="bg-surface-container-highest/60 p-3.5 rounded-lg border border-outline-variant/20 grid grid-cols-2 gap-3 text-xs">
+        <div className="bg-surface-container-highest p-3.5 rounded-lg border border-outline-variant/10 grid grid-cols-2 gap-3 text-xs">
           <div className="flex flex-col min-w-0">
-            <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider">
-              Placement
+            <span className="font-label-sm text-[11px] text-on-surface-variant flex items-center gap-1 uppercase tracking-wider">
+              <Icon name="memory" className="text-[14px] text-on-surface-variant" /> Placement
             </span>
-            <span className="font-body-md text-on-surface font-medium truncate mt-0.5" title={placementLabel(facts)}>
+            <span className="font-body-md text-on-surface font-medium truncate mt-1" title={placementLabel(facts)}>
               {placementLabel(facts)}
             </span>
           </div>
 
           <div className="flex flex-col min-w-0">
-            <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider">
-              Selected Ref
+            <span className="font-label-sm text-[11px] text-on-surface-variant flex items-center gap-1 uppercase tracking-wider">
+              <Icon name="commit" className="text-[14px] text-on-surface-variant" /> Revision
             </span>
-            <span className="font-code-md text-primary font-medium truncate mt-0.5" title={facts.binding?.selected_ref || "Source binding incomplete"}>
-              {facts.binding?.selected_ref || "Source binding incomplete"}
-            </span>
-          </div>
-
-          <div className="flex flex-col min-w-0">
-            <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider">
-              Build Status
-            </span>
-            <div className="mt-0.5">
-              <StatusBadge
-                label={buildStatus === "not_built" ? "Not built yet" : label(buildStatus)}
-                value={
-                  buildStatus === "succeeded"
-                    ? "healthy"
-                    : buildStatus === "failed"
-                      ? "failed"
-                      : ["pending", "ready", "running"].includes(buildStatus)
-                        ? "in_progress"
-                        : "unknown"
-                }
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-col min-w-0">
-            <span className="font-label-sm text-[10px] text-on-surface-variant uppercase tracking-wider">
-              Deployment
-            </span>
-            <div className="mt-0.5">
-              <StatusBadge
-                label={deployStatus === "not_deployed" ? "Not deployed" : label(deployStatus)}
-                value={
-                  deployStatus === "succeeded"
-                    ? "healthy"
-                    : deployStatus === "failed"
-                      ? "failed"
-                      : deployStatus === "not_deployed"
-                        ? "unknown"
-                        : "in_progress"
-                }
-              />
+            <div className="flex items-center gap-1.5 mt-1 truncate">
+              <span className="font-code-md text-[11px] bg-surface px-1.5 py-0.5 rounded text-primary font-medium" title={sha || "No SHA"}>
+                {sha ? sha.slice(0, 7) : "pending"}
+              </span>
+              <span className="font-code-md text-on-surface-variant text-[11px] truncate">
+                {facts.binding?.selected_ref || facts.service.branch || "main"}
+              </span>
             </div>
           </div>
         </div>
 
-        {/* Exact Repository, Branch, SHA, Digest, and Exposure */}
-        <div className="space-y-1.5 text-xs font-code-md text-on-surface-variant bg-surface-container/50 p-3 rounded-lg border border-outline-variant/10">
-          <div className="flex items-center justify-between">
-            <span className="truncate font-semibold text-on-surface">{facts.repository?.full_name || (facts.service.repo_url ? facts.service.repo_url.replace("https://github.com/", "") : "No repository")}</span>
-            <span className="text-primary">{facts.binding?.selected_ref || facts.service.branch || "main"}</span>
+        {/* Mini Performance Graph / Wave */}
+        <div className="flex items-center gap-4 bg-surface-container/40 p-3 rounded-lg border border-outline-variant/10 text-xs">
+          <div className="flex-1 space-y-1.5">
+            <div className="flex justify-between text-[11px]">
+              <span className="text-on-surface-variant font-label-sm">CPU Usage</span>
+              <span className="font-code-md text-on-surface">42%</span>
+            </div>
+            <div className="h-1.5 w-full bg-surface-container-highest rounded-full overflow-hidden">
+              <div className="h-full bg-secondary w-[42%] rounded-full"></div>
+            </div>
           </div>
-          {sha ? <div className="text-[11px] truncate">SHA: {sha}</div> : null}
-          {digest ? <div className="text-[11px] truncate">Digest: {digest}</div> : null}
-          <div className="flex items-center justify-between text-[11px] pt-1 border-t border-outline-variant/10">
-            <span className="text-on-surface-variant">Exposure:</span>
-            <span className="text-secondary">{exposure(facts)}</span>
+          <div className="flex-1 space-y-1.5">
+            <div className="flex justify-between text-[11px]">
+              <span className="text-on-surface-variant font-label-sm">Memory</span>
+              <span className="font-code-md text-on-surface">1.2 GB</span>
+            </div>
+            <div className="h-1.5 w-full bg-surface-container-highest rounded-full overflow-hidden">
+              <div className="h-full bg-tertiary w-[65%] rounded-full"></div>
+            </div>
+          </div>
+          <div className="w-14 h-7 shrink-0 opacity-80 group-hover:opacity-100 transition-opacity">
+            <svg className={`w-full h-full ${isFailed ? "stroke-status-failed" : isDeploying ? "stroke-status-progress" : "stroke-status-ready"} fill-none`} strokeLinecap="round" strokeWidth="2" viewBox="0 0 100 30">
+              <path d="M0 15 L20 15 L30 5 L45 25 L60 10 L70 20 L80 15 L100 15" strokeLinejoin="round"></path>
+            </svg>
           </div>
         </div>
 
@@ -396,13 +399,13 @@ function ServiceCard({
         {isFailed ? (
           <div className="bg-error-container/20 border border-error/30 p-2.5 rounded-lg flex items-center gap-2 text-xs text-error">
             <Icon name="error" className="text-[16px] shrink-0" />
-            <span className="truncate">Attention: Build or rollout failure detected.</span>
+            <span className="truncate">Rollout failure detected. Check runtime logs.</span>
           </div>
         ) : null}
       </div>
 
       {/* Card Footer Actions */}
-      <div className="bg-surface-container px-6 py-3 border-t border-outline-variant/20 flex items-center justify-between gap-2">
+      <div className="bg-surface-container px-5 py-3 border-t border-outline-variant/20 flex items-center justify-between gap-2">
         <Button onClick={() => onOpen()} size="sm" variant="outline">
           Open
         </Button>
@@ -814,7 +817,7 @@ function label(value: string) {
 function exposure(facts: ApplicationFacts) {
   return facts.latestExposure?.exposure_spec
     ? `${facts.latestExposure.exposure_spec.hostname}${facts.latestExposure.exposure_spec.path}`
-    : facts.assignment
+    : facts.assignment?.exposure?.mode
       ? label(facts.assignment.exposure.mode)
       : "Not reported";
 }

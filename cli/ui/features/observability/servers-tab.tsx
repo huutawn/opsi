@@ -1,11 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Empty, StatusBadge, Surface } from "@/components/ui/primitives";
+import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import { routeHref } from "@/features/console/navigation";
 import type { ConsoleController } from "@/features/console/types";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
-import { Fact, formatObserved } from "@/features/observability/shared";
+import { formatObserved } from "@/features/observability/shared";
 import type { ServerRuntimeSummary } from "@/lib/presentation/observability/model";
 
 export function ServersTab({
@@ -29,104 +29,109 @@ export function ServersTab({
   }
 
   return (
-    <div className="observabilityStack" data-testid="observability-servers">
-      <div className="observabilityHero">
+    <div className="space-y-6" data-testid="observability-servers">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <p className="eyebrow">Physical / VM Capacity · Node Telemetry</p>
-          <h2>Server Observability</h2>
-          <p>
-            Inspect server nodes, live Agent connectivity, factual hardware capacity, and placed workload allocations.
+          <p className="font-label-sm text-xs text-primary uppercase tracking-wider">Physical / VM Capacity</p>
+          <h2 className="font-headline-md text-xl font-bold text-on-surface">Server Observability</h2>
+          <p className="text-xs text-on-surface-variant mt-0.5">
+            Server nodes, live Agent connectivity, hardware capacity, and workloads.
           </p>
         </div>
-        <div className="heroStatus">
-          <button
-            className="secondaryAction"
+        <div>
+          <Button
             disabled={model.data.sources.nodes === "loading"}
             onClick={() => void model.load()}
-            type="button"
+            size="sm"
+            variant="secondary"
           >
+            <Icon name="refresh" className="text-[16px]" />
             Refresh Servers
-          </button>
+          </Button>
         </div>
       </div>
 
       {servers.length > 0 ? (
-        <div className="tableWrap">
-          <table className="dataTable" aria-label="Servers runtime inventory">
-            <thead>
-              <tr>
-                <th scope="col">Server</th>
-                <th scope="col">Status</th>
-                <th scope="col">Agent</th>
-                <th scope="col">CPU Capacity</th>
-                <th scope="col">Memory</th>
-                <th scope="col">Placed Workloads</th>
-                <th scope="col">Public Host</th>
-                <th scope="col">Freshness</th>
-                <th scope="col"><span className="srOnly">Actions</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              {servers.map((server) => {
-                const isSelected = selectedServer?.id === server.id;
-                return (
-                  <tr
-                    className={isSelected ? "selectedRow" : ""}
-                    key={server.id}
-                    onClick={() => selectServer(server)}
-                    style={{ cursor: "pointer" }}
-                    data-testid={`server-row-${server.name}`}
-                  >
-                    <td>
-                      <strong>{server.name}</strong>
-                      <small className="cellSubtext">{server.role}</small>
-                    </td>
-                    <td>
-                      <StatusBadge
-                        label={server.statusLabel}
-                        value={server.status === "ready" ? "healthy" : server.status === "offline" ? "degraded" : server.status}
-                      />
-                    </td>
-                    <td>
-                      <span>{server.agentConnected ? `Active (${server.agentVersion})` : "Disconnected"}</span>
-                    </td>
-                    <td>
-                      <span>{server.cpuCores !== undefined ? `${server.cpuCores} cores` : "Not reported"}</span>
-                    </td>
-                    <td>
-                      <span>{server.memoryMB !== undefined ? `${server.memoryMB} MB` : "Not reported"}</span>
-                    </td>
-                    <td>
-                      <span>
-                        {server.placedWorkloadCount} placed
+        <div className="bg-surface-container-low border border-outline-variant/20 rounded-2xl overflow-hidden shadow-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse" aria-label="Servers runtime inventory">
+              <thead>
+                <tr className="bg-surface-container/60 border-b border-outline-variant/20 text-[11px] font-label-sm uppercase tracking-wider text-on-surface-variant">
+                  <th className="py-3 px-4 font-semibold">Server</th>
+                  <th className="py-3 px-4 font-semibold">Status</th>
+                  <th className="py-3 px-4 font-semibold">Agent</th>
+                  <th className="py-3 px-4 font-semibold">CPU Capacity</th>
+                  <th className="py-3 px-4 font-semibold">Memory</th>
+                  <th className="py-3 px-4 font-semibold">Placed Workloads</th>
+                  <th className="py-3 px-4 font-semibold">Public Host</th>
+                  <th className="py-3 px-4 font-semibold">Observed</th>
+                  <th className="py-3 px-4 text-right"><span className="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-outline-variant/15 text-xs text-on-surface">
+                {servers.map((server) => {
+                  const isSelected = selectedServer?.id === server.id;
+                  return (
+                    <tr
+                      className={`hover:bg-surface-container/60 transition-colors cursor-pointer ${
+                        isSelected ? "bg-primary-container/30 ring-1 ring-inset ring-primary/40" : ""
+                      }`}
+                      key={server.id}
+                      onClick={() => selectServer(server)}
+                      data-testid={`server-row-${server.name}`}
+                    >
+                      <td className="py-3.5 px-4 font-semibold">
+                        <span className="text-on-surface font-body-md block">{server.name}</span>
+                        <span className="text-[11px] text-on-surface-variant font-code-md block">{server.role}</span>
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <StatusBadge
+                          label={server.statusLabel}
+                          value={server.status === "ready" ? "healthy" : server.status === "offline" ? "degraded" : server.status}
+                        />
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <span className={`inline-flex items-center gap-1.5 font-code-md ${server.agentConnected ? "text-status-ready" : "text-on-surface-variant"}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${server.agentConnected ? "bg-status-ready" : "bg-outline-variant"}`} />
+                          {server.agentConnected ? `Active (${server.agentVersion || "v1"})` : "Disconnected"}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 font-code-md">
+                        {server.cpuCores !== undefined ? `${server.cpuCores} cores` : "—"}
+                      </td>
+                      <td className="py-3.5 px-4 font-code-md">
+                        {server.memoryMB !== undefined ? `${server.memoryMB} MB` : "—"}
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <span className="font-semibold">{server.placedWorkloadCount} placed</span>
                         {server.degradedWorkloadCount > 0 ? (
-                          <small className="warningText"> ({server.degradedWorkloadCount} degraded)</small>
+                          <span className="text-status-warning block text-[11px]">({server.degradedWorkloadCount} degraded)</span>
                         ) : null}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="mono">{server.publicHost}</span>
-                    </td>
-                    <td>
-                      <small className="muted">{server.lastSeenFreshness}</small>
-                    </td>
-                    <td>
-                      <button
-                        className="textButton"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          selectServer(server);
-                        }}
-                        type="button"
-                      >
-                        Inspect
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                      </td>
+                      <td className="py-3.5 px-4 font-code-md text-on-surface-variant">
+                        {server.publicHost}
+                      </td>
+                      <td className="py-3.5 px-4 text-on-surface-variant font-code-md text-[11px]">
+                        {server.lastSeenFreshness}
+                      </td>
+                      <td className="py-3.5 px-4 text-right">
+                        <Button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            selectServer(server);
+                          }}
+                          size="sm"
+                          variant="ghost"
+                        >
+                          Inspect →
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <Empty
@@ -137,7 +142,7 @@ export function ServersTab({
 
       {/* Server Detail Drawer */}
       {selectedServer ? (
-        <ServerDetailSurface
+        <ServerDetailDrawer
           console={console}
           detailTab={detailTab}
           model={model}
@@ -151,7 +156,7 @@ export function ServersTab({
   );
 }
 
-function ServerDetailSurface({
+function ServerDetailDrawer({
   console,
   detailTab,
   model,
@@ -173,152 +178,175 @@ function ServerDetailSurface({
   );
 
   return (
-    <div className="modalBackdrop" onClick={onClose} role="presentation">
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end" onClick={onClose} role="presentation">
       <section
         aria-label={`Server diagnostics for ${server.name}`}
         aria-modal="true"
-        className="diagnosticDrawer"
+        className="w-full max-w-2xl h-full bg-surface-container-low border-l border-outline-variant/30 shadow-2xl flex flex-col text-on-surface overflow-hidden"
         data-testid="server-detail-drawer"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
       >
-        <header className="drawerHeader">
+        {/* Drawer Header */}
+        <header className="p-6 border-b border-outline-variant/20 flex items-start justify-between gap-4 bg-surface-container/50">
           <div>
-            <p className="eyebrow">Server Node Diagnostics · {server.role}</p>
-            <h2>{server.name}</h2>
-            <div className="drawerBadges">
+            <span className="font-label-sm text-xs text-primary font-bold uppercase tracking-wider block mb-1">
+              Server Node Diagnostics • {server.role}
+            </span>
+            <h2 className="font-headline-md text-2xl font-bold text-on-surface">{server.name}</h2>
+            <div className="flex items-center gap-2 mt-2">
               <StatusBadge
                 label={`Status: ${server.statusLabel}`}
                 value={server.status === "ready" ? "healthy" : server.status === "offline" ? "degraded" : server.status}
               />
-              <span className="infoBadge">Agent: {server.agentConnected ? "Active" : "Offline"}</span>
+              <span className={`text-xs px-2.5 py-0.5 rounded-md font-mono ${server.agentConnected ? "bg-status-ready/15 text-status-ready" : "bg-surface-container-high text-on-surface-variant"}`}>
+                Agent: {server.agentConnected ? "Active" : "Offline"}
+              </span>
             </div>
           </div>
-          <div className="drawerHeaderActions">
-            <a
-              className="secondaryAction textLink"
-              href={routeHref({ projectID, view: "infrastructure", tab: "servers", server: server.id })}
-              onClick={(e) => {
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                e.preventDefault();
-                console.navigate({ projectID, view: "infrastructure", tab: "servers", server: server.id });
-              }}
+
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={() => console.navigate({ projectID, view: "infrastructure", tab: "servers", server: server.id })}
+              size="sm"
+              variant="outline"
             >
-              Open in Infrastructure
-            </a>
-            <button aria-label="Close diagnostics" className="closeButton" onClick={onClose} type="button">
-              ✕
+              Infrastructure
+            </Button>
+            <button
+              aria-label="Close diagnostics"
+              className="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors cursor-pointer"
+              onClick={onClose}
+              type="button"
+            >
+              <Icon name="close" className="text-[20px]" />
             </button>
           </div>
         </header>
 
-        <nav aria-label="Server sections" className="consoleTabs drawerTabs">
-          <button
-            aria-selected={detailTab === "overview"}
-            className={detailTab === "overview" ? "active" : ""}
-            onClick={() => onTabChange("overview")}
-            role="tab"
-            type="button"
-          >
-            Overview
-          </button>
-          <button
-            aria-selected={detailTab === "runtime"}
-            className={detailTab === "runtime" ? "active" : ""}
-            onClick={() => onTabChange("runtime")}
-            role="tab"
-            type="button"
-          >
-            Runtime
-          </button>
-          <button
-            aria-selected={detailTab === "applications"}
-            className={detailTab === "applications" ? "active" : ""}
-            onClick={() => onTabChange("applications")}
-            role="tab"
-            type="button"
-          >
-            Applications ({server.placedWorkloadCount})
-          </button>
-          <button
-            aria-selected={detailTab === "events"}
-            className={detailTab === "events" ? "active" : ""}
-            onClick={() => onTabChange("events")}
-            role="tab"
-            type="button"
-          >
-            Events ({auditEvents.length})
-          </button>
+        {/* Drawer Tabs */}
+        <nav aria-label="Server sections" className="flex items-center gap-1 border-b border-outline-variant/20 px-6 pt-2 bg-surface-container/20">
+          {(["overview", "runtime", "applications", "events"] as const).map((t) => {
+            const active = detailTab === t;
+            return (
+              <button
+                aria-selected={active}
+                className={`px-4 py-2.5 text-xs font-label-sm uppercase font-bold border-b-2 transition-all cursor-pointer ${
+                  active ? "border-primary text-primary" : "border-transparent text-on-surface-variant hover:text-on-surface"
+                }`}
+                key={t}
+                onClick={() => onTabChange(t)}
+                role="tab"
+                type="button"
+              >
+                {t === "applications" ? `Applications (${server.placedWorkloadCount})` : t === "events" ? `Events (${auditEvents.length})` : t}
+              </button>
+            );
+          })}
         </nav>
 
-        <div className="drawerContent">
+        {/* Drawer Body */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {detailTab === "overview" ? (
-            <div className="drawerSectionStack">
-              <Surface title="Server Identity & Agent Connectivity">
-                <dl className="evidenceGrid">
-                  <Fact label="Node ID" value={server.id} />
-                  <Fact label="Public Host" value={server.publicHost} />
-                  <Fact label="Role" value={server.role} />
-                  <Fact label="Agent Status" value={server.agentConnected ? "Connected" : "Disconnected / Offline"} />
-                  <Fact label="Agent Version" value={server.agentVersion || "Not reported"} />
-                  <Fact label="Last Heartbeat" value={server.lastSeenFreshness} />
-                </dl>
-              </Surface>
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 bg-surface-container p-4 rounded-2xl border border-outline-variant/15 text-xs">
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Node ID</span>
+                  <strong className="text-on-surface font-code-md truncate block">{server.id}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Public Host</span>
+                  <strong className="text-on-surface font-code-md">{server.publicHost}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Role</span>
+                  <strong className="text-on-surface capitalize">{server.role}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Agent Status</span>
+                  <strong className={server.agentConnected ? "text-status-ready" : "text-error"}>
+                    {server.agentConnected ? "Connected" : "Disconnected"}
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Agent Version</span>
+                  <strong className="text-on-surface font-code-md">{server.agentVersion || "—"}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Last Heartbeat</span>
+                  <strong className="text-on-surface font-code-md">{server.lastSeenFreshness}</strong>
+                </div>
+              </div>
             </div>
           ) : detailTab === "runtime" ? (
-            <div className="drawerSectionStack">
-              <Surface title="Reported Hardware Capacity">
-                <dl className="evidenceGrid">
-                  <Fact label="CPU Cores" value={server.cpuCores !== undefined ? `${server.cpuCores} cores` : "Not reported"} />
-                  <Fact label="Memory Capacity" value={server.memoryMB !== undefined ? `${server.memoryMB} MB` : "Not reported"} />
-                  <Fact label="Placed Workloads" value={`${server.placedWorkloadCount} workloads`} />
-                  <Fact label="Degraded Workloads" value={`${server.degradedWorkloadCount} workloads`} />
-                </dl>
-              </Surface>
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 gap-3 bg-surface-container p-4 rounded-2xl border border-outline-variant/15 text-xs">
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">CPU Cores</span>
+                  <strong className="text-on-surface font-code-md text-base">{server.cpuCores !== undefined ? `${server.cpuCores} cores` : "Not reported"}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Memory Capacity</span>
+                  <strong className="text-on-surface font-code-md text-base">{server.memoryMB !== undefined ? `${server.memoryMB} MB` : "Not reported"}</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Placed Workloads</span>
+                  <strong className="text-on-surface">{server.placedWorkloadCount} workloads</strong>
+                </div>
+                <div>
+                  <span className="text-on-surface-variant text-[11px] block mb-0.5">Degraded Workloads</span>
+                  <strong className={server.degradedWorkloadCount > 0 ? "text-status-warning" : "text-on-surface"}>
+                    {server.degradedWorkloadCount} workloads
+                  </strong>
+                </div>
+              </div>
             </div>
           ) : detailTab === "applications" ? (
-            <div className="drawerSectionStack">
-              <Surface title="Placed Applications">
-                {server.placedServices.length > 0 ? (
-                  <ul className="compactList">
+            <div className="space-y-4">
+              {server.placedServices.length > 0 ? (
+                <div className="bg-surface-container rounded-2xl border border-outline-variant/15 p-4 space-y-2">
+                  <h3 className="font-headline-md text-sm font-bold text-on-surface mb-3">Placed Applications</h3>
+                  <ul className="divide-y divide-outline-variant/15 text-xs">
                     {server.placedServices.map((svcName) => (
-                      <li key={svcName}>
-                        <strong>{svcName}</strong>
-                        <small>Assigned to node {server.name}</small>
+                      <li className="py-2.5 flex items-center justify-between" key={svcName}>
+                        <strong className="text-on-surface font-semibold">{svcName}</strong>
+                        <span className="text-on-surface-variant font-code-md">Assigned to {server.name}</span>
                       </li>
                     ))}
                   </ul>
-                ) : (
-                  <Empty title="No placed applications" text="No applications are currently assigned to this server node." />
-                )}
-              </Surface>
+                </div>
+              ) : (
+                <div className="p-8 text-center text-xs text-on-surface-variant bg-surface-container rounded-2xl border border-outline-variant/15">
+                  No applications are currently assigned to this server node.
+                </div>
+              )}
             </div>
           ) : (
-            <div className="drawerSectionStack">
-              <Surface title="Server Events">
-                {auditEvents.length > 0 ? (
-                  <ol className="eventTimeline">
-                    {auditEvents.map((evt) => (
-                      <li key={evt.id}>
-                        <span className="timelineDot info" aria-hidden="true" />
-                        <div>
-                          <div className="eventHeader">
-                            <strong>{evt.action.replaceAll("_", " ")}</strong>
-                            <time dateTime={evt.created_at}>
-                              {formatObserved(Date.parse(evt.created_at) / 1000)}
-                            </time>
-                          </div>
-                          <p className="eventDetail">
-                            Actor {evt.actor_user_id || "system"} · result: {evt.result}
-                          </p>
-                        </div>
-                      </li>
-                    ))}
-                  </ol>
-                ) : (
-                  <Empty title="No recent events" text="No audit or lifecycle events recorded for this server." />
-                )}
-              </Surface>
+            <div className="space-y-4">
+              {auditEvents.length > 0 ? (
+                <div className="space-y-2">
+                  {auditEvents.map((evt) => (
+                    <div
+                      className="p-3 bg-surface-container/60 rounded-xl border border-outline-variant/15 flex items-start justify-between gap-3 text-xs"
+                      key={evt.id}
+                    >
+                      <div className="space-y-0.5">
+                        <strong className="text-on-surface font-semibold block capitalize">
+                          {evt.action.replaceAll("_", " ")}
+                        </strong>
+                        <p className="text-on-surface-variant">Actor {evt.actor_user_id || "system"} • result: {evt.result}</p>
+                      </div>
+                      <time className="text-[11px] font-code-md text-on-surface-variant/70 shrink-0">
+                        {formatObserved(Date.parse(evt.created_at) / 1000)}
+                      </time>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-8 text-center text-xs text-on-surface-variant bg-surface-container rounded-2xl border border-outline-variant/15">
+                  No audit or lifecycle events recorded for this server.
+                </div>
+              )}
             </div>
           )}
         </div>

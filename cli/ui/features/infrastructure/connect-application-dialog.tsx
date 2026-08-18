@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Button, Icon } from "@/components/ui/primitives";
 import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
 import type { Resource, ResourceBinding, ServiceRecord } from "@/lib/contracts/registry";
 import { resourceErrorExplanation } from "@/lib/presentation/resources/model";
@@ -35,16 +36,14 @@ export function ConnectApplicationDialog({
     };
   }, []);
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
     if (!selectedServiceID || !logicalName || submitting) return;
 
     setSubmitting(true);
     setError(null);
 
     const client = new LocalClient();
-    const idempotencyKey = crypto.randomUUID();
-
     try {
       const result = await client.createResourceBinding(
         projectID,
@@ -55,7 +54,7 @@ export function ConnectApplicationDialog({
           protocol: resource.type === "postgres" ? "postgres" : resource.type === "redis" ? "redis" : "nats",
           logical_name: logicalName.trim().toUpperCase(),
         },
-        idempotencyKey,
+        crypto.randomUUID()
       );
 
       await onBindingCreated(result.binding);
@@ -73,34 +72,41 @@ export function ConnectApplicationDialog({
     <dialog
       aria-describedby="connect-app-desc"
       aria-labelledby="connect-app-title"
-      className="connectServerDialog placementDialog"
+      className="fixed inset-0 m-auto bg-surface-container-low border border-outline-variant/30 rounded-2xl shadow-2xl p-6 max-w-xl w-full backdrop:bg-background/80 backdrop:backdrop-blur-sm z-50 text-on-surface flex flex-col gap-5 max-h-[90vh] overflow-y-auto"
       onCancel={(e) => {
         e.preventDefault();
         onClose();
       }}
       ref={dialog}
     >
-      <div className="dialogHeading">
+      <div className="flex items-start justify-between border-b border-outline-variant/20 pb-4">
         <div>
-          <p className="eyebrow">Resource Connection</p>
-          <h2 id="connect-app-title">Connect Application</h2>
-          <p id="connect-app-desc">
-            Connect an application service to <strong>{resource.name}</strong>. Environment variables with connection
-            details will be provisioned securely.
+          <span className="font-label-sm text-xs text-primary font-bold uppercase tracking-wider block mb-1">
+            Resource Connection
+          </span>
+          <h2 id="connect-app-title" className="font-headline-md text-xl font-bold text-on-surface">
+            Connect Application
+          </h2>
+          <p id="connect-app-desc" className="font-body-md text-xs text-on-surface-variant mt-1">
+            Connect an application to <strong className="text-on-surface">{resource.name}</strong>. Environment variables will be injected securely.
           </p>
         </div>
-        <button aria-label="Close dialog" autoFocus className="iconButton" onClick={onClose} type="button">
-          <svg aria-hidden="true" viewBox="0 0 20 20">
-            <path d="m5 5 10 10M15 5 5 15" />
-          </svg>
+        <button
+          aria-label="Close dialog"
+          autoFocus
+          className="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors cursor-pointer"
+          onClick={onClose}
+          type="button"
+        >
+          <Icon name="close" className="text-[20px]" />
         </button>
       </div>
 
-      <form className="form" onSubmit={handleSubmit}>
-        <label className="span2">
-          Application Service
+      <form className="space-y-4" onSubmit={handleSubmit}>
+        <div className="space-y-1.5">
+          <label className="text-xs font-label-sm text-on-surface-variant block">Application Service</label>
           <select
-            className="select"
+            className="field"
             disabled={services.length === 0}
             name="service"
             onChange={(e) => setSelectedServiceID(e.target.value)}
@@ -117,10 +123,10 @@ export function ConnectApplicationDialog({
               ))
             )}
           </select>
-        </label>
+        </div>
 
-        <label className="span2">
-          Logical Binding Name
+        <div className="space-y-1.5">
+          <label className="text-xs font-label-sm text-on-surface-variant block">Logical Binding Name</label>
           <input
             autoComplete="off"
             className="field"
@@ -130,37 +136,35 @@ export function ConnectApplicationDialog({
             required
             value={logicalName}
           />
-          <small className="fieldHint">
-            Prefix used for injected configuration keys (e.g. {logicalName || "DATABASE"}_HOST,{" "}
-            {logicalName || "DATABASE"}_URL).
-          </small>
-        </label>
-
-        <div className="infoBanner span2">
-          <p>
-            Target resource: <strong>{resource.name}</strong> ({resource.type.toUpperCase()})
-          </p>
-          <small>
-            Credentials are generated and managed by Cloud authority. Passwords and tokens are stored in secure secrets
-            and not displayed in plaintext.
+          <small className="text-[11px] text-on-surface-variant block">
+            Prefix used for configuration keys (e.g. {logicalName || "DATABASE"}_HOST, {logicalName || "DATABASE"}_URL).
           </small>
         </div>
 
+        <div className="bg-surface-container/60 p-3 rounded-xl border border-outline-variant/15 text-xs text-on-surface-variant space-y-1">
+          <p>
+            Target resource: <strong className="text-on-surface">{resource.name}</strong> ({resource.type.toUpperCase()})
+          </p>
+          <p className="text-[11px]">
+            Credentials and tokens are stored in secure secrets and not displayed in plaintext.
+          </p>
+        </div>
+
         {error ? (
-          <div className="truthCallout span2" role="alert">
-            <b>{error.summary}</b>
+          <div className="p-3 bg-error-container/20 text-error border border-error/30 rounded-xl text-xs space-y-1" role="alert">
+            <strong className="block font-semibold">{error.summary}</strong>
             <p>{error.action}</p>
-            {error.code ? <small className="errorCode">Error code: {error.code}</small> : null}
+            {error.code ? <small className="font-mono text-[10px]">Error code: {error.code}</small> : null}
           </div>
         ) : null}
 
-        <div className="dialogActions span2">
-          <button disabled={submitting} onClick={onClose} type="button">
+        <div className="flex items-center justify-end gap-3 pt-3 border-t border-outline-variant/20">
+          <Button disabled={submitting} onClick={onClose} size="sm" type="button" variant="outline">
             Cancel
-          </button>
-          <button className="primary" disabled={submitting || !selectedServiceID || !logicalName} type="submit">
+          </Button>
+          <Button disabled={submitting || !selectedServiceID || !logicalName} size="sm" type="submit" variant="primary">
             {submitting ? "Connecting…" : "Connect Application"}
-          </button>
+          </Button>
         </div>
       </form>
     </dialog>

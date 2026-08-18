@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Empty, Surface, StatusBadge } from "@/components/ui/primitives";
+import { Button, Empty, Icon, Surface, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { LocalClient } from "@/lib/api/local-client";
 import type { BuildRecord, DeploymentPolicy, GitHubBinding, GitHubRepository, PlacementFacts, TopologyDiff, TopologyDraft, TopologyPlan, TopologyPreview, TopologyValidation } from "@/lib/contracts/registry";
@@ -100,31 +100,224 @@ export function PlacementDialog({ console, data, onClose, onApplied }: { console
     finally { setBusy(false); }
   }
 
-  return <dialog className="placementDialog" onCancel={(event) => { event.preventDefault(); onClose(); }} ref={dialog} aria-labelledby="placement-title">
-    <div className="dialogHeading"><div><p className="eyebrow">Infrastructure action</p><h2 id="placement-title">Plan placement</h2><p>Review exact target, capacity, validation, and immutable revisions before apply.</p></div><button aria-label="Close placement dialog" autoFocus className="iconButton" onClick={onClose} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button></div>
-    <ol className="phaseRail" aria-label="Placement phases">{["Target", "Capacity", "Validate", "Review & apply"].map((item, index) => <li className={phase === ["target", "capacity", "validate", "review"][index] ? "active" : ""} key={item}>{index + 1}. {item}</li>)}</ol>
-    {phase === "target" ? <div className="form placementForm">
-      <label>Repository<select aria-label="Repository" className="select" value={repositoryID} onChange={(event) => { setRepositoryID(event.target.value); setServiceKey(""); setBuildID(""); }}><option value="">Choose exact repository…</option>{repositories.map((item) => <option key={item.repository_id} value={item.repository_id}>{item.full_name}</option>)}</select></label>
-      <label>Service binding<select aria-label="Service binding" className="select" value={serviceKey} onChange={(event) => selectService(event.target.value)}><option value="">Choose exact service…</option>{bindings.map((item) => <option key={item.id} value={item.service_key}>{item.service_key}</option>)}</select></label>
-      <label>BuildRecord<select aria-label="BuildRecord" className="select" value={buildID} onChange={(event) => setBuildID(event.target.value)}><option value="">Choose accepted BuildRecord…</option>{builds.map((item) => <option key={item.id} value={item.id}>{item.id} · {item.workload.sha.slice(0, 12)}</option>)}</select></label>
-      <label>Environment<select aria-label="Environment" className="select" value={environmentID} onChange={(event) => { setEnvironmentID(event.target.value); setRuntimeID(""); }}><option value="">Choose exact environment…</option>{environments.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.status}</option>)}</select></label>
-      <label>Runtime<select aria-label="Runtime" className="select" value={runtimeID} onChange={(event) => setRuntimeID(event.target.value)}><option value="">Choose exact runtime…</option>{runtimes.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.status}</option>)}</select></label>
-      <div className="dialogActions"><button disabled={!targetReady} onClick={() => setPhase("capacity")} type="button">Next: Capacity</button></div>
-    </div> : null}
-    {phase === "capacity" ? <div className="form placementForm">
-      <p className="notice">{currentAssignment ? `Prefilled from current TopologyPlan assignment ${currentAssignment.service_key}.` : "No current assignment found. Enter every value; nothing is silently defaulted."}</p>
-      <label>Replicas<input aria-label="Replicas" className="field" inputMode="numeric" min="1" name="replicas" onChange={(event) => setReplicas(event.target.value)} type="number" value={replicas} /></label>
-      <label>CPU request (millicores)<input aria-label="CPU request" className="field" inputMode="numeric" min="1" name="cpu" onChange={(event) => setCPU(event.target.value)} type="number" value={cpu} /></label>
-      <label>Memory request (MiB)<input aria-label="Memory request" className="field" inputMode="numeric" min="1" name="memory" onChange={(event) => setMemory(event.target.value)} type="number" value={memory} /></label>
-      <label>Exposure intent<select aria-label="Exposure intent" className="select" value={exposure} onChange={(event) => setExposure(event.target.value)}><option value="">Choose exposure intent…</option><option value="none">None</option><option value="internal">Internal intent</option><option value="public">Public intent metadata</option></select></label>
-      <label className="span2">Rationale<textarea aria-label="Placement rationale" className="textarea" maxLength={2048} onChange={(event) => setRationale(event.target.value)} value={rationale} /></label>
-      <label className="span2"><input checked={allowUnknown} onChange={(event) => setAllowUnknown(event.target.checked)} type="checkbox" /> Allow unknown capacity only if the reviewed policy explicitly grants it.</label>
-      <div className="dialogActions"><button onClick={() => setPhase("target")} type="button">Back</button><button disabled={!capacityReady} onClick={() => setPhase("validate")} type="button">Next: Validate</button></div>
-    </div> : null}
-    {phase === "validate" ? <div className="form placementForm"><Surface title="Validation inputs"><p>Runtime eligibility, heartbeat freshness, requested/reserved/available capacity, oversubscription, and policy match are evaluated by Local API.</p><button disabled={busy} onClick={() => void validate()} type="button">{busy ? "Validating…" : "Run factual validation"}</button></Surface><div className="dialogActions"><button onClick={() => setPhase("capacity")} type="button">Back</button></div></div> : null}
-    {phase === "review" && preview ? <div className="form placementForm"><Surface title="Review & apply"><div className="hashPair"><div><span>Topology plan hash</span><code>{preview.topology.plan_hash}</code></div><div><span>Policy hash</span><code>{preview.policyHash}</code></div></div><StatusBadge value={preview.validation.valid ? "ready" : "blocked"} /><p>{preview.validation.issues.length ? preview.validation.issues.map((item) => `${item.code}: ${item.message}`).join(" · ") : "No deterministic validation issues."}</p><p>{preview.diff.changes.length} topology changes; {preview.policyDiff.length} policy changes. Policy and topology apply are sequential, not atomic.</p>{preview.validation.runtimes.map((runtime) => <div className="capacityCard" key={runtime.runtime_id}><b>{runtime.runtime_id}</b><p>CPU {runtime.capacity.available_cpu_millicores === undefined ? "Unknown" : `${runtime.capacity.available_cpu_millicores}m available`} · memory {runtime.capacity.available_memory_bytes === undefined ? "Unknown" : `${runtime.capacity.available_memory_bytes} bytes available`} · heartbeat {runtime.capacity.heartbeat_age_seconds === undefined ? "Unknown" : `${runtime.capacity.heartbeat_age_seconds}s`}</p></div>)}<label>Type APPLY to confirm<input aria-label="Apply confirmation" className="field" onChange={(event) => setConfirm(event.target.value)} value={confirm} /></label><div className="dialogActions"><button onClick={() => setPhase("validate")} type="button">Back</button><button disabled={busy || confirm !== "APPLY" || (!preview.validation.valid && !(allowUnknown && onlyUnknownCapacity(preview.validation)))} onClick={() => void apply()} type="button">{busy ? "Applying…" : "Apply reviewed revisions"}</button></div></Surface></div> : <Empty text="Validation preview is unavailable." />}
-    {message ? <p className="inlineError" role="alert">{message}</p> : null}
-  </dialog>;
+  return (
+    <dialog
+      aria-labelledby="placement-title"
+      className="fixed inset-0 m-auto bg-surface-container-low border border-outline-variant/30 rounded-2xl shadow-2xl p-6 max-w-2xl w-full backdrop:bg-background/80 backdrop:backdrop-blur-sm z-50 text-on-surface flex flex-col gap-5 max-h-[90vh] overflow-y-auto"
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      ref={dialog}
+    >
+      <div className="flex items-start justify-between border-b border-outline-variant/20 pb-4">
+        <div>
+          <span className="font-label-sm text-xs text-primary font-bold uppercase tracking-wider block mb-1">
+            Infrastructure Action
+          </span>
+          <h2 id="placement-title" className="font-headline-md text-xl font-bold text-on-surface">
+            Plan Placement
+          </h2>
+          <p className="font-body-md text-xs text-on-surface-variant mt-1">
+            Review target, capacity, validation, and immutable revisions before apply.
+          </p>
+        </div>
+        <button
+          aria-label="Close placement dialog"
+          autoFocus
+          className="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors cursor-pointer"
+          onClick={onClose}
+          type="button"
+        >
+          <Icon name="close" className="text-[20px]" />
+        </button>
+      </div>
+
+      <ol aria-label="Placement phases" className="grid grid-cols-4 gap-2 bg-surface-container p-2.5 rounded-xl border border-outline-variant/15 text-xs text-center">
+        {["Target", "Capacity", "Validate", "Review"].map((item, index) => {
+          const active = phase === ["target", "capacity", "validate", "review"][index];
+          return (
+            <li
+              className={`py-1.5 px-2 rounded-lg font-semibold transition-colors ${
+                active ? "bg-primary text-on-primary shadow-sm" : "text-on-surface-variant"
+              }`}
+              key={item}
+            >
+              {index + 1}. {item}
+            </li>
+          );
+        })}
+      </ol>
+
+      {phase === "target" ? (
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-xs font-label-sm text-on-surface-variant block">Repository</label>
+            <select aria-label="Repository" className="select" onChange={(event) => { setRepositoryID(event.target.value); setServiceKey(""); setBuildID(""); }} value={repositoryID}>
+              <option value="">Choose exact repository…</option>
+              {repositories.map((item) => (
+                <option key={item.repository_id} value={item.repository_id}>{item.full_name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-label-sm text-on-surface-variant block">Service Binding</label>
+            <select aria-label="Service binding" className="select" onChange={(event) => selectService(event.target.value)} value={serviceKey}>
+              <option value="">Choose exact service…</option>
+              {bindings.map((item) => (
+                <option key={item.id} value={item.service_key}>{item.service_key}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-label-sm text-on-surface-variant block">BuildRecord</label>
+            <select aria-label="BuildRecord" className="select" onChange={(event) => setBuildID(event.target.value)} value={buildID}>
+              <option value="">Choose accepted BuildRecord…</option>
+              {builds.map((item) => (
+                <option key={item.id} value={item.id}>{item.id} · {item.workload.sha.slice(0, 12)}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-label-sm text-on-surface-variant block">Environment</label>
+              <select aria-label="Environment" className="select" onChange={(event) => { setEnvironmentID(event.target.value); setRuntimeID(""); }} value={environmentID}>
+                <option value="">Choose environment…</option>
+                {environments.map((item) => (
+                  <option key={item.id} value={item.id}>{item.name} · {item.status}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-label-sm text-on-surface-variant block">Runtime</label>
+              <select aria-label="Runtime" className="select" onChange={(event) => setRuntimeID(event.target.value)} value={runtimeID}>
+                <option value="">Choose runtime…</option>
+                {runtimes.map((item) => (
+                  <option key={item.id} value={item.id}>{item.name} · {item.status}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-3 border-t border-outline-variant/20">
+            <Button disabled={!targetReady} onClick={() => setPhase("capacity")} size="sm" type="button" variant="primary">
+              Next: Capacity →
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {phase === "capacity" ? (
+        <div className="space-y-4">
+          <p className="text-xs text-on-surface-variant bg-surface-container/60 p-3 rounded-xl border border-outline-variant/15">
+            {currentAssignment ? `Prefilled from current assignment ${currentAssignment.service_key}.` : "Enter desired resource capacity requirements."}
+          </p>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-label-sm text-on-surface-variant block">Replicas</label>
+              <input aria-label="Replicas" className="field" inputMode="numeric" min="1" name="replicas" onChange={(event) => setReplicas(event.target.value)} type="number" value={replicas} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-label-sm text-on-surface-variant block">CPU (m)</label>
+              <input aria-label="CPU request" className="field" inputMode="numeric" min="1" name="cpu" onChange={(event) => setCPU(event.target.value)} type="number" value={cpu} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-label-sm text-on-surface-variant block">Memory (MiB)</label>
+              <input aria-label="Memory request" className="field" inputMode="numeric" min="1" name="memory" onChange={(event) => setMemory(event.target.value)} type="number" value={memory} />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-label-sm text-on-surface-variant block">Exposure Intent</label>
+            <select aria-label="Exposure intent" className="select" onChange={(event) => setExposure(event.target.value)} value={exposure}>
+              <option value="">Choose exposure intent…</option>
+              <option value="none">None</option>
+              <option value="internal">Internal intent</option>
+              <option value="public">Public intent</option>
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-label-sm text-on-surface-variant block">Rationale</label>
+            <textarea aria-label="Placement rationale" className="textarea" maxLength={2048} onChange={(event) => setRationale(event.target.value)} rows={2} value={rationale} />
+          </div>
+
+          <label className="flex items-center gap-2 text-xs text-on-surface-variant cursor-pointer">
+            <input checked={allowUnknown} onChange={(event) => setAllowUnknown(event.target.checked)} type="checkbox" />
+            <span>Allow unknown capacity if policy explicitly grants it</span>
+          </label>
+
+          <div className="flex items-center justify-between pt-3 border-t border-outline-variant/20">
+            <Button onClick={() => setPhase("target")} size="sm" type="button" variant="outline">
+              ← Back
+            </Button>
+            <Button disabled={!capacityReady} onClick={() => setPhase("validate")} size="sm" type="button" variant="primary">
+              Next: Validate →
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {phase === "validate" ? (
+        <div className="space-y-4">
+          <div className="bg-surface-container/60 p-4 rounded-xl border border-outline-variant/15 space-y-3">
+            <h4 className="font-headline-md text-sm font-bold text-on-surface">Validation Inputs</h4>
+            <p className="text-xs text-on-surface-variant leading-relaxed">
+              Runtime eligibility, heartbeat freshness, requested/reserved capacity, and policy matching are evaluated by Local API.
+            </p>
+            <Button disabled={busy} onClick={() => void validate()} size="sm" type="button" variant="primary">
+              {busy ? "Validating…" : "Run Factual Validation"}
+            </Button>
+          </div>
+          <div className="flex items-center justify-start pt-3 border-t border-outline-variant/20">
+            <Button onClick={() => setPhase("capacity")} size="sm" type="button" variant="outline">
+              ← Back
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {phase === "review" && preview ? (
+        <div className="space-y-4">
+          <div className="bg-surface-container/60 p-4 rounded-xl border border-outline-variant/15 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="font-headline-md text-sm font-bold text-on-surface">Review & Apply</h4>
+              <StatusBadge value={preview.validation.valid ? "ready" : "blocked"} />
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs font-code-md bg-surface-container p-2.5 rounded-lg">
+              <div><span className="text-on-surface-variant">Plan Hash:</span> <strong className="text-on-surface truncate block">{preview.topology.plan_hash?.slice(0, 10)}</strong></div>
+              <div><span className="text-on-surface-variant">Policy Hash:</span> <strong className="text-primary truncate block">{preview.policyHash?.slice(0, 10)}</strong></div>
+            </div>
+            <p className="text-xs text-on-surface-variant">
+              {preview.diff.changes.length} topology changes; {preview.policyDiff.length} policy changes.
+            </p>
+            <div className="space-y-1.5 pt-2">
+              <label className="text-xs font-label-sm text-on-surface-variant block">Type APPLY to confirm</label>
+              <input aria-label="Apply confirmation" className="field" onChange={(event) => setConfirm(event.target.value)} placeholder="APPLY" value={confirm} />
+            </div>
+          </div>
+          <div className="flex items-center justify-between pt-3 border-t border-outline-variant/20">
+            <Button onClick={() => setPhase("validate")} size="sm" type="button" variant="outline">
+              ← Back
+            </Button>
+            <Button disabled={busy || confirm !== "APPLY" || (!preview.validation.valid && !(allowUnknown && onlyUnknownCapacity(preview.validation)))} onClick={() => void apply()} size="sm" type="button" variant="primary">
+              {busy ? "Applying…" : "Apply Reviewed Revisions"}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {message ? (
+        <p className="p-3 bg-error-container/20 text-error border border-error/30 rounded-xl text-xs" role="alert">
+          {message}
+        </p>
+      ) : null}
+    </dialog>
+  );
 }
 
 function onlyUnknownCapacity(validation: TopologyValidation) { return validation.issues.length > 0 && validation.issues.every((item) => item.code === "TOPOLOGY_CAPACITY_UNKNOWN"); }
+

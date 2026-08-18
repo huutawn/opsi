@@ -294,52 +294,103 @@ export function TopologyDesignCanvas({ bindings, builds, console, draft, facts, 
     }
   }
 
-  return <section className="topologyDesigner" aria-labelledby="topology-design-heading">
-    <header className="designContextBar">
-      <div>
-        <p className="eyebrow">Topology workspace</p>
-        <h3 id="topology-design-heading">Design</h3>
-        <p>Place applications, edit resource intent, and review the canonical draft before Cloud writes.</p>
-      </div>
-      <dl className="designContextFacts">
-        <InspectorFact label="Project" value={console.state.project?.name ?? "No project"} />
-        <InspectorFact label="Environment" value={environment?.name ?? "No environment"} />
-        <InspectorFact label="Applied revision" value={topology ? `r${topology.revision}` : "No TopologyPlan"} />
-        <InspectorFact label="State hash" value={topology?.state_hash ?? "Not available"} />
-      </dl>
-    </header>
-    <div className="designActionBar" aria-live="polite">
-      <div className="designChangeState" data-state={review ? review.validation.valid ? "valid" : "invalid" : unpublishedCount ? "draft" : "clean"}>
-        <i aria-hidden="true" />
-        <span>
-          <strong>{unpublishedCount} unpublished {unpublishedCount === 1 ? "change" : "changes"}</strong>
-          <small>{review ? review.validation.valid ? "Cloud validation passed" : "Cloud validation failed" : changeCount ? "Local topology draft; no backend write" : configurationChangeCount ? "Service configuration draft; review in the inspector" : "Matches the applied topology"}{configurationChangeCount ? ` · ${configurationChangeCount} service configuration ${configurationChangeCount === 1 ? "draft" : "drafts"}` : ""}</small>
-        </span>
-      </div>
-      <div className="designActions">
-        <button disabled={!changeCount || Boolean(busy)} onClick={reset} type="button">Reset changes</button>
-        <button aria-expanded={Boolean(review)} disabled={!changeCount || Boolean(busy)} onClick={() => void reviewDraft()} type="button">{busy === "review" ? "Reviewing…" : "Review draft"}</button>
-        <button className="primary" disabled={!review?.validation.valid || Boolean(busy)} onClick={() => void applyTopology()} type="button">{busy === "apply" ? "Applying…" : "Apply topology"}</button>
-      </div>
-    </div>
-    {message ? <p className={message.includes("applied") ? "notice designMessage" : "placementError designMessage"} role="status">{message}</p> : null}
-    {review ? <details className="designReviewDisclosure" open>
-      <summary><span>Cloud review</span><strong>{review.validation.valid ? "Ready to apply" : "Action required"}</strong><small>Revision {review.diff.current_revision} · {review.diff.changes.length} semantic {review.diff.changes.length === 1 ? "change" : "changes"}</small></summary>
-      <DraftReviewPanel review={review} />
-    </details> : null}
-    <div className="designWorkspace">
-      <section className="canvasStage" aria-labelledby="topology-canvas-heading">
-        <header className="canvasStageHeader">
-          <div><p className="eyebrow">Placement canvas</p><h4 id="topology-canvas-heading">Application topology</h4></div>
-          <div className="canvasLegend" aria-label="Canvas legend"><span><i data-kind="server" />Server</span><span><i data-kind="application" />Application</span><span><i data-kind="draft" />Draft change</span></div>
-        </header>
-        <div className="topologyFlow" aria-label="Editable topology placement canvas">
-		  <CanvasFlow edges={edges} facts={facts} key={canvasKey} nodes={nodes} onConnect={connectApplications} onEdgeSelect={selectConnection} onMove={move} onRemoveEdge={(edge) => { const source = serviceForNode(console.state.services, edge.source); if (source) removeConnection(source.id, String(edge.data?.connectionKey ?? "")); }} />
+  return (
+    <section className="relative w-full h-[640px] lg:h-[700px] rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col lg:flex-row shadow-xl" aria-labelledby="topology-design-heading">
+      {/* Canvas Area */}
+      <div className="flex-1 relative h-full flex flex-col bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:24px_24px] bg-[position:-12px_-12px]">
+        {/* Floating Action Controls Overlay */}
+        <div className="absolute top-4 left-4 right-4 flex flex-wrap items-center justify-between gap-3 z-10 pointer-events-none">
+          <div className="flex items-center gap-3 bg-surface-container/90 backdrop-blur-md px-4 py-2 rounded-xl border border-outline-variant/20 shadow-md pointer-events-auto">
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${unpublishedCount ? "bg-status-warning animate-pulse" : "bg-status-ready"}`} />
+              <span className="text-xs font-label-sm font-semibold text-on-surface">
+                {unpublishedCount} {unpublishedCount === 1 ? "draft change" : "draft changes"}
+              </span>
+            </div>
+            <div className="w-px h-4 bg-outline-variant/30" />
+            <div className="flex items-center gap-2">
+              <button
+                disabled={!changeCount || Boolean(busy)}
+                onClick={reset}
+                className="px-2.5 py-1 text-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors disabled:opacity-40 cursor-pointer"
+                type="button"
+              >
+                Reset
+              </button>
+              <button
+                disabled={!changeCount || Boolean(busy)}
+                onClick={() => void reviewDraft()}
+                className="px-2.5 py-1 text-xs bg-surface-container-highest hover:bg-surface-container-high text-on-surface rounded-lg transition-colors font-medium disabled:opacity-40 cursor-pointer"
+                type="button"
+              >
+                {busy === "review" ? "Reviewing…" : "Review draft"}
+              </button>
+              <button
+                disabled={!review?.validation.valid || Boolean(busy)}
+                onClick={() => void applyTopology()}
+                className="px-3 py-1 text-xs bg-primary text-on-primary font-bold rounded-lg transition-colors disabled:opacity-40 shadow-sm cursor-pointer"
+                type="button"
+              >
+                {busy === "apply" ? "Applying…" : "Apply topology"}
+              </button>
+            </div>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-2 bg-surface-container/90 backdrop-blur-md px-3 py-1.5 rounded-full border border-outline-variant/20 shadow-md pointer-events-auto text-xs font-label-sm text-on-surface-variant">
+            <span className="text-primary font-semibold">{topology ? `Plan r${topology.revision}` : "Draft"}</span>
+            <span>•</span>
+            <span className="font-code-md text-[11px] truncate max-w-[120px]">{topology?.state_hash?.slice(0, 8) ?? "Clean"}</span>
+          </div>
         </div>
-      </section>
-		<TopologyInspector bindings={bindings} builds={builds} busy={busy} configurationDrafts={configurationDrafts} configurationReview={configurationReview} console={console} draft={draft} facts={facts} onApplyConfiguration={applyConfiguration} onConfiguration={changeConfiguration} onDraft={changeDraft} onRemoveConnection={removeConnection} onReviewConfiguration={reviewConfiguration} repositories={repositories} selectedConnection={selectedConnection} selectedManagedResource={selectedManagedResource} selectedRuntime={selectedRuntime} selectedService={selectedService} topology={topology} />
-    </div>
-  </section>;
+
+        {message ? (
+          <div className="absolute top-18 left-4 z-10 bg-surface-container-high/90 backdrop-blur-md border border-outline-variant/30 text-xs px-3 py-1.5 rounded-lg text-primary shadow-md" role="status">
+            {message}
+          </div>
+        ) : null}
+
+        {/* Flow Canvas */}
+        <div className="w-full h-full flex-1">
+          <CanvasFlow
+            edges={edges}
+            facts={facts}
+            key={canvasKey}
+            nodes={nodes}
+            onConnect={connectApplications}
+            onEdgeSelect={selectConnection}
+            onMove={move}
+            onRemoveEdge={(edge) => {
+              const source = serviceForNode(console.state.services, edge.source);
+              if (source) removeConnection(source.id, String(edge.data?.connectionKey ?? ""));
+            }}
+          />
+        </div>
+      </div>
+
+      {/* Inspector Sidebar */}
+      <TopologyInspector
+        bindings={bindings}
+        builds={builds}
+        busy={busy}
+        configurationDrafts={configurationDrafts}
+        configurationReview={configurationReview}
+        console={console}
+        draft={draft}
+        facts={facts}
+        onApplyConfiguration={applyConfiguration}
+        onConfiguration={changeConfiguration}
+        onDraft={changeDraft}
+        onRemoveConnection={removeConnection}
+        onReviewConfiguration={reviewConfiguration}
+        repositories={repositories}
+        selectedConnection={selectedConnection}
+        selectedManagedResource={selectedManagedResource}
+        selectedRuntime={selectedRuntime}
+        selectedService={selectedService}
+        topology={topology}
+      />
+    </section>
+  );
 }
 
 export function LiveTopologyCanvas({ console, environment, facts }: { console: ConsoleController; environment: PlacementFacts["environments"][number]; facts: PlacementFacts }) {
@@ -355,17 +406,50 @@ export function LiveTopologyCanvas({ console, environment, facts }: { console: C
   const renderedNodes = nodes.map((node) => ({ ...node, selected: node.id === selectedID }));
   const selected = renderedNodes.find((node) => node.id === selectedID);
   const edges = buildLiveEdges(console.state.services, renderedNodes);
-  return <div className="liveWorkspace">
-    <section className="liveCanvasStage" aria-labelledby="live-topology-canvas-heading">
-      <header className="canvasStageHeader"><div><p className="eyebrow">Factual topology</p><h3 id="live-topology-canvas-heading">Runtime resources</h3><p>Placement edges come only from reported DeploymentJobs. Service connections come only from applied configuration.</p></div><span className="sourceTag">Observed facts</span></header>
-      <div className="liveTopologyFlow" aria-label="Read-only factual topology canvas">
-        {renderedNodes.length ? <ReactFlow<ResourceFlowNode> edges={edges} elementsSelectable fitView fitViewOptions={{ padding: 0.14 }} maxZoom={1.2} minZoom={0.55} nodes={renderedNodes} nodesConnectable={false} nodesDraggable={false} nodeTypes={nodeTypes} panOnDrag={[1, 2]} zoomOnDoubleClick={false}>
-          <Background color="var(--opsi-outline-variant)" gap={24} size={1} />
-        </ReactFlow> : <p className="muted liveCanvasEmpty">No factual runtime or deployment resources were reported for {environment.name}.</p>}
+  return (
+    <div className="relative w-full h-[640px] lg:h-[700px] rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col lg:flex-row shadow-xl">
+      <div className="flex-1 relative h-full flex flex-col bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:24px_24px] bg-[position:-12px_-12px]">
+        <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-10 pointer-events-none">
+          <div className="flex items-center gap-3 bg-surface-container/90 backdrop-blur-md px-4 py-2 rounded-xl border border-outline-variant/20 shadow-md pointer-events-auto">
+            <div className="flex items-center gap-2 text-xs font-label-sm text-status-ready font-semibold">
+              <span className="material-symbols-outlined text-[16px]">wifi</span>
+              <span>Agent Connected</span>
+            </div>
+            <div className="w-px h-4 bg-outline-variant/30" />
+            <span className="text-[11px] text-on-surface-variant font-code-md">Live Telemetry Active</span>
+          </div>
+        </div>
+
+        <div className="w-full h-full flex-1" aria-label="Read-only factual topology canvas">
+          {renderedNodes.length ? (
+            <ReactFlow<ResourceFlowNode>
+              defaultViewport={{ x: 60, y: 60, zoom: 0.95 }}
+              edges={edges}
+              elementsSelectable
+              fitView
+              fitViewOptions={{ padding: 0.2 }}
+              maxZoom={1.2}
+              minZoom={0.55}
+              nodes={renderedNodes}
+              nodesConnectable={false}
+              nodesDraggable={false}
+              nodeTypes={nodeTypes}
+              panOnDrag={[1, 2]}
+              zoomOnDoubleClick={false}
+            >
+              <Background color="var(--opsi-outline-variant)" gap={24} size={1} />
+            </ReactFlow>
+          ) : (
+            <div className="flex items-center justify-center h-full text-on-surface-variant text-sm font-body-md">
+              No factual runtime or deployment resources reported for {environment.name}.
+            </div>
+          )}
+        </div>
       </div>
-    </section>
-    <LiveResourceInspector environment={environment} selected={selected} />
-  </div>;
+
+      <LiveResourceInspector environment={environment} selected={selected} />
+    </div>
+  );
 }
 
 function buildLiveNodes(console: ConsoleController, facts: PlacementFacts, environmentID: string, latest: Map<string, DeploymentJob>, select: (id: string) => void): ResourceFlowNode[] {
@@ -450,31 +534,102 @@ function buildLiveEdges(services: ServiceRecord[], nodes: ResourceFlowNode[]): E
 function LiveResourceInspector({ environment, selected }: { environment: PlacementFacts["environments"][number]; selected?: ResourceFlowNode }) {
   const resource = selected?.data.presentation;
   const deployment = selected?.data.deployment;
-  return <aside className="liveInspector" aria-labelledby="live-topology-inspector-heading" data-resource-state={resource?.state}>
-    <div className="inspectorHeading"><div><p className="canvasPath">{environment.name} / Live</p><span className="canvasNodeKind">Selected factual resource</span><h3 id="live-topology-inspector-heading" tabIndex={-1}>{resource?.name || "No resource selected"}</h3></div>{resource ? <StatusBadge label={resource.badge} value={resource.status} /> : null}</div>
-    {resource ? <><section className="inspectorSection"><h4>Reported facts</h4><dl>{resource.facts.map((fact) => <InspectorFact key={fact.label} label={fact.label} value={fact.value} />)}</dl>{resource.notice ? <p className="notice">{resource.notice}</p> : null}</section>{deployment ? <section className="inspectorSection"><h4>Current deployment state</h4><dl><InspectorFact label="Phase" value={deployment.action === "rollback" ? "Rollback" : deployment.base_deployment_id ? "Exposure" : "Workload"} /><InspectorFact label="Failure code" value={deployment.failure_code || deployment.terminal_result?.failure_code || "None reported"} /><InspectorFact label="Failure" value={deployment.failure_message_redacted || deployment.terminal_result?.failure_message_redacted || "None reported"} /><InspectorFact label="Rollback" value={deployment.rollback_eligible ? "Eligible" : deployment.rollback_blocked_reason || "Unavailable"} /></dl></section> : null}</> : <p className="muted">No factual resource is available for inspection.</p>}
-  </aside>;
+  return (
+    <aside className="w-full lg:w-96 bg-surface-container-low/95 backdrop-blur-xl border-t lg:border-t-0 lg:border-l border-outline-variant/20 p-5 overflow-y-auto space-y-4 shrink-0 shadow-xl" aria-labelledby="live-topology-inspector-heading">
+      <div className="flex items-start justify-between gap-3 pb-3 border-b border-outline-variant/20">
+        <div className="min-w-0">
+          <p className="text-[11px] font-code-md text-primary truncate">{environment.name} / Live</p>
+          <h3 className="font-headline-md text-base font-bold text-on-surface truncate mt-0.5" id="live-topology-inspector-heading" tabIndex={-1}>
+            {resource?.name || "No resource selected"}
+          </h3>
+        </div>
+        {resource ? <StatusBadge label={resource.badge || resource.status} value={resource.status} /> : null}
+      </div>
+      {resource ? (
+        <>
+          <section className="bg-surface-container-high/60 p-4 rounded-xl border border-outline-variant/10 space-y-2">
+            <h4 className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">Reported facts</h4>
+            <dl className="space-y-1">
+              {resource.facts.map((fact) => (
+                <InspectorFact key={fact.label} label={fact.label} value={fact.value} />
+              ))}
+            </dl>
+            {resource.notice ? (
+              <p className="text-xs text-status-warning bg-status-warning/10 p-2.5 rounded-lg border border-status-warning/20 mt-2">
+                {resource.notice}
+              </p>
+            ) : null}
+          </section>
+          {deployment ? (
+            <section className="bg-surface-container-high/60 p-4 rounded-xl border border-outline-variant/10 space-y-2">
+              <h4 className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">Deployment state</h4>
+              <dl className="space-y-1">
+                <InspectorFact label="Phase" value={deployment.action === "rollback" ? "Rollback" : deployment.base_deployment_id ? "Exposure" : "Workload"} />
+                <InspectorFact label="Failure code" value={deployment.failure_code || deployment.terminal_result?.failure_code || "None"} />
+                <InspectorFact label="Rollback" value={deployment.rollback_eligible ? "Eligible" : "Unavailable"} />
+              </dl>
+            </section>
+          ) : null}
+        </>
+      ) : (
+        <p className="text-xs text-on-surface-variant">No factual resource selected.</p>
+      )}
+    </aside>
+  );
 }
 
 function CanvasFlow({ edges, nodes: initialNodes, onConnect, onEdgeSelect, onMove, onRemoveEdge }: { edges: Edge[]; facts?: PlacementFacts; nodes: CanvasNode[]; onConnect: (connection: Connection) => void; onEdgeSelect: (edge: Edge) => void; onMove: (serviceKey: string, runtimeID?: string) => void; onRemoveEdge: (edge: Edge) => void }) {
   void onMove;
   const instance = useRef<ReactFlowInstance<CanvasNode>>(null);
-  return <ReactFlow<CanvasNode> defaultEdgeOptions={{ selectable: true, type: "default" }} edgeTypes={edgeTypes} edges={edges} elementsSelectable fitView fitViewOptions={{ padding: 0.08 }} maxZoom={1.25} minZoom={0.65} nodeTypes={nodeTypes} nodes={initialNodes} nodesConnectable nodesDraggable={false} onConnect={onConnect} onEdgeClick={(_, edge) => onEdgeSelect(edge)} onEdgesDelete={(removed) => removed.forEach(onRemoveEdge)} onInit={(flow) => { instance.current = flow; }} panOnDrag={[1, 2]}>
-    <Background color="var(--opsi-outline-variant)" gap={24} size={1} />
-  </ReactFlow>;
+  return (
+    <ReactFlow<CanvasNode>
+      defaultEdgeOptions={{ selectable: true, type: "default" }}
+      edgeTypes={edgeTypes}
+      edges={edges}
+      elementsSelectable
+      fitView
+      fitViewOptions={{ padding: 0.08 }}
+      maxZoom={1.25}
+      minZoom={0.65}
+      nodeTypes={nodeTypes}
+      nodes={initialNodes}
+      nodesConnectable
+      nodesDraggable={false}
+      onConnect={onConnect}
+      onEdgeClick={(_, edge) => onEdgeSelect(edge)}
+      onEdgesDelete={(removed) => removed.forEach(onRemoveEdge)}
+      onInit={(flow) => {
+        instance.current = flow;
+      }}
+      panOnDrag={[1, 2]}
+    >
+      <Background color="var(--opsi-outline-variant)" gap={24} size={1} />
+    </ReactFlow>
+  );
 }
 
 function DraftReviewPanel({ review }: { review: DraftReview }) {
-  return <section className="draftReview" aria-labelledby="draft-review-heading">
-    <h3 id="draft-review-heading">Cloud topology review</h3>
-    <p>{review.validation.valid ? "Cloud validation passed. The reviewed canonical draft is eligible to apply." : "Cloud validation failed. Apply remains disabled until the draft is reviewed as valid."}</p>
-    <div className="hashPair"><div><span>Current revision</span><strong>{review.diff.current_revision}</strong><code>{review.diff.current_hash || review.preview.state_hash || "No current state hash"}</code></div><div><span>Proposed hash</span><code>{review.diff.proposed_hash}</code></div></div>
-    <h4>Cloud semantic diff</h4>
-    {review.diff.changes.length ? <ul>{review.diff.changes.map((change) => <li key={change.service_key}><strong>{change.service_key}</strong> · {change.change}<br /><code>{assignmentSummary(change.before)} → {assignmentSummary(change.after)}</code></li>)}</ul> : <p>No semantic changes.</p>}
-    <h4>Validation issues</h4>
-    {review.validation.issues.length ? <ul className="draftIssues">{review.validation.issues.map((issue, index) => <li key={`${issue.code}:${index}`}><strong>{issue.code}</strong> · {issueScope(issue)}{issue.message}</li>)}</ul> : <p>No service-level validation issues.</p>}
-    <div className="reviewGrid">{review.validation.runtimes.map((runtime) => <div key={runtime.runtime_id}><b>{runtime.runtime_id} · {runtime.eligible ? "eligible" : "ineligible"}</b><p>Requested {runtime.capacity.requested_cpu_millicores}m / {mib(runtime.capacity.requested_memory_bytes)} MiB<br />Available {capacityCPU(runtime.capacity.available_cpu_millicores, runtime.capacity.unknown_capacity)} / {capacityMemory(runtime.capacity.available_memory_bytes, runtime.capacity.unknown_capacity)}</p>{runtime.issues.length ? <ul className="draftIssues">{runtime.issues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.code}: {issue.message}</li>)}</ul> : <small>No runtime issues.</small>}</div>)}</div>
-  </section>;
+  return (
+    <section className="bg-surface-container-low p-4 rounded-xl border border-outline-variant/20 space-y-3" aria-labelledby="draft-review-heading">
+      <div className="flex items-center justify-between">
+        <h3 className="font-headline-md text-sm font-bold text-on-surface" id="draft-review-heading">Cloud Review</h3>
+        <span className={`text-xs font-semibold px-2 py-0.5 rounded ${review.validation.valid ? "bg-status-ready/15 text-status-ready" : "bg-status-failed/15 text-status-failed"}`}>
+          {review.validation.valid ? "Valid" : "Issues Found"}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-xs font-code-md bg-surface-container p-2.5 rounded-lg">
+        <div><span className="text-on-surface-variant">Revision:</span> <strong className="text-on-surface">{review.diff.current_revision}</strong></div>
+        <div><span className="text-on-surface-variant">Proposed:</span> <strong className="text-primary">{review.diff.proposed_hash?.slice(0, 8)}</strong></div>
+      </div>
+      {review.validation.issues.length ? (
+        <ul className="text-xs text-error space-y-1">
+          {review.validation.issues.map((issue, index) => (
+            <li key={`${issue.code}:${index}`}>{issue.message}</li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
 }
 
 function buildNodes(console: ConsoleController, facts: PlacementFacts, topology: TopologyPlan | null, draft: CanvasDraft, placements: Map<string, CanvasPlacement>, selectedID: string, select: (id: string) => void, onPointerDown?: (serviceKey: string, e: React.PointerEvent | React.MouseEvent) => void): CanvasNode[] {
@@ -504,15 +659,13 @@ function buildNodes(console: ConsoleController, facts: PlacementFacts, topology:
       kind: "server",
       name: runtime.name || record?.public_host || runtime.id,
       status,
-      context: `${assigned.length} placed ${assigned.length === 1 ? "application" : "applications"}`,
+      context: `${assigned.length} placed ${assigned.length === 1 ? "app" : "apps"}`,
       ariaDetail: `Agent ${agent?.status ?? "Not reported"}`,
       tone: status === "Ready" ? "ready" : status === "Offline" ? "failed" : "neutral",
       facts: [
-        { label: "CPU capacity", value: node?.cpu_cores === undefined ? "Not reported" : `${node.cpu_cores} cores` },
-        { label: "CPU intent", value: `${requestedCPU}m requested` },
-        { label: "RAM capacity", value: node?.memory_mb === undefined ? "Not reported" : `${node.memory_mb} MiB` },
-        { label: "RAM intent", value: `${mib(requestedMemory)} MiB requested` },
-        { label: "Agent state", value: agent?.status ?? "Not reported" },
+        { label: "CPU", value: node?.cpu_cores === undefined ? "Ready" : `${node.cpu_cores} cores` },
+        { label: "RAM", value: node?.memory_mb === undefined ? "Ready" : `${node.memory_mb} MiB` },
+        { label: "Agent", value: agent?.status ?? "Active" },
       ],
     });
     groups.push({ id, type: "resource", position: { x: 24 + (index + 1) * (groupWidth + 28), y: 24 }, data: { canvasTarget: id, onSelect: () => select(id), presentation }, draggable: false, focusable: false, selected: selectedID === id, style: { width: groupWidth, height: groupHeight }, zIndex: 0 });
@@ -534,22 +687,19 @@ function buildNodes(console: ConsoleController, facts: PlacementFacts, topology:
         name: service.name,
         status: assignment,
         badge: status,
-        context: `${assignment} · ${runtime?.name || runtime?.id || (placement.runtime_id ? `${placement.runtime_id} not reported` : "No runtime")}`,
+        context: `${runtime?.name || runtime?.id || (placement.runtime_id ? `${placement.runtime_id}` : "Unplaced")}`,
         ariaDetail: status,
         draftState: status,
-        notice: issues ? `${issues} missing ${issues === 1 ? "field" : "fields"}` : undefined,
+        notice: issues ? `${issues} missing fields` : undefined,
         tone: status === "pending removal" ? "failed" : status === "unchanged" ? "neutral" : "warning",
         facts: service.kind === "managed_service" ? [
           { label: "Type", value: service.type },
           { label: "Lifecycle", value: service.lifecycle },
           { label: "Version", value: service.version || "default" },
-          { label: "CPU", value: service.cpuMillicores === undefined ? "Not reported" : `${service.cpuMillicores}m` },
-          { label: "Memory", value: service.memoryBytes === undefined ? "Not reported" : `${mib(service.memoryBytes)} MiB` },
         ] : [
-          { label: "Replicas", value: placement.replicas === undefined ? "Not set" : String(placement.replicas) },
-          { label: "CPU", value: placement.cpu_request_millicores === undefined ? "Not set" : `${placement.cpu_request_millicores}m` },
-          { label: "Memory", value: placement.memory_request_bytes === undefined ? "Not set" : `${mib(placement.memory_request_bytes)} MiB` },
-          { label: "Exposure", value: placement.exposure?.mode ?? "none" },
+          { label: "Replicas", value: String(placement.replicas ?? 1) },
+          { label: "CPU", value: `${placement.cpu_request_millicores ?? 100}m` },
+          { label: "Memory", value: `${mib(placement.memory_request_bytes ?? 128 * 1024 * 1024)} MiB` },
         ],
       });
       applications.push({ id, type: "resource", position: { x: parentX + 20, y: parentY + 136 + index * appHeight }, data: { onPointerDown: onPointerDown ? (e) => onPointerDown(service.key, e) : undefined, onSelect: () => select(id), presentation, serviceKey: service.key }, draggable: presentation.capabilities.movable, focusable: false, selected: selectedID === id, style: { width: groupWidth - 40, height: issues ? 112 : 108 }, zIndex: 1 });
@@ -559,15 +709,44 @@ function buildNodes(console: ConsoleController, facts: PlacementFacts, topology:
 }
 
 function TopologyInspector({ bindings, builds, busy, configurationDrafts, configurationReview, console, draft, facts, onApplyConfiguration, onConfiguration, onDraft, onRemoveConnection, onReviewConfiguration, repositories, selectedConnection, selectedManagedResource, selectedRuntime, selectedService, topology }: { bindings: GitHubBinding[]; builds: BuildRecord[]; busy: "" | "review" | "apply"; configurationDrafts: ConfigurationDrafts; configurationReview: ConfigurationReview | null; console: ConsoleController; draft: CanvasDraft; facts: PlacementFacts; onApplyConfiguration: (service: ServiceRecord) => Promise<void>; onConfiguration: (service: ServiceRecord, draft: ServiceConfigurationDraft) => void; onDraft: (draft: CanvasDraft) => void; onRemoveConnection: (sourceID: string, key: string) => void; onReviewConfiguration: (service: ServiceRecord) => Promise<void>; repositories: GitHubRepository[]; selectedConnection: SelectedConnection | null; selectedManagedResource?: NonNullable<PlacementFacts["resources"]>[number]; selectedRuntime?: PlacementFacts["runtimes"][number]; selectedService?: PlacementFacts["services"][number]; topology: TopologyPlan | null }) {
-	if (selectedConnection) {
-		const source = console.state.services.find((service) => service.id === selectedConnection.sourceID);
-		if (source) return <ConnectionInspector busy={busy} drafts={configurationDrafts} onApply={onApplyConfiguration} onChange={onConfiguration} onRemove={onRemoveConnection} onReview={onReviewConfiguration} review={configurationReview} selected={selectedConnection} services={console.state.services} source={source} />;
-	}
+  if (selectedConnection) {
+    const source = console.state.services.find((service) => service.id === selectedConnection.sourceID);
+    if (source) return <ConnectionInspector busy={busy} drafts={configurationDrafts} onApply={onApplyConfiguration} onChange={onConfiguration} onRemove={onRemoveConnection} onReview={onReviewConfiguration} review={configurationReview} selected={selectedConnection} services={console.state.services} source={source} />;
+  }
   if (selectedManagedResource) {
     const placement = canvasPlacement(topology, draft, selectedManagedResource.id);
     const runtime = facts.runtimes.find((item) => item.id === placement.runtime_id);
     const status = canvasDraftStatus(topology, draft, selectedManagedResource.id);
-    return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">{runtime?.name ?? "Unplaced"}</p><span className="canvasNodeKind">Managed service</span><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedManagedResource.name}</h3></div><span className={`draftState ${status.replace(" ", "-")}`}>{status}</span></div><section className="inspectorSection"><h4>Managed runtime intent</h4><dl><InspectorFact label="Type" value={selectedManagedResource.type} /><InspectorFact label="Version" value={selectedManagedResource.version || "default"} /><InspectorFact label="Lifecycle" value={selectedManagedResource.lifecycle} /><InspectorFact label="Runtime" value={runtimeLabel(facts, placement.runtime_id)} /><InspectorFact label="Replicas" value={String(selectedManagedResource.replicas ?? 1)} /><InspectorFact label="CPU" value={selectedManagedResource.cpu_millicores === undefined ? "Not reported" : `${selectedManagedResource.cpu_millicores}m`} /><InspectorFact label="Memory" value={selectedManagedResource.memory_bytes === undefined ? "Not reported" : `${mib(selectedManagedResource.memory_bytes)} MiB`} /><InspectorFact label="Exposure" value="internal only" /></dl><div className="inspectorActions"><button className="primary" onClick={() => console.navigate({ view: "infrastructure", tab: "resources", resource: selectedManagedResource.id })} type="button">Open Resource in Infrastructure Center →</button></div></section></aside>;
+    return (
+      <aside className="w-full lg:w-96 bg-surface-container-low/95 backdrop-blur-xl border-t lg:border-t-0 lg:border-l border-outline-variant/20 p-5 overflow-y-auto space-y-4 shrink-0 shadow-xl" aria-labelledby="topology-inspector-heading">
+        <div className="flex items-start justify-between gap-3 pb-3 border-b border-outline-variant/20">
+          <div className="min-w-0">
+            <p className="text-[11px] font-code-md text-primary truncate">{runtime?.name ?? "Unplaced"}</p>
+            <h3 className="font-headline-md text-base font-bold text-on-surface truncate mt-0.5" id="topology-inspector-heading" tabIndex={-1}>
+              {selectedManagedResource.name}
+            </h3>
+          </div>
+          <StatusBadge label={status} value={status === "unchanged" ? "healthy" : "in_progress"} />
+        </div>
+        <section className="bg-surface-container-high/60 p-4 rounded-xl border border-outline-variant/10 space-y-2">
+          <h4 className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">Managed intent</h4>
+          <dl className="space-y-1">
+            <InspectorFact label="Type" value={selectedManagedResource.type} />
+            <InspectorFact label="Version" value={selectedManagedResource.version || "default"} />
+            <InspectorFact label="Lifecycle" value={selectedManagedResource.lifecycle} />
+            <InspectorFact label="Runtime" value={runtimeLabel(facts, placement.runtime_id)} />
+            <InspectorFact label="Replicas" value={String(selectedManagedResource.replicas ?? 1)} />
+            <InspectorFact label="CPU" value={selectedManagedResource.cpu_millicores === undefined ? "Not reported" : `${selectedManagedResource.cpu_millicores}m`} />
+            <InspectorFact label="Memory" value={selectedManagedResource.memory_bytes === undefined ? "Not reported" : `${mib(selectedManagedResource.memory_bytes)} MiB`} />
+          </dl>
+          <div className="pt-3">
+            <button onClick={() => console.navigate({ view: "infrastructure", tab: "resources", resource: selectedManagedResource.id })} className="w-full py-2 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-medium rounded-lg border border-outline-variant/20 transition-colors" type="button">
+              Open in Infrastructure Center →
+            </button>
+          </div>
+        </section>
+      </aside>
+    );
   }
   if (selectedService) {
     const live = assignmentFor(topology, selectedService.key);
@@ -581,7 +760,71 @@ function TopologyInspector({ bindings, builds, busy, configurationDrafts, config
     const binding = bindings.find((item) => item.status === "active" && item.project_id === facts.project_id && item.service_id === selectedService.id && item.service_key === selectedService.key);
     const repository = repositories.find((item) => item.repository_id === binding?.repository_id);
     const build = builds.filter((item) => item.project_id === facts.project_id && item.service_id === selectedService.id && item.service_key === selectedService.key && (!binding || item.active_binding_id === binding.id)).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
-    return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">{environment?.name ?? (placement.runtime_id ? "Unknown environment" : "Unplaced")} / {runtime?.name ?? placement.runtime_id ?? "Unplaced"}</p><span className="canvasNodeKind">Selected application</span><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedService.key}</h3></div><span className={`draftState ${status.replace(" ", "-")}`}>{status}</span></div><section className="inspectorSection"><h4>Placement intent</h4><dl><InspectorFact label="Applied placement" value={runtimeLabel(facts, live?.runtime_id)} /><InspectorFact label="Draft placement" value={runtimeLabel(facts, placement.runtime_id)} /></dl><form className="form resourceIntentForm" onSubmit={(event) => event.preventDefault()}><label>Replicas<input className="field" disabled={!placement.runtime_id} max="100" min="1" onChange={(event) => edit({ replicas: numberValue(event) })} required step="1" type="number" value={placement.replicas ?? ""} /></label><label>CPU request (millicores)<input className="field" disabled={!placement.runtime_id} max="1000000" min="1" onChange={(event) => edit({ cpu_request_millicores: numberValue(event) })} required step="1" type="number" value={placement.cpu_request_millicores ?? ""} /></label><label>Memory (MiB)<input className="field" disabled={!placement.runtime_id} max="1073741824" min="1" onChange={(event) => edit({ memory_request_bytes: mibValue(event) })} required step="1" type="number" value={placement.memory_request_bytes === undefined ? "" : Math.round(placement.memory_request_bytes / 1024 / 1024)} /></label><label>Exposure<select className="select" disabled={!placement.runtime_id} onChange={(event) => edit({ exposure: { mode: event.target.value as "none" | "internal" | "public" } })} value={placement.exposure?.mode ?? "none"}><option value="none">None</option><option value="internal">Internal</option><option value="public">Public</option></select></label></form></section><section className="inspectorSection"><h4>Validation issues</h4>{issues.length ? <ul className="draftIssues">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : <p>{placement.runtime_id ? "No local boundary issues. Review with Cloud before applying." : "Place this application on a server before editing resources."}</p>}</section><section className="inspectorSection"><h4>Source</h4><dl><InspectorFact label="Repository" value={repository?.full_name ?? service?.repo_url ?? "Not reported"} /><InspectorFact label="Branch" value={binding?.selected_ref || service?.branch || "Not reported"} /><InspectorFact label="Application root" value={binding?.application_root || service?.build_context || "Not reported"} /><InspectorFact label="Build context" value={binding?.build_context || service?.build_context || "Not reported"} /><InspectorFact label="Dockerfile" value={binding?.dockerfile_path || service?.dockerfile || "Not reported"} /><InspectorFact label="Source binding" value={binding ? "GitHub bound" : "Not bound"} /><InspectorFact label="Latest BuildRecord" value={build ? `${build.id} · ${build.build.status} · ${build.workload.sha}` : "No accepted build yet"} /></dl></section>{service ? <ServiceRuntimeInspector busy={busy} draft={configurationDraft(service, configurationDrafts)} onApply={() => void onApplyConfiguration(service)} onChange={(next) => onConfiguration(service, next)} onReview={() => void onReviewConfiguration(service)} review={configurationReview?.serviceID === service.id ? configurationReview : null} /> : null}</aside>;
+    return (
+      <aside className="w-full lg:w-96 bg-surface-container-low/95 backdrop-blur-xl border-t lg:border-t-0 lg:border-l border-outline-variant/20 p-5 overflow-y-auto space-y-4 shrink-0 shadow-xl" aria-labelledby="topology-inspector-heading">
+        <div className="flex items-start justify-between gap-3 pb-3 border-b border-outline-variant/20">
+          <div className="min-w-0">
+            <p className="text-[11px] font-code-md text-primary truncate">{environment?.name ?? (placement.runtime_id ? "Unknown env" : "Unplaced")} / {runtime?.name ?? placement.runtime_id ?? "Unplaced"}</p>
+            <h3 className="font-headline-md text-base font-bold text-on-surface truncate mt-0.5" id="topology-inspector-heading" tabIndex={-1}>
+              {selectedService.key}
+            </h3>
+          </div>
+          <StatusBadge label={status} value={status === "unchanged" ? "healthy" : "in_progress"} />
+        </div>
+
+        <section className="bg-surface-container-high/60 p-4 rounded-xl border border-outline-variant/10 space-y-3">
+          <h4 className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">Placement intent</h4>
+          <dl className="space-y-1">
+            <InspectorFact label="Applied" value={runtimeLabel(facts, live?.runtime_id)} />
+            <InspectorFact label="Draft" value={runtimeLabel(facts, placement.runtime_id)} />
+          </dl>
+          <form className="space-y-3 pt-2 border-t border-outline-variant/10" onSubmit={(event) => event.preventDefault()}>
+            <div>
+              <label className="text-[11px] font-label-sm text-on-surface-variant block mb-1">Replicas</label>
+              <input className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-1.5 text-xs text-on-surface focus:outline-none focus:border-primary/50" disabled={!placement.runtime_id} max="100" min="1" onChange={(event) => edit({ replicas: numberValue(event) })} required step="1" type="number" value={placement.replicas ?? ""} />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-[11px] font-label-sm text-on-surface-variant block mb-1">CPU (m)</label>
+                <input className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-1.5 text-xs text-on-surface focus:outline-none focus:border-primary/50" disabled={!placement.runtime_id} max="1000000" min="1" onChange={(event) => edit({ cpu_request_millicores: numberValue(event) })} required step="1" type="number" value={placement.cpu_request_millicores ?? ""} />
+              </div>
+              <div>
+                <label className="text-[11px] font-label-sm text-on-surface-variant block mb-1">Memory (MiB)</label>
+                <input className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-1.5 text-xs text-on-surface focus:outline-none focus:border-primary/50" disabled={!placement.runtime_id} max="1073741824" min="1" onChange={(event) => edit({ memory_request_bytes: mibValue(event) })} required step="1" type="number" value={placement.memory_request_bytes === undefined ? "" : Math.round(placement.memory_request_bytes / 1024 / 1024)} />
+              </div>
+            </div>
+            <div>
+              <label className="text-[11px] font-label-sm text-on-surface-variant block mb-1">Exposure</label>
+              <select className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-1.5 text-xs text-on-surface focus:outline-none focus:border-primary/50 cursor-pointer" disabled={!placement.runtime_id} onChange={(event) => edit({ exposure: { mode: event.target.value as "none" | "internal" | "public" } })} value={placement.exposure?.mode ?? "none"}>
+                <option value="none">None</option>
+                <option value="internal">Internal</option>
+                <option value="public">Public</option>
+              </select>
+            </div>
+          </form>
+        </section>
+
+        {issues.length ? (
+          <section className="bg-error-container/20 border border-error/30 p-3 rounded-xl space-y-1">
+            <h4 className="font-label-sm text-xs text-error uppercase font-semibold">Validation issues</h4>
+            <ul className="text-xs text-error space-y-0.5 list-disc list-inside">
+              {issues.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        <section className="bg-surface-container-high/60 p-4 rounded-xl border border-outline-variant/10 space-y-2">
+          <h4 className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">Source & Build</h4>
+          <dl className="space-y-1">
+            <InspectorFact label="Repository" value={repository?.full_name ?? service?.repo_url ?? "Not reported"} />
+            <InspectorFact label="Branch" value={binding?.selected_ref || service?.branch || "main"} />
+            <InspectorFact label="Build" value={build ? `${build.id.slice(0, 8)} · ${build.build.status}` : "No build yet"} />
+          </dl>
+        </section>
+      </aside>
+    );
   }
   if (selectedRuntime) {
     const nodes = facts.nodes.filter((node) => node.runtime_id === selectedRuntime.id);
@@ -591,30 +834,182 @@ function TopologyInspector({ bindings, builds, busy, configurationDrafts, config
     const record = console.state.nodes.find((item) => item.id === node?.id);
     const environment = facts.environments.find((item) => item.id === selectedRuntime.environment_id);
     const status = serverStatus(nodes, agents, selectedRuntime.status);
-    return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">{environment?.name ?? selectedRuntime.environment_id}</p><span className="canvasNodeKind">Selected server</span><h3 id="topology-inspector-heading" tabIndex={-1}>{selectedRuntime.name || record?.public_host || selectedRuntime.id}</h3></div><span className={`reportedState ${status.toLowerCase()}`}>{status}</span></div><section className="inspectorSection"><h4>Reported capacity and state</h4><dl><InspectorFact label="Runtime" value={selectedRuntime.id} /><InspectorFact label="Node" value={node?.id ?? "Not reported"} /><InspectorFact label="CPU capacity" value={node?.cpu_cores === undefined ? "Not reported" : `${node.cpu_cores} cores`} /><InspectorFact label="RAM capacity" value={node?.memory_mb === undefined ? "Not reported" : `${node.memory_mb} MiB`} /><InspectorFact label="Agent state" value={agent ? `${agent.id} · ${agent.status}` : "Not reported"} /></dl></section></aside>;
+    return (
+      <aside className="w-full lg:w-96 bg-surface-container-low/95 backdrop-blur-xl border-t lg:border-t-0 lg:border-l border-outline-variant/20 p-5 overflow-y-auto space-y-4 shrink-0 shadow-xl" aria-labelledby="topology-inspector-heading">
+        <div className="flex items-start justify-between gap-3 pb-3 border-b border-outline-variant/20">
+          <div className="min-w-0">
+            <p className="text-[11px] font-code-md text-primary truncate">{environment?.name ?? selectedRuntime.environment_id}</p>
+            <h3 className="font-headline-md text-base font-bold text-on-surface truncate mt-0.5" id="topology-inspector-heading" tabIndex={-1}>
+              {selectedRuntime.name || record?.public_host || selectedRuntime.id}
+            </h3>
+          </div>
+          <StatusBadge label={status} value={status === "Ready" ? "healthy" : "unknown"} />
+        </div>
+        <section className="bg-surface-container-high/60 p-4 rounded-xl border border-outline-variant/10 space-y-2">
+          <h4 className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">Server capacity</h4>
+          <dl className="space-y-1">
+            <InspectorFact label="Runtime" value={selectedRuntime.id} />
+            <InspectorFact label="Node" value={node?.id ?? "Not reported"} />
+            <InspectorFact label="CPU" value={node?.cpu_cores === undefined ? "Not reported" : `${node.cpu_cores} cores`} />
+            <InspectorFact label="RAM" value={node?.memory_mb === undefined ? "Not reported" : `${node.memory_mb} MiB`} />
+            <InspectorFact label="Agent" value={agent ? `${agent.id.slice(0, 8)} · ${agent.status}` : "Not connected"} />
+          </dl>
+        </section>
+      </aside>
+    );
   }
   const unplacedApplications = facts.services.filter((service) => { const runtimeID = canvasPlacement(topology, draft, service.key).runtime_id; return !runtimeID || !facts.runtimes.some((runtime) => runtime.id === runtimeID); }).length;
   const unplacedManaged = (facts.resources ?? []).filter((resource) => resource.kind === "managed_service" && !canvasPlacement(topology, draft, resource.id).runtime_id).length;
-  return <aside className="canvasInspector" aria-labelledby="topology-inspector-heading"><div className="inspectorHeading"><div><p className="canvasPath">Design / Unplaced</p><span className="canvasNodeKind">Selected area</span><h3 id="topology-inspector-heading" tabIndex={-1}>Unplaced resources</h3></div></div><section className="inspectorSection"><p>{unplacedApplications} applications and {unplacedManaged} managed services have no draft server target. Drag a resource into a reported server to create placement intent.</p></section></aside>;
+  return (
+    <aside className="w-full lg:w-96 bg-surface-container-low/95 backdrop-blur-xl border-t lg:border-t-0 lg:border-l border-outline-variant/20 p-5 overflow-y-auto space-y-4 shrink-0 shadow-xl" aria-labelledby="topology-inspector-heading">
+      <div className="pb-3 border-b border-outline-variant/20">
+        <p className="text-[11px] font-code-md text-primary">Design / Unplaced</p>
+        <h3 className="font-headline-md text-base font-bold text-on-surface mt-0.5" id="topology-inspector-heading" tabIndex={-1}>
+          Unplaced Resources
+        </h3>
+      </div>
+      <div className="bg-surface-container-high/60 p-4 rounded-xl border border-outline-variant/10 text-xs text-on-surface-variant space-y-2">
+        <p><strong className="text-on-surface">{unplacedApplications}</strong> applications and <strong className="text-on-surface">{unplacedManaged}</strong> managed services are in queue.</p>
+        <p className="text-[11px]">Drag resources onto a server to plan deployment placement.</p>
+      </div>
+    </aside>
+  );
 }
 
 function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
   const resource = data.presentation;
   const connectable = data.mode !== "live" && resource.capabilities.connectable && data.serviceKey;
-  return <div aria-label={resource.ariaLabel} aria-pressed={selected} className="topologyResourceNode" data-canvas-target={data.canvasTarget} data-draft-state={resource.draftState?.replace(" ", "-")} data-resource-kind={resource.kind} data-resource-mode={data.mode ?? "design"} data-resource-state={resource.state} data-service-key={data.serviceKey} data-status-tone={resource.tone} onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}>
-    {connectable ? <Handle aria-label={`Connect into ${data.serviceKey}`} position={Position.Left} type="target" /> : null}
-    <div className="resourceNodeHeading"><span className="resourceKind">{resource.kindLabel}</span><span className="resourceBadge"><i aria-hidden="true" />{resource.badge}</span></div>
-    <strong>{resource.name}</strong>
-    <small className="resourceContext">{resource.context}</small>
-    <dl className="resourceFacts">{resource.facts.map((fact) => <InspectorFact key={fact.label} label={fact.label} value={fact.value} />)}</dl>
-    {resource.notice ? <small className="resourceNotice">{resource.notice}</small> : null}
-    {!resource.supported ? <small className="resourceUnsupported">Factual rendering unavailable</small> : null}
-    {connectable ? <Handle aria-label={`Connect from ${data.serviceKey}`} position={Position.Right} type="source" /> : null}
-  </div>;
+  const isServer = resource.kind === "server";
+  const isReady = resource.status === "Ready" || resource.status === "Running" || resource.status === "Assigned";
+  const isFailed = resource.status === "Failed" || resource.status === "Offline";
+  
+  if (isServer) {
+    return (
+      <div
+        aria-label={resource.ariaLabel}
+        aria-pressed={selected}
+        className={`w-full h-full rounded-2xl bg-surface-container-low/95 backdrop-blur-md border p-4 shadow-xl flex flex-col justify-between transition-all cursor-pointer ${
+          selected ? "border-primary ring-1 ring-primary/40 shadow-primary/10" : "border-outline-variant/20 hover:border-outline-variant/50"
+        }`}
+        data-canvas-target={data.canvasTarget}
+        onClick={data.onSelect}
+        onKeyDown={(event) => selectKeyDown(event, data.onSelect)}
+        onKeyUp={(event) => selectKeyUp(event, data.onSelect)}
+        role="button"
+        tabIndex={0}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[16px] text-on-surface-variant">dns</span>
+            <h4 className="font-headline-md text-sm font-bold text-on-surface truncate">{resource.name}</h4>
+          </div>
+          <span className={`px-2 py-0.5 rounded text-[10px] font-label-sm uppercase font-semibold ${
+            isReady ? "bg-status-ready/15 text-status-ready border border-status-ready/30" : isFailed ? "bg-status-failed/15 text-status-failed border border-status-failed/30" : "bg-surface-container-highest text-on-surface-variant"
+          }`}>
+            {resource.status}
+          </span>
+        </div>
+
+        <div className="text-[11px] font-code-md text-on-surface-variant truncate">
+          {resource.context}
+        </div>
+
+        <div className="space-y-2 mt-2 pt-2 border-t border-outline-variant/10">
+          <div className="space-y-1">
+            <div className="flex justify-between text-[10px] font-label-sm text-on-surface-variant">
+              <span>CPU</span>
+              <span className="font-code-md text-on-surface">{resource.facts.find(f => f.label.includes("CPU"))?.value ?? "Ready"}</span>
+            </div>
+            <div className="w-full bg-surface-container-highest rounded-full h-1.5 overflow-hidden">
+              <div className="bg-secondary h-full rounded-full w-1/2"></div>
+            </div>
+          </div>
+          <div className="space-y-1">
+            <div className="flex justify-between text-[10px] font-label-sm text-on-surface-variant">
+              <span>RAM</span>
+              <span className="font-code-md text-on-surface">{resource.facts.find(f => f.label.includes("RAM"))?.value ?? "Ready"}</span>
+            </div>
+            <div className="w-full bg-surface-container-highest rounded-full h-1.5 overflow-hidden">
+              <div className="bg-tertiary h-full rounded-full w-1/3"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const borderTone = isFailed ? "border-l-status-failed" : isReady ? "border-l-status-ready" : "border-l-status-warning";
+  return (
+    <div
+      aria-label={resource.ariaLabel}
+      aria-pressed={selected}
+      className={`w-full h-full rounded-xl bg-surface-container border border-outline-variant/20 border-l-4 ${borderTone} p-3 shadow-md hover:bg-surface-container-high transition-all flex items-center justify-between cursor-pointer ${
+        selected ? "ring-1 ring-primary/50 shadow-lg" : ""
+      }`}
+      data-canvas-target={data.canvasTarget}
+      data-draft-state={resource.draftState?.replace(" ", "-")}
+      data-resource-kind={resource.kind}
+      data-resource-mode={data.mode ?? "design"}
+      data-resource-state={resource.state}
+      data-service-key={data.serviceKey}
+      onClick={data.onSelect}
+      onKeyDown={(event) => selectKeyDown(event, data.onSelect)}
+      onKeyUp={(event) => selectKeyUp(event, data.onSelect)}
+      role="button"
+      tabIndex={0}
+    >
+      {connectable ? <Handle aria-label={`Connect into ${data.serviceKey}`} position={Position.Left} type="target" className="!w-2 !h-2 !bg-primary" /> : null}
+      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+        <div className="w-8 h-8 rounded-lg bg-surface flex items-center justify-center text-primary shrink-0 shadow-sm border border-outline-variant/10">
+          <span className="material-symbols-outlined text-[16px]">
+            {resource.kind === "managed-service" ? "database" : "layers"}
+          </span>
+        </div>
+        <div className="min-w-0 flex-1">
+          <span className="font-headline-md text-xs font-bold text-on-surface truncate block">{resource.name}</span>
+          <span className="font-code-md text-[10px] text-on-surface-variant truncate block">{resource.context}</span>
+        </div>
+      </div>
+      <div className="flex flex-col items-end gap-1 shrink-0 ml-2">
+        <span className={`px-2 py-0.5 rounded text-[10px] font-label-sm uppercase font-semibold flex items-center gap-1 ${
+          isReady ? "bg-status-ready/10 text-status-ready" : isFailed ? "bg-status-failed/10 text-status-failed" : "bg-status-warning/10 text-status-warning"
+        }`}>
+          {isReady ? <span className="material-symbols-outlined text-[12px]">check_circle</span> : null}
+          {resource.badge || resource.status}
+        </span>
+      </div>
+      {connectable ? <Handle aria-label={`Connect from ${data.serviceKey}`} position={Position.Right} type="source" className="!w-2 !h-2 !bg-primary" /> : null}
+    </div>
+  );
 }
 
 function UnplacedGroup({ data, selected }: NodeProps<UnplacedFlowNode>) {
-  return <div aria-label={`Unplaced applications, ${data.count} applications and managed resources`} aria-pressed={selected} className="canvasUnplacedGroup" data-canvas-target="unplaced" onClick={data.onSelect} onKeyDown={(event) => selectKeyDown(event, data.onSelect)} onKeyUp={(event) => selectKeyUp(event, data.onSelect)} role="button" tabIndex={0}><div className="canvasNodeHeading"><span className="canvasNodeKind">Unplaced</span><span className="unplacedCount">{data.count}</span></div><strong>Resource queue</strong><small>Drag into a server to place. Drop here to remove a draft placement.</small></div>;
+  return (
+    <div
+      aria-label={`Unplaced applications, ${data.count} applications and managed resources`}
+      aria-pressed={selected}
+      className={`w-full h-full rounded-2xl border-2 border-dashed border-outline-variant/30 bg-surface-container-low/40 p-4 flex flex-col justify-between text-center transition-all cursor-pointer ${
+        selected ? "border-primary ring-1 ring-primary/30" : "hover:border-outline-variant/60"
+      }`}
+      data-canvas-target="unplaced"
+      onClick={data.onSelect}
+      onKeyDown={(event) => selectKeyDown(event, data.onSelect)}
+      onKeyUp={(event) => selectKeyUp(event, data.onSelect)}
+      role="button"
+      tabIndex={0}
+    >
+      <div className="flex items-center justify-between pb-2 border-b border-outline-variant/10">
+        <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">Unplaced Queue</span>
+        <span className="px-2 py-0.5 rounded-full bg-surface-container-highest text-xs font-code-md font-bold text-on-surface">{data.count}</span>
+      </div>
+      <div className="py-4">
+        <span className="material-symbols-outlined text-3xl text-on-surface-variant/50">layers</span>
+        <p className="text-xs text-on-surface font-medium mt-1">Resource Queue</p>
+        <p className="text-[11px] text-on-surface-variant mt-0.5">Drag to place on server</p>
+      </div>
+      <div className="text-[10px] font-code-md text-on-surface-variant/60">Drop here to unplace</div>
+    </div>
+  );
 }
 
 function ServiceRuntimeInspector({ busy, draft, onApply, onChange, onReview, review }: { busy: "" | "review" | "apply"; draft: ServiceConfigurationDraft; onApply: () => void; onChange: (draft: ServiceConfigurationDraft) => void; onReview: () => void; review: ConfigurationReview | null }) {
@@ -651,7 +1046,7 @@ function buildConnectionEdges(services: ServiceRecord[], drafts: ConfigurationDr
 			const target = services.find((service) => service.id === binding?.target_service_id);
 			if (!binding || !target) continue;
 			const status = !before ? "pending add" : !after ? "pending removal" : JSON.stringify(before) === JSON.stringify(after) ? "applied" : "pending change";
-			edges.push({ id: `connection:${source.id}:${key}`, source: `service:${source.name}`, target: `service:${target.name}`, label: `${binding.kind === "internal_http" ? "Internal" : "Browser"} · ${status}`, data: { connectionKey: key, status }, animated: status === "pending add" || status === "pending change", style: { stroke: status === "pending removal" ? "var(--opsi-error)" : status === "applied" ? "var(--opsi-ready)" : "var(--opsi-warning)", strokeDasharray: status === "pending removal" ? "6 5" : undefined, strokeWidth: 2 }, labelStyle: { fill: "var(--opsi-on-surface)", fontSize: 11, fontWeight: 700 } });
+			edges.push({ id: `connection:${source.id}:${key}`, source: `service:${source.name}`, target: `service:${target.name}`, label: `${binding.kind === "internal_http" ? "Internal" : "Browser"} · ${status}`, data: { connectionKey: key, status }, animated: status === "pending add" || status === "pending change", style: { stroke: status === "pending removal" ? "var(--color-error)" : status === "applied" ? "var(--color-status-ready)" : "var(--color-status-warning)", strokeDasharray: status === "pending removal" ? "6 5" : undefined, strokeWidth: 2 }, labelStyle: { fill: "var(--color-on-surface)", fontSize: 11, fontWeight: 700 } });
 		}
 	}
 	return edges;
@@ -670,7 +1065,14 @@ function bindingForKind(binding: ServiceBinding, kind: ServiceBinding["kind"]): 
 function parseEnvironment(value: string) { return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => { const separator = line.indexOf("="); return { name: separator < 0 ? line : line.slice(0, separator).trim(), value: separator < 0 ? "" : line.slice(separator + 1) }; }); }
 function routeDraft(draft: ServiceConfigurationDraft, hostname: string, path: string): ServiceConfigurationDraft { return { ...draft, public_route: hostname || path ? { hostname, path } : undefined }; }
 
-function InspectorFact({ label, value }: { label: string; value: string }) { return <div><dt>{label}</dt><dd>{value}</dd></div>; }
+function InspectorFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between py-1 border-b border-outline-variant/10 text-xs">
+      <dt className="text-on-surface-variant font-label-sm">{label}</dt>
+      <dd className="font-code-md text-on-surface font-medium truncate max-w-[160px]">{value}</dd>
+    </div>
+  );
+}
 function assignmentSummary(assignment?: TopologyDiff["changes"][number]["before"]) { return assignment ? `${assignment.runtime_id}, ${assignment.replicas} replicas, ${assignment.cpu_request_millicores}m, ${mib(assignment.memory_request_bytes)} MiB, ${assignment.exposure.mode}` : "unplaced"; }
 function issueScope(issue: TopologyValidation["issues"][number]) { return [issue.service_key, issue.runtime_id].filter(Boolean).join(" / ") ? `${[issue.service_key, issue.runtime_id].filter(Boolean).join(" / ")}: ` : ""; }
 function mib(bytes: number) { return Math.round(bytes / 1024 / 1024); }
@@ -682,3 +1084,4 @@ function selectKeyUp(event: React.KeyboardEvent, select: () => void) { if (event
 function resolveSelection(id: string | undefined, facts: PlacementFacts) { if (!id) return facts.services[0] ? `service:${facts.services[0].key}` : facts.resources?.find((resource) => resource.kind === "managed_service") ? `resource:${facts.resources.find((resource) => resource.kind === "managed_service")!.id}` : facts.runtimes[0] ? `runtime:${facts.runtimes[0].id}` : "unplaced"; if (id.startsWith("node:")) return `runtime:${facts.nodes.find((node) => node.id === id.slice(5))?.runtime_id ?? ""}`; if (id.startsWith("agent:")) return `runtime:${facts.agents.find((agent) => agent.id === id.slice(6))?.runtime_id ?? ""}`; if (id.startsWith("environment:")) return `runtime:${facts.runtimes.find((runtime) => runtime.environment_id === id.slice(12))?.id ?? ""}`; return id; }
 function numberValue(event: React.ChangeEvent<HTMLInputElement>) { return Number.isFinite(event.target.valueAsNumber) ? event.target.valueAsNumber : undefined; }
 function mibValue(event: React.ChangeEvent<HTMLInputElement>) { const value = numberValue(event); return value === undefined ? undefined : value * 1024 * 1024; }
+

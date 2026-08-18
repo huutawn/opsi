@@ -63,73 +63,7 @@ export function InfrastructureCenterView({ console }: { console: ConsoleControll
   });
 
   return (
-    <div className="p-4 lg:p-margin-desktop max-w-7xl mx-auto space-y-6">
-      {/* Header */}
-      <PageHeader
-        action={
-          <div className="flex items-center gap-3">
-            {activeTab === "servers" ? (
-              <Button onClick={() => setShowAddServer(true)} variant="primary">
-                <Icon name="add" className="text-[18px]" />
-                Connect Server
-              </Button>
-            ) : activeTab === "resources" ? (
-              <Button onClick={() => setShowAddResource(true)} variant="primary">
-                <Icon name="add" className="text-[18px]" />
-                Add Managed Resource
-              </Button>
-            ) : null}
-          </div>
-        }
-        description="Inspect and operate execution capacity, cloud-managed resources, and persistent storage."
-        eyebrow="Infrastructure Resource Center"
-        icon="dns"
-        title="Infrastructure"
-      />
-
-      {/* Tabs */}
-      <nav aria-label="Infrastructure sections" className="flex items-center gap-8 border-b border-outline-variant/20 overflow-x-auto">
-        <button
-          aria-selected={activeTab === "servers"}
-          className={`font-body-md text-sm pb-2.5 -mb-px border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
-            activeTab === "servers"
-              ? "font-bold text-primary border-primary"
-              : "font-medium text-on-surface-variant hover:text-on-surface border-transparent"
-          }`}
-          onClick={() => handleTabChange("servers")}
-          role="tab"
-          type="button"
-        >
-          Servers ({data.nodes.length})
-        </button>
-        <button
-          aria-selected={activeTab === "resources"}
-          className={`font-body-md text-sm pb-2.5 -mb-px border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
-            activeTab === "resources"
-              ? "font-bold text-primary border-primary"
-              : "font-medium text-on-surface-variant hover:text-on-surface border-transparent"
-          }`}
-          onClick={() => handleTabChange("resources")}
-          role="tab"
-          type="button"
-        >
-          Managed Resources ({data.resources.length})
-        </button>
-        <button
-          aria-selected={activeTab === "storage"}
-          className={`font-body-md text-sm pb-2.5 -mb-px border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
-            activeTab === "storage"
-              ? "font-bold text-primary border-primary"
-              : "font-medium text-on-surface-variant hover:text-on-surface border-transparent"
-          }`}
-          onClick={() => handleTabChange("storage")}
-          role="tab"
-          type="button"
-        >
-          Retained Storage ({data.retainedStorages.length})
-        </button>
-      </nav>
-
+    <div className="space-y-6">
       {error ? (
         <div className="bg-status-warning/10 border border-status-warning/30 p-4 rounded-xl text-status-warning text-xs flex items-center gap-2" role="alert">
           <Icon name="warning" className="text-[18px] shrink-0" />

@@ -421,8 +421,14 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
         <div className="w-full bg-surface-container-low shadow-2xl rounded-2xl overflow-hidden backdrop-blur-sm border border-outline-variant/20">
           <div className="p-8 sm:p-10 flex flex-col items-center text-center">
             {/* Logo */}
-            <div className="w-16 h-16 rounded-xl bg-surface-container-high border border-outline-variant/30 flex items-center justify-center shadow-md mb-6">
-              <Icon name="terminal" className="text-[32px] text-primary" />
+            <div className="w-16 h-16 rounded-xl bg-white flex flex-col items-center justify-center shadow-md mb-6 p-2">
+              <svg className="w-8 h-8 text-[#00a6e0]" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M24 4L40 13.24V31.76L24 41L8 31.76V13.24L24 4Z" stroke="#00354a" strokeWidth="3" fill="#c4e7ff" />
+                <path d="M24 4V22.5M24 22.5L40 13.24M24 22.5L8 13.24" stroke="#00354a" strokeWidth="3" />
+                <path d="M24 22.5V41" stroke="#00354a" strokeWidth="3" />
+                <circle cx="24" cy="22.5" r="3.5" fill="#00a6e0" />
+              </svg>
+              <span className="text-[9px] font-bold text-[#00354a] tracking-tight -mt-0.5 font-headline-md">Opsi</span>
             </div>
 
             {selectionID && (loadingProjects || projects) ? (
@@ -530,7 +536,7 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
                         fillRule="evenodd"
                       />
                     </svg>
-                    <span>{busy ? "Opening GitHub…" : "Continue with GitHub"}</span>
+                    <span>{busy ? "Opening GitHub…" : "Login with GitHub"}</span>
                   </button>
                 ) : null}
 
