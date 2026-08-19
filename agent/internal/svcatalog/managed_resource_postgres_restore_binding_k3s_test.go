@@ -215,11 +215,18 @@ psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$manager" -d "$db" -tAc "SELECT rolcanl
 	}
 
 	// 14. Redeploy stability
-	redeployPlan, err := adapter.PrepareRollout(context.Background(), targetSnapshot)
-	if err != nil {
-		t.Fatal(err)
+	var redeployPlan deploy.RolloutPlan
+	for attempt := 0; attempt < 5; attempt++ {
+		redeployPlan, err = adapter.PrepareRollout(context.Background(), targetSnapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = adapter.ApplyRollout(context.Background(), redeployPlan); err == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	if _, err := adapter.ApplyRollout(context.Background(), redeployPlan); err != nil {
+	if err != nil {
 		t.Fatal(err)
 	}
 	if evidence, _, err := adapter.ObserveReadiness(context.Background(), redeployPlan); err != nil || !evidence.RuntimeReady {

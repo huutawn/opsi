@@ -57,7 +57,7 @@ export function Sidebar({
     { id: "infrastructure", label: "Infrastructure", icon: "dns" },
     { id: "observability", label: "Observability", icon: "monitoring" },
     { id: "security", label: "Security", icon: "security" },
-  ];
+  ] as const;
 
   const systemLive = cloudConnected === "ok" && (!project || agentConnected === "ok");
 
@@ -152,10 +152,10 @@ export function Sidebar({
                 <NavItem
                   key={item.id}
                   active={route.view === item.id}
-                  href={routeHref({ ...route, projectID, view: item.id as any, tab: "" })}
+                  href={routeHref({ ...route, projectID, view: item.id, tab: "" })}
                   icon={iconMap[item.id] || "folder"}
                   label={item.label}
-                  onClick={(e) => navigate(e, { projectID, view: item.id as any, tab: "" })}
+                  onClick={(e) => navigate(e, { projectID, view: item.id, tab: "" })}
                 />
               );
             })

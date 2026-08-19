@@ -20,6 +20,7 @@ local_image=""
 generic_image=""
 wrong_image=""
 postgres_image=""
+adc02_image=""
 evidence_dir="${OPSI_K3S_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3b1-postgres-binding-$(date -u +%Y%m%dT%H%M%SZ)}"
 backup_evidence_dir="${OPSI_P07B3C1_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c1-postgres-backup-$(date -u +%Y%m%dT%H%M%SZ)}"
 restore_evidence_dir="${OPSI_P07B3C2A_EVIDENCE_DIR:-$PWD/.tmp/evidence/p07b3c2a-postgres-restore-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -47,7 +48,7 @@ cleanup() {
 			docker rm -f "$container" >/dev/null 2>&1 || cleanup_status=1
 		fi
 	done
-	for image in "$local_image" "$generic_image" "$wrong_image" "$postgres_image" "$minio_image"; do
+	for image in "$local_image" "$generic_image" "$wrong_image" "$postgres_image" "$adc02_image" "$minio_image"; do
 		if [ -n "$image" ] && docker image inspect "$image" >/dev/null 2>&1; then
 			docker image rm -f "$image" >/dev/null 2>&1 || cleanup_status=1
 		fi
@@ -69,7 +70,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$work_dir/auth" "$work_dir/bin" "$work_dir/fixture" "$work_dir/postgres-fixture" "$DOCKER_CONFIG" \
+mkdir -p "$work_dir/auth" "$work_dir/bin" "$work_dir/fixture" "$work_dir/postgres-fixture" "$work_dir/adc02-fixture" "$DOCKER_CONFIG" \
 	"$evidence_dir" "$backup_evidence_dir" "$restore_evidence_dir" "$restore_binding_evidence_dir" \
 	"$cutover_evidence_dir" "$cutover_apply_evidence_dir" "$cutover_rollback_evidence_dir" "$cutover_finalize_evidence_dir" \
 	"$final_evidence_dir"
@@ -202,6 +203,10 @@ docker push "$local_image" >/dev/null || { echo 'fixture push failed' >&2; exit 
 postgres_image="${registry_host}/opsi/p07b3b1-acceptance:fixture-${suffix}"
 docker build -q -f cloud/integration/fixtures/p07b3b1-application/Dockerfile -t "$postgres_image" "$work_dir/postgres-fixture" >/dev/null
 docker push "$postgres_image" >/dev/null || { echo 'PostgreSQL fixture push failed' >&2; exit 1; }
+(cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$work_dir/adc02-fixture/adc02-consumer" ./integration/fixtures/adc02-consumer)
+adc02_image="${registry_host}/opsi/adc02-acceptance:fixture-${suffix}"
+docker build -q -f cloud/integration/fixtures/adc02-consumer/Dockerfile -t "$adc02_image" "$work_dir/adc02-fixture" >/dev/null
+docker push "$adc02_image" >/dev/null || { echo 'ADC02 consumer fixture push failed' >&2; exit 1; }
 docker pull nginx:1.27-alpine >/dev/null
 generic_image="${registry_host}/opsi/e2e:seed"
 docker tag nginx:1.27-alpine "$generic_image"
@@ -235,15 +240,21 @@ postgres_headers="$work_dir/postgres-headers"
 http_status -D "$postgres_headers" -u "${username}:${password}" -H "Accept: ${accept}" "http://${registry_host}/v2/opsi/p07b3b1-acceptance/manifests/fixture-${suffix}"
 postgres_status="$status"
 postgres_digest="$(awk 'BEGIN{IGNORECASE=1} /^Docker-Content-Digest:/ {gsub("\r", "", $2); print $2}' "$postgres_headers")"
+adc02_headers="$work_dir/adc02-headers"
+http_status -D "$adc02_headers" -u "${username}:${password}" -H "Accept: ${accept}" "http://${registry_host}/v2/opsi/adc02-acceptance/manifests/fixture-${suffix}"
+adc02_status="$status"
+adc02_digest="$(awk 'BEGIN{IGNORECASE=1} /^Docker-Content-Digest:/ {gsub("\r", "", $2); print $2}' "$adc02_headers")"
 [[ "$anonymous_status" == 401 ]]
 [[ "$wrong_status" == 401 ]]
 [[ "$correct_status" == 200 ]]
 [[ "$digest_status" == 200 ]]
 [[ "$generic_status" == 200 ]]
 [[ "$postgres_status" == 200 ]]
+[[ "$adc02_status" == 200 ]]
 [[ "${digest#sha256:}" != "$digest" ]]
 [[ "${generic_digest#sha256:}" != "$generic_digest" ]]
 [[ "${postgres_digest#sha256:}" != "$postgres_digest" ]]
+[[ "${adc02_digest#sha256:}" != "$adc02_digest" ]]
 printf 'registry_manifest_checks=PASS\n'
 
 printf '%s\n' \
@@ -283,7 +294,9 @@ printf 'registry_pull_tests=PASS\n'
 
 export PATH="$work_dir/bin:$PATH" OPSI_E2E_K3S_POSTGRES=1 OPSI_E2E_K3S_POSTGRES_BINDING=1 OPSI_E2E_K3S_POSTGRES_BACKUP=1 OPSI_E2E_K3S_NATS=1 OPSI_E2E_K3S_VALKEY=1 \
 	OPSI_E2E_MINIO_ENDPOINT="http://127.0.0.1:${minio_port}" OPSI_E2E_MINIO_ACCESS_KEY="$minio_access" OPSI_E2E_MINIO_SECRET_KEY="$minio_secret" OPSI_E2E_MINIO_BUCKET="$minio_bucket" \
-	OPSI_P07B3B1_ACCEPTANCE_E2E_IMAGE="registry:5000/opsi/p07b3b1-acceptance@${postgres_digest}" OPSI_PRIVATE_REGISTRY_E2E_USERNAME="$username" OPSI_PRIVATE_REGISTRY_E2E_PASSWORD="$password" \
+	OPSI_P07B3B1_ACCEPTANCE_E2E_IMAGE="registry:5000/opsi/p07b3b1-acceptance@${postgres_digest}" \
+	OPSI_ADC02_ACCEPTANCE_E2E_IMAGE="registry:5000/opsi/adc02-acceptance@${adc02_digest}" \
+	OPSI_PRIVATE_REGISTRY_E2E_USERNAME="$username" OPSI_PRIVATE_REGISTRY_E2E_PASSWORD="$password" \
 	OPSI_K3S_EVIDENCE_DIR="$evidence_dir" OPSI_P07B3C1_EVIDENCE_DIR="$backup_evidence_dir" OPSI_P07B3C2A_EVIDENCE_DIR="$restore_evidence_dir" \
 	OPSI_P07B3C2B1_EVIDENCE_DIR="$restore_binding_evidence_dir" OPSI_P07B3C2B2A_EVIDENCE_DIR="$cutover_evidence_dir" \
 	OPSI_P07B3C2B2B1_EVIDENCE_DIR="$cutover_apply_evidence_dir" OPSI_P07B3C2B2B2_EVIDENCE_DIR="$cutover_rollback_evidence_dir" \
@@ -294,9 +307,9 @@ export PATH="$work_dir/bin:$PATH" OPSI_E2E_K3S_POSTGRES=1 OPSI_E2E_K3S_POSTGRES_
 if [ "${OPSI_P07B3C2A_ONLY:-}" = "1" ]; then
 	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3sPostgresLogicalBackup$' -v ./agent/internal/svcatalog
 else
-	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3s(NATS|Valkey)$' -v ./agent/internal/svcatalog
+	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3s(NATS|Valkey|ValkeyApplicationDependencyRealization)$' -v ./agent/internal/svcatalog
 	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3sPostgresLogicalBackup$' -v ./agent/internal/svcatalog
-	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3sPostgres(Persistence|ApplicationBinding|RestoreApplicationBinding|CutoverReview|CutoverApply|CutoverRollback|CutoverFinalize|FullLifecycleFinalAcceptance)$' -v ./agent/internal/svcatalog
+	go test -timeout=30m -count=1 -run '^TestManagedResourceRealK3s(Postgres(Persistence|ApplicationBinding|ApplicationDependencyRealization|RestoreApplicationBinding|CutoverReview|CutoverApply|CutoverRollback|CutoverFinalize|FullLifecycleFinalAcceptance)|MultiDependencyRealization)$' -v ./agent/internal/svcatalog
 fi
 
 authority_file="$restore_evidence_dir/restore-authority.json"
