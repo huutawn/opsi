@@ -328,7 +328,7 @@ func integrationWorkspace(t *testing.T) string {
 		t.Fatal("DOCKER_CONFIG must be the canonical workspace/docker-config path")
 	}
 	workspace := filepath.Dir(dockerConfig)
-	for _, name := range []string{"source", "git-home"} {
+	for _, name := range []string{"source", "git-home", "tmp"} {
 		if err := os.RemoveAll(filepath.Join(workspace, name)); err != nil {
 			t.Fatal(err)
 		}

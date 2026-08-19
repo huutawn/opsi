@@ -70,6 +70,77 @@ func TestPostgresBuildpackEvidenceFinalizesRecords(t *testing.T) {
 	}
 }
 
+func TestPostgresBuildpackDependencyStateAndWorkerClaim(t *testing.T) {
+	db := newBuildJobPostgres(t)
+	job := postgresBuildJob("job-bp-dep-1", "job-bp-dep-key-1")
+	job.RequestedBuildStrategy = StrategyAuto
+	job.ResolvedBuildStrategy = StrategyBuildpack
+	job.DockerfilePath = ""
+	job.Source.BuildDependencyState = "hash-dep-state-url-a"
+	job.Source.BuildEnvironment = map[string]string{
+		"PUBLIC_API_ORIGIN": "https://api-buildpack-a.example.test",
+	}
+
+	job, attempt, token, now := postgresRunningJob(t, db, job, 3001)
+
+	// In a fresh Service instance without shared in-memory state:
+	freshService := Service{
+		Store:    PostgresStore{DB: db},
+		Executor: executorTestConfig(),
+		Registry: executorTestRegistry(),
+		Now:      func() time.Time { return now.Add(time.Minute) },
+	}
+
+	// Remote worker reconstructs BuildSpec from durable lease claim
+	spec, err := freshService.BuildSpec(context.Background(), job.ID, token)
+	if err != nil {
+		t.Fatalf("BuildSpec error: %v", err)
+	}
+	if spec.ResolvedBuildStrategy != StrategyBuildpack || spec.BuildEnvironment["PUBLIC_API_ORIGIN"] != "https://api-buildpack-a.example.test" {
+		t.Fatalf("reconstructed BuildSpec invalid: %+v", spec)
+	}
+
+	// Verify database columns
+	var readDepState string
+	var readEnvRaw []byte
+	if err := db.QueryRow(`SELECT COALESCE(build_dependency_state,''), COALESCE(build_environment,'{}'::jsonb) FROM build_jobs WHERE id=$1`, job.ID).Scan(&readDepState, &readEnvRaw); err != nil {
+		t.Fatal(err)
+	}
+	if readDepState != "hash-dep-state-url-a" {
+		t.Fatalf("persisted build_dependency_state = %s, want hash-dep-state-url-a", readDepState)
+	}
+	var readEnv map[string]string
+	if err := json.Unmarshal(readEnvRaw, &readEnv); err != nil || readEnv["PUBLIC_API_ORIGIN"] != "https://api-buildpack-a.example.test" {
+		t.Fatalf("persisted build_environment = %+v, err = %v", readEnv, err)
+	}
+
+	// Complete build record
+	result := postgresRunnerResult(t, job, attempt)
+	result.Executor.Strategy = StrategyBuildpack
+	result.Executor.Builder = buildrecordv1.BuilderMetadata{
+		PackVersion:        "0.40.9",
+		BuilderImage:       "paketobuildpacks/ubuntu-noble-builder:0.0.167@sha256:cebbe41ca97c166e10f4fc6076724df39c4e247f8ee9c81b852a9219b7a993c0",
+		BuilderImageDigest: "sha256:cebbe41ca97c166e10f4fc6076724df39c4e247f8ee9c81b852a9219b7a993c0",
+		RunImage:           "paketobuildpacks/ubuntu-noble-run:0.0.112@sha256:a9433b9e0b786dc2f90a433464cf7c11ede0877e30e4155a66abe35001a56d20",
+		RunImageDigest:     "sha256:a9433b9e0b786dc2f90a433464cf7c11ede0877e30e4155a66abe35001a56d20",
+		LifecycleVersion:   "0.21.15",
+		Buildpacks:         []buildrecordv1.Buildpack{{ID: "paketo-buildpacks/node-engine", Version: "8.5.0"}},
+		Processes:          []buildrecordv1.Process{{Type: "web", Command: []string{"node", "server.js"}, Direct: true, Default: true}},
+	}
+	completion, err := freshService.Complete(context.Background(), result, token)
+	if err != nil {
+		t.Fatalf("Complete error: %v", err)
+	}
+
+	var recStrategy, recDigest string
+	if err := db.QueryRow(`SELECT build_strategy, oci_digest FROM build_records WHERE id=$1`, completion.BuildRecordID).Scan(&recStrategy, &recDigest); err != nil {
+		t.Fatal(err)
+	}
+	if recStrategy != StrategyBuildpack || recDigest != result.Digest {
+		t.Fatalf("unexpected build_record: strategy=%s digest=%s", recStrategy, recDigest)
+	}
+}
+
 func TestPostgresBuildCompletionFinalizesOneAcceptedRecord(t *testing.T) {
 	db := newBuildJobPostgres(t)
 	job, attempt, token, now := postgresRunningBuild(t, db, "job-finalize")

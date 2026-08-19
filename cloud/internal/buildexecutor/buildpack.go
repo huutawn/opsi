@@ -47,6 +47,7 @@ func Buildpack(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspac
 	if err := os.MkdirAll(tempDir, 0o700); err != nil {
 		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "Buildpacks temporary directory cannot be created"}
 	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	env := append(dockerEnv(dockerConfig), "TMPDIR="+tempDir)
 	builder, err := inspectBuildpackToolchain(ctx, workspace, env)
 	if err != nil {
