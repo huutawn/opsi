@@ -132,6 +132,18 @@ func (s *Server) handleDeploymentAPI(w http.ResponseWriter, r *http.Request, pro
 		writeRegistryResult(w, r, preview, err, http.StatusOK)
 		return true
 	}
+	if len(parts) == 4 && parts[3] == "preflight" && r.Method == http.MethodPost {
+		if !s.requireRole(w, r, principal, projectID, "deployment_job", projectID, "owner", "admin", "developer", "viewer") {
+			return true
+		}
+		var request deploymentv1.CreateRequest
+		if !decodeStrictDeploymentJSON(w, r, &request) {
+			return true
+		}
+		preflight, err := s.runPreflight(r.Context(), projectID, request)
+		writeRegistryResult(w, r, preflight, err, http.StatusOK)
+		return true
+	}
 	if len(parts) == 3 && r.Method == http.MethodPost {
 		if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "deployment_job", projectID, "owner", "admin", "developer") {
 			return true
@@ -150,6 +162,50 @@ func (s *Server) handleDeploymentAPI(w http.ResponseWriter, r *http.Request, pro
 			writeRegistryFailure(w, r, err)
 			return true
 		}
+		if preview.Preflight.Status == deploymentv1.PreflightStatusBlocked {
+			blockCode := deploymentv1.CodePreflightBlocked
+			blockMsg := "deployment is blocked by preflight safety gate"
+			for _, chk := range preview.Preflight.Checks {
+				if chk.Severity == deploymentv1.CheckSeverityBlock {
+					blockCode = chk.Code
+					blockMsg = chk.Message
+					break
+				}
+			}
+			writeRegistryError(w, registry.APIError{Status: 409, Code: blockCode, Message: blockMsg, NextAction: "fix_preflight_blockers", RequestID: r.Header.Get("X-Request-ID")})
+			return true
+		}
+		if preview.Preflight.Status == deploymentv1.PreflightStatusPassWithWarnings {
+			warningIDs := preview.Preflight.WarningIDs()
+			if len(request.WarningAcknowledgements) == 0 {
+				writeRegistryError(w, registry.APIError{Status: 409, Code: deploymentv1.CodePreflightWarningUnack, Message: "deployment has unacknowledged preflight warnings; explicit acknowledgement required", NextAction: "acknowledge_warnings", RequestID: r.Header.Get("X-Request-ID")})
+				return true
+			}
+			blockMap := make(map[string]bool)
+			for _, bID := range preview.Preflight.BlockIDs() {
+				blockMap[bID] = true
+			}
+			for _, ack := range request.WarningAcknowledgements {
+				if blockMap[ack] {
+					writeRegistryError(w, registry.APIError{Status: 409, Code: deploymentv1.CodePreflightBlocked, Message: "blocking check cannot be acknowledged: " + ack, RequestID: r.Header.Get("X-Request-ID")})
+					return true
+				}
+			}
+			ackMap := make(map[string]bool)
+			for _, ack := range request.WarningAcknowledgements {
+				ackMap[ack] = true
+			}
+			for _, wID := range warningIDs {
+				if !ackMap[wID] {
+					writeRegistryError(w, registry.APIError{Status: 409, Code: deploymentv1.CodePreflightWarningUnack, Message: "unacknowledged warning: " + wID, NextAction: "acknowledge_warnings", RequestID: r.Header.Get("X-Request-ID")})
+					return true
+				}
+			}
+			if len(ackMap) != len(warningIDs) {
+				writeRegistryError(w, registry.APIError{Status: 409, Code: deploymentv1.CodePreflightReviewStale, Message: "warning acknowledgements do not match current preflight warnings", NextAction: "review_again", RequestID: r.Header.Get("X-Request-ID")})
+				return true
+			}
+		}
 		starter, ok := s.Registry.(immutableDeploymentStarter)
 		if !ok {
 			writeRegistryError(w, registry.APIError{Status: 503, Code: "DEPLOYMENT_UNAVAILABLE", Message: "immutable deployment store is unavailable", RequestID: r.Header.Get("X-Request-ID")})
@@ -158,7 +214,7 @@ func (s *Server) handleDeploymentAPI(w http.ResponseWriter, r *http.Request, pro
 		job, reused, err := starter.StartImmutableDeployment(preview.Snapshot, principal.UserID, request.IdempotencyKey, r.Header.Get("X-Request-ID"))
 		job.Reused = reused
 		if err == nil && !reused {
-			s.Registry.Audit(job.OrgID, projectID, principal.UserID, "IMMUTABLE_DEPLOYMENT_CREATED", "deployment_job", job.ID, "success", map[string]any{"build_record_id": preview.Snapshot.Authority.BuildRecord.ID, "oci_digest": preview.Snapshot.Image.Digest, "runtime_id": job.RuntimeID, "node_id": job.NodeID, "agent_id": job.AgentID, "spec_hash": job.SpecHash, "reused": reused})
+			s.Registry.Audit(job.OrgID, projectID, principal.UserID, "IMMUTABLE_DEPLOYMENT_CREATED", "deployment_job", job.ID, "success", map[string]any{"build_record_id": preview.Snapshot.Authority.BuildRecord.ID, "oci_digest": preview.Snapshot.Image.Digest, "runtime_id": job.RuntimeID, "node_id": job.NodeID, "agent_id": job.AgentID, "spec_hash": job.SpecHash, "preflight_status": preview.Preflight.Status, "warning_acknowledgements": request.WarningAcknowledgements, "preflight_hash": preview.Preflight.PreflightHash, "deployment_set": request.DeploymentBatch, "reused": reused})
 		}
 		writeRegistryResult(w, r, job, err, http.StatusAccepted)
 		return true
@@ -344,11 +400,16 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 			return result, registry.APIError{Status: 409, Code: "WORKLOAD_CANONICAL_MISMATCH", Message: "client WorkloadSpec does not exactly match the Cloud-compiled canonical spec", NextAction: "refresh_cli_spec", RequestID: r.Header.Get("X-Request-ID")}
 		}
 	}
+	preflight, _ := s.runPreflight(r.Context(), projectID, request)
+	if request.ExpectedPreflightHash != "" && preflight.PreflightHash != "" && request.ExpectedPreflightHash != preflight.PreflightHash {
+		return result, registry.APIError{Status: 409, Code: deploymentv1.CodePreflightReviewStale, Message: "deployment preflight state changed after review; review again", NextAction: "review_again", RequestID: r.Header.Get("X-Request-ID")}
+	}
 	specHash, _ := workload.Hash()
-	snapshot := deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: workload, SpecHash: specHash, ActorUserID: actor, IdempotencyKey: request.IdempotencyKey, CreatedAt: s.clock(), Authority: deploymentv1.AuthoritySnapshot{BuildRecord: record, TopologyPlanID: plan.ID, TopologyRevision: plan.Revision, TopologyHash: plan.PlanHash, ServiceConfigurationRevision: configuration.Revision, ServiceConfigurationStateHash: configuration.StateHash, DeploymentPolicyID: policy.ID, DeploymentPolicyRevision: policy.Revision, DeploymentPolicyHash: policy.PolicyHash, RoutingDecisionHash: decision.DecisionHash, EnvironmentID: request.EnvironmentID, RuntimeID: decision.RuntimeID, NodeID: decision.NodeID, AgentID: decision.AgentID}}
+	snapshot := deploymentv1.JobSnapshot{SchemaVersion: deploymentv1.JobSchemaVersion, ProjectID: projectID, Image: image, Workload: workload, SpecHash: specHash, ActorUserID: actor, IdempotencyKey: request.IdempotencyKey, CreatedAt: s.clock(), Authority: deploymentv1.AuthoritySnapshot{BuildRecord: record, TopologyPlanID: plan.ID, TopologyRevision: plan.Revision, TopologyHash: plan.PlanHash, ServiceConfigurationRevision: configuration.Revision, ServiceConfigurationStateHash: configuration.StateHash, DeploymentPolicyID: policy.ID, DeploymentPolicyRevision: policy.Revision, DeploymentPolicyHash: policy.PolicyHash, RoutingDecisionHash: decision.DecisionHash, PreflightHash: preflight.PreflightHash, EnvironmentID: request.EnvironmentID, RuntimeID: decision.RuntimeID, NodeID: decision.NodeID, AgentID: decision.AgentID}}
 	snapshot.PayloadHash = hashDeploymentPayload(snapshot)
 	result.Snapshot = snapshot
-	result.Eligible = true
+	result.Preflight = preflight
+	result.Eligible = preflight.Status != deploymentv1.PreflightStatusBlocked
 	result.DecisionCode = decision.DecisionCode
 	result.Message = decision.Message
 	for _, job := range mustListDeployments(s.Registry, projectID) {

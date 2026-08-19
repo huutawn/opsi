@@ -377,6 +377,7 @@ type AuthoritySnapshot struct {
 	DeploymentPolicyRevision      uint64               `json:"deployment_policy_revision"`
 	DeploymentPolicyHash          string               `json:"deployment_policy_hash"`
 	RoutingDecisionHash           string               `json:"routing_decision_hash"`
+	PreflightHash                 string               `json:"preflight_hash,omitempty"`
 	EnvironmentID                 string               `json:"environment_id"`
 	RuntimeID                     string               `json:"runtime_id"`
 	NodeID                        string               `json:"node_id"`
@@ -407,19 +408,23 @@ type CreateRequest struct {
 	ExpectedConfigurationStateHash   string        `json:"expected_configuration_state_hash,omitempty"`
 	ExpectedDeploymentPolicyRevision uint64        `json:"expected_deployment_policy_revision,omitempty"`
 	ExpectedDeploymentPolicyHash     string        `json:"expected_deployment_policy_hash,omitempty"`
+	ExpectedPreflightHash            string        `json:"expected_preflight_hash,omitempty"`
+	WarningAcknowledgements          []string      `json:"warning_acknowledgements,omitempty"`
+	DeploymentBatch                  []string      `json:"deployment_batch,omitempty"`
 	Workload                         *WorkloadSpec `json:"workload,omitempty"`
 	IdempotencyKey                   string        `json:"-"`
 }
 
 type Preview struct {
-	SchemaVersion string       `json:"schema_version"`
-	Snapshot      JobSnapshot  `json:"snapshot"`
-	Current       *JobSnapshot `json:"current,omitempty"`
-	Changes       []string     `json:"changes"`
-	Eligible      bool         `json:"eligible"`
-	DecisionCode  string       `json:"decision_code"`
-	Message       string       `json:"message"`
-	ResolvedAt    time.Time    `json:"resolved_at"`
+	SchemaVersion string          `json:"schema_version"`
+	Snapshot      JobSnapshot     `json:"snapshot"`
+	Current       *JobSnapshot    `json:"current,omitempty"`
+	Changes       []string        `json:"changes"`
+	Eligible      bool            `json:"eligible"`
+	DecisionCode  string          `json:"decision_code"`
+	Message       string          `json:"message"`
+	Preflight     PreflightResult `json:"preflight"`
+	ResolvedAt    time.Time       `json:"resolved_at"`
 }
 
 type Event struct {

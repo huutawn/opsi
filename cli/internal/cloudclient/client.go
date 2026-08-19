@@ -247,6 +247,12 @@ func (c *Client) RouteBuildRecord(ctx context.Context, projectID string, request
 	return response, err
 }
 
+func (c *Client) PreflightDeployment(ctx context.Context, projectID string, request DeploymentCreateRequest) (PreflightResult, error) {
+	var response PreflightResult
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", "preflight"}, request, "", &response)
+	return response, err
+}
+
 func (c *Client) PreviewDeployment(ctx context.Context, projectID string, request DeploymentCreateRequest) (DeploymentPreview, error) {
 	var response DeploymentPreview
 	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployments", "preview"}, request, "", &response)
