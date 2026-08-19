@@ -623,6 +623,7 @@ type Service struct {
 	deployEvents            map[string][]DeploymentEvent
 	deployLocks             map[string]deploymentLock
 	audit                   []AuditEvent
+	DependencyResolver DependencyTargetResolver
 	idempotency             map[string]any
 	githubInstallations     map[int64]GitHubInstallation
 	githubRepositories      map[int64]GitHubRepository

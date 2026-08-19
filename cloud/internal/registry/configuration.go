@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,19 @@ type GeneratedEnvironment struct {
 	Value   string `json:"value"`
 	Binding int    `json:"binding"`
 }
+type DependencyTargetFacts struct {
+	Exists        bool
+	ProjectID     string
+	EnvironmentID string
+	TargetKind    string
+	Deleted       bool
+	StateHash     string
+}
+
+type DependencyTargetResolver interface {
+	ResolveDependencyTarget(ctx context.Context, projectID, targetIdentity string, targetKind string) (DependencyTargetFacts, error)
+}
+
 
 type ServiceConfigurationPreview struct {
 	Configuration        ServiceConfigurationDraft `json:"configuration"`
@@ -98,7 +112,7 @@ func serviceConfigurationHash(draft ServiceConfigurationDraft) string {
 	return serviceconfigurationv1.StateHash(draft)
 }
 
-func validateServiceConfiguration(source ServiceRecord, draft ServiceConfigurationDraft, services []ServiceRecord) (ServiceConfigurationDraft, []GeneratedEnvironment, error) {
+func validateServiceConfiguration(ctx context.Context, resolver DependencyTargetResolver, source ServiceRecord, draft ServiceConfigurationDraft, services []ServiceRecord) (ServiceConfigurationDraft, []GeneratedEnvironment, error) {
 	draft = normalizeServiceConfigurationDraft(draft)
 	if err := deploymentv1.ValidateEnvironment(draft.Environment, nil); err != nil {
 		return draft, nil, configurationError("ENVIRONMENT_INVALID", "environment", err.Error())
@@ -161,13 +175,35 @@ func validateServiceConfiguration(source ServiceRecord, draft ServiceConfigurati
 			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_phase", index), "invalid injection phase")
 		}
 
-		if dep.TargetKind == "application" {
-			target, ok := targets[dep.TargetIdentity]
-			if !ok || target.ProjectID != source.ProjectID {
-				return draft, nil, configurationError("DEPENDENCY_TARGET_FORBIDDEN", fmt.Sprintf("dependencies[%d].target_identity", index), "target application must belong to the project")
+		if resolver != nil {
+			facts, err := resolver.ResolveDependencyTarget(ctx, source.ProjectID, dep.TargetIdentity, dep.TargetKind)
+			if err != nil {
+				return draft, nil, configurationError("DEPENDENCY_TARGET_INVALID", fmt.Sprintf("dependencies[%d].target_identity", index), "failed to resolve target")
 			}
-			if target.ID == source.ID {
+			if !facts.Exists || facts.Deleted {
+				return draft, nil, configurationError("DEPENDENCY_TARGET_NOT_FOUND", fmt.Sprintf("dependencies[%d].target_identity", index), "target not found or deleted")
+			}
+			if facts.ProjectID != source.ProjectID {
+				return draft, nil, configurationError("DEPENDENCY_TARGET_FORBIDDEN", fmt.Sprintf("dependencies[%d].target_identity", index), "target belongs to another project")
+			}
+			if facts.EnvironmentID != source.EnvironmentID {
+				return draft, nil, configurationError("DEPENDENCY_TARGET_INVALID", fmt.Sprintf("dependencies[%d].target_identity", index), "target environment does not match")
+			}
+			if facts.TargetKind != dep.TargetKind {
+				return draft, nil, configurationError("DEPENDENCY_TARGET_INVALID", fmt.Sprintf("dependencies[%d].target_kind", index), "target kind mismatch")
+			}
+			if dep.TargetKind == "application" && dep.TargetIdentity == source.ID {
 				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].target_identity", index), "a service cannot depend on itself")
+			}
+		} else {
+			if dep.TargetKind == "application" {
+				target, ok := targets[dep.TargetIdentity]
+				if !ok || target.ProjectID != source.ProjectID {
+					return draft, nil, configurationError("DEPENDENCY_TARGET_FORBIDDEN", fmt.Sprintf("dependencies[%d].target_identity", index), "target application must belong to the project")
+				}
+				if target.ID == source.ID {
+					return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].target_identity", index), "a service cannot depend on itself")
+				}
 			}
 		}
 
@@ -262,7 +298,7 @@ func validateServiceConfiguration(source ServiceRecord, draft ServiceConfigurati
 }
 
 func CompileServiceRuntime(source ServiceRecord, assignment topologyv1.Assignment, assignments []topologyv1.Assignment, applied ServiceConfiguration, services []ServiceRecord) (CompiledServiceRuntime, error) {
-	draft, generated, err := validateServiceConfiguration(source, applied.ServiceConfigurationDraft, services)
+	draft, generated, err := validateServiceConfiguration(context.Background(), nil, source, applied.ServiceConfigurationDraft, services)
 	if err != nil {
 		return CompiledServiceRuntime{}, err
 	}
@@ -509,7 +545,7 @@ func (s *Service) PreviewServiceConfiguration(projectID, serviceID string, draft
 	if err != nil {
 		return ServiceConfigurationPreview{}, err
 	}
-	normalized, generated, err := validateServiceConfiguration(service, draft, services)
+	normalized, generated, err := validateServiceConfiguration(context.Background(), s.DependencyResolver, service, draft, services)
 	if err != nil {
 		return ServiceConfigurationPreview{}, err
 	}
@@ -568,7 +604,7 @@ func (s *Service) ApplyServiceConfiguration(projectID, serviceID, actorUserID, k
 	if request.ExpectedRevision != current.Revision || request.ExpectedStateHash != current.StateHash {
 		return ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "SERVICE_CONFIGURATION_STALE", Message: "service configuration revision or state hash is stale"}
 	}
-	normalized, _, err := validateServiceConfiguration(service, request.Draft, services)
+	normalized, _, err := validateServiceConfiguration(context.Background(), s.DependencyResolver, service, request.Draft, services)
 	if err != nil {
 		return ServiceConfigurationApplyResult{}, err
 	}

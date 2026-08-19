@@ -116,11 +116,12 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		}
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
 		postgresRegistry := registry.PostgresService{DB: db}
+		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry}
+		postgresRegistry.DependencyResolver = webhookrelay.DependencyResolverAdapter{Registry: postgresRegistry, Resources: relay.Resources}
 		relay.Registry = postgresRegistry
 		relay.Backups.Store = backupdomain.PostgresStore{DB: db}
 		relay.Restores.Store = restoredomain.PostgresStore{DB: db}
 		relay.Cutovers.Store = cutoverdomain.PostgresStore{DB: db}
-		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry}
 		relay.Backups.Resources = relay.Resources
 		relay.Restores.Resources, relay.Restores.Backups, relay.Restores.Artifacts = relay.Resources, relay.Backups, relay.Backups.Artifacts
 		relay.Cutovers.Applications, relay.Cutovers.Resources, relay.Cutovers.Restores, relay.Cutovers.Backups, relay.Cutovers.Credentials = postgresRegistry, relay.Resources, relay.Restores, relay.Backups, relay.Resources.Credentials

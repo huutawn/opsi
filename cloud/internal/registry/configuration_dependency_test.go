@@ -2,6 +2,7 @@ package registry
 
 import (
 	"strings"
+	"context"
 	"testing"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
@@ -92,7 +93,7 @@ func TestServiceConfigurationDependenciesValidation(t *testing.T) {
 			draft := serviceconfigurationv1.ServiceConfigurationDraft{
 				Dependencies: tt.dependencies,
 			}
-			_, _, err := validateServiceConfiguration(services[0], draft, services)
+			_, _, err := validateServiceConfiguration(context.Background(), nil, services[0], draft, services)
 			if tt.expectedErr != "" {
 				if err == nil || !hasAPIErrorMessage(err, tt.expectedErr) {
 					t.Fatalf("expected error containing %q, got %v", tt.expectedErr, err)

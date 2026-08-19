@@ -35,7 +35,7 @@ func (s PostgresService) PreviewServiceConfiguration(projectID, serviceID string
 	if source.ID == "" {
 		return ServiceConfigurationPreview{}, ErrNotFound
 	}
-	normalized, generated, err := validateServiceConfiguration(source, draft, services)
+	normalized, generated, err := validateServiceConfiguration(context.Background(), s.DependencyResolver, source, draft, services)
 	if err != nil {
 		return ServiceConfigurationPreview{}, err
 	}
@@ -125,7 +125,7 @@ func (s PostgresService) ApplyServiceConfiguration(projectID, serviceID, actorUs
 	if request.ExpectedRevision != current.Revision || request.ExpectedStateHash != current.StateHash {
 		return ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "SERVICE_CONFIGURATION_STALE", Message: "service configuration revision or state hash is stale"}
 	}
-	normalized, _, err := validateServiceConfiguration(source, request.Draft, services)
+	normalized, _, err := validateServiceConfiguration(ctx, s.DependencyResolver, source, request.Draft, services)
 	if err != nil {
 		return ServiceConfigurationApplyResult{}, err
 	}
