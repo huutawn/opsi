@@ -13,6 +13,7 @@ import (
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/sourcescanner"
 )
 
 func (s *Server) runPreflight(ctx context.Context, projectID string, request deploymentv1.CreateRequest) (deploymentv1.PreflightResult, error) {
@@ -96,6 +97,67 @@ func (s *Server) runPreflight(ctx context.Context, projectID string, request dep
 			Message:      "BuildRecord is accepted and immutable",
 			SafeEvidence: map[string]string{"build_record_id": record.ID, "digest": record.Build.OCIDigest},
 		})
+	}
+
+	// 1b. Source Risk Analysis (ADC-05)
+	// Derived heuristic evidence — emits WARN checks only, NEVER BLOCK.
+	if s.SourceReports != nil && record.Workload.SHA != "" {
+		report, srrErr := s.SourceReports.GetForCommit(ctx, projectID, record.ServiceID, record.Workload.SHA)
+		if srrErr != nil && record.Build.BuildJobID != "" {
+			report, srrErr = s.SourceReports.GetForBuildJob(ctx, record.Build.BuildJobID)
+		}
+		if srrErr == nil {
+			if report.AnalysisStatus == sourcescanner.AnalysisStatusFailed || report.AnalysisStatus == sourcescanner.AnalysisStatusUnavailable {
+				result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
+					ID:              "chk:src:" + record.ServiceKey + ":SOURCE_ANALYSIS_UNAVAILABLE",
+					Code:            deploymentv1.CodeSourceAnalysisUnavailable,
+					Severity:        deploymentv1.CheckSeverityWarn,
+					ScopeKind:       deploymentv1.ScopeKindApplication,
+					ScopeID:         record.ServiceKey,
+					Message:         "source risk analysis was unavailable or failed during build",
+					RemediationCode: deploymentv1.RemediationReviewConfiguration,
+				})
+			} else if len(report.Findings) == 0 {
+				result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
+					ID:           "chk:src:" + record.ServiceKey + ":SOURCE_ANALYSIS_PASS",
+					Code:         "SOURCE_ANALYSIS_PASS",
+					Severity:     deploymentv1.CheckSeverityPass,
+					ScopeKind:    deploymentv1.ScopeKindApplication,
+					ScopeID:      record.ServiceKey,
+					Message:      "source risk analysis passed with 0 findings",
+					SafeEvidence: map[string]string{"commit_sha": record.Workload.SHA, "report_hash": report.ReportHash},
+				})
+			} else {
+				for _, f := range report.Findings {
+					checkID := "chk:src:" + record.ServiceKey + ":" + f.FindingID
+					safeEv := map[string]string{
+						"rule_id":    f.RuleID,
+						"file":       f.File,
+						"line":       strconv.Itoa(f.Line),
+						"confidence": f.Confidence,
+						"evidence":   f.SafeEvidence,
+					}
+					if f.DependencyLogicalName != "" {
+						safeEv["dependency"] = f.DependencyLogicalName
+					}
+					msg := f.SafeEvidence
+					if msg == "" {
+						msg = "source risk finding: " + f.RuleID
+					}
+					result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
+						ID:                    checkID,
+						Code:                  f.RuleID,
+						Severity:              deploymentv1.CheckSeverityWarn,
+						ScopeKind:             deploymentv1.ScopeKindApplication,
+						ScopeID:               record.ServiceKey,
+						DependencyLogicalName: f.DependencyLogicalName,
+						Message:               msg,
+						RemediationCode:       deploymentv1.RemediationReviewConfiguration,
+						SafeEvidence:          safeEv,
+					})
+				}
+			}
+		}
 	}
 
 	// 2. Routing Decision & Deployment Policy

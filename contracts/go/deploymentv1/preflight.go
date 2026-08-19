@@ -92,6 +92,18 @@ const (
 	CodePreflightBlocked         = "PREFLIGHT_BLOCKED"
 )
 
+// Check codes - Source Risk (ADC-05, WARN only, never BLOCK)
+const (
+	CodeSourceLoopbackEndpoint       = "SOURCE_LOOPBACK_ENDPOINT"
+	CodeSourceHardcodedIPEndpoint    = "SOURCE_HARDCODED_IP_ENDPOINT"
+	CodeSourceBrowserInternalDNS     = "SOURCE_BROWSER_INTERNAL_DNS"
+	CodeSourceSameOriginAbsEndpoint  = "SOURCE_SAME_ORIGIN_ABSOLUTE_ENDPOINT"
+	CodeSourceDeclaredEnvNotObserved = "SOURCE_DECLARED_ENV_NOT_OBSERVED"
+	CodeSourceAlternateDepEnv        = "SOURCE_ALTERNATE_DEPENDENCY_ENV_OBSERVED"
+	CodeSourceEmbeddedCredential     = "SOURCE_EMBEDDED_CREDENTIAL_SUSPECTED"
+	CodeSourceAnalysisUnavailable    = "SOURCE_ANALYSIS_UNAVAILABLE"
+)
+
 type PreflightCheck struct {
 	ID                    string            `json:"id"`
 	Code                  string            `json:"code"`

@@ -29,7 +29,9 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
+	"github.com/opsi-dev/opsi/cloud/internal/sourcereport"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	"github.com/opsi-dev/opsi/cloud/internal/verificationstore"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
@@ -53,6 +55,8 @@ type Server struct {
 	RegistryPullCredentials RegistryPullCredentialProvider
 	Topology                topology.Service
 	Policies                deploymentpolicy.Service
+	SourceReports           sourcereport.Store
+	Verifications           verificationstore.Store
 	OIDC                    interface {
 		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
 	}
@@ -126,6 +130,8 @@ func NewServer(cfg Config) *Server {
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
 		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
+		SourceReports:           sourcereport.NewMemoryStore(),
+		Verifications:           verificationstore.NewMemoryStore(),
 		OIDC:                    verifier,
 		RunnerOIDC:              runnerVerifier,
 		oidcInitError:           verifierErr,
@@ -245,6 +251,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/bootstrap/claim", s.handleBootstrapCommandClaim)
 	mux.HandleFunc("/v1/bootstrap/sessions/{session_id}/checkpoint", s.handleBootstrapWorkerCheckpoint)
 	mux.HandleFunc("/v1/bootstrap/sessions/", s.handleBootstrapWorker)
+	mux.HandleFunc("/v1/projects/{project_id}/dependencies/verify", s.handleVerifyDependencyAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/dependencies/{dependency_logical_name}/verification", s.handleGetDependencyVerificationAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/source-risk-report", s.handleGetApplicationSourceRiskReportAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/source-risk-reports/{report_id}", s.handleGetSourceRiskReportByIDAPI)
+	mux.HandleFunc("/v1/agents/{node_id}/dep-verifications/{verification_id}/result", s.handleAgentDepVerificationResult)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	mux.HandleFunc("/v1/agent/projects/{project_id}/action-devices/{device_id}", s.handleAgentActionDevice)
 	mux.HandleFunc("/internal/bootstrap/sessions/lease", s.handleBootstrapWorker)

@@ -42,17 +42,28 @@ type DependencyInjectionMapping struct {
 	SymbolicSource string `json:"symbolic_source"`
 }
 
+// DependencyVerificationContract is optional user-declared consumer assertion intent.
+// When set, the verification runner will perform an HTTP probe against the consumer
+// service after deployment and compare the response code to ExpectedStatus.
+// A missing or non-matching assertion results in PARTIALLY_VERIFIED, never VERIFIED.
+type DependencyVerificationContract struct {
+	Type           string `json:"type"`            // "consumer_http"
+	Path           string `json:"path"`            // relative path on the consumer service
+	ExpectedStatus int    `json:"expected_status"` // e.g. 200
+}
+
 type ApplicationDependency struct {
-	LogicalName       string                       `json:"logical_name"`
-	TargetKind        string                       `json:"target_kind"`
-	TargetIdentity    string                       `json:"target_identity"`
-	Protocol          string                       `json:"protocol"`
-	Strategy          string                       `json:"strategy,omitempty"`
-	AccessContext     string                       `json:"access_context,omitempty"`
-	Path              string                       `json:"path,omitempty"`
-	Required          bool                         `json:"required"`
-	InjectionPhase    string                       `json:"injection_phase"`
-	InjectionMappings []DependencyInjectionMapping `json:"injection_mappings,omitempty"`
+	LogicalName          string                           `json:"logical_name"`
+	TargetKind           string                           `json:"target_kind"`
+	TargetIdentity       string                           `json:"target_identity"`
+	Protocol             string                           `json:"protocol"`
+	Strategy             string                           `json:"strategy,omitempty"`
+	AccessContext        string                           `json:"access_context,omitempty"`
+	Path                 string                           `json:"path,omitempty"`
+	Required             bool                             `json:"required"`
+	InjectionPhase       string                           `json:"injection_phase"`
+	InjectionMappings    []DependencyInjectionMapping     `json:"injection_mappings,omitempty"`
+	VerificationContract *DependencyVerificationContract  `json:"verification_contract,omitempty"`
 }
 
 type ServiceConfigurationDraft struct {

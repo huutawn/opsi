@@ -250,6 +250,34 @@ func (s PostgresStore) CompleteRunner(ctx context.Context, completion Completion
 	if _, err := tx.ExecContext(ctx, `UPDATE build_executor_attempts SET last_state='succeeded',completed_at=$2,updated_at=$2 WHERE attempt_id=$1 AND last_state='claimed'`, attempt.AttemptID, completion.Now); err != nil {
 		return CompletionResult{}, unavailable()
 	}
+	if result.SourceRiskReport != nil {
+		srr := *result.SourceRiskReport
+		id := sha256.Sum256([]byte(job.ID + ":srr"))
+		srrID := "srr-" + hex.EncodeToString(id[:12])
+		findingsJSON, _ := json.Marshal(srr.Findings)
+		envRefsJSON, _ := json.Marshal(srr.EnvReferences)
+		_, _ = tx.ExecContext(ctx, `
+			INSERT INTO source_risk_reports(
+				id, project_id, application_id, repository_id, resolved_commit_sha,
+				application_root, scanner_version, build_job_id, analysis_status,
+				files_scanned, bytes_scanned, truncated, findings, env_references,
+				report_hash, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			ON CONFLICT (project_id, application_id, repository_id, resolved_commit_sha, application_root, scanner_version)
+			DO UPDATE SET
+				build_job_id = EXCLUDED.build_job_id,
+				analysis_status = EXCLUDED.analysis_status,
+				files_scanned = EXCLUDED.files_scanned,
+				bytes_scanned = EXCLUDED.bytes_scanned,
+				truncated = EXCLUDED.truncated,
+				findings = EXCLUDED.findings,
+				env_references = EXCLUDED.env_references,
+				report_hash = EXCLUDED.report_hash
+		`, srrID, job.ProjectID, job.ApplicationID, job.Source.RepositoryID, job.Source.ResolvedCommitSHA,
+			job.Source.ApplicationRoot, srr.ScannerVersion, job.ID, srr.AnalysisStatus,
+			srr.FilesScanned, srr.BytesScanned, srr.Truncated, findingsJSON, envRefsJSON,
+			srr.ReportHash, completion.Now)
+	}
 	if err := tx.Commit(); err != nil {
 		return CompletionResult{}, unavailable()
 	}

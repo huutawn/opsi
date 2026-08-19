@@ -46,6 +46,7 @@ type JobLease struct {
 	RestoreReview   *restorev1.ReviewLease `json:"restore_review_lease,omitempty"`
 	Restore         *restorev1.Lease       `json:"restore_lease,omitempty"`
 	CutoverReview   *cutoverv1.ReviewLease `json:"cutover_review_lease,omitempty"`
+	DepVerification *DepVerificationLease  `json:"dep_verification_lease,omitempty"`
 }
 
 type ManagedResourceLease struct {
@@ -76,6 +77,43 @@ type RetainedStorageResult struct {
 	Evidence               *resourcev1.RetainedStorageDestroyEvidence `json:"evidence,omitempty"`
 	FailureCode            string                                     `json:"failure_code,omitempty"`
 	FailureMessageRedacted string                                     `json:"failure_message_redacted,omitempty"`
+}
+
+type DepVerificationLease struct {
+	ID                    string `json:"id"`
+	LeaseToken            string `json:"lease_token"`
+	ProjectID             string `json:"project_id"`
+	EnvironmentID         string `json:"environment_id"`
+	ConsumerApplicationID string `json:"consumer_application_id"`
+	DependencyLogicalName string `json:"dependency_logical_name"`
+	ProviderKind          string `json:"provider_kind"`
+	ProviderServiceName   string `json:"provider_service_name"`
+	ProviderNamespace     string `json:"provider_namespace"`
+	ConsumerServiceKey    string `json:"consumer_service_key"`
+	ConsumerNamespace     string `json:"consumer_namespace,omitempty"`
+	ConsumerInternalHost  string `json:"consumer_internal_host,omitempty"`
+	ConsumerInternalPort  int    `json:"consumer_internal_port,omitempty"`
+	AssertionPath         string `json:"assertion_path,omitempty"`
+	AssertionExpectedCode int    `json:"assertion_expected_code,omitempty"`
+	TimeoutSeconds        int    `json:"timeout_seconds"`
+}
+
+type DepVerificationResult struct {
+	ID                   string `json:"id"`
+	LeaseToken           string `json:"lease_token"`
+	ConnectionStatus     string `json:"connection_status"`
+	ConnectionLatencyMs  int64  `json:"connection_latency_ms,omitempty"`
+	ConnectionFailCode   string `json:"connection_failure_code,omitempty"`
+	ConnectionMessage    string `json:"connection_message,omitempty"`
+	ConsumerHealthStatus string `json:"consumer_health_status"`
+	ConsumerReadyPods    int    `json:"consumer_ready_pods"`
+	ConsumerTotalPods    int    `json:"consumer_total_pods"`
+	AssertionStatus      string `json:"assertion_status"`
+	AssertionStatusCode  int    `json:"assertion_status_code,omitempty"`
+	AssertionFailCode    string `json:"assertion_failure_code,omitempty"`
+	AssertionMessage     string `json:"assertion_message,omitempty"`
+	FailureCode          string `json:"failure_code,omitempty"`
+	FailureMessage       string `json:"failure_message,omitempty"`
 }
 
 type DeploymentJobEnvelope struct {
@@ -208,9 +246,54 @@ func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) 
 			return nil, err
 		}
 		return &JobLease{Kind: kind.Kind, CutoverReview: &lease}, nil
+	case "dependency_verification":
+		var lease DepVerificationLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, DepVerification: &lease}, nil
 	default:
 		return nil, nil
 	}
+}
+
+func (c Client) CompleteDepVerification(ctx context.Context, nodeID, leaseID string, result DepVerificationResult) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/dep-verifications/" + url.PathEscape(leaseID) + "/result"
+	query := endpoint.Query()
+	if c.ProjectID != "" {
+		query.Set("project_id", c.ProjectID)
+	}
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete dep verification: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c Client) CompleteRestoreReview(ctx context.Context, nodeID, reviewID string, result restorev1.ReviewResult) error {

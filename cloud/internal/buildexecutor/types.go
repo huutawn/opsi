@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
+	"github.com/opsi-dev/opsi/cloud/internal/sourcescanner"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
 
@@ -81,6 +82,7 @@ type Result struct {
 	OCIArtifactPath   string                          `json:"oci_artifact_path,omitempty"`
 	OCIArtifactSHA256 string                          `json:"oci_artifact_sha256,omitempty"`
 	BuildMetadataPath string                          `json:"build_metadata_path,omitempty"`
+	SourceRiskReport  *sourcescanner.Report           `json:"source_risk_report,omitempty"`
 	StartedAt         time.Time                       `json:"started_at"`
 	CompletedAt       time.Time                       `json:"completed_at"`
 	Status            string                          `json:"status"`

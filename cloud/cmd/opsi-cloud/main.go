@@ -27,7 +27,9 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
+	"github.com/opsi-dev/opsi/cloud/internal/sourcereport"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	"github.com/opsi-dev/opsi/cloud/internal/verificationstore"
 	"github.com/opsi-dev/opsi/cloud/internal/webhookrelay"
 )
 
@@ -140,6 +142,8 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.BuildJobs.Sources = postgresRegistry
 		relay.BuildRecords.Store = buildrecord.PostgresStore{DB: db}
 		relay.BuildRecords.Bindings = postgresRegistry
+		relay.SourceReports = sourcereport.PostgresStore{DB: db}
+		relay.Verifications = verificationstore.PostgresStore{DB: db}
 		relay.Topology = topology.Service{Store: topology.PostgresStore{DB: db}, Facts: postgresRegistry, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 		relay.Policies = deploymentpolicy.Service{Store: deploymentpolicy.PostgresStore{DB: db}, BuildRecords: relay.BuildRecords.Store, Bindings: postgresRegistry, Topology: relay.Topology}
 		relay.Cutovers.Deployments = postgresRegistry

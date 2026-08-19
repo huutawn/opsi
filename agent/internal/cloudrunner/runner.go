@@ -66,6 +66,7 @@ type Runner struct {
 	Backups             BackupExecutor
 	Restores            RestoreExecutor
 	Cutovers            CutoverExecutor
+	DepVerifier         DepVerificationExecutor
 	BackupHeartbeat     time.Duration
 	NodeID              string
 	Version             string
@@ -102,6 +103,14 @@ type restoreCloudClient interface {
 
 type cutoverCloudClient interface {
 	CompleteCutoverReview(context.Context, string, string, cutoverv1.ReviewResult) error
+}
+
+type DepVerificationExecutor interface {
+	Verify(context.Context, cloudrelay.DepVerificationLease) cloudrelay.DepVerificationResult
+}
+
+type depVerificationCloudClient interface {
+	CompleteDepVerification(context.Context, string, string, cloudrelay.DepVerificationResult) error
 }
 
 type NodeLifecycleExecutor interface {
@@ -154,7 +163,7 @@ func (r Runner) sendHeartbeat(ctx context.Context) {
 		NodeReady:    health.NodeReady,
 		K3SStatus:    health.K3SStatus,
 		Capacity:     health.Capacity,
-		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil, "postgres_logical_restore": health.NodeReady && r.Restores != nil},
+		Capabilities: map[string]any{"deploy": health.NodeReady && r.Engine != nil, "node_lifecycle": r.NodeLifecycle != nil, "managed_resources": health.NodeReady && r.ManagedResources != nil, "postgres_logical_backup": health.NodeReady && r.Backups != nil, "postgres_logical_restore": health.NodeReady && r.Restores != nil, "dep_verification": health.NodeReady && r.DepVerifier != nil},
 	})
 	if err != nil {
 		r.ConnectionState.SetConnected(false)
@@ -205,7 +214,41 @@ func (r Runner) jobLoop(ctx context.Context) error {
 		if lease != nil && lease.CutoverReview != nil {
 			r.handleCutoverReview(ctx, *lease.CutoverReview)
 		}
+		if lease != nil && lease.DepVerification != nil {
+			r.handleDepVerification(ctx, *lease.DepVerification)
+		}
 		timer.Reset(r.PollInterval)
+	}
+}
+
+func (r Runner) handleDepVerification(ctx context.Context, lease cloudrelay.DepVerificationLease) {
+	result := cloudrelay.DepVerificationResult{
+		ID:                   lease.ID,
+		LeaseToken:           lease.LeaseToken,
+		ConnectionStatus:     "NOT_SUPPORTED",
+		ConsumerHealthStatus: "UNHEALTHY",
+		AssertionStatus:      "NOT_CONFIGURED",
+		FailureCode:          "DEP_VERIFIER_UNAVAILABLE",
+		FailureMessage:       "dependency verifier is not configured",
+	}
+	if r.DepVerifier != nil {
+		result = r.DepVerifier.Verify(ctx, lease)
+	}
+	depClient, ok := r.Client.(depVerificationCloudClient)
+	if !ok {
+		return
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		err := depClient.CompleteDepVerification(ctx, r.NodeID, lease.ID, result)
+		if err == nil {
+			return
+		}
+		r.log().Warn("cloud dep verification result report failed", "lease_id", lease.ID, "attempt", attempt+1, "error", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
 	}
 }
 

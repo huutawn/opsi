@@ -18,8 +18,8 @@ if [[ "$(git -C "$ROOT" rev-parse HEAD)" != "$revision" ]]; then
   echo "source revision does not match the checked-out revision" >&2
   exit 1
 fi
-if [[ "$(go env GOVERSION)" != "go1.26.4" ]]; then
-  echo "Go 1.26.4 is required" >&2
+if [[ ! "$(go env GOVERSION)" =~ ^go1\.26\.[45] ]]; then
+  echo "Go 1.26.4 or 1.26.5 is required" >&2
   exit 1
 fi
 

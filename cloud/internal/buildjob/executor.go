@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/opsi-dev/opsi/cloud/internal/sourcescanner"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
 
@@ -156,6 +157,17 @@ type RunnerLease struct {
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// SourceScanContext carries advisory dependency data for the source risk scanner.
+// It is NOT part of the immutable build authority and does NOT affect Validate().
+// Scanner uses this to perform dependency-aware analysis only.
+type SourceScanContext struct {
+	ProjectID     string `json:"project_id"`
+	ApplicationID string `json:"application_id"`
+	// ScanDependenciesJSON is the JSON-encoded []serviceconfigurationv1.ApplicationDependency
+	// for env key correlation. Optional — if empty, env correlation is skipped.
+	ScanDependenciesJSON []byte `json:"scan_dependencies_json,omitempty"`
+}
+
 type BuildSpec struct {
 	BuildJobID            string            `json:"build_job_id"`
 	Repository            string            `json:"repository"`
@@ -169,6 +181,8 @@ type BuildSpec struct {
 	DockerfilePath        string            `json:"dockerfile_path"`
 	Publication           PublicationTarget `json:"publication"`
 	BuildEnvironment      map[string]string `json:"build_environment,omitempty"`
+	// ScanContext carries advisory scanner data. Not part of immutable build authority.
+	ScanContext *SourceScanContext `json:"scan_context,omitempty"`
 }
 
 func (s BuildSpec) Validate() error {
@@ -213,9 +227,10 @@ type ExecutorResult struct {
 type RunnerResult struct {
 	BuildJobID        string         `json:"build_job_id"`
 	AttemptID         string         `json:"attempt_id"`
-	RegistryReference string         `json:"registry_reference"`
-	Digest            string         `json:"digest"`
-	Executor          ExecutorResult `json:"executor"`
+	RegistryReference string                `json:"registry_reference"`
+	Digest            string                `json:"digest"`
+	Executor          ExecutorResult        `json:"executor"`
+	SourceRiskReport  *sourcescanner.Report `json:"source_risk_report,omitempty"`
 }
 
 type RunnerFailure struct {
