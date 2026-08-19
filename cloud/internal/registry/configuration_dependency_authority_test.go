@@ -31,11 +31,11 @@ func TestDependencyTargetAuthorityValidation(t *testing.T) {
 			"res-foreign-env":     {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-2", TargetKind: "managed_resource"},
 			"res-deleted":         {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-1", TargetKind: "managed_resource", Deleted: true},
 			
-			"app-exists":          {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-1", TargetKind: "application"},
-			"app-foreign-project": {Exists: true, ProjectID: "proj-2", EnvironmentID: "env-1", TargetKind: "application"},
-			"app-foreign-env":     {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-2", TargetKind: "application"},
-			"app-deleted":         {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-1", TargetKind: "application", Deleted: true},
-			"source-1":            {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-1", TargetKind: "application"},
+			"app-exists":          {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-1", TargetKind: "application", ContainerPort: 8080},
+			"app-foreign-project": {Exists: true, ProjectID: "proj-2", EnvironmentID: "env-1", TargetKind: "application", ContainerPort: 8080},
+			"app-foreign-env":     {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-2", TargetKind: "application", ContainerPort: 8080},
+			"app-deleted":         {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-1", TargetKind: "application", Deleted: true, ContainerPort: 8080},
+			"source-1":            {Exists: true, ProjectID: "proj-1", EnvironmentID: "env-1", TargetKind: "application", ContainerPort: 8080},
 		},
 	}
 

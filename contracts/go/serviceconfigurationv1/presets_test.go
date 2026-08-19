@@ -24,4 +24,20 @@ func TestPresets(t *testing.T) {
 	if valkeyCache.Protocol != ProtocolRedis || len(valkeyCache.InjectionMappings) != 3 {
 		t.Fatalf("unexpected valkey cache preset: %+v", valkeyCache)
 	}
+
+	sameOrigin := SameOriginPreset("api", "app-api-1", "/api/v1", "API_PATH", true)
+	if sameOrigin.TargetKind != TargetKindApplication || sameOrigin.Strategy != StrategySameOrigin || sameOrigin.AccessContext != AccessContextBrowser || sameOrigin.Path != "/api/v1" || len(sameOrigin.InjectionMappings) != 1 || sameOrigin.InjectionMappings[0].EnvName != "API_PATH" {
+		t.Fatalf("unexpected same origin preset: %+v", sameOrigin)
+	}
+
+	internalHTTP := InternalHTTPPreset("api", "app-api-1", "API", true)
+	if internalHTTP.TargetKind != TargetKindApplication || internalHTTP.Strategy != StrategyInternalHTTP || internalHTTP.AccessContext != AccessContextServer || len(internalHTTP.InjectionMappings) != 3 {
+		t.Fatalf("unexpected internal HTTP preset: %+v", internalHTTP)
+	}
+
+	publicHTTP := PublicHTTPPreset("api", "app-api-1", AccessContextServer, "API_ENDPOINT", false)
+	if publicHTTP.TargetKind != TargetKindApplication || publicHTTP.Strategy != StrategyPublicHTTP || publicHTTP.AccessContext != AccessContextServer || len(publicHTTP.InjectionMappings) != 1 || publicHTTP.InjectionMappings[0].EnvName != "API_ENDPOINT" {
+		t.Fatalf("unexpected public HTTP preset: %+v", publicHTTP)
+	}
 }
+

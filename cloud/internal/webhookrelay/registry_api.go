@@ -769,8 +769,11 @@ func (s *Server) reviewDependencies(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	resolver := DependencyResolverAdapter{Registry: s.Registry, Resources: s.Resources}
 	plan, err := registry.PlanDependencyRealization(r.Context(), config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
 		return s.Resources.Get(ctx, projectID, targetID)
+	}, func(ctx context.Context, targetID string) (registry.DependencyTargetFacts, error) {
+		return resolver.ResolveDependencyTarget(ctx, projectID, targetID, "application")
 	})
 	if err != nil {
 		writeRegistryFailure(w, r, err)
@@ -816,8 +819,11 @@ func (s *Server) applyDependencies(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
+	resolver := DependencyResolverAdapter{Registry: s.Registry, Resources: s.Resources}
 	plan, err := registry.PlanDependencyRealization(r.Context(), config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
 		return s.Resources.Get(ctx, projectID, targetID)
+	}, func(ctx context.Context, targetID string) (registry.DependencyTargetFacts, error) {
+		return resolver.ResolveDependencyTarget(ctx, projectID, targetID, "application")
 	})
 	if err != nil {
 		writeRegistryFailure(w, r, err)

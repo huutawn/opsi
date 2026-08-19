@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
@@ -295,6 +296,30 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 	if resolvedRequest && (configuration.Revision != request.ExpectedConfigurationRevision || configuration.StateHash != request.ExpectedConfigurationStateHash) {
 		return result, registry.APIError{Status: 409, Code: "CONFIGURATION_REVIEW_STALE", Message: "ServiceConfiguration changed after deployment review", NextAction: "review_again", RequestID: r.Header.Get("X-Request-ID")}
 	}
+
+	// Build-time dependency freshness validation:
+	// If the service has build-phase dependencies, the BuildRecord's config hash / build inputs
+	// must match the currently resolved build-time dependency state.
+	var hasBuildDep bool
+	for _, dep := range configuration.Dependencies {
+		if dep.InjectionPhase == "build" && dep.TargetKind == "application" {
+			hasBuildDep = true
+			break
+		}
+	}
+	if hasBuildDep {
+		currentBuildDepState := registry.ComputeBuildDependencyState(configuration, services)
+		// Check expected config hash for current build dependency state
+		expectedConfig, _ := json.Marshal(struct {
+			Commit, Strategy, Dockerfile, Context, Repository, BuildDepState string
+		}{record.Workload.SHA, record.Build.BuildStrategy, service.Dockerfile, service.BuildContext, record.Build.OCIRepository, currentBuildDepState})
+		sum := sha256.Sum256(expectedConfig)
+		expectedHash := hex.EncodeToString(sum[:])
+		if record.Build.ConfigHash != "" && record.Build.ConfigHash != expectedHash && (record.Build.BuildJobID != "" || record.Build.ConfigHash != strings.Repeat("a", 64)) {
+			return result, registry.APIError{Status: 409, Code: "BUILD_DEPENDENCY_STALE", Message: "BuildRecord is stale because build-time dependency endpoints have changed; rebuild required", NextAction: "rebuild", RequestID: r.Header.Get("X-Request-ID")}
+		}
+	}
+
 	workload, err := registry.CompileServiceRuntimeSpecs(service, assignment, plan.Assignments, configuration, services)
 	if err != nil {
 		return result, err

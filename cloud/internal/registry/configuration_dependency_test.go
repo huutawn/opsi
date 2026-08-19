@@ -1,17 +1,19 @@
 package registry
 
 import (
-	"strings"
 	"context"
+	"errors"
+	"strings"
 	"testing"
+
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
 
 func TestServiceConfigurationDependenciesValidation(t *testing.T) {
 	services := []ServiceRecord{
 		{ID: "source-1", ProjectID: "proj-1"},
-		{ID: "target-app", ProjectID: "proj-1"},
-		{ID: "foreign-app", ProjectID: "proj-2"},
+		{ID: "target-app", ProjectID: "proj-1", ContainerPort: 8080},
+		{ID: "foreign-app", ProjectID: "proj-2", ContainerPort: 8080},
 	}
 
 	tests := []struct {
@@ -116,4 +118,58 @@ func hasAPIErrorMessage(err error, msg string) bool {
 		return false
 	}
 	return strings.Contains(apiErr.Message, msg)
+}
+
+func TestBuildDependencyCycleDetection(t *testing.T) {
+	// Service A depends on Service B in build phase
+	// Service B depends on Service A in build phase -> cycle!
+	serviceB := ServiceRecord{
+		ID:            "svc-b",
+		ProjectID:     "proj-1",
+		ContainerPort: 8080,
+		Configuration: ServiceConfiguration{
+			ServiceConfigurationDraft: ServiceConfigurationDraft{
+				Dependencies: []serviceconfigurationv1.ApplicationDependency{
+					{
+						LogicalName:    "dep-a",
+						TargetKind:     "application",
+						TargetIdentity: "svc-a",
+						Protocol:       "http",
+						Strategy:       serviceconfigurationv1.StrategyInternalHTTP,
+						AccessContext:  serviceconfigurationv1.AccessContextServer,
+						InjectionPhase: serviceconfigurationv1.InjectionPhaseBuild,
+					},
+				},
+			},
+		},
+	}
+	serviceA := ServiceRecord{
+		ID:            "svc-a",
+		ProjectID:     "proj-1",
+		ContainerPort: 8080,
+	}
+
+	services := []ServiceRecord{serviceA, serviceB}
+	draftA := ServiceConfigurationDraft{
+		Dependencies: []serviceconfigurationv1.ApplicationDependency{
+			{
+				LogicalName:    "dep-b",
+				TargetKind:     "application",
+				TargetIdentity: "svc-b",
+				Protocol:       "http",
+				Strategy:       serviceconfigurationv1.StrategyInternalHTTP,
+				AccessContext:  serviceconfigurationv1.AccessContextServer,
+				InjectionPhase: serviceconfigurationv1.InjectionPhaseBuild,
+			},
+		},
+	}
+
+	_, _, err := validateServiceConfiguration(context.Background(), nil, serviceA, draftA, services)
+	if err == nil {
+		t.Fatal("expected cycle detection error, got nil")
+	}
+	var apiErr APIError
+	if !strings.Contains(err.Error(), "DEPENDENCY_CYCLE_DETECTED") && (!errors.As(err, &apiErr) || apiErr.Code != "DEPENDENCY_CYCLE_DETECTED") {
+		t.Fatalf("expected DEPENDENCY_CYCLE_DETECTED, got %v", err)
+	}
 }

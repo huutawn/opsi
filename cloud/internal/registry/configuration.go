@@ -45,6 +45,11 @@ type DependencyTargetFacts struct {
 	Database      string
 	Deleted       bool
 	StateHash     string
+	ServiceKey    string
+	ContainerPort int
+	PublicRoute   *PublicRouteIntent
+	Exposure      *exposurev1.ExposureSpec
+	Dependencies  []serviceconfigurationv1.ApplicationDependency
 }
 
 type DependencyTargetResolver interface {
@@ -142,8 +147,152 @@ func validSymbolicSourceForProtocol(protocol, source string) bool {
 		case "resource.host", "resource.port", "connection.url":
 			return true
 		}
+	case "http":
+		switch source {
+		case "application.internal_url", "application.internal_host", "application.internal_port",
+			"application.public_url", "application.public_host", "application.public_port", "application.public_scheme",
+			"application.path", "application.url":
+			return true
+		}
 	}
 	return false
+}
+
+func validSymbolicSourceForStrategy(strategy, source string) bool {
+	switch strategy {
+	case serviceconfigurationv1.StrategyInternalHTTP:
+		switch source {
+		case "application.internal_url", "application.internal_host", "application.internal_port", "application.path":
+			return true
+		}
+	case serviceconfigurationv1.StrategyPublicHTTP:
+		switch source {
+		case "application.public_url", "application.public_host", "application.public_port", "application.public_scheme", "application.path", "application.url":
+			return true
+		}
+	case serviceconfigurationv1.StrategySameOrigin:
+		switch source {
+		case "application.path", "application.url":
+			return true
+		}
+	}
+	return false
+}
+
+type BuildDependencyMapping struct {
+	EnvName string `json:"env_name"`
+	Value   string `json:"value"`
+}
+
+func ComputeBuildDependencyState(config ServiceConfiguration, services []ServiceRecord) string {
+	targets := make(map[string]ServiceRecord, len(services))
+	for _, s := range services {
+		targets[s.ID] = s
+	}
+
+	mappings := []BuildDependencyMapping{}
+	for _, dep := range config.Dependencies {
+		if dep.InjectionPhase != "build" || dep.TargetKind != "application" {
+			continue
+		}
+		target, ok := targets[dep.TargetIdentity]
+		if !ok {
+			continue
+		}
+
+		publicHost := ""
+		publicURL := ""
+		targetPath := "/"
+		if target.Configuration.PublicRoute != nil {
+			publicHost = target.Configuration.PublicRoute.Hostname
+			targetPath = target.Configuration.PublicRoute.Path
+			if targetPath == "" {
+				targetPath = "/"
+			}
+			if targetPath == "/" {
+				publicURL = "https://" + publicHost
+			} else {
+				publicURL = "https://" + publicHost + targetPath
+			}
+		}
+
+		for _, m := range dep.InjectionMappings {
+			val := ""
+			switch m.SymbolicSource {
+			case "application.public_url":
+				val = publicURL
+			case "application.public_host":
+				val = publicHost
+			case "application.public_port":
+				val = "443"
+			case "application.public_scheme":
+				val = "https"
+			case "application.path":
+				if dep.Strategy == serviceconfigurationv1.StrategySameOrigin && dep.Path != "" {
+					val = dep.Path
+				} else {
+					val = targetPath
+				}
+			case "application.url":
+				if dep.Strategy == serviceconfigurationv1.StrategySameOrigin {
+					if dep.Path != "" {
+						val = dep.Path
+					} else {
+						val = targetPath
+					}
+				} else if dep.Strategy == serviceconfigurationv1.StrategyPublicHTTP {
+					val = publicURL
+				}
+			}
+			if val != "" {
+				mappings = append(mappings, BuildDependencyMapping{EnvName: m.EnvName, Value: val})
+			}
+		}
+	}
+
+	sort.Slice(mappings, func(i, j int) bool {
+		return mappings[i].EnvName < mappings[j].EnvName
+	})
+
+	data, _ := json.Marshal(mappings)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func checkDependencyCycle(sourceID, targetID string, targetDeps []serviceconfigurationv1.ApplicationDependency, targets map[string]ServiceRecord, resolver DependencyTargetResolver, ctx context.Context, projectID string) error {
+	visited := map[string]bool{sourceID: true}
+	var dfs func(currentID string, currentDeps []serviceconfigurationv1.ApplicationDependency) error
+	dfs = func(currentID string, currentDeps []serviceconfigurationv1.ApplicationDependency) error {
+		if currentID == sourceID {
+			return errors.New("circular dependency detected in build phase dependency graph")
+		}
+		if visited[currentID] {
+			return nil
+		}
+		visited[currentID] = true
+
+		var depsToTraverse []serviceconfigurationv1.ApplicationDependency
+		if currentDeps != nil {
+			depsToTraverse = currentDeps
+		} else if resolver != nil {
+			facts, err := resolver.ResolveDependencyTarget(ctx, projectID, currentID, "application")
+			if err == nil && facts.Exists {
+				depsToTraverse = facts.Dependencies
+			}
+		} else if target, ok := targets[currentID]; ok {
+			depsToTraverse = target.Configuration.Dependencies
+		}
+
+		for _, dep := range depsToTraverse {
+			if dep.TargetKind == "application" && dep.InjectionPhase == "build" {
+				if err := dfs(dep.TargetIdentity, nil); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return dfs(targetID, targetDeps)
 }
 
 func validateServiceConfiguration(ctx context.Context, resolver DependencyTargetResolver, source ServiceRecord, draft ServiceConfigurationDraft, services []ServiceRecord) (ServiceConfigurationDraft, []GeneratedEnvironment, error) {
@@ -218,6 +367,10 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			}
 		}
 
+		var targetContainerPort int
+		var targetPublicRoute *PublicRouteIntent
+		var targetDeps []serviceconfigurationv1.ApplicationDependency
+
 		if resolver != nil {
 			facts, err := resolver.ResolveDependencyTarget(ctx, source.ProjectID, dep.TargetIdentity, dep.TargetKind)
 			if err != nil {
@@ -246,6 +399,14 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 					return draft, nil, configurationError("DEPENDENCY_PROTOCOL_UNSUPPORTED", fmt.Sprintf("dependencies[%d].protocol", index), "target resource does not support redis protocol")
 				}
 			}
+			if dep.TargetKind == "application" {
+				targetContainerPort = facts.ContainerPort
+				targetPublicRoute = facts.PublicRoute
+				targetDeps = facts.Dependencies
+				if facts.Exposure != nil && targetPublicRoute == nil {
+					targetPublicRoute = &PublicRouteIntent{Hostname: facts.Exposure.Hostname, Path: facts.Exposure.Path}
+				}
+			}
 		} else {
 			if dep.TargetKind == "application" {
 				target, ok := targets[dep.TargetIdentity]
@@ -254,6 +415,90 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 				}
 				if target.ID == source.ID {
 					return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].target_identity", index), "a service cannot depend on itself")
+				}
+				targetContainerPort = target.ContainerPort
+				targetPublicRoute = target.Configuration.PublicRoute
+				targetDeps = target.Configuration.Dependencies
+			}
+		}
+
+		if dep.TargetKind == "application" {
+			if dep.Protocol != "http" {
+				return draft, nil, configurationError("DEPENDENCY_PROTOCOL_UNSUPPORTED", fmt.Sprintf("dependencies[%d].protocol", index), "application dependencies must use protocol http")
+			}
+			// If strategy is not set, default to internal_http if access_context is empty/server, or same_origin if access_context is browser
+			if dep.Strategy == "" {
+				if dep.AccessContext == serviceconfigurationv1.AccessContextBrowser {
+					dep.Strategy = serviceconfigurationv1.StrategySameOrigin
+				} else {
+					dep.Strategy = serviceconfigurationv1.StrategyInternalHTTP
+				}
+			}
+			if dep.AccessContext == "" {
+				if dep.Strategy == serviceconfigurationv1.StrategySameOrigin {
+					dep.AccessContext = serviceconfigurationv1.AccessContextBrowser
+				} else {
+					dep.AccessContext = serviceconfigurationv1.AccessContextServer
+				}
+			}
+
+			if dep.Strategy != serviceconfigurationv1.StrategySameOrigin && dep.Strategy != serviceconfigurationv1.StrategyInternalHTTP && dep.Strategy != serviceconfigurationv1.StrategyPublicHTTP {
+				return draft, nil, configurationError("DEPENDENCY_STRATEGY_INVALID", fmt.Sprintf("dependencies[%d].strategy", index), "application dependency strategy must be same_origin, internal_http, or public_http")
+			}
+			if dep.AccessContext != serviceconfigurationv1.AccessContextServer && dep.AccessContext != serviceconfigurationv1.AccessContextBrowser {
+				return draft, nil, configurationError("DEPENDENCY_ACCESS_CONTEXT_INVALID", fmt.Sprintf("dependencies[%d].access_context", index), "access context must be server or browser")
+			}
+
+			// Matrix validation:
+			// server + internal_http -> VALID
+			// server + public_http -> VALID
+			// server + same_origin -> REJECT (STRATEGY_CONTEXT_MISMATCH)
+			// browser + same_origin -> VALID
+			// browser + public_http -> VALID
+			// browser + internal_http -> REJECT (BROWSER_INTERNAL_HTTP_FORBIDDEN)
+			if dep.AccessContext == serviceconfigurationv1.AccessContextBrowser && dep.Strategy == serviceconfigurationv1.StrategyInternalHTTP {
+				return draft, nil, configurationError("BROWSER_INTERNAL_HTTP_FORBIDDEN", fmt.Sprintf("dependencies[%d]", index), "browser access context cannot use internal_http strategy")
+			}
+			if dep.AccessContext == serviceconfigurationv1.AccessContextServer && dep.Strategy == serviceconfigurationv1.StrategySameOrigin {
+				return draft, nil, configurationError("STRATEGY_CONTEXT_MISMATCH", fmt.Sprintf("dependencies[%d]", index), "server access context cannot use same_origin strategy")
+			}
+
+			if dep.Strategy == serviceconfigurationv1.StrategySameOrigin {
+				if dep.Path == "" {
+					if targetPublicRoute != nil && targetPublicRoute.Path != "" {
+						dep.Path = targetPublicRoute.Path
+					} else {
+						dep.Path = "/api"
+					}
+				}
+				normPath, err := exposurev1.NormalizePath(dep.Path)
+				if err != nil {
+					return draft, nil, configurationError("DEPENDENCY_PATH_INVALID", fmt.Sprintf("dependencies[%d].path", index), err.Error())
+				}
+				dep.Path = normPath
+			}
+
+			if dep.Strategy == serviceconfigurationv1.StrategyInternalHTTP {
+				if targetContainerPort < 1 || targetContainerPort > 65535 {
+					return draft, nil, configurationError("TARGET_PORT_MISSING", fmt.Sprintf("dependencies[%d]", index), "internal HTTP target application must declare a container port")
+				}
+			}
+			if dep.Strategy == serviceconfigurationv1.StrategyPublicHTTP {
+				if targetPublicRoute == nil {
+					return draft, nil, configurationError("TARGET_PUBLIC_ROUTE_MISSING", fmt.Sprintf("dependencies[%d]", index), "public HTTP target application must have an applied public route")
+				}
+			}
+			if dep.Strategy == serviceconfigurationv1.StrategySameOrigin {
+				if targetPublicRoute == nil {
+					return draft, nil, configurationError("TARGET_PUBLIC_ROUTE_MISSING", fmt.Sprintf("dependencies[%d]", index), "same-origin target application must have an applied public route")
+				}
+				if draft.PublicRoute != nil {
+					if draft.PublicRoute.Hostname != targetPublicRoute.Hostname {
+						return draft, nil, configurationError("SAME_ORIGIN_HOSTNAME_MISMATCH", fmt.Sprintf("dependencies[%d]", index), "same-origin consumer and target must share the same public route hostname")
+					}
+				}
+				if dep.Path != targetPublicRoute.Path {
+					return draft, nil, configurationError("SAME_ORIGIN_PATH_MISMATCH", fmt.Sprintf("dependencies[%d].path", index), "same-origin dependency path must match the target public route path")
 				}
 			}
 		}
@@ -285,6 +530,18 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			}
 			if dep.TargetKind == "managed_resource" && !validSymbolicSourceForProtocol(dep.Protocol, mapping.SymbolicSource) {
 				return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), fmt.Sprintf("symbolic source %s is invalid for protocol %s", mapping.SymbolicSource, dep.Protocol))
+			}
+			if dep.TargetKind == "application" {
+				if !validSymbolicSourceForProtocol(dep.Protocol, mapping.SymbolicSource) || !validSymbolicSourceForStrategy(dep.Strategy, mapping.SymbolicSource) {
+					return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), fmt.Sprintf("symbolic source %s is invalid for application strategy %s", mapping.SymbolicSource, dep.Strategy))
+				}
+			}
+		}
+
+		// Cycle detection for build phase dependencies:
+		if dep.TargetKind == "application" && dep.InjectionPhase == "build" {
+			if err := checkDependencyCycle(source.ID, dep.TargetIdentity, targetDeps, targets, resolver, ctx, source.ProjectID); err != nil {
+				return draft, nil, configurationError("DEPENDENCY_CYCLE_DETECTED", fmt.Sprintf("dependencies[%d].target_identity", index), err.Error())
 			}
 		}
 	}
@@ -394,6 +651,104 @@ func CompileServiceRuntime(source ServiceRecord, assignment topologyv1.Assignmen
 		}
 		environment = append(environment, deploymentv1.EnvironmentVariable{Name: item.Name, Value: value})
 	}
+	for _, dep := range draft.Dependencies {
+		if dep.InjectionPhase != "runtime" || dep.TargetKind != "application" {
+			continue
+		}
+		target, ok := targets[dep.TargetIdentity]
+		if !ok {
+			continue
+		}
+
+		targetAssignment, hasAssignment := serviceAssignment(assignments, target.Name, assignment.EnvironmentID)
+		namespace := deploymentv1.StableDNSName("opsi", source.ProjectID, assignment.EnvironmentID)
+		internalHost := ""
+		if hasAssignment {
+			resource := deploymentv1.StableDNSName("opsi", target.Name, targetAssignment.RuntimeID)
+			internalHost = resource + "." + namespace + ".svc.cluster.local"
+		}
+		internalPort := strconv.Itoa(target.ContainerPort)
+		internalURL := ""
+		if internalHost != "" {
+			internalURL = "http://" + internalHost + ":" + internalPort
+		}
+
+		publicHost := ""
+		publicPort := "443"
+		publicScheme := "https"
+		publicURL := ""
+		targetPath := "/"
+		if target.Configuration.PublicRoute != nil {
+			publicHost = target.Configuration.PublicRoute.Hostname
+			targetPath = target.Configuration.PublicRoute.Path
+			if targetPath == "" {
+				targetPath = "/"
+			}
+			if targetPath == "/" {
+				publicURL = "https://" + publicHost
+			} else {
+				publicURL = "https://" + publicHost + targetPath
+			}
+		}
+
+		for _, mapping := range dep.InjectionMappings {
+			val := ""
+			switch mapping.SymbolicSource {
+			case "application.internal_url":
+				if dep.Strategy == serviceconfigurationv1.StrategyInternalHTTP {
+					if !hasAssignment {
+						return CompiledServiceRuntime{}, configurationError("TARGET_ASSIGNMENT_MISSING", dep.LogicalName, "internal HTTP target must have an assignment in the source environment")
+					}
+					if targetAssignment.RuntimeID != assignment.RuntimeID {
+						return CompiledServiceRuntime{}, configurationError("MULTI_RUNTIME_NETWORKING_UNSUPPORTED", dep.LogicalName, "manual v1 internal HTTP requires source and target on the same runtime")
+					}
+					val = internalURL
+				}
+			case "application.internal_host":
+				if dep.Strategy == serviceconfigurationv1.StrategyInternalHTTP {
+					if !hasAssignment {
+						return CompiledServiceRuntime{}, configurationError("TARGET_ASSIGNMENT_MISSING", dep.LogicalName, "internal HTTP target must have an assignment in the source environment")
+					}
+					if targetAssignment.RuntimeID != assignment.RuntimeID {
+						return CompiledServiceRuntime{}, configurationError("MULTI_RUNTIME_NETWORKING_UNSUPPORTED", dep.LogicalName, "manual v1 internal HTTP requires source and target on the same runtime")
+					}
+					val = internalHost
+				}
+			case "application.internal_port":
+				val = internalPort
+			case "application.public_url":
+				val = publicURL
+			case "application.public_host":
+				val = publicHost
+			case "application.public_port":
+				val = publicPort
+			case "application.public_scheme":
+				val = publicScheme
+			case "application.path":
+				if dep.Strategy == serviceconfigurationv1.StrategySameOrigin && dep.Path != "" {
+					val = dep.Path
+				} else {
+					val = targetPath
+				}
+			case "application.url":
+				if dep.Strategy == serviceconfigurationv1.StrategySameOrigin {
+					if dep.Path != "" {
+						val = dep.Path
+					} else {
+						val = targetPath
+					}
+				} else if dep.Strategy == serviceconfigurationv1.StrategyPublicHTTP {
+					val = publicURL
+				} else if dep.Strategy == serviceconfigurationv1.StrategyInternalHTTP {
+					val = internalURL
+				}
+			}
+			if val != "" {
+				environment = append(environment, deploymentv1.EnvironmentVariable{Name: mapping.EnvName, Value: val})
+			}
+		}
+	}
+
 	sort.Slice(environment, func(i, j int) bool { return environment[i].Name < environment[j].Name })
 	if err := deploymentv1.ValidateEnvironment(environment, nil); err != nil {
 		return CompiledServiceRuntime{}, err

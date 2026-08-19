@@ -303,8 +303,8 @@ func (s PostgresStore) FailRunner(ctx context.Context, failure RunnerFailure, le
 func runnerBuildRecord(job Job, attempt DispatchAttempt, serviceKey string, result RunnerResult, target PublicationTarget, executor ExecutorConfig, now time.Time) buildrecordv1.Record {
 	idHash := sha256.Sum256([]byte(job.ID))
 	config, _ := json.Marshal(struct {
-		Commit, Strategy, Dockerfile, Context, Repository string
-	}{job.Source.ResolvedCommitSHA, job.ResolvedBuildStrategy, job.DockerfilePath, job.Source.BuildContext, target.Repository})
+		Commit, Strategy, Dockerfile, Context, Repository, BuildDepState string
+	}{job.Source.ResolvedCommitSHA, job.ResolvedBuildStrategy, job.DockerfilePath, job.Source.BuildContext, target.Repository, job.Source.BuildDependencyState})
 	configHash := sha256.Sum256(config)
 	builderVersion := result.Executor.BuildKitVersion + "/buildx-" + result.Executor.BuildxVersion
 	if job.ResolvedBuildStrategy == StrategyBuildpack {

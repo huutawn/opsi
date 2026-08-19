@@ -43,8 +43,9 @@ type SourceSnapshot struct {
 	RepositoryFullName string    `json:"repository_full_name"`
 	SelectedRef        string    `json:"selected_ref"`
 	ResolvedCommitSHA  string    `json:"resolved_commit_sha"`
-	ApplicationRoot    string    `json:"application_root"`
-	BuildContext       string    `json:"build_context"`
+	ApplicationRoot      string    `json:"application_root"`
+	BuildContext         string    `json:"build_context"`
+	BuildDependencyState string    `json:"build_dependency_state,omitempty"`
 }
 
 type ApplicationSource struct {
@@ -60,8 +61,9 @@ type ApplicationSource struct {
 	SelectedRef        string
 	ApplicationRoot    string
 	BuildContext       string
-	BuildStrategy      string
-	DockerfilePath     string
+	BuildStrategy        string
+	DockerfilePath       string
+	BuildDependencyState string
 }
 
 type Job struct {
@@ -159,7 +161,7 @@ func (s Service) Create(ctx context.Context, projectID, applicationID, createdBy
 	now := s.clock()
 	job := Job{
 		ID: id, ProjectID: projectID, EnvironmentID: source.EnvironmentID, ApplicationID: applicationID,
-		Source:                 SourceSnapshot{BindingID: source.BindingID, BindingUpdatedAt: source.BindingUpdatedAt, InstallationID: source.InstallationID, RepositoryID: source.RepositoryID, RepositoryOwnerID: source.RepositoryOwnerID, RepositoryFullName: source.RepositoryFullName, SelectedRef: source.SelectedRef, ResolvedCommitSHA: sha, ApplicationRoot: source.ApplicationRoot, BuildContext: source.BuildContext},
+		Source:                 SourceSnapshot{BindingID: source.BindingID, BindingUpdatedAt: source.BindingUpdatedAt, InstallationID: source.InstallationID, RepositoryID: source.RepositoryID, RepositoryOwnerID: source.RepositoryOwnerID, RepositoryFullName: source.RepositoryFullName, SelectedRef: source.SelectedRef, ResolvedCommitSHA: sha, ApplicationRoot: source.ApplicationRoot, BuildContext: source.BuildContext, BuildDependencyState: source.BuildDependencyState},
 		RequestedBuildStrategy: source.BuildStrategy, ResolvedBuildStrategy: resolved, DockerfilePath: dockerfile,
 		Status: StatusReady, CreatedBy: createdBy, CreatedAt: now, UpdatedAt: now, IdempotencyKey: idempotencyKey,
 	}

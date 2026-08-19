@@ -47,6 +47,9 @@ type ApplicationDependency struct {
 	TargetKind        string                       `json:"target_kind"`
 	TargetIdentity    string                       `json:"target_identity"`
 	Protocol          string                       `json:"protocol"`
+	Strategy          string                       `json:"strategy,omitempty"`
+	AccessContext     string                       `json:"access_context,omitempty"`
+	Path              string                       `json:"path,omitempty"`
 	Required          bool                         `json:"required"`
 	InjectionPhase    string                       `json:"injection_phase"`
 	InjectionMappings []DependencyInjectionMapping `json:"injection_mappings,omitempty"`
@@ -117,6 +120,14 @@ func Normalize(draft ServiceConfigurationDraft) ServiceConfigurationDraft {
 		draft.Dependencies[i].TargetKind = strings.TrimSpace(draft.Dependencies[i].TargetKind)
 		draft.Dependencies[i].TargetIdentity = strings.TrimSpace(draft.Dependencies[i].TargetIdentity)
 		draft.Dependencies[i].Protocol = strings.TrimSpace(draft.Dependencies[i].Protocol)
+		draft.Dependencies[i].Strategy = strings.TrimSpace(draft.Dependencies[i].Strategy)
+		draft.Dependencies[i].AccessContext = strings.TrimSpace(draft.Dependencies[i].AccessContext)
+		draft.Dependencies[i].Path = strings.TrimSpace(draft.Dependencies[i].Path)
+		if draft.Dependencies[i].Path != "" {
+			if normalizedPath, err := exposurev1.NormalizePath(draft.Dependencies[i].Path); err == nil {
+				draft.Dependencies[i].Path = normalizedPath
+			}
+		}
 		draft.Dependencies[i].InjectionPhase = strings.TrimSpace(draft.Dependencies[i].InjectionPhase)
 
 		draft.Dependencies[i].InjectionMappings = append([]DependencyInjectionMapping(nil), draft.Dependencies[i].InjectionMappings...)

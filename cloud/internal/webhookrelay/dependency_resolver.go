@@ -47,12 +47,17 @@ func (a DependencyResolverAdapter) ResolveDependencyTarget(ctx context.Context, 
 	}
 	for _, app := range apps {
 		if app.ID == targetIdentity {
+			config, _ := a.Registry.GetServiceConfiguration(projectID, app.ID)
 			return registry.DependencyTargetFacts{
 				Exists:        true,
 				ProjectID:     app.ProjectID,
 				EnvironmentID: app.EnvironmentID,
 				TargetKind:    "application",
 				Deleted:       app.Status == "deleted",
+				ServiceKey:    app.Name,
+				ContainerPort: app.ContainerPort,
+				PublicRoute:   config.PublicRoute,
+				Dependencies:  config.Dependencies,
 			}, nil
 		}
 	}

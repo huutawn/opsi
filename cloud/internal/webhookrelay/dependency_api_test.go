@@ -192,3 +192,155 @@ func TestServiceDependenciesAPI_ReviewAndApply(t *testing.T) {
 		t.Fatalf("expected postgres URL in material, got %s", materials[0].Values["APP_DATABASE_URL"])
 	}
 }
+
+func TestApplicationToApplicationDependencies(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-app-dep", "App Dep Project", "app-dep-proj", "user-1", "project-app-dep")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Create API backend service
+	apiApp, err := server.Registry.CreateService(project.ID, registry.ServiceDraft{Name: "api", ContainerPort: 8080}, "api-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiCfg, err := server.Registry.GetServiceConfiguration(project.ID, apiApp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Give API service a public route
+	applyAPICfg := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+apiApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			PublicRoute: &registry.PublicRouteIntent{Hostname: "app.example.com", Path: "/api"},
+		},
+		ExpectedRevision: apiCfg.Revision,
+		ExpectedStateHash: apiCfg.StateHash,
+	}, "api-cfg-1")
+	if applyAPICfg.Code != http.StatusOK {
+		t.Fatalf("apply API config failed: %s", applyAPICfg.Body.String())
+	}
+
+	// 2. Create Web frontend service
+	webApp, err := server.Registry.CreateService(project.ID, registry.ServiceDraft{Name: "web", ContainerPort: 3000}, "web-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	webCfg, err := server.Registry.GetServiceConfiguration(project.ID, webApp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Scenario A: Same-Origin Browser Dependency
+	sameOriginDraft := registry.ServiceConfigurationDraft{
+		PublicRoute: &registry.PublicRouteIntent{Hostname: "app.example.com", Path: "/"},
+		Dependencies: []serviceconfigurationv1.ApplicationDependency{
+			serviceconfigurationv1.SameOriginPreset("api-backend", apiApp.ID, "/api", "API_PATH", true),
+		},
+	}
+	applyWebCfg := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft: sameOriginDraft,
+		ExpectedRevision: webCfg.Revision,
+		ExpectedStateHash: webCfg.StateHash,
+	}, "web-cfg-1")
+	if applyWebCfg.Code != http.StatusOK {
+		t.Fatalf("apply same-origin config failed: %s", applyWebCfg.Body.String())
+	}
+
+	// Review dependencies for Web (Zero-mutation)
+	reviewWebResp := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/dependencies/review", nil, "")
+	if reviewWebResp.Code != http.StatusOK {
+		t.Fatalf("review web dependencies failed: status=%d body=%s", reviewWebResp.Code, reviewWebResp.Body.String())
+	}
+	var webReview registry.DependencyReviewResult
+	if err := json.Unmarshal(reviewWebResp.Body.Bytes(), &webReview); err != nil {
+		t.Fatal(err)
+	}
+	if len(webReview.Dependencies) != 1 || webReview.Dependencies[0].Strategy != "same_origin" || webReview.Dependencies[0].AccessContext != "browser" {
+		t.Fatalf("unexpected web review: %+v", webReview)
+	}
+	if len(webReview.Dependencies[0].Projections) != 1 || webReview.Dependencies[0].Projections[0].ValuePreview != "/api" {
+		t.Fatalf("expected projection preview '/api', got %+v", webReview.Dependencies[0].Projections)
+	}
+
+	// Scenario B: Internal HTTP Server Dependency
+	webCfg2, _ := server.Registry.GetServiceConfiguration(project.ID, webApp.ID)
+	internalHTTPDraft := registry.ServiceConfigurationDraft{
+		Dependencies: []serviceconfigurationv1.ApplicationDependency{
+			serviceconfigurationv1.InternalHTTPPreset("api-internal", apiApp.ID, "API", true),
+		},
+	}
+	applyInternal := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft:             internalHTTPDraft,
+		ExpectedRevision:  webCfg2.Revision,
+		ExpectedStateHash: webCfg2.StateHash,
+	}, "web-cfg-2")
+	if applyInternal.Code != http.StatusOK {
+		t.Fatalf("apply internal HTTP failed: %s", applyInternal.Body.String())
+	}
+
+	// Scenario Matrix Rejections:
+	// 1. browser + internal_http -> REJECT (BROWSER_INTERNAL_HTTP_FORBIDDEN)
+	webCfgCur, _ := server.Registry.GetServiceConfiguration(project.ID, webApp.ID)
+	forbiddenBrowserInternal := registry.ServiceConfigurationDraft{
+		Dependencies: []serviceconfigurationv1.ApplicationDependency{
+			{
+				LogicalName:    "bad-dep",
+				TargetKind:     "application",
+				TargetIdentity: apiApp.ID,
+				Protocol:       "http",
+				Strategy:       "internal_http",
+				AccessContext:  "browser",
+				InjectionPhase: "runtime",
+			},
+		},
+	}
+	resp1 := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft:             forbiddenBrowserInternal,
+		ExpectedRevision:  webCfgCur.Revision,
+		ExpectedStateHash: webCfgCur.StateHash,
+	}, "bad-1")
+	if resp1.Code != http.StatusUnprocessableEntity || !strings.Contains(resp1.Body.String(), "BROWSER_INTERNAL_HTTP_FORBIDDEN") {
+		t.Fatalf("expected BROWSER_INTERNAL_HTTP_FORBIDDEN, got status=%d body=%s", resp1.Code, resp1.Body.String())
+	}
+
+	// 2. server + same_origin -> REJECT (STRATEGY_CONTEXT_MISMATCH)
+	mismatchServerSameOrigin := registry.ServiceConfigurationDraft{
+		Dependencies: []serviceconfigurationv1.ApplicationDependency{
+			{
+				LogicalName:    "bad-dep-2",
+				TargetKind:     "application",
+				TargetIdentity: apiApp.ID,
+				Protocol:       "http",
+				Strategy:       "same_origin",
+				AccessContext:  "server",
+				Path:           "/api",
+				InjectionPhase: "runtime",
+			},
+		},
+	}
+	resp2 := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft:             mismatchServerSameOrigin,
+		ExpectedRevision:  webCfgCur.Revision,
+		ExpectedStateHash: webCfgCur.StateHash,
+	}, "bad-2")
+	if resp2.Code != http.StatusUnprocessableEntity || !strings.Contains(resp2.Body.String(), "STRATEGY_CONTEXT_MISMATCH") {
+		t.Fatalf("expected STRATEGY_CONTEXT_MISMATCH, got status=%d body=%s", resp2.Code, resp2.Body.String())
+	}
+
+	// 3. same_origin hostname mismatch -> REJECT (SAME_ORIGIN_HOSTNAME_MISMATCH)
+	hostnameMismatch := registry.ServiceConfigurationDraft{
+		PublicRoute: &registry.PublicRouteIntent{Hostname: "different.example.com", Path: "/"},
+		Dependencies: []serviceconfigurationv1.ApplicationDependency{
+			serviceconfigurationv1.SameOriginPreset("api-backend", apiApp.ID, "/api", "API_PATH", true),
+		},
+	}
+	resp3 := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft:             hostnameMismatch,
+		ExpectedRevision:  webCfgCur.Revision,
+		ExpectedStateHash: webCfgCur.StateHash,
+	}, "bad-3")
+	if resp3.Code != http.StatusUnprocessableEntity || !strings.Contains(resp3.Body.String(), "SAME_ORIGIN_HOSTNAME_MISMATCH") {
+		t.Fatalf("expected SAME_ORIGIN_HOSTNAME_MISMATCH, got status=%d body=%s", resp3.Code, resp3.Body.String())
+	}
+}
