@@ -96,6 +96,11 @@ type DepVerificationLease struct {
 	AssertionPath         string `json:"assertion_path,omitempty"`
 	AssertionExpectedCode int    `json:"assertion_expected_code,omitempty"`
 	TimeoutSeconds        int    `json:"timeout_seconds"`
+	BindingUsername       string `json:"binding_username,omitempty"`
+	BindingPassword       string `json:"binding_password,omitempty"`
+	BindingDatabase       string `json:"binding_database,omitempty"`
+	BindingHost           string `json:"binding_host,omitempty"`
+	BindingPort           int    `json:"binding_port,omitempty"`
 }
 
 type DepVerificationResult struct {

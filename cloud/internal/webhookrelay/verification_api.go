@@ -553,7 +553,18 @@ func (s *Server) isVerificationStale(ctx context.Context, projectID string, run 
 		}
 	}
 
-	currentHash := s.computeCurrentFingerprint(ctx, projectID, run.EnvironmentID, run.ConsumerApplicationID, dep, run.DeploymentJobID, consumerApp.GitSHA, run.TargetBindingID, assertionContract)
+	var currentBindingID string
+	if dep.TargetKind == "managed_resource" {
+		bindings, _ := s.Resources.ListBindings(ctx, projectID, run.EnvironmentID)
+		for i := range bindings {
+			if bindings[i].Source.ID == run.ConsumerApplicationID && bindings[i].LogicalName == dep.LogicalName && (bindings[i].Lifecycle == resourcev1.LifecycleReady || bindings[i].Lifecycle == resourcev1.LifecycleConfigured) {
+				currentBindingID = bindings[i].ID
+				break
+			}
+		}
+	}
+
+	currentHash := s.computeCurrentFingerprint(ctx, projectID, run.EnvironmentID, run.ConsumerApplicationID, dep, run.DeploymentJobID, consumerApp.GitSHA, currentBindingID, assertionContract)
 	if currentHash == "" || currentHash != run.StalenessHash {
 		return true
 	}

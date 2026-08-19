@@ -137,6 +137,11 @@ func (r Runner) Run(ctx context.Context) error {
 	if _, err := r.Engine.ReconcilePending(recoveryCtx, nil); err != nil {
 		r.log().Warn("pending rollout reconciliation failed", "error", err)
 	}
+	if cleaner, ok := r.DepVerifier.(interface{ CleanupStaleProbes(context.Context) error }); ok {
+		if err := cleaner.CleanupStaleProbes(recoveryCtx); err != nil {
+			r.log().Warn("stale probe cleanup failed", "error", err)
+		}
+	}
 	cancelRecovery()
 	r.sendHeartbeat(ctx)
 	go r.heartbeatLoop(ctx)

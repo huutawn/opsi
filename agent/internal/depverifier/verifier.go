@@ -2,6 +2,8 @@ package depverifier
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/opsi-dev/opsi/agent/internal/cloudrelay"
 	"github.com/opsi-dev/opsi/agent/internal/deploy"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
 
@@ -90,29 +93,71 @@ func (v Verifier) executePostgresProbe(ctx context.Context, lease cloudrelay.Dep
 		providerNS = "opsi-managed"
 	}
 
-	targetHost := fmt.Sprintf("%s.%s.svc.cluster.local", lease.ProviderServiceName, providerNS)
-	targetPort := 5432
+	targetHost := lease.BindingHost
+	if targetHost == "" {
+		targetHost = fmt.Sprintf("%s.%s.svc.cluster.local", lease.ProviderServiceName, providerNS)
+	}
+	targetPort := lease.BindingPort
+	if targetPort <= 0 {
+		targetPort = 5432
+	}
+	database := lease.BindingDatabase
+	if database == "" {
+		database = "opsi"
+	}
+	username := lease.BindingUsername
+	if username == "" {
+		username = "opsi"
+	}
+	password := lease.BindingPassword
+
+	// If credentials were not supplied directly on the lease, attempt to resolve from provider secret
+	if password == "" {
+		if secJSON, secErr := v.run(ctx, nil, "get", "secret", "mrsec-"+lease.ProviderServiceName, "-n", providerNS, "-o", "json"); secErr == nil {
+			var secObj struct {
+				Data map[string]string `json:"data"`
+			}
+			if json.Unmarshal([]byte(secJSON), &secObj) == nil {
+				if u, ok := secObj.Data["username"]; ok {
+					if dec, err := base64.StdEncoding.DecodeString(u); err == nil && len(dec) > 0 {
+						username = string(dec)
+					}
+				}
+				if p, ok := secObj.Data["password"]; ok {
+					if dec, err := base64.StdEncoding.DecodeString(p); err == nil {
+						password = string(dec)
+					}
+				}
+				if d, ok := secObj.Data["database"]; ok {
+					if dec, err := base64.StdEncoding.DecodeString(d); err == nil && len(dec) > 0 {
+						database = string(dec)
+					}
+				}
+			}
+		}
+	}
 
 	start := time.Now()
-	// Bounded network probe in consumer namespace against canonical cluster IP DNS
 	probePodName := fmt.Sprintf("opsi-pg-probe-%s", sanitizeResourceName(lease.ID))
 	defer v.cleanupProbePod(context.Background(), consumerNS, probePodName)
 
-	script := fmt.Sprintf("nc -z -w 5 %s %d", targetHost, targetPort)
-	_, err := v.run(ctx, nil, "run", probePodName, "-n", consumerNS,
-		"--image=busybox:1.36.1",
+	script := `set -eu
+IFS= read -r PGPASSWORD
+export PGPASSWORD
+out=$(psql -v ON_ERROR_STOP=1 -qAt -h "$1" -p "$2" -U "$3" -d "$4" -c 'SELECT 1')
+test "$out" = "1"
+`
+	input := []byte(password + "\n")
+	_, err := v.run(ctx, input, "run", probePodName, "-n", consumerNS,
+		"--image="+resourcev1.PostgresImage,
 		"--labels=opsi.dev/probe=dep-verification,opsi.dev/lease-id="+sanitizeResourceName(lease.ID),
-		"--restart=Never", "--rm", "-i", "--", "sh", "-c", script)
+		"--restart=Never", "--rm", "-i", "--", "sh", "-ec", script, "pg-probe", targetHost, strconv.Itoa(targetPort), username, database)
 	latency := time.Since(start).Milliseconds()
 
 	if err != nil {
-		// Try direct connection check fallback
-		_, err2 := v.run(ctx, nil, "exec", "pod/"+lease.ProviderServiceName+"-0", "-n", providerNS, "-c", "postgres", "--", "pg_isready", "-q")
-		if err2 != nil {
-			return verificationv1.LayerStatusFailed, latency, verificationv1.FailureConnectionFailed, "PostgreSQL connection probe failed"
-		}
+		return verificationv1.LayerStatusFailed, latency, verificationv1.FailureConnectionFailed, "PostgreSQL protocol verification failed"
 	}
-	return verificationv1.LayerStatusVerified, latency, "", "PostgreSQL connectivity verified from consumer network context"
+	return verificationv1.LayerStatusVerified, latency, "", "PostgreSQL protocol and SELECT 1 verified from consumer network context"
 }
 
 func (v Verifier) executeValkeyProbe(ctx context.Context, lease cloudrelay.DepVerificationLease) (status string, latencyMs int64, failCode, msg string) {
@@ -125,24 +170,66 @@ func (v Verifier) executeValkeyProbe(ctx context.Context, lease cloudrelay.DepVe
 		providerNS = "opsi-managed"
 	}
 
-	targetHost := fmt.Sprintf("%s.%s.svc.cluster.local", lease.ProviderServiceName, providerNS)
-	targetPort := 6379
+	targetHost := lease.BindingHost
+	if targetHost == "" {
+		targetHost = fmt.Sprintf("%s.%s.svc.cluster.local", lease.ProviderServiceName, providerNS)
+	}
+	targetPort := lease.BindingPort
+	if targetPort <= 0 {
+		targetPort = 6379
+	}
+	username := lease.BindingUsername
+	password := lease.BindingPassword
+
+	if password == "" && username == "" {
+		if secJSON, secErr := v.run(ctx, nil, "get", "secret", "mrsec-"+lease.ProviderServiceName, "-n", providerNS, "-o", "json"); secErr == nil {
+			var secObj struct {
+				Data map[string]string `json:"data"`
+			}
+			if json.Unmarshal([]byte(secJSON), &secObj) == nil {
+				if u, ok := secObj.Data["username"]; ok {
+					if dec, err := base64.StdEncoding.DecodeString(u); err == nil && len(dec) > 0 {
+						username = string(dec)
+					}
+				}
+				if p, ok := secObj.Data["password"]; ok {
+					if dec, err := base64.StdEncoding.DecodeString(p); err == nil {
+						password = string(dec)
+					}
+				}
+			}
+		}
+	}
 
 	start := time.Now()
 	probePodName := fmt.Sprintf("opsi-vk-probe-%s", sanitizeResourceName(lease.ID))
 	defer v.cleanupProbePod(context.Background(), consumerNS, probePodName)
 
-	script := fmt.Sprintf("nc -z -w 5 %s %d", targetHost, targetPort)
-	_, err := v.run(ctx, nil, "run", probePodName, "-n", consumerNS,
-		"--image=busybox:1.36.1",
+	script := `set -eu
+IFS= read -r pass
+if [ -n "$pass" ]; then
+  if [ -n "$3" ]; then
+    out=$(valkey-cli -h "$1" -p "$2" --user "$3" -a "$pass" --no-auth-warning PING)
+  else
+    export REDISCLI_AUTH="$pass"
+    out=$(valkey-cli -h "$1" -p "$2" PING)
+  fi
+else
+  out=$(valkey-cli -h "$1" -p "$2" PING)
+fi
+test "$out" = "PONG"
+`
+	input := []byte(password + "\n")
+	_, err := v.run(ctx, input, "run", probePodName, "-n", consumerNS,
+		"--image="+resourcev1.ValkeyImage,
 		"--labels=opsi.dev/probe=dep-verification,opsi.dev/lease-id="+sanitizeResourceName(lease.ID),
-		"--restart=Never", "--rm", "-i", "--", "sh", "-c", script)
+		"--restart=Never", "--rm", "-i", "--", "sh", "-ec", script, "vk-probe", targetHost, strconv.Itoa(targetPort), username)
 	latency := time.Since(start).Milliseconds()
 
 	if err != nil {
 		return verificationv1.LayerStatusFailed, latency, verificationv1.FailureConnectionFailed, "Valkey connection probe failed"
 	}
-	return verificationv1.LayerStatusVerified, latency, "", "Valkey PING connectivity verified from consumer network context"
+	return verificationv1.LayerStatusVerified, latency, "", "Valkey PING/PONG verified from consumer network context"
 }
 
 func (v Verifier) executeAppDependencyProbe(ctx context.Context, lease cloudrelay.DepVerificationLease) (status string, latencyMs int64, failCode, msg string) {
@@ -247,7 +334,16 @@ func (v Verifier) executeConsumerAssertion(ctx context.Context, lease cloudrelay
 }
 
 func (v Verifier) cleanupProbePod(ctx context.Context, namespace, podName string) {
-	_, _ = v.run(ctx, nil, "delete", "pod", podName, "-n", namespace, "--ignore-not-found=true", "--grace-period=0", "--force")
+	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, _ = v.run(cleanupCtx, nil, "delete", "pod", podName, "-n", namespace, "--ignore-not-found=true", "--grace-period=0", "--force")
+}
+
+func (v Verifier) CleanupStaleProbes(ctx context.Context) error {
+	cleanupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	_, err := v.run(cleanupCtx, nil, "delete", "pod", "-A", "-l", "opsi.dev/probe=dep-verification", "--ignore-not-found=true", "--grace-period=0", "--force")
+	return err
 }
 
 func sanitizeResourceName(s string) string {

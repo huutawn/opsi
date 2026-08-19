@@ -590,3 +590,62 @@ func TestVerificationHTTPEndpoints(t *testing.T) {
 		t.Fatalf("expected VERIFIED, got %s", fetched.OverallStatus)
 	}
 }
+
+func TestVerifyFreshnessComprehensiveMutations(t *testing.T) {
+	f := setupVerificationFixture(t)
+	ctx := context.Background()
+
+	req := verificationv1.VerifyDependencyRequest{
+		DependencyLogicalName: f.depName,
+		ConsumerContract: &verificationv1.ConsumerVerificationContract{
+			Type:           "consumer_http",
+			Path:           "/health/dependencies/database",
+			ExpectedStatus: 200,
+		},
+	}
+	run, err := f.server.ExecuteDependencyVerification(ctx, f.projectID, f.envID, f.appID, req, "test-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Initially FRESH
+	if f.server.isVerificationStale(ctx, f.projectID, run) {
+		t.Fatal("expected fresh verification run")
+	}
+
+	// 2. Unrelated project mutation -> Still FRESH for this project/run
+	_, _ = f.server.Registry.CreateProject("org-test", "Other Project", "other-proj", "user-1", "project-other")
+	if f.server.isVerificationStale(ctx, f.projectID, run) {
+		t.Fatal("expected run to remain FRESH after unrelated project mutation")
+	}
+
+	// 3. Deployed revision / GitSHA mutation -> STALE
+	runDifferentGitSHA := run
+	runDifferentGitSHA.SourceCommitSHA = "ffffffffffffffffffffffffffffffffffffffff"
+	if !f.server.isVerificationStale(ctx, f.projectID, runDifferentGitSHA) {
+		t.Fatal("expected STALE when consumer GitSHA / deployed revision changed")
+	}
+
+	// 4. ResourceBinding identity change -> STALE
+	newBinding := resourcev1.Binding{
+		SchemaVersion: resourcev1.SchemaVersion,
+		ID:            "bind-pg-new-identity",
+		ProjectID:     f.projectID,
+		EnvironmentID: f.envID,
+		Source:        resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: f.appID},
+		Target:        resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: f.resourceID},
+		Protocol:      resourcev1.ProtocolPostgres,
+		LogicalName:   f.depName,
+		Lifecycle:     resourcev1.LifecycleReady,
+		CredentialID:  "bcred-2",
+		RoleName:      "app_role_2",
+		Database:      "opsi",
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+	}
+	_ = f.server.Resources.Store.DeleteBinding(ctx, f.projectID, "bind-pg-test")
+	_, _, _ = f.server.Resources.Store.CreateBinding(ctx, newBinding, "bind-key-2", "payload-2")
+	if !f.server.isVerificationStale(ctx, f.projectID, run) {
+		t.Fatal("expected STALE when ResourceBinding identity changed")
+	}
+}
