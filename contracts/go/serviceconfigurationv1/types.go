@@ -37,12 +37,28 @@ type ResourceBinding struct {
 	BindingID   string `json:"binding_id"`
 }
 
+type DependencyInjectionMapping struct {
+	EnvName        string `json:"env_name"`
+	SymbolicSource string `json:"symbolic_source"`
+}
+
+type ApplicationDependency struct {
+	LogicalName       string                       `json:"logical_name"`
+	TargetKind        string                       `json:"target_kind"`
+	TargetIdentity    string                       `json:"target_identity"`
+	Protocol          string                       `json:"protocol"`
+	Required          bool                         `json:"required"`
+	InjectionPhase    string                       `json:"injection_phase"`
+	InjectionMappings []DependencyInjectionMapping `json:"injection_mappings,omitempty"`
+}
+
 type ServiceConfigurationDraft struct {
 	SchemaVersion    string                             `json:"schema_version"`
 	Environment      []deploymentv1.EnvironmentVariable `json:"environment,omitempty"`
 	PublicRoute      *PublicRouteIntent                 `json:"public_route,omitempty"`
 	Bindings         []Binding                          `json:"bindings,omitempty"`
 	ResourceBindings []ResourceBinding                  `json:"resource_bindings,omitempty"`
+	Dependencies     []ApplicationDependency            `json:"dependencies,omitempty"`
 }
 
 type Configuration struct {
@@ -94,6 +110,28 @@ func Normalize(draft ServiceConfigurationDraft) ServiceConfigurationDraft {
 		first, second := draft.ResourceBindings[i], draft.ResourceBindings[j]
 		return first.LogicalName+"\x00"+first.BindingID < second.LogicalName+"\x00"+second.BindingID
 	})
+
+	draft.Dependencies = append([]ApplicationDependency(nil), draft.Dependencies...)
+	for i := range draft.Dependencies {
+		draft.Dependencies[i].LogicalName = strings.TrimSpace(draft.Dependencies[i].LogicalName)
+		draft.Dependencies[i].TargetKind = strings.TrimSpace(draft.Dependencies[i].TargetKind)
+		draft.Dependencies[i].TargetIdentity = strings.TrimSpace(draft.Dependencies[i].TargetIdentity)
+		draft.Dependencies[i].Protocol = strings.TrimSpace(draft.Dependencies[i].Protocol)
+		draft.Dependencies[i].InjectionPhase = strings.TrimSpace(draft.Dependencies[i].InjectionPhase)
+
+		draft.Dependencies[i].InjectionMappings = append([]DependencyInjectionMapping(nil), draft.Dependencies[i].InjectionMappings...)
+		for j := range draft.Dependencies[i].InjectionMappings {
+			draft.Dependencies[i].InjectionMappings[j].EnvName = strings.TrimSpace(draft.Dependencies[i].InjectionMappings[j].EnvName)
+			draft.Dependencies[i].InjectionMappings[j].SymbolicSource = strings.TrimSpace(draft.Dependencies[i].InjectionMappings[j].SymbolicSource)
+		}
+		sort.Slice(draft.Dependencies[i].InjectionMappings, func(k, l int) bool {
+			return draft.Dependencies[i].InjectionMappings[k].EnvName < draft.Dependencies[i].InjectionMappings[l].EnvName
+		})
+	}
+	sort.Slice(draft.Dependencies, func(i, j int) bool {
+		return draft.Dependencies[i].LogicalName < draft.Dependencies[j].LogicalName
+	})
+
 	return draft
 }
 

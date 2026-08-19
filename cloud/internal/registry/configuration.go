@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,6 +130,72 @@ func validateServiceConfiguration(source ServiceRecord, draft ServiceConfigurati
 	for _, service := range services {
 		targets[service.ID] = service
 	}
+
+	if len(draft.Dependencies) > 100 {
+		return draft, nil, configurationError("DEPENDENCY_COUNT_EXCEEDED", "dependencies", "dependency count exceeds limit")
+	}
+
+	logicalNames := map[string]struct{}{}
+	envKeys := map[string]string{}
+	envRegex := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+	for index, dep := range draft.Dependencies {
+		if dep.LogicalName == "" {
+			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].logical_name", index), "logical name is required")
+		}
+		if _, ok := logicalNames[dep.LogicalName]; ok {
+			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].logical_name", index), "logical name must be unique")
+		}
+		logicalNames[dep.LogicalName] = struct{}{}
+
+		if dep.TargetKind != "application" && dep.TargetKind != "managed_resource" {
+			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].target_kind", index), "invalid target kind")
+		}
+		if dep.TargetIdentity == "" {
+			return draft, nil, configurationError("DEPENDENCY_TARGET_NOT_FOUND", fmt.Sprintf("dependencies[%d].target_identity", index), "missing target identity")
+		}
+		if dep.Protocol == "" {
+			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].protocol", index), "protocol is required")
+		}
+		if dep.InjectionPhase != "runtime" && dep.InjectionPhase != "build" {
+			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_phase", index), "invalid injection phase")
+		}
+
+		if dep.TargetKind == "application" {
+			target, ok := targets[dep.TargetIdentity]
+			if !ok || target.ProjectID != source.ProjectID {
+				return draft, nil, configurationError("DEPENDENCY_TARGET_FORBIDDEN", fmt.Sprintf("dependencies[%d].target_identity", index), "target application must belong to the project")
+			}
+			if target.ID == source.ID {
+				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].target_identity", index), "a service cannot depend on itself")
+			}
+		}
+
+		if len(dep.InjectionMappings) > 64 {
+			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings", index), "too many injection mappings")
+		}
+
+		depEnvNames := map[string]struct{}{}
+		for i, mapping := range dep.InjectionMappings {
+			if !envRegex.MatchString(mapping.EnvName) {
+				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].env_name", index, i), "invalid env name format")
+			}
+			if _, ok := depEnvNames[mapping.EnvName]; ok {
+				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].env_name", index, i), "duplicate env name in mapping")
+			}
+			depEnvNames[mapping.EnvName] = struct{}{}
+
+			if existingOwner, ok := envKeys[mapping.EnvName]; ok {
+				return draft, nil, configurationError("DEPENDENCY_ENV_COLLISION", fmt.Sprintf("dependencies[%d].injection_mappings[%d].env_name", index, i), fmt.Sprintf("env name %s conflicts with dependency %s", mapping.EnvName, existingOwner))
+			}
+			envKeys[mapping.EnvName] = dep.LogicalName
+
+			if mapping.SymbolicSource == "" {
+				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), "symbolic source is required")
+			}
+		}
+	}
+
 	manual := make(map[string]struct{}, len(draft.Environment))
 	for _, item := range draft.Environment {
 		manual[item.Name] = struct{}{}
@@ -360,6 +427,55 @@ func configurationDiff(current ServiceConfigurationDraft, next ServiceConfigurat
 			changes = append(changes, ServiceConfigurationChange{Kind: "resource_binding", Action: "add", Name: name, After: value})
 		}
 	}
+	currentDeps := map[string]serviceconfigurationv1.ApplicationDependency{}
+	nextDeps := map[string]serviceconfigurationv1.ApplicationDependency{}
+	for _, d := range current.Dependencies {
+		currentDeps[d.LogicalName] = d
+	}
+	for _, d := range next.Dependencies {
+		nextDeps[d.LogicalName] = d
+	}
+	for name, currentDep := range currentDeps {
+		nextDep, ok := nextDeps[name]
+		if !ok {
+			changes = append(changes, ServiceConfigurationChange{Kind: "dependency", Action: "remove", Name: name})
+		} else {
+			if currentDep.TargetIdentity != nextDep.TargetIdentity || currentDep.TargetKind != nextDep.TargetKind {
+				changes = append(changes, ServiceConfigurationChange{Kind: "dependency_target", Action: "change", Name: name})
+			}
+			if currentDep.Protocol != nextDep.Protocol {
+				changes = append(changes, ServiceConfigurationChange{Kind: "dependency_protocol", Action: "change", Name: name})
+			}
+			if currentDep.Required != nextDep.Required {
+				changes = append(changes, ServiceConfigurationChange{Kind: "dependency_required", Action: "change", Name: name})
+			}
+			if currentDep.InjectionPhase != nextDep.InjectionPhase {
+				changes = append(changes, ServiceConfigurationChange{Kind: "dependency_phase", Action: "change", Name: name})
+			}
+			currMappings := map[string]string{}
+			for _, m := range currentDep.InjectionMappings { currMappings[m.EnvName] = m.SymbolicSource }
+			nextMappings := map[string]string{}
+			for _, m := range nextDep.InjectionMappings { nextMappings[m.EnvName] = m.SymbolicSource }
+			for envName, sym := range currMappings {
+				if nextSym, ok := nextMappings[envName]; !ok {
+					changes = append(changes, ServiceConfigurationChange{Kind: "dependency_mapping", Action: "remove", Name: name + ":" + envName, Before: sym})
+				} else if nextSym != sym {
+					changes = append(changes, ServiceConfigurationChange{Kind: "dependency_mapping", Action: "change", Name: name + ":" + envName, Before: sym, After: nextSym})
+				}
+			}
+			for envName, sym := range nextMappings {
+				if _, ok := currMappings[envName]; !ok {
+					changes = append(changes, ServiceConfigurationChange{Kind: "dependency_mapping", Action: "add", Name: name + ":" + envName, After: sym})
+				}
+			}
+		}
+	}
+	for name := range nextDeps {
+		if _, ok := currentDeps[name]; !ok {
+			changes = append(changes, ServiceConfigurationChange{Kind: "dependency", Action: "add", Name: name})
+		}
+	}
+
 	sort.Slice(changes, func(i, j int) bool {
 		return changes[i].Kind+changes[i].Name+changes[i].Action < changes[j].Kind+changes[j].Name+changes[j].Action
 	})

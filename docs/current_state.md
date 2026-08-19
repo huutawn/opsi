@@ -1090,3 +1090,5 @@ PostCSS and Sharp advisories are upstream-blocked and are not present in the
 static browser export; PostCSS remains build-time reachable, so dependency
 remediation, supply-chain closure, release readiness, and production readiness
 are not claimed.
+
+Application Dependency Contract foundation implemented.
