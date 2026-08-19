@@ -609,6 +609,9 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateR5012ServiceConfiguration(ctx, db); err != nil {
 		return err
 	}
+	if err := MigrateR5013BuildDependency(ctx, db); err != nil {
+		return err
+	}
 	if err := MigrateP07AResources(ctx, db); err != nil {
 		return err
 	}

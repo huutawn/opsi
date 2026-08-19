@@ -5,11 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
+	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
@@ -342,5 +346,319 @@ func TestApplicationToApplicationDependencies(t *testing.T) {
 	}, "bad-3")
 	if resp3.Code != http.StatusUnprocessableEntity || !strings.Contains(resp3.Body.String(), "SAME_ORIGIN_HOSTNAME_MISMATCH") {
 		t.Fatalf("expected SAME_ORIGIN_HOSTNAME_MISMATCH, got status=%d body=%s", resp3.Code, resp3.Body.String())
+	}
+}
+
+func TestApplicationToApplicationScenarioCPublicHTTPBuildTimeFreshness(t *testing.T) {
+	server, projectID, webApp, plan, _ := deploymentResolutionFixture(t)
+
+	// 1. Create API backend service with initial public route URL-A
+	apiApp, err := server.Registry.CreateService(projectID, registry.ServiceDraft{Name: "api", ContainerPort: 8080}, "api-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiCfg, _ := server.Registry.GetServiceConfiguration(projectID, apiApp.ID)
+	if _, err := server.Registry.ApplyServiceConfiguration(projectID, apiApp.ID, "owner", "api-cfg-1", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			PublicRoute: &registry.PublicRouteIntent{Hostname: "api-a.example.com", Path: "/api"},
+		},
+		ExpectedRevision:  apiCfg.Revision,
+		ExpectedStateHash: apiCfg.StateHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Configure Web consumer service with build-phase public_http dependency
+	webCfg, _ := server.Registry.GetServiceConfiguration(projectID, webApp.ID)
+	publicDep := serviceconfigurationv1.PublicHTTPPreset("api-public", apiApp.ID, serviceconfigurationv1.AccessContextServer, "PUBLIC_API", false)
+	publicDep.InjectionPhase = serviceconfigurationv1.InjectionPhaseBuild
+	appliedWebCfg, err := server.Registry.ApplyServiceConfiguration(projectID, webApp.ID, "owner", "web-cfg-1", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			Dependencies: []serviceconfigurationv1.ApplicationDependency{publicDep},
+		},
+		ExpectedRevision:  webCfg.Revision,
+		ExpectedStateHash: webCfg.StateHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Review Web dependencies: zero ResourceBindings needed
+	reviewResp := configurationRequest(t, server, http.MethodPost, "/api/projects/"+projectID+"/services/"+webApp.ID+"/dependencies/review", nil, "")
+	if reviewResp.Code != http.StatusOK {
+		t.Fatalf("review failed: %s", reviewResp.Body.String())
+	}
+	var review registry.DependencyReviewResult
+	if err := json.Unmarshal(reviewResp.Body.Bytes(), &review); err != nil {
+		t.Fatal(err)
+	}
+	if len(review.Dependencies) != 1 || review.Dependencies[0].Status != "ready" || review.Dependencies[0].BindingAction != "none" {
+		t.Fatalf("expected ready/none review, got %+v", review)
+	}
+
+	// 4. Build Record BR-A is created with URL-A build dependency state
+	services, _ := server.Registry.ListServices(projectID)
+	buildDepStateA := registry.ComputeBuildDependencyState(appliedWebCfg.Configuration, services)
+	configHashA := registry.ComputeBuildConfigHash(strings.Repeat("a", 40), "", webApp.Dockerfile, webApp.BuildContext, "ghcr.io/org/web", buildDepStateA)
+
+	recordA := buildrecordv1.Record{
+		SchemaVersion:     buildrecordv1.SchemaVersion,
+		ID:                "br-a",
+		ProjectID:         projectID,
+		RepositoryID:      7,
+		RepositoryOwnerID: 8,
+		ActiveBindingID:   "binding-1",
+		ServiceID:         webApp.ID,
+		ServiceKey:        webApp.Name,
+		CreatedAt:         time.Now().UTC(),
+		Workload: buildrecordv1.WorkloadIdentity{
+			RepositoryID:      7,
+			RepositoryOwnerID: 8,
+			Ref:               "refs/heads/main",
+			SHA:               strings.Repeat("a", 40),
+			EventName:         "push",
+			WorkflowRef:       "o/r/.github/workflows/cd.yml@refs/heads/main",
+			RunID:             10,
+			RunAttempt:        1,
+		},
+		Build: buildrecordv1.BuildMetadata{
+			ConfigHash:    configHashA,
+			PlanHash:      strings.Repeat("b", 64),
+			Platform:      "linux/amd64",
+			OCIRepository: "ghcr.io/org/web",
+			OCIDigest:     "sha256:" + strings.Repeat("a", 64),
+			BuildJobID:    "job-a",
+			Status:        "succeeded",
+		},
+	}
+	if _, _, err := server.BuildRecords.Store.Create(context.Background(), "payload-a", recordA); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update policy for recordA
+	if _, err := server.Policies.Apply(context.Background(), projectID, "owner", "policy-key-a", deploymentpolicyv1.ApplyRequest{
+		Draft: deploymentpolicyv1.Draft{
+			SchemaVersion:          deploymentpolicyv1.SchemaVersion,
+			ProjectID:              projectID,
+			RepositoryID:           recordA.RepositoryID,
+			ServiceKeys:            []string{webApp.Name},
+			WorkflowRefs:           []string{recordA.Workload.WorkflowRef},
+			AllowedEvents:          []string{recordA.Workload.EventName},
+			AllowedGitRefs:         []string{recordA.Workload.Ref},
+			EnvironmentID:          plan.Assignments[0].EnvironmentID,
+			AllowedRuntimeIDs:      []string{plan.Assignments[0].RuntimeID},
+			AllowedOCIRepositories: []string{recordA.Build.OCIRepository},
+			AllowedPlatforms:       []string{"linux/amd64"},
+			AllowedConfigHashes:    []string{recordA.Build.ConfigHash},
+			AllowedBuildPlanHashes: []string{recordA.Build.PlanHash},
+			Enabled:                true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Deploy preview for BR-A succeeds while API is at URL-A
+	requestA := deploymentv1.CreateRequest{
+		SchemaVersion:                  deploymentv1.JobSchemaVersion,
+		BuildRecordID:                  recordA.ID,
+		EnvironmentID:                  plan.Assignments[0].EnvironmentID,
+		ExpectedTopologyRevision:       plan.Revision,
+		ExpectedTopologyHash:           plan.PlanHash,
+		ExpectedConfigurationRevision:  appliedWebCfg.Configuration.Revision,
+		ExpectedConfigurationStateHash: appliedWebCfg.Configuration.StateHash,
+	}
+	previewA, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", requestA)
+	if err != nil || !previewA.Eligible {
+		t.Fatalf("preview BR-A failed: eligible=%v err=%v", previewA.Eligible, err)
+	}
+
+	// 6. Change API public route to URL-B
+	apiCfgCur, _ := server.Registry.GetServiceConfiguration(projectID, apiApp.ID)
+	if _, err := server.Registry.ApplyServiceConfiguration(projectID, apiApp.ID, "owner", "api-cfg-2", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			PublicRoute: &registry.PublicRouteIntent{Hostname: "api-b.example.com", Path: "/api"},
+		},
+		ExpectedRevision:  apiCfgCur.Revision,
+		ExpectedStateHash: apiCfgCur.StateHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7. Deploy preview for BR-A is now BLOCKED with BUILD_DEPENDENCY_STALE
+	_, err = server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", requestA)
+	if deploymentAPIErrorCode(err) != "BUILD_DEPENDENCY_STALE" {
+		t.Fatalf("expected BUILD_DEPENDENCY_STALE for stale BR-A, got err: %v", err)
+	}
+
+	// 8. Rebuild: New build BR-B is generated with URL-B build dependency state
+	servicesB, _ := server.Registry.ListServices(projectID)
+	buildDepStateB := registry.ComputeBuildDependencyState(appliedWebCfg.Configuration, servicesB)
+	if buildDepStateA == buildDepStateB {
+		t.Fatalf("build dependency state should have changed: stateA=%s stateB=%s", buildDepStateA, buildDepStateB)
+	}
+	configHashB := registry.ComputeBuildConfigHash(strings.Repeat("a", 40), "", webApp.Dockerfile, webApp.BuildContext, "ghcr.io/org/web", buildDepStateB)
+
+	recordB := buildrecordv1.Record{
+		SchemaVersion:     buildrecordv1.SchemaVersion,
+		ID:                "br-b",
+		ProjectID:         projectID,
+		RepositoryID:      7,
+		RepositoryOwnerID: 8,
+		ActiveBindingID:   "binding-1",
+		ServiceID:         webApp.ID,
+		ServiceKey:        webApp.Name,
+		CreatedAt:         time.Now().UTC(),
+		Workload: buildrecordv1.WorkloadIdentity{
+			RepositoryID:      7,
+			RepositoryOwnerID: 8,
+			Ref:               "refs/heads/main",
+			SHA:               strings.Repeat("a", 40),
+			EventName:         "push",
+			WorkflowRef:       "o/r/.github/workflows/cd.yml@refs/heads/main",
+			RunID:             20,
+			RunAttempt:        1,
+		},
+		Build: buildrecordv1.BuildMetadata{
+			ConfigHash:    configHashB,
+			PlanHash:      strings.Repeat("b", 64),
+			Platform:      "linux/amd64",
+			OCIRepository: "ghcr.io/org/web",
+			OCIDigest:     "sha256:" + strings.Repeat("b", 64),
+			BuildJobID:    "job-b",
+			Status:        "succeeded",
+		},
+	}
+	if _, _, err := server.BuildRecords.Store.Create(context.Background(), "payload-b", recordB); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update policy for recordB
+	if _, err := server.Policies.Apply(context.Background(), projectID, "owner", "policy-key-b", deploymentpolicyv1.ApplyRequest{
+		Draft: deploymentpolicyv1.Draft{
+			SchemaVersion:          deploymentpolicyv1.SchemaVersion,
+			ProjectID:              projectID,
+			RepositoryID:           recordB.RepositoryID,
+			ServiceKeys:            []string{webApp.Name},
+			WorkflowRefs:           []string{recordB.Workload.WorkflowRef},
+			AllowedEvents:          []string{recordB.Workload.EventName},
+			AllowedGitRefs:         []string{recordB.Workload.Ref},
+			EnvironmentID:          plan.Assignments[0].EnvironmentID,
+			AllowedRuntimeIDs:      []string{plan.Assignments[0].RuntimeID},
+			AllowedOCIRepositories: []string{recordB.Build.OCIRepository},
+			AllowedPlatforms:       []string{"linux/amd64"},
+			AllowedConfigHashes:    []string{recordB.Build.ConfigHash},
+			AllowedBuildPlanHashes: []string{recordB.Build.PlanHash},
+			Enabled:                true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 9. Deploy preview for BR-B succeeds
+	requestB := deploymentv1.CreateRequest{
+		SchemaVersion:                  deploymentv1.JobSchemaVersion,
+		BuildRecordID:                  recordB.ID,
+		EnvironmentID:                  plan.Assignments[0].EnvironmentID,
+		ExpectedTopologyRevision:       plan.Revision,
+		ExpectedTopologyHash:           plan.PlanHash,
+		ExpectedConfigurationRevision:  appliedWebCfg.Configuration.Revision,
+		ExpectedConfigurationStateHash: appliedWebCfg.Configuration.StateHash,
+	}
+	previewB, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", requestB)
+	if err != nil || !previewB.Eligible {
+		t.Fatalf("preview BR-B failed: eligible=%v err=%v", previewB.Eligible, err)
+	}
+}
+
+func TestApplicationToApplicationZeroResourceBindings(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-z", "Zero Binding Project", "zero-proj", "user-1", "project-zero")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiApp, _ := server.Registry.CreateService(project.ID, registry.ServiceDraft{Name: "api", ContainerPort: 8080}, "api-key")
+	webApp, _ := server.Registry.CreateService(project.ID, registry.ServiceDraft{Name: "web", ContainerPort: 3000}, "web-key")
+
+	webCfg, _ := server.Registry.GetServiceConfiguration(project.ID, webApp.ID)
+	_ = configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			Dependencies: []serviceconfigurationv1.ApplicationDependency{
+				serviceconfigurationv1.InternalHTTPPreset("api-internal", apiApp.ID, "API", true),
+			},
+		},
+		ExpectedRevision:  webCfg.Revision,
+		ExpectedStateHash: webCfg.StateHash,
+	}, "web-cfg-1")
+
+	// Apply dependencies
+	applyResp := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/dependencies/apply", nil, "apply-dep-1")
+	if applyResp.Code != http.StatusOK {
+		t.Fatalf("apply dependencies failed: %s", applyResp.Body.String())
+	}
+
+	// Verify that NO ResourceBinding rows exist for webApp or apiApp
+	bindings, err := server.Resources.Store.ListBindings(context.Background(), project.ID, webApp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 0 {
+		t.Fatalf("expected 0 ResourceBindings for App->App dependency, got %d", len(bindings))
+	}
+}
+
+func TestApplicationToApplicationServerPublicHTTPRuntime(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-pub-rt", "Public RT Project", "pub-rt-proj", "user-1", "project-pub-rt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiApp, _ := server.Registry.CreateService(project.ID, registry.ServiceDraft{Name: "api", ContainerPort: 8080}, "api-key")
+	apiCfg, _ := server.Registry.GetServiceConfiguration(project.ID, apiApp.ID)
+	_ = configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+apiApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			PublicRoute: &registry.PublicRouteIntent{Hostname: "api.public.com", Path: "/v1"},
+		},
+		ExpectedRevision:  apiCfg.Revision,
+		ExpectedStateHash: apiCfg.StateHash,
+	}, "api-cfg-1")
+
+	consumerApp, _ := server.Registry.CreateService(project.ID, registry.ServiceDraft{Name: "worker", ContainerPort: 8000}, "worker-key")
+	consumerCfg, _ := server.Registry.GetServiceConfiguration(project.ID, consumerApp.ID)
+	_ = configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+consumerApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			Dependencies: []serviceconfigurationv1.ApplicationDependency{
+				{
+					LogicalName:    "api-public",
+					TargetKind:     "application",
+					TargetIdentity: apiApp.ID,
+					Protocol:       "http",
+					Strategy:       serviceconfigurationv1.StrategyPublicHTTP,
+					AccessContext:  serviceconfigurationv1.AccessContextServer,
+					InjectionPhase: serviceconfigurationv1.InjectionPhaseRuntime,
+					Required:       true,
+					InjectionMappings: []serviceconfigurationv1.DependencyInjectionMapping{
+						{EnvName: "PUBLIC_API_URL", SymbolicSource: "application.public_url"},
+					},
+				},
+			},
+		},
+		ExpectedRevision:  consumerCfg.Revision,
+		ExpectedStateHash: consumerCfg.StateHash,
+	}, "worker-cfg-1")
+
+	// Review dependencies: projection should resolve PUBLIC_API_URL to https://api.public.com/v1
+	reviewResp := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+consumerApp.ID+"/dependencies/review", nil, "")
+	if reviewResp.Code != http.StatusOK {
+		t.Fatalf("review failed: %s", reviewResp.Body.String())
+	}
+	var review registry.DependencyReviewResult
+	if err := json.Unmarshal(reviewResp.Body.Bytes(), &review); err != nil {
+		t.Fatal(err)
+	}
+	if len(review.Dependencies) != 1 || len(review.Dependencies[0].Projections) != 1 {
+		t.Fatalf("unexpected review: %+v", review)
+	}
+	if review.Dependencies[0].Projections[0].ValuePreview != "https://api.public.com/v1" {
+		t.Fatalf("expected projection preview https://api.public.com/v1, got %s", review.Dependencies[0].Projections[0].ValuePreview)
 	}
 }

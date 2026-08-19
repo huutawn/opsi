@@ -3,8 +3,6 @@ package webhookrelay
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -500,11 +498,7 @@ func TestResolvedDeploymentRejectsStaleBuildPhaseDependency(t *testing.T) {
 	// 1. Compute expected build record with matching build dependency state
 	services, _ := server.Registry.ListServices(projectID)
 	buildDepState := registry.ComputeBuildDependencyState(appliedSvcCfg.Configuration, services)
-	config, _ := json.Marshal(struct {
-		Commit, Strategy, Dockerfile, Context, Repository, BuildDepState string
-	}{strings.Repeat("a", 40), "", service.Dockerfile, service.BuildContext, "ghcr.io/o/r/api", buildDepState})
-	sum := sha256.Sum256(config)
-	configHash := hex.EncodeToString(sum[:])
+	configHash := registry.ComputeBuildConfigHash(strings.Repeat("a", 40), "", service.Dockerfile, service.BuildContext, "ghcr.io/o/r/api", buildDepState)
 
 	record := buildrecordv1.Record{
 		SchemaVersion: buildrecordv1.SchemaVersion,

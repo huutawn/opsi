@@ -141,6 +141,18 @@ func TestCanonicalRegistryBuildArgumentsPushOnlyOpsiTarget(t *testing.T) {
 	}
 }
 
+func TestCanonicalBuildArgumentsInjectsBuildEnvironment(t *testing.T) {
+	env := map[string]string{
+		"PUBLIC_API_ORIGIN": "https://api.example.com",
+		"API_BASE_PATH":     "/v1",
+	}
+	args := canonicalBuildArgs("/source/Dockerfile", "/output/metadata.json", "type=oci,dest=/output/image.oci.tar", "/source", env)
+	want := "buildx build --builder opsi --progress=plain --platform linux/amd64 --build-arg API_BASE_PATH=/v1 --build-arg PUBLIC_API_ORIGIN=https://api.example.com --file /source/Dockerfile --metadata-file /output/metadata.json --provenance=false --output type=oci,dest=/output/image.oci.tar /source"
+	if got := strings.Join(args, " "); got != want {
+		t.Fatalf("args=%q want=%q", got, want)
+	}
+}
+
 func TestCanonicalExecutorWorkflowPinsRestrictedBuilder(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "opsi-build-executor.yml"))
 	if err != nil {

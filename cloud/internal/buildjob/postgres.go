@@ -3,6 +3,7 @@ package buildjob
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -13,15 +14,19 @@ func (s PostgresStore) Create(ctx context.Context, job Job) (Job, bool, error) {
 	if s.DB == nil {
 		return Job{}, false, unavailable()
 	}
+	buildEnvJSON, _ := json.Marshal(job.Source.BuildEnvironment)
+	if job.Source.BuildEnvironment == nil {
+		buildEnvJSON = []byte("{}")
+	}
 	result, err := s.DB.ExecContext(ctx, `INSERT INTO build_jobs(
 		id,project_id,environment_id,application_id,source_binding_id,source_binding_updated_at,github_installation_id,repository_id,repository_owner_id,
 		repository_full_name,selected_ref,resolved_commit_sha,application_root,build_context,requested_build_strategy,
-		resolved_build_strategy,dockerfile_path,status,failure_code,failure_message_redacted,failure_cause,created_by,idempotency_key,created_at,updated_at
-	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NULLIF($17,''),$18,NULLIF($19,''),NULLIF($20,''),NULLIF($21,''),$22,$23,$24,$25)
+		resolved_build_strategy,dockerfile_path,build_dependency_state,build_environment,status,failure_code,failure_message_redacted,failure_cause,created_by,idempotency_key,created_at,updated_at
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NULLIF($17,''),$18,$19,$20,NULLIF($21,''),NULLIF($22,''),NULLIF($23,''),$24,$25,$26,$27)
 	ON CONFLICT (project_id,application_id,idempotency_key) DO NOTHING`,
 		job.ID, job.ProjectID, job.EnvironmentID, job.ApplicationID, job.Source.BindingID, job.Source.BindingUpdatedAt, job.Source.InstallationID, job.Source.RepositoryID, job.Source.RepositoryOwnerID,
 		job.Source.RepositoryFullName, job.Source.SelectedRef, job.Source.ResolvedCommitSHA, job.Source.ApplicationRoot, job.Source.BuildContext, job.RequestedBuildStrategy,
-		job.ResolvedBuildStrategy, job.DockerfilePath, job.Status, job.FailureCode, job.FailureMessageRedacted, job.FailureCause, job.CreatedBy, job.IdempotencyKey, job.CreatedAt, job.UpdatedAt)
+		job.ResolvedBuildStrategy, job.DockerfilePath, job.Source.BuildDependencyState, buildEnvJSON, job.Status, job.FailureCode, job.FailureMessageRedacted, job.FailureCause, job.CreatedBy, job.IdempotencyKey, job.CreatedAt, job.UpdatedAt)
 	if err != nil {
 		return Job{}, false, unavailable()
 	}
@@ -98,12 +103,22 @@ func (s PostgresStore) List(ctx context.Context, projectID, applicationID, statu
 	return jobs, nil
 }
 
-const selectJobColumns = `SELECT id,project_id,environment_id,application_id,source_binding_id,source_binding_updated_at,github_installation_id,repository_id,repository_owner_id,repository_full_name,selected_ref,resolved_commit_sha,application_root,build_context,requested_build_strategy,resolved_build_strategy,COALESCE(dockerfile_path,''),status,COALESCE(failure_code,''),COALESCE(failure_message_redacted,''),COALESCE(failure_cause,''),COALESCE(build_record_id,''),completed_at,created_by,idempotency_key,created_at,updated_at FROM build_jobs`
+const selectJobColumns = `SELECT id,project_id,environment_id,application_id,source_binding_id,source_binding_updated_at,github_installation_id,repository_id,repository_owner_id,repository_full_name,selected_ref,resolved_commit_sha,application_root,build_context,requested_build_strategy,resolved_build_strategy,COALESCE(dockerfile_path,''),COALESCE(build_dependency_state,''),COALESCE(build_environment,'{}'::jsonb),status,COALESCE(failure_code,''),COALESCE(failure_message_redacted,''),COALESCE(failure_cause,''),COALESCE(build_record_id,''),completed_at,created_by,idempotency_key,created_at,updated_at FROM build_jobs`
 
 type scanner interface{ Scan(...any) error }
 
 func scanJob(row scanner) (Job, error) {
 	var job Job
-	err := row.Scan(&job.ID, &job.ProjectID, &job.EnvironmentID, &job.ApplicationID, &job.Source.BindingID, &job.Source.BindingUpdatedAt, &job.Source.InstallationID, &job.Source.RepositoryID, &job.Source.RepositoryOwnerID, &job.Source.RepositoryFullName, &job.Source.SelectedRef, &job.Source.ResolvedCommitSHA, &job.Source.ApplicationRoot, &job.Source.BuildContext, &job.RequestedBuildStrategy, &job.ResolvedBuildStrategy, &job.DockerfilePath, &job.Status, &job.FailureCode, &job.FailureMessageRedacted, &job.FailureCause, &job.BuildRecordID, &job.CompletedAt, &job.CreatedBy, &job.IdempotencyKey, &job.CreatedAt, &job.UpdatedAt)
-	return job, err
+	var buildEnvRaw []byte
+	err := row.Scan(&job.ID, &job.ProjectID, &job.EnvironmentID, &job.ApplicationID, &job.Source.BindingID, &job.Source.BindingUpdatedAt, &job.Source.InstallationID, &job.Source.RepositoryID, &job.Source.RepositoryOwnerID, &job.Source.RepositoryFullName, &job.Source.SelectedRef, &job.Source.ResolvedCommitSHA, &job.Source.ApplicationRoot, &job.Source.BuildContext, &job.RequestedBuildStrategy, &job.ResolvedBuildStrategy, &job.DockerfilePath, &job.Source.BuildDependencyState, &buildEnvRaw, &job.Status, &job.FailureCode, &job.FailureMessageRedacted, &job.FailureCause, &job.BuildRecordID, &job.CompletedAt, &job.CreatedBy, &job.IdempotencyKey, &job.CreatedAt, &job.UpdatedAt)
+	if err != nil {
+		return job, err
+	}
+	if len(buildEnvRaw) > 0 {
+		var env map[string]string
+		if json.Unmarshal(buildEnvRaw, &env) == nil && len(env) > 0 {
+			job.Source.BuildEnvironment = env
+		}
+	}
+	return job, nil
 }

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
@@ -184,7 +185,7 @@ type BuildDependencyMapping struct {
 	Value   string `json:"value"`
 }
 
-func ComputeBuildDependencyState(config ServiceConfiguration, services []ServiceRecord) string {
+func ComputeBuildDependencyMappings(config ServiceConfiguration, services []ServiceRecord) []BuildDependencyMapping {
 	targets := make(map[string]ServiceRecord, len(services))
 	for _, s := range services {
 		targets[s.ID] = s
@@ -253,10 +254,33 @@ func ComputeBuildDependencyState(config ServiceConfiguration, services []Service
 	sort.Slice(mappings, func(i, j int) bool {
 		return mappings[i].EnvName < mappings[j].EnvName
 	})
+	return mappings
+}
 
+func ComputeBuildEnvironment(config ServiceConfiguration, services []ServiceRecord) map[string]string {
+	mappings := ComputeBuildDependencyMappings(config, services)
+	if len(mappings) == 0 {
+		return nil
+	}
+	env := make(map[string]string, len(mappings))
+	for _, m := range mappings {
+		env[m.EnvName] = m.Value
+	}
+	return env
+}
+
+func ComputeBuildDependencyState(config ServiceConfiguration, services []ServiceRecord) string {
+	mappings := ComputeBuildDependencyMappings(config, services)
+	if len(mappings) == 0 {
+		return ""
+	}
 	data, _ := json.Marshal(mappings)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func ComputeBuildConfigHash(sha, strategy, dockerfilePath, buildContext, repository, buildDepState string) string {
+	return buildjob.ComputeBuildConfigHash(sha, strategy, dockerfilePath, buildContext, repository, buildDepState)
 }
 
 func checkDependencyCycle(sourceID, targetID string, targetDeps []serviceconfigurationv1.ApplicationDependency, targets map[string]ServiceRecord, resolver DependencyTargetResolver, ctx context.Context, projectID string) error {

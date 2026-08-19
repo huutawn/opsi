@@ -310,11 +310,7 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 	if hasBuildDep {
 		currentBuildDepState := registry.ComputeBuildDependencyState(configuration, services)
 		// Check expected config hash for current build dependency state
-		expectedConfig, _ := json.Marshal(struct {
-			Commit, Strategy, Dockerfile, Context, Repository, BuildDepState string
-		}{record.Workload.SHA, record.Build.BuildStrategy, service.Dockerfile, service.BuildContext, record.Build.OCIRepository, currentBuildDepState})
-		sum := sha256.Sum256(expectedConfig)
-		expectedHash := hex.EncodeToString(sum[:])
+		expectedHash := registry.ComputeBuildConfigHash(record.Workload.SHA, record.Build.BuildStrategy, service.Dockerfile, service.BuildContext, record.Build.OCIRepository, currentBuildDepState)
 		if record.Build.ConfigHash != "" && record.Build.ConfigHash != expectedHash && (record.Build.BuildJobID != "" || record.Build.ConfigHash != strings.Repeat("a", 64)) {
 			return result, registry.APIError{Status: 409, Code: "BUILD_DEPENDENCY_STALE", Message: "BuildRecord is stale because build-time dependency endpoints have changed; rebuild required", NextAction: "rebuild", RequestID: r.Header.Get("X-Request-ID")}
 		}

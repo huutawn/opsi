@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
@@ -99,7 +100,7 @@ func build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, o
 		return BuildOutput{}, err
 	}
 	metadataPath := filepath.Join(outputDir, "buildkit-metadata.json")
-	args := canonicalBuildArgs(dockerfilePath, metadataPath, exporter, contextPath)
+	args := canonicalBuildArgs(dockerfilePath, metadataPath, exporter, contextPath, spec.BuildEnvironment)
 	logFile, err := os.CreateTemp(workspace, "buildkit-log-*")
 	if err != nil {
 		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "BuildKit log cannot be created"}
@@ -135,12 +136,25 @@ func build(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspace, o
 	return output, nil
 }
 
-func canonicalBuildArgs(dockerfilePath, metadataPath, exporter, contextPath string) []string {
-	return []string{
+func canonicalBuildArgs(dockerfilePath, metadataPath, exporter, contextPath string, buildEnv ...map[string]string) []string {
+	args := []string{
 		"buildx", "build", "--builder", BuilderName, "--progress=plain", "--platform", Platform,
+	}
+	if len(buildEnv) > 0 && len(buildEnv[0]) > 0 {
+		keys := make([]string, 0, len(buildEnv[0]))
+		for k := range buildEnv[0] {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--build-arg", k+"="+buildEnv[0][k])
+		}
+	}
+	args = append(args,
 		"--file", dockerfilePath, "--metadata-file", metadataPath, "--provenance=false",
 		"--output", exporter, contextPath,
-	}
+	)
+	return args
 }
 
 func sourcePath(root, relative string) (string, error) {

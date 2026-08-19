@@ -80,12 +80,14 @@ func (s PostgresService) ResolveBuildJobSource(ctx context.Context, projectID, a
 	service, _ := s.getService(ctx, applicationID)
 	services, _ := s.ListServices(projectID)
 	buildDepState := ComputeBuildDependencyState(service.Configuration, services)
+	buildEnv := ComputeBuildEnvironment(service.Configuration, services)
 	return buildjob.ApplicationSource{
 		ProjectID: projectID, EnvironmentID: environmentID, ApplicationID: applicationID, BindingID: binding.ID, BindingUpdatedAt: binding.UpdatedAt,
 		InstallationID: binding.InstallationID, RepositoryID: binding.RepositoryID, RepositoryOwnerID: repositoryOwnerID,
 		RepositoryFullName: repositoryFullName, SelectedRef: binding.SelectedRef, ApplicationRoot: binding.ApplicationRoot,
 		BuildContext: binding.BuildContext, BuildStrategy: binding.BuildStrategy, DockerfilePath: binding.DockerfilePath,
 		BuildDependencyState: buildDepState,
+		BuildEnvironment:     buildEnv,
 	}, nil
 }
 
@@ -95,21 +97,27 @@ func (s *Service) buildJobApplicationSourceWithServices(service ServiceRecord, b
 		services = append(services, s)
 	}
 	buildDepState := ComputeBuildDependencyState(service.Configuration, services)
+	buildEnv := ComputeBuildEnvironment(service.Configuration, services)
 	return buildjob.ApplicationSource{
 		ProjectID: binding.ProjectID, EnvironmentID: service.EnvironmentID, ApplicationID: binding.ServiceID, BindingID: binding.ID, BindingUpdatedAt: binding.UpdatedAt,
 		InstallationID: binding.InstallationID, RepositoryID: binding.RepositoryID, RepositoryOwnerID: repository.OwnerID,
 		RepositoryFullName: repository.FullName, SelectedRef: binding.SelectedRef, ApplicationRoot: binding.ApplicationRoot,
 		BuildContext: binding.BuildContext, BuildStrategy: binding.BuildStrategy, DockerfilePath: binding.DockerfilePath,
 		BuildDependencyState: buildDepState,
+		BuildEnvironment:     buildEnv,
 	}
 }
 
 func buildJobApplicationSource(service ServiceRecord, binding GitHubServiceBinding, repository GitHubRepository) buildjob.ApplicationSource {
+	buildDepState := ComputeBuildDependencyState(service.Configuration, nil)
+	buildEnv := ComputeBuildEnvironment(service.Configuration, nil)
 	return buildjob.ApplicationSource{
 		ProjectID: binding.ProjectID, EnvironmentID: service.EnvironmentID, ApplicationID: binding.ServiceID, BindingID: binding.ID, BindingUpdatedAt: binding.UpdatedAt,
 		InstallationID: binding.InstallationID, RepositoryID: binding.RepositoryID, RepositoryOwnerID: repository.OwnerID,
 		RepositoryFullName: repository.FullName, SelectedRef: binding.SelectedRef, ApplicationRoot: binding.ApplicationRoot,
 		BuildContext: binding.BuildContext, BuildStrategy: binding.BuildStrategy, DockerfilePath: binding.DockerfilePath,
+		BuildDependencyState: buildDepState,
+		BuildEnvironment:     buildEnv,
 	}
 }
 

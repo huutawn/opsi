@@ -300,12 +300,31 @@ func (s PostgresStore) FailRunner(ctx context.Context, failure RunnerFailure, le
 	return nil
 }
 
+type BuildConfigInput struct {
+	Commit        string `json:"commit"`
+	Strategy      string `json:"strategy"`
+	Dockerfile    string `json:"dockerfile,omitempty"`
+	Context       string `json:"context"`
+	Repository    string `json:"repository"`
+	BuildDepState string `json:"build_dep_state,omitempty"`
+}
+
+func ComputeBuildConfigHash(commit, strategy, dockerfile, buildContext, repository, buildDepState string) string {
+	data, _ := json.Marshal(BuildConfigInput{
+		Commit:        commit,
+		Strategy:      strategy,
+		Dockerfile:    dockerfile,
+		Context:       buildContext,
+		Repository:    repository,
+		BuildDepState: buildDepState,
+	})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func runnerBuildRecord(job Job, attempt DispatchAttempt, serviceKey string, result RunnerResult, target PublicationTarget, executor ExecutorConfig, now time.Time) buildrecordv1.Record {
 	idHash := sha256.Sum256([]byte(job.ID))
-	config, _ := json.Marshal(struct {
-		Commit, Strategy, Dockerfile, Context, Repository, BuildDepState string
-	}{job.Source.ResolvedCommitSHA, job.ResolvedBuildStrategy, job.DockerfilePath, job.Source.BuildContext, target.Repository, job.Source.BuildDependencyState})
-	configHash := sha256.Sum256(config)
+	configHash := ComputeBuildConfigHash(job.Source.ResolvedCommitSHA, job.ResolvedBuildStrategy, job.DockerfilePath, job.Source.BuildContext, target.Repository, job.Source.BuildDependencyState)
 	builderVersion := result.Executor.BuildKitVersion + "/buildx-" + result.Executor.BuildxVersion
 	if job.ResolvedBuildStrategy == StrategyBuildpack {
 		builderVersion = "pack-" + result.Executor.Builder.PackVersion + "/lifecycle-" + result.Executor.Builder.LifecycleVersion
@@ -314,7 +333,7 @@ func runnerBuildRecord(job Job, attempt DispatchAttempt, serviceKey string, resu
 		SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + hex.EncodeToString(idHash[:16]), ProjectID: job.ProjectID,
 		RepositoryID: uint64(job.Source.RepositoryID), RepositoryOwnerID: uint64(job.Source.RepositoryOwnerID), ActiveBindingID: job.Source.BindingID, ServiceID: job.ApplicationID, ServiceKey: serviceKey, CreatedAt: now,
 		Workload: buildrecordv1.WorkloadIdentity{Issuer: "https://token.actions.githubusercontent.com", Subject: "repo:" + executor.RepositoryFullName() + ":ref:" + executor.Ref, RepositoryID: uint64(job.Source.RepositoryID), RepositoryOwnerID: uint64(job.Source.RepositoryOwnerID), Ref: executor.Ref, SHA: job.Source.ResolvedCommitSHA, EventName: "workflow_dispatch", Workflow: attempt.Workflow, WorkflowRef: attempt.WorkflowRef, RunID: attempt.RunID, RunAttempt: attempt.RunAttempt},
-		Build:    buildrecordv1.BuildMetadata{ConfigHash: hex.EncodeToString(configHash[:]), Platform: result.Executor.Platform, OCIRepository: target.Repository, OCIDigest: result.Digest, BuildJobID: job.ID, BuildStrategy: job.ResolvedBuildStrategy, BuilderIdentity: result.Executor.BuilderIdentity, BuilderVersion: builderVersion, Builder: result.Executor.Builder, MediaType: result.Executor.Remote.Descriptor.MediaType, Status: "succeeded"},
+		Build:    buildrecordv1.BuildMetadata{ConfigHash: configHash, Platform: result.Executor.Platform, OCIRepository: target.Repository, OCIDigest: result.Digest, BuildJobID: job.ID, BuildStrategy: job.ResolvedBuildStrategy, BuilderIdentity: result.Executor.BuilderIdentity, BuilderVersion: builderVersion, Builder: result.Executor.Builder, MediaType: result.Executor.Remote.Descriptor.MediaType, Status: "succeeded"},
 	}
 }
 
