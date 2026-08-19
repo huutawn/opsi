@@ -1,6 +1,7 @@
 package webhookrelay
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
 
 func (s *Server) handleRegistryAPI(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +217,9 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 		return
 	}
 	if s.handleServiceConfigurationAPI(w, r, projectID, parts, principal) {
+		return
+	}
+	if s.handleServiceDependenciesAPI(w, r, projectID, parts, principal) {
 		return
 	}
 	if s.handleExposureAPI(w, r, projectID, parts, principal) {
@@ -702,6 +708,189 @@ func (s *Server) handleServiceConfigurationAPI(w http.ResponseWriter, r *http.Re
 		return true
 	}
 	return false
+}
+
+func (s *Server) handleServiceDependenciesAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
+	if len(parts) < 5 || parts[2] != "services" {
+		return false
+	}
+	serviceID := parts[3]
+	action := ""
+	if parts[4] == "dependencies" && len(parts) == 6 {
+		action = parts[5]
+	} else if parts[4] == "configuration" && len(parts) == 7 && parts[5] == "dependencies" {
+		action = parts[6]
+	} else {
+		return false
+	}
+
+	if r.Method != http.MethodPost {
+		return false
+	}
+
+	switch action {
+	case "review":
+		s.reviewDependencies(w, r, projectID, serviceID, principal)
+		return true
+	case "apply":
+		s.applyDependencies(w, r, projectID, serviceID, principal)
+		return true
+	}
+	return false
+}
+
+func (s *Server) reviewDependencies(w http.ResponseWriter, r *http.Request, projectID, serviceID string, principal auth.VerifyResult) {
+	services, err := s.Registry.ListServices(projectID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	var source registry.ServiceRecord
+	for _, candidate := range services {
+		if candidate.ID == serviceID {
+			source = candidate
+			break
+		}
+	}
+	if source.ID == "" {
+		writeRegistryFailure(w, r, registry.ErrNotFound)
+		return
+	}
+
+	config, err := s.Registry.GetServiceConfiguration(projectID, serviceID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+
+	bindings, err := s.Resources.ListBindings(r.Context(), projectID, source.EnvironmentID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+
+	plan, err := registry.PlanDependencyRealization(r.Context(), config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
+		return s.Resources.Get(ctx, projectID, targetID)
+	})
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) applyDependencies(w http.ResponseWriter, r *http.Request, projectID, serviceID string, principal auth.VerifyResult) {
+	if !requireWriteHeaders(w, r) {
+		return
+	}
+	if !s.requireRole(w, r, principal, projectID, "service", serviceID, "owner", "admin", "developer") {
+		return
+	}
+	services, err := s.Registry.ListServices(projectID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	var source registry.ServiceRecord
+	for _, candidate := range services {
+		if candidate.ID == serviceID {
+			source = candidate
+			break
+		}
+	}
+	if source.ID == "" {
+		writeRegistryFailure(w, r, registry.ErrNotFound)
+		return
+	}
+
+	config, err := s.Registry.GetServiceConfiguration(projectID, serviceID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+
+	bindings, err := s.Resources.ListBindings(r.Context(), projectID, source.EnvironmentID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+
+	plan, err := registry.PlanDependencyRealization(r.Context(), config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
+		return s.Resources.Get(ctx, projectID, targetID)
+	})
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	resBindings := append([]serviceconfigurationv1.ResourceBinding(nil), config.ResourceBindings...)
+	reusedAll := true
+
+	for i, item := range plan.Dependencies {
+		if item.TargetKind != "managed_resource" || item.InjectionPhase != "runtime" {
+			continue
+		}
+		if item.BindingAction == "create" {
+			reusedAll = false
+			bindingKey := fmt.Sprintf("%s:%s:%s", idempotencyKey, item.LogicalName, item.TargetIdentity)
+			createReq := resourcev1.CreateBindingRequest{
+				EnvironmentID: source.EnvironmentID,
+				Source:        resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: serviceID},
+				Target:        resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: item.TargetIdentity},
+				Protocol:      resourcev1.Protocol(item.Protocol),
+				LogicalName:   item.LogicalName,
+			}
+			created, reused, createErr := s.Resources.CreateBinding(r.Context(), projectID, bindingKey, createReq)
+			if createErr != nil {
+				writeRegistryFailure(w, r, createErr)
+				return
+			}
+			if !reused {
+				s.Registry.Audit(source.OrgID, projectID, principal.UserID, "RESOURCE_BINDING_CREATED", "resource_binding", created.ID, "success", map[string]any{"protocol": created.Protocol, "target_id": created.Target.ID, "logical_name": created.LogicalName})
+			}
+			plan.Dependencies[i].BindingID = created.ID
+			plan.Dependencies[i].BindingAction = "create"
+			if reused {
+				plan.Dependencies[i].BindingAction = "reused"
+			}
+			plan.Dependencies[i].Status = "ready"
+			resBindings = append(resBindings, serviceconfigurationv1.ResourceBinding{LogicalName: item.LogicalName, BindingID: created.ID})
+		} else if item.BindingAction == "reused" {
+			found := false
+			for _, rb := range resBindings {
+				if rb.LogicalName == item.LogicalName && rb.BindingID == item.BindingID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				resBindings = append(resBindings, serviceconfigurationv1.ResourceBinding{LogicalName: item.LogicalName, BindingID: item.BindingID})
+			}
+		}
+	}
+
+	config.ResourceBindings = resBindings
+	applyReq := registry.ServiceConfigurationApplyRequest{
+		Draft:             config.ServiceConfigurationDraft,
+		ExpectedRevision:  config.Revision,
+		ExpectedStateHash: config.StateHash,
+	}
+	_, applyErr := s.Registry.ApplyServiceConfiguration(projectID, serviceID, principal.UserID, idempotencyKey+":cfg", applyReq)
+	if applyErr != nil {
+		// Even if config apply is skipped/stale if already matched, continue
+	}
+
+	s.Registry.Audit(source.OrgID, projectID, principal.UserID, "DEPENDENCY_REALIZATION_APPLIED", "service", serviceID, "success", map[string]any{
+		"service_id": serviceID,
+		"reused":     reusedAll,
+	})
+
+	writeJSON(w, http.StatusOK, registry.DependencyApplyResult{
+		Realized: plan.Dependencies,
+		Reused:   reusedAll,
+	})
 }
 
 func (s *Server) authorizeOrg(w http.ResponseWriter, r *http.Request, orgID string) (auth.VerifyResult, bool) {

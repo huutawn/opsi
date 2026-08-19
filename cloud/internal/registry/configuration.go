@@ -38,6 +38,11 @@ type DependencyTargetFacts struct {
 	ProjectID     string
 	EnvironmentID string
 	TargetKind    string
+	ResourceType  string
+	Lifecycle     string
+	Host          string
+	Port          int32
+	Database      string
 	Deleted       bool
 	StateHash     string
 }
@@ -112,6 +117,35 @@ func serviceConfigurationHash(draft ServiceConfigurationDraft) string {
 	return serviceconfigurationv1.StateHash(draft)
 }
 
+func isPlatformReservedEnv(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	if upper == "PORT" || upper == "HOSTNAME" || upper == "HOST_IP" || upper == "POD_NAME" || upper == "POD_NAMESPACE" || upper == "POD_IP" || strings.HasPrefix(upper, "OPSI_") || strings.HasPrefix(upper, "KUBERNETES_") {
+		return true
+	}
+	return false
+}
+
+func validSymbolicSourceForProtocol(protocol, source string) bool {
+	switch protocol {
+	case "postgres":
+		switch source {
+		case "resource.host", "resource.port", "credential.database", "credential.username", "credential.password", "connection.url":
+			return true
+		}
+	case "redis":
+		switch source {
+		case "resource.host", "resource.port", "credential.password", "connection.url":
+			return true
+		}
+	case "nats":
+		switch source {
+		case "resource.host", "resource.port", "connection.url":
+			return true
+		}
+	}
+	return false
+}
+
 func validateServiceConfiguration(ctx context.Context, resolver DependencyTargetResolver, source ServiceRecord, draft ServiceConfigurationDraft, services []ServiceRecord) (ServiceConfigurationDraft, []GeneratedEnvironment, error) {
 	draft = normalizeServiceConfigurationDraft(draft)
 	if err := deploymentv1.ValidateEnvironment(draft.Environment, nil); err != nil {
@@ -174,13 +208,22 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 		if dep.InjectionPhase != "runtime" && dep.InjectionPhase != "build" {
 			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_phase", index), "invalid injection phase")
 		}
+		if dep.TargetKind == "managed_resource" && dep.InjectionPhase == "build" {
+			return draft, nil, configurationError("DEPENDENCY_BUILD_PHASE_UNSUPPORTED", fmt.Sprintf("dependencies[%d].injection_phase", index), "managed resource build phase injection is unsupported in ADC-02")
+		}
+
+		for _, currentDep := range source.Configuration.Dependencies {
+			if currentDep.LogicalName == dep.LogicalName && currentDep.TargetKind == "managed_resource" && currentDep.TargetIdentity != dep.TargetIdentity {
+				return draft, nil, APIError{Status: 409, Code: "DEPENDENCY_BINDING_REPLACEMENT_REQUIRES_EXPLICIT_MIGRATION", Message: "replacing an active database dependency target requires explicit PostgreSQL cutover migration", NextAction: fmt.Sprintf("dependencies[%d].target_identity", index)}
+			}
+		}
 
 		if resolver != nil {
 			facts, err := resolver.ResolveDependencyTarget(ctx, source.ProjectID, dep.TargetIdentity, dep.TargetKind)
 			if err != nil {
 				return draft, nil, configurationError("DEPENDENCY_TARGET_INVALID", fmt.Sprintf("dependencies[%d].target_identity", index), "failed to resolve target")
 			}
-			if !facts.Exists || facts.Deleted {
+			if !facts.Exists || facts.Deleted || facts.Lifecycle == "deleted" || facts.Lifecycle == "retiring" || facts.Lifecycle == "retired" || facts.Lifecycle == "deleting" || facts.Lifecycle == "failed" {
 				return draft, nil, configurationError("DEPENDENCY_TARGET_NOT_FOUND", fmt.Sprintf("dependencies[%d].target_identity", index), "target not found or deleted")
 			}
 			if facts.ProjectID != source.ProjectID {
@@ -194,6 +237,14 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			}
 			if dep.TargetKind == "application" && dep.TargetIdentity == source.ID {
 				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].target_identity", index), "a service cannot depend on itself")
+			}
+			if dep.TargetKind == "managed_resource" {
+				if dep.Protocol == "postgres" && facts.ResourceType != "" && facts.ResourceType != "postgres" {
+					return draft, nil, configurationError("DEPENDENCY_PROTOCOL_UNSUPPORTED", fmt.Sprintf("dependencies[%d].protocol", index), "target resource does not support postgres protocol")
+				}
+				if dep.Protocol == "redis" && facts.ResourceType != "" && facts.ResourceType != "redis" {
+					return draft, nil, configurationError("DEPENDENCY_PROTOCOL_UNSUPPORTED", fmt.Sprintf("dependencies[%d].protocol", index), "target resource does not support redis protocol")
+				}
 			}
 		} else {
 			if dep.TargetKind == "application" {
@@ -216,6 +267,9 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			if !envRegex.MatchString(mapping.EnvName) {
 				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].env_name", index, i), "invalid env name format")
 			}
+			if isPlatformReservedEnv(mapping.EnvName) {
+				return draft, nil, configurationError("DEPENDENCY_ENV_CONFLICT", fmt.Sprintf("dependencies[%d].injection_mappings[%d].env_name", index, i), fmt.Sprintf("env name %s is reserved by the platform", mapping.EnvName))
+			}
 			if _, ok := depEnvNames[mapping.EnvName]; ok {
 				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].env_name", index, i), "duplicate env name in mapping")
 			}
@@ -229,11 +283,17 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			if mapping.SymbolicSource == "" {
 				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), "symbolic source is required")
 			}
+			if dep.TargetKind == "managed_resource" && !validSymbolicSourceForProtocol(dep.Protocol, mapping.SymbolicSource) {
+				return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), fmt.Sprintf("symbolic source %s is invalid for protocol %s", mapping.SymbolicSource, dep.Protocol))
+			}
 		}
 	}
 
 	manual := make(map[string]struct{}, len(draft.Environment))
 	for _, item := range draft.Environment {
+		if depLogical, exists := envKeys[item.Name]; exists {
+			return draft, nil, configurationError("DEPENDENCY_ENV_CONFLICT", item.Name, fmt.Sprintf("manual user environment %s conflicts with dependency %s mapping", item.Name, depLogical))
+		}
 		manual[item.Name] = struct{}{}
 	}
 	generated := make([]GeneratedEnvironment, 0, len(draft.Bindings)*3)
@@ -281,6 +341,9 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			return draft, nil, configurationError("GENERATED_ENV_INVALID", fmt.Sprintf("bindings[%d]", index), err.Error())
 		}
 		for _, item := range values {
+			if depLogical, exists := envKeys[item.Name]; exists {
+				return draft, nil, configurationError("DEPENDENCY_ENV_CONFLICT", item.Name, fmt.Sprintf("service binding environment %s conflicts with dependency %s mapping", item.Name, depLogical))
+			}
 			if _, exists := manual[item.Name]; exists {
 				return draft, nil, configurationError("GENERATED_ENV_OVERRIDE", item.Name, "generated environment cannot be overridden by user environment")
 			}

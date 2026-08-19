@@ -376,3 +376,104 @@ func writePostgresBindingEvidence(t *testing.T, secrets []string, evidence map[s
 	}
 	t.Logf("P07B3B1_POSTGRES_BINDING_EVIDENCE=%s", dir)
 }
+
+func TestManagedResourceRealK3sPostgresApplicationDependencyRealization(t *testing.T) {
+	reference := os.Getenv("OPSI_P07B3B1_ACCEPTANCE_E2E_IMAGE")
+	registryUsername := os.Getenv("OPSI_PRIVATE_REGISTRY_E2E_USERNAME")
+	registryPassword := os.Getenv("OPSI_PRIVATE_REGISTRY_E2E_PASSWORD")
+	if os.Getenv("OPSI_E2E_K3S_POSTGRES_BINDING") != "1" || reference == "" || registryUsername == "" || registryPassword == "" {
+		t.Skip("set P07B3B1 K3s, immutable fixture, and private registry inputs")
+	}
+	referenceParts := strings.Split(reference, "@")
+	if len(referenceParts) != 2 {
+		t.Fatal("fixture image must be an immutable digest reference")
+	}
+	image, err := deploymentv1.NewImmutableImage(referenceParts[0], referenceParts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireK3sInfrastructure(t)
+
+	spec := postgresBindingK3sSpec()
+	spec.ResourceID = "res-pg-dep-e2e"
+	spec.CredentialID = "mrcred-res-pg-dep-e2e"
+	management := randomManagedCredential(t, spec.CredentialID, resourcev1.CredentialPurposeResourceManagement, spec.ResourceID, spec.ResourceID, "opsi")
+	binding := postgresBindingOperation(t, spec, "binding-postgres-dep-app", true)
+	namespace := managedResourceNamespace(spec)
+	_, _ = kubectlOutput(context.Background(), "delete", "namespace", namespace, "--ignore-not-found", "--wait=true", "--timeout=2m")
+	t.Cleanup(func() {
+		_, _ = kubectlOutput(context.Background(), "delete", "namespace", namespace, "--ignore-not-found", "--wait=true", "--timeout=2m")
+	})
+
+	reconciler := ManagedResourceReconciler{Timeout: 8 * time.Minute, PollInterval: time.Second}
+	first := reconcilePostgresBindingK3s(t, reconciler, "binding-dep-create", spec, management, binding)
+	if first.Status != "ready" {
+		t.Fatalf("first reconcile failed: %+v", first)
+	}
+
+	registry := strings.SplitN(image.Repository, "/", 2)[0]
+	registryRef := deploymentv1.RegistryPullCredentialReference{Provider: "local", CredentialID: "p07b3b1-fixture", Registry: registry}
+	workload := deploymentv1.WorkloadSpec{
+		SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: "dep-app", Replicas: 1, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: 8080,
+		ReadinessProbe:               &deploymentv1.Probe{Path: "/health", Port: 8080, InitialDelaySeconds: 1, PeriodSeconds: 1, TimeoutSeconds: 1, FailureThreshold: 3},
+		Resources:                    deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: "50m", Memory: "64Mi"}, Limits: deploymentv1.ResourceValues{CPU: "250m", Memory: "256Mi"}},
+		TerminationGracePeriodSecond: 10, Exposure: deploymentv1.ExposureIntent{Mode: "internal"}, RegistryPullCredential: &registryRef,
+		Environment: []deploymentv1.EnvironmentVariable{
+			{Name: "DB_HOST", Value: spec.Connection.Host},
+			{Name: "DB_PORT", Value: "5432"},
+			{Name: "DB_NAME", Value: spec.Connection.Database},
+		},
+		SecretReferences: []deploymentv1.SecretReference{
+			{EnvName: "APP_DATABASE_URL", SecretID: binding.CredentialID},
+			{EnvName: "DB_USER", SecretID: binding.CredentialID},
+			{EnvName: "DB_PASSWORD", SecretID: binding.CredentialID},
+		},
+	}
+	workloadHash, err := workload.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := deploymentv1.RuntimeSnapshot{
+		SchemaVersion: deploymentv1.RuntimeSnapshotVersion, Target: deploymentv1.RuntimeTarget{ProjectID: spec.ProjectID, EnvironmentID: spec.EnvironmentID, RuntimeID: "runtime-dep-app", ServiceKey: "dep-app", NodeID: "node-e2e", AgentID: "agent-e2e"},
+		DeploymentJobID: "deployment-postgres-dep", Image: image, Workload: workload, WorkloadSpecHash: workloadHash,
+		Authority: deploymentv1.RuntimeAuthority{TopologyPlanID: "topology-postgres-dep", TopologyRevision: 1, TopologyHash: strings.Repeat("c", 64), DeploymentPolicyID: "policy-postgres-dep", DeploymentPolicyRevision: 1, DeploymentPolicyHash: strings.Repeat("d", 64), RoutingDecisionHash: strings.Repeat("e", 64)},
+	}
+	command := snapshot.AgentCommand()
+	command.RegistryPullCredential = &deploymentv1.RegistryPullCredential{Reference: registryRef, Username: registryUsername, Password: registryPassword}
+	connectionURL := url.URL{Scheme: "postgres", User: url.UserPassword(binding.Credential.Username, binding.Credential.Password), Host: fmt.Sprintf("%s:%d", spec.Connection.Host, spec.Connection.Port), Path: "/" + spec.Connection.Database, RawQuery: "sslmode=disable"}
+	command.SecretMaterials = []deploymentv1.SecretMaterial{
+		{
+			SecretID: binding.CredentialID,
+			Values: map[string]string{
+				"APP_DATABASE_URL": connectionURL.String(),
+				"DB_USER":          binding.Credential.Username,
+				"DB_PASSWORD":      binding.Credential.Password,
+			},
+		},
+	}
+
+	runner := deploy.ExecCommandRunner{}
+	if err := (deploy.KubernetesRegistryPullSecretEnsurer{Runner: runner, KubectlPath: "kubectl"}).Ensure(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	workloadSecrets := deploy.KubernetesWorkloadSecretEnsurer{Runner: runner, KubectlPath: "kubectl"}
+	if err := workloadSecrets.Ensure(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := deploy.ProductionAdapter{Runner: runner, KubectlPath: "kubectl", PollInterval: time.Second, Timeout: 5 * time.Minute}
+	plan, err := adapter.PrepareRollout(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := adapter.ApplyRollout(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readiness, _, err := adapter.ObserveReadiness(context.Background(), plan)
+	if err != nil || !readiness.RuntimeReady {
+		t.Fatalf("application rollout readiness failed: readiness=%+v err=%v", readiness, err)
+	}
+	_ = resources
+}
+

@@ -18,12 +18,25 @@ func (a DependencyResolverAdapter) ResolveDependencyTarget(ctx context.Context, 
 		if err != nil {
 			return registry.DependencyTargetFacts{}, nil
 		}
-		deleted := res.Lifecycle == "deleted" || res.Lifecycle == "retiring" || res.Lifecycle == "retired"
+		deleted := res.Lifecycle == "deleted" || res.Lifecycle == "retiring" || res.Lifecycle == "retired" || res.Lifecycle == "deleting"
+		host := ""
+		port := int32(0)
+		db := ""
+		if res.Runtime != nil {
+			host = res.Runtime.Spec.Connection.Host
+			port = res.Runtime.Spec.Connection.Port
+			db = res.Runtime.Spec.Connection.Database
+		}
 		return registry.DependencyTargetFacts{
 			Exists:        true,
 			ProjectID:     res.ProjectID,
 			EnvironmentID: res.EnvironmentID,
 			TargetKind:    "managed_resource",
+			ResourceType:  string(res.Type),
+			Lifecycle:     string(res.Lifecycle),
+			Host:          host,
+			Port:          port,
+			Database:      db,
 			Deleted:       deleted,
 		}, nil
 	}
