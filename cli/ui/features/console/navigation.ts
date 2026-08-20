@@ -80,6 +80,7 @@ export function defaultTab(view: ConsoleView) {
 }
 
 const legacyTabs: Record<string, string[]> = {
+  services: ["overview", "dependencies", "source", "builds", "runtime"],
   infrastructure: ["topology", "runtimes", "nodes", "bootstrap"],
   observability: ["health", "metrics", "logs", "incidents"],
   security: ["secrets"],

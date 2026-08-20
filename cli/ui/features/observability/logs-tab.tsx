@@ -54,7 +54,7 @@ export function LogsTab({ console, model }: { console: ConsoleController; model:
             variant="outline"
           >
             <Icon name={paused ? "play_arrow" : "pause"} className="text-[16px]" />
-            {paused ? "Resume Auto-refresh" : "Pause Auto-refresh"}
+            {paused ? "Resume periodic refresh" : "Pause periodic refresh"}
           </Button>
           <Button
             disabled={model.data.logs.source === "loading"}
@@ -105,8 +105,9 @@ export function LogsTab({ console, model }: { console: ConsoleController; model:
         </label>
 
         <label className="flex flex-col gap-1.5 font-medium text-on-surface-variant">
-          <span>Search Text</span>
+          <span>Search loaded page</span>
           <input
+            aria-label="Search loaded page"
             autoComplete="off"
             className="w-full bg-surface-container border border-outline-variant/30 rounded-xl px-3 py-2 text-xs text-on-surface focus:outline-none focus:border-primary/50"
             name="query"

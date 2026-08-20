@@ -8,8 +8,11 @@ import type { ObservabilityModel } from "@/features/observability/observability-
 import { safeLogMessage } from "@/features/observability/data";
 import { formatObserved } from "@/features/observability/shared";
 import { LocalClient } from "@/lib/api/local-client";
+import { DependencyVerificationPanel } from "@/features/dependencies/verification-panel";
 import { formatShortDigest, type ApplicationRuntimeSummary, type RuntimeEvent } from "@/lib/presentation/observability/model";
 import type { TelemetryLogEntry, TelemetryQueryResponse } from "@/lib/contracts/registry";
+
+type DetailTab = "overview" | "workload" | "dependencies" | "logs" | "events" | "exposure";
 
 export function ApplicationsTab({
   console,
@@ -23,7 +26,7 @@ export function ApplicationsTab({
   const selectedServiceID = console.route.service || "";
   const selectedApp = applications.find((a) => a.id === selectedServiceID || a.key === selectedServiceID) ?? null;
 
-  const [detailTab, setDetailTab] = useState<"overview" | "workload" | "logs" | "events" | "exposure">("overview");
+  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
 
   function selectApp(app: ApplicationRuntimeSummary | null) {
     console.navigate({
@@ -174,10 +177,10 @@ function ApplicationDetailDrawer({
 }: {
   app: ApplicationRuntimeSummary;
   console: ConsoleController;
-  detailTab: "overview" | "workload" | "logs" | "events" | "exposure";
+  detailTab: DetailTab;
   model: ObservabilityModel;
   onClose: () => void;
-  onTabChange: (tab: "overview" | "workload" | "logs" | "events" | "exposure") => void;
+  onTabChange: (tab: DetailTab) => void;
   projectID: string;
 }) {
   const events = model.getApplicationEvents(app.id, app.key);
@@ -212,20 +215,28 @@ function ApplicationDetailDrawer({
           </div>
 
           <div className="flex items-center gap-2">
-            <Button
-              onClick={() => console.navigate({ projectID, view: "delivery", tab: "deployments", service: app.id })}
-              size="sm"
-              variant="outline"
+            <a
+              className="inline-flex items-center justify-center px-3 py-1.5 text-xs font-medium rounded-lg border border-outline-variant text-on-surface hover:bg-surface-container-high transition-colors"
+              href={routeHref({ projectID, view: "delivery", tab: "deployments", service: app.id })}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey) return;
+                e.preventDefault();
+                console.navigate({ projectID, view: "delivery", tab: "deployments", service: app.id });
+              }}
             >
-              Delivery
-            </Button>
-            <Button
-              onClick={() => console.navigate({ projectID, view: "topology", service: app.id })}
-              size="sm"
-              variant="outline"
+              Open in Delivery
+            </a>
+            <a
+              className="inline-flex items-center justify-center px-3 py-1.5 text-xs font-medium rounded-lg border border-outline-variant text-on-surface hover:bg-surface-container-high transition-colors"
+              href={routeHref({ projectID, view: "topology", service: app.id })}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey) return;
+                e.preventDefault();
+                console.navigate({ projectID, view: "topology", service: app.id });
+              }}
             >
-              Topology
-            </Button>
+              Open in Topology
+            </a>
             <button
               aria-label="Close diagnostics"
               className="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors cursor-pointer"
@@ -239,7 +250,7 @@ function ApplicationDetailDrawer({
 
         {/* Drawer Tabs */}
         <nav aria-label="Diagnostic sections" className="flex items-center gap-1 border-b border-outline-variant/20 px-6 pt-2 bg-surface-container/20">
-          {(["overview", "workload", "logs", "events", "exposure"] as const).map((t) => {
+          {(["overview", "workload", "dependencies", "logs", "events", "exposure"] as const).map((t) => {
             const active = detailTab === t;
             return (
               <button
@@ -264,6 +275,8 @@ function ApplicationDetailDrawer({
             <AppOverviewSection app={app} />
           ) : detailTab === "workload" ? (
             <AppWorkloadSection app={app} />
+          ) : detailTab === "dependencies" ? (
+            <AppDependenciesSection app={app} console={console} projectID={projectID} />
           ) : detailTab === "logs" ? (
             <AppLogsSection app={app} model={model} projectID={projectID} />
           ) : detailTab === "events" ? (
@@ -273,6 +286,57 @@ function ApplicationDetailDrawer({
           )}
         </div>
       </section>
+    </div>
+  );
+}
+
+function AppDependenciesSection({
+  app,
+  console,
+  projectID,
+}: {
+  app: ApplicationRuntimeSummary;
+  console: ConsoleController;
+  projectID: string;
+}) {
+  const service = console.state.services.find((s) => s.id === app.id || s.name === app.key);
+  const dependencies = service?.configuration?.dependencies ?? [];
+
+  if (!dependencies.length) {
+    return (
+      <div className="bg-surface-container rounded-xl p-8 border border-outline-variant/20 text-center space-y-3">
+        <Icon name="hub" className="text-[32px] text-on-surface-variant/40 mx-auto" />
+        <h4 className="font-headline-md text-base text-on-surface font-semibold">No Dependencies Declared</h4>
+        <p className="text-xs text-on-surface-variant max-w-md mx-auto">
+          This application does not declare any explicit database, cache, or HTTP dependencies in its configuration.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h4 className="font-headline-md text-sm font-semibold text-on-surface">
+          Runtime Dependency Verification ({dependencies.length})
+        </h4>
+        <span className="text-xs font-code-md text-on-surface-variant">
+          5-Layer Verification
+        </span>
+      </div>
+
+      <div className="space-y-4">
+        {dependencies.map((dep) => (
+          <DependencyVerificationPanel
+            applicationID={app.id}
+            dependency={dep}
+            deploymentJobID={app.lastDeploymentID}
+            environmentID={app.environment}
+            key={dep.logical_name}
+            projectID={projectID}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -395,6 +459,8 @@ function AppLogsSection({
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<string>("all");
 
+  const [searchQuery, setSearchQuery] = useState("");
+
   useEffect(() => {
     let active = true;
     async function fetchLogs() {
@@ -418,13 +484,24 @@ function AppLogsSection({
   }, [app.id, projectID]);
 
   const filteredLogs = logs.filter((log) => {
-    if (filter === "errors") return log.level === "error" || log.level === "warn";
+    if (filter === "errors" && !(log.level === "error" || log.level === "warn")) return false;
+    if (searchQuery && !log.message?.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
   });
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+        <div className="relative flex-1">
+          <Icon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-[16px] pointer-events-none" />
+          <input
+            className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg pl-9 pr-3 py-2 text-xs text-on-surface focus:outline-none focus:border-primary/50 min-h-[40px]"
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search log output…"
+            type="search"
+            value={searchQuery}
+          />
+        </div>
         <div className="flex items-center gap-2">
           <Button
             onClick={() => setFilter("all")}
@@ -441,12 +518,17 @@ function AppLogsSection({
             Errors only
           </Button>
         </div>
-        <span className="text-xs text-on-surface-variant font-code-md">
-          {filteredLogs.length} entries
-        </span>
       </div>
 
-      <div className="bg-surface-container-lowest p-4 rounded-2xl border border-outline-variant/20 font-code-md text-xs text-on-surface max-h-[400px] overflow-y-auto space-y-1.5">
+      <div className="text-[11px] text-on-surface-variant bg-surface-container/40 p-2.5 rounded-xl border border-outline-variant/10 flex items-center justify-between">
+        <span>Security boundary: Log payloads are bounded and sanitized by Local Edge.</span>
+        <span className="font-code-md">{filteredLogs.length} entries</span>
+      </div>
+
+      <div
+        className="bg-surface-container-lowest p-4 rounded-2xl border border-outline-variant/20 font-code-md text-xs text-on-surface max-h-[400px] overflow-y-auto space-y-1.5"
+        data-logs-status={loading ? "loading" : "ready"}
+      >
         {loading ? (
           <div className="py-8 text-center text-on-surface-variant">Streaming logs…</div>
         ) : filteredLogs.length === 0 ? (
@@ -457,6 +539,11 @@ function AppLogsSection({
               <span className="text-on-surface-variant/60 shrink-0 text-[11px]">
                 {formatObserved(entry.observed_unix)}
               </span>
+              {entry.pod_id ? (
+                <span className="text-primary font-code-md text-[10px] px-1 py-0.2 rounded bg-primary/10 shrink-0">
+                  {entry.pod_id}
+                </span>
+              ) : null}
               <span
                 className={`font-bold uppercase text-[10px] px-1.5 py-0.2 rounded shrink-0 ${
                   entry.level === "error" || entry.level === "warn"

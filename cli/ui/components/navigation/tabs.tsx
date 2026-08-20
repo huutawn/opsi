@@ -35,14 +35,15 @@ export function Tabs({ items, label, selected, onSelect }: TabsProps) {
   }
 
   return (
-    <div className="border-b border-outline-variant/20 mb-6">
-      <nav className="flex space-x-6" aria-label={label} role="tablist" onKeyDown={handleKeyDown}>
+    <div className="border-b border-outline-variant/20 mb-6 overflow-x-auto max-w-full">
+      <nav className="flex space-x-6 min-w-max" aria-label={label} role="tablist" onKeyDown={handleKeyDown}>
         {items.map((tab) => {
           const isSelected = tab.id === selected;
           return (
             <Link
               key={tab.id}
               href={tab.href}
+              prefetch={false}
               onClick={(e) => onSelect(e, tab.id)}
               className={`
                 whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm transition-colors

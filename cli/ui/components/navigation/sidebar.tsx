@@ -50,8 +50,8 @@ export function Sidebar({
   };
 
   const projectDestinations = [
-    { id: "overview", label: "Overview", icon: "dashboard" },
     { id: "topology", label: "Topology", icon: "account_tree" },
+    { id: "overview", label: "Overview", icon: "dashboard" },
     { id: "services", label: "Services", icon: "layers" },
     { id: "delivery", label: "Delivery", icon: "rocket_launch" },
     { id: "infrastructure", label: "Infrastructure", icon: "dns" },
@@ -72,14 +72,14 @@ export function Sidebar({
       
       <aside
         className={`
-          fixed top-0 bottom-0 left-0 z-50 w-72 bg-surface-container-low border-r border-outline-variant/30 flex flex-col shadow-2xl transition-transform duration-300 ease-in-out
+          sidebar fixed top-0 bottom-0 left-0 z-50 w-72 bg-surface-container-low border-r border-outline-variant/30 flex flex-col shadow-2xl transition-transform duration-300 ease-in-out
           ${open ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
         `}
         ref={drawerRef}
       >
         <div className="flex items-center justify-between px-6 py-6 border-b border-outline-variant/20">
           <a
-            className="flex items-center gap-3 cursor-pointer"
+            className="flex items-center gap-3 cursor-pointer min-h-[40px]"
             href={routeHref({ view: "home" })}
             onClick={(e) => navigate(e, { view: "home", projectID: "" })}
           >
@@ -95,8 +95,10 @@ export function Sidebar({
           </a>
           {open && (
             <button
-              className="lg:hidden p-2 text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors"
+              aria-label="Close navigation"
+              className="lg:hidden p-2 text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors min-h-[40px] min-w-[40px]"
               onClick={onClose}
+              type="button"
             >
               <Icon name="close" className="text-[20px]" />
             </button>
@@ -116,7 +118,8 @@ export function Sidebar({
               <div className="flex-1 px-2 py-1">
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-wider block font-medium">Environment</span>
                 <select
-                  className="w-full bg-transparent text-sm text-on-surface font-medium border-0 p-0 focus:outline-none appearance-none cursor-pointer"
+                  aria-label="Current environment"
+                  className="environmentPicker w-full bg-transparent text-sm text-on-surface font-medium border-0 p-0 focus:outline-none appearance-none cursor-pointer min-h-[40px]"
                   onChange={(e) => onEnvironment(e.target.value)}
                   value={environmentID}
                 >
@@ -131,7 +134,7 @@ export function Sidebar({
           )}
         </div>
 
-        <nav className="flex-1 px-3 py-2 space-y-1 overflow-y-auto">
+        <nav className="navSection flex-1 px-3 py-2 space-y-1 overflow-y-auto">
           {!project ? (
             <>
               <NavItem active={route.view === "home"} href={routeHref({ view: "home" })} icon="home" label="Home" onClick={(e) => navigate(e, { view: "home", projectID: "" })} />
@@ -190,6 +193,7 @@ export function Sidebar({
 function NavItem({ active, href, icon, label, onClick }: { active: boolean; href: string; icon: string; label: string; onClick: (e: MouseEvent<HTMLAnchorElement>) => void }) {
   return (
     <a
+      aria-current={active ? "page" : undefined}
       href={href}
       onClick={onClick}
       className={`flex items-center px-4 py-3 rounded-lg text-sm transition-all group ${
@@ -198,7 +202,7 @@ function NavItem({ active, href, icon, label, onClick }: { active: boolean; href
           : "text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface font-medium"
       }`}
     >
-      <Icon name={icon} className={`mr-3 text-[20px] ${active ? "text-primary" : "text-on-surface-variant group-hover:text-on-surface"}`} />
+      <span aria-hidden="true" className={`mr-3 material-symbols-outlined text-[20px] before:content-[attr(data-icon)] select-none ${active ? "text-primary" : "text-on-surface-variant group-hover:text-on-surface"}`} data-icon={icon} />
       <span>{label}</span>
     </a>
   );

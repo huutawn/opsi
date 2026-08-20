@@ -132,7 +132,7 @@ function IncidentDetail({
         <div>
           <h3 className="font-headline-md text-sm font-bold text-on-surface">Next Action</h3>
           <p className="text-xs text-on-surface-variant mt-0.5">
-            Investigation can continue with logs or deployments. Approval and execution continue in CLI.
+            Investigation can proceed with logs or deployments. Approval and execution use CLI.
           </p>
         </div>
 

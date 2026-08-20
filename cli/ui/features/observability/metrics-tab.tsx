@@ -96,10 +96,10 @@ function Comparison({
 
   return (
     <div className="bg-surface-container-low border border-outline-variant/20 rounded-2xl p-5 shadow-sm space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="font-headline-md text-sm font-bold text-on-surface">{title}</h3>
-        {note ? <span className="text-xs text-on-surface-variant font-code-md">{note}</span> : null}
-      </div>
+      <h3 className="font-headline-md text-sm font-bold text-on-surface flex items-center justify-between">
+        <span>{title}</span>
+        {note ? <span className="text-xs font-normal text-on-surface-variant font-code-md">{note}</span> : null}
+      </h3>
 
       <div className="space-y-3" role="img" aria-label={`${title}: ${rows.map((row) => `${row.label} ${row.suffix}`).join(", ")}`}>
         {rows.map((row) => (

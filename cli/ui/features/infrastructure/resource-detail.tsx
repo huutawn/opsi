@@ -26,7 +26,7 @@ import {
   resourceLifecyclePresentation,
   restoreLifecyclePresentation,
 } from "@/lib/presentation/resources/model";
-import { ConnectApplicationDialog } from "./connect-application-dialog";
+import { DependencyDialog } from "@/features/dependencies/dependency-dialog";
 import { RestoreWizardDialog } from "./restore-wizard-dialog";
 import { CutoverFinalizeDialog, CutoverReviewDialog, CutoverRollbackDialog } from "./cutover-dialogs";
 
@@ -724,17 +724,26 @@ export function ResourceDetail({
         </div>
       ) : null}
 
-      {showConnectApp ? (
-        <ConnectApplicationDialog
-          environmentID={resource.environment_id}
-          onBindingCreated={async () => {
+      {showConnectApp && services[0] ? (
+        <DependencyDialog
+          consumer={services[0]}
+          facts={{
+            project_id: projectID,
+            runtimes: [],
+            services: services.map((s) => ({ id: s.id, project_id: projectID, key: s.name })),
+            agents: [],
+            nodes: [],
+            environments: [{ id: resource.environment_id, name: resource.environment_id, type: "production", project_id: projectID, status: "ready" }],
+            resources: allResources.filter((r): r is typeof r & { kind: "managed_service" | "external_resource" } => r.kind === "managed_service" || r.kind === "external_resource"),
+          }}
+          onApply={async () => {
             await onReload();
             setShowConnectApp(false);
           }}
           onClose={() => setShowConnectApp(false)}
           projectID={projectID}
-          resource={resource}
-          services={services}
+          targetIdentityHint={resource.id}
+          targetKindHint="managed_service"
         />
       ) : null}
 

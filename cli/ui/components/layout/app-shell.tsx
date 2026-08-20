@@ -100,7 +100,7 @@ export function AppShell() {
         route={console.route}
       />
 
-      <div className="pl-0 lg:pl-72 flex flex-col min-h-screen">
+      <div className="pl-0 lg:pl-72 flex flex-col min-h-screen max-w-full overflow-x-hidden">
         <ContextHeader
           environment={environmentName}
           lastUpdated={latestUpdate(console)}
@@ -113,7 +113,7 @@ export function AppShell() {
           session={console.session}
         />
 
-        <main className="relative pt-16 min-h-screen bg-surface flex-1" id="main-content" ref={main} tabIndex={-1}>
+        <main className="relative pt-16 min-h-screen bg-surface flex-1 max-w-full overflow-x-hidden" id="main-content" ref={main} tabIndex={-1}>
           <ConsoleRouter console={console} />
         </main>
       </div>
@@ -536,7 +536,7 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
                         fillRule="evenodd"
                       />
                     </svg>
-                    <span>{busy ? "Opening GitHub…" : "Login with GitHub"}</span>
+                    <span>{busy ? "Opening GitHub…" : "Continue with GitHub"}</span>
                   </button>
                 ) : null}
 

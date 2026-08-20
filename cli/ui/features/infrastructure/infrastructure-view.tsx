@@ -64,7 +64,7 @@ export function TopologyTab({ bindings, builds, console, environment, error, fac
       <div className="flex flex-wrap items-center justify-between gap-4 pb-2 border-b border-outline-variant/15">
         <div>
           <h2 className="font-headline-lg text-2xl font-bold text-on-surface" id="topology-heading" tabIndex={-1}>
-            Topology Workspace
+            Topology
           </h2>
           <p className="font-body-md text-xs text-on-surface-variant mt-1">
             {mode === "design" ? "Interactive application placement and configuration canvas" : "Real-time observed runtime and deployment infrastructure"}
@@ -74,10 +74,10 @@ export function TopologyTab({ bindings, builds, console, environment, error, fac
           <span className="px-2.5 py-1 rounded-full text-xs font-code-md bg-surface-container text-on-surface-variant border border-outline-variant/20">
             {mode === "design" ? (topology ? `Plan r${topology.revision}` : "No Plan") : "Observed State"}
           </span>
-          <div aria-label="Topology view mode" className="flex bg-surface-container-highest p-1 rounded-full border border-outline-variant/20 shadow-inner" role="group">
+          <div aria-label="Topology view mode" className="topologyMode flex bg-surface-container-highest p-1 rounded-full border border-outline-variant/20 shadow-inner" role="group">
             <button
               aria-pressed={mode === "design"}
-              className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+              className={`px-4 py-2 min-h-[40px] min-w-[40px] rounded-full text-xs font-semibold transition-all cursor-pointer ${
                 mode === "design" ? "bg-surface-bright text-on-surface shadow-md" : "text-on-surface-variant hover:text-on-surface"
               }`}
               onClick={() => onMode("design")}
@@ -87,7 +87,7 @@ export function TopologyTab({ bindings, builds, console, environment, error, fac
             </button>
             <button
               aria-pressed={mode === "live"}
-              className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+              className={`px-4 py-2 min-h-[40px] min-w-[40px] rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
                 mode === "live" ? "bg-surface-bright text-on-surface shadow-md" : "text-on-surface-variant hover:text-on-surface"
               }`}
               onClick={() => onMode("live")}
@@ -135,7 +135,11 @@ export function TopologyTab({ bindings, builds, console, environment, error, fac
 
 function TopologyOnboarding({ action, state }: { action: (event: React.MouseEvent<HTMLButtonElement>) => void; state: TopologyOnboardingState }) {
   return (
-    <section className="p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 flex flex-col justify-between space-y-4 shadow-sm" aria-labelledby="topology-next-step">
+    <section
+      aria-labelledby="topology-next-step"
+      className="topologyOnboarding p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 flex flex-col justify-between space-y-4 shadow-sm"
+      data-state={state.kind}
+    >
       <div>
         <p className="text-[11px] font-code-md text-primary uppercase font-bold tracking-wider">Guided Setup</p>
         <h3 className="font-headline-md text-base font-bold text-on-surface mt-1" id="topology-next-step">{state.title}</h3>
@@ -178,7 +182,7 @@ function ServerLifecycleCard({ console, lifecycle }: { console: ConsoleControlle
   ];
   const reportedFacts = facts.filter((fact): fact is [string, string] => fact !== null);
   return (
-    <section className="p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 space-y-4 shadow-sm" aria-labelledby="server-lifecycle-heading">
+    <section className="serverLifecycle p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 space-y-4 shadow-sm" aria-labelledby="server-lifecycle-heading">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-[11px] font-code-md text-primary uppercase font-bold tracking-wider">Server Status</p>
@@ -200,12 +204,44 @@ function ServerLifecycleCard({ console, lifecycle }: { console: ConsoleControlle
       ) : (
         <p className="text-xs text-on-surface-variant">No server identity or bootstrap facts reported.</p>
       )}
-      {session?.id === console.state.bootstrapCommandSessionID && console.state.bootstrapCommand ? <BootstrapCommand command={console.state.bootstrapCommand} /> : null}
+      {session?.id === console.state.bootstrapCommandSessionID && console.state.bootstrapCommand ? (
+        <BootstrapCommand command={console.state.bootstrapCommand} />
+      ) : session && session.status === "waiting" ? (
+        <p className="text-xs text-on-surface-variant bg-surface-container/40 p-3 rounded-xl border border-outline-variant/10" role="status">
+          This browser only shows the command when it is issued. Waiting for server to report progress.
+        </p>
+      ) : null}
       {recent.length ? (
-        <div className="pt-2 border-t border-outline-variant/10 space-y-2">
-          <span className="text-[11px] font-label-sm text-on-surface-variant uppercase">Recent Events</span>
-          <EventTimeline events={recent} />
-        </div>
+        <>
+          <div className="flex items-center justify-between text-[11px] font-label-sm text-on-surface-variant pt-2 border-t border-outline-variant/10">
+            <span className="uppercase font-semibold">Recent Events</span>
+            <span>{events.length} total</span>
+          </div>
+          <ol className="eventTimeline space-y-2 text-xs">
+            {recent.map((event) => (
+              <li key={event.id} className="flex items-start gap-2 bg-surface-container/40 p-2 rounded-lg border border-outline-variant/10">
+                <span className="w-2 h-2 rounded-full bg-primary mt-1 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <b className="text-on-surface font-medium block truncate">{event.step}</b>
+                  <p className="text-on-surface-variant text-[11px] truncate">{event.message_redacted}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+          {events.length > 5 ? (
+            <button
+              className="text-primary hover:underline text-[11px] font-medium cursor-pointer block"
+              onClick={() => {
+                if (session) {
+                  console.navigate({ view: "infrastructure", tab: "bootstrap", session: session.id });
+                }
+              }}
+              type="button"
+            >
+              Open full bootstrap details
+            </button>
+          ) : null}
+        </>
       ) : null}
     </section>
   );
@@ -213,7 +249,7 @@ function ServerLifecycleCard({ console, lifecycle }: { console: ConsoleControlle
 
 function EventTimeline({ events }: { events: TimelineEvent[] }) {
   return (
-    <ol className="space-y-2 text-xs">
+    <ol className="eventTimeline space-y-2 text-xs">
       {events.map((event) => (
         <li key={event.id} className="flex items-start gap-2 bg-surface-container/40 p-2 rounded-lg border border-outline-variant/10">
           <span className="w-2 h-2 rounded-full bg-primary mt-1 shrink-0" />
@@ -247,9 +283,9 @@ function LiveTopology({ console, environment, facts, lifecycle, onConnectServer,
           <h3 className="font-headline-md text-base font-bold text-on-surface mt-0.5" id="live-overview-heading">Runtime Environment</h3>
           <p className="font-body-md text-xs text-on-surface-variant mt-1">{runtimes.length} runtimes • {facts.nodes.filter((node) => runtimes.some((runtime) => runtime.id === node.runtime_id)).length} nodes connected</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="liveOverviewStatus flex items-center gap-3">
           <StatusBadge label={lifecycle.status} value={lifecycle.status === "Ready" ? "healthy" : "unknown"} />
-          <Button onClick={act} size="sm" variant="primary">
+          <Button className="min-h-[40px] min-w-[40px]" onClick={act} size="sm" variant="primary">
             {lifecycleAction}
           </Button>
         </div>
@@ -257,7 +293,9 @@ function LiveTopology({ console, environment, facts, lifecycle, onConnectServer,
 
       <LiveTopologyCanvas console={console} environment={environment} facts={facts} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <ServerLifecycleCard console={console} lifecycle={lifecycle} />
+
+      <section aria-label="Connections and exposure" className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 space-y-3 shadow-sm">
           <h4 className="font-headline-md text-sm font-bold text-on-surface">Service Connections</h4>
           {connections.length ? (
@@ -289,7 +327,7 @@ function LiveTopology({ console, environment, facts, lifecycle, onConnectServer,
             <p className="text-xs text-on-surface-variant">No public exposures configured.</p>
           )}
         </div>
-      </div>
+      </section>
 
       <LiveDeploymentBoard console={console} environmentID={environment.id} environmentName={environment.name} />
     </div>
@@ -384,7 +422,7 @@ export function BootstrapDialog({ console, onClose, onCreated }: { console: Cons
         <button
           aria-label="Close connect server dialog"
           autoFocus
-          className="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors cursor-pointer"
+          className="p-2 min-h-[40px] min-w-[40px] flex items-center justify-center text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors cursor-pointer"
           onClick={onClose}
           type="button"
         >
@@ -409,22 +447,22 @@ export function BootstrapDialog({ console, onClose, onCreated }: { console: Cons
 
       <form className="space-y-4" onSubmit={(event) => { void console.actions.addServer(event, onCreated); onClose(); }}>
         <div className="space-y-1.5">
-          <label className="text-xs font-label-sm text-on-surface-variant block">Server Role</label>
-          <select className="field" defaultValue="first_server" name="role" required>
+          <label className="text-xs font-label-sm text-on-surface-variant block">Role</label>
+          <select aria-label="Role" className="field min-h-[40px]" defaultValue="first_server" name="role" required>
             <option value="first_server">First server</option>
             <option value="worker">Worker</option>
           </select>
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-xs font-label-sm text-on-surface-variant block">Server IP or Hostname</label>
-          <input autoComplete="off" className="field" name="public_host" placeholder="203.0.113.10" required spellCheck={false} />
+          <label className="text-xs font-label-sm text-on-surface-variant block">Server IP or hostname</label>
+          <input aria-label="Server IP or hostname" autoComplete="off" className="field min-h-[40px]" name="public_host" placeholder="203.0.113.10" required spellCheck={false} />
         </div>
 
         <fieldset className="space-y-3 bg-surface-container/60 p-4 rounded-xl border border-outline-variant/15">
           <legend className="text-xs font-label-sm font-bold text-on-surface uppercase tracking-wider px-1">Bootstrap Method</legend>
           <label className="flex items-start gap-3 p-3 bg-surface-container-high rounded-xl border border-outline-variant/20 cursor-pointer">
-            <input checked={method === "command"} className="mt-1" name="auth_method" onChange={() => setMethod("command")} type="radio" value="command" />
+            <input aria-label="Run bootstrap command" checked={method === "command"} className="mt-1" name="auth_method" onChange={() => setMethod("command")} type="radio" value="command" />
             <div>
               <strong className="text-xs text-on-surface block font-semibold">Run bootstrap command</strong>
               <small className="text-[11px] text-on-surface-variant block mt-0.5">Recommended. Scoped one-time execution on the server.</small>
@@ -432,17 +470,17 @@ export function BootstrapDialog({ console, onClose, onCreated }: { console: Cons
           </label>
 
           <details className="text-xs text-on-surface-variant space-y-3 pt-2">
-            <summary className="cursor-pointer font-medium hover:text-on-surface">Advanced: Bootstrap over SSH</summary>
+            <summary className="cursor-pointer font-medium hover:text-on-surface min-h-[40px] min-w-[40px] flex items-center">Advanced: Bootstrap over SSH</summary>
             <div className="space-y-3 pt-2">
               <label className="flex items-start gap-3 p-3 bg-surface-container-high rounded-xl border border-outline-variant/20 cursor-pointer">
-                <input checked={method === "password"} className="mt-1" name="auth_method" onChange={() => setMethod("password")} type="radio" value="password" />
+                <input aria-label="SSH password" checked={method === "password"} className="mt-1" name="auth_method" onChange={() => setMethod("password")} type="radio" value="password" />
                 <div>
                   <strong className="text-xs text-on-surface block font-semibold">SSH Password</strong>
                   <small className="text-[11px] text-on-surface-variant block mt-0.5">Requested again only after mutation review.</small>
                 </div>
               </label>
               <label className="flex items-start gap-3 p-3 bg-surface-container-high rounded-xl border border-outline-variant/20 cursor-pointer">
-                <input checked={method === "private_key"} className="mt-1" name="auth_method" onChange={() => setMethod("private_key")} type="radio" value="private_key" />
+                <input aria-label="SSH private key" checked={method === "private_key"} className="mt-1" name="auth_method" onChange={() => setMethod("private_key")} type="radio" value="private_key" />
                 <div>
                   <strong className="text-xs text-on-surface block font-semibold">SSH Private Key</strong>
                   <small className="text-[11px] text-on-surface-variant block mt-0.5">Uses verified known_hosts workflow.</small>
@@ -451,12 +489,12 @@ export function BootstrapDialog({ console, onClose, onCreated }: { console: Cons
               {method !== "command" ? (
                 <div className="grid grid-cols-2 gap-3 pt-2">
                   <div className="space-y-1">
-                    <label className="text-[11px] font-label-sm text-on-surface-variant block">SSH Port</label>
-                    <input className="field" defaultValue="22" inputMode="numeric" max="65535" min="1" name="ssh_port" required type="number" />
+                    <label className="text-[11px] font-label-sm text-on-surface-variant block">SSH port</label>
+                    <input aria-label="SSH port" className="field" defaultValue="22" inputMode="numeric" max="65535" min="1" name="ssh_port" required type="number" />
                   </div>
                   <div className="space-y-1">
-                    <label className="text-[11px] font-label-sm text-on-surface-variant block">SSH Username</label>
-                    <input autoComplete="username" className="field" defaultValue="root" name="ssh_username" required spellCheck={false} />
+                    <label className="text-[11px] font-label-sm text-on-surface-variant block">SSH username</label>
+                    <input aria-label="SSH username" autoComplete="username" className="field" defaultValue="root" name="ssh_username" required spellCheck={false} />
                   </div>
                 </div>
               ) : null}
@@ -469,10 +507,10 @@ export function BootstrapDialog({ console, onClose, onCreated }: { console: Cons
         </p>
 
         <div className="flex items-center justify-end gap-3 pt-3 border-t border-outline-variant/20">
-          <Button onClick={onClose} size="sm" type="button" variant="outline">
+          <Button className="min-h-[40px] min-w-[40px]" onClick={onClose} size="sm" type="button" variant="outline">
             Cancel
           </Button>
-          <Button size="sm" type="submit" variant="primary">
+          <Button className="min-h-[40px] min-w-[40px]" size="sm" type="submit" variant="primary">
             Generate bootstrap command
           </Button>
         </div>

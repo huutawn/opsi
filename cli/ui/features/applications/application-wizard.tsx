@@ -306,7 +306,7 @@ spec:
         </div>
         <button
           aria-label="Close application wizard"
-          className="text-on-surface-variant hover:text-on-surface p-2 rounded-lg cursor-pointer transition-colors"
+          className="text-on-surface-variant hover:text-on-surface p-2 rounded-lg cursor-pointer transition-colors min-w-[40px] min-h-[40px] inline-flex items-center justify-center"
           onClick={onClose}
           type="button"
         >

@@ -78,14 +78,14 @@ export function RepositoryCD({ console }: { console: ConsoleController }) {
   function edit(service: RepositoryCDService) {
     setDraft({
       key: service.key,
-      context: service.build.context,
-      dockerfile: service.build.dockerfile,
-      platform: service.build.platform,
-      watchPaths: service.watch_paths.join(", "),
-      sharedPaths: service.shared_paths.join(", "),
-      dependencies: service.dependencies.join(", "),
-      branch: service.deploy.production.branches[0] ?? "main",
-      preview: service.deploy.preview.enabled,
+      context: service.build?.context ?? ".",
+      dockerfile: service.build?.dockerfile ?? "Dockerfile",
+      platform: service.build?.platform ?? "linux/amd64",
+      watchPaths: (service.watch_paths ?? []).join(", "),
+      sharedPaths: (service.shared_paths ?? []).join(", "),
+      dependencies: (service.dependencies ?? []).join(", "),
+      branch: service.deploy?.production?.branches?.[0] ?? "main",
+      preview: Boolean(service.deploy?.preview?.enabled),
     });
     setPreview(null);
   }
@@ -153,13 +153,13 @@ export function RepositoryCD({ console }: { console: ConsoleController }) {
 
       <Surface title="Monorepo services">
         <p className="muted">Config hash: {configHash || "not available"}. This file contains repository intent only—no project, Cloud, node, runtime, or credential identity.</p>
-        {config?.services.length ? (
+        {config?.services?.length ? (
           <div className="tableWrap"><table><thead><tr><th>Service</th><th>Build</th><th>Watch / shared</th><th>Dependencies</th><th /></tr></thead><tbody>
             {config.services.map((service) => <tr key={service.key}>
-              <td><b>{service.key}</b><br /><StatusBadge value={service.deploy.preview.enabled ? "preview enabled" : "production"} /></td>
-              <td>{service.build.context}<br /><span className="muted">{service.build.dockerfile} · {service.build.platform}</span></td>
-              <td>{[...service.watch_paths, ...service.shared_paths].join(", ") || "context only"}</td>
-              <td>{service.dependencies.join(", ") || "none"}</td>
+              <td><b>{service.key}</b><br /><StatusBadge value={service.deploy?.preview?.enabled ? "preview enabled" : "production"} /></td>
+              <td>{service.build?.context}<br /><span className="muted">{service.build?.dockerfile} · {service.build?.platform}</span></td>
+              <td>{[...(service.watch_paths ?? []), ...(service.shared_paths ?? [])].join(", ") || "context only"}</td>
+              <td>{(service.dependencies ?? []).join(", ") || "none"}</td>
               <td><button type="button" onClick={() => edit(service)}>Edit</button></td>
             </tr>)}
           </tbody></table></div>

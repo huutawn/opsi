@@ -166,6 +166,74 @@ export function HealthTab({ console, model }: { console: ConsoleController; mode
           )}
         </div>
       </div>
+
+      {support ? (
+        <OperationalEvidence support={support} sourceStates={model.data.sources} />
+      ) : (
+        <details className="evidenceDisclosure bg-surface-container-low border border-outline-variant/20 rounded-2xl p-4 text-xs text-on-surface-variant">
+          <summary className="cursor-pointer font-semibold text-on-surface">Operational evidence</summary>
+          <p className="mt-2">Support projection unavailable. SLO signals, gates, break-glass policy, request IDs, and runbooks cannot be claimed.</p>
+        </details>
+      )}
     </div>
+  );
+}
+
+function OperationalEvidence({ support, sourceStates }: { support: NonNullable<ConsoleController["state"]["support"]>; sourceStates: Record<string, SourceState> }) {
+  return (
+    <details className="evidenceDisclosure bg-surface-container-low border border-outline-variant/20 rounded-2xl p-4 text-xs text-on-surface-variant space-y-4">
+      <summary className="cursor-pointer font-semibold text-on-surface">Operational evidence</summary>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3">
+        <section className="space-y-2">
+          <h4 className="font-bold text-on-surface">SLO signals</h4>
+          {support.signals.length ? (
+            <ul className="space-y-1">
+              {support.signals.map((signal) => (
+                <li key={signal.name} className="flex items-center justify-between">
+                  <b>{signal.name}</b>
+                  <span>{signal.status} · {signal.value} / {signal.target}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-on-surface-variant/70">Not reported.</p>
+          )}
+        </section>
+        <section className="space-y-2">
+          <h4 className="font-bold text-on-surface">Production gates & break-glass</h4>
+          <ul className="space-y-1">
+            {support.production_gates.map((gate) => (
+              <li key={gate.name} className="flex items-center gap-2">
+                <StatusBadge value={gate.passed ? "healthy" : "degraded"} />
+                <span>{gate.name} · {gate.detail}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="text-[11px] text-on-surface-variant/70 pt-1">Break-glass approval: {support.break_glass_policy.approval_required ? "required" : "not reported"}; audited: {support.break_glass_policy.audited ? "yes" : "no"}.</p>
+        </section>
+        <section className="space-y-2">
+          <h4 className="font-bold text-on-surface">Runbooks & correlation</h4>
+          {support.runbooks.length ? (
+            <ul className="space-y-1">
+              {support.runbooks.map((runbook) => (
+                <li key={runbook.id} className="flex items-center justify-between">
+                  <b>{runbook.title}</b>
+                  <span>{runbook.escalation_path}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-on-surface-variant/70">No runbooks reported.</p>
+          )}
+          <p className="text-[11px] text-on-surface-variant/70">Request IDs: {support.recent_request_ids?.join(", ") || "Not reported"}</p>
+        </section>
+        <section className="space-y-2">
+          <h4 className="font-bold text-on-surface">Source states</h4>
+          {Object.entries(sourceStates).map(([name, state]) => (
+            <p key={name}><b>{name}</b>: {state}</p>
+          ))}
+        </section>
+      </div>
+    </details>
   );
 }

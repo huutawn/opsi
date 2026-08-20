@@ -19,6 +19,14 @@ import type {
   ServiceConfigurationValidation,
   ServiceConfigurationDiff,
   ServiceConfigurationApplyResult,
+  ApplicationDependency,
+  DependencyReviewResult,
+  PreflightCheck,
+  PreflightResult,
+  VerificationRun,
+  VerifyDependencyRequest,
+  VerifyDependencyResponse,
+  SourceRiskReport,
   SecretResult,
   IncidentResult,
   IncidentListResult,
@@ -71,6 +79,9 @@ export type ResolvedDeploymentRequest = {
   expected_configuration_state_hash?: string;
   expected_deployment_policy_revision?: number;
   expected_deployment_policy_hash?: string;
+  expected_preflight_hash?: string;
+  warning_acknowledgements?: string[];
+  deployment_batch?: string[];
   workload?: WorkloadSpec;
 };
 
@@ -301,6 +312,51 @@ export class LocalClient {
   serviceConfigurationDiff(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationDiff>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/diff`, { method: "POST", body: JSON.stringify(draft) }); }
   serviceConfigurationApply(projectID: string, serviceID: string, body: { draft: ServiceConfigurationDraft; expected_revision: number; expected_state_hash: string }, idempotencyKey: string) { return this.call<ServiceConfigurationApplyResult>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/apply`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
 
+  dependenciesReview(projectID: string, serviceID: string) {
+    return this.call<DependencyReviewResult>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/dependencies/review`, {
+      method: "POST",
+      body: "{}",
+    });
+  }
+
+  dependenciesApply(projectID: string, serviceID: string, idempotencyKey: string) {
+    return this.call<{ status: string; realized: number }>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/dependencies/apply`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: "{}",
+    });
+  }
+
+  sourceRiskReport(projectID: string, applicationID: string) {
+    return this.call<SourceRiskReport>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/source-risk-report`);
+  }
+
+  sourceRiskReportByID(projectID: string, reportID: string) {
+    return this.call<SourceRiskReport>(`/api/local/projects/${projectID}/source-risk-reports/${encodeURIComponent(reportID)}`);
+  }
+
+  verifyDependency(projectID: string, body: VerifyDependencyRequest, applicationID?: string, environmentID?: string, idempotencyKey?: string) {
+    const query = new URLSearchParams();
+    if (applicationID) query.set("application_id", applicationID);
+    if (environmentID) query.set("environment_id", environmentID);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return this.call<VerifyDependencyResponse>(`/api/local/projects/${projectID}/dependencies/verify${suffix}`, {
+      method: "POST",
+      write: true,
+      idempotencyKey: idempotencyKey || crypto.randomUUID(),
+      body: JSON.stringify(body),
+    });
+  }
+
+  dependencyVerification(projectID: string, dependencyLogicalName: string, applicationID?: string, environmentID?: string) {
+    const query = new URLSearchParams();
+    if (applicationID) query.set("application_id", applicationID);
+    if (environmentID) query.set("environment_id", environmentID);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return this.call<VerifyDependencyResponse>(`/api/local/projects/${projectID}/dependencies/${encodeURIComponent(dependencyLogicalName)}/verification${suffix}`);
+  }
+
   buildRecords(projectID: string, filters: { serviceKey?: string; repositoryID?: string; sha?: string; status?: string; cursor?: string } = {}) {
     const query = new URLSearchParams({ limit: "50" });
     if (filters.serviceKey) query.set("service_key", filters.serviceKey);
@@ -430,6 +486,13 @@ export class LocalClient {
 
   previewRepositoryPlan(body: { event: RepositoryCDPlan["event"]; base: string; head: string }) {
     return this.call<RepositoryCDPlan>("/api/local/repository/plan/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  deploymentPreflight(projectID: string, body: ResolvedDeploymentRequest) {
+    return this.call<PreflightResult>(`/api/local/projects/${projectID}/deployments/preflight`, {
       method: "POST",
       body: JSON.stringify(body),
     });

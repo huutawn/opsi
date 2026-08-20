@@ -7,11 +7,17 @@ import { BuildJobFacts, BuildRecordFacts, Fact } from "@/features/applications/b
 import type { ConsoleController } from "@/features/console/types";
 import { useServicesData } from "@/features/services/data";
 import { acceptedDigest, applicationFacts, buildState, deploymentState, exactSourceSHA, placementLabel, type ApplicationFacts } from "@/features/services/model";
-import type { ServiceRecord } from "@/lib/contracts/registry";
+import { DependencyDialog } from "@/features/dependencies/dependency-dialog";
+import { RealizationReviewDialog } from "@/features/dependencies/realization-review-panel";
+import { DependencyVerificationPanel } from "@/features/dependencies/verification-panel";
+import { SourceRiskPanel } from "@/features/dependencies/source-risk-panel";
+import { formatSymbolicSource } from "@/features/dependencies/types";
+import { LocalClient } from "@/lib/api/local-client";
+import type { ApplicationDependency, ServiceConfigurationDraft, ServiceRecord } from "@/lib/contracts/registry";
 import { currentEnvironment } from "@/lib/presentation/infrastructure/model";
 import { terminalBuild } from "@/lib/presentation/build";
 
-type DetailTab = "overview" | "source" | "builds" | "runtime";
+type DetailTab = "overview" | "dependencies" | "source" | "builds" | "runtime";
 
 export function ServicesView({ console }: { console: ConsoleController }) {
   const data = useServicesData(console);
@@ -21,7 +27,12 @@ export function ServicesView({ console }: { console: ConsoleController }) {
   const [placement, setPlacement] = useState("all");
   const [build, setBuild] = useState("all");
   const [deployment, setDeployment] = useState("all");
-  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  const [detailTab, setDetailTab] = useState<DetailTab>(() => (console.route.tab as DetailTab) || "overview");
+  useEffect(() => {
+    if (console.route.tab && ["overview", "dependencies", "source", "builds", "runtime"].includes(console.route.tab)) {
+      setDetailTab(console.route.tab as DetailTab);
+    }
+  }, [console.route.tab]);
   const environment = currentEnvironment(data.placement, console.route.environment ?? "");
 
   const applications = useMemo(
@@ -73,7 +84,9 @@ export function ServicesView({ console }: { console: ConsoleController }) {
     );
   });
 
-  const selected = applications.find((facts) => facts.service.id === console.state.serviceDetail?.id);
+  const selected = applications.find(
+    (facts) => facts.service.id === (console.state.serviceDetail?.id || console.route.service)
+  );
 
   function openDetail(facts: ApplicationFacts, tab: DetailTab = "overview") {
     setDetailTab(tab);
@@ -121,7 +134,7 @@ export function ServicesView({ console }: { console: ConsoleController }) {
           <input
             aria-label="Search Applications"
             autoComplete="off"
-            className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg py-2.5 pl-11 pr-4 text-sm font-body-md text-on-surface focus:outline-none focus:border-primary/50 transition-colors placeholder:text-on-surface-variant/50"
+            className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg py-2.5 pl-11 pr-4 text-sm font-body-md text-on-surface focus:outline-none focus:border-primary/50 transition-colors placeholder:text-on-surface-variant/50 min-h-[40px]"
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search services, repositories, SHA..."
             type="search"
@@ -133,7 +146,7 @@ export function ServicesView({ console }: { console: ConsoleController }) {
           <div className="relative">
             <select
               aria-label="Placement"
-              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
+              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer min-h-[40px]"
               onChange={(event) => setPlacement(event.target.value)}
               value={placement}
             >
@@ -147,7 +160,7 @@ export function ServicesView({ console }: { console: ConsoleController }) {
           <div className="relative">
             <select
               aria-label="Build state"
-              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
+              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer min-h-[40px]"
               onChange={(event) => setBuild(event.target.value)}
               value={build}
             >
@@ -163,7 +176,7 @@ export function ServicesView({ console }: { console: ConsoleController }) {
           <div className="relative">
             <select
               aria-label="Deployment"
-              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer"
+              className="bg-surface-container-highest border border-outline-variant/30 text-on-surface text-xs font-medium rounded-lg py-2.5 pl-3 pr-8 appearance-none focus:outline-none focus:border-primary/50 cursor-pointer min-h-[40px]"
               onChange={(event) => setDeployment(event.target.value)}
               value={deployment}
             >
@@ -177,10 +190,10 @@ export function ServicesView({ console }: { console: ConsoleController }) {
           </div>
 
           <div className="hidden sm:flex bg-surface-container-highest border border-outline-variant/30 rounded-lg p-1 gap-1">
-            <button aria-label="Grid view" className="p-1.5 bg-surface text-on-surface rounded shadow-sm cursor-pointer" type="button">
+            <button aria-label="Grid view" className="p-2 min-h-[40px] min-w-[40px] flex items-center justify-center bg-surface text-on-surface rounded shadow-sm cursor-pointer" type="button">
               <Icon name="grid_view" className="text-[18px]" />
             </button>
-            <button aria-label="Table view" className="p-1.5 text-on-surface-variant hover:text-on-surface rounded transition-colors cursor-pointer" type="button">
+            <button aria-label="Table view" className="p-2 min-h-[40px] min-w-[40px] flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded transition-colors cursor-pointer" type="button">
               <Icon name="table_rows" className="text-[18px]" />
             </button>
           </div>
@@ -342,17 +355,51 @@ function ServiceCard({
 
           <div className="flex flex-col min-w-0">
             <span className="font-label-sm text-[11px] text-on-surface-variant flex items-center gap-1 uppercase tracking-wider">
-              <Icon name="commit" className="text-[14px] text-on-surface-variant" /> Revision
+              <Icon name="commit" className="text-[14px] text-on-surface-variant" /> Source & Revision
             </span>
-            <div className="flex items-center gap-1.5 mt-1 truncate">
-              <span className="font-code-md text-[11px] bg-surface px-1.5 py-0.5 rounded text-primary font-medium" title={sha || "No SHA"}>
-                {sha ? sha.slice(0, 7) : "pending"}
-              </span>
-              <span className="font-code-md text-on-surface-variant text-[11px] truncate">
-                {facts.binding?.selected_ref || facts.service.branch || "main"}
-              </span>
+            <div className="flex flex-col gap-0.5 mt-1 truncate">
+              {facts.repository?.full_name || facts.service.repo_url ? (
+                <span className="font-code-md text-on-surface-variant text-[11px] truncate">
+                  {facts.repository?.full_name || facts.service.repo_url}
+                </span>
+              ) : null}
+              <div className="flex items-center gap-1.5 truncate">
+                <span className="font-code-md text-[11px] bg-surface px-1.5 py-0.5 rounded text-primary font-medium truncate" title={sha || "No SHA"}>
+                  {sha || "pending"}
+                </span>
+                <span className="font-code-md text-on-surface-variant text-[11px] truncate">
+                  {facts.binding?.selected_ref || facts.service.branch || "main"}
+                </span>
+              </div>
             </div>
           </div>
+        </div>
+
+        {acceptedDigest(facts) || facts.latestDeployment?.current_digest ? (
+          <div className="text-[11px] font-code-md text-on-surface-variant truncate">
+            <span>{acceptedDigest(facts) || facts.latestDeployment?.current_digest}</span>
+          </div>
+        ) : null}
+
+        {/* Build & Deployment facts */}
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs bg-surface-container/30 px-3 py-2 rounded-lg border border-outline-variant/10">
+          <div className="flex items-center gap-1.5">
+            <span className="font-label-sm uppercase tracking-wider text-[10px] text-on-surface-variant">Build</span>
+            <StatusBadge label={label(buildStatus)} value={buildStatus === "succeeded" ? "ready" : buildStatus} />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="font-label-sm uppercase tracking-wider text-[10px] text-on-surface-variant">Deployment</span>
+            <StatusBadge label={label(deployStatus)} value={deployStatus === "succeeded" ? "ready" : deployStatus} />
+          </div>
+          {facts.latestExposure?.exposure_spec?.hostname ? (
+            <div className="font-code-md text-[11px] text-primary truncate w-full">
+              {facts.latestExposure.exposure_spec.hostname}{facts.latestExposure.exposure_spec.path || "/"}
+            </div>
+          ) : facts.latestDeployment?.exposure_spec?.hostname ? (
+            <div className="font-code-md text-[11px] text-primary truncate w-full">
+              {facts.latestDeployment.exposure_spec.hostname}{facts.latestDeployment.exposure_spec.path || "/"}
+            </div>
+          ) : null}
         </div>
 
         {/* Mini Performance Graph / Wave */}
@@ -402,6 +449,14 @@ function ServiceCard({
             <span className="truncate">Rollout failure detected. Check runtime logs.</span>
           </div>
         ) : null}
+
+        {/* Missing source binding notice */}
+        {!facts.binding ? (
+          <div className="bg-status-warning/10 border border-status-warning/30 p-2.5 rounded-lg flex items-center gap-2 text-xs text-status-warning">
+            <Icon name="warning" className="text-[16px] shrink-0" />
+            <span className="truncate">Source binding incomplete</span>
+          </div>
+        ) : null}
       </div>
 
       {/* Card Footer Actions */}
@@ -446,6 +501,10 @@ function ServiceDetailDrawer({
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState(initialTab);
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
 
   useEffect(() => {
     const element = dialog.current;
@@ -505,8 +564,9 @@ function ServiceDetailDrawer({
 
       {/* Drawer Tabs */}
       <div role="tablist" className="flex items-center border-b border-outline-variant/20 bg-surface-container px-6 gap-6">
-        {(["overview", "source", "builds", "runtime"] as DetailTab[]).map((item) => {
+        {(["overview", "dependencies", "source", "builds", "runtime"] as DetailTab[]).map((item) => {
           const active = tab === item;
+          const depCount = facts.service.configuration?.dependencies?.length ?? 0;
           return (
             <button
               aria-selected={active}
@@ -520,7 +580,11 @@ function ServiceDetailDrawer({
               role="tab"
               type="button"
             >
-              {item === "runtime" ? "Runtime / Deployment" : label(item)}
+              {item === "runtime"
+                ? "Runtime / Deployment"
+                : item === "dependencies"
+                ? `Dependencies (${depCount})`
+                : label(item)}
             </button>
           );
         })}
@@ -530,8 +594,10 @@ function ServiceDetailDrawer({
       <div className="flex-1 p-6 overflow-y-auto space-y-6" role="tabpanel">
         {tab === "overview" ? (
           <OverviewTab console={console} facts={facts} />
+        ) : tab === "dependencies" ? (
+          <DependenciesTab console={console} facts={facts} />
         ) : tab === "source" ? (
-          <SourceTab facts={facts} onResume={onResume} />
+          <SourceTab console={console} facts={facts} onResume={onResume} />
         ) : tab === "builds" ? (
           <BuildsTab facts={facts} onBuild={onBuild} onResume={onResume} />
         ) : (
@@ -625,7 +691,228 @@ function OverviewTab({ console, facts }: { console: ConsoleController; facts: Ap
   );
 }
 
-function SourceTab({ facts, onResume }: { facts: ApplicationFacts; onResume: () => void }) {
+function DependenciesTab({
+  console,
+  facts,
+}: {
+  console: ConsoleController;
+  facts: ApplicationFacts;
+}) {
+  const service = facts.service;
+  const dependencies = service.configuration?.dependencies ?? [];
+  const projectID = console.state.project?.id || "proj-1";
+  const [depModal, setDepModal] = useState<{
+    consumer: ServiceRecord;
+    existingDependency?: ApplicationDependency;
+  } | null>(null);
+  const [realizationModal, setRealizationModal] = useState<ServiceRecord | null>(null);
+
+  const boundLogicalNames = new Set(
+    (service.configuration?.resource_bindings ?? [])
+      .filter((b) => Boolean(b.binding_id))
+      .map((b) => b.logical_name)
+  );
+
+  async function handleRemove(depName: string) {
+    const client = new LocalClient();
+    const current = service.configuration || {
+      schema_version: "opsi.service_configuration/v1",
+      dependencies: [],
+    };
+    const nextDraft: ServiceConfigurationDraft = {
+      ...current,
+      dependencies: (current.dependencies ?? []).filter((d) => d.logical_name !== depName),
+    };
+    try {
+      const preview = await client.serviceConfigurationPreview(projectID, service.id, nextDraft);
+      await client.serviceConfigurationApply(
+        projectID,
+        service.id,
+        {
+          draft: preview.configuration,
+          expected_revision: preview.current_revision,
+          expected_state_hash: preview.current_state_hash,
+        },
+        crypto.randomUUID()
+      );
+      await console.actions.load();
+    } catch (_cause) {
+      // ignore
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="font-headline-md text-sm font-semibold text-on-surface">
+            Application Dependencies ({dependencies.length})
+          </h3>
+          <p className="text-xs text-on-surface-variant mt-0.5">
+            Explicit dependency contracts for databases, caches, and internal HTTP services.
+          </p>
+        </div>
+        <Button
+          onClick={() => setDepModal({ consumer: service })}
+          size="sm"
+          variant="primary"
+        >
+          <Icon name="add" className="text-[16px]" />
+          Add Dependency
+        </Button>
+      </div>
+
+      {dependencies.length ? (
+        <div className="space-y-4">
+          {dependencies.map((dep) => {
+            const isManaged = dep.target_kind === "managed_service";
+            const isBound = isManaged && boundLogicalNames.has(dep.logical_name);
+
+            return (
+              <section
+                key={dep.logical_name}
+                className="bg-surface-container rounded-xl p-5 border border-outline-variant/20 space-y-4"
+              >
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-headline-md text-base font-bold text-on-surface">
+                        {dep.logical_name}
+                      </h4>
+                      <StatusBadge
+                        label={isManaged ? (isBound ? "Realized" : "Needs setup") : "Ready"}
+                        value={isManaged && !isBound ? "in_progress" : "healthy"}
+                      />
+                    </div>
+                    <span className="text-xs text-on-surface-variant font-code-md block mt-0.5">
+                      Target: {dep.target_identity} ({dep.protocol}) · {dep.injection_phase} phase · {dep.required ? "Required" : "Optional"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      onClick={() => setDepModal({ consumer: service, existingDependency: dep })}
+                      size="sm"
+                      variant="secondary"
+                    >
+                      Edit Contract
+                    </Button>
+                    <Button
+                      onClick={() => void handleRemove(dep.logical_name)}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+
+                {isManaged && !isBound ? (
+                  <div className="p-3 bg-status-warning/10 border border-status-warning/30 rounded-lg text-xs text-status-warning flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Icon name="warning" className="text-[16px] shrink-0" />
+                      <span>Connection setup required. Review realization to generate credentials safely.</span>
+                    </div>
+                    <Button
+                      onClick={() => setRealizationModal(service)}
+                      size="sm"
+                      variant="primary"
+                    >
+                      Review Connection
+                    </Button>
+                  </div>
+                ) : null}
+
+                {dep.injection_mappings && dep.injection_mappings.length > 0 ? (
+                  <div className="space-y-1.5">
+                    <span className="font-label-sm text-[11px] text-on-surface-variant uppercase font-semibold block">
+                      Injected Environment Variables
+                    </span>
+                    <ul className="space-y-1 bg-surface-container-highest p-2.5 rounded-lg font-code-md text-xs">
+                      {dep.injection_mappings.map((m, idx) => (
+                        <li key={idx} className="flex items-center justify-between">
+                          <span className="text-on-surface font-bold">{m.env_name}</span>
+                          <span className="text-on-surface-variant">← {formatSymbolicSource(m.symbolic_source, dep.protocol)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                <DependencyVerificationPanel
+                  applicationID={service.id}
+                  dependency={dep}
+                  deploymentJobID={facts.latestDeployment?.id}
+                  environmentID={facts.assignment?.environment_id}
+                  projectID={projectID}
+                />
+              </section>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="bg-surface-container rounded-xl p-8 border border-outline-variant/20 text-center space-y-3">
+          <Icon name="hub" className="text-[32px] text-on-surface-variant/40 mx-auto" />
+          <h4 className="font-headline-md text-base text-on-surface font-semibold">No Dependencies Declared</h4>
+          <p className="text-xs text-on-surface-variant max-w-md mx-auto">
+            Configure dependency contracts for PostgreSQL databases, Valkey caches, or internal APIs. Environment variables and credentials will be injected securely.
+          </p>
+          <Button
+            onClick={() => setDepModal({ consumer: service })}
+            variant="primary"
+          >
+            Configure Dependency
+          </Button>
+        </div>
+      )}
+
+      {depModal ? (
+        <DependencyDialog
+          consumer={depModal.consumer}
+          existingDependency={depModal.existingDependency}
+          facts={{
+            project_id: projectID,
+            runtimes: [],
+            services: console.state.services.map((s) => ({ id: s.id, project_id: projectID, key: s.name })),
+            agents: [],
+            nodes: [],
+            environments: console.state.foundation.placement?.environments ?? [],
+            resources: console.state.foundation.placement?.resources ?? [],
+          }}
+          onApply={async () => {
+            await console.actions.load();
+            setDepModal(null);
+          }}
+          onClose={() => setDepModal(null)}
+          projectID={projectID}
+        />
+      ) : null}
+
+      {realizationModal ? (
+        <RealizationReviewDialog
+          consumer={realizationModal}
+          onApplied={async () => {
+            await console.actions.load();
+          }}
+          onClose={() => setRealizationModal(null)}
+          projectID={projectID}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function SourceTab({
+  console,
+  facts,
+  onResume,
+}: {
+  console: ConsoleController;
+  facts: ApplicationFacts;
+  onResume: () => void;
+}) {
+  const projectID = console.state.project?.id || "proj-1";
+
   if (!facts.binding) {
     return (
       <div className="bg-surface-container rounded-xl p-8 border border-outline-variant/20 text-center space-y-4">
@@ -673,6 +960,12 @@ function SourceTab({ facts, onResume }: { facts: ApplicationFacts; onResume: () 
           The selected branch is mutable. Only an exact commit SHA identifies a built revision.
         </p>
       </section>
+
+      <SourceRiskPanel
+        applicationID={facts.service.id}
+        currentCommitSHA={exactSourceSHA(facts)}
+        projectID={projectID}
+      />
     </div>
   );
 }
@@ -811,6 +1104,8 @@ function StateCard({ label: name, state }: { label: string; state: string }) {
 }
 
 function label(value: string) {
+  if (value === "not_built") return "Not built yet";
+  if (value === "not_deployed") return "Not deployed";
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 

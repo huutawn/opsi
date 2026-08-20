@@ -262,13 +262,16 @@ function ResourceDetailDrawer({
 
               {resource.type.toLowerCase().includes("postgres") ? (
                 <div className="bg-surface-container/60 p-4 rounded-2xl border border-outline-variant/15 space-y-2 text-xs">
-                  <h3 className="font-headline-md text-sm font-bold text-on-surface">PostgreSQL Safety</h3>
+                  <h3 className="font-headline-md text-sm font-bold text-on-surface">PostgreSQL Safe Runtime Facts</h3>
                   <p className="text-on-surface-variant">
                     Volume Mount: {resource.persistentStorage ? "Mounted persistent volume" : "Ephemeral"}
                   </p>
-                  <p className="text-on-surface-variant text-[11px]">
-                    Credentials Safety: Passwords & connection strings protected; never exposed in Observability.
-                  </p>
+                  <div className="space-y-1">
+                    <strong className="text-on-surface block">Credentials Safety</strong>
+                    <p className="text-on-surface-variant text-[11px]">
+                      Passwords & connection strings protected; never exposed in Observability.
+                    </p>
+                  </div>
                 </div>
               ) : null}
             </div>

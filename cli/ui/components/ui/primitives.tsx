@@ -15,7 +15,7 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 export function Button({ variant = "primary", size = "md", className = "", children, ref, ...props }: ButtonProps) {
-  const sizeClasses = size === "sm" ? "px-3 py-1.5 text-xs" : size === "lg" ? "px-6 py-3 text-base" : "px-4 py-2 text-sm";
+  const sizeClasses = size === "sm" ? "px-3 py-1.5 text-xs min-h-[32px]" : size === "lg" ? "px-6 py-3 text-base min-h-[48px]" : "px-4 py-2.5 text-sm min-h-[40px]";
   let variantClasses = "";
   switch (variant) {
     case "primary":
@@ -67,24 +67,26 @@ export function Textarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   );
 }
 
-export function StatusBadge({ label, value, status, className = "" }: { label?: string; value?: string; status?: "ready" | "healthy" | "failed" | "in_progress" | "degraded" | "unknown"; className?: string }) {
+export function StatusBadge({ label, value, status, className = "" }: { label?: string; value?: string; status?: "ready" | "healthy" | "failed" | "in_progress" | "degraded" | "unknown" | "blocked" | "pending"; className?: string }) {
   const resolved = status ?? value ?? "unknown";
   let colorClass = "bg-status-unknown/20 text-status-unknown";
-  let displayLabel = label ?? "Unknown";
+  const displayLabel = label ?? (resolved === "ready" ? "Ready" : resolved === "healthy" ? "Healthy" : resolved === "failed" ? "Failed" : resolved === "in_progress" ? "In Progress" : resolved === "degraded" ? "Degraded" : resolved);
   switch (resolved) {
     case "ready":
     case "healthy":
-      colorClass = "bg-status-ready/20 text-status-ready"; if (!label) displayLabel = resolved === "ready" ? "Ready" : "Healthy"; break;
+      colorClass = "bg-status-ready/20 text-status-ready"; break;
     case "failed":
-      colorClass = "bg-status-failed/20 text-status-failed"; if (!label) displayLabel = "Failed"; break;
+    case "blocked":
+      colorClass = "bg-status-failed/20 text-status-failed"; break;
     case "in_progress":
-      colorClass = "bg-status-progress/20 text-status-progress"; if (!label) displayLabel = "In Progress"; break;
+      colorClass = "bg-status-progress/20 text-status-progress"; break;
     case "degraded":
-      colorClass = "bg-status-warning/20 text-status-warning"; if (!label) displayLabel = "Degraded"; break;
+      colorClass = "bg-status-warning/20 text-status-warning"; break;
   }
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colorClass} ${className}`}>
-      {displayLabel}
+    <span className={`status ${resolved} inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${colorClass} ${className}`}>
+      <span className={`statusIcon w-1.5 h-1.5 rounded-full ${resolved === "ready" || resolved === "healthy" ? "bg-status-ready" : resolved === "in_progress" ? "bg-status-progress animate-pulse" : resolved === "degraded" ? "bg-status-warning" : resolved === "failed" || resolved === "blocked" ? "bg-status-failed" : "bg-status-unknown"}`} />
+      <span>{displayLabel}</span>
     </span>
   );
 }
@@ -107,7 +109,7 @@ export function Card({ className = "", children, ...props }: HTMLAttributes<HTML
 
 export function PageHeader({ title, description, eyebrow, action, icon }: { title: string; description?: string; eyebrow?: string; action?: ReactNode; icon?: string }) {
   return (
-    <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-8 gap-4">
+    <div className="pageHeader flex flex-col sm:flex-row sm:items-center justify-between pb-8 gap-4">
       <div className="flex items-center gap-4">
         {icon && (
           <div className="p-3 bg-surface-container-high rounded-xl shadow-sm flex items-center justify-center">

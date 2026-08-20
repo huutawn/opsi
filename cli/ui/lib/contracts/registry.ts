@@ -69,11 +69,43 @@ export type ServiceBinding = {
 
 export type PublicRouteIntent = { hostname: string; path: string };
 
+export type ServiceResourceBinding = {
+  logical_name: string;
+  binding_id: string;
+};
+
+export type DependencyInjectionMapping = {
+  env_name: string;
+  symbolic_source: string;
+};
+
+export type DependencyVerificationContract = {
+  type: string; // "consumer_http"
+  path: string; // relative path e.g. "/health/dependencies/database"
+  expected_status: number; // e.g. 200
+};
+
+export type ApplicationDependency = {
+  logical_name: string;
+  target_kind: "managed_service" | "application" | string;
+  target_identity: string;
+  protocol: "postgres" | "redis" | "http" | string;
+  strategy?: "same_origin" | "internal_http" | "public_http" | string;
+  access_context?: "browser" | "server" | string;
+  path?: string;
+  required: boolean;
+  injection_phase: "runtime" | "build" | string;
+  injection_mappings?: DependencyInjectionMapping[];
+  verification_contract?: DependencyVerificationContract;
+};
+
 export type ServiceConfigurationDraft = {
   schema_version?: "opsi.service_configuration/v1";
   environment?: EnvironmentVariable[];
   public_route?: PublicRouteIntent;
   bindings?: ServiceBinding[];
+  resource_bindings?: ServiceResourceBinding[];
+  dependencies?: ApplicationDependency[];
 };
 
 export type ServiceConfiguration = ServiceConfigurationDraft & {
@@ -87,9 +119,39 @@ export type ServiceConfiguration = ServiceConfigurationDraft & {
 export type GeneratedEnvironment = { name: string; value: string; binding: number };
 export type ServiceConfigurationPreview = { configuration: ServiceConfigurationDraft; generated_environment?: GeneratedEnvironment[]; current_revision: number; current_state_hash: string; draft_state_hash: string };
 export type ServiceConfigurationValidation = { valid: boolean; issues?: { code: string; field?: string; message: string }[] };
-export type ServiceConfigurationChange = { kind: "connection" | "generated_environment" | "public_route" | "user_environment"; action: string; name?: string; before?: string; after?: string };
+export type ServiceConfigurationChange = { kind: "connection" | "dependency" | "resource_binding" | "generated_environment" | "public_route" | "user_environment"; action: string; name?: string; before?: string; after?: string };
 export type ServiceConfigurationDiff = { changes: ServiceConfigurationChange[] };
 export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
+
+export type DependencyRealizationProjection = {
+  env_name: string;
+  symbolic_source: string;
+  injection_phase: string;
+  conflict: boolean;
+  conflict_reason?: string;
+};
+
+export type DependencyRealizationPlanItem = {
+  logical_name: string;
+  target_kind: string;
+  target_identity: string;
+  target_display_name?: string;
+  protocol: string;
+  strategy?: string;
+  access_context?: string;
+  required: boolean;
+  injection_phase: string;
+  binding_action: "create" | "reuse" | "noop" | "migration_required" | string;
+  existing_binding_id?: string;
+  projections: DependencyRealizationProjection[];
+  status: string;
+  message?: string;
+};
+
+export type DependencyReviewResult = {
+  dependencies: DependencyRealizationPlanItem[];
+  realized: DependencyRealizationPlanItem[];
+};
 
 export type GitHubInstallation = {
   installation_id: number;
@@ -321,11 +383,12 @@ export type DeploymentJob = {
 	 readiness_evidence_hash?: string;
 	 exposure_spec?: ExposureSpec;
   requested_by?: string;
+  warning_acknowledgements?: string[];
 	 created_at: string;
 	 snapshot?: {
 		project_id: string;
 		image: { repository: string; digest: string; reference: string };
-		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; topology_hash?: string; service_configuration_revision?: number; service_configuration_state_hash?: string; deployment_policy_id: string; deployment_policy_revision: number; deployment_policy_hash?: string; runtime_id: string; node_id: string; agent_id: string };
+		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; topology_hash?: string; service_configuration_revision?: number; service_configuration_state_hash?: string; deployment_policy_id: string; deployment_policy_revision: number; deployment_policy_hash?: string; expected_preflight_hash?: string; runtime_id: string; node_id: string; agent_id: string };
 		workload: WorkloadSpec;
 		spec_hash: string;
 		preview?: PreviewSpec;
@@ -389,6 +452,27 @@ export type WorkloadSpec = {
 	exposure: { mode: "none" | "internal" };
 };
 
+export type PreflightCheck = {
+  id: string;
+  code: string;
+  severity: "PASS" | "WARN" | "BLOCK";
+  scope_kind: string;
+  scope_id: string;
+  dependency_logical_name?: string;
+  target_safe_id?: string;
+  message: string;
+  remediation_code?: string;
+  safe_evidence?: Record<string, string>;
+};
+
+export type PreflightResult = {
+  status: "PASS" | "PASS_WITH_WARNINGS" | "BLOCKED";
+  checks: PreflightCheck[];
+  authority_fingerprint: string;
+  preflight_hash: string;
+  generated_at: string;
+};
+
 export type DeploymentPreview = {
 	schema_version: string;
 	snapshot: NonNullable<DeploymentJob["snapshot"]>;
@@ -397,7 +481,122 @@ export type DeploymentPreview = {
 	eligible: boolean;
 	decision_code: string;
 	message: string;
+	preflight?: PreflightResult;
 	resolved_at: string;
+};
+
+export type ProviderHealthLayer = {
+  status: "HEALTHY" | "UNHEALTHY" | "PENDING" | string;
+  provider_kind: string;
+  provider_id: string;
+  safe_evidence?: Record<string, string>;
+  failure_code?: string;
+  message?: string;
+};
+
+export type ContractResolutionLayer = {
+  status: "RESOLVED" | "INVALID" | string;
+  binding_id?: string;
+  protocol?: string;
+  injection_complete: boolean;
+  failure_code?: string;
+  message?: string;
+};
+
+export type ConnectionLayer = {
+  status: "VERIFIED" | "FAILED" | "NOT_SUPPORTED" | "NOT_CONFIGURED" | string;
+  protocol?: string;
+  latency_ms?: number;
+  failure_code?: string;
+  message?: string;
+};
+
+export type ConsumerHealthLayer = {
+  status: "HEALTHY" | "UNHEALTHY" | string;
+  ready_pods: number;
+  total_pods: number;
+  failure_code?: string;
+  message?: string;
+};
+
+export type ConsumerAssertionLayer = {
+  status: "VERIFIED" | "FAILED" | "NOT_CONFIGURED" | "NOT_SUPPORTED" | string;
+  assertion_path?: string;
+  status_code?: number;
+  expected_code?: number;
+  failure_code?: string;
+  message?: string;
+};
+
+export type VerificationRun = {
+  schema_version: "opsi.verification/v1";
+  id: string;
+  project_id: string;
+  environment_id: string;
+  consumer_application_id: string;
+  dependency_logical_name: string;
+  deployment_job_id: string;
+  config_revision: number;
+  target_binding_id?: string;
+  source_commit_sha?: string;
+  staleness_hash: string;
+  provider_health: ProviderHealthLayer;
+  contract_resolution: ContractResolutionLayer;
+  connection: ConnectionLayer;
+  consumer_health: ConsumerHealthLayer;
+  consumer_assertion: ConsumerAssertionLayer;
+  overall_status: "VERIFIED" | "PARTIALLY_VERIFIED" | "FAILED" | "STALE" | "NOT_RUN" | string;
+  failure_code?: string;
+  triggered_by: string;
+  started_at: string;
+  completed_at?: string;
+};
+
+export type VerifyDependencyRequest = {
+  dependency_logical_name: string;
+  deployment_job_id: string;
+  consumer_contract?: DependencyVerificationContract;
+};
+
+export type VerifyDependencyResponse = {
+  run: VerificationRun;
+};
+
+export type SourceRiskFinding = {
+  finding_id: string;
+  rule_id: string;
+  severity: "INFO" | "WARN" | string;
+  confidence: "HIGH" | "MEDIUM" | "LOW" | string;
+  category: string;
+  dependency_logical_name?: string;
+  file: string;
+  line: number;
+  column?: number;
+  safe_evidence: string;
+  remediation_code?: string;
+};
+
+export type SourceRiskEnvReference = {
+  env_key: string;
+  file: string;
+  line: number;
+};
+
+export type SourceRiskReport = {
+  scanner_version: string;
+  application_id: string;
+  project_id: string;
+  repository_id: number;
+  commit_sha: string;
+  application_root: string;
+  build_job_id?: string;
+  analysis_status: "complete" | "failed" | "unavailable" | string;
+  findings: SourceRiskFinding[];
+  env_references: SourceRiskEnvReference[];
+  files_scanned: number;
+  bytes_scanned: number;
+  truncated: boolean;
+  report_hash: string;
 };
 
 export type TimelineEvent = {

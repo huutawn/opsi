@@ -55,25 +55,27 @@ export function ContextHeader({
 
   return (
     <header className="fixed top-0 left-0 lg:left-72 right-0 h-16 bg-surface/80 backdrop-blur-xl border-b border-outline-variant/20 z-30 flex items-center justify-between px-4 lg:px-8">
-      <div className="flex items-center gap-3">
+      <div className="contextIdentity flex items-center gap-3" aria-label="Current context">
         <button
-          className="lg:hidden p-2 text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors"
+          aria-label="Open navigation"
+          className="lg:hidden p-2 text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors min-h-[40px] min-w-[40px]"
           onClick={onMenu}
           ref={menuButtonRef}
+          type="button"
         >
           <Icon name="menu" className="text-[22px]" />
         </button>
 
-        <nav aria-label="Breadcrumb" className="flex items-center text-sm font-medium text-on-surface-variant truncate gap-2 font-breadcrumb">
+        <nav aria-label="Breadcrumb" className="breadcrumb flex items-center text-sm font-medium text-on-surface-variant truncate gap-1 font-breadcrumb">
           <span className="hover:text-on-surface transition-colors cursor-pointer">{project ? "Projects" : session.org_id || "Workspace"}</span>
           {project && (
             <>
-              <Icon name="chevron_right" className="text-[16px] text-on-surface-variant/70 shrink-0" />
+              <i aria-hidden="true" className="not-italic text-on-surface-variant/50 px-0.5">/</i>
               <span className="truncate max-w-[140px] hover:text-on-surface transition-colors cursor-pointer font-medium" title={project.name}>{project.name}</span>
-              <Icon name="chevron_right" className="text-[16px] text-on-surface-variant/70 shrink-0" />
+              <i aria-hidden="true" className="not-italic text-on-surface-variant/50 px-0.5">/</i>
               <span className="truncate max-w-[120px] hover:text-on-surface transition-colors cursor-pointer font-medium" title={environment}>{environment}</span>
-              <Icon name="chevron_right" className="text-[16px] text-on-surface-variant/70 shrink-0" />
-              <span className="text-on-surface font-bold truncate">{routeLabel(route)}</span>
+              <i aria-hidden="true" className="not-italic text-on-surface-variant/50 px-0.5">/</i>
+              <strong aria-current="page" className="text-on-surface font-bold truncate">{routeLabel(route)}</strong>
             </>
           )}
         </nav>
@@ -105,13 +107,15 @@ export function ContextHeader({
         )}
 
         <div className="flex items-center gap-2 border-l border-outline-variant/30 pl-4 lg:pl-6">
-          <IconButton icon="refresh" title="Refresh data" onClick={onRefresh} />
+          <IconButton aria-label="Refresh current data" icon="refresh" title="Refresh current data" onClick={onRefresh} />
           <IconButton icon="notifications" title="Notifications" />
 
           <div className="relative ml-2" ref={menuRef}>
             <button
-              className="w-8 h-8 rounded-full bg-surface-container-highest border border-outline-variant/40 flex items-center justify-center text-primary font-bold text-xs ring-2 ring-transparent hover:ring-primary/40 transition-all cursor-pointer"
+              aria-label="Account menu"
+              className="w-10 h-10 min-h-[40px] min-w-[40px] rounded-full bg-surface-container-highest border border-outline-variant/40 flex items-center justify-center text-primary font-bold text-xs ring-2 ring-transparent hover:ring-primary/40 transition-all cursor-pointer"
               onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+              type="button"
             >
               {project ? project.name.slice(0, 2).toUpperCase() : "OP"}
             </button>

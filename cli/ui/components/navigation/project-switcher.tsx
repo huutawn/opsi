@@ -30,7 +30,7 @@ export function ProjectSwitcher({
 
   return (
     <details
-      className="relative z-50 group"
+      className="projectSwitcher relative z-50 group"
       onKeyDown={(e) => {
         if (e.key === "Escape" && menu.current?.open) {
           menu.current.open = false;
@@ -40,7 +40,8 @@ export function ProjectSwitcher({
       ref={menu}
     >
       <summary
-        className="bg-surface-container-high rounded-xl p-2 flex items-center justify-between gap-2 border border-outline-variant/20 cursor-pointer list-none hover:border-outline-variant/50 transition-colors"
+        aria-label="Switch project"
+        className="bg-surface-container-high rounded-xl p-2 flex items-center justify-between gap-2 border border-outline-variant/20 cursor-pointer list-none hover:border-outline-variant/50 transition-colors min-h-[40px]"
       >
         <div className="flex-1 flex flex-col min-w-0 px-2 py-1">
           <span className="text-[11px] font-medium text-on-surface-variant uppercase tracking-wider truncate">

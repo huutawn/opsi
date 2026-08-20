@@ -206,6 +206,19 @@ func (s *manualParityCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeManualJSON(w, map[string]any{"rollbacks": []any{}})
 	case strings.HasSuffix(r.URL.Path, "/cutover-finalizations"):
 		writeManualJSON(w, map[string]any{"finalizations": []any{}})
+	case strings.Contains(r.URL.Path, "/source-risk-report") || strings.Contains(r.URL.Path, "/source-risk-reports"):
+		writeManualJSON(w, map[string]any{
+			"schema_version":  "opsi.source_risk_report/v1",
+			"project_id":      manualProjectID(r.URL.Path),
+			"application_id":  "svc-1",
+			"commit_sha":      strings.Repeat("a", 40),
+			"analysis_status": "complete",
+			"scanner_version": "1.0.0",
+			"files_scanned":   10,
+			"findings":        []any{},
+		})
+	case strings.Contains(r.URL.Path, "/dependencies/") && strings.Contains(r.URL.Path, "/verification"):
+		writeManualJSON(w, map[string]any{"run": nil})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		writeManualJSON(w, map[string]any{"error": map[string]any{"code": "TEST_ROUTE_MISSING", "message": r.Method + " " + r.URL.Path}})
