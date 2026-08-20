@@ -275,6 +275,7 @@ export function Empty({ title, text, action }: { title?: string; text: string; a
 export function Surface({ title, children, className = "", ...props }: HTMLAttributes<HTMLDivElement> & { title?: string }) {
   return (
     <div className={`bg-surface-container-low border border-outline-variant/20 rounded-xl p-4 ${className}`} {...props}>
+      {title ? <h4 className="font-headline-md text-sm font-semibold text-on-surface mb-2">{title}</h4> : null}
       {children}
     </div>
   );

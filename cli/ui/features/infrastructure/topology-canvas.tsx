@@ -18,11 +18,10 @@ import {
   type NodeTypes,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { Button, Icon, StatusBadge } from "@/components/ui/primitives";
+import { Button, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { DependencyDialog } from "@/features/dependencies/dependency-dialog";
 import { RealizationReviewDialog } from "@/features/dependencies/realization-review-panel";
-import { DependencyVerificationPanel } from "@/features/dependencies/verification-panel";
 import { formatSymbolicSource } from "@/features/dependencies/types";
 import { liveDeploymentHealth } from "@/features/infrastructure/deployment-review-model";
 import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
@@ -33,7 +32,6 @@ import type {
   GitHubBinding,
   GitHubRepository,
   PlacementFacts,
-  ResourceBinding,
   ServiceBinding,
   ServiceConfigurationDiff,
   ServiceConfigurationDraft,
@@ -51,7 +49,6 @@ import {
   canvasDraftStatus,
   canvasPlacement,
   compileCanvasDraft,
-  currentEnvironment,
   moveCanvasPlacement,
   serverStatus,
   topologyResourcePresentation,
@@ -173,7 +170,7 @@ function CustomConnectionEdge({
 }
 
 function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
-  const { canvasTarget, deployment, mode, onPointerDown, onSelect, presentation, serviceKey } = data;
+  const { canvasTarget, mode, onPointerDown, onSelect, presentation, serviceKey } = data;
   const isServer = presentation.kind === "server";
   const isManaged = presentation.kind === "managed-service";
 
@@ -246,7 +243,7 @@ function UnplacedGroup({ data, selected }: NodeProps<UnplacedFlowNode>) {
 const nodeTypes = { resource: TopologyResourceNode, unplaced: UnplacedGroup } satisfies NodeTypes;
 const edgeTypes = { default: CustomConnectionEdge } satisfies EdgeTypes;
 const groupWidth = 292;
-const appHeight = 126;
+const appHeight = 148;
 
 export function TopologyDesignCanvas({
   bindings,
@@ -289,7 +286,6 @@ export function TopologyDesignCanvas({
   const changeCount = Object.keys(draft).length;
   const configurationChangeCount = Object.keys(configurationDrafts).length;
   const unpublishedCount = changeCount + configurationChangeCount;
-  const environment = currentEnvironment(facts, console.route.environment ?? "");
 
   const select = (id: string) => {
     setSelectedDependency(null);
@@ -413,7 +409,7 @@ export function TopologyDesignCanvas({
       .map((resource) => [resource.id, canvasPlacement(topology, draft, resource.id)] as const),
   ]);
   const nodes = buildNodes(console, facts, topology, draft, placements, selectedID, select);
-  const edges = buildConnectionEdges(console.state.services, facts.resources, configurationDrafts);
+  const edges = buildConnectionEdges(console.state.services, configurationDrafts);
   const canvasKey = "" + (topology?.revision ?? 0) + ":" + (topology?.state_hash ?? "none") + ":" + nodes
     .map((node) =>
       node.type === "resource"
@@ -757,26 +753,7 @@ export function TopologyDesignCanvas({
             setMessage((cause as Error).message);
           }
         }}
-        onReviewConfiguration={async (service) => {
-          const next = configurationDraft(service, configurationDrafts);
-          setBusy("review");
-          try {
-            const [preview, validation, diff] = await Promise.all([
-              client.serviceConfigurationPreview(projectID, service.id, next),
-              client.serviceConfigurationValidate(projectID, service.id, next),
-              client.serviceConfigurationDiff(projectID, service.id, next),
-            ]);
-            setConfigurationReview({
-              serviceID: service.id,
-              preview,
-              validation,
-              diff,
-              idempotencyKey: crypto.randomUUID(),
-            });
-          } finally {
-            setBusy("");
-          }
-        }}
+        onReviewConfiguration={reviewConfiguration}
         repositories={repositories}
         review={review}
         selectedDependency={selectedDependency}
@@ -1321,11 +1298,9 @@ function buildNodes(
 
 function buildConnectionEdges(
   services: ServiceRecord[],
-  resources: NonNullable<PlacementFacts["resources"]> = [],
   drafts: ConfigurationDrafts = {}
 ): Edge[] {
   const edges: Edge[] = [];
-  const resourceMap = new Map(resources.map((r) => [r.id, r]));
 
   for (const source of services) {
     const applied = source.configuration?.bindings ?? [];
@@ -1364,7 +1339,6 @@ function buildConnectionEdges(
     if (dependencies.length > 0) {
       for (const dep of dependencies) {
         if (dep.target_kind === "managed_service") {
-          const res = resourceMap.get(dep.target_identity);
           const targetNodeId = "resource:" + dep.target_identity;
           const isBound = boundLogicalNames.has(dep.logical_name);
           const status = isBound ? "Ready" : "Needs setup";
@@ -1431,8 +1405,6 @@ function buildConnectionEdges(
 }
 
 function TopologyInspector({
-  bindings,
-  builds,
   busy,
   configurationDrafts,
   configurationReview,
@@ -1447,12 +1419,10 @@ function TopologyInspector({
   onRealizeDependency,
   onRemoveDependency,
   onReviewConfiguration,
-  repositories,
   review,
   selectedDependency,
   selectedID,
   selectedManagedResource,
-  selectedRuntime,
   selectedService,
   topology,
 }: {

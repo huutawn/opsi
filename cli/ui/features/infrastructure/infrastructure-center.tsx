@@ -15,20 +15,19 @@ import { ResourceDetail } from "./resource-detail";
 import { ServerDetail } from "./server-detail";
 import { DestroyStorageDialog } from "./destroy-storage-dialog";
 import { BootstrapDialog } from "./infrastructure-view";
-import { Button, Empty, Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
+import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 
 export function InfrastructureCenterView({ console }: { console: ConsoleController }) {
   const projectID = console.state.project?.id ?? "";
   const environmentID = console.route.environment ?? "";
   const { data, error, reload } = useInfrastructureCenterData(console);
 
-  const [activeTab, setActiveTab] = useState<"servers" | "resources" | "storage">(
+  const activeTab: "servers" | "resources" | "storage" =
     console.route.tab === "storage"
       ? "storage"
       : console.route.tab === "resources"
       ? "resources"
-      : "servers"
-  );
+      : "servers";
 
   const [showAddResource, setShowAddResource] = useState(false);
   const [showAddServer, setShowAddServer] = useState(false);
@@ -46,11 +45,6 @@ export function InfrastructureCenterView({ console }: { console: ConsoleControll
   const selectedResource = data.resources.find((r) => r.id === selectedResourceID) ?? null;
   const effectiveNodeID = selectedNodeID || data.nodes[0]?.id || "";
   const selectedNode = data.nodes.find((n) => n.id === effectiveNodeID) ?? null;
-
-  function handleTabChange(tab: "servers" | "resources" | "storage") {
-    setActiveTab(tab);
-    console.navigate({ view: "infrastructure", tab });
-  }
 
   const filteredNodes = data.nodes.filter((node) => {
     const q = searchQuery.trim().toLowerCase();

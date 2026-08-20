@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Button, Icon, StatusBadge } from "@/components/ui/primitives";
+import { Button, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { PreflightPanel } from "@/features/dependencies/preflight-panel";
 import { RealizationReviewDialog } from "@/features/dependencies/realization-review-panel";

@@ -25,7 +25,6 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
   const projectID = console.state.project?.id ?? "";
   useEffect(() => {
     // Project-scoped dialogs never survive a context change.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPlacementOpen(false);
     setBootstrapOpen(false);
     setServiceOpen(false);

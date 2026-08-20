@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, MouseEvent } from "react";
+import { MouseEvent } from "react";
 import { routeHref, type ConsoleRoute } from "@/features/console/navigation";
 import type { Project } from "@/lib/contracts/registry";
 import { ProjectSwitcher } from "./project-switcher";

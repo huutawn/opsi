@@ -278,7 +278,7 @@ function ApplicationDetailDrawer({
           ) : detailTab === "dependencies" ? (
             <AppDependenciesSection app={app} console={console} projectID={projectID} />
           ) : detailTab === "logs" ? (
-            <AppLogsSection app={app} model={model} projectID={projectID} />
+            <AppLogsSection app={app} projectID={projectID} />
           ) : detailTab === "events" ? (
             <AppEventsSection events={events} />
           ) : (
@@ -448,11 +448,9 @@ function AppWorkloadSection({ app }: { app: ApplicationRuntimeSummary }) {
 
 function AppLogsSection({
   app,
-  model,
   projectID,
 }: {
   app: ApplicationRuntimeSummary;
-  model: ObservabilityModel;
   projectID: string;
 }) {
   const [logs, setLogs] = useState<TelemetryLogEntry[]>([]);

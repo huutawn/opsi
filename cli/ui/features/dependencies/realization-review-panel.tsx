@@ -26,27 +26,31 @@ export function RealizationReviewDialog({
   const [error, setError] = useState<{ code?: string; message: string; nextAction?: string } | null>(null);
   const [appliedMessage, setAppliedMessage] = useState("");
 
-  async function loadReview() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await client.dependenciesReview(projectID, consumer.id);
-      setPlan(res);
-    } catch (cause) {
-      const apiErr = cause as LocalAPIError;
-      setError({
-        code: apiErr.code || "REALIZATION_REVIEW_FAILED",
-        message: apiErr.message || "Failed to review dependency realization plan.",
-        nextAction: apiErr.nextAction,
-      });
-    } finally {
-      setLoading(false);
-    }
-  }
-
   useEffect(() => {
+    let active = true;
+    async function loadReview() {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await client.dependenciesReview(projectID, consumer.id);
+        if (active) setPlan(res);
+      } catch (cause) {
+        if (!active) return;
+        const apiErr = cause as LocalAPIError;
+        setError({
+          code: apiErr.code || "REALIZATION_REVIEW_FAILED",
+          message: apiErr.message || "Failed to review dependency realization plan.",
+          nextAction: apiErr.nextAction,
+        });
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
     void loadReview();
-  }, [projectID, consumer.id]);
+    return () => {
+      active = false;
+    };
+  }, [client, consumer.id, projectID]);
 
   async function handleApply() {
     setBusy(true);

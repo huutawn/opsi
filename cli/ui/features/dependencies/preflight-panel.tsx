@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { Button, Icon, StatusBadge } from "@/components/ui/primitives";
+import { Icon, StatusBadge } from "@/components/ui/primitives";
 import type { PreflightCheck, PreflightResult } from "@/lib/contracts/registry";
 
 type Props = {
@@ -63,7 +63,7 @@ export function PreflightPanel({
       map[categorizeCheck(chk)].push(chk);
     }
     return map;
-  }, [preflight?.checks]);
+  }, [preflight]);
 
   if (!preflight) return null;
 

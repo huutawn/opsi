@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap');
 @import "./design-system.css";
 @import "@xyflow/react/dist/style.css";
 
@@ -304,3 +305,139 @@ dialog {
   margin-top: 0.25rem;
 }
 
+/* Topology Canvas & Node Styles */
+.topologyResourceNode {
+  background-color: var(--color-surface-container-high);
+  border: 1px solid rgba(144, 144, 151, 0.3);
+  border-radius: 0.75rem;
+  padding: 0.75rem 0.875rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  box-sizing: border-box;
+}
+
+.topologyResourceNode:hover {
+  border-color: var(--color-primary);
+}
+
+.topologyResourceNode.selected {
+  border-color: var(--color-secondary);
+  box-shadow: 0 0 0 2px var(--color-secondary);
+}
+
+.topologyResourceNode.serverNode {
+  background-color: rgba(31, 31, 33, 0.9);
+  border: 1px solid rgba(144, 144, 151, 0.25);
+  padding: 1rem;
+}
+
+.topologyResourceNode.managedNode {
+  background-color: var(--color-surface-container);
+  border: 1px solid rgba(123, 208, 255, 0.35);
+}
+
+.topologyResourceNode.appNode {
+  background-color: var(--color-surface-container-high);
+}
+
+.nodeHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.nodeKind {
+  display: block;
+  font-size: 0.65rem;
+  font-family: var(--font-mono), monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-on-surface-variant);
+}
+
+.nodeTitle {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nodeContext {
+  font-size: 0.75rem;
+  color: var(--color-on-surface-variant);
+  margin: 0;
+}
+
+.nodeFacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+  font-family: var(--font-mono), monospace;
+  padding-top: 0.25rem;
+  border-top: 1px solid rgba(144, 144, 151, 0.15);
+}
+
+.nodeFact small {
+  color: var(--color-on-surface-variant);
+  margin-right: 0.25rem;
+}
+
+.nodeFact strong {
+  color: var(--color-on-surface);
+}
+
+.nodeNotice {
+  font-size: 0.7rem;
+  color: var(--color-status-warning);
+  margin: 0;
+}
+
+.unplacedGroup {
+  background-color: rgba(27, 27, 29, 0.6);
+  border: 2px dashed rgba(144, 144, 151, 0.3);
+  border-radius: 1rem;
+  padding: 1rem;
+  box-sizing: border-box;
+}
+
+.unplacedGroup.selected {
+  border-color: var(--color-primary);
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.groupTitle {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-on-surface);
+  margin: 0;
+}
+
+.countBadge {
+  background-color: var(--color-surface-container-highest);
+  color: var(--color-on-surface-variant);
+  font-size: 0.75rem;
+  font-family: var(--font-mono), monospace;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+}
+
+.groupHint {
+  font-size: 0.75rem;
+  color: var(--color-on-surface-variant);
+  margin: 0;
+}

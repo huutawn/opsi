@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Button, Icon, StatusBadge } from "@/components/ui/primitives";
+import { Icon, StatusBadge } from "@/components/ui/primitives";
 import { LocalClient } from "@/lib/api/local-client";
 import type { SourceRiskReport } from "@/lib/contracts/registry";
 
@@ -31,23 +31,27 @@ export function SourceRiskPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  async function fetchReport() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await client.sourceRiskReport(projectID, applicationID);
-      setReport(res);
-    } catch (cause) {
-      setError((cause as Error).message || "Source risk report unavailable.");
-      setReport(null);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   useEffect(() => {
+    let active = true;
+    async function fetchReport() {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await client.sourceRiskReport(projectID, applicationID);
+        if (active) setReport(res);
+      } catch (cause) {
+        if (!active) return;
+        setError((cause as Error).message || "Source risk report unavailable.");
+        setReport(null);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
     void fetchReport();
-  }, [projectID, applicationID]);
+    return () => {
+      active = false;
+    };
+  }, [applicationID, client, projectID]);
 
   if (loading) {
     return (

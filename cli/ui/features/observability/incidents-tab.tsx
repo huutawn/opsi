@@ -1,8 +1,7 @@
 "use client";
 
-import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
+import { Button, Empty, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
-import { safeLogMessage } from "@/features/observability/data";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
 import { Fact, formatObserved } from "@/features/observability/shared";
 

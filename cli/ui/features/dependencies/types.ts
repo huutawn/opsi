@@ -1,11 +1,7 @@
 import type {
   ApplicationDependency,
   DependencyInjectionMapping,
-  DependencyVerificationContract,
   PreflightCheck,
-  PreflightResult,
-  Resource,
-  ServiceRecord,
   VerificationRun,
 } from "@/lib/contracts/registry";
 

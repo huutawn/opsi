@@ -32,28 +32,31 @@ export function DependencyVerificationPanel({
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
 
-  async function fetchVerification() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await client.dependencyVerification(
-        projectID,
-        dependency.logical_name,
-        applicationID,
-        environmentID
-      );
-      setRun(res.run);
-    } catch {
-      // 404 is normal if not run yet
-      setRun(null);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   useEffect(() => {
+    let active = true;
+    async function fetchVerification() {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await client.dependencyVerification(
+          projectID,
+          dependency.logical_name,
+          applicationID,
+          environmentID
+        );
+        if (active) setRun(res.run);
+      } catch {
+        // 404 is normal if not run yet
+        if (active) setRun(null);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
     void fetchVerification();
-  }, [projectID, dependency.logical_name, applicationID, environmentID]);
+    return () => {
+      active = false;
+    };
+  }, [applicationID, client, dependency.logical_name, environmentID, projectID]);
 
   async function triggerVerification() {
     if (!deploymentJobID && !run?.deployment_job_id) {

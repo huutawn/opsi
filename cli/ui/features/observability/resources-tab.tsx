@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
-import { routeHref } from "@/features/console/navigation";
 import type { ConsoleController } from "@/features/console/types";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
 import type { ResourceRuntimeSummary } from "@/lib/presentation/observability/model";

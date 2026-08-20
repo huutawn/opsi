@@ -8,13 +8,11 @@ import { Icon, IconButton } from "@/components/ui/primitives";
 
 export function ContextHeader({
   environment,
-  lastUpdated,
   menuButtonRef,
   onMenu,
   onRefresh,
   project,
   route,
-  serviceScope,
   session,
 }: {
   environment: string;

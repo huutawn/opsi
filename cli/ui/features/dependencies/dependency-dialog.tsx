@@ -6,9 +6,7 @@ import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
 import type {
   ApplicationDependency,
   DependencyInjectionMapping,
-  DependencyVerificationContract,
   PlacementFacts,
-  Resource,
   ServiceConfigurationDiff,
   ServiceConfigurationDraft,
   ServiceConfigurationPreview,
@@ -21,7 +19,6 @@ import {
   VALKEY_REDIS_URL_MAPPING,
   detectPostgresPreset,
   detectValkeyPreset,
-  formatSymbolicSource,
   type PostgresPreset,
   type ValkeyPreset,
 } from "./types";

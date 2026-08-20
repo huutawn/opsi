@@ -279,7 +279,6 @@ function ServiceCard({
 }) {
   const buildStatus = buildState(facts);
   const deployStatus = deploymentState(facts);
-  const digest = acceptedDigest(facts);
   const sha = exactSourceSHA(facts);
   const isPlaced = Boolean(facts.assignments.length);
   const isDeploying = ["queued", "leased", "pulling", "applying", "waiting_ready"].includes(deployStatus);
@@ -736,7 +735,7 @@ function DependenciesTab({
         crypto.randomUUID()
       );
       await console.actions.load();
-    } catch (_cause) {
+    } catch {
       // ignore
     }
   }

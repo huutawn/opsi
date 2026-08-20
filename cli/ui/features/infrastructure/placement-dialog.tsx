@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Button, Empty, Icon, Surface, StatusBadge } from "@/components/ui/primitives";
+import { Button, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { LocalClient } from "@/lib/api/local-client";
 import type { BuildRecord, DeploymentPolicy, GitHubBinding, GitHubRepository, PlacementFacts, TopologyDiff, TopologyDraft, TopologyPlan, TopologyPreview, TopologyValidation } from "@/lib/contracts/registry";
