@@ -239,7 +239,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		if cfg.databaseURL != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			_, err := exercisePostgres(ctx, cfg.databaseURL)
@@ -260,7 +260,9 @@ func main() {
 
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
-	})
+	}
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/health/", healthHandler)
 
 	mux.HandleFunc("/evidence", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
