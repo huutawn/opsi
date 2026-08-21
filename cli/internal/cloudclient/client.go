@@ -512,6 +512,93 @@ func (c *Client) RevokePAT(ctx context.Context, projectID string) (map[string]an
 	return response, err
 }
 
+func (c *Client) ListResources(ctx context.Context, projectID, environmentID string) ([]ManagedResource, error) {
+	var response struct {
+		Resources []ManagedResource `json:"resources"`
+	}
+	endpoint, err := c.endpoint("api", "projects", projectID, "resources")
+	if err != nil {
+		return nil, err
+	}
+	if environmentID != "" {
+		endpoint.RawQuery = url.Values{"environment_id": {environmentID}}.Encode()
+	}
+	err = c.doURL(ctx, http.MethodGet, endpoint, nil, "", &response)
+	return response.Resources, err
+}
+
+func (c *Client) GetResource(ctx context.Context, projectID, resourceID string) (ManagedResource, error) {
+	var response ManagedResource
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "resources", resourceID}, nil, "", &response)
+	return response, err
+}
+
+func (c *Client) ListResourceBindings(ctx context.Context, projectID, environmentID string) ([]ManagedResourceBinding, error) {
+	var response struct {
+		Bindings []ManagedResourceBinding `json:"bindings"`
+	}
+	endpoint, err := c.endpoint("api", "projects", projectID, "resource-bindings")
+	if err != nil {
+		return nil, err
+	}
+	if environmentID != "" {
+		endpoint.RawQuery = url.Values{"environment_id": {environmentID}}.Encode()
+	}
+	err = c.doURL(ctx, http.MethodGet, endpoint, nil, "", &response)
+	return response.Bindings, err
+}
+
+func (c *Client) GetSourceRiskReport(ctx context.Context, projectID, applicationID, commitSHA string) (SourceRiskReport, error) {
+	var response struct {
+		Report SourceRiskReport `json:"report"`
+	}
+	endpoint, err := c.endpoint("v1", "projects", projectID, "applications", applicationID, "source-risk-report")
+	if err != nil {
+		return response.Report, err
+	}
+	if commitSHA != "" {
+		endpoint.RawQuery = url.Values{"commit_sha": {commitSHA}}.Encode()
+	}
+	err = c.doURL(ctx, http.MethodGet, endpoint, nil, "", &response)
+	return response.Report, err
+}
+
+func (c *Client) GetSourceRiskReportByID(ctx context.Context, projectID, reportID string) (SourceRiskReport, error) {
+	var response struct {
+		Report SourceRiskReport `json:"report"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"v1", "projects", projectID, "source-risk-reports", reportID}, nil, "", &response)
+	return response.Report, err
+}
+
+func (c *Client) GetDependencyVerification(ctx context.Context, projectID, dependencyLogicalName, environmentID, applicationID string) (VerificationRun, error) {
+	var response struct {
+		Run VerificationRun `json:"run"`
+	}
+	endpoint, err := c.endpoint("v1", "projects", projectID, "dependencies", dependencyLogicalName, "verification")
+	if err != nil {
+		return response.Run, err
+	}
+	query := url.Values{}
+	if environmentID != "" {
+		query.Set("environment_id", environmentID)
+	}
+	if applicationID != "" {
+		query.Set("application_id", applicationID)
+	}
+	endpoint.RawQuery = query.Encode()
+	err = c.doURL(ctx, http.MethodGet, endpoint, nil, "", &response)
+	return response.Run, err
+}
+
+func (c *Client) ListDependencyVerifications(ctx context.Context, projectID, deploymentJobID string) ([]VerificationRun, error) {
+	var response struct {
+		Runs []VerificationRun `json:"runs"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"v1", "projects", projectID, "deployments", deploymentJobID, "verifications"}, nil, "", &response)
+	return response.Runs, err
+}
+
 func (c *Client) do(ctx context.Context, method string, segments []string, body any, idempotencyKey string, response any) error {
 	endpoint, err := c.endpoint(segments...)
 	if err != nil {

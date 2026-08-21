@@ -84,6 +84,41 @@ func (s *Server) handleGetDependencyVerificationAPI(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, verificationv1.VerifyDependencyResponse{Run: run})
 }
 
+// handleListDeploymentVerificationsAPI handles GET /v1/projects/{project_id}/deployments/{deployment_id}/verifications
+func (s *Server) handleListDeploymentVerificationsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.PathValue("project_id")
+	deploymentID := r.PathValue("deployment_id")
+	principal, ok := s.authorizeGitHubProject(w, r, projectID)
+	if !ok || !s.requireRole(w, r, principal, projectID, "dependency_verification", deploymentID, "owner", "admin", "developer", "viewer", "support") {
+		return
+	}
+
+	if s.Verifications == nil {
+		writeError(w, http.StatusNotFound, "verification store unavailable")
+		return
+	}
+
+	runs, err := s.Verifications.ListForDeployment(r.Context(), projectID, deploymentID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if runs == nil {
+		runs = []verificationv1.VerificationRun{}
+	}
+	for i := range runs {
+		if s.isVerificationStale(r.Context(), projectID, runs[i]) {
+			runs[i].OverallStatus = verificationv1.RunStatusStale
+			runs[i].FailureCode = verificationv1.FailureVerificationStale
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
 // handleGetApplicationSourceRiskReportAPI handles GET /v1/projects/{project_id}/applications/{application_id}/source-risk-report
 func (s *Server) handleGetApplicationSourceRiskReportAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

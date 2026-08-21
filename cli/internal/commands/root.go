@@ -66,6 +66,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	root.AddCommand(newPolicyCommand(&configPath, options))
 	root.AddCommand(newInternalCommand(options))
 	root.AddCommand(newStartCommand(&configPath, options.KeychainFactory))
+	root.AddCommand(newMCPCommand(&configPath, options))
 	root.AddCommand(newVersionCommand(options))
 
 	return root

@@ -253,6 +253,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/bootstrap/sessions/", s.handleBootstrapWorker)
 	mux.HandleFunc("/v1/projects/{project_id}/dependencies/verify", s.handleVerifyDependencyAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/dependencies/{dependency_logical_name}/verification", s.handleGetDependencyVerificationAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/deployments/{deployment_id}/verifications", s.handleListDeploymentVerificationsAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/source-risk-report", s.handleGetApplicationSourceRiskReportAPI)
 	mux.HandleFunc("/v1/projects/{project_id}/source-risk-reports/{report_id}", s.handleGetSourceRiskReportByIDAPI)
 	mux.HandleFunc("/v1/agents/{node_id}/dep-verifications/{verification_id}/result", s.handleAgentDepVerificationResult)

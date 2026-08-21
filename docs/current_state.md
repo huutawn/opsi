@@ -1092,3 +1092,10 @@ remediation, supply-chain closure, release readiness, and production readiness
 are not claimed.
 
 Application Dependency Contract foundation implemented.
+
+## MCP-01 Read-Only Context Surface
+
+The MCP capability (`opsi mcp` / `opsi mcp serve`) is implemented at the local Opsi Edge boundary:
+- Read-only protocol supporting 18 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), and exact commit-bound source file listing, reading, and literal searching.
+- Strict security constraints: zero domain mutations exposed, zero secret credentials exposed (regex redaction for URI credentials, bearer tokens, private keys, and passwords), path traversal protection against `..` or escaping `ApplicationRoot`, binary file classification, size-bounded reading (max 256 KiB), bounded search (max 50 matches), and exact commit provenance (returns `SOURCE_SNAPSHOT_UNAVAILABLE` rather than falling back to uncommitted working trees).
+- Transports: stdio JSON-RPC 2.0 (default) with stderr diagnostic logging, and local loopback HTTP (`127.0.0.1` / `localhost`).
