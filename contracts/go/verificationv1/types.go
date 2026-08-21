@@ -138,11 +138,20 @@ type VerificationRun struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
+// DepProbeEvidence captures raw probe observation reported from agent or runtime probe.
+type DepProbeEvidence struct {
+	StatusCode int    `json:"status_code,omitempty"`
+	LatencyMs  int64  `json:"latency_ms,omitempty"`
+	Message    string `json:"message,omitempty"`
+}
+
 // VerifyDependencyRequest is the API trigger payload.
 type VerifyDependencyRequest struct {
 	DependencyLogicalName string                        `json:"dependency_logical_name"`
 	DeploymentJobID       string                        `json:"deployment_job_id"`
 	ConsumerContract      *ConsumerVerificationContract `json:"consumer_contract,omitempty"`
+	ObservedStatusCode    int                           `json:"observed_status_code,omitempty"`
+	ProbeResult           *DepProbeEvidence             `json:"probe_result,omitempty"`
 }
 
 // VerifyDependencyResponse is the API response after initiating or completing verification.

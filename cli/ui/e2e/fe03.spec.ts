@@ -654,6 +654,8 @@ async function dragNode(page: Page, sourceName: RegExp, targetName: RegExp) {
 async function connectApplications(page: Page, sourceName: RegExp, targetName: RegExp) {
 	const source = page.getByRole("button", { name: sourceName });
 	const target = page.getByRole("button", { name: targetName });
+	await expect(source).toBeVisible();
+	await expect(target).toBeVisible();
 	await source.scrollIntoViewIfNeeded();
 	await target.scrollIntoViewIfNeeded();
 	const sourceHandle = source.locator(".react-flow__handle-right");

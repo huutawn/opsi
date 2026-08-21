@@ -2,6 +2,8 @@ package webhookrelay
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -647,5 +649,189 @@ func TestVerifyFreshnessComprehensiveMutations(t *testing.T) {
 	_, _, _ = f.server.Resources.Store.CreateBinding(ctx, newBinding, "bind-key-2", "payload-2")
 	if !f.server.isVerificationStale(ctx, f.projectID, run) {
 		t.Fatal("expected STALE when ResourceBinding identity changed")
+	}
+}
+
+func TestVerifyDependencyProbeEvidenceEvaluation(t *testing.T) {
+	f := setupVerificationFixture(t)
+	ctx := context.Background()
+
+	// 1. Probe observes HTTP 503 (bad consumer assertion failure)
+	req503 := verificationv1.VerifyDependencyRequest{
+		DependencyLogicalName: f.depName,
+		ConsumerContract: &verificationv1.ConsumerVerificationContract{
+			Type:           "consumer_http",
+			Path:           "/health/dependencies/database/unreachable",
+			ExpectedStatus: 200,
+		},
+		ObservedStatusCode: 503,
+	}
+
+	run503, err := f.server.ExecuteDependencyVerification(ctx, f.projectID, f.envID, f.appID, req503, "test-user")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if run503.ProviderHealth.Status != verificationv1.LayerStatusHealthy {
+		t.Fatalf("expected Provider HEALTHY, got %s", run503.ProviderHealth.Status)
+	}
+	if run503.ContractResolution.Status != verificationv1.LayerStatusResolved {
+		t.Fatalf("expected Contract RESOLVED, got %s", run503.ContractResolution.Status)
+	}
+	if run503.Connection.Status != verificationv1.LayerStatusVerified {
+		t.Fatalf("expected Connection VERIFIED, got %s", run503.Connection.Status)
+	}
+	if run503.ConsumerHealth.Status != verificationv1.LayerStatusHealthy {
+		t.Fatalf("expected Consumer HEALTHY, got %s", run503.ConsumerHealth.Status)
+	}
+	if run503.ConsumerAssertion.Status != verificationv1.LayerStatusFailed {
+		t.Fatalf("expected Assertion FAILED, got %s", run503.ConsumerAssertion.Status)
+	}
+	if run503.ConsumerAssertion.StatusCode != 503 {
+		t.Fatalf("expected Assertion StatusCode 503, got %d", run503.ConsumerAssertion.StatusCode)
+	}
+	if run503.ConsumerAssertion.ExpectedCode != 200 {
+		t.Fatalf("expected Assertion ExpectedCode 200, got %d", run503.ConsumerAssertion.ExpectedCode)
+	}
+	if run503.ConsumerAssertion.FailureCode != verificationv1.FailureConsumerAssertionFailed {
+		t.Fatalf("expected failure code CONSUMER_ASSERTION_FAILED, got %s", run503.ConsumerAssertion.FailureCode)
+	}
+	if run503.OverallStatus != verificationv1.RunStatusFailed {
+		t.Fatalf("expected Overall FAILED, got %s", run503.OverallStatus)
+	}
+	if run503.FailureCode != verificationv1.FailureConsumerAssertionFailed {
+		t.Fatalf("expected overall failure code CONSUMER_ASSERTION_FAILED, got %s", run503.FailureCode)
+	}
+
+	// 2. Negative Control: Probe observes HTTP 200 (passing assertion)
+	req200 := verificationv1.VerifyDependencyRequest{
+		DependencyLogicalName: f.depName,
+		ConsumerContract: &verificationv1.ConsumerVerificationContract{
+			Type:           "consumer_http",
+			Path:           "/health/dependencies/database",
+			ExpectedStatus: 200,
+		},
+		ObservedStatusCode: 200,
+	}
+
+	run200, err := f.server.ExecuteDependencyVerification(ctx, f.projectID, f.envID, f.appID, req200, "test-user")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if run200.ConsumerAssertion.Status != verificationv1.LayerStatusVerified {
+		t.Fatalf("expected Assertion VERIFIED for 200 status, got %s", run200.ConsumerAssertion.Status)
+	}
+	if run200.ConsumerAssertion.StatusCode != 200 {
+		t.Fatalf("expected Assertion StatusCode 200, got %d", run200.ConsumerAssertion.StatusCode)
+	}
+	if run200.OverallStatus != verificationv1.RunStatusVerified {
+		t.Fatalf("expected Overall VERIFIED for 200 status, got %s", run200.OverallStatus)
+	}
+}
+
+func TestAssertionAuthenticityWithRealConsumerFixtureHandlers(t *testing.T) {
+	f := setupVerificationFixture(t)
+	ctx := context.Background()
+
+	// Simulate actual consumer fixture HTTP handler (same behavior as cloud/integration/fixtures/adc02-consumer/main.go)
+	consumerMux := http.NewServeMux()
+	consumerMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	consumerMux.HandleFunc("/health/dependencies/database/unreachable", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad consumer assertion failed: connection refused", http.StatusServiceUnavailable)
+	})
+	consumerMux.HandleFunc("/health/dependencies/database", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
+
+	testServer := httptest.NewServer(consumerMux)
+	defer testServer.Close()
+
+	// 1. Probe /health -> actual consumer returns 200
+	respHealth, err := http.Get(testServer.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = respHealth.Body.Close()
+	if respHealth.StatusCode != http.StatusOK {
+		t.Fatalf("expected consumer /health to return 200, got %d", respHealth.StatusCode)
+	}
+
+	// 2. Probe /health/dependencies/database/unreachable -> actual consumer returns 503
+	respUnreachable, err := http.Get(testServer.URL + "/health/dependencies/database/unreachable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = respUnreachable.Body.Close()
+	if respUnreachable.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected consumer unreachable endpoint to return 503, got %d", respUnreachable.StatusCode)
+	}
+
+	// 3. Probe /health/dependencies/database -> actual consumer returns 200 (Negative control)
+	respDatabase, err := http.Get(testServer.URL + "/health/dependencies/database")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = respDatabase.Body.Close()
+	if respDatabase.StatusCode != http.StatusOK {
+		t.Fatalf("expected consumer database endpoint to return 200, got %d", respDatabase.StatusCode)
+	}
+
+	// 4. Cloud receives actual observed probe status 503 -> evaluates FAILED
+	failingRun, err := f.server.ExecuteDependencyVerification(ctx, f.projectID, f.envID, f.appID, verificationv1.VerifyDependencyRequest{
+		DependencyLogicalName: f.depName,
+		ConsumerContract: &verificationv1.ConsumerVerificationContract{
+			Type:           "consumer_http",
+			Path:           "/health/dependencies/database/unreachable",
+			ExpectedStatus: 200,
+		},
+		ObservedStatusCode: respUnreachable.StatusCode,
+	}, "test-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failingRun.ProviderHealth.Status != verificationv1.LayerStatusHealthy ||
+		failingRun.ContractResolution.Status != verificationv1.LayerStatusResolved ||
+		failingRun.Connection.Status != verificationv1.LayerStatusVerified ||
+		failingRun.ConsumerHealth.Status != verificationv1.LayerStatusHealthy {
+		t.Fatalf("preceding 4 layers must all be healthy/verified, got: provider=%s, contract=%s, connection=%s, consumer=%s",
+			failingRun.ProviderHealth.Status, failingRun.ContractResolution.Status, failingRun.Connection.Status, failingRun.ConsumerHealth.Status)
+	}
+	if failingRun.ConsumerAssertion.Status != verificationv1.LayerStatusFailed {
+		t.Fatalf("expected Assertion FAILED for 503 probe, got %s", failingRun.ConsumerAssertion.Status)
+	}
+	if failingRun.ConsumerAssertion.StatusCode != 503 {
+		t.Fatalf("expected Assertion StatusCode 503, got %d", failingRun.ConsumerAssertion.StatusCode)
+	}
+	if failingRun.ConsumerAssertion.FailureCode != verificationv1.FailureConsumerAssertionFailed {
+		t.Fatalf("expected Assertion FailureCode %s, got %s", verificationv1.FailureConsumerAssertionFailed, failingRun.ConsumerAssertion.FailureCode)
+	}
+	if failingRun.OverallStatus != verificationv1.RunStatusFailed {
+		t.Fatalf("expected OverallStatus FAILED, got %s", failingRun.OverallStatus)
+	}
+
+	// 5. Cloud receives actual observed probe status 200 (Negative control) -> evaluates VERIFIED
+	passingRun, err := f.server.ExecuteDependencyVerification(ctx, f.projectID, f.envID, f.appID, verificationv1.VerifyDependencyRequest{
+		DependencyLogicalName: f.depName,
+		ConsumerContract: &verificationv1.ConsumerVerificationContract{
+			Type:           "consumer_http",
+			Path:           "/health/dependencies/database",
+			ExpectedStatus: 200,
+		},
+		ObservedStatusCode: respDatabase.StatusCode,
+	}, "test-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if passingRun.ConsumerAssertion.Status != verificationv1.LayerStatusVerified {
+		t.Fatalf("expected Assertion VERIFIED for 200 probe, got %s", passingRun.ConsumerAssertion.Status)
+	}
+	if passingRun.ConsumerAssertion.StatusCode != 200 {
+		t.Fatalf("expected Assertion StatusCode 200, got %d", passingRun.ConsumerAssertion.StatusCode)
+	}
+	if passingRun.OverallStatus != verificationv1.RunStatusVerified {
+		t.Fatalf("expected OverallStatus VERIFIED for passing run, got %s", passingRun.OverallStatus)
 	}
 }

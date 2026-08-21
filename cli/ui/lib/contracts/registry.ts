@@ -552,10 +552,18 @@ export type VerificationRun = {
   completed_at?: string;
 };
 
+export type DepProbeEvidence = {
+  status_code?: number;
+  latency_ms?: number;
+  message?: string;
+};
+
 export type VerifyDependencyRequest = {
   dependency_logical_name: string;
   deployment_job_id: string;
   consumer_contract?: DependencyVerificationContract;
+  observed_status_code?: number;
+  probe_result?: DepProbeEvidence;
 };
 
 export type VerifyDependencyResponse = {
