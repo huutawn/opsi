@@ -61,7 +61,7 @@ func (m *MemoryStore) GetLatest(_ context.Context, projectID, environmentID, con
 	var latest verificationv1.VerificationRun
 	found := false
 	for _, r := range m.runs {
-		if r.ProjectID == projectID && r.EnvironmentID == environmentID && r.ConsumerApplicationID == consumerApplicationID && r.DependencyLogicalName == dependencyLogicalName {
+		if r.ProjectID == projectID && (environmentID == "" || r.EnvironmentID == environmentID) && (consumerApplicationID == "" || r.ConsumerApplicationID == consumerApplicationID) && r.DependencyLogicalName == dependencyLogicalName {
 			if !found || r.StartedAt.After(latest.StartedAt) {
 				latest = r
 				found = true

@@ -131,7 +131,7 @@ func (s PostgresStore) GetLatest(ctx context.Context, projectID, environmentID, 
 			consumer_health, consumer_assertion, overall_status,
 			COALESCE(failure_code, ''), triggered_by, started_at, completed_at
 		FROM dependency_verification_runs
-		WHERE project_id = $1 AND environment_id = $2 AND consumer_application_id = $3 AND dependency_logical_name = $4
+		WHERE project_id = $1 AND ($2 = '' OR environment_id = $2) AND ($3 = '' OR consumer_application_id = $3) AND dependency_logical_name = $4
 		ORDER BY started_at DESC
 		LIMIT 1
 	`, projectID, environmentID, consumerApplicationID, dependencyLogicalName)

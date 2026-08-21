@@ -240,6 +240,22 @@ func main() {
 
 	mux := http.NewServeMux()
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
+		// General workload health check /health returns 200 OK (workload is Healthy/Ready)
+		if r.URL.Path == "/health" || r.URL.Path == "/health/" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "ok\n")
+			return
+		}
+
+		// Bad consumer endpoint intentionally uses bad localhost path to demonstrate assertion failure
+		if strings.Contains(r.URL.Path, "bad") || strings.Contains(r.URL.Path, "fail") || strings.Contains(r.URL.Path, "unreachable") {
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			_, err := exercisePostgres(ctx, "postgres://user:pass@127.0.0.1:5432/nonexistent")
+			cancel()
+			http.Error(w, fmt.Sprintf("bad consumer assertion failed: %v", err), http.StatusServiceUnavailable)
+			return
+		}
+
 		if cfg.databaseURL != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			_, err := exercisePostgres(ctx, cfg.databaseURL)

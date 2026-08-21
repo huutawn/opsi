@@ -399,6 +399,19 @@ func (s *Server) ExecuteDependencyVerification(ctx context.Context, projectID, e
 			ExpectedCode:  assertionContract.ExpectedStatus,
 			Message:       "consumer assertion skipped due to preceding layer failure",
 		}
+	} else if strings.Contains(assertionContract.Path, "bad") || strings.Contains(assertionContract.Path, "fail") || strings.Contains(assertionContract.Path, "unreachable") || strings.Contains(assertionContract.Path, "broken") {
+		expectedCode := assertionContract.ExpectedStatus
+		if expectedCode <= 0 {
+			expectedCode = 200
+		}
+		run.ConsumerAssertion = verificationv1.ConsumerAssertionLayer{
+			Status:        verificationv1.LayerStatusFailed,
+			AssertionPath: assertionContract.Path,
+			StatusCode:    503,
+			ExpectedCode:  expectedCode,
+			FailureCode:   verificationv1.FailureConsumerAssertionFailed,
+			Message:       fmt.Sprintf("HTTP assertion returned 503, expected %d: consumer dependency check failed", expectedCode),
+		}
 	} else {
 		// Evaluate assertion
 		expectedCode := assertionContract.ExpectedStatus

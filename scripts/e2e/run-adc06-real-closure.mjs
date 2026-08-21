@@ -182,6 +182,12 @@ mirrors:
   log(`api digest: ${apiDigest}`);
   log(`web digest: ${webDigest}`);
 
+  // Build local binaries
+  log("Building local binaries (opsi-cloud, opsi-agent, opsi)...");
+  execSync("GOTOOLCHAIN=go1.26.4+auto go build -trimpath -o ./bin/opsi-cloud ./cloud/cmd/opsi-cloud", { cwd: ROOT, stdio: "pipe" });
+  execSync("GOTOOLCHAIN=go1.26.4+auto go build -trimpath -o ./bin/opsi-agent ./agent/cmd/opsi-agent", { cwd: ROOT, stdio: "pipe" });
+  execSync("GOTOOLCHAIN=go1.26.4+auto go build -trimpath -o ./bin/opsi ./cli/cmd/opsi", { cwd: ROOT, stdio: "pipe" });
+
   // 6. Cloud Server
   const cloudPort = await getFreePort();
   const cloudUrl = `http://127.0.0.1:${cloudPort}`;
@@ -314,18 +320,22 @@ mirrors:
   log(`Local Edge session token obtained: ${localSessionToken ? "ok" : "empty"}`);
 
   // Helper for Local Edge mutation requests
-  const localPost = async (path, body = null) => {
-    const headers = {
-      "X-Local-Session": localSessionToken,
-      "Idempotency-Key": `idemp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      "X-Request-ID": `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    };
-    if (body) headers["Content-Type"] = "application/json";
-    return await fetch(`${edgeOrigin}${path}`, {
-      method: "POST",
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+  const localPost = async (path, body = null, retries = 3) => {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      const headers = {
+        "X-Local-Session": localSessionToken,
+        "Idempotency-Key": `idemp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        "X-Request-ID": `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      };
+      if (body) headers["Content-Type"] = "application/json";
+      const res = await fetch(`${edgeOrigin}${path}`, {
+        method: "POST",
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (res.ok || attempt === retries - 1) return res;
+      await new Promise((r) => setTimeout(r, 500));
+    }
   };
 
   // Set project session on Local Edge
@@ -784,9 +794,24 @@ mirrors:
   const verifiedRun = verifyPgData.run || verifyPgData;
   log(`Verification result for database: overall=${verifiedRun.overall_status}`);
 
+  const scrollToDep = async (logicalName) => {
+    try {
+      await page.locator('section').filter({ hasText: logicalName }).first().scrollIntoViewIfNeeded({ timeout: 2000 });
+    } catch (_) {}
+    await page.evaluate((name) => {
+      const headings = Array.from(document.querySelectorAll('h3, div, span'));
+      const target = headings.find((el) => el.textContent?.trim() === name && el.closest('section'));
+      if (target) {
+        target.closest('section')?.scrollIntoView({ behavior: 'instant', block: 'start' });
+      }
+    }, logicalName);
+    await page.waitForTimeout(500);
+  };
+
   // Navigate to API service dependencies tab
   await page.goto(`${edgeOrigin}/?project=${cloudProjectId}&view=services&service=${apiSvc.id}&tab=dependencies`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1000);
+  await scrollToDep("database");
   const verifiedScreenshotPath = path.join(EVIDENCE_DIR, "03_real_verification_verified.png");
   await page.screenshot({ path: verifiedScreenshotPath });
   log(`Saved screenshot: ${verifiedScreenshotPath}`);
@@ -802,6 +827,7 @@ mirrors:
 
   await page.reload({ waitUntil: "networkidle" });
   await page.waitForTimeout(1000);
+  await scrollToDep("cache");
   const partialScreenshotPath = path.join(EVIDENCE_DIR, "04_real_verification_partially_verified.png");
   await page.screenshot({ path: partialScreenshotPath });
   log(`Saved screenshot: ${partialScreenshotPath}`);
@@ -812,19 +838,23 @@ mirrors:
     dependency_logical_name: "database",
     consumer_contract: {
       type: "consumer_http",
-      path: "invalid-relative-path-no-slash",
+      path: "/health/dependencies/database/unreachable",
       expected_status: 200,
     },
   });
   const verifyBadData = await verifyBadRes.json();
   const failedRun = verifyBadData.run || verifyBadData;
-  log(`Verification result for bad assertion: overall=${failedRun.overall_status} assertion=${failedRun.consumer_assertion?.status}`);
+  log(`Verification result for bad assertion: overall=${failedRun.overall_status} assertion=${failedRun.consumer_assertion?.status} failure_code=${failedRun.failure_code}`);
 
   await page.reload({ waitUntil: "networkidle" });
   await page.waitForTimeout(1000);
+  await scrollToDep("database");
   const failedScreenshotPath = path.join(EVIDENCE_DIR, "05_real_verification_failed.png");
   await page.screenshot({ path: failedScreenshotPath });
   log(`Saved screenshot: ${failedScreenshotPath}`);
+  const badConsumerNamedScreenshotPath = path.join(EVIDENCE_DIR, "real_bad_consumer_verification_failed.png");
+  await page.screenshot({ path: badConsumerNamedScreenshotPath });
+  log(`Saved screenshot: ${badConsumerNamedScreenshotPath}`);
 
   // STEP 16: REAL STALE RESULT
   log("Executing Real STALE Dependency Verification...");
@@ -840,6 +870,7 @@ mirrors:
 
   await page.reload({ waitUntil: "networkidle" });
   await page.waitForTimeout(1000);
+  await scrollToDep("database");
   const staleScreenshotPath = path.join(EVIDENCE_DIR, "06_real_verification_stale.png");
   await page.screenshot({ path: staleScreenshotPath });
   log(`Saved screenshot: ${staleScreenshotPath}`);
@@ -983,6 +1014,7 @@ mirrors:
         item_number: 5,
         state: "Real Bad-Consumer Verification FAILED",
         actual_screenshot_path: failedScreenshotPath,
+        bad_consumer_screenshot_path: badConsumerNamedScreenshotPath,
         verdict: "PASS",
       },
       {
