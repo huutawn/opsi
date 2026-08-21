@@ -14,7 +14,7 @@ Exact pins remain supported:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/huutawn/opsi/main/scripts/install-cli.sh \
-  | OPSI_VERSION=v0.1.0-beta.1 sh
+  | OPSI_VERSION=v0.1.0-beta.2 sh
 ```
 
 The supported targets are Linux and macOS on amd64 and arm64. Existing files,
@@ -43,7 +43,7 @@ explicit YAML config selects a self-hosted `cloud_url`. No Agent address is
 invented: before `opsi server connect` or an explicit `agent_addr`, the Local
 UI starts normally and reports the Agent as not connected.
 
-The `v0.1.0-beta.1` support boundary is a single VPS with single-node K3s,
+The `v0.1.0-beta.2` support boundary is a single VPS with single-node K3s,
 Web/API workloads, deployment, exposure, and rollback. DNS/TLS automation,
 multi-VPS, managed databases, production hardening, and production SLA are
 excluded from this beta.

@@ -76,7 +76,7 @@ credentials are not exposed to browser code.
 
 ## Status
 
-Opsi `v0.1.0-beta.1` is a public beta, not a production-ready release. The
+Opsi `v0.1.0-beta.2` is a public beta, not a production-ready release. The
 currently supported scope is one VPS running single-node K3s, with Web/API
 workloads, deployment, exposure, and known-good rollback.
 
