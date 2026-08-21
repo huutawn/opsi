@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -343,11 +345,20 @@ func (s *Server) HandleMessage(ctx context.Context, reqBytes []byte) (*JSONRPCRe
 
 func (s *Server) handleNotification(_ context.Context, req JSONRPCRequest) {
 	switch req.Method {
-	case "notifications/initialized":
+	case "notifications/initialized", "initialized":
 		s.logf("Client initialized session")
 	default:
 		s.logf("Ignored notification %q", req.Method)
 	}
+}
+
+func isLoopbackHost(host string) bool {
+	h := strings.Trim(host, "[]")
+	if h == "127.0.0.1" || h == "localhost" || h == "::1" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ServeStdio starts the stdio JSON-RPC loop.
@@ -425,23 +436,55 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 
 // ServeHTTP starts a local loopback HTTP server.
 func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
+	if strings.TrimSpace(addr) == "" {
+		addr = "127.0.0.1:9781"
+	}
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
-	if host != "127.0.0.1" && host != "localhost" && host != "::1" && host != "" {
-		return errors.New("MCP HTTP transport must bind to loopback address (127.0.0.1 or localhost)")
+	if !isLoopbackHost(host) {
+		return errors.New("MCP HTTP transport must bind to loopback address (127.0.0.1, localhost, or ::1)")
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
+		// Validate Host header to protect against DNS rebinding attacks
+		reqHost := r.Host
+		if h, _, err := net.SplitHostPort(reqHost); err == nil {
+			reqHost = h
+		}
+		if !isLoopbackHost(reqHost) {
+			http.Error(w, "Forbidden: invalid Host header", http.StatusForbidden)
 			return
 		}
+
+		// Validate Origin header to protect against malicious browser websites
+		if origin := r.Header.Get("Origin"); origin != "" {
+			u, err := url.Parse(origin)
+			if err != nil || !isLoopbackHost(u.Hostname()) {
+				http.Error(w, "Forbidden: cross-origin requests are rejected", http.StatusForbidden)
+				return
+			}
+		}
+
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Validate Content-Type
+		if ct := r.Header.Get("Content-Type"); ct != "" {
+			mediaType, _, _ := mime.ParseMediaType(ct)
+			if mediaType != "application/json" {
+				http.Error(w, "Unsupported Media Type: Content-Type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+
 		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
+			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
 		resp, err := s.HandleMessage(r.Context(), body)
@@ -452,7 +495,15 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		reqHost := r.Host
+		if h, _, err := net.SplitHostPort(reqHost); err == nil {
+			reqHost = h
+		}
+		if !isLoopbackHost(reqHost) {
+			http.Error(w, "Forbidden: invalid Host header", http.StatusForbidden)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"opsi-mcp"}`))
 	})

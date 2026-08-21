@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -37,6 +38,40 @@ func (s *Server) registerHandlers() map[string]ToolHandler {
 		"source_file_read":                 s.handleSourceFileRead,
 		"source_search":                    s.handleSourceSearch,
 	}
+}
+
+func getIntArg(args map[string]any, key string, defaultVal, maxVal int) int {
+	if args == nil {
+		return defaultVal
+	}
+	val, ok := args[key]
+	if !ok || val == nil {
+		return defaultVal
+	}
+	var num int
+	switch v := val.(type) {
+	case float64:
+		num = int(v)
+	case int:
+		num = v
+	case int64:
+		num = int(v)
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			num = int(n)
+		} else {
+			return defaultVal
+		}
+	default:
+		return defaultVal
+	}
+	if num <= 0 {
+		return defaultVal
+	}
+	if maxVal > 0 && num > maxVal {
+		return maxVal
+	}
+	return num
 }
 
 func (s *Server) resolveProjectID(ctx context.Context, client *cloudclient.Client, args map[string]any) (string, error) {
@@ -188,10 +223,7 @@ func (s *Server) handleApplicationsList(ctx context.Context, _ *Server, args map
 		}
 	}
 
-	limit := DefaultFileListLimit
-	if l, ok := args["limit"].(float64); ok && int(l) > 0 {
-		limit = int(l)
-	}
+	limit := getIntArg(args, "limit", DefaultFileListLimit, 100)
 
 	results := make([]ApplicationSummary, 0, len(services))
 	for _, svc := range services {
@@ -470,10 +502,7 @@ func (s *Server) handleManagedResourcesList(ctx context.Context, _ *Server, args
 		return nil, mapAPIError(err)
 	}
 
-	limit := DefaultFileListLimit
-	if l, ok := args["limit"].(float64); ok && int(l) > 0 {
-		limit = int(l)
-	}
+	limit := getIntArg(args, "limit", DefaultFileListLimit, 100)
 
 	allBindings, _ := client.ListResourceBindings(ctx, projectID, envID)
 	bindingCountMap := make(map[string]int)
@@ -600,10 +629,7 @@ func (s *Server) handleBuildRecordsList(ctx context.Context, _ *Server, args map
 	if c, ok := args["cursor"].(string); ok && c != "" {
 		query.Set("cursor", c)
 	}
-	limit := DefaultFileListLimit
-	if l, ok := args["limit"].(float64); ok && int(l) > 0 {
-		limit = int(l)
-	}
+	limit := getIntArg(args, "limit", DefaultFileListLimit, 100)
 	query.Set("limit", strconv.Itoa(limit))
 
 	result, err := client.ListBuildRecords(ctx, projectID, query)
@@ -652,10 +678,7 @@ func (s *Server) handleDeploymentsList(ctx context.Context, _ *Server, args map[
 
 	serviceID, _ := args["service_id"].(string)
 	environmentID, _ := args["environment_id"].(string)
-	limit := DefaultFileListLimit
-	if l, ok := args["limit"].(float64); ok && int(l) > 0 {
-		limit = int(l)
-	}
+	limit := getIntArg(args, "limit", DefaultFileListLimit, 100)
 
 	filtered := make([]cloudclient.DeploymentJob, 0)
 	for _, d := range deployments {
@@ -799,6 +822,10 @@ func (s *Server) handleDependencyVerificationHistory(ctx context.Context, _ *Ser
 	if err != nil {
 		return nil, mapAPIError(err)
 	}
+	limit := getIntArg(args, "limit", DefaultFileListLimit, 100)
+	if len(runs) > limit {
+		runs = runs[:limit]
+	}
 	return map[string]any{"runs": runs}, nil
 }
 
@@ -881,10 +908,7 @@ func (s *Server) handleSourceFilesList(ctx context.Context, _ *Server, args map[
 	commitSHA, _ := args["commit_sha"].(string)
 	pathPrefix, _ := args["path_prefix"].(string)
 	cursor, _ := args["cursor"].(string)
-	limit := DefaultFileListLimit
-	if l, ok := args["limit"].(float64); ok && int(l) > 0 {
-		limit = int(l)
-	}
+	limit := getIntArg(args, "limit", DefaultFileListLimit, AbsoluteFileListLimit)
 
 	repoRoot, resolvedSHA, appRoot, err := s.resolveSourceSnapshot(ctx, client, projectID, appID, buildRecordID, commitSHA)
 	if err != nil {
@@ -913,10 +937,7 @@ func (s *Server) handleSourceFileRead(ctx context.Context, _ *Server, args map[s
 	relativePath, _ := args["relative_path"].(string)
 	buildRecordID, _ := args["build_record_id"].(string)
 	commitSHA, _ := args["commit_sha"].(string)
-	maxBytes := DefaultMaxFileBytes
-	if mb, ok := args["max_bytes"].(float64); ok && int(mb) > 0 {
-		maxBytes = int(mb)
-	}
+	maxBytes := getIntArg(args, "max_bytes", DefaultMaxFileBytes, AbsoluteMaxFileBytes)
 
 	if strings.TrimSpace(relativePath) == "" {
 		return nil, &DomainError{Code: ErrCodeInvalidArgument, Message: "relative_path is required"}
@@ -950,10 +971,7 @@ func (s *Server) handleSourceSearch(ctx context.Context, _ *Server, args map[str
 	buildRecordID, _ := args["build_record_id"].(string)
 	commitSHA, _ := args["commit_sha"].(string)
 	pathPrefix, _ := args["path_prefix"].(string)
-	limit := DefaultSearchLimit
-	if l, ok := args["limit"].(float64); ok && int(l) > 0 {
-		limit = int(l)
-	}
+	limit := getIntArg(args, "limit", DefaultSearchLimit, AbsoluteSearchLimit)
 
 	if strings.TrimSpace(query) == "" {
 		return nil, &DomainError{Code: ErrCodeInvalidArgument, Message: "query is required"}

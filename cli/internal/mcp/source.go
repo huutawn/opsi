@@ -62,6 +62,9 @@ func CleanRelativePath(rel string) (string, error) {
 	if strings.ContainsRune(rel, 0) {
 		return "", errors.New("path contains null bytes")
 	}
+	if strings.Contains(rel, "..") {
+		return "", errors.New("path traversal with '..' is not allowed")
+	}
 	// Normalize forward slashes
 	rel = filepath.ToSlash(rel)
 	if strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, "\\") {
