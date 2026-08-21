@@ -29,10 +29,10 @@ func TestPostgresResourceStorePersistsReferencesAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := Service{Store: PostgresStore{DB: db}, Scopes: registryStore}
+	service := Service{Store: PostgresStore{DB: db}, Scopes: registryStore, Credentials: NewMemoryCredentialAuthority()}
 	request := resourcev1.CreateRequest{EnvironmentID: facts.Environments[0].ID, Name: "postgres", Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres, Managed: &resourcev1.ManagedSpec{
-		Type: resourcev1.TypePostgres, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30},
-		CredentialRefs: []resourcev1.SecretReference{{SecretID: "vault-postgres"}}, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"},
+		Type: resourcev1.TypePostgres, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20, Storage: resourcev1.StorageRequest{Persistent: true, SizeBytes: 1 << 30, PolicyRef: resourcev1.StoragePolicyDefault},
+		ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"},
 	}}
 	created, reused, err := service.Create(context.Background(), project.ID, userID, "resource-"+suffix, request)
 	if err != nil || reused {
@@ -42,6 +42,12 @@ func TestPostgresResourceStorePersistsReferencesAndIdempotency(t *testing.T) {
 	if err != nil || !reused || replay.ID != created.ID {
 		t.Fatalf("replay=%+v reused=%t err=%v", replay, reused, err)
 	}
+	created.Lifecycle = resourcev1.LifecycleReady
+	spec := resourcev1.ManagedResourceSpec{ResourceType: resourcev1.TypePostgres, Image: resourcev1.PostgresImage, Replicas: 1, SpecHash: "ready", Connection: resourcev1.ManagedResourceConnection{Host: "postgres.internal", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"}}
+	created.Runtime = &resourcev1.ManagedResourceRuntime{Spec: spec, Evidence: &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: true, PodReady: true, ServiceReady: true, SecretReady: true, AuthReady: true, StorageReady: true, VolumeMounted: true, PVCName: "pvc", PVName: "pv", Image: spec.Image, ImageID: spec.Image, AvailableReplicas: 1}}
+	if _, err := service.Store.Update(context.Background(), created); err != nil {
+		t.Fatal(err)
+	}
 	binding, reused, err := service.CreateBinding(context.Background(), project.ID, "binding-"+suffix, resourcev1.CreateBindingRequest{
 		EnvironmentID: facts.Environments[0].ID, Source: resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: application.ID},
 		Target: resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: created.ID}, Protocol: resourcev1.ProtocolPostgres, LogicalName: "DATABASE",
@@ -49,13 +55,13 @@ func TestPostgresResourceStorePersistsReferencesAndIdempotency(t *testing.T) {
 	if err != nil || reused {
 		t.Fatalf("binding=%+v reused=%t err=%v", binding, reused, err)
 	}
-	var stored string
-	if err := db.QueryRowContext(context.Background(), `SELECT runtime_references::text FROM resource_bindings WHERE id=$1`, binding.ID).Scan(&stored); err != nil {
+	var stored, lifecycle, credentialID, roleName, database string
+	if err := db.QueryRowContext(context.Background(), `SELECT runtime_references::text,lifecycle,credential_id,role_name,database_name FROM resource_bindings WHERE id=$1`, binding.ID).Scan(&stored, &lifecycle, &credentialID, &roleName, &database); err != nil {
 		t.Fatal(err)
 	}
 	var references []resourcev1.RuntimeConnectionReference
-	if err := json.Unmarshal([]byte(stored), &references); err != nil || references != nil {
-		t.Fatalf("stored references=%s", stored)
+	if err := json.Unmarshal([]byte(stored), &references); err != nil || len(references) != 6 || lifecycle != string(resourcev1.LifecycleProvisioning) || credentialID == "" || roleName == "" || database != "opsi" {
+		t.Fatalf("stored references=%s lifecycle=%s credential=%s role=%s database=%s", stored, lifecycle, credentialID, roleName, database)
 	}
 }
 

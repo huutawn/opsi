@@ -29,13 +29,13 @@ type ManagedResourceReconciler struct {
 func (r ManagedResourceReconciler) Reconcile(ctx context.Context, lease cloudrelay.ManagedResourceLease) cloudrelay.ManagedResourceResult {
 	result := cloudrelay.ManagedResourceResult{LeaseToken: lease.LeaseToken}
 	if err := lease.Spec.Validate(); err != nil {
-		result.Status, result.FailureCode, result.FailureMessageRedacted = "failed", "MANAGED_RESOURCE_SPEC_INVALID", err.Error()
+		result.Status, result.FailureCode, result.FailureMessageRedacted = "failed", invalidSpecFailureCode(lease.Spec), err.Error()
 		return result
 	}
 	if lease.Action == "delete" {
 		evidence, err := r.delete(ctx, lease.Spec)
 		if err != nil {
-			result.Status, result.FailureCode, result.FailureMessageRedacted = "failed", "MANAGED_RESOURCE_DELETE_FAILED", err.Error()
+			result.Status, result.FailureCode, result.FailureMessageRedacted = "failed", failureCodeOr(err, resourcev1.FailureDeleteFailed), err.Error()
 			return result
 		}
 		result.Status, result.Evidence = "deleted", evidence
@@ -47,12 +47,15 @@ func (r ManagedResourceReconciler) Reconcile(ctx context.Context, lease cloudrel
 		return result
 	}
 	result.Status, result.Evidence = "ready", evidence
+	if lease.Spec.ResourceType == resourcev1.TypePostgres {
+		result.BindingResults = r.reconcilePostgresBindings(ctx, lease.Spec, lease.Bindings)
+	}
 	return result
 }
 
 func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.ManagedResourceSpec, credential *resourcev1.ManagedResourceCredential) (*resourcev1.ManagedResourceEvidence, error) {
-	if spec.ResourceType == resourcev1.TypeRedis && (credential == nil || credential.Validate() != nil || credential.CredentialID != spec.CredentialID) {
-		return nil, errors.New("managed resource credential is unavailable")
+	if managedCredentialRequired(spec.ResourceType) && (credential == nil || credential.ValidateFor(spec.ResourceType) != nil || credential.CredentialID != spec.CredentialID) {
+		return nil, managedResourceError{resourcev1.FailureCredentialUnavailable, "managed resource credential is unavailable"}
 	}
 	if err := r.ensureNamespace(ctx, spec); err != nil {
 		return nil, err
@@ -65,6 +68,12 @@ func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.Ma
 		if current != nil && !exactManagedResourceOwnership(current, spec) {
 			return nil, errors.New("existing Kubernetes object has different Opsi managed-resource ownership")
 		}
+		if current != nil && manifestKind(object) == "PersistentVolumeClaim" {
+			if !postgresPVCMatchesIntent(current, spec) {
+				return nil, managedResourceError{resourcev1.FailureStorageResizeUnsupported, "managed PostgreSQL PVC intent does not match the existing retained volume"}
+			}
+			continue
+		}
 		manifest := cloneObject(object)
 		verb := "create"
 		if current != nil {
@@ -76,8 +85,11 @@ func (r ManagedResourceReconciler) apply(ctx context.Context, spec resourcev1.Ma
 		}
 		data, _ := json.Marshal(manifest)
 		if _, err := r.run(ctx, data, verb, "--field-manager="+managedResourceFieldManager, "-f", "-"); err != nil {
-			if manifest["kind"] == "Secret" {
-				return nil, secretApplyError{}
+			if manifestKind(manifest) == "Secret" {
+				return nil, managedResourceError{resourcev1.FailureSecretApplyFailed, "managed resource secret apply failed"}
+			}
+			if manifestKind(manifest) == "PersistentVolumeClaim" {
+				return nil, managedResourceError{resourcev1.FailurePVCApplyFailed, "managed PostgreSQL PVC apply failed"}
 			}
 			return nil, err
 		}
@@ -108,8 +120,26 @@ func (r ManagedResourceReconciler) ensureNamespace(ctx context.Context, spec res
 }
 
 func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
-	for _, kind := range []string{"deployment", "service", "secret"} {
-		if kind == "secret" && spec.ResourceType != resourcev1.TypeRedis {
+	var retainedPVC map[string]any
+	if spec.ResourceType == resourcev1.TypePostgres {
+		pvc, err := r.get(ctx, "persistentvolumeclaim", managedResourcePVCName(spec), managedResourceNamespace(spec))
+		if err != nil {
+			return nil, err
+		}
+		if pvc == nil {
+			return nil, managedResourceError{resourcev1.FailurePersistentDeleteUnsupported, "managed PostgreSQL runtime delete cannot verify a retained PVC"}
+		}
+		if !exactManagedResourceOwnership(pvc, spec) || !postgresPVCMatchesIntent(pvc, spec) {
+			return nil, errors.New("refusing to retain a PostgreSQL PVC with different Opsi managed-resource ownership")
+		}
+		retainedPVC = pvc
+	}
+	workloadKind := "deployment"
+	if spec.ResourceType == resourcev1.TypePostgres {
+		workloadKind = "statefulset"
+	}
+	for _, kind := range []string{workloadKind, "service", "secret"} {
+		if kind == "secret" && !managedCredentialRequired(spec.ResourceType) {
 			continue
 		}
 		name := spec.Connection.ServiceName
@@ -126,11 +156,33 @@ func (r ManagedResourceReconciler) delete(ctx context.Context, spec resourcev1.M
 		if !exactManagedResourceOwnership(current, spec) {
 			return nil, errors.New("refusing to delete Kubernetes object with different Opsi managed-resource ownership")
 		}
-		if _, err := r.run(ctx, nil, "delete", kind, name, "-n", managedResourceNamespace(spec), "--wait=true", "--timeout=2m"); err != nil {
+		if _, err := r.run(ctx, nil, "delete", kind, name, "-n", managedResourceNamespace(spec), "--wait=true", "--timeout=2m", "--ignore-not-found"); err != nil {
 			return nil, err
 		}
 	}
-	return &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, Deleted: true, ObservedAt: time.Now().UTC()}, nil
+	evidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, Deleted: true, ObservedAt: time.Now().UTC()}
+	if spec.ResourceType == resourcev1.TypePostgres {
+		evidence.Namespace, evidence.PVCName, evidence.StorageRetained = managedResourceNamespace(spec), managedResourcePVCName(spec), true
+		evidence.PVCUID, _ = nested(retainedPVC, "metadata", "uid").(string)
+		evidence.PVName, _ = nested(retainedPVC, "spec", "volumeName").(string)
+		evidence.StorageClass, _ = nested(retainedPVC, "spec", "storageClassName").(string)
+		evidence.ActualStorage, _ = nested(retainedPVC, "status", "capacity", "storage").(string)
+		evidence.RequestedBytes, evidence.StorageHash = spec.Storage.SizeBytes, resourcev1.ManagedResourceStorageHash(spec)
+		pv, err := r.get(ctx, "persistentvolume", evidence.PVName, "")
+		if err != nil || pv == nil {
+			return nil, managedResourceError{resourcev1.FailureRetainedStorageIdentityMismatch, "managed PostgreSQL runtime delete cannot verify the bound PV"}
+		}
+		evidence.PVUID, _ = nested(pv, "metadata", "uid").(string)
+		evidence.ReclaimPolicy, _ = nested(pv, "spec", "persistentVolumeReclaimPolicy").(string)
+		claimName, _ := nested(pv, "spec", "claimRef", "name").(string)
+		claimNamespace, _ := nested(pv, "spec", "claimRef", "namespace").(string)
+		claimUID, _ := nested(pv, "spec", "claimRef", "uid").(string)
+		pvStorageClass, _ := nested(pv, "spec", "storageClassName").(string)
+		if evidence.PVCUID == "" || evidence.PVUID == "" || evidence.PVName == "" || evidence.ReclaimPolicy == "" || claimName != evidence.PVCName || claimNamespace != evidence.Namespace || claimUID != evidence.PVCUID || pvStorageClass != evidence.StorageClass {
+			return nil, managedResourceError{resourcev1.FailureRetainedStorageIdentityMismatch, "managed PostgreSQL retained PVC/PV identity does not match"}
+		}
+	}
+	return evidence, nil
 }
 
 func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
@@ -149,29 +201,44 @@ func (r ManagedResourceReconciler) waitReady(ctx context.Context, spec resourcev
 	for {
 		evidence, err := r.observe(ctx, spec)
 		if err != nil {
-			var auth authError
-			var secret secretApplyError
-			if errors.As(err, &auth) || errors.As(err, &secret) {
+			code := failureCode(err)
+			if code == resourcev1.FailureSecretApplyFailed {
 				return evidence, err
 			}
 		}
-		if err == nil && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (spec.ResourceType != resourcev1.TypeRedis || evidence.SecretReady && evidence.AuthReady) && evidence.Image == spec.Image {
+		if err == nil && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (!managedCredentialRequired(spec.ResourceType) || evidence.SecretReady && evidence.AuthReady) && (spec.ResourceType != resourcev1.TypePostgres || evidence.StorageReady && evidence.VolumeMounted) && evidence.Image == spec.Image {
 			return evidence, nil
 		}
 		if err == nil && evidence.Image != "" && evidence.Image != spec.Image {
-			return evidence, runtimeMismatchError{}
+			return evidence, managedResourceError{resourcev1.FailureRuntimeMismatch, "managed resource runtime image does not match compiled intent"}
 		}
 		select {
 		case <-ctx.Done():
 			return nil, errors.New("managed resource readiness cancelled")
 		case <-deadline.C:
-			return evidence, errors.New("managed resource readiness timed out")
+			if evidence != nil && !evidence.AuthReady && managedCredentialRequired(spec.ResourceType) {
+				return evidence, managedResourceError{resourcev1.FailureAuthFailed, "managed resource authenticated readiness check failed"}
+			}
+			if spec.ResourceType == resourcev1.TypePostgres && evidence != nil {
+				switch {
+				case !evidence.StorageReady:
+					return evidence, managedResourceError{resourcev1.FailurePVCNotBound, "managed PostgreSQL PVC did not become Bound"}
+				case !evidence.VolumeMounted:
+					return evidence, managedResourceError{resourcev1.FailureVolumeMountFailed, "managed PostgreSQL PVC was not mounted at the data directory"}
+				case !evidence.WorkloadReady || !evidence.PodReady:
+					return evidence, managedResourceError{resourcev1.FailureDatabaseInitFailed, "managed PostgreSQL database did not initialize"}
+				}
+			}
+			return evidence, managedResourceError{resourcev1.FailureReadinessFailed, "managed resource readiness timed out"}
 		case <-ticker.C:
 		}
 	}
 }
 
 func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.ManagedResourceSpec) (*resourcev1.ManagedResourceEvidence, error) {
+	if spec.ResourceType == resourcev1.TypePostgres {
+		return r.observePostgres(ctx, spec)
+	}
 	namespace := managedResourceNamespace(spec)
 	deployment, err := r.get(ctx, "deployment", spec.Connection.ServiceName, namespace)
 	if err != nil || deployment == nil || !exactManagedResourceOwnership(deployment, spec) {
@@ -188,7 +255,7 @@ func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.
 			if secretErr != nil {
 				return &resourcev1.ManagedResourceEvidence{}, secretErr
 			}
-			return &resourcev1.ManagedResourceEvidence{}, secretApplyError{}
+			return &resourcev1.ManagedResourceEvidence{}, managedResourceError{resourcev1.FailureSecretApplyFailed, "managed resource secret is unavailable"}
 		}
 		secretReady = true
 	}
@@ -207,7 +274,7 @@ func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.
 	if spec.ResourceType == resourcev1.TypeRedis && workloadReady && podReady >= spec.Replicas && serviceReady {
 		out, authErr := r.run(ctx, nil, "exec", "deployment/"+spec.Connection.ServiceName, "-n", namespace, "-c", "redis", "--", "sh", "-ec", `u=$(cat /run/opsi-valkey/username); export REDISCLI_AUTH=$(cat /run/opsi-valkey/password); valkey-cli --user "$u" -h 127.0.0.1 PING`)
 		if authErr != nil || !strings.Contains(string(out), "PONG") {
-			return &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: workloadReady, PodReady: podReady >= spec.Replicas, ServiceReady: serviceReady, SecretReady: secretReady, Image: image, ImageID: imageID, AvailableReplicas: available, ObservedAt: time.Now().UTC()}, authError{}
+			return &resourcev1.ManagedResourceEvidence{ObservedSpecHash: spec.SpecHash, WorkloadReady: workloadReady, PodReady: podReady >= spec.Replicas, ServiceReady: serviceReady, SecretReady: secretReady, Image: image, ImageID: imageID, AvailableReplicas: available, ObservedAt: time.Now().UTC()}, managedResourceError{resourcev1.FailureAuthFailed, "managed resource authentication check failed"}
 		}
 		authReady = true
 	}
@@ -215,6 +282,9 @@ func (r ManagedResourceReconciler) observe(ctx context.Context, spec resourcev1.
 }
 
 func managedResourceObjects(spec resourcev1.ManagedResourceSpec, credential *resourcev1.ManagedResourceCredential) []map[string]any {
+	if spec.ResourceType == resourcev1.TypePostgres {
+		return postgresManagedResourceObjects(spec, credential)
+	}
 	namespace := managedResourceNamespace(spec)
 	labels := managedResourceLabels(spec)
 	selector := managedResourceOwnershipLabels(spec)
@@ -449,41 +519,53 @@ func managedLabel(value string) string {
 	return value
 }
 func failureCode(err error) string {
-	var mismatch runtimeMismatchError
-	if errors.As(err, &mismatch) {
-		return resourcev1.FailureRuntimeMismatch
-	}
-	var secret secretApplyError
-	if errors.As(err, &secret) {
-		return resourcev1.FailureSecretApplyFailed
-	}
-	var auth authError
-	if errors.As(err, &auth) {
-		return resourcev1.FailureAuthFailed
+	var failure interface{ FailureCode() string }
+	if errors.As(err, &failure) {
+		return failure.FailureCode()
 	}
 	message := strings.ToLower(err.Error())
 	if strings.Contains(message, "credential") {
 		return resourcev1.FailureCredentialUnavailable
 	}
 	if strings.Contains(message, "image") {
-		return "MANAGED_RESOURCE_IMAGE_UNAVAILABLE"
+		return resourcev1.FailureImageUnavailable
 	}
 	if strings.Contains(message, "readiness") {
-		return "MANAGED_RESOURCE_READINESS_FAILED"
+		return resourcev1.FailureReadinessFailed
 	}
-	return "MANAGED_RESOURCE_APPLY_FAILED"
+	return resourcev1.FailureApplyFailed
 }
 
-type runtimeMismatchError struct{}
+func failureCodeOr(err error, fallback string) string {
+	if code := failureCode(err); code != resourcev1.FailureApplyFailed {
+		return code
+	}
+	return fallback
+}
 
-type secretApplyError struct{}
+type managedResourceError struct {
+	code    string
+	message string
+}
 
-func (secretApplyError) Error() string { return "managed resource secret apply failed" }
+func (e managedResourceError) Error() string       { return e.message }
+func (e managedResourceError) FailureCode() string { return e.code }
 
-type authError struct{}
+func manifestKind(object map[string]any) string {
+	value, _ := object["kind"].(string)
+	return value
+}
 
-func (authError) Error() string { return "managed resource authentication check failed" }
-
-func (runtimeMismatchError) Error() string {
-	return "managed resource runtime image does not match compiled intent"
+func invalidSpecFailureCode(spec resourcev1.ManagedResourceSpec) string {
+	if spec.ResourceType == resourcev1.TypePostgres {
+		switch {
+		case !spec.Storage.Persistent:
+			return resourcev1.FailureStorageRequired
+		case spec.Storage.SizeBytes < 1 || spec.Storage.PolicyRef != resourcev1.StoragePolicyDefault:
+			return resourcev1.FailureStorageInvalid
+		case spec.Version != resourcev1.PostgresVersion:
+			return resourcev1.FailureVersionUpgradeUnsupported
+		}
+	}
+	return resourcev1.FailureSpecInvalid
 }

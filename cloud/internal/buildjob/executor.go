@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/opsi-dev/opsi/cloud/internal/sourcescanner"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 )
 
@@ -154,6 +155,19 @@ type RunnerLease struct {
 	RunAttempt uint32    `json:"run_attempt"`
 }
 
+var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// SourceScanContext carries advisory dependency data for the source risk scanner.
+// It is NOT part of the immutable build authority and does NOT affect Validate().
+// Scanner uses this to perform dependency-aware analysis only.
+type SourceScanContext struct {
+	ProjectID     string `json:"project_id"`
+	ApplicationID string `json:"application_id"`
+	// ScanDependenciesJSON is the JSON-encoded []serviceconfigurationv1.ApplicationDependency
+	// for env key correlation. Optional — if empty, env correlation is skipped.
+	ScanDependenciesJSON []byte `json:"scan_dependencies_json,omitempty"`
+}
+
 type BuildSpec struct {
 	BuildJobID            string            `json:"build_job_id"`
 	Repository            string            `json:"repository"`
@@ -166,12 +180,20 @@ type BuildSpec struct {
 	ResolvedBuildStrategy string            `json:"resolved_build_strategy"`
 	DockerfilePath        string            `json:"dockerfile_path"`
 	Publication           PublicationTarget `json:"publication"`
+	BuildEnvironment      map[string]string `json:"build_environment,omitempty"`
+	// ScanContext carries advisory scanner data. Not part of immutable build authority.
+	ScanContext *SourceScanContext `json:"scan_context,omitempty"`
 }
 
 func (s BuildSpec) Validate() error {
 	strategyValid := s.ResolvedBuildStrategy == StrategyDockerfile && canonicalRepositoryPath(s.DockerfilePath, false) || s.ResolvedBuildStrategy == StrategyBuildpack && s.DockerfilePath == ""
 	if !validOpaqueID(s.BuildJobID) || !validRepositoryFullName(s.Repository) || s.RepositoryID <= 0 || s.RepositoryOwnerID <= 0 || s.GitHubInstallationID <= 0 || !validSHA40(s.ResolvedCommitSHA) || !canonicalRepositoryPath(s.ApplicationRoot, true) || !canonicalRepositoryPath(s.BuildContext, true) || !strategyValid || !s.Publication.Empty() && s.Publication.Validate() != nil {
 		return Error{Code: "BUILD_SPEC_INVALID", Status: 409, Message: "Build Spec is invalid.", Cause: "build_spec"}
+	}
+	for k, v := range s.BuildEnvironment {
+		if !envNamePattern.MatchString(k) || len(v) > 4096 || strings.IndexFunc(v, unicode.IsControl) >= 0 {
+			return Error{Code: "BUILD_SPEC_INVALID", Status: 409, Message: "Build Spec environment is invalid.", Cause: "build_environment"}
+		}
 	}
 	return nil
 }
@@ -205,9 +227,10 @@ type ExecutorResult struct {
 type RunnerResult struct {
 	BuildJobID        string         `json:"build_job_id"`
 	AttemptID         string         `json:"attempt_id"`
-	RegistryReference string         `json:"registry_reference"`
-	Digest            string         `json:"digest"`
-	Executor          ExecutorResult `json:"executor"`
+	RegistryReference string                `json:"registry_reference"`
+	Digest            string                `json:"digest"`
+	Executor          ExecutorResult        `json:"executor"`
+	SourceRiskReport  *sourcescanner.Report `json:"source_risk_report,omitempty"`
 }
 
 type RunnerFailure struct {
@@ -359,7 +382,20 @@ func validateDispatchableJob(job Job) error {
 }
 
 func buildSpec(job Job, registry RegistryConfig) BuildSpec {
-	return BuildSpec{BuildJobID: job.ID, Repository: job.Source.RepositoryFullName, RepositoryID: job.Source.RepositoryID, RepositoryOwnerID: job.Source.RepositoryOwnerID, GitHubInstallationID: job.Source.InstallationID, ResolvedCommitSHA: job.Source.ResolvedCommitSHA, ApplicationRoot: job.Source.ApplicationRoot, BuildContext: job.Source.BuildContext, ResolvedBuildStrategy: job.ResolvedBuildStrategy, DockerfilePath: job.DockerfilePath, Publication: registry.Target(job.ApplicationID, job.ID)}
+	return BuildSpec{
+		BuildJobID:            job.ID,
+		Repository:            job.Source.RepositoryFullName,
+		RepositoryID:          job.Source.RepositoryID,
+		RepositoryOwnerID:     job.Source.RepositoryOwnerID,
+		GitHubInstallationID:  job.Source.InstallationID,
+		ResolvedCommitSHA:     job.Source.ResolvedCommitSHA,
+		ApplicationRoot:       job.Source.ApplicationRoot,
+		BuildContext:          job.Source.BuildContext,
+		ResolvedBuildStrategy: job.ResolvedBuildStrategy,
+		DockerfilePath:        job.DockerfilePath,
+		Publication:           registry.Target(job.ApplicationID, job.ID),
+		BuildEnvironment:      job.Source.BuildEnvironment,
+	}
 }
 
 func (s Service) Complete(ctx context.Context, result RunnerResult, token string) (CompletionResult, error) {

@@ -1,47 +1,79 @@
-"use client";
+import React, { KeyboardEvent, MouseEvent } from "react";
+import Link from "next/link";
 
-import { useEffect, useState, type KeyboardEvent } from "react";
+export interface TabItem {
+  id: string;
+  label: string;
+  href: string;
+}
 
-function tabID(label: string, id: string, part: "tab" | "panel") {
-  return `${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")}-${part}-${id}`;
+export interface TabsProps {
+  items: TabItem[];
+  label: string;
+  selected: string;
+  onSelect: (event: MouseEvent<HTMLAnchorElement>, tabId: string) => void;
+}
+
+export function Tabs({ items, label, selected, onSelect }: TabsProps) {
+  function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
+    const keys = ["ArrowRight", "ArrowLeft", "Home", "End"];
+    if (!keys.includes(event.key)) return;
+    const currentIndex = items.findIndex((item) => item.id === selected);
+    if (currentIndex === -1) return;
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % items.length;
+    else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + items.length) % items.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = items.length - 1;
+    const nextItem = items[nextIndex];
+    if (nextItem) {
+      event.preventDefault();
+      const target = document.getElementById(`tab-${nextItem.id}`);
+      target?.click();
+      target?.focus();
+    }
+  }
+
+  return (
+    <div className="border-b border-outline-variant/20 mb-6 overflow-x-auto max-w-full">
+      <nav className="flex space-x-6 min-w-max" aria-label={label} role="tablist" onKeyDown={handleKeyDown}>
+        {items.map((tab) => {
+          const isSelected = tab.id === selected;
+          return (
+            <Link
+              key={tab.id}
+              href={tab.href}
+              prefetch={false}
+              onClick={(e) => onSelect(e, tab.id)}
+              className={`
+                whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm transition-colors
+                ${
+                  isSelected
+                    ? "border-primary text-primary"
+                    : "border-transparent text-on-surface-variant hover:text-on-surface hover:border-outline-variant/50"
+                }
+              `}
+              role="tab"
+              aria-selected={isSelected}
+              aria-controls={`panel-${tab.id}`}
+              id={`tab-${tab.id}`}
+            >
+              {tab.label}
+            </Link>
+          );
+        })}
+      </nav>
+    </div>
+  );
 }
 
 export function tabPanelProps(label: string, id: string) {
-  return { "aria-labelledby": tabID(label, id, "tab"), id: tabID(label, id, "panel"), role: "tabpanel" as const, tabIndex: 0 };
-}
-
-export function Tabs({ label, items, selected, onSelect }: {
-  label: string;
-  items: ReadonlyArray<{ id: string; label: string; href: string }>;
-  selected: string;
-  onSelect: (event: React.MouseEvent<HTMLAnchorElement>, id: string) => void;
-}) {
-  const [focused, setFocused] = useState(selected);
-  useEffect(() => {
-    // Keep roving focus aligned when browser history changes the selected tab.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setFocused(selected);
-  }, [selected]);
-
-  function move(event: KeyboardEvent<HTMLAnchorElement>, index: number) {
-    const tabs = Array.from(event.currentTarget.closest('[role="tablist"]')?.querySelectorAll<HTMLAnchorElement>('[role="tab"]') ?? []);
-    let next = index;
-    if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
-    else if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
-    else if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = tabs.length - 1;
-    else if (event.key === " " || event.key === "Enter") {
-      event.preventDefault();
-      event.currentTarget.click();
-      return;
-    } else return;
-    event.preventDefault();
-    setFocused(items[next]?.id ?? selected);
-    tabs[next]?.focus();
-  }
-
-  return <nav aria-label={label} className="tabs"><div role="tablist">{items.map((item, index) => {
-    const active = selected === item.id;
-    return <a aria-controls={tabID(label, item.id, "panel")} aria-selected={active} className={active ? "active" : ""} href={item.href} id={tabID(label, item.id, "tab")} key={item.id} onClick={(event) => { setFocused(item.id); onSelect(event, item.id); }} onKeyDown={(event) => move(event, index)} role="tab" tabIndex={focused === item.id ? 0 : -1}>{item.label}</a>;
-  })}</div></nav>;
+  return {
+    role: "tabpanel",
+    id: `panel-${id}`,
+    "aria-labelledby": `tab-${id}`,
+    "aria-label": label,
+    className: "focus:outline-none",
+    tabIndex: 0,
+  };
 }

@@ -10,8 +10,10 @@ import (
 	"time"
 	"unicode"
 
+	backupdomain "github.com/opsi-dev/opsi/cloud/internal/backup"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
+	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 )
 
 const (
@@ -39,6 +41,36 @@ type Config struct {
 	BuildRegistry          buildjob.RegistryConfig `json:"build_registry"`
 	RegistryPull           RegistryPullConfig      `json:"registry_pull"`
 	Placement              PlacementConfig         `json:"placement"`
+	BackupStore            BackupStoreConfig       `json:"backup_store"`
+}
+
+type BackupStoreConfig struct {
+	ID               string `json:"id,omitempty"`
+	Endpoint         string `json:"endpoint,omitempty"`
+	Bucket           string `json:"bucket,omitempty"`
+	Region           string `json:"region,omitempty"`
+	Prefix           string `json:"prefix,omitempty"`
+	CAFile           string `json:"ca_file,omitempty"`
+	AccessKeyFile    string `json:"access_key_file,omitempty"`
+	SecretKeyFile    string `json:"secret_key_file,omitempty"`
+	SessionTokenFile string `json:"session_token_file,omitempty"`
+	AllowInsecure    bool   `json:"allow_insecure,omitempty"`
+	AccessKey        string `json:"-"`
+	SecretKey        string `json:"-"`
+	SessionToken     string `json:"-"`
+	CABundlePEM      string `json:"-"`
+}
+
+func (c BackupStoreConfig) Enabled() bool {
+	return c.ID != "" || c.Endpoint != "" || c.Bucket != "" || c.Region != "" || c.Prefix != "" || c.CAFile != "" || c.AccessKeyFile != "" || c.SecretKeyFile != "" || c.SessionTokenFile != "" || c.AllowInsecure
+}
+
+func backupStoreAuthority(cfg BackupStoreConfig) backupdomain.StaticStoreAuthority {
+	return backupdomain.StaticStoreAuthority{
+		Spec:       backupv1.StoreSpec{ID: cfg.ID, Provider: backupv1.StoreProviderS3, Endpoint: cfg.Endpoint, Bucket: cfg.Bucket, Region: cfg.Region, CABundlePEM: cfg.CABundlePEM, AllowInsecure: cfg.AllowInsecure},
+		Credential: backupv1.StoreCredential{AccessKey: cfg.AccessKey, SecretKey: cfg.SecretKey, SessionToken: cfg.SessionToken},
+		Prefix:     cfg.Prefix,
+	}
 }
 
 type RegistryPullConfig struct {
@@ -114,6 +146,9 @@ func LoadConfig(path string) (Config, error) {
 		}
 	}
 	if err := applyEnvOverrides(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := loadBackupStoreFiles(&cfg.BackupStore); err != nil {
 		return Config{}, err
 	}
 	if err := validateConfig(&cfg); err != nil {
@@ -215,6 +250,48 @@ func applyEnvOverrides(cfg *Config) error {
 	applyStringEnv("OPSI_BUILD_REGISTRY_VISIBILITY", &cfg.BuildRegistry.Visibility)
 	applyStringEnv("OPSI_CLOUD_GHCR_PULL_USERNAME_FILE", &cfg.RegistryPull.UsernameFile)
 	applyStringEnv("OPSI_CLOUD_GHCR_PULL_TOKEN_FILE", &cfg.RegistryPull.TokenFile)
+	applyStringEnv("OPSI_CLOUD_BACKUP_STORE_ID", &cfg.BackupStore.ID)
+	applyStringEnv("OPSI_CLOUD_BACKUP_S3_ENDPOINT", &cfg.BackupStore.Endpoint)
+	applyStringEnv("OPSI_CLOUD_BACKUP_S3_BUCKET", &cfg.BackupStore.Bucket)
+	applyStringEnv("OPSI_CLOUD_BACKUP_S3_REGION", &cfg.BackupStore.Region)
+	applyStringEnv("OPSI_CLOUD_BACKUP_S3_PREFIX", &cfg.BackupStore.Prefix)
+	applyStringEnv("OPSI_CLOUD_BACKUP_S3_CA_FILE", &cfg.BackupStore.CAFile)
+	applyStringEnv("OPSI_CLOUD_BACKUP_S3_ACCESS_KEY_FILE", &cfg.BackupStore.AccessKeyFile)
+	applyStringEnv("OPSI_CLOUD_BACKUP_S3_SECRET_KEY_FILE", &cfg.BackupStore.SecretKeyFile)
+	applyStringEnv("OPSI_CLOUD_BACKUP_S3_SESSION_TOKEN_FILE", &cfg.BackupStore.SessionTokenFile)
+	if err := applyBoolEnv("OPSI_CLOUD_BACKUP_S3_ALLOW_INSECURE", &cfg.BackupStore.AllowInsecure); err != nil {
+		return err
+	}
+	return nil
+}
+
+func loadBackupStoreFiles(cfg *BackupStoreConfig) error {
+	read := func(label, path string) (string, error) {
+		if path == "" {
+			return "", nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", label, err)
+		}
+		if len(data) > maxConfigFileBytes {
+			return "", fmt.Errorf("%s exceeds %d bytes", label, maxConfigFileBytes)
+		}
+		return trimOneTrailingNewline(string(data)), nil
+	}
+	var err error
+	if cfg.AccessKey, err = read("backup S3 access key file", cfg.AccessKeyFile); err != nil {
+		return err
+	}
+	if cfg.SecretKey, err = read("backup S3 secret key file", cfg.SecretKeyFile); err != nil {
+		return err
+	}
+	if cfg.SessionToken, err = read("backup S3 session token file", cfg.SessionTokenFile); err != nil {
+		return err
+	}
+	if cfg.CABundlePEM, err = read("backup S3 CA file", cfg.CAFile); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -339,6 +416,9 @@ func validateConfig(cfg *Config) error {
 	if cfg.Placement.ReservedMemoryBytes < 0 || cfg.Placement.ReservedMemoryBytes > 1<<50 {
 		return fmt.Errorf("placement.reserved_memory_bytes is outside bounded values")
 	}
+	if err := validateBackupStoreConfig(cfg); err != nil {
+		return err
+	}
 	if cfg.Production {
 		if cfg.DatabaseURL == "" {
 			return fmt.Errorf("production requires database_url")
@@ -439,6 +519,35 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 	return cfg.GitHubOIDC.Validate(cfg.Production)
+}
+
+func validateBackupStoreConfig(cfg *Config) error {
+	store := &cfg.BackupStore
+	if !store.Enabled() {
+		return nil
+	}
+	if store.ID == "" {
+		store.ID = "default"
+	}
+	if store.Bucket == "" || store.Region == "" || store.AccessKeyFile == "" || store.SecretKeyFile == "" || store.AccessKey == "" || store.SecretKey == "" {
+		return fmt.Errorf("backup_store requires bucket, region, access_key_file and secret_key_file")
+	}
+	if strings.ContainsAny(store.ID+store.Bucket+store.Region, "\x00\r\n") {
+		return fmt.Errorf("backup_store identity is invalid")
+	}
+	if store.Endpoint != "" {
+		endpoint, err := url.Parse(store.Endpoint)
+		if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Path != "" && endpoint.Path != "/" || endpoint.Scheme != "https" && endpoint.Scheme != "http" {
+			return fmt.Errorf("backup_store endpoint must be an HTTP(S) origin")
+		}
+		if endpoint.Scheme == "http" && !store.AllowInsecure {
+			return fmt.Errorf("backup_store HTTP endpoint requires allow_insecure=true")
+		}
+	}
+	if cfg.Production && store.AllowInsecure {
+		return fmt.Errorf("production forbids insecure backup_store transport")
+	}
+	return nil
 }
 
 func normalizeProductionPublicBaseURL(raw string) (string, error) {

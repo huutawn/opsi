@@ -250,6 +250,34 @@ func (s PostgresStore) CompleteRunner(ctx context.Context, completion Completion
 	if _, err := tx.ExecContext(ctx, `UPDATE build_executor_attempts SET last_state='succeeded',completed_at=$2,updated_at=$2 WHERE attempt_id=$1 AND last_state='claimed'`, attempt.AttemptID, completion.Now); err != nil {
 		return CompletionResult{}, unavailable()
 	}
+	if result.SourceRiskReport != nil {
+		srr := *result.SourceRiskReport
+		id := sha256.Sum256([]byte(job.ID + ":srr"))
+		srrID := "srr-" + hex.EncodeToString(id[:12])
+		findingsJSON, _ := json.Marshal(srr.Findings)
+		envRefsJSON, _ := json.Marshal(srr.EnvReferences)
+		_, _ = tx.ExecContext(ctx, `
+			INSERT INTO source_risk_reports(
+				id, project_id, application_id, repository_id, resolved_commit_sha,
+				application_root, scanner_version, build_job_id, analysis_status,
+				files_scanned, bytes_scanned, truncated, findings, env_references,
+				report_hash, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			ON CONFLICT (project_id, application_id, repository_id, resolved_commit_sha, application_root, scanner_version)
+			DO UPDATE SET
+				build_job_id = EXCLUDED.build_job_id,
+				analysis_status = EXCLUDED.analysis_status,
+				files_scanned = EXCLUDED.files_scanned,
+				bytes_scanned = EXCLUDED.bytes_scanned,
+				truncated = EXCLUDED.truncated,
+				findings = EXCLUDED.findings,
+				env_references = EXCLUDED.env_references,
+				report_hash = EXCLUDED.report_hash
+		`, srrID, job.ProjectID, job.ApplicationID, job.Source.RepositoryID, job.Source.ResolvedCommitSHA,
+			job.Source.ApplicationRoot, srr.ScannerVersion, job.ID, srr.AnalysisStatus,
+			srr.FilesScanned, srr.BytesScanned, srr.Truncated, findingsJSON, envRefsJSON,
+			srr.ReportHash, completion.Now)
+	}
 	if err := tx.Commit(); err != nil {
 		return CompletionResult{}, unavailable()
 	}
@@ -300,12 +328,31 @@ func (s PostgresStore) FailRunner(ctx context.Context, failure RunnerFailure, le
 	return nil
 }
 
+type BuildConfigInput struct {
+	Commit        string `json:"commit"`
+	Strategy      string `json:"strategy"`
+	Dockerfile    string `json:"dockerfile,omitempty"`
+	Context       string `json:"context"`
+	Repository    string `json:"repository"`
+	BuildDepState string `json:"build_dep_state,omitempty"`
+}
+
+func ComputeBuildConfigHash(commit, strategy, dockerfile, buildContext, repository, buildDepState string) string {
+	data, _ := json.Marshal(BuildConfigInput{
+		Commit:        commit,
+		Strategy:      strategy,
+		Dockerfile:    dockerfile,
+		Context:       buildContext,
+		Repository:    repository,
+		BuildDepState: buildDepState,
+	})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func runnerBuildRecord(job Job, attempt DispatchAttempt, serviceKey string, result RunnerResult, target PublicationTarget, executor ExecutorConfig, now time.Time) buildrecordv1.Record {
 	idHash := sha256.Sum256([]byte(job.ID))
-	config, _ := json.Marshal(struct {
-		Commit, Strategy, Dockerfile, Context, Repository string
-	}{job.Source.ResolvedCommitSHA, job.ResolvedBuildStrategy, job.DockerfilePath, job.Source.BuildContext, target.Repository})
-	configHash := sha256.Sum256(config)
+	configHash := ComputeBuildConfigHash(job.Source.ResolvedCommitSHA, job.ResolvedBuildStrategy, job.DockerfilePath, job.Source.BuildContext, target.Repository, job.Source.BuildDependencyState)
 	builderVersion := result.Executor.BuildKitVersion + "/buildx-" + result.Executor.BuildxVersion
 	if job.ResolvedBuildStrategy == StrategyBuildpack {
 		builderVersion = "pack-" + result.Executor.Builder.PackVersion + "/lifecycle-" + result.Executor.Builder.LifecycleVersion
@@ -314,7 +361,7 @@ func runnerBuildRecord(job Job, attempt DispatchAttempt, serviceKey string, resu
 		SchemaVersion: buildrecordv1.SchemaVersion, ID: "br-" + hex.EncodeToString(idHash[:16]), ProjectID: job.ProjectID,
 		RepositoryID: uint64(job.Source.RepositoryID), RepositoryOwnerID: uint64(job.Source.RepositoryOwnerID), ActiveBindingID: job.Source.BindingID, ServiceID: job.ApplicationID, ServiceKey: serviceKey, CreatedAt: now,
 		Workload: buildrecordv1.WorkloadIdentity{Issuer: "https://token.actions.githubusercontent.com", Subject: "repo:" + executor.RepositoryFullName() + ":ref:" + executor.Ref, RepositoryID: uint64(job.Source.RepositoryID), RepositoryOwnerID: uint64(job.Source.RepositoryOwnerID), Ref: executor.Ref, SHA: job.Source.ResolvedCommitSHA, EventName: "workflow_dispatch", Workflow: attempt.Workflow, WorkflowRef: attempt.WorkflowRef, RunID: attempt.RunID, RunAttempt: attempt.RunAttempt},
-		Build:    buildrecordv1.BuildMetadata{ConfigHash: hex.EncodeToString(configHash[:]), Platform: result.Executor.Platform, OCIRepository: target.Repository, OCIDigest: result.Digest, BuildJobID: job.ID, BuildStrategy: job.ResolvedBuildStrategy, BuilderIdentity: result.Executor.BuilderIdentity, BuilderVersion: builderVersion, Builder: result.Executor.Builder, MediaType: result.Executor.Remote.Descriptor.MediaType, Status: "succeeded"},
+		Build:    buildrecordv1.BuildMetadata{ConfigHash: configHash, Platform: result.Executor.Platform, OCIRepository: target.Repository, OCIDigest: result.Digest, BuildJobID: job.ID, BuildStrategy: job.ResolvedBuildStrategy, BuilderIdentity: result.Executor.BuilderIdentity, BuilderVersion: builderVersion, Builder: result.Executor.Builder, MediaType: result.Executor.Remote.Descriptor.MediaType, Status: "succeeded"},
 	}
 }
 

@@ -35,33 +35,37 @@ type Error struct {
 func (e Error) Error() string { return e.Code }
 
 type SourceSnapshot struct {
-	BindingID          string    `json:"binding_id"`
-	BindingUpdatedAt   time.Time `json:"binding_updated_at"`
-	InstallationID     int64     `json:"github_installation_id"`
-	RepositoryID       int64     `json:"repository_id"`
-	RepositoryOwnerID  int64     `json:"repository_owner_id"`
-	RepositoryFullName string    `json:"repository_full_name"`
-	SelectedRef        string    `json:"selected_ref"`
-	ResolvedCommitSHA  string    `json:"resolved_commit_sha"`
-	ApplicationRoot    string    `json:"application_root"`
-	BuildContext       string    `json:"build_context"`
+	BindingID            string            `json:"binding_id"`
+	BindingUpdatedAt     time.Time         `json:"binding_updated_at"`
+	InstallationID       int64             `json:"github_installation_id"`
+	RepositoryID         int64             `json:"repository_id"`
+	RepositoryOwnerID    int64             `json:"repository_owner_id"`
+	RepositoryFullName   string            `json:"repository_full_name"`
+	SelectedRef          string            `json:"selected_ref"`
+	ResolvedCommitSHA    string            `json:"resolved_commit_sha"`
+	ApplicationRoot      string            `json:"application_root"`
+	BuildContext         string            `json:"build_context"`
+	BuildDependencyState string            `json:"build_dependency_state,omitempty"`
+	BuildEnvironment     map[string]string `json:"build_environment,omitempty"`
 }
 
 type ApplicationSource struct {
-	ProjectID          string
-	EnvironmentID      string
-	ApplicationID      string
-	BindingID          string
-	BindingUpdatedAt   time.Time
-	InstallationID     int64
-	RepositoryID       int64
-	RepositoryOwnerID  int64
-	RepositoryFullName string
-	SelectedRef        string
-	ApplicationRoot    string
-	BuildContext       string
-	BuildStrategy      string
-	DockerfilePath     string
+	ProjectID            string
+	EnvironmentID        string
+	ApplicationID        string
+	BindingID            string
+	BindingUpdatedAt     time.Time
+	InstallationID       int64
+	RepositoryID         int64
+	RepositoryOwnerID    int64
+	RepositoryFullName   string
+	SelectedRef          string
+	ApplicationRoot      string
+	BuildContext         string
+	BuildStrategy        string
+	DockerfilePath       string
+	BuildDependencyState string
+	BuildEnvironment     map[string]string
 }
 
 type Job struct {
@@ -159,7 +163,7 @@ func (s Service) Create(ctx context.Context, projectID, applicationID, createdBy
 	now := s.clock()
 	job := Job{
 		ID: id, ProjectID: projectID, EnvironmentID: source.EnvironmentID, ApplicationID: applicationID,
-		Source:                 SourceSnapshot{BindingID: source.BindingID, BindingUpdatedAt: source.BindingUpdatedAt, InstallationID: source.InstallationID, RepositoryID: source.RepositoryID, RepositoryOwnerID: source.RepositoryOwnerID, RepositoryFullName: source.RepositoryFullName, SelectedRef: source.SelectedRef, ResolvedCommitSHA: sha, ApplicationRoot: source.ApplicationRoot, BuildContext: source.BuildContext},
+		Source:                 SourceSnapshot{BindingID: source.BindingID, BindingUpdatedAt: source.BindingUpdatedAt, InstallationID: source.InstallationID, RepositoryID: source.RepositoryID, RepositoryOwnerID: source.RepositoryOwnerID, RepositoryFullName: source.RepositoryFullName, SelectedRef: source.SelectedRef, ResolvedCommitSHA: sha, ApplicationRoot: source.ApplicationRoot, BuildContext: source.BuildContext, BuildDependencyState: source.BuildDependencyState, BuildEnvironment: source.BuildEnvironment},
 		RequestedBuildStrategy: source.BuildStrategy, ResolvedBuildStrategy: resolved, DockerfilePath: dockerfile,
 		Status: StatusReady, CreatedBy: createdBy, CreatedAt: now, UpdatedAt: now, IdempotencyKey: idempotencyKey,
 	}

@@ -244,16 +244,48 @@ func TestApplicationReadinessReportsRequestedDigestDuringMixedRollout(t *testing
 
 type recordingRunner struct {
 	calls   [][]string
+	inputs  [][]byte
 	outputs map[string][]byte
 }
 
-func (r *recordingRunner) Run(_ context.Context, _ []byte, name string, args ...string) ([]byte, error) {
+func (r *recordingRunner) Run(_ context.Context, input []byte, name string, args ...string) ([]byte, error) {
 	call := append([]string{name}, args...)
 	r.calls = append(r.calls, call)
+	r.inputs = append(r.inputs, append([]byte(nil), input...))
 	if len(args) > 1 {
 		if out, ok := r.outputs[args[1]]; ok {
 			return out, nil
 		}
 	}
 	return nil, nil
+}
+
+func TestPostgresBindingSecretMaterializesExactTypedValuesWithoutWorkloadPlaintext(t *testing.T) {
+	command := testAgentCommand(t)
+	command.ProjectID, command.EnvironmentID, command.RuntimeID = "project-db", "env-db", "runtime-db"
+	command.Workload.ServiceKey = "api"
+	command.Workload.Environment = []deploymentv1.EnvironmentVariable{{Name: "DATABASE_HOST", Value: "postgres.internal"}, {Name: "DATABASE_NAME", Value: "opsi"}, {Name: "DATABASE_PORT", Value: "5432"}}
+	command.Workload.SecretReferences = []deploymentv1.SecretReference{{EnvName: "DATABASE_PASSWORD", SecretID: "rbcred-binding"}, {EnvName: "DATABASE_URL", SecretID: "rbcred-binding"}, {EnvName: "DATABASE_USER", SecretID: "rbcred-binding"}}
+	command.SecretMaterials = []deploymentv1.SecretMaterial{{SecretID: "rbcred-binding", Values: map[string]string{"DATABASE_USER": "opsi_b_role", "DATABASE_PASSWORD": "binding-secret", "DATABASE_URL": "postgres://opsi_b_role:binding-secret@postgres.internal:5432/opsi?sslmode=disable"}}}
+	runner := &recordingRunner{outputs: map[string][]byte{}}
+	if err := (KubernetesWorkloadSecretEnsurer{Runner: runner, KubectlPath: "kubectl"}).Ensure(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	var secret map[string]any
+	if err := json.Unmarshal(runner.inputs[len(runner.inputs)-1], &secret); err != nil {
+		t.Fatal(err)
+	}
+	metadata := secret["metadata"].(map[string]any)
+	labels := metadata["labels"].(map[string]any)
+	if metadata["name"] != workloadSecretName(command, "rbcred-binding") || metadata["name"] == "opsi-mr-postgres-server-acl" || labels["opsi.dev/workload-secret"] != "rbcred-binding" {
+		t.Fatalf("secret identity=%+v", metadata)
+	}
+	data := secret["data"].(map[string]any)
+	if len(data) != 3 || data["DATABASE_USER"] == nil || data["DATABASE_PASSWORD"] == nil || data["DATABASE_URL"] == nil {
+		t.Fatalf("secret data keys=%+v", data)
+	}
+	manifest, _, _, err := renderProductionResources(command)
+	if err != nil || strings.Contains(string(manifest), "binding-secret") || strings.Contains(string(manifest), "postgres://opsi_b_role") {
+		t.Fatalf("workload manifest leaked binding credential: err=%v manifest=%s", err, manifest)
+	}
 }

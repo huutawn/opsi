@@ -3,29 +3,67 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const component = new URL("./security-view.tsx", import.meta.url);
-const state = new URL("../../hooks/use-console-state.ts", import.meta.url);
-const client = new URL("../../lib/api/local-client.ts", import.meta.url);
+const accessTab = new URL("./access-tab.tsx", import.meta.url);
+const overviewTab = new URL("./overview-tab.tsx", import.meta.url);
+const auditTab = new URL("./audit-tab.tsx", import.meta.url);
 const router = new URL("../console/router-map.tsx", import.meta.url);
 
-test("Security is one canonical route with contextual operations and bounded audit detail", async () => {
-  const [source, routerSource] = await Promise.all([readFile(component, "utf8"), readFile(router, "utf8")]);
-  for (const marker of ["SecurityView", "Choose a service", "SecondFactorFields", "ProtectedResult", "Hide now", "Automatically hides in", "Loaded history", "Machine actor", "Human actor", "boundedMetadata"]) assert.match(source, new RegExp(marker));
-  assert.match(routerSource, /security: \{ secrets: SecurityView, audit: SecurityView \}/);
-  assert.match(source, /setIsOpen\(true\)/);
-  assert.match(source, /isOpen && result/);
-  assert.match(source, /isOpen && totp/);
-  assert.doesNotMatch(routerSource, /SecretsView|AuditView/);
-  assert.doesNotMatch(source, /defaultValue=\{services\[0\]|JSON\.stringify|localStorage|sessionStorage|dangerouslySetInnerHTML/);
+test("Security Center is strictly audit, visibility, and access inspection without secret mutation controls", async () => {
+  const [source, accessSource, overviewSource, auditSource, routerSource] = await Promise.all([
+    readFile(component, "utf8"),
+    readFile(accessTab, "utf8"),
+    readFile(overviewTab, "utf8"),
+    readFile(auditTab, "utf8"),
+    readFile(router, "utf8"),
+  ]);
+
+  // Routing and canonical tabs
+  assert.match(source, /OverviewTab/);
+  assert.match(source, /AuditTab/);
+  assert.match(source, /AccessTab/);
+  assert.match(routerSource, /security: \{ overview: SecurityView, audit: SecurityView, access: SecurityView, secrets: SecurityView \}/);
+
+  // Factual security visibility and safe metadata
+  assert.match(overviewSource, /Security Overview/);
+  assert.match(overviewSource, /Loaded Audit Events/);
+  assert.match(overviewSource, /Denied Operations/);
+  assert.match(overviewSource, /High-Impact Operations/);
+  assert.match(auditSource, /Audit/);
+  assert.match(auditSource, /safeAuditMetadata/);
+  assert.match(accessSource, /Access & Identities/);
+  assert.match(accessSource, /Authenticated Session/);
+  assert.match(accessSource, /Authority Connections/);
+  assert.match(accessSource, /Connected Nodes & Machine Authorities/);
+
+  // Strictly NO secret mutation, reveal, rotation, or TOTP administration controls in Security UI
+  for (const fileSource of [source, accessSource, overviewSource, auditSource]) {
+    assert.doesNotMatch(fileSource, /<form[^>]*onSubmit/);
+    assert.doesNotMatch(fileSource, /secretCreate|secretReveal|secretRotate|setupTOTP/);
+    assert.doesNotMatch(fileSource, /SecondFactorFields|ProtectedResult/);
+    assert.doesNotMatch(fileSource, /Reveal Secret|Rotate Secret|Create Secret|Set up TOTP/i);
+    assert.doesNotMatch(fileSource, /name="otp_code"|name="totp_code"/);
+  }
+
+  // Strictly NO synthetic compliance scoring, percentage, or risk grade
+  for (const fileSource of [source, accessSource, overviewSource, auditSource]) {
+    assert.doesNotMatch(fileSource, /compliance score|security score|risk score|compliance grade/i);
+    assert.doesNotMatch(fileSource, /\b(SOC|ISO|CIS|PCI|HIPAA)\b/);
+  }
 });
 
-test("secret requests carry no caller identity, PAT, silent namespace, or protected value in review", async () => {
-  const componentSource = await readFile(component, "utf8");
-  const stateSource = await readFile(state, "utf8");
-  const clientSource = await readFile(client, "utf8");
-  const secretBody = stateSource.slice(stateSource.indexOf("function secretCreate"), stateSource.indexOf("function setupTOTP"));
-  const clientMethods = clientSource.slice(clientSource.indexOf("createSecret("), clientSource.indexOf("incidents("));
-  assert.doesNotMatch(componentSource, /name="(?:user_id|role|pat)"/);
-  assert.doesNotMatch(secretBody, /user_id|form\.get\("role"\)|\bpat\b|namespace.*default/i);
-  assert.doesNotMatch(clientMethods, /user_id|"role"|"pat"/i);
-  assert.doesNotMatch(secretBody, /password:|secret:|totp\.secret|totp\.uri/);
+test("Security Center preserves safe cross-surface links without destructive action duplication", async () => {
+  const [accessSource, auditSource] = await Promise.all([
+    readFile(accessTab, "utf8"),
+    readFile(auditTab, "utf8"),
+  ]);
+
+  // Links to canonical surfaces
+  assert.match(accessSource, /console\.navigate\(\{ view: "infrastructure", tab: "servers"/);
+  assert.match(accessSource, /console\.navigate\(\{ view: "services", service:/);
+  assert.match(auditSource, /console\.navigate\((?:selectedRow|item)\.crossLink/);
+
+  // No duplicated destructive action triggers
+  for (const fileSource of [accessSource, auditSource]) {
+    assert.doesNotMatch(fileSource, /Delete Server|Destroy Storage|Delete Resource/i);
+  }
 });

@@ -609,8 +609,38 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateR5012ServiceConfiguration(ctx, db); err != nil {
 		return err
 	}
+	if err := MigrateR5013BuildDependency(ctx, db); err != nil {
+		return err
+	}
 	if err := MigrateP07AResources(ctx, db); err != nil {
 		return err
 	}
-	return MigrateP07B2Valkey(ctx, db)
+	if err := MigrateP07B2Valkey(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07B3B1PostgresBinding(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07B3B2RetainedStorage(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07B3C1Backup(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07B3C2ARestore(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07B3C2B2ACutover(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07B3C2B2B1CutoverApply(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07B3C2B2B2CutoverRollback(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateP07B3C2B2CCutoverFinalize(ctx, db); err != nil {
+		return err
+	}
+	return MigrateR5014SourceRisk(ctx, db)
 }

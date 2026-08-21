@@ -13,8 +13,11 @@ import (
 	"net/url"
 	"time"
 
+	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
 )
 
 type Client struct {
@@ -34,10 +37,16 @@ type DeploymentLease struct {
 }
 
 type JobLease struct {
-	Kind            string                `json:"kind"`
-	Deployment      *DeploymentLease      `json:"deployment_lease,omitempty"`
-	NodeLifecycle   *NodeLifecycleLease   `json:"node_lifecycle_lease,omitempty"`
-	ManagedResource *ManagedResourceLease `json:"managed_resource_lease,omitempty"`
+	Kind            string                 `json:"kind"`
+	Deployment      *DeploymentLease       `json:"deployment_lease,omitempty"`
+	NodeLifecycle   *NodeLifecycleLease    `json:"node_lifecycle_lease,omitempty"`
+	ManagedResource *ManagedResourceLease  `json:"managed_resource_lease,omitempty"`
+	RetainedStorage *RetainedStorageLease  `json:"retained_storage_lease,omitempty"`
+	Backup          *backupv1.Lease        `json:"backup_lease,omitempty"`
+	RestoreReview   *restorev1.ReviewLease `json:"restore_review_lease,omitempty"`
+	Restore         *restorev1.Lease       `json:"restore_lease,omitempty"`
+	CutoverReview   *cutoverv1.ReviewLease `json:"cutover_review_lease,omitempty"`
+	DepVerification *DepVerificationLease  `json:"dep_verification_lease,omitempty"`
 }
 
 type ManagedResourceLease struct {
@@ -45,6 +54,7 @@ type ManagedResourceLease struct {
 	LeaseToken string                                `json:"lease_token"`
 	Spec       resourcev1.ManagedResourceSpec        `json:"spec"`
 	Credential *resourcev1.ManagedResourceCredential `json:"credential,omitempty"`
+	Bindings   []resourcev1.PostgresBindingOperation `json:"bindings,omitempty"`
 }
 
 type ManagedResourceResult struct {
@@ -53,6 +63,62 @@ type ManagedResourceResult struct {
 	Evidence               *resourcev1.ManagedResourceEvidence `json:"evidence,omitempty"`
 	FailureCode            string                              `json:"failure_code,omitempty"`
 	FailureMessageRedacted string                              `json:"failure_message_redacted,omitempty"`
+	BindingResults         []resourcev1.PostgresBindingResult  `json:"binding_results,omitempty"`
+}
+
+type RetainedStorageLease struct {
+	LeaseToken string                                `json:"lease_token"`
+	Spec       resourcev1.RetainedStorageDestroySpec `json:"spec"`
+}
+
+type RetainedStorageResult struct {
+	Status                 string                                     `json:"status"`
+	LeaseToken             string                                     `json:"lease_token"`
+	Evidence               *resourcev1.RetainedStorageDestroyEvidence `json:"evidence,omitempty"`
+	FailureCode            string                                     `json:"failure_code,omitempty"`
+	FailureMessageRedacted string                                     `json:"failure_message_redacted,omitempty"`
+}
+
+type DepVerificationLease struct {
+	ID                    string `json:"id"`
+	LeaseToken            string `json:"lease_token"`
+	ProjectID             string `json:"project_id"`
+	EnvironmentID         string `json:"environment_id"`
+	ConsumerApplicationID string `json:"consumer_application_id"`
+	DependencyLogicalName string `json:"dependency_logical_name"`
+	ProviderKind          string `json:"provider_kind"`
+	ProviderServiceName   string `json:"provider_service_name"`
+	ProviderNamespace     string `json:"provider_namespace"`
+	ConsumerServiceKey    string `json:"consumer_service_key"`
+	ConsumerNamespace     string `json:"consumer_namespace,omitempty"`
+	ConsumerInternalHost  string `json:"consumer_internal_host,omitempty"`
+	ConsumerInternalPort  int    `json:"consumer_internal_port,omitempty"`
+	AssertionPath         string `json:"assertion_path,omitempty"`
+	AssertionExpectedCode int    `json:"assertion_expected_code,omitempty"`
+	TimeoutSeconds        int    `json:"timeout_seconds"`
+	BindingUsername       string `json:"binding_username,omitempty"`
+	BindingPassword       string `json:"binding_password,omitempty"`
+	BindingDatabase       string `json:"binding_database,omitempty"`
+	BindingHost           string `json:"binding_host,omitempty"`
+	BindingPort           int    `json:"binding_port,omitempty"`
+}
+
+type DepVerificationResult struct {
+	ID                   string `json:"id"`
+	LeaseToken           string `json:"lease_token"`
+	ConnectionStatus     string `json:"connection_status"`
+	ConnectionLatencyMs  int64  `json:"connection_latency_ms,omitempty"`
+	ConnectionFailCode   string `json:"connection_failure_code,omitempty"`
+	ConnectionMessage    string `json:"connection_message,omitempty"`
+	ConsumerHealthStatus string `json:"consumer_health_status"`
+	ConsumerReadyPods    int    `json:"consumer_ready_pods"`
+	ConsumerTotalPods    int    `json:"consumer_total_pods"`
+	AssertionStatus      string `json:"assertion_status"`
+	AssertionStatusCode  int    `json:"assertion_status_code,omitempty"`
+	AssertionFailCode    string `json:"assertion_failure_code,omitempty"`
+	AssertionMessage     string `json:"assertion_message,omitempty"`
+	FailureCode          string `json:"failure_code,omitempty"`
+	FailureMessage       string `json:"failure_message,omitempty"`
 }
 
 type DeploymentJobEnvelope struct {
@@ -155,9 +221,207 @@ func (c Client) PollJob(ctx context.Context, nodeID string, wait time.Duration) 
 			return nil, err
 		}
 		return &JobLease{Kind: kind.Kind, ManagedResource: &lease}, nil
+	case "retained_storage":
+		var lease RetainedStorageLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, RetainedStorage: &lease}, nil
+	case "backup":
+		var lease backupv1.Lease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, Backup: &lease}, nil
+	case "restore_review":
+		var lease restorev1.ReviewLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, RestoreReview: &lease}, nil
+	case "restore":
+		var lease restorev1.Lease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, Restore: &lease}, nil
+	case "cutover_review":
+		var lease cutoverv1.ReviewLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, CutoverReview: &lease}, nil
+	case "dependency_verification":
+		var lease DepVerificationLease
+		if err := json.Unmarshal(body, &lease); err != nil {
+			return nil, err
+		}
+		return &JobLease{Kind: kind.Kind, DepVerification: &lease}, nil
 	default:
 		return nil, nil
 	}
+}
+
+func (c Client) CompleteDepVerification(ctx context.Context, nodeID, leaseID string, result DepVerificationResult) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/dep-verifications/" + url.PathEscape(leaseID) + "/result"
+	query := endpoint.Query()
+	if c.ProjectID != "" {
+		query.Set("project_id", c.ProjectID)
+	}
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete dep verification: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c Client) CompleteRestoreReview(ctx context.Context, nodeID, reviewID string, result restorev1.ReviewResult) error {
+	return c.completeRestore(ctx, nodeID, "restore-reviews", reviewID, result)
+}
+
+func (c Client) CompleteCutoverReview(ctx context.Context, nodeID, reviewID string, result cutoverv1.ReviewResult) error {
+	return c.completeRestore(ctx, nodeID, "cutover-reviews", reviewID, result)
+}
+
+func (c Client) CompleteRestore(ctx context.Context, nodeID, restoreID string, result restorev1.Result) error {
+	return c.completeRestore(ctx, nodeID, "restores", restoreID, result)
+}
+
+func (c Client) completeRestore(ctx context.Context, nodeID, collection, id string, result any) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/" + collection + "/" + url.PathEscape(id) + "/result"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete restore: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c Client) CompleteBackup(ctx context.Context, nodeID, backupID string, result backupv1.Result) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/backups/" + url.PathEscape(backupID) + "/result"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete backup: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c Client) CompleteRetainedStorage(ctx context.Context, nodeID, retainedStorageID string, result RetainedStorageResult) error {
+	if c.BaseURL == "" {
+		return fmt.Errorf("cloud base URL is required")
+	}
+	endpoint, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = "/v1/agents/" + url.PathEscape(nodeID) + "/retained-storages/" + url.PathEscape(retainedStorageID) + "/result"
+	query := endpoint.Query()
+	query.Set("project_id", c.ProjectID)
+	endpoint.RawQuery = query.Encode()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	c.authorize(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("complete retained storage: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c Client) CompleteManagedResource(ctx context.Context, nodeID, resourceID string, result ManagedResourceResult) error {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Empty, StatusBadge } from "@/components/ui/primitives";
+import { Button, Empty, StatusBadge } from "@/components/ui/primitives";
 import { ApplicationWizard } from "@/features/applications/application-wizard";
 import type { ConsoleController } from "@/features/console/types";
 import { PlacementDialog } from "@/features/infrastructure/placement-dialog";
@@ -25,7 +25,6 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
   const projectID = console.state.project?.id ?? "";
   useEffect(() => {
     // Project-scoped dialogs never survive a context change.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPlacementOpen(false);
     setBootstrapOpen(false);
     setServiceOpen(false);
@@ -47,7 +46,7 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
   </div>;
 }
 
-function TopologyTab({ bindings, builds, console, environment, error, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, onReload, policies, repositories, topology }: { bindings: ReturnType<typeof useInfrastructureData>["data"]["bindings"]; builds: ReturnType<typeof useInfrastructureData>["data"]["builds"]; console: ConsoleController; environment?: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>["environments"][number]; error: string; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void>; policies: ReturnType<typeof useInfrastructureData>["data"]["policies"]; repositories: ReturnType<typeof useInfrastructureData>["data"]["repositories"]; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
+export function TopologyTab({ bindings, builds, console, environment, error, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, onReload, policies, repositories, topology }: { bindings: ReturnType<typeof useInfrastructureData>["data"]["bindings"]; builds: ReturnType<typeof useInfrastructureData>["data"]["builds"]; console: ConsoleController; environment?: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>["environments"][number]; error: string; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void>; policies: ReturnType<typeof useInfrastructureData>["data"]["policies"]; repositories: ReturnType<typeof useInfrastructureData>["data"]["repositories"]; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
   const [draft, setDraft] = useState<CanvasDraft>({});
   const lifecycle = serverLifecycle(facts, console.state.sessions);
   const onboarding = topologyOnboarding(facts, topology, console.state.sessions);
@@ -59,20 +58,109 @@ function TopologyTab({ bindings, builds, console, environment, error, facts, mod
     else if (onboarding.kind === "placement") onPlanPlacement(event.currentTarget);
     else { onMode("design"); window.requestAnimationFrame(() => document.getElementById("topology-heading")?.focus()); }
   }
-  return <section aria-labelledby="topology-heading">
-    <div className="sectionHeading topologyHeading"><div><h2 id="topology-heading" tabIndex={-1}>Topology</h2><p>{mode === "design" ? "TopologyPlan assignments and services still waiting for placement." : "Runtime, node, Agent, and deployment facts reported by existing sources."}</p></div><div className="topologyControls"><span className="sourceTag">{mode === "design" ? topology ? `TopologyPlan r${topology.revision}` : "No TopologyPlan" : "Live facts"}</span><div aria-label="Topology view" className="topologyMode" role="group"><button aria-pressed={mode === "design"} onClick={() => onMode("design")} type="button">Design</button><button aria-pressed={mode === "live"} onClick={() => onMode("live")} type="button">Live</button></div></div></div>
-    {mode === "design" ? <>
-      {error ? <p className="truthCallout" role="alert">{error}</p> : null}
-      {!topology ? <div className="truthCallout"><b>No topology plan</b><p>Infrastructure facts are shown without service placement edges. Service inventory is not used to fabricate assignments.</p></div> : null}
-      <TopologyDesignCanvas bindings={bindings} builds={builds} console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} repositories={repositories} topology={topology} />
-      <div className="designSupportingFacts"><TopologyOnboarding action={act} state={onboarding} /><ServerLifecycleCard console={console} lifecycle={lifecycle} /></div>
-    </> : <>{error ? <p className="truthCallout" role="alert">{error}</p> : null}<LiveTopology console={console} environment={environment} facts={facts} lifecycle={lifecycle} onConnectServer={onConnectServer} onReload={onReload} /></>}
-    {topology ? <div className="designDeploymentReview" hidden={mode !== "design"}><DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "No current environment"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} /></div> : null}
-  </section>;
+  return (
+    <section className="space-y-6" aria-labelledby="topology-heading">
+      <div className="flex flex-wrap items-center justify-between gap-4 pb-2 border-b border-outline-variant/15">
+        <div>
+          <h2 className="font-headline-lg text-2xl font-bold text-on-surface" id="topology-heading" tabIndex={-1}>
+            Topology
+          </h2>
+          <p className="font-body-md text-xs text-on-surface-variant mt-1">
+            {mode === "design" ? "Interactive application placement and configuration canvas" : "Real-time observed runtime and deployment infrastructure"}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="px-2.5 py-1 rounded-full text-xs font-code-md bg-surface-container text-on-surface-variant border border-outline-variant/20">
+            {mode === "design" ? (topology ? `Plan r${topology.revision}` : "No Plan") : "Observed State"}
+          </span>
+          <div aria-label="Topology view mode" className="topologyMode flex bg-surface-container-highest p-1 rounded-full border border-outline-variant/20 shadow-inner" role="group">
+            <button
+              aria-pressed={mode === "design"}
+              className={`px-4 py-2 min-h-[40px] min-w-[40px] rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                mode === "design" ? "bg-surface-bright text-on-surface shadow-md" : "text-on-surface-variant hover:text-on-surface"
+              }`}
+              onClick={() => onMode("design")}
+              type="button"
+            >
+              Design
+            </button>
+            <button
+              aria-pressed={mode === "live"}
+              className={`px-4 py-2 min-h-[40px] min-w-[40px] rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                mode === "live" ? "bg-surface-bright text-on-surface shadow-md" : "text-on-surface-variant hover:text-on-surface"
+              }`}
+              onClick={() => onMode("live")}
+              type="button"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-status-ready animate-pulse" />
+              Live
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {mode === "design" ? (
+        <>
+          {error ? <p className="p-3 bg-error-container/20 text-error border border-error/30 rounded-xl text-xs" role="alert">{error}</p> : null}
+          {!topology ? (
+            <div className="p-4 bg-surface-container-low rounded-2xl border border-outline-variant/15 text-xs text-on-surface-variant flex items-center gap-3">
+              <span className="material-symbols-outlined text-primary text-xl">info</span>
+              <div>
+                <b className="text-on-surface block font-semibold">No TopologyPlan draft yet</b>
+                <span>Infrastructure facts are displayed without service placement edges.</span>
+              </div>
+            </div>
+          ) : null}
+          <TopologyDesignCanvas bindings={bindings} builds={builds} console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} repositories={repositories} topology={topology} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <TopologyOnboarding action={act} state={onboarding} />
+            <ServerLifecycleCard console={console} lifecycle={lifecycle} />
+          </div>
+        </>
+      ) : (
+        <>
+          {error ? <p className="p-3 bg-error-container/20 text-error border border-error/30 rounded-xl text-xs" role="alert">{error}</p> : null}
+          <LiveTopology console={console} environment={environment} facts={facts} lifecycle={lifecycle} onConnectServer={onConnectServer} onReload={onReload} />
+        </>
+      )}
+      {topology ? (
+        <div className="mt-4" hidden={mode !== "design"}>
+          <DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "Default"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} />
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 function TopologyOnboarding({ action, state }: { action: (event: React.MouseEvent<HTMLButtonElement>) => void; state: TopologyOnboardingState }) {
-  return <section className="topologyOnboarding" data-state={state.kind} aria-labelledby="topology-next-step"><div><p className="eyebrow">Next step</p><h3 id="topology-next-step">{state.title}</h3><p>{state.description}</p>{state.progress ? <div className="bootstrapProgress" role="status"><span>{state.progress.percent === null ? state.progress.label : `${state.progress.percent}% · ${state.progress.label}`}</span>{state.progress.percent !== null ? <progress max="100" value={state.progress.percent} /> : null}</div> : null}</div><button className="primary" onClick={action} type="button">{state.action}</button></section>;
+  return (
+    <section
+      aria-labelledby="topology-next-step"
+      className="topologyOnboarding p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 flex flex-col justify-between space-y-4 shadow-sm"
+      data-state={state.kind}
+    >
+      <div>
+        <p className="text-[11px] font-code-md text-primary uppercase font-bold tracking-wider">Guided Setup</p>
+        <h3 className="font-headline-md text-base font-bold text-on-surface mt-1" id="topology-next-step">{state.title}</h3>
+        <p className="font-body-md text-xs text-on-surface-variant mt-1.5 leading-relaxed">{state.description}</p>
+        {state.progress ? (
+          <div className="mt-3 bg-surface-container-highest p-3 rounded-xl border border-outline-variant/10 text-xs font-code-md" role="status">
+            <span className="text-on-surface font-medium">{state.progress.percent === null ? state.progress.label : `${state.progress.percent}% · ${state.progress.label}`}</span>
+            {state.progress.percent !== null ? (
+              <div className="w-full bg-surface-container rounded-full h-1.5 mt-2 overflow-hidden">
+                <div className="bg-primary h-full rounded-full transition-all" style={{ width: `${state.progress.percent}%` }} />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      <div>
+        <Button onClick={action} size="sm" variant="primary">
+          {state.action}
+        </Button>
+      </div>
+    </section>
+  );
 }
 
 function ServerLifecycleCard({ console, lifecycle }: { console: ConsoleController; lifecycle: ServerLifecycle }) {
@@ -83,58 +171,166 @@ function ServerLifecycleCard({ console, lifecycle }: { console: ConsoleControlle
   const recent = events.slice(0, 5);
   const progress = session ? bootstrapProgress(session.checkpoint, events.length) : null;
   const facts: Array<[string, string] | null> = [
-    publicHost ? ["Public host", publicHost] : null,
-    lifecycle.runtime ? ["Runtime", `${lifecycle.runtime.name} · ${lifecycle.runtime.type} · ${lifecycle.runtime.status}`] : null,
+    publicHost ? ["Host", publicHost] : null,
+    lifecycle.runtime ? ["Runtime", `${lifecycle.runtime.name} · ${lifecycle.runtime.status}`] : null,
     lifecycle.node ? ["Node", `${lifecycle.node.id} · ${lifecycle.node.status}`] : null,
-    lifecycle.agent ? ["Agent", `${lifecycle.agent.id} · ${lifecycle.agent.status}${nodeRecord?.agent_version ? ` · ${nodeRecord.agent_version}` : ""}`] : null,
-    session ? ["Bootstrap status", `${session.status} · ${session.created_at}`] : null,
-    progress ? ["Bootstrap progress", progress.percent === null ? progress.label : `${progress.percent}% · ${progress.label}`] : null,
-    session?.last_failure_code ? ["Failure code", session.last_failure_code] : null,
-    session?.last_failure_message_redacted ? ["Failure", session.last_failure_message_redacted] : null,
+    lifecycle.agent ? ["Agent", `${lifecycle.agent.id.slice(0, 8)} · ${lifecycle.agent.status}`] : null,
+    session ? ["Bootstrap", `${session.status} · ${session.created_at.slice(0, 10)}`] : null,
+    progress ? ["Progress", progress.percent === null ? progress.label : `${progress.percent}% · ${progress.label}`] : null,
+    session?.last_failure_code ? ["Error", session.last_failure_code] : null,
   ];
   const reportedFacts = facts.filter((fact): fact is [string, string] => fact !== null);
-  const detailFacts: Array<[string, string] | null> = session ? [
-    ["Session", session.id],
-    ["Role", session.role],
-    session.attempt_count !== undefined ? ["Attempt", session.max_attempts === undefined ? String(session.attempt_count) : `${session.attempt_count}/${session.max_attempts}`] : null,
-    session.checkpoint ? ["Next step", String(session.checkpoint.next_step_index)] : null,
-  ] : [];
-  const reportedDetails = detailFacts.filter((fact): fact is [string, string] => fact !== null);
-  return <section className="serverLifecycle" aria-labelledby="server-lifecycle-heading" data-state={lifecycle.status.toLowerCase()}>
-    <div className="detailHeading"><div><p className="eyebrow">Server lifecycle</p><h3 id="server-lifecycle-heading" tabIndex={-1}>{publicHost || lifecycle.runtime?.name || session?.id || "Server facts"}</h3></div><StatusBadge label={lifecycle.status} value={lifecycle.status === "Connecting" ? "bootstrapping" : lifecycle.status} /></div>
-    {reportedFacts.length ? <dl className="evidenceGrid">{reportedFacts.map(([label, value]) => <Fact key={label} label={label} value={value} />)}</dl> : <p className="muted">No server identity or bootstrap facts have been reported.</p>}
-    {session?.id === console.state.bootstrapCommandSessionID && console.state.bootstrapCommand ? <BootstrapCommand command={console.state.bootstrapCommand} /> : session?.status === "waiting" && session.auth_method === "command" ? <p className="notice" role="status">Waiting for the one-time command to connect. This browser only shows the command when it is issued.</p> : null}
-    {recent.length ? <><div className="sectionHeading lifecycleEventsHeading"><div><h4>Recent bootstrap events</h4><p>Latest five factual events for this session.</p></div><span>{events.length} total</span></div><EventTimeline events={recent} /></> : null}
-    {session ? <details className="lifecycleDetails"><summary>Open full bootstrap details</summary><dl className="evidenceGrid">{reportedDetails.map(([label, value]) => <Fact key={label} label={label} value={value} />)}</dl>{events.length > 5 ? <EventTimeline events={events} /> : null}</details> : null}
-  </section>;
+  return (
+    <section className="serverLifecycle p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 space-y-4 shadow-sm" aria-labelledby="server-lifecycle-heading">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-code-md text-primary uppercase font-bold tracking-wider">Server Status</p>
+          <h3 className="font-headline-md text-base font-bold text-on-surface mt-1" id="server-lifecycle-heading" tabIndex={-1}>
+            {publicHost || lifecycle.runtime?.name || session?.id || "Active Server"}
+          </h3>
+        </div>
+        <StatusBadge label={lifecycle.status} value={lifecycle.status === "Connecting" ? "in_progress" : lifecycle.status === "Ready" ? "healthy" : "unknown"} />
+      </div>
+      {reportedFacts.length ? (
+        <dl className="grid grid-cols-2 gap-2 text-xs">
+          {reportedFacts.map(([label, value]) => (
+            <div key={label} className="bg-surface-container/60 p-2 rounded-lg border border-outline-variant/10">
+              <dt className="text-on-surface-variant text-[11px]">{label}</dt>
+              <dd className="font-code-md text-on-surface font-semibold truncate mt-0.5">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="text-xs text-on-surface-variant">No server identity or bootstrap facts reported.</p>
+      )}
+      {session?.id === console.state.bootstrapCommandSessionID && console.state.bootstrapCommand ? (
+        <BootstrapCommand command={console.state.bootstrapCommand} />
+      ) : session && session.status === "waiting" ? (
+        <p className="text-xs text-on-surface-variant bg-surface-container/40 p-3 rounded-xl border border-outline-variant/10" role="status">
+          This browser only shows the command when it is issued. Waiting for server to report progress.
+        </p>
+      ) : null}
+      {recent.length ? (
+        <>
+          <div className="flex items-center justify-between text-[11px] font-label-sm text-on-surface-variant pt-2 border-t border-outline-variant/10">
+            <span className="uppercase font-semibold">Recent Events</span>
+            <span>{events.length} total</span>
+          </div>
+          <ol className="eventTimeline space-y-2 text-xs">
+            {recent.map((event) => (
+              <li key={event.id} className="flex items-start gap-2 bg-surface-container/40 p-2 rounded-lg border border-outline-variant/10">
+                <span className="w-2 h-2 rounded-full bg-primary mt-1 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <b className="text-on-surface font-medium block truncate">{event.step}</b>
+                  <p className="text-on-surface-variant text-[11px] truncate">{event.message_redacted}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+          {events.length > 5 ? (
+            <button
+              className="text-primary hover:underline text-[11px] font-medium cursor-pointer block"
+              onClick={() => {
+                if (session) {
+                  console.navigate({ view: "infrastructure", tab: "bootstrap", session: session.id });
+                }
+              }}
+              type="button"
+            >
+              Open full bootstrap details
+            </button>
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
 }
 
 function EventTimeline({ events }: { events: TimelineEvent[] }) {
-  return <ol className="eventTimeline">{events.map((event) => <li key={event.id}><span aria-hidden="true" /><div><b>{event.step}</b><p>{event.message_redacted}</p><small>{event.created_at}</small></div></li>)}</ol>;
+  return (
+    <ol className="eventTimeline space-y-2 text-xs">
+      {events.map((event) => (
+        <li key={event.id} className="flex items-start gap-2 bg-surface-container/40 p-2 rounded-lg border border-outline-variant/10">
+          <span className="w-2 h-2 rounded-full bg-primary mt-1 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <b className="text-on-surface font-medium block truncate">{event.step}</b>
+            <p className="text-on-surface-variant text-[11px] truncate">{event.message_redacted}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
 }
 
 function LiveTopology({ console, environment, facts, lifecycle, onConnectServer, onReload }: { console: ConsoleController; environment?: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>["environments"][number]; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; lifecycle: ServerLifecycle; onConnectServer: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void> }) {
-  if (!environment) return <div className="truthCallout" role="alert"><b>Choose the current environment</b><p>Live deployment facts are blocked because this project has multiple environments and none is selected.</p></div>;
+  if (!environment) return <div className="p-4 bg-surface-container-low rounded-2xl border border-outline-variant/15 text-xs text-on-surface-variant">Choose the current environment to view live facts.</div>;
   const runtimes = facts.runtimes.filter((runtime) => runtime.environment_id === environment.id);
   const connections = console.state.services.flatMap((service) => (service.configuration?.bindings ?? []).map((binding) => ({ source: service.name, target: binding.target_service_key, kind: binding.kind, route: binding.path || binding.env_prefix || "" })));
   const exposures = console.state.deployments.filter((deployment) => deployment.environment_id === environment.id && deployment.exposure_spec);
-  const lifecycleAction = lifecycle.status === "Failed" ? "Retry bootstrap" : ["Waiting", "Connecting", "Bootstrapping"].includes(lifecycle.status) ? "Inspect progress" : lifecycle.status === "Unknown" && !lifecycle.session ? "Connect Server" : "Refresh factual state";
+  const lifecycleAction = lifecycle.status === "Failed" ? "Retry bootstrap" : ["Waiting", "Connecting", "Bootstrapping"].includes(lifecycle.status) ? "Inspect progress" : lifecycle.status === "Unknown" && !lifecycle.session ? "Connect Server" : "Refresh state";
   function act(event: React.MouseEvent<HTMLButtonElement>) {
     if (lifecycleAction === "Connect Server") onConnectServer(event.currentTarget);
     else if (lifecycleAction === "Retry bootstrap" && lifecycle.session) console.actions.retryBootstrap(lifecycle.session.id, onReload);
     else if (lifecycleAction === "Inspect progress" && lifecycle.session) { void console.actions.loadBootstrapEvents(lifecycle.session.id); window.requestAnimationFrame(() => document.getElementById("server-lifecycle-heading")?.focus()); }
     else void onReload();
   }
-  return <div className="liveTopology" data-mode="live">
-    <section className="liveOverview" aria-labelledby="live-overview-heading">
-      <div><p className="liveContext">{console.state.project?.name} / {environment.name} / Topology</p><p className="eyebrow">Factual runtime workspace</p><h3 id="live-overview-heading">Environment and runtime overview</h3><p>Observed runtime, node, Agent, workload, exposure, and rollback facts. Design draft placement is never used here.</p></div>
-      <div className="liveOverviewStatus"><StatusBadge label={lifecycle.status} value={lifecycle.status === "Connecting" ? "bootstrapping" : lifecycle.status} /><span>{runtimes.length} runtimes · {facts.nodes.filter((node) => runtimes.some((runtime) => runtime.id === node.runtime_id)).length} nodes</span><button className="primary" onClick={act} type="button">{lifecycleAction}</button></div>
-    </section>
-    <ServerLifecycleCard console={console} lifecycle={lifecycle} />
-    <LiveTopologyCanvas console={console} environment={environment} facts={facts} />
-    <section className="liveConnections" aria-labelledby="live-connections-heading"><div className="sectionHeading"><div><p className="eyebrow">Applied configuration</p><h3 id="live-connections-heading">Connections and exposure</h3><p>Routes below are present only when the Local API reports applied service configuration or ExposureSpec facts.</p></div><span>{connections.length + exposures.length} facts</span></div><div className="liveConnectionGrid"><div><h4>Service connections</h4>{connections.length ? <ul className="compactList">{connections.map((connection, index) => <li key={`${connection.source}:${connection.target}:${index}`}><strong>{connection.source} → {connection.target}</strong><small>{connection.kind}{connection.route ? ` · ${connection.route}` : " · route not reported"}</small></li>)}</ul> : <p className="muted">No applied connections reported.</p>}</div><div><h4>Exposure</h4>{exposures.length ? <ul className="compactList">{exposures.map((deployment) => <li key={deployment.id}><strong>{deployment.exposure_spec?.hostname}{deployment.exposure_spec?.path}</strong><small>{deployment.service_id} · {deployment.rollout_state || deployment.status}</small></li>)}</ul> : <p className="muted">No factual public exposure reported.</p>}</div></div></section>
-    <LiveDeploymentBoard console={console} environmentID={environment.id} environmentName={environment.name} />
-  </div>;
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-4 p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 shadow-sm">
+        <div>
+          <span className="text-[11px] font-code-md text-primary font-bold">{console.state.project?.name} / {environment.name}</span>
+          <h3 className="font-headline-md text-base font-bold text-on-surface mt-0.5" id="live-overview-heading">Runtime Environment</h3>
+          <p className="font-body-md text-xs text-on-surface-variant mt-1">{runtimes.length} runtimes • {facts.nodes.filter((node) => runtimes.some((runtime) => runtime.id === node.runtime_id)).length} nodes connected</p>
+        </div>
+        <div className="liveOverviewStatus flex items-center gap-3">
+          <StatusBadge label={lifecycle.status} value={lifecycle.status === "Ready" ? "healthy" : "unknown"} />
+          <Button className="min-h-[40px] min-w-[40px]" onClick={act} size="sm" variant="primary">
+            {lifecycleAction}
+          </Button>
+        </div>
+      </div>
+
+      <LiveTopologyCanvas console={console} environment={environment} facts={facts} />
+
+      <ServerLifecycleCard console={console} lifecycle={lifecycle} />
+
+      <section aria-label="Connections and exposure" className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 space-y-3 shadow-sm">
+          <h4 className="font-headline-md text-sm font-bold text-on-surface">Service Connections</h4>
+          {connections.length ? (
+            <ul className="space-y-2 text-xs">
+              {connections.map((connection, index) => (
+                <li key={`${connection.source}:${connection.target}:${index}`} className="flex items-center justify-between bg-surface-container/60 p-2.5 rounded-xl border border-outline-variant/10">
+                  <strong className="text-on-surface font-code-md">{connection.source} → {connection.target}</strong>
+                  <span className="text-on-surface-variant text-[11px]">{connection.kind}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-on-surface-variant">No active service connections.</p>
+          )}
+        </div>
+
+        <div className="p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 space-y-3 shadow-sm">
+          <h4 className="font-headline-md text-sm font-bold text-on-surface">Public Exposures</h4>
+          {exposures.length ? (
+            <ul className="space-y-2 text-xs">
+              {exposures.map((deployment) => (
+                <li key={deployment.id} className="flex items-center justify-between bg-surface-container/60 p-2.5 rounded-xl border border-outline-variant/10">
+                  <strong className="text-on-surface font-code-md">{deployment.exposure_spec?.hostname}{deployment.exposure_spec?.path}</strong>
+                  <span className="text-on-surface-variant text-[11px]">{deployment.service_id}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-on-surface-variant">No public exposures configured.</p>
+          )}
+        </div>
+      </section>
+
+      <LiveDeploymentBoard console={console} environmentID={environment.id} environmentName={environment.name} />
+    </div>
+  );
 }
 
 function LiveDeploymentBoard({ console, environmentID, environmentName }: { console: ConsoleController; environmentID: string; environmentName: string }) {
@@ -191,7 +387,7 @@ function BootstrapTab({ console, facts, onReload }: { console: ConsoleController
   return <div className="bootstrapLayout"><section className="bootstrapInventory"><div className="sectionHeading"><div><p className="eyebrow">Connection history</p><h2>Bootstrap sessions</h2><p>Durable, project-scoped Cloud sessions. Credentials and plaintext commands are never reconstructed here.</p></div></div>{console.state.sessions.length ? <ul>{console.state.sessions.map((session) => { const state = bootstrapLifecycleStatus(session.status); return <li key={session.id}><button aria-pressed={selected?.id === session.id} onClick={() => { console.navigate({ session: session.id }); void console.actions.loadBootstrapEvents(session.id); }} type="button"><span><strong>{session.public_host || session.id}</strong><small>{session.role} · attempt {session.attempt_count ?? "?"}/{session.max_attempts ?? "?"}</small><small>{session.id}</small></span><StatusBadge label={state === "Unknown" ? session.status : state} value={session.status} /></button></li>; })}</ul> : <Empty title="No bootstrap sessions" text="Use Connect Server to generate the first one-time bootstrap command." />}</section><section className="bootstrapDetail"><div className="detailHeading"><div><p className="eyebrow">Factual server lifecycle</p><h2>{lifecycle.runtime?.name || lifecycle.session?.public_host || "Connect a server"}</h2></div><StatusBadge label={lifecycle.status} value={lifecycle.status === "Connecting" ? "bootstrapping" : lifecycle.status} /></div><ol aria-label="Server connection progress" className="bootstrapLifecycleRail">{["Waiting", "Connecting", "Bootstrapping", "Ready"].map((state) => <li aria-current={lifecycle.status === state ? "step" : undefined} data-state={lifecycle.status === state ? "current" : "idle"} key={state}><StatusBadge label={state} value={state === "Connecting" || state === "Bootstrapping" ? "bootstrapping" : state} /></li>)}</ol><ServerLifecycleCard console={console} lifecycle={lifecycle} />{selected ? <section className="bootstrapSessionDetail" aria-labelledby="selected-bootstrap-heading"><div className="sectionHeading"><div><p className="eyebrow">Selected session</p><h3 id="selected-bootstrap-heading">{selected.id}</h3></div><StatusBadge value={selected.status} /></div><dl className="evidenceGrid"><Fact label="Attempt" value={`${selected.attempt_count ?? "Unknown"}/${selected.max_attempts ?? "Unknown"}`} /><Fact label="Progress" value={progress.percent === null ? progress.label : `${progress.percent}% · ${progress.label}`} /><Fact label="Next step" value={selected.checkpoint ? `Step ${selected.checkpoint.next_step_index}` : "Not reported"} /><Fact label="Failure" value={selected.last_failure_message_redacted || selected.last_failure_code || "None reported"} /></dl><EventTimeline events={console.state.bootstrapEventsSessionID === selected.id ? console.state.bootstrapEvents : []} />{['failed', 'dead_letter'].includes(selected.status) ? <button className="primary" onClick={() => console.actions.retryBootstrap(selected.id, onReload)} type="button">Retry bootstrap</button> : null}</section> : null}</section></div>;
 }
 
-function BootstrapDialog({ console, onClose, onCreated }: { console: ConsoleController; onClose: () => void; onCreated: () => Promise<void> }) {
+export function BootstrapDialog({ console, onClose, onCreated }: { console: ConsoleController; onClose: () => void; onCreated: () => Promise<void> }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [method, setMethod] = useState("command");
   useEffect(() => {
@@ -199,7 +395,127 @@ function BootstrapDialog({ console, onClose, onCreated }: { console: ConsoleCont
     element?.showModal();
     return () => { if (element?.open) element.close(); };
   }, []);
-  return <dialog aria-describedby="bootstrap-description" aria-labelledby="bootstrap-title" className="connectServerDialog placementDialog" onCancel={(event) => { event.preventDefault(); onClose(); }} ref={dialog}><div className="dialogHeading"><div><p className="eyebrow">Topology · Connect Server</p><h2 id="bootstrap-title">Connect Server</h2><p id="bootstrap-description">Generate a one-time command, run it on the VPS, then follow factual progress until Ready or Failed.</p></div><button aria-label="Close connect server dialog" autoFocus className="iconButton" onClick={onClose} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button></div><ol aria-label="Connect Server steps" className="connectServerSteps"><li aria-current="step"><b>1</b><span>Generate command</span></li><li><b>2</b><span>Run on VPS</span></li><li><b>3</b><span>Wait for Ready</span></li></ol><form className="form connectServerForm" onSubmit={(event) => { void console.actions.addServer(event, onCreated); onClose(); }}><label>Role<select className="select" defaultValue="first_server" name="role" required><option value="first_server">First server</option><option value="worker">Worker</option></select></label><label>Server IP or hostname<input autoComplete="off" className="field" name="public_host" placeholder="203.0.113.10" required spellCheck={false} /></label><fieldset className="bootstrapMethod span2"><legend>Bootstrap command</legend><label className="methodChoice commandMethod"><input checked={method === "command"} name="auth_method" onChange={() => setMethod("command")} type="radio" value="command" /><span><strong>Run bootstrap command</strong><small>Recommended. No SSH private key, SSH password, Cloud PAT, or global Worker token is requested by this browser flow.</small></span></label><details><summary>Advanced: Bootstrap over SSH</summary><div className="advancedBootstrap"><p>Use the existing verified SSH bootstrap only when command execution on the VPS is not available.</p><label className="methodChoice"><input checked={method === "password"} name="auth_method" onChange={() => setMethod("password")} type="radio" value="password" /><span><strong>SSH password</strong><small>Requested again only after mutation review.</small></span></label><label className="methodChoice"><input checked={method === "private_key"} name="auth_method" onChange={() => setMethod("private_key")} type="radio" value="private_key" /><span><strong>SSH private key</strong><small>Uses the existing verified known_hosts workflow.</small></span></label>{method !== "command" ? <div className="sshBootstrapFields"><label>SSH port<input className="field" defaultValue="22" inputMode="numeric" max="65535" min="1" name="ssh_port" required type="number" /></label><label>SSH username<input autoComplete="username" className="field" defaultValue="root" name="ssh_username" required spellCheck={false} /></label></div> : null}</div></details></fieldset><p className="notice span2">The issued token expires, is scoped to this reviewed project/environment/runtime/node session, and can claim the exact session once. Refresh cannot reconstruct plaintext after issuance.</p><div className="dialogActions span2"><button onClick={onClose} type="button">Cancel</button><button className="primary" type="submit">Generate bootstrap command</button></div></form></dialog>;
+  return (
+    <dialog
+      aria-describedby="bootstrap-description"
+      aria-labelledby="bootstrap-title"
+      className="fixed inset-0 m-auto bg-surface-container-low border border-outline-variant/30 rounded-2xl shadow-2xl p-6 max-w-xl w-full backdrop:bg-background/80 backdrop:backdrop-blur-sm z-50 text-on-surface flex flex-col gap-5 max-h-[90vh] overflow-y-auto"
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      ref={dialog}
+    >
+      <div className="flex items-start justify-between border-b border-outline-variant/20 pb-4">
+        <div>
+          <span className="font-label-sm text-xs text-primary font-bold uppercase tracking-wider block mb-1">
+            Topology · Connect Server
+          </span>
+          <h2 id="bootstrap-title" className="font-headline-md text-xl font-bold text-on-surface">
+            Connect Server
+          </h2>
+          <p id="bootstrap-description" className="font-body-md text-xs text-on-surface-variant mt-1">
+            Generate a one-time command, run it on the VPS, then follow progress until Ready.
+          </p>
+        </div>
+        <button
+          aria-label="Close connect server dialog"
+          autoFocus
+          className="p-2 min-h-[40px] min-w-[40px] flex items-center justify-center text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest rounded-lg transition-colors cursor-pointer"
+          onClick={onClose}
+          type="button"
+        >
+          <span className="material-symbols-outlined text-[20px]">close</span>
+        </button>
+      </div>
+
+      <ol aria-label="Connect Server steps" className="grid grid-cols-3 gap-2 bg-surface-container p-3 rounded-xl border border-outline-variant/15 text-xs">
+        <li className="flex items-center gap-2 text-primary font-bold">
+          <span className="w-5 h-5 rounded-full bg-primary text-on-primary flex items-center justify-center text-[11px]">1</span>
+          <span>Generate command</span>
+        </li>
+        <li className="flex items-center gap-2 text-on-surface-variant">
+          <span className="w-5 h-5 rounded-full bg-surface-container-highest flex items-center justify-center text-[11px]">2</span>
+          <span>Run on VPS</span>
+        </li>
+        <li className="flex items-center gap-2 text-on-surface-variant">
+          <span className="w-5 h-5 rounded-full bg-surface-container-highest flex items-center justify-center text-[11px]">3</span>
+          <span>Wait for Ready</span>
+        </li>
+      </ol>
+
+      <form className="space-y-4" onSubmit={(event) => { void console.actions.addServer(event, onCreated); onClose(); }}>
+        <div className="space-y-1.5">
+          <label className="text-xs font-label-sm text-on-surface-variant block">Role</label>
+          <select aria-label="Role" className="field min-h-[40px]" defaultValue="first_server" name="role" required>
+            <option value="first_server">First server</option>
+            <option value="worker">Worker</option>
+          </select>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-label-sm text-on-surface-variant block">Server IP or hostname</label>
+          <input aria-label="Server IP or hostname" autoComplete="off" className="field min-h-[40px]" name="public_host" placeholder="203.0.113.10" required spellCheck={false} />
+        </div>
+
+        <fieldset className="space-y-3 bg-surface-container/60 p-4 rounded-xl border border-outline-variant/15">
+          <legend className="text-xs font-label-sm font-bold text-on-surface uppercase tracking-wider px-1">Bootstrap Method</legend>
+          <label className="flex items-start gap-3 p-3 bg-surface-container-high rounded-xl border border-outline-variant/20 cursor-pointer">
+            <input aria-label="Run bootstrap command" checked={method === "command"} className="mt-1" name="auth_method" onChange={() => setMethod("command")} type="radio" value="command" />
+            <div>
+              <strong className="text-xs text-on-surface block font-semibold">Run bootstrap command</strong>
+              <small className="text-[11px] text-on-surface-variant block mt-0.5">Recommended. Scoped one-time execution on the server.</small>
+            </div>
+          </label>
+
+          <details className="text-xs text-on-surface-variant space-y-3 pt-2">
+            <summary className="cursor-pointer font-medium hover:text-on-surface min-h-[40px] min-w-[40px] flex items-center">Advanced: Bootstrap over SSH</summary>
+            <div className="space-y-3 pt-2">
+              <label className="flex items-start gap-3 p-3 bg-surface-container-high rounded-xl border border-outline-variant/20 cursor-pointer">
+                <input aria-label="SSH password" checked={method === "password"} className="mt-1" name="auth_method" onChange={() => setMethod("password")} type="radio" value="password" />
+                <div>
+                  <strong className="text-xs text-on-surface block font-semibold">SSH Password</strong>
+                  <small className="text-[11px] text-on-surface-variant block mt-0.5">Requested again only after mutation review.</small>
+                </div>
+              </label>
+              <label className="flex items-start gap-3 p-3 bg-surface-container-high rounded-xl border border-outline-variant/20 cursor-pointer">
+                <input aria-label="SSH private key" checked={method === "private_key"} className="mt-1" name="auth_method" onChange={() => setMethod("private_key")} type="radio" value="private_key" />
+                <div>
+                  <strong className="text-xs text-on-surface block font-semibold">SSH Private Key</strong>
+                  <small className="text-[11px] text-on-surface-variant block mt-0.5">Uses verified known_hosts workflow.</small>
+                </div>
+              </label>
+              {method !== "command" ? (
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-label-sm text-on-surface-variant block">SSH port</label>
+                    <input aria-label="SSH port" className="field" defaultValue="22" inputMode="numeric" max="65535" min="1" name="ssh_port" required type="number" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-label-sm text-on-surface-variant block">SSH username</label>
+                    <input aria-label="SSH username" autoComplete="username" className="field" defaultValue="root" name="ssh_username" required spellCheck={false} />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </details>
+        </fieldset>
+
+        <p className="text-[11px] text-on-surface-variant bg-surface-container/40 p-3 rounded-xl border border-outline-variant/10">
+          The issued token expires and is scoped to this reviewed session.
+        </p>
+
+        <div className="flex items-center justify-end gap-3 pt-3 border-t border-outline-variant/20">
+          <Button className="min-h-[40px] min-w-[40px]" onClick={onClose} size="sm" type="button" variant="outline">
+            Cancel
+          </Button>
+          <Button className="min-h-[40px] min-w-[40px]" size="sm" type="submit" variant="primary">
+            Generate bootstrap command
+          </Button>
+        </div>
+      </form>
+    </dialog>
+  );
 }
 
 function BootstrapCommand({ command }: { command: string }) {

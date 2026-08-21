@@ -48,20 +48,37 @@ type Store interface {
 	UpdateClaimed(context.Context, resourcev1.Resource, string) (resourcev1.Resource, error)
 	Delete(context.Context, string, string) error
 	DeleteClaimed(context.Context, string, string, string) error
+	RetainAndDeleteClaimed(context.Context, resourcev1.Resource, resourcev1.RetainedStorage, string) error
+	GetRetainedStorage(context.Context, string, string) (resourcev1.RetainedStorage, error)
+	GetRetainedStorageByResource(context.Context, string, string) (resourcev1.RetainedStorage, error)
+	ListRetainedStorage(context.Context, string, string) ([]resourcev1.RetainedStorage, error)
+	SaveRetainedStorageReview(context.Context, string, string, uint64, string, string, time.Time) (resourcev1.RetainedStorage, bool, bool, error)
+	RequestRetainedStorageDestroy(context.Context, string, string, string, string, string, string, time.Time) (resourcev1.RetainedStorage, bool, error)
+	ClaimRetainedStorageDestroy(context.Context, string, string, string, time.Time, time.Time) (resourcev1.RetainedStorage, bool, error)
+	UpdateRetainedStorageClaimed(context.Context, resourcev1.RetainedStorage, string) (resourcev1.RetainedStorage, error)
 	CreateBinding(context.Context, resourcev1.Binding, string, string) (resourcev1.Binding, bool, error)
+	GetBinding(context.Context, string, string) (resourcev1.Binding, error)
 	ListBindings(context.Context, string, string) ([]resourcev1.Binding, error)
+	UpdateBinding(context.Context, resourcev1.Binding) (resourcev1.Binding, error)
+	DeleteBinding(context.Context, string, string) error
 }
 
 type CredentialAuthority interface {
 	Ensure(context.Context, string) (resourcev1.ManagedResourceCredential, error)
+	EnsureBinding(context.Context, resourcev1.BindingCredentialSpec) (resourcev1.ManagedResourceCredential, error)
 	Get(context.Context, string) (resourcev1.ManagedResourceCredential, error)
 	Delete(context.Context, string) error
+}
+
+type ActiveOperationAuthority interface {
+	HasActive(context.Context, string, string) (bool, error)
 }
 
 type Service struct {
 	Store       Store
 	Scopes      ScopeAuthority
 	Credentials CredentialAuthority
+	Operations  []ActiveOperationAuthority
 	Now         func() time.Time
 }
 
@@ -126,10 +143,22 @@ func (s Service) Update(ctx context.Context, projectID, resourceID string, reque
 	}
 	switch current.Kind {
 	case resourcev1.KindManagedService:
+		if current.Type == resourcev1.TypePostgres {
+			active, err := s.hasActiveOperation(ctx, projectID, resourceID)
+			if err != nil {
+				return resourcev1.Resource{}, err
+			}
+			if active {
+				return resourcev1.Resource{}, Error{Code: "RESOURCE_ACTIVE_OPERATION_CONFLICT", Status: 409, Message: "resource has an active backup"}
+			}
+		}
 		if request.Managed == nil || request.External != nil || request.Managed.Type != current.Type {
 			return resourcev1.Resource{}, invalid("RESOURCE_SPEC_INVALID", "managed resource update must preserve kind and type")
 		}
 		if err := validateManaged(*request.Managed); err != nil {
+			return resourcev1.Resource{}, err
+		}
+		if err := validateManagedUpdate(current, *request.Managed); err != nil {
 			return resourcev1.Resource{}, err
 		}
 		current.Managed = cloneManaged(request.Managed)
@@ -159,14 +188,49 @@ func (s Service) Update(ctx context.Context, projectID, resourceID string, reque
 	return s.Store.Update(ctx, current)
 }
 
-func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID string) (resourcev1.Resource, error) {
+func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID, actor string) (resourcev1.Resource, error) {
 	current, err := s.Get(ctx, projectID, resourceID)
 	if err != nil {
 		return resourcev1.Resource{}, err
 	}
+	if current.Type == resourcev1.TypePostgres {
+		active, err := s.hasActiveOperation(ctx, projectID, resourceID)
+		if err != nil {
+			return resourcev1.Resource{}, err
+		}
+		if active {
+			return resourcev1.Resource{}, Error{Code: "RESOURCE_ACTIVE_OPERATION_CONFLICT", Status: 409, Message: "resource has an active backup"}
+		}
+		bindings, err := s.ListBindings(ctx, projectID, current.EnvironmentID)
+		if err != nil {
+			return resourcev1.Resource{}, err
+		}
+		for _, binding := range bindings {
+			if binding.Target.ID == resourceID {
+				return resourcev1.Resource{}, Error{Code: resourcev1.FailureBindingActive, Status: 409, Message: "resource has active bindings"}
+			}
+		}
+	}
+	if current.Runtime == nil {
+		return resourcev1.Resource{}, invalid("MANAGED_RESOURCE_DELETE_FAILED", "managed resource runtime authority is unavailable")
+	}
 	current.Lifecycle = resourcev1.LifecycleDeleting
+	current.Runtime.DeleteActor = actor
 	current.UpdatedAt = s.clock()
 	return s.Store.Update(ctx, current)
+}
+
+func (s Service) hasActiveOperation(ctx context.Context, projectID, resourceID string) (bool, error) {
+	for _, authority := range s.Operations {
+		if authority == nil {
+			continue
+		}
+		active, err := authority.HasActive(ctx, projectID, resourceID)
+		if err != nil || active {
+			return active, err
+		}
+	}
+	return false, nil
 }
 
 func (s Service) CreateBinding(ctx context.Context, projectID, key string, request resourcev1.CreateBindingRequest) (resourcev1.Binding, bool, error) {
@@ -200,13 +264,58 @@ func (s Service) CreateBinding(ctx context.Context, projectID, key string, reque
 	if logical == "" || len(logical) > 64 {
 		return resourcev1.Binding{}, false, invalid("RESOURCE_BINDING_NAME_INVALID", "binding logical name is required")
 	}
+	if target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres && (target.Lifecycle == resourcev1.LifecycleDeleting || target.Runtime == nil || !factualReady(target.Runtime.Spec, target.Runtime.Evidence)) {
+		return resourcev1.Binding{}, false, invalid("RESOURCE_BINDING_TARGET_NOT_READY", "managed resource must be factually Ready before binding")
+	}
+	if target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres {
+		active, err := s.hasActiveOperation(ctx, projectID, target.ID)
+		if err != nil {
+			return resourcev1.Binding{}, false, err
+		}
+		if active {
+			return resourcev1.Binding{}, false, Error{Code: "RESOURCE_ACTIVE_OPERATION_CONFLICT", Status: 409, Message: "resource has an active operation"}
+		}
+	}
 	now := s.clock()
 	binding := resourcev1.Binding{
 		SchemaVersion: resourcev1.SchemaVersion, ID: newID("rbind"), ProjectID: projectID, EnvironmentID: request.EnvironmentID,
 		Source: request.Source, Target: request.Target, Protocol: request.Protocol, LogicalName: logical,
-		RuntimeRefs: runtimeRefs(target), CreatedAt: now, UpdatedAt: now,
+		Lifecycle: resourcev1.LifecycleReady, RuntimeRefs: runtimeRefs(target), CreatedAt: now, UpdatedAt: now,
 	}
-	return s.Store.CreateBinding(ctx, binding, key, bindingPayload(request))
+	postgresBinding := target.Kind == resourcev1.KindManagedService && target.Type == resourcev1.TypePostgres
+	if postgresBinding {
+		binding.Lifecycle = resourcev1.LifecycleProvisioning
+		binding.CredentialID = "rbcred-" + binding.ID
+		binding.RoleName = postgresBindingRole(binding.ID)
+		binding.Database = target.Runtime.Spec.Connection.Database
+		binding.RuntimeRefs = postgresBindingRuntimeRefs(target, binding)
+	}
+	stored, reused, err := s.Store.CreateBinding(ctx, binding, key, bindingPayload(request))
+	if err != nil || !postgresBinding {
+		return stored, reused, err
+	}
+	if s.Credentials == nil {
+		return stored, reused, invalid(resourcev1.FailureBindingCredentialUnavailable, "PostgreSQL binding credential authority is unavailable")
+	}
+	credential, err := s.Credentials.EnsureBinding(ctx, resourcev1.BindingCredentialSpec{CredentialID: stored.CredentialID, BindingID: stored.ID, ResourceID: stored.Target.ID, Username: stored.RoleName, Database: stored.Database})
+	if err != nil || credential.ValidateBinding(stored.ID, stored.Target.ID) != nil {
+		return stored, reused, invalid(resourcev1.FailureBindingCredentialUnavailable, "PostgreSQL binding credential could not be generated")
+	}
+	if stored.Lifecycle != resourcev1.LifecycleReady {
+		target.Lifecycle = resourcev1.LifecyclePlanned
+		target.UpdatedAt = now
+		if _, err := s.Store.Update(ctx, target); err != nil {
+			return stored, reused, err
+		}
+	}
+	return stored, reused, nil
+}
+
+func (s Service) GetBinding(ctx context.Context, projectID, bindingID string) (resourcev1.Binding, error) {
+	if s.Store == nil {
+		return resourcev1.Binding{}, unavailable()
+	}
+	return s.Store.GetBinding(ctx, projectID, bindingID)
 }
 
 func (s Service) ListBindings(ctx context.Context, projectID, environmentID string) ([]resourcev1.Binding, error) {
@@ -214,6 +323,52 @@ func (s Service) ListBindings(ctx context.Context, projectID, environmentID stri
 		return nil, unavailable()
 	}
 	return s.Store.ListBindings(ctx, projectID, environmentID)
+}
+
+func (s Service) DeleteBinding(ctx context.Context, projectID, bindingID string) (resourcev1.Binding, error) {
+	binding, err := s.GetBinding(ctx, projectID, bindingID)
+	if err != nil {
+		return resourcev1.Binding{}, err
+	}
+	target, err := s.Get(ctx, projectID, binding.Target.ID)
+	if err != nil {
+		return resourcev1.Binding{}, err
+	}
+	if target.Kind != resourcev1.KindManagedService || target.Type != resourcev1.TypePostgres {
+		return resourcev1.Binding{}, s.Store.DeleteBinding(ctx, projectID, bindingID)
+	}
+	if binding.Lifecycle != resourcev1.LifecycleDeleting {
+		binding.Lifecycle = resourcev1.LifecycleDeleting
+		binding.FailureCode = ""
+		binding.UpdatedAt = s.clock()
+		binding, err = s.Store.UpdateBinding(ctx, binding)
+		if err != nil {
+			return resourcev1.Binding{}, err
+		}
+	}
+	target.Lifecycle = resourcev1.LifecyclePlanned
+	target.UpdatedAt = binding.UpdatedAt
+	if _, err := s.Store.Update(ctx, target); err != nil {
+		return resourcev1.Binding{}, err
+	}
+	return binding, nil
+}
+
+func postgresBindingRole(bindingID string) string {
+	sum := sha256.Sum256([]byte(bindingID))
+	return "opsi_b_" + hex.EncodeToString(sum[:16])
+}
+
+func postgresBindingRuntimeRefs(target resourcev1.Resource, binding resourcev1.Binding) []resourcev1.RuntimeConnectionReference {
+	secret := &resourcev1.SecretReference{SecretID: binding.CredentialID}
+	return []resourcev1.RuntimeConnectionReference{
+		{Name: "HOST", Sensitivity: resourcev1.ValueNonSecret, Value: target.Runtime.Spec.Connection.Host},
+		{Name: "PORT", Sensitivity: resourcev1.ValueNonSecret, Value: strconv.Itoa(int(target.Runtime.Spec.Connection.Port))},
+		{Name: "NAME", Sensitivity: resourcev1.ValueNonSecret, Value: binding.Database},
+		{Name: "USER", Sensitivity: resourcev1.ValueSecret, SecretRef: secret},
+		{Name: "PASSWORD", Sensitivity: resourcev1.ValueSecret, SecretRef: secret},
+		{Name: "URL", Sensitivity: resourcev1.ValueSecret, SecretRef: secret},
+	}
 }
 
 func (s Service) TopologyResources(ctx context.Context, projectID string) ([]resourcev1.Resource, error) {
@@ -245,11 +400,11 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 	if spec.Replicas < 1 || spec.Replicas > maxReplicas || spec.CPUMillicores < 1 || spec.CPUMillicores > maxCPUMillicores || spec.MemoryBytes < 1 || spec.MemoryBytes > maxMemoryBytes {
 		return invalid("RESOURCE_CAPACITY_INVALID", "replicas, CPU, or memory request is invalid")
 	}
-	if spec.Storage.SizeBytes < 0 || spec.Storage.SizeBytes > maxStorageBytes || (spec.Storage.Persistent && spec.Storage.SizeBytes == 0) {
-		return invalid("RESOURCE_STORAGE_INVALID", "persistent storage requires a bounded positive size")
+	if spec.Storage.SizeBytes < 0 || spec.Storage.SizeBytes > maxStorageBytes || (spec.Storage.Persistent && spec.Storage.SizeBytes == 0) || (!spec.Storage.Persistent && (spec.Storage.SizeBytes != 0 || spec.Storage.PolicyRef != "")) {
+		return invalid(resourcev1.FailureStorageInvalid, "persistent storage requires a bounded positive size")
 	}
 	if definition.Storage.Required && !spec.Storage.Persistent {
-		return invalid("RESOURCE_STORAGE_REQUIRED", "resource type requires persistent storage")
+		return invalid(resourcev1.FailureStorageRequired, "resource type requires persistent storage")
 	}
 	if !definition.Storage.Supported && spec.Storage.Persistent {
 		return invalid("RESOURCE_STORAGE_UNSUPPORTED", "resource type does not support persistent storage")
@@ -257,12 +412,20 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 	if len(spec.ServiceConfig) != 0 {
 		return invalid("RESOURCE_CONFIG_UNSUPPORTED", "resource type has no configurable service keys in P07A")
 	}
-	if spec.Type == resourcev1.TypeRedis {
+	if spec.Type == resourcev1.TypePostgres {
+		if spec.Storage.PolicyRef != "" && spec.Storage.PolicyRef != resourcev1.StoragePolicyDefault {
+			return invalid(resourcev1.FailureStorageInvalid, "managed PostgreSQL storage policy is unsupported")
+		}
+		if spec.Version != "" && spec.Version != "default" && spec.Version != resourcev1.PostgresVersion {
+			return invalid(resourcev1.FailureVersionUpgradeUnsupported, "managed PostgreSQL version changes are unsupported")
+		}
+	}
+	if spec.Type == resourcev1.TypeRedis || spec.Type == resourcev1.TypePostgres {
 		if spec.ConnectionPolicy.Mode != "none" && spec.ConnectionPolicy.Mode != "internal" {
 			return invalid("RESOURCE_EXPOSURE_INVALID", "managed resource connection policy must be none or internal")
 		}
 		if len(spec.CredentialRefs) != 0 {
-			return invalid("RESOURCE_SECRET_REFERENCE_INVALID", "managed Redis credentials are generated by Cloud")
+			return invalid("RESOURCE_SECRET_REFERENCE_INVALID", "managed resource credentials are generated by Cloud")
 		}
 		return nil
 	}
@@ -281,6 +444,24 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 		if value.Sensitivity == resourcev1.ValueSecret && credentialRef(spec.CredentialRefs, value.Name) == nil {
 			return invalid("RESOURCE_SECRET_REFERENCE_INVALID", "generated secret values require typed secret references")
 		}
+	}
+	return nil
+}
+
+func validateManagedUpdate(current resourcev1.Resource, next resourcev1.ManagedSpec) error {
+	if current.Runtime == nil || current.Type != resourcev1.TypePostgres {
+		return nil
+	}
+	version := strings.TrimSpace(next.Version)
+	if version != "" && version != "default" && version != current.Runtime.Spec.Version {
+		return invalid(resourcev1.FailureVersionUpgradeUnsupported, "managed PostgreSQL version changes are unsupported")
+	}
+	policy := next.Storage.PolicyRef
+	if policy == "" {
+		policy = resourcev1.StoragePolicyDefault
+	}
+	if next.Storage.SizeBytes != current.Runtime.Spec.Storage.SizeBytes || policy != current.Runtime.Spec.Storage.PolicyRef {
+		return invalid(resourcev1.FailureStorageResizeUnsupported, "managed PostgreSQL storage resize or policy changes are unsupported")
 	}
 	return nil
 }

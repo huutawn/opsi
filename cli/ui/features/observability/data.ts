@@ -2,15 +2,65 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LocalClient } from "@/lib/api/local-client";
-import type { IncidentEvidence, IncidentResponse, TelemetryLogEntry, TelemetryServiceStatus, TelemetrySummary } from "@/lib/contracts/registry";
+import type {
+  AuditEvent,
+  DeploymentJob,
+  IncidentEvidence,
+  IncidentResponse,
+  NodeRecord,
+  PlacementFacts,
+  Resource,
+  ResourceBinding,
+  ServiceRecord,
+  TelemetryLogEntry,
+  TelemetryServiceStatus,
+  TelemetrySummary,
+  TopologyPlan,
+} from "@/lib/contracts/registry";
 import type { ConsoleController } from "@/features/console/types";
+import {
+  deriveApplicationEvents,
+  deriveApplicationRuntimeSummaries,
+  deriveResourceRuntimeSummaries,
+  deriveRuntimeOverview,
+  deriveServerRuntimeSummaries,
+  type ApplicationRuntimeSummary,
+  type ResourceRuntimeSummary,
+  type RuntimeEvent,
+  type RuntimeOverviewSummary,
+  type ServerRuntimeSummary,
+} from "@/lib/presentation/observability/model";
 
 export type SourceState = "loading" | "ready" | "empty" | "unavailable" | "partial";
-export type SourceStates = { registry: SourceState; telemetry: SourceState; incidents: SourceState; support: SourceState };
-export type LogState = { rows: TelemetryLogEntry[]; nextCursor?: string; source: SourceState; error: string };
+export type SourceStates = {
+  registry: SourceState;
+  telemetry: SourceState;
+  incidents: SourceState;
+  support: SourceState;
+  nodes: SourceState;
+  resources: SourceState;
+  deployments: SourceState;
+};
+
+export type LogState = {
+  rows: TelemetryLogEntry[];
+  nextCursor?: string;
+  source: SourceState;
+  error: string;
+};
+
 export type ObservabilityData = {
   summary: TelemetrySummary | null;
   telemetry: TelemetryServiceStatus[];
+  services: ServiceRecord[];
+  nodes: NodeRecord[];
+  resources: Resource[];
+  bindings: ResourceBinding[];
+  deployments: DeploymentJob[];
+  exposures: DeploymentJob[];
+  audit: AuditEvent[];
+  placement: PlacementFacts | null;
+  topology: TopologyPlan | null;
   incidents: IncidentResponse[];
   selectedIncident: IncidentResponse | null;
   evidence: IncidentEvidence | null;
@@ -19,84 +69,378 @@ export type ObservabilityData = {
   sources: SourceStates;
   logs: LogState;
   error: string;
+  // Presentation model projections
+  applications: ApplicationRuntimeSummary[];
+  servers: ServerRuntimeSummary[];
+  managedResources: ResourceRuntimeSummary[];
+  overview: RuntimeOverviewSummary;
 };
 
 const emptyLogs: LogState = { rows: [], source: "empty", error: "" };
-const emptyData: ObservabilityData = { summary: null, telemetry: [], incidents: [], selectedIncident: null, evidence: null, evidenceState: "empty", evidenceError: "", sources: { registry: "empty", telemetry: "empty", incidents: "empty", support: "empty" }, logs: emptyLogs, error: "" };
+const emptySources: SourceStates = {
+  registry: "empty",
+  telemetry: "empty",
+  incidents: "empty",
+  support: "empty",
+  nodes: "empty",
+  resources: "empty",
+  deployments: "empty",
+};
+
+const emptyOverview: RuntimeOverviewSummary = {
+  applications: { ready: 0, degraded: 0, failed: 0, unknown: 0, total: 0 },
+  servers: { ready: 0, offline: 0, failed: 0, unknown: 0, total: 0 },
+  resources: { ready: 0, degraded: 0, failed: 0, unknown: 0, total: 0 },
+  delivery: { active: 0, failed: 0, succeeded: 0 },
+  actionableFailures: [],
+  freshness: "Not reported",
+};
+
+const emptyData: ObservabilityData = {
+  summary: null,
+  telemetry: [],
+  services: [],
+  nodes: [],
+  resources: [],
+  bindings: [],
+  deployments: [],
+  exposures: [],
+  audit: [],
+  placement: null,
+  topology: null,
+  incidents: [],
+  selectedIncident: null,
+  evidence: null,
+  evidenceState: "empty",
+  evidenceError: "",
+  sources: emptySources,
+  logs: emptyLogs,
+  error: "",
+  applications: [],
+  servers: [],
+  managedResources: [],
+  overview: emptyOverview,
+};
 
 export function useObservabilityData(console: ConsoleController) {
-  const projectID = console.state.project?.id ?? "";
-  const services = console.state.services;
+  const projectID = console.route.projectID || console.state.project?.id || "";
+  const environmentID = console.route.environment ?? "";
   const client = useMemo(() => new LocalClient(), []);
   const sequence = useRef(0);
   const incidentSequence = useRef(0);
-  const logSequence = useRef(0);
   const [data, setData] = useState<ObservabilityData>(() => seedData(console));
+
   const load = useCallback(async () => {
     if (!projectID) return;
     const current = ++sequence.current;
-    setData((previous) => ({ ...previous, error: "", sources: { ...previous.sources, telemetry: previous.summary ? previous.sources.telemetry : "loading", incidents: previous.incidents.length ? previous.sources.incidents : "loading" } }));
-    const [summary, serviceResults, incidents] = await Promise.allSettled([
+    setData((previous) => ({
+      ...previous,
+      error: "",
+      sources: {
+        ...previous.sources,
+        telemetry: previous.summary ? previous.sources.telemetry : "loading",
+        incidents: previous.incidents.length ? previous.sources.incidents : "loading",
+        nodes: previous.nodes.length ? previous.sources.nodes : "loading",
+        resources: previous.resources.length ? previous.sources.resources : "loading",
+        deployments: previous.deployments.length ? previous.sources.deployments : "loading",
+      },
+    }));
+
+    const [
+      summaryRes,
+      servicesRes,
+      nodesRes,
+      resourcesRes,
+      bindingsRes,
+      deploymentsRes,
+      exposuresRes,
+      placementRes,
+      topologyRes,
+      auditRes,
+      incidentsRes,
+    ] = await Promise.allSettled([
       client.telemetrySummary(projectID),
-      Promise.all(services.map((service) => client.telemetryService(projectID, service.id))),
+      client.services(projectID),
+      client.nodes(projectID),
+      client.resources(projectID, environmentID || undefined),
+      client.resourceBindings(projectID, environmentID || undefined),
+      client.deployments(projectID),
+      client.exposures(projectID),
+      client.placementFacts(projectID),
+      client.topology(projectID),
+      client.audit(projectID),
       client.incidents(projectID),
     ]);
+
     if (current !== sequence.current) return;
-    setData((previous) => {
-      const telemetry = serviceResults.status === "fulfilled" ? serviceResults.value.flatMap((item) => item.services ?? []) : previous.telemetry;
-      const nextSummary = summary.status === "fulfilled" ? summary.value : previous.summary;
-      const nextIncidents = incidents.status === "fulfilled" ? incidents.value.incidents ?? [] : previous.incidents;
-      return { ...previous, summary: nextSummary, telemetry, incidents: nextIncidents, sources: { ...previous.sources, registry: "ready", telemetry: summary.status === "fulfilled" && serviceResults.status === "fulfilled" ? telemetry.length ? "ready" : "empty" : previous.summary ? "partial" : "unavailable", incidents: incidents.status === "fulfilled" ? nextIncidents.length ? "ready" : "empty" : previous.incidents.length ? "partial" : "unavailable" }, error: summary.status === "rejected" || serviceResults.status === "rejected" || incidents.status === "rejected" ? "A refresh source failed; last factual data is preserved." : "" };
-    });
-  }, [client, projectID, services]);
 
-  const loadLogs = useCallback(async (params: { serviceID?: string; cursor?: string; level?: string; query?: string } = {}) => {
-    if (!projectID) return;
-    const current = ++logSequence.current;
-    setData((previous) => ({ ...previous, logs: { ...previous.logs, source: previous.logs.rows.length ? previous.logs.source : "loading", error: "" } }));
-    try {
-      const result = await client.logs(projectID, { serviceID: params.serviceID, cursor: params.cursor, limit: 100 });
-      if (current !== logSequence.current) return;
-      setData((previous) => ({ ...previous, logs: { rows: params.cursor ? [...previous.logs.rows, ...(result.logs ?? [])] : result.logs ?? [], nextCursor: result.next_cursor, source: result.logs?.length ? "ready" : "empty", error: "" } }));
-    } catch (error) {
-      if (current !== logSequence.current) return;
-      setData((previous) => ({ ...previous, logs: { ...previous.logs, source: previous.logs.rows.length ? "partial" : "unavailable", error: (error as Error).message } }));
+    const services = servicesRes.status === "fulfilled" ? servicesRes.value.services ?? [] : console.state.services;
+    const nodes = nodesRes.status === "fulfilled" ? nodesRes.value : console.state.nodes;
+    const resources = resourcesRes.status === "fulfilled" ? resourcesRes.value : [];
+    const bindings = bindingsRes.status === "fulfilled" ? bindingsRes.value : [];
+    const deployments = deploymentsRes.status === "fulfilled" ? deploymentsRes.value.deployments ?? [] : console.state.deployments;
+    const exposures = exposuresRes.status === "fulfilled" ? exposuresRes.value.exposures ?? [] : [];
+    const placement = placementRes.status === "fulfilled" ? placementRes.value : console.state.foundation.placement;
+    const topology = topologyRes.status === "fulfilled" ? topologyRes.value : console.state.foundation.topology;
+    const audit = auditRes.status === "fulfilled" ? auditRes.value.events ?? [] : console.state.audit;
+    const incidents = incidentsRes.status === "fulfilled" ? incidentsRes.value.incidents ?? [] : console.state.incidents;
+    const summary = summaryRes.status === "fulfilled" ? summaryRes.value : null;
+
+    // Fetch individual service telemetries if services exist
+    let telemetry: TelemetryServiceStatus[] = [];
+    if (services.length > 0) {
+      const serviceTelemetryRes = await Promise.allSettled(
+        services.map((service) => client.telemetryService(projectID, service.id)),
+      );
+      if (current !== sequence.current) return;
+      telemetry = serviceTelemetryRes.flatMap((res) => (res.status === "fulfilled" ? res.value.services ?? [] : []));
     }
-  }, [client, projectID]);
 
-  const selectIncident = useCallback(async (incidentID: string) => {
-    if (!projectID || !incidentID) return;
-    const current = ++incidentSequence.current;
-    setData((previous) => ({ ...previous, selectedIncident: previous.incidents.find((item) => item.incident_id === incidentID) ?? null, evidence: null, evidenceState: "loading", evidenceError: "" }));
-    const [incident, evidence] = await Promise.allSettled([client.incident(projectID, incidentID), client.incidentEvidence(projectID, incidentID)]);
-    if (current !== incidentSequence.current) return;
-    const validEvidence = evidence.status === "fulfilled" && isIncidentEvidence(evidence.value);
-    setData((previous) => ({ ...previous, selectedIncident: incident.status === "fulfilled" ? incident.value.incident : previous.selectedIncident, evidence: validEvidence ? evidence.value : null, evidenceState: validEvidence ? "ready" : "unavailable", evidenceError: evidence.status === "rejected" ? (evidence.reason as Error).message : validEvidence ? "" : "Incident evidence failed structural validation." }));
-  }, [client, projectID]);
+    const agentAvailable = console.session?.agent_connected === "ok";
+
+    // Compute presentation models
+    const applications = deriveApplicationRuntimeSummaries({
+      services,
+      telemetry,
+      deployments,
+      exposures,
+      placement,
+      topology,
+      bindings,
+      resources,
+      nodes,
+      agentAvailable,
+    });
+
+    const servers = deriveServerRuntimeSummaries({
+      nodes,
+      telemetry,
+      placement,
+      topology,
+      services,
+      agentAvailable,
+    });
+
+    const managedResources = deriveResourceRuntimeSummaries({
+      resources,
+      bindings,
+      nodes,
+      topology,
+      placement,
+    });
+
+    const overview = deriveRuntimeOverview({
+      applications,
+      servers,
+      resources: managedResources,
+      deployments,
+      incidents,
+      audit,
+    });
+
+    const hasAnyFailure =
+      summaryRes.status === "rejected" ||
+      servicesRes.status === "rejected" ||
+      nodesRes.status === "rejected" ||
+      resourcesRes.status === "rejected" ||
+      deploymentsRes.status === "rejected" ||
+      incidentsRes.status === "rejected";
+
+    setData((previous) => ({
+      ...previous,
+      summary,
+      telemetry,
+      services,
+      nodes,
+      resources,
+      bindings,
+      deployments,
+      exposures,
+      placement,
+      topology,
+      audit,
+      incidents,
+      applications,
+      servers,
+      managedResources,
+      overview,
+      sources: {
+        registry: services.length ? "ready" : "empty",
+        telemetry: summaryRes.status === "fulfilled" ? (telemetry.length ? "ready" : "empty") : previous.summary ? "partial" : "unavailable",
+        incidents: incidentsRes.status === "fulfilled" ? (incidents.length ? "ready" : "empty") : previous.incidents.length ? "partial" : "unavailable",
+        support: console.state.support ? "ready" : "unavailable",
+        nodes: nodesRes.status === "fulfilled" ? (nodes.length ? "ready" : "empty") : "unavailable",
+        resources: resourcesRes.status === "fulfilled" ? (resources.length ? "ready" : "empty") : "unavailable",
+        deployments: deploymentsRes.status === "fulfilled" ? (deployments.length ? "ready" : "empty") : "unavailable",
+      },
+      error: hasAnyFailure ? "A refresh source failed; last factual data is preserved." : "",
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, console.session?.agent_connected, console.state.support, environmentID, projectID]);
+
+  const loadLogs = useCallback(
+    async (params: { serviceID?: string; cursor?: string; level?: string; query?: string } = {}) => {
+      if (!projectID) return { logs: [] };
+      setData((previous) => ({
+        ...previous,
+        logs: { ...previous.logs, source: previous.logs.rows.length ? previous.logs.source : "loading", error: "" },
+      }));
+      try {
+        const result = await client.logs(projectID, { serviceID: params.serviceID, cursor: params.cursor, limit: 100 });
+        setData((previous) => ({
+          ...previous,
+          logs: {
+            rows: params.cursor ? [...previous.logs.rows, ...(result.logs ?? [])] : result.logs ?? [],
+            nextCursor: result.next_cursor,
+            source: result.logs?.length ? "ready" : "empty",
+            error: "",
+          },
+        }));
+        return result;
+      } catch (error) {
+        setData((previous) => ({
+          ...previous,
+          logs: {
+            ...previous.logs,
+            source: previous.logs.rows.length ? "partial" : "unavailable",
+            error: (error as Error).message,
+          },
+        }));
+        throw error;
+      }
+    },
+    [client, projectID],
+  );
+
+  const selectIncident = useCallback(
+    async (incidentID: string) => {
+      if (!projectID || !incidentID) return;
+      const current = ++incidentSequence.current;
+      setData((previous) => ({
+        ...previous,
+        selectedIncident: previous.incidents.find((item) => item.incident_id === incidentID) ?? null,
+        evidence: null,
+        evidenceState: "loading",
+        evidenceError: "",
+        sources: { ...previous.sources, incidents: "loading" },
+      }));
+      const [incidentRes, evidenceRes] = await Promise.allSettled([
+        client.incident(projectID, incidentID),
+        client.incidentEvidence(projectID, incidentID),
+      ]);
+      if (current !== incidentSequence.current) return;
+      const incident = incidentRes.status === "fulfilled" ? incidentRes.value.incident : data.incidents.find((item) => item.incident_id === incidentID) ?? null;
+      const validEvidence = evidenceRes.status === "fulfilled" && isIncidentEvidence(evidenceRes.value);
+      setData((previous) => ({
+        ...previous,
+        selectedIncident: incident,
+        evidence: validEvidence ? evidenceRes.value : null,
+        evidenceState: validEvidence ? "ready" : "unavailable",
+        sources: { ...previous.sources, incidents: incident ? "ready" : "unavailable" },
+        evidenceError:
+          evidenceRes.status === "rejected"
+            ? (evidenceRes.reason as Error).message
+            : validEvidence
+            ? ""
+            : "Incident evidence failed structural validation.",
+      }));
+    },
+    [client, data.incidents, projectID],
+  );
+
+  const getApplicationEvents = useCallback(
+    (serviceID: string, serviceKey: string): RuntimeEvent[] => {
+      return deriveApplicationEvents(serviceID, serviceKey, data.deployments, data.audit);
+    },
+    [data.audit, data.deployments],
+  );
 
   useEffect(() => {
-    sequence.current++;
-    incidentSequence.current++;
-    logSequence.current++;
-    queueMicrotask(() => {
-      setData(projectID ? seedData(console) : emptyData);
-      void load();
-    });
-  }, [projectID]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!projectID) {
+      setData(emptyData);
+      return;
+    }
+    void load();
+  }, [projectID, environmentID]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const incidentID = console.route.incident;
-    if (incidentID && data.incidents.some((item) => item.incident_id === incidentID) && data.selectedIncident?.incident_id !== incidentID) void selectIncident(incidentID);
+    if (incidentID && data.incidents.some((item) => item.incident_id === incidentID) && data.selectedIncident?.incident_id !== incidentID) {
+      void selectIncident(incidentID);
+    }
   }, [console.route.incident, data.incidents, data.selectedIncident?.incident_id, selectIncident]);
 
-  return { data, load, loadLogs, selectIncident };
+  return useMemo(
+    () => ({ data, load, loadLogs, selectIncident, getApplicationEvents }),
+    [data, getApplicationEvents, load, loadLogs, selectIncident],
+  );
 }
 
 function seedData(console: ConsoleController): ObservabilityData {
   const foundation = console.state.foundation;
+  const services = console.state.services;
+  const nodes = console.state.nodes;
+  const deployments = console.state.deployments;
+  const audit = console.state.audit;
   const incidents = foundation.incidents;
   const support = console.state.support;
-  return { ...emptyData, telemetry: foundation.telemetry, incidents, sources: { registry: console.state.services.length ? "ready" : "empty", telemetry: foundation.sources.telemetry === "available" ? foundation.telemetry.length ? "ready" : "empty" : foundation.sources.telemetry === "unavailable" ? "unavailable" : "empty", incidents: foundation.sources.incidents === "available" ? incidents.length ? "ready" : "empty" : foundation.sources.incidents === "unavailable" ? "unavailable" : "empty", support: support ? "ready" : "unavailable" } };
+  const telemetry = foundation.telemetry;
+  const agentAvailable = console.session?.agent_connected === "ok";
+
+  const applications = deriveApplicationRuntimeSummaries({
+    services,
+    telemetry,
+    deployments,
+    placement: foundation.placement,
+    topology: foundation.topology,
+    nodes,
+    agentAvailable,
+  });
+
+  const servers = deriveServerRuntimeSummaries({
+    nodes,
+    telemetry,
+    placement: foundation.placement,
+    topology: foundation.topology,
+    services,
+    agentAvailable,
+  });
+
+  const managedResources: ResourceRuntimeSummary[] = [];
+
+  const overview = deriveRuntimeOverview({
+    applications,
+    servers,
+    resources: managedResources,
+    deployments,
+    incidents,
+    audit,
+  });
+
+  return {
+    ...emptyData,
+    services,
+    nodes,
+    deployments,
+    audit,
+    telemetry,
+    incidents,
+    placement: foundation.placement,
+    topology: foundation.topology,
+    applications,
+    servers,
+    managedResources,
+    overview,
+    sources: {
+      registry: services.length ? "ready" : "empty",
+      telemetry: foundation.sources.telemetry === "available" ? (telemetry.length ? "ready" : "empty") : foundation.sources.telemetry === "unavailable" ? "unavailable" : "empty",
+      incidents: foundation.sources.incidents === "available" ? (incidents.length ? "ready" : "empty") : foundation.sources.incidents === "unavailable" ? "unavailable" : "empty",
+      support: support ? "ready" : "unavailable",
+      nodes: nodes.length ? "ready" : "empty",
+      resources: "empty",
+      deployments: deployments.length ? "ready" : "empty",
+    },
+  };
 }
 
 export function overallHealth(data: ObservabilityData, services: number, agentAvailable: boolean) {
@@ -107,7 +451,9 @@ export function overallHealth(data: ObservabilityData, services: number, agentAv
 }
 
 export function safeLogMessage(message: string) {
-  return /(?:authorization:\s*bearer|password\s*=|token\s*=|private[_ -]?key|secret\s*=)/i.test(message) ? "[message hidden: backend redaction contract violation]" : message;
+  return /(?:authorization:\s*bearer|password\s*=|token\s*=|private[_ -]?key|secret\s*=)/i.test(message)
+    ? "[message hidden: backend redaction contract violation]"
+    : message;
 }
 
 const MAX_EVIDENCE_COVERAGE = 32;

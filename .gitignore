@@ -80,6 +80,8 @@ tmp/
 cli/ui/out/
 cli/ui/.next/
 cli/ui/node_modules/
+cli/ui/test-results/
+test-results/
 
 # Go module vendor (optional but good to have if we don't commit it)
 # vendor/

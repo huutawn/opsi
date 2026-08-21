@@ -16,15 +16,20 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	backupdomain "github.com/opsi-dev/opsi/cloud/internal/backup"
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/postgres"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
+	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
+	"github.com/opsi-dev/opsi/cloud/internal/sourcereport"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	"github.com/opsi-dev/opsi/cloud/internal/verificationstore"
 	"github.com/opsi-dev/opsi/cloud/internal/webhookrelay"
 )
 
@@ -113,21 +118,39 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		}
 		relay.Auth = &auth.Service{Store: auth.PostgresStore{DB: db}}
 		postgresRegistry := registry.PostgresService{DB: db}
-		relay.Registry = postgresRegistry
 		relay.Resources = resource.Service{Store: resource.PostgresStore{DB: db}, Scopes: postgresRegistry}
+		postgresRegistry.DependencyResolver = webhookrelay.DependencyResolverAdapter{Registry: postgresRegistry, Resources: relay.Resources}
+		relay.Registry = postgresRegistry
+		relay.Backups.Store = backupdomain.PostgresStore{DB: db}
+		relay.Restores.Store = restoredomain.PostgresStore{DB: db}
+		relay.Cutovers.Store = cutoverdomain.PostgresStore{DB: db}
+		relay.Backups.Resources = relay.Resources
+		relay.Restores.Resources, relay.Restores.Backups, relay.Restores.Artifacts = relay.Resources, relay.Backups, relay.Backups.Artifacts
+		relay.Cutovers.Applications, relay.Cutovers.Resources, relay.Cutovers.Restores, relay.Cutovers.Backups, relay.Cutovers.Credentials = postgresRegistry, relay.Resources, relay.Restores, relay.Backups, relay.Resources.Credentials
+		relay.Resources.Operations = []resource.ActiveOperationAuthority{relay.Backups, relay.Restores}
 		if cfg.BootstrapSecretKey != "" {
 			credentialVault, vaultErr := webhookrelay.NewPostgresManagedResourceCredentialVault(db, cfg.BootstrapSecretKey)
 			if vaultErr != nil {
 				return fmt.Errorf("configure managed resource credential vault: %w", vaultErr)
 			}
 			relay.Resources.Credentials = credentialVault
+			relay.Backups.Resources = relay.Resources
+			relay.Restores.Resources = relay.Resources
+			relay.Cutovers.Credentials = credentialVault
 		}
 		relay.BuildJobs.Store = buildjob.PostgresStore{DB: db}
 		relay.BuildJobs.Sources = postgresRegistry
 		relay.BuildRecords.Store = buildrecord.PostgresStore{DB: db}
 		relay.BuildRecords.Bindings = postgresRegistry
+		relay.SourceReports = sourcereport.PostgresStore{DB: db}
+		relay.Verifications = verificationstore.PostgresStore{DB: db}
 		relay.Topology = topology.Service{Store: topology.PostgresStore{DB: db}, Facts: postgresRegistry, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 		relay.Policies = deploymentpolicy.Service{Store: deploymentpolicy.PostgresStore{DB: db}, BuildRecords: relay.BuildRecords.Store, Bindings: postgresRegistry, Topology: relay.Topology}
+		relay.Cutovers.Deployments = postgresRegistry
+		relay.Cutovers.BuildRecords = relay.BuildRecords.Store
+		relay.Cutovers.Topology = relay.Topology
+		relay.Cutovers.Policies = relay.Policies
+		relay.Cutovers.RuntimeResolver = relay.Resources
 		relay.BuildRecords.AuditSink = func(event buildrecord.AuditEvent) {
 			postgresRegistry.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
 		}

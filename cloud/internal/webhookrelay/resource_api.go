@@ -42,6 +42,15 @@ func (s *Server) handleResourceAPI(w http.ResponseWriter, r *http.Request, proje
 	if len(parts) < 3 {
 		return false
 	}
+	if s.handleBackupAPI(w, r, projectID, parts, principal) {
+		return true
+	}
+	if s.handleRestoreAPI(w, r, projectID, parts, principal) {
+		return true
+	}
+	if s.handleCutoverAPI(w, r, projectID, parts, principal) {
+		return true
+	}
 	if parts[2] == "resource-types" && len(parts) == 3 && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]any{"resource_types": s.Resources.Definitions()})
 		return true
@@ -65,6 +74,56 @@ func (s *Server) handleResourceAPI(w http.ResponseWriter, r *http.Request, proje
 				s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RESOURCE_BINDING_CREATED", "resource_binding", value.ID, "success", map[string]any{"protocol": value.Protocol, "target_id": value.Target.ID})
 			}
 			writeResourceResult(w, r, map[string]any{"binding": value, "reused": reused}, err, http.StatusCreated)
+			return true
+		}
+		if len(parts) == 4 && r.Method == http.MethodDelete {
+			if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "resource_binding", parts[3], "owner", "admin", "developer") {
+				return true
+			}
+			value, err := s.Resources.DeleteBinding(r.Context(), projectID, parts[3])
+			if err == nil {
+				s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RESOURCE_BINDING_DELETE_REQUESTED", "resource_binding", parts[3], "success", nil)
+			}
+			writeResourceResult(w, r, value, err, http.StatusAccepted)
+			return true
+		}
+		return false
+	}
+	if parts[2] == "retained-storages" {
+		if len(parts) == 3 && r.Method == http.MethodGet {
+			value, err := s.Resources.ListRetainedStorage(r.Context(), projectID, r.URL.Query().Get("environment_id"))
+			writeResourceResult(w, r, map[string]any{"retained_storages": value}, err, http.StatusOK)
+			return true
+		}
+		if len(parts) == 4 && r.Method == http.MethodGet {
+			value, err := s.Resources.GetRetainedStorage(r.Context(), projectID, parts[3])
+			writeResourceResult(w, r, value, err, http.StatusOK)
+			return true
+		}
+		if len(parts) == 5 && parts[4] == "review" && r.Method == http.MethodPost {
+			if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "retained_storage", parts[3], "owner", "admin") {
+				return true
+			}
+			value, err := s.Resources.ReviewRetainedStorageDestroy(r.Context(), projectID, parts[3], principal.UserID)
+			if err == nil {
+				s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RETAINED_STORAGE_DESTROY_REVIEWED", "retained_storage", parts[3], "success", map[string]any{"review_token": value.ReviewToken, "revision": value.Revision})
+			}
+			writeResourceResult(w, r, map[string]any{"review": value}, err, http.StatusOK)
+			return true
+		}
+		if len(parts) == 5 && parts[4] == "destroy" && r.Method == http.MethodPost {
+			if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "retained_storage", parts[3], "owner", "admin") {
+				return true
+			}
+			var request resourcev1.DestroyRetainedStorageRequest
+			if !decodeResourceJSON(w, r, &request) {
+				return true
+			}
+			value, reused, err := s.Resources.RequestRetainedStorageDestroy(r.Context(), projectID, parts[3], principal.UserID, r.Header.Get("Idempotency-Key"), request)
+			if err == nil && !reused {
+				s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RETAINED_STORAGE_DESTROY_REQUESTED", "retained_storage", parts[3], "success", map[string]any{"review_token": request.ReviewToken, "lifecycle": value.Lifecycle})
+			}
+			writeResourceResult(w, r, map[string]any{"retained_storage": value, "reused": reused}, err, http.StatusAccepted)
 			return true
 		}
 		return false
@@ -113,7 +172,10 @@ func (s *Server) handleResourceAPI(w http.ResponseWriter, r *http.Request, proje
 		if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "resource", parts[3], "owner", "admin") {
 			return true
 		}
-		value, err := s.Resources.DeleteIntent(r.Context(), projectID, parts[3])
+		value, err := s.Resources.DeleteIntent(r.Context(), projectID, parts[3], principal.UserID)
+		if err == nil {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "RESOURCE_DELETE_REQUESTED", "resource", parts[3], "success", map[string]any{"result": "runtime deletion requested; persistent storage will be retained"})
+		}
 		writeResourceResult(w, r, value, err, http.StatusAccepted)
 		return true
 	}

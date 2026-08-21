@@ -2309,3 +2309,160 @@ func TestResolveUIDirUsesEnv(t *testing.T) {
 		t.Fatalf("dir = %q", got)
 	}
 }
+
+func TestLocalBrowserLoginProjectSelectionFlow(t *testing.T) {
+	store := keychain.NewFakeStore()
+	var localCallback, localState string
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/browser/start":
+			var req struct {
+				LocalCallback string `json:"local_callback"`
+				LocalState    string `json:"local_state"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			localCallback = req.LocalCallback
+			localState = req.LocalState
+			_ = json.NewEncoder(w).Encode(map[string]any{"auth_url": "https://cloud.example.test/login", "status": "pending"})
+		case "/v1/auth/browser/redeem":
+			var req struct {
+				Code string `json:"code"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Code != "grant-multi" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":          "select_project",
+				"selection_token": "cloud-selection-token-123",
+				"projects": []map[string]any{
+					{"id": "proj-1", "name": "Project One", "role": "owner"},
+					{"id": "proj-2", "name": "Project Two", "role": "developer"},
+				},
+			})
+		case "/v1/auth/browser/select-project":
+			var req struct {
+				SelectionToken string `json:"selection_token"`
+				ProjectID      string `json:"project_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.SelectionToken != "cloud-selection-token-123" || req.ProjectID != "proj-2" {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "PROJECT_UNAUTHORIZED", "message": "unauthorized"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "authenticated",
+				"token":  "pat_stored_after_selection",
+				"session": map[string]any{
+					"org_id":     "org-1",
+					"project_id": "proj-2",
+					"user_id":    "user-1",
+					"role":       "developer",
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer cloud.Close()
+
+	factory := func() (keychain.Store, error) { return store, nil }
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, factory))
+	defer server.Close()
+
+	// 1. Start login
+	res, err := http.Post(server.URL+"/api/local/session/login/start", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+
+	// 2. Callback from Cloud
+	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	callback, err := url.Parse(localCallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := callback.Query()
+	query.Set("code", "grant-multi")
+	query.Set("state", localState)
+	callback.RawQuery = query.Encode()
+
+	res, err = client.Get(callback.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("callback status=%d", res.StatusCode)
+	}
+	location, _ := url.Parse(res.Header.Get("Location"))
+	if location.Query().Get("auth") != "select_project" {
+		t.Fatalf("expected auth=select_project redirect, got: %s", res.Header.Get("Location"))
+	}
+	selectionID := location.Query().Get("selection_id")
+	if selectionID == "" {
+		t.Fatalf("missing selection_id in redirect: %s", res.Header.Get("Location"))
+	}
+
+	// 3. GET /api/local/session/selection retrieves projects safely without secret tokens
+	selRes, err := http.Get(server.URL + "/api/local/session/selection?selection_id=" + url.QueryEscape(selectionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selBody struct {
+		SelectionID string           `json:"selection_id"`
+		Projects    []map[string]any `json:"projects"`
+	}
+	if err := json.NewDecoder(selRes.Body).Decode(&selBody); err != nil {
+		t.Fatal(err)
+	}
+	_ = selRes.Body.Close()
+	if len(selBody.Projects) != 2 || selBody.Projects[0]["id"] != "proj-1" || selBody.Projects[1]["id"] != "proj-2" {
+		t.Fatalf("unexpected selection response: %#v", selBody)
+	}
+
+	// 4. POST /api/local/session/select-project with unauthorized project is rejected
+	unauthBody, _ := json.Marshal(map[string]string{
+		"selection_id": selectionID,
+		"project_id":   "proj-unauthorized",
+	})
+	unauthRes, err := http.Post(server.URL+"/api/local/session/select-project", "application/json", bytes.NewReader(unauthBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unauthRes.Body.Close()
+	if unauthRes.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for unauthorized project, got: %d", unauthRes.StatusCode)
+	}
+
+	// 5. POST /api/local/session/select-project with valid project completes sign-in
+	validBody, _ := json.Marshal(map[string]string{
+		"selection_id": selectionID,
+		"project_id":   "proj-2",
+	})
+	validRes, err := http.Post(server.URL+"/api/local/session/select-project", "application/json", bytes.NewReader(validBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for valid project, got: %d", validRes.StatusCode)
+	}
+	var validOut struct {
+		Authenticated bool                 `json:"authenticated"`
+		Session       localSessionIdentity `json:"session"`
+	}
+	_ = json.NewDecoder(validRes.Body).Decode(&validOut)
+	_ = validRes.Body.Close()
+	if !validOut.Authenticated || validOut.Session.ProjectID != "proj-2" {
+		t.Fatalf("unexpected valid output: %#v", validOut)
+	}
+
+	// Stored PAT in OS keychain
+	pat, err := store.GetPAT()
+	if err != nil || pat != "pat_stored_after_selection" {
+		t.Fatalf("stored PAT = %q err = %v", pat, err)
+	}
+}

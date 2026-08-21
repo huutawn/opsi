@@ -69,11 +69,43 @@ export type ServiceBinding = {
 
 export type PublicRouteIntent = { hostname: string; path: string };
 
+export type ServiceResourceBinding = {
+  logical_name: string;
+  binding_id: string;
+};
+
+export type DependencyInjectionMapping = {
+  env_name: string;
+  symbolic_source: string;
+};
+
+export type DependencyVerificationContract = {
+  type: string; // "consumer_http"
+  path: string; // relative path e.g. "/health/dependencies/database"
+  expected_status: number; // e.g. 200
+};
+
+export type ApplicationDependency = {
+  logical_name: string;
+  target_kind: "managed_service" | "application" | string;
+  target_identity: string;
+  protocol: "postgres" | "redis" | "http" | string;
+  strategy?: "same_origin" | "internal_http" | "public_http" | string;
+  access_context?: "browser" | "server" | string;
+  path?: string;
+  required: boolean;
+  injection_phase: "runtime" | "build" | string;
+  injection_mappings?: DependencyInjectionMapping[];
+  verification_contract?: DependencyVerificationContract;
+};
+
 export type ServiceConfigurationDraft = {
   schema_version?: "opsi.service_configuration/v1";
   environment?: EnvironmentVariable[];
   public_route?: PublicRouteIntent;
   bindings?: ServiceBinding[];
+  resource_bindings?: ServiceResourceBinding[];
+  dependencies?: ApplicationDependency[];
 };
 
 export type ServiceConfiguration = ServiceConfigurationDraft & {
@@ -87,9 +119,39 @@ export type ServiceConfiguration = ServiceConfigurationDraft & {
 export type GeneratedEnvironment = { name: string; value: string; binding: number };
 export type ServiceConfigurationPreview = { configuration: ServiceConfigurationDraft; generated_environment?: GeneratedEnvironment[]; current_revision: number; current_state_hash: string; draft_state_hash: string };
 export type ServiceConfigurationValidation = { valid: boolean; issues?: { code: string; field?: string; message: string }[] };
-export type ServiceConfigurationChange = { kind: "connection" | "generated_environment" | "public_route" | "user_environment"; action: string; name?: string; before?: string; after?: string };
+export type ServiceConfigurationChange = { kind: "connection" | "dependency" | "resource_binding" | "generated_environment" | "public_route" | "user_environment"; action: string; name?: string; before?: string; after?: string };
 export type ServiceConfigurationDiff = { changes: ServiceConfigurationChange[] };
 export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
+
+export type DependencyRealizationProjection = {
+  env_name: string;
+  symbolic_source: string;
+  injection_phase: string;
+  conflict: boolean;
+  conflict_reason?: string;
+};
+
+export type DependencyRealizationPlanItem = {
+  logical_name: string;
+  target_kind: string;
+  target_identity: string;
+  target_display_name?: string;
+  protocol: string;
+  strategy?: string;
+  access_context?: string;
+  required: boolean;
+  injection_phase: string;
+  binding_action: "create" | "reuse" | "noop" | "migration_required" | string;
+  existing_binding_id?: string;
+  projections: DependencyRealizationProjection[];
+  status: string;
+  message?: string;
+};
+
+export type DependencyReviewResult = {
+  dependencies: DependencyRealizationPlanItem[];
+  realized: DependencyRealizationPlanItem[];
+};
 
 export type GitHubInstallation = {
   installation_id: number;
@@ -321,11 +383,12 @@ export type DeploymentJob = {
 	 readiness_evidence_hash?: string;
 	 exposure_spec?: ExposureSpec;
   requested_by?: string;
+  warning_acknowledgements?: string[];
 	 created_at: string;
 	 snapshot?: {
 		project_id: string;
 		image: { repository: string; digest: string; reference: string };
-		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; topology_hash?: string; service_configuration_revision?: number; service_configuration_state_hash?: string; deployment_policy_id: string; deployment_policy_revision: number; deployment_policy_hash?: string; runtime_id: string; node_id: string; agent_id: string };
+		authority: { build_record: BuildRecord; topology_plan_id: string; topology_revision: number; topology_hash?: string; service_configuration_revision?: number; service_configuration_state_hash?: string; deployment_policy_id: string; deployment_policy_revision: number; deployment_policy_hash?: string; expected_preflight_hash?: string; runtime_id: string; node_id: string; agent_id: string };
 		workload: WorkloadSpec;
 		spec_hash: string;
 		preview?: PreviewSpec;
@@ -389,6 +452,27 @@ export type WorkloadSpec = {
 	exposure: { mode: "none" | "internal" };
 };
 
+export type PreflightCheck = {
+  id: string;
+  code: string;
+  severity: "PASS" | "WARN" | "BLOCK";
+  scope_kind: string;
+  scope_id: string;
+  dependency_logical_name?: string;
+  target_safe_id?: string;
+  message: string;
+  remediation_code?: string;
+  safe_evidence?: Record<string, string>;
+};
+
+export type PreflightResult = {
+  status: "PASS" | "PASS_WITH_WARNINGS" | "BLOCKED";
+  checks: PreflightCheck[];
+  authority_fingerprint: string;
+  preflight_hash: string;
+  generated_at: string;
+};
+
 export type DeploymentPreview = {
 	schema_version: string;
 	snapshot: NonNullable<DeploymentJob["snapshot"]>;
@@ -397,7 +481,130 @@ export type DeploymentPreview = {
 	eligible: boolean;
 	decision_code: string;
 	message: string;
+	preflight?: PreflightResult;
 	resolved_at: string;
+};
+
+export type ProviderHealthLayer = {
+  status: "HEALTHY" | "UNHEALTHY" | "PENDING" | string;
+  provider_kind: string;
+  provider_id: string;
+  safe_evidence?: Record<string, string>;
+  failure_code?: string;
+  message?: string;
+};
+
+export type ContractResolutionLayer = {
+  status: "RESOLVED" | "INVALID" | string;
+  binding_id?: string;
+  protocol?: string;
+  injection_complete: boolean;
+  failure_code?: string;
+  message?: string;
+};
+
+export type ConnectionLayer = {
+  status: "VERIFIED" | "FAILED" | "NOT_SUPPORTED" | "NOT_CONFIGURED" | string;
+  protocol?: string;
+  latency_ms?: number;
+  failure_code?: string;
+  message?: string;
+};
+
+export type ConsumerHealthLayer = {
+  status: "HEALTHY" | "UNHEALTHY" | string;
+  ready_pods: number;
+  total_pods: number;
+  failure_code?: string;
+  message?: string;
+};
+
+export type ConsumerAssertionLayer = {
+  status: "VERIFIED" | "FAILED" | "NOT_CONFIGURED" | "NOT_SUPPORTED" | string;
+  assertion_path?: string;
+  status_code?: number;
+  expected_code?: number;
+  failure_code?: string;
+  message?: string;
+};
+
+export type VerificationRun = {
+  schema_version: "opsi.verification/v1";
+  id: string;
+  project_id: string;
+  environment_id: string;
+  consumer_application_id: string;
+  dependency_logical_name: string;
+  deployment_job_id: string;
+  config_revision: number;
+  target_binding_id?: string;
+  source_commit_sha?: string;
+  staleness_hash: string;
+  provider_health: ProviderHealthLayer;
+  contract_resolution: ContractResolutionLayer;
+  connection: ConnectionLayer;
+  consumer_health: ConsumerHealthLayer;
+  consumer_assertion: ConsumerAssertionLayer;
+  overall_status: "VERIFIED" | "PARTIALLY_VERIFIED" | "FAILED" | "STALE" | "NOT_RUN" | string;
+  failure_code?: string;
+  triggered_by: string;
+  started_at: string;
+  completed_at?: string;
+};
+
+export type DepProbeEvidence = {
+  status_code?: number;
+  latency_ms?: number;
+  message?: string;
+};
+
+export type VerifyDependencyRequest = {
+  dependency_logical_name: string;
+  deployment_job_id: string;
+  consumer_contract?: DependencyVerificationContract;
+  observed_status_code?: number;
+  probe_result?: DepProbeEvidence;
+};
+
+export type VerifyDependencyResponse = {
+  run: VerificationRun;
+};
+
+export type SourceRiskFinding = {
+  finding_id: string;
+  rule_id: string;
+  severity: "INFO" | "WARN" | string;
+  confidence: "HIGH" | "MEDIUM" | "LOW" | string;
+  category: string;
+  dependency_logical_name?: string;
+  file: string;
+  line: number;
+  column?: number;
+  safe_evidence: string;
+  remediation_code?: string;
+};
+
+export type SourceRiskEnvReference = {
+  env_key: string;
+  file: string;
+  line: number;
+};
+
+export type SourceRiskReport = {
+  scanner_version: string;
+  application_id: string;
+  project_id: string;
+  repository_id: number;
+  commit_sha: string;
+  application_root: string;
+  build_job_id?: string;
+  analysis_status: "complete" | "failed" | "unavailable" | string;
+  findings: SourceRiskFinding[];
+  env_references: SourceRiskEnvReference[];
+  files_scanned: number;
+  bytes_scanned: number;
+  truncated: boolean;
+  report_hash: string;
 };
 
 export type TimelineEvent = {
@@ -685,4 +892,502 @@ export type ConsoleState = {
   nodeDetail: NodeDiagnostics | null;
   serviceDetail: ServiceRecord | null;
   busy: string;
+};
+
+export type ResourceKind = "application" | "managed_service" | "external_resource";
+export type ResourceLifecycle = "unplaced" | "planned" | "provisioning" | "ready" | "updating" | "degraded" | "failed" | "deleting" | "unknown" | "configured";
+
+export type ManagedResourceSpec = {
+  type: "postgres" | "redis" | "nats" | string;
+  version?: string;
+  profile?: string;
+  replicas: number;
+  cpu_millicores: number;
+  memory_bytes: number;
+  storage: { persistent: boolean; size_bytes?: number; policy_ref?: string };
+  service_config?: Record<string, string>;
+  credential_refs?: Array<{ secret_id: string; key?: string }>;
+  connection_policy: { mode: string };
+};
+
+export type ManagedResourceEvidence = {
+  observed_spec_hash?: string;
+  workload_ready?: boolean;
+  pod_ready?: boolean;
+  service_ready?: boolean;
+  secret_ready?: boolean;
+  auth_ready?: boolean;
+  storage_ready?: boolean;
+  volume_mounted?: boolean;
+  image?: string;
+  image_id?: string;
+  available_replicas?: number;
+  namespace?: string;
+  pvc_name?: string;
+  pvc_uid?: string;
+  pv_name?: string;
+  pv_uid?: string;
+  storage_class?: string;
+  reclaim_policy?: string;
+  requested_bytes?: number;
+  actual_storage?: string;
+  storage_hash?: string;
+  storage_retained?: boolean;
+  deleted?: boolean;
+  observed_at?: string;
+};
+
+export type Resource = {
+  schema_version?: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  name: string;
+  kind: ResourceKind;
+  provider?: string;
+  type: string;
+  lifecycle: ResourceLifecycle;
+  managed?: ManagedResourceSpec;
+  external?: Record<string, unknown>;
+  internal_name?: string;
+  runtime?: {
+    spec: {
+      schema_version: string;
+      resource_id: string;
+      project_id: string;
+      environment_id: string;
+      resource_type: string;
+      profile: string;
+      version: string;
+      image: string;
+      assignment: { runtime_id: string; node_id: string; agent_id: string };
+      replicas: number;
+      cpu_millicores: number;
+      memory_bytes: number;
+      ports: Array<{ name: string; port: number; protocol: string }>;
+      storage: { persistent: boolean; size_bytes?: number; policy_ref?: string };
+      connection: { protocol: string; host: string; port: number; service_name: string; database?: string; url?: string };
+      configuration_hash: string;
+      topology_revision: number;
+      topology_hash: string;
+      spec_hash: string;
+    };
+    evidence?: ManagedResourceEvidence;
+    failure_code?: string;
+    failure_message?: string;
+    delete_actor?: string;
+  };
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateResourceRequest = {
+  environment_id: string;
+  name: string;
+  kind: ResourceKind;
+  provider?: string;
+  type: string;
+  managed?: ManagedResourceSpec;
+  external?: Record<string, unknown>;
+};
+
+export type UpdateResourceRequest = {
+  managed?: ManagedResourceSpec;
+  external?: Record<string, unknown>;
+};
+
+export type ResourceTypeDefinition = {
+  type: string;
+  display_name: string;
+  support_tier: string;
+  stateful: boolean;
+  default_port: number;
+  protocols: string[];
+  required_config: string[];
+  optional_config: string[];
+  credential_keys: string[];
+  generated_values: Array<{ name: string; sensitivity: "non_secret" | "secret" }>;
+  storage: { supported: boolean; required: boolean };
+  provisioning: { implemented: boolean; profiles: Array<{ name: string; versions: Array<{ version: string; image: string }> }> };
+};
+
+export type ResourceBinding = {
+  schema_version?: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  source: { kind: "application" | string; id: string };
+  target: { kind: "managed_service" | string; id: string };
+  protocol: string;
+  logical_name: string;
+  lifecycle: string;
+  credential_id?: string;
+  role_name?: string;
+  database?: string;
+  failure_code?: string;
+  runtime_refs?: Array<{ name: string; sensitivity: "non_secret" | "secret"; value?: string; secret_ref?: { secret_id: string; key?: string } }>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateResourceBindingRequest = {
+  environment_id: string;
+  source: { kind: "application" | string; id: string };
+  target: { kind: "managed_service" | "external_resource" | string; id: string };
+  protocol: string;
+  logical_name: string;
+  credential_ref?: { secret_id: string; key?: string };
+};
+
+export type RetainedStorage = {
+  schema_version?: string;
+  id: string;
+  original_resource_id: string;
+  project_id: string;
+  environment_id: string;
+  resource_type: string;
+  resource_name: string;
+  namespace: string;
+  pvc_name: string;
+  pvc_uid: string;
+  pv_name: string;
+  pv_uid?: string;
+  storage_class: string;
+  reclaim_policy: string;
+  requested_bytes: number;
+  actual_size: string;
+  storage_hash: string;
+  assignment: { runtime_id: string; node_id: string; agent_id: string };
+  lifecycle: "retained" | "destroying" | "destroyed" | "destroy_failed" | "unknown";
+  revision: number;
+  original_created_by?: string;
+  retained_by?: string;
+  retained_at: string;
+  destroy_requested_by?: string;
+  destroy_requested_at?: string;
+  destroyed_at?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
+};
+
+export type RetainedStorageReview = {
+  retained_storage_id: string;
+  original_resource_id: string;
+  resource_name: string;
+  pvc_name: string;
+  pvc_uid: string;
+  pv_name: string;
+  pv_uid?: string;
+  storage_class: string;
+  reclaim_policy: string;
+  requested_bytes: number;
+  actual_size: string;
+  storage_hash: string;
+  retained_at: string;
+  revision: number;
+  active_resource: boolean;
+  active_binding: boolean;
+  warning?: string;
+  review_token: string;
+  reviewed_at: string;
+};
+
+export type DestroyRetainedStorageRequest = {
+  review_token: string;
+};
+
+export type Backup = {
+  schema_version: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  source_resource_id: string;
+  source_node_id: string;
+  resource_type: string;
+  backup_type: string;
+  source_database: string;
+  source_postgres_version?: string;
+  source_profile?: string;
+  source_image?: string;
+  source_spec_revision: number;
+  source_spec_hash: string;
+  source_pvc_name: string;
+  source_pvc_uid: string;
+  source_pv_name?: string;
+  source_pv_uid?: string;
+  source_storage_hash: string;
+  format: string;
+  dump_options: string[];
+  lifecycle: "queued" | "leased" | "running" | "succeeded" | "failed";
+  store_id: string;
+  object_key: string;
+  object_etag?: string;
+  object_version_id?: string;
+  artifact_size?: number;
+  sha256?: string;
+  pg_dump_version?: string;
+  archive_verified: boolean;
+  requested_by: string;
+  requested_at: string;
+  created_at: string;
+  leased_at?: string;
+  started_at?: string;
+  completed_at?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
+  attempt_count: number;
+};
+
+export type RestoreReview = {
+  schema_version: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  backup_id: string;
+  backup_created_at: string;
+  backup_artifact_sha256: string;
+  backup_revision: string;
+  source_resource_id: string;
+  source_postgres_version: string;
+  artifact_size: number;
+  target_resource_id: string;
+  target_node_id: string;
+  target_postgres_version: string;
+  target_database: string;
+  target_database_oid?: string;
+  target_lifecycle: string;
+  target_spec_revision: number;
+  target_spec_hash: string;
+  target_pvc_name: string;
+  target_pvc_uid: string;
+  target_pv_name?: string;
+  target_pv_uid?: string;
+  target_storage_hash: string;
+  pristine: boolean;
+  objects: { schemas: number; tables: number; sequences: number; indexes: number; functions: number };
+  pristine_evidence_hash?: string;
+  warning?: string;
+  lifecycle: "queued" | "leased" | "succeeded" | "failed";
+  requested_by: string;
+  requested_at: string;
+  reviewed_at?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
+  attempt_count: number;
+};
+
+export type Restore = {
+  schema_version: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  review_id: string;
+  backup_id: string;
+  backup_revision: string;
+  source_resource_id: string;
+  target_resource_id: string;
+  target_node_id: string;
+  artifact_sha256: string;
+  artifact_size: number;
+  source_postgres_version: string;
+  target_postgres_version: string;
+  source_profile: string;
+  source_image: string;
+  target_profile: string;
+  target_image: string;
+  source_spec_revision: number;
+  source_spec_hash: string;
+  source_pvc_uid: string;
+  target_spec_revision: number;
+  target_spec_hash: string;
+  target_database: string;
+  target_database_oid: string;
+  target_pvc_name: string;
+  target_pvc_uid: string;
+  target_storage_hash: string;
+  pristine_evidence_hash: string;
+  restore_options: string[];
+  lifecycle: "queued" | "leased" | "running" | "verifying" | "succeeded" | "failed";
+  requested_by: string;
+  requested_at: string;
+  created_at: string;
+  leased_at?: string;
+  started_at?: string;
+  verifying_at?: string;
+  completed_at?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
+  attempt_count: number;
+  restored_objects?: { schemas: number; tables: number; sequences: number; indexes: number; functions: number };
+};
+
+export type ApplicationCutoverReview = {
+  schema_version: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  application_id: string;
+  source_binding_id: string;
+  source_resource_id: string;
+  target_resource_id: string;
+  target_binding_id: string;
+  application_config_revision: number;
+  application_config_hash: string;
+  source_binding_revision: string;
+  target_binding_revision: string;
+  source_resource_revision: number;
+  source_resource_spec_hash: string;
+  target_resource_revision: number;
+  target_resource_spec_hash: string;
+  target_restore_id: string;
+  target_restore_revision: string;
+  backup_id: string;
+  backup_completed_at?: string;
+  restore_completed_at?: string;
+  backup_age_seconds: number;
+  validation_summary: {
+    source_sql_preflight: string;
+    target_sql_preflight: string;
+    target_role_attributes: string;
+    source_binding_ready: boolean;
+    target_binding_ready: boolean;
+    target_restore_ready: boolean;
+    target_pvc_uid?: string;
+    target_pv_uid?: string;
+    target_storage_hash?: string;
+  };
+  warnings: string[];
+  lifecycle: "queued" | "leased" | "succeeded" | "failed";
+  requested_by: string;
+  requested_at: string;
+  reviewed_at?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
+  attempt_count: number;
+  target_node_id?: string;
+  evidence_hash?: string;
+};
+
+export type ApplicationCutover = {
+  schema_version: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  application_id: string;
+  cutover_review_id: string;
+  source_binding_id: string;
+  target_binding_id: string;
+  source_resource_id: string;
+  target_resource_id: string;
+  reviewed_application_config_revision: number;
+  reviewed_application_config_hash: string;
+  pre_cutover_application_config_revision: number;
+  pre_cutover_application_config_hash: string;
+  resulting_application_config_revision: number;
+  resulting_application_config_hash: string;
+  deployment_job_id?: string;
+  lifecycle: "queued" | "validating" | "applying" | "deploying" | "verifying" | "succeeded" | "failed";
+  requested_by: string;
+  requested_at: string;
+  applied_at?: string;
+  completed_at?: string;
+  updated_at: string;
+  target_node_id?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
+  verification_summary: {
+    source_sql_preflight: string;
+    target_sql_preflight: string;
+    target_role_attributes: string;
+    deployment_ready: boolean;
+    workload_ready: boolean;
+    target_db_connected: boolean;
+    restored_data_verified: boolean;
+    target_only_marker_present: boolean;
+    source_only_marker_absent: boolean;
+    post_cutover_target_written: boolean;
+    source_rollback_preserved: boolean;
+  };
+  evidence_hash?: string;
+};
+
+export type ApplicationCutoverRollback = {
+  schema_version: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  application_id: string;
+  cutover_id: string;
+  source_binding_id: string;
+  target_binding_id: string;
+  source_resource_id: string;
+  target_resource_id: string;
+  current_application_config_revision: number;
+  current_application_config_hash: string;
+  original_pre_cutover_application_config_revision: number;
+  original_pre_cutover_application_config_hash: string;
+  resulting_application_config_revision: number;
+  resulting_application_config_hash: string;
+  deployment_job_id?: string;
+  lifecycle: "queued" | "validating" | "applying" | "deploying" | "verifying" | "succeeded" | "failed";
+  requested_by?: string;
+  requested_at: string;
+  applied_at?: string;
+  completed_at?: string;
+  updated_at: string;
+  target_node_id?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
+  warnings?: string[];
+  verification_summary?: {
+    source_sql_preflight: string;
+    target_sql_preflight?: string;
+    source_role_attributes: string;
+    deployment_ready: boolean;
+    workload_ready: boolean;
+    source_db_connected: boolean;
+    source_marker_present: boolean;
+    target_marker_absent: boolean;
+    post_rollback_source_written: boolean;
+    target_authority_preserved: boolean;
+  };
+  evidence_hash?: string;
+};
+
+export type ApplicationCutoverFinalization = {
+  schema_version: string;
+  id: string;
+  project_id: string;
+  environment_id: string;
+  application_id: string;
+  cutover_id: string;
+  source_binding_id: string;
+  target_binding_id: string;
+  source_resource_id: string;
+  target_resource_id: string;
+  application_config_revision: number;
+  application_config_hash: string;
+  cutover_evidence_hash: string;
+  lifecycle: "queued" | "validating" | "revoking_source_binding" | "verifying" | "succeeded" | "failed";
+  requested_by: string;
+  requested_at: string;
+  completed_at?: string;
+  updated_at: string;
+  target_node_id?: string;
+  failure_code?: string;
+  failure_message_redacted?: string;
+  verification_summary: {
+    target_sql_preflight: string;
+    target_role_attributes: string;
+    target_db_connected: boolean;
+    target_only_marker_present: boolean;
+    post_cutover_marker_present: boolean;
+    source_marker_absent: boolean;
+    source_binding_revoked: boolean;
+    source_credential_rejected: boolean;
+    source_resource_retained: boolean;
+    post_finalize_target_written: boolean;
+  };
+  evidence_hash?: string;
 };

@@ -37,7 +37,7 @@ func (s *Service) ResolveBuildJobSource(_ context.Context, projectID, applicatio
 	if !ok || claim.ProjectID != projectID || claim.InstallationID != binding.InstallationID || claim.Status != GitHubLinkActive {
 		return buildjob.ApplicationSource{}, invalidBuildJobSourceScope()
 	}
-	return buildJobApplicationSource(service, binding, repository), nil
+	return s.buildJobApplicationSourceWithServices(service, binding, repository), nil
 }
 
 func (s PostgresService) ResolveBuildJobSource(ctx context.Context, projectID, applicationID string) (buildjob.ApplicationSource, error) {
@@ -77,20 +77,47 @@ func (s PostgresService) ResolveBuildJobSource(ctx context.Context, projectID, a
 	if err := normalizeGitHubSource(&binding.GitHubSource, defaultBranch); err != nil {
 		return buildjob.ApplicationSource{}, buildjob.Error{Code: "BUILD_SOURCE_INVALID", Status: 409, Message: "The source binding is invalid.", Cause: "source_binding"}
 	}
+	service, _ := s.getService(ctx, applicationID)
+	services, _ := s.ListServices(projectID)
+	buildDepState := ComputeBuildDependencyState(service.Configuration, services)
+	buildEnv := ComputeBuildEnvironment(service.Configuration, services)
 	return buildjob.ApplicationSource{
 		ProjectID: projectID, EnvironmentID: environmentID, ApplicationID: applicationID, BindingID: binding.ID, BindingUpdatedAt: binding.UpdatedAt,
 		InstallationID: binding.InstallationID, RepositoryID: binding.RepositoryID, RepositoryOwnerID: repositoryOwnerID,
 		RepositoryFullName: repositoryFullName, SelectedRef: binding.SelectedRef, ApplicationRoot: binding.ApplicationRoot,
 		BuildContext: binding.BuildContext, BuildStrategy: binding.BuildStrategy, DockerfilePath: binding.DockerfilePath,
+		BuildDependencyState: buildDepState,
+		BuildEnvironment:     buildEnv,
 	}, nil
 }
 
-func buildJobApplicationSource(service ServiceRecord, binding GitHubServiceBinding, repository GitHubRepository) buildjob.ApplicationSource {
+func (s *Service) buildJobApplicationSourceWithServices(service ServiceRecord, binding GitHubServiceBinding, repository GitHubRepository) buildjob.ApplicationSource {
+	services := make([]ServiceRecord, 0, len(s.services))
+	for _, s := range s.services {
+		services = append(services, s)
+	}
+	buildDepState := ComputeBuildDependencyState(service.Configuration, services)
+	buildEnv := ComputeBuildEnvironment(service.Configuration, services)
 	return buildjob.ApplicationSource{
 		ProjectID: binding.ProjectID, EnvironmentID: service.EnvironmentID, ApplicationID: binding.ServiceID, BindingID: binding.ID, BindingUpdatedAt: binding.UpdatedAt,
 		InstallationID: binding.InstallationID, RepositoryID: binding.RepositoryID, RepositoryOwnerID: repository.OwnerID,
 		RepositoryFullName: repository.FullName, SelectedRef: binding.SelectedRef, ApplicationRoot: binding.ApplicationRoot,
 		BuildContext: binding.BuildContext, BuildStrategy: binding.BuildStrategy, DockerfilePath: binding.DockerfilePath,
+		BuildDependencyState: buildDepState,
+		BuildEnvironment:     buildEnv,
+	}
+}
+
+func buildJobApplicationSource(service ServiceRecord, binding GitHubServiceBinding, repository GitHubRepository) buildjob.ApplicationSource {
+	buildDepState := ComputeBuildDependencyState(service.Configuration, nil)
+	buildEnv := ComputeBuildEnvironment(service.Configuration, nil)
+	return buildjob.ApplicationSource{
+		ProjectID: binding.ProjectID, EnvironmentID: service.EnvironmentID, ApplicationID: binding.ServiceID, BindingID: binding.ID, BindingUpdatedAt: binding.UpdatedAt,
+		InstallationID: binding.InstallationID, RepositoryID: binding.RepositoryID, RepositoryOwnerID: repository.OwnerID,
+		RepositoryFullName: repository.FullName, SelectedRef: binding.SelectedRef, ApplicationRoot: binding.ApplicationRoot,
+		BuildContext: binding.BuildContext, BuildStrategy: binding.BuildStrategy, DockerfilePath: binding.DockerfilePath,
+		BuildDependencyState: buildDepState,
+		BuildEnvironment:     buildEnv,
 	}
 }
 

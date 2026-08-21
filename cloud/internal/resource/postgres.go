@@ -157,7 +157,7 @@ func (s PostgresStore) CreateBinding(ctx context.Context, value resourcev1.Bindi
 		_ = tx.Rollback()
 		return s.replayBinding(ctx, value.ProjectID, key, payload, err)
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO resource_bindings(id,project_id,environment_id,source_kind,source_id,target_kind,target_id,protocol,logical_name,runtime_references,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12)`, value.ID, value.ProjectID, value.EnvironmentID, value.Source.Kind, value.Source.ID, value.Target.Kind, value.Target.ID, value.Protocol, value.LogicalName, string(references), value.CreatedAt, value.UpdatedAt); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO resource_bindings(id,project_id,environment_id,source_kind,source_id,target_kind,target_id,protocol,logical_name,lifecycle,credential_id,role_name,database_name,failure_code,runtime_references,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULLIF($11,''),NULLIF($12,''),NULLIF($13,''),NULLIF($14,''),$15::jsonb,$16,$17)`, value.ID, value.ProjectID, value.EnvironmentID, value.Source.Kind, value.Source.ID, value.Target.Kind, value.Target.ID, value.Protocol, value.LogicalName, value.Lifecycle, value.CredentialID, value.RoleName, value.Database, value.FailureCode, string(references), value.CreatedAt, value.UpdatedAt); err != nil {
 		return resourcev1.Binding{}, false, err
 	}
 	return value, false, tx.Commit()
@@ -211,10 +211,40 @@ func (s PostgresStore) ListBindings(ctx context.Context, projectID, environmentI
 	return out, rows.Err()
 }
 
+func (s PostgresStore) GetBinding(ctx context.Context, projectID, bindingID string) (resourcev1.Binding, error) {
+	return getBinding(ctx, s.DB, projectID, bindingID)
+}
+
+func (s PostgresStore) UpdateBinding(ctx context.Context, value resourcev1.Binding) (resourcev1.Binding, error) {
+	references, err := json.Marshal(value.RuntimeRefs)
+	if err != nil {
+		return resourcev1.Binding{}, err
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE resource_bindings SET lifecycle=$1,credential_id=NULLIF($2,''),role_name=NULLIF($3,''),database_name=NULLIF($4,''),failure_code=NULLIF($5,''),runtime_references=$6::jsonb,updated_at=$7 WHERE project_id=$8 AND id=$9`, value.Lifecycle, value.CredentialID, value.RoleName, value.Database, value.FailureCode, string(references), value.UpdatedAt, value.ProjectID, value.ID)
+	if err != nil {
+		return resourcev1.Binding{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return resourcev1.Binding{}, ErrNotFound
+	}
+	return value, nil
+}
+
+func (s PostgresStore) DeleteBinding(ctx context.Context, projectID, bindingID string) error {
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM resource_bindings WHERE project_id=$1 AND id=$2`, projectID, bindingID)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 const resourceReturning = `id,project_id,environment_id,name,kind,provider,type,lifecycle,managed_spec::text,external_spec::text,runtime_state::text,COALESCE(managed_lease_token,''),managed_lease_expires_at,COALESCE(internal_name,''),COALESCE(created_by,''),created_at,updated_at`
 const qualifiedResourceReturning = `r.id,r.project_id,r.environment_id,r.name,r.kind,r.provider,r.type,r.lifecycle,r.managed_spec::text,r.external_spec::text,r.runtime_state::text,COALESCE(r.managed_lease_token,''),r.managed_lease_expires_at,COALESCE(r.internal_name,''),COALESCE(r.created_by,''),r.created_at,r.updated_at`
 const resourceColumns = `SELECT ` + resourceReturning + ` FROM resources`
-const bindingColumns = `SELECT id,project_id,environment_id,source_kind,source_id,target_kind,target_id,protocol,logical_name,runtime_references::text,created_at,updated_at FROM resource_bindings`
+const bindingColumns = `SELECT id,project_id,environment_id,source_kind,source_id,target_kind,target_id,protocol,logical_name,lifecycle,COALESCE(credential_id,''),COALESCE(role_name,''),COALESCE(database_name,''),COALESCE(failure_code,''),runtime_references::text,created_at,updated_at FROM resource_bindings`
 
 type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -275,7 +305,7 @@ func getBinding(ctx context.Context, db queryer, projectID, bindingID string) (r
 func scanBinding(row scanner) (resourcev1.Binding, error) {
 	var value resourcev1.Binding
 	var references string
-	err := row.Scan(&value.ID, &value.ProjectID, &value.EnvironmentID, &value.Source.Kind, &value.Source.ID, &value.Target.Kind, &value.Target.ID, &value.Protocol, &value.LogicalName, &references, &value.CreatedAt, &value.UpdatedAt)
+	err := row.Scan(&value.ID, &value.ProjectID, &value.EnvironmentID, &value.Source.Kind, &value.Source.ID, &value.Target.Kind, &value.Target.ID, &value.Protocol, &value.LogicalName, &value.Lifecycle, &value.CredentialID, &value.RoleName, &value.Database, &value.FailureCode, &references, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		return value, err
 	}

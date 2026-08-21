@@ -18,18 +18,26 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/actiondevice"
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	backupdomain "github.com/opsi-dev/opsi/cloud/internal/backup"
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
+	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
+	"github.com/opsi-dev/opsi/cloud/internal/sourcereport"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
+	"github.com/opsi-dev/opsi/cloud/internal/verificationstore"
+	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	restorev1 "github.com/opsi-dev/opsi/contracts/go/restorev1"
 )
 
 type Server struct {
@@ -39,11 +47,16 @@ type Server struct {
 	HTTPClient              *http.Client
 	Registry                registry.API
 	Resources               resource.Service
+	Backups                 backupdomain.Service
+	Restores                restoredomain.Service
+	Cutovers                cutoverdomain.Service
 	BuildJobs               buildjob.Service
 	BuildRecords            buildrecord.Service
 	RegistryPullCredentials RegistryPullCredentialProvider
 	Topology                topology.Service
 	Policies                deploymentpolicy.Service
+	SourceReports           sourcereport.Store
+	Verifications           verificationstore.Store
 	OIDC                    interface {
 		Verify(context.Context, string) (githuboidc.VerifiedIdentity, error)
 	}
@@ -65,6 +78,7 @@ type Server struct {
 	authMu                  sync.Mutex
 	oauthStates             map[string]oauthState
 	authGrants              map[string]authGrant
+	authSelectionGrants     map[string]authGrant
 	installationClaimGrants map[string]installationClaimGrant
 	now                     func() time.Time
 	random                  io.Reader
@@ -89,6 +103,17 @@ func NewServer(cfg Config) *Server {
 	runnerVerifier, runnerVerifierErr := githuboidc.NewIdentityVerifier(runnerOIDCConfig)
 	registryService := registry.NewService()
 	resourceService := resource.Service{Store: resource.NewMemoryStore(), Scopes: registryService, Credentials: resource.NewMemoryCredentialAuthority()}
+	backupService := backupdomain.Service{Store: backupdomain.NewMemoryStore(), Resources: resourceService}
+	restoreService := restoredomain.Service{Store: restoredomain.NewMemoryStore(), Backups: backupService, Resources: resourceService}
+	if cfg.BackupStore.Enabled() {
+		backupService.Artifacts = backupStoreAuthority(cfg.BackupStore)
+	}
+	resourceService.Operations = []resource.ActiveOperationAuthority{backupService, restoreService}
+	backupService.Resources = resourceService
+	restoreService.Resources = resourceService
+	restoreService.Backups = backupService
+	restoreService.Artifacts = backupService.Artifacts
+	cutoverService := cutoverdomain.Service{Store: cutoverdomain.NewMemoryStore(), Applications: registryService, Resources: resourceService, Restores: restoreService, Backups: backupService, Credentials: resourceService.Credentials}
 	topologyService := topology.Service{Store: topology.NewMemoryStore(), Facts: registryService, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 	buildRecordService := buildrecord.Service{Store: buildrecord.NewMemoryStore(), Bindings: registryService, Policies: oidcConfig.Workloads}
 	buildJobService := buildjob.Service{Store: buildjob.NewMemoryStore(), Sources: registryService, Executor: cfg.BuildExecutor, Registry: cfg.BuildRegistry}
@@ -98,10 +123,15 @@ func NewServer(cfg Config) *Server {
 		HTTPClient:              newGitHubHTTPClient(),
 		Registry:                registryService,
 		Resources:               resourceService,
+		Backups:                 backupService,
+		Restores:                restoreService,
+		Cutovers:                cutoverService,
 		BuildJobs:               buildJobService,
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
 		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
+		SourceReports:           sourcereport.NewMemoryStore(),
+		Verifications:           verificationstore.NewMemoryStore(),
 		OIDC:                    verifier,
 		RunnerOIDC:              runnerVerifier,
 		oidcInitError:           verifierErr,
@@ -114,9 +144,15 @@ func NewServer(cfg Config) *Server {
 		buildRecordSlots:        make(chan struct{}, buildRecordMaxConcurrency),
 		oauthStates:             map[string]oauthState{},
 		authGrants:              map[string]authGrant{},
+		authSelectionGrants:     map[string]authGrant{},
 		installationClaimGrants: map[string]installationClaimGrant{},
 		random:                  rand.Reader,
 	}
+	server.Cutovers.Deployments = registryService
+	server.Cutovers.BuildRecords = buildRecordService.Store
+	server.Cutovers.Topology = topologyService
+	server.Cutovers.Policies = server.Policies
+	server.Cutovers.RuntimeResolver = resourceService
 	server.BuildRecords.AuditSink = func(event buildrecord.AuditEvent) {
 		registryService.AuditWorkload(event.ProjectID, "BUILD_RECORD_SUBMITTED", event.RecordID, event.Result, map[string]any{"repository_id": event.RepositoryID, "run_id": event.RunID, "run_attempt": event.RunAttempt, "service_key": event.ServiceKey, "sha": event.SHA, "config_hash": event.ConfigHash, "oci_digest": event.OCIDigest})
 	}
@@ -189,6 +225,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/auth/browser/start", s.handleBrowserAuthStart)
 	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)
 	mux.HandleFunc("/v1/auth/browser/redeem", s.handleBrowserAuthRedeem)
+	mux.HandleFunc("/v1/auth/browser/select-project", s.handleBrowserAuthSelectProject)
 	mux.HandleFunc("/v1/projects/{project_id}/github/installations/{installation_id}/claim/start", s.handleInstallationClaimStart)
 	mux.HandleFunc("/v1/github/installations/claim/redeem", s.handleInstallationClaimRedeem)
 	mux.HandleFunc("/v1/projects/{project_id}/github/installations", s.handleGitHubInstallationsAPI)
@@ -214,6 +251,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/bootstrap/claim", s.handleBootstrapCommandClaim)
 	mux.HandleFunc("/v1/bootstrap/sessions/{session_id}/checkpoint", s.handleBootstrapWorkerCheckpoint)
 	mux.HandleFunc("/v1/bootstrap/sessions/", s.handleBootstrapWorker)
+	mux.HandleFunc("/v1/projects/{project_id}/dependencies/verify", s.handleVerifyDependencyAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/dependencies/{dependency_logical_name}/verification", s.handleGetDependencyVerificationAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/deployments/{deployment_id}/verifications", s.handleListDeploymentVerificationsAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/applications/{application_id}/source-risk-report", s.handleGetApplicationSourceRiskReportAPI)
+	mux.HandleFunc("/v1/projects/{project_id}/source-risk-reports/{report_id}", s.handleGetSourceRiskReportByIDAPI)
+	mux.HandleFunc("/v1/agents/{node_id}/dep-verifications/{verification_id}/result", s.handleAgentDepVerificationResult)
 	mux.HandleFunc("/v1/agents/", s.handleAgentWebhookNext)
 	mux.HandleFunc("/v1/agent/projects/{project_id}/action-devices/{device_id}", s.handleAgentActionDevice)
 	mux.HandleFunc("/internal/bootstrap/sessions/lease", s.handleBootstrapWorker)
@@ -365,6 +408,38 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		s.handleAgentManagedResourceResult(w, r)
 		return
 	}
+	if strings.Contains(r.URL.Path, "/retained-storages/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentRetainedStorageResult(w, r)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/backups/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentBackupResult(w, r)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/restore-reviews/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentRestoreReviewResult(w, r)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/restores/") && strings.HasSuffix(r.URL.Path, "/result") {
+		s.handleAgentRestoreResult(w, r)
+		return
+	}
+	if (strings.Contains(r.URL.Path, "/cutover-finalizations/") || strings.Contains(r.URL.Path, "/application-cutover-finalizations/")) && !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
+		s.handleAgentCutoverFinalizationResult(w, r)
+		return
+	}
+	if (strings.Contains(r.URL.Path, "/cutover-rollbacks/") || strings.Contains(r.URL.Path, "/application-cutover-rollbacks/")) && !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
+		s.handleAgentCutoverRollbackResult(w, r)
+		return
+	}
+	if strings.Contains(r.URL.Path, "/cutover-reviews/") && (strings.HasSuffix(r.URL.Path, "/result") || !strings.HasSuffix(r.URL.Path, "/webhooks/next")) {
+		s.handleAgentCutoverReviewResult(w, r)
+		return
+	}
+	if (strings.Contains(r.URL.Path, "/cutovers/") || strings.Contains(r.URL.Path, "/application-cutovers/")) && !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
+		s.handleAgentCutoverResult(w, r)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/webhooks/next") {
 		http.NotFound(w, r)
 		return
@@ -404,18 +479,90 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, map[string]any{"kind": "deployment", "deployment": lease.Deployment, "action": lease.Action, "lease_token": lease.LeaseToken, "command": lease.Command})
 		return
 	}
+	reviewLease, ok, err := s.Restores.LeaseReview(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeRestoreResult(w, r, reviewLease, err, http.StatusOK)
+		return
+	}
+	if reviewLease.Review.Lifecycle == restorev1.ReviewFailed {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "RESTORE_FAILED", "restore_review", reviewLease.Review.ID, "failure", map[string]any{"failure_code": reviewLease.Review.FailureCode})
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "restore_review", "lease_token": reviewLease.LeaseToken, "review": reviewLease.Review, "target_spec": reviewLease.TargetSpec})
+		return
+	}
+	restoreLease, ok, err := s.Restores.Lease(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeRestoreResult(w, r, restoreLease, err, http.StatusOK)
+		return
+	}
+	if restoreLease.Restore.Lifecycle == restorev1.LifecycleFailed {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "RESTORE_FAILED", "restore", restoreLease.Restore.ID, "failure", map[string]any{"target_resource_id": restoreLease.Restore.TargetResourceID, "failure_code": restoreLease.Restore.FailureCode})
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "restore", "lease_token": restoreLease.LeaseToken, "restore": restoreLease.Restore, "backup": restoreLease.Backup, "target_spec": restoreLease.TargetSpec, "store": restoreLease.Store, "credential": restoreLease.Credential})
+		return
+	}
+	cutoverLease, ok, err := s.Cutovers.LeaseReview(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeCutoverResult(w, r, cutoverLease, err, http.StatusOK)
+		return
+	}
+	if cutoverLease.Review.Lifecycle == cutoverv1.ReviewFailed {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "CUTOVER_REVIEW_FAILED", "cutover_review", cutoverLease.Review.ID, "failure", map[string]any{"application_id": cutoverLease.Review.ApplicationID, "failure_code": cutoverLease.Review.FailureCode})
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"kind":                         "cutover_review",
+			"lease_token":                  cutoverLease.LeaseToken,
+			"cutover_review_lease":         cutoverLease,
+			"review":                       cutoverLease.Review,
+			"source_spec":                  cutoverLease.SourceSpec,
+			"target_spec":                  cutoverLease.TargetSpec,
+			"source_credential":            cutoverLease.SourceCredential,
+			"target_credential":            cutoverLease.TargetCredential,
+			"target_management_credential": cutoverLease.TargetManagementCredential,
+		})
+		return
+	}
+	backupLease, ok, err := s.Backups.Lease(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeBackupResult(w, r, backupLease, err, http.StatusOK)
+		return
+	}
+	if backupLease.Backup.Lifecycle == backupv1.LifecycleFailed {
+		s.Registry.Audit(agent.OrgID, projectID, agent.ID, "BACKUP_FAILED", "backup", backupLease.Backup.ID, "failure", map[string]any{"resource_id": backupLease.Backup.SourceResourceID, "failure_code": backupLease.Backup.FailureCode})
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "backup", "lease_token": backupLease.LeaseToken, "backup": backupLease.Backup, "source_spec": backupLease.SourceSpec, "store": backupLease.Store, "credential": backupLease.Credential})
+		return
+	}
+	retained, ok, err := s.Resources.LeaseRetainedStorageDestroy(r.Context(), projectID, nodeID)
+	if err != nil {
+		writeRegistryFailure(w, r, err)
+		return
+	}
+	if ok {
+		s.observer.Inc("agent_jobs_leased_total")
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "retained_storage", "lease_token": retained.LeaseToken, "spec": retained.Spec})
+		return
+	}
 	managed, ok, err := s.Resources.LeaseManaged(r.Context(), projectID, nodeID)
 	if err != nil {
 		writeRegistryFailure(w, r, err)
 		return
 	}
 	if ok {
-		if managed.Action == "apply" && managed.Spec.ResourceType == resourcev1.TypeRedis && managed.Credential == nil {
+		if managed.Action == "apply" && (managed.Spec.ResourceType == resourcev1.TypeRedis || managed.Spec.ResourceType == resourcev1.TypePostgres) && managed.Credential == nil {
 			writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureCredentialUnavailable})
 			return
 		}
 		s.observer.Inc("agent_jobs_leased_total")
-		writeJSON(w, http.StatusOK, map[string]any{"kind": "managed_resource", "action": managed.Action, "lease_token": managed.LeaseToken, "spec": managed.Spec, "credential": managed.Credential})
+		writeJSON(w, http.StatusOK, map[string]any{"kind": "managed_resource", "action": managed.Action, "lease_token": managed.LeaseToken, "spec": managed.Spec, "credential": managed.Credential, "bindings": managed.Bindings})
 		return
 	}
 	lifecycle, ok, err := s.Registry.LeaseNodeLifecycle(projectID, nodeID)
@@ -454,6 +601,50 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleAgentBackupResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 6 {
+		http.NotFound(w, r)
+		return
+	}
+	var result backupv1.Result
+	if !decodeResourceJSON(w, r, &result) {
+		return
+	}
+	id := parts[len(parts)-2]
+	started := false
+	if result.Status == backupv1.LifecycleRunning {
+		current, getErr := s.Backups.Get(r.Context(), projectID, id)
+		started = getErr == nil && current.Lifecycle == backupv1.LifecycleLeased
+	}
+	value, err := s.Backups.Complete(r.Context(), projectID, id, result)
+	if err != nil {
+		writeBackupResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	action, outcome, metadata := "BACKUP_FAILED", "failure", map[string]any{"resource_id": value.SourceResourceID, "failure_code": value.FailureCode}
+	if result.Status == backupv1.LifecycleRunning && started {
+		action, outcome, metadata = "BACKUP_STARTED", "success", map[string]any{"resource_id": value.SourceResourceID, "attempt_count": value.AttemptCount}
+	} else if result.Status == backupv1.LifecycleRunning {
+		writeJSON(w, http.StatusOK, map[string]any{"backup": value})
+		return
+	} else if value.Lifecycle == backupv1.LifecycleSucceeded {
+		action, outcome, metadata = "BACKUP_SUCCEEDED", "success", map[string]any{"resource_id": value.SourceResourceID, "sha256": value.SHA256, "artifact_size": value.ArtifactSize}
+	}
+	s.Registry.Audit(agent.OrgID, projectID, agent.ID, action, "backup", id, outcome, metadata)
+	writeJSON(w, http.StatusOK, map[string]any{"backup": value})
+}
+
 func (s *Server) handleAgentManagedResourceResult(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -461,7 +652,8 @@ func (s *Server) handleAgentManagedResourceResult(w http.ResponseWriter, r *http
 	}
 	projectID := r.URL.Query().Get("project_id")
 	nodeID := nodeIDFromAgentPath(r.URL.Path)
-	if _, ok := s.authorizeAgent(w, r, projectID, nodeID); !ok {
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
@@ -478,7 +670,46 @@ func (s *Server) handleAgentManagedResourceResult(w http.ResponseWriter, r *http
 		writeResourceResult(w, r, value, err, http.StatusOK)
 		return
 	}
+	if result.Status == "deleted" {
+		if retained, retainedErr := s.Resources.GetRetainedStorageByResource(r.Context(), projectID, parts[len(parts)-2]); retainedErr == nil {
+			s.Registry.Audit(agent.OrgID, projectID, agent.ID, "RESOURCE_RUNTIME_DELETED_STORAGE_RETAINED", "resource", parts[len(parts)-2], "success", map[string]any{"retained_storage_id": retained.ID, "pvc_uid": retained.PVCUID, "pv_uid": retained.PVUID})
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"resource": value})
+}
+
+func (s *Server) handleAgentRetainedStorageResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	nodeID := nodeIDFromAgentPath(r.URL.Path)
+	agent, ok := s.authorizeAgent(w, r, projectID, nodeID)
+	if !ok {
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 6 {
+		http.NotFound(w, r)
+		return
+	}
+	var result resource.RetainedStorageResult
+	if !decodeResourceJSON(w, r, &result) {
+		return
+	}
+	id := parts[len(parts)-2]
+	value, err := s.Resources.CompleteRetainedStorageDestroy(r.Context(), projectID, id, result)
+	if err != nil {
+		writeResourceResult(w, r, value, err, http.StatusOK)
+		return
+	}
+	action, outcome := "RETAINED_STORAGE_DESTROY_FAILED", "failure"
+	if value.Lifecycle == resourcev1.RetainedStorageDestroyed {
+		action, outcome = "RETAINED_STORAGE_DESTROYED", "success"
+	}
+	s.Registry.Audit(agent.OrgID, projectID, agent.ID, action, "retained_storage", id, outcome, map[string]any{"lifecycle": value.Lifecycle, "failure_code": value.FailureCode})
+	writeJSON(w, http.StatusOK, map[string]any{"retained_storage": value})
 }
 
 func (s *Server) recoverAutomaticDeliveries(ctx context.Context, projectID string) {

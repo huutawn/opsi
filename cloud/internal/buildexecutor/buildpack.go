@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
@@ -46,6 +47,7 @@ func Buildpack(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspac
 	if err := os.MkdirAll(tempDir, 0o700); err != nil {
 		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "Buildpacks temporary directory cannot be created"}
 	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	env := append(dockerEnv(dockerConfig), "TMPDIR="+tempDir)
 	builder, err := inspectBuildpackToolchain(ctx, workspace, env)
 	if err != nil {
@@ -66,9 +68,21 @@ func Buildpack(ctx context.Context, spec buildjob.BuildSpec, sourceDir, workspac
 		"build", spec.Publication.TagReference(), "--path", appPath,
 		"--builder", BuildpackBuilder, "--run-image", BuildpackRunImage,
 		"--platform", Platform, "--pull-policy", "always", "--network", "bridge", "--creation-time", "0",
+	}
+	if len(spec.BuildEnvironment) > 0 {
+		keys := make([]string, 0, len(spec.BuildEnvironment))
+		for k := range spec.BuildEnvironment {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--env", k+"="+spec.BuildEnvironment[k])
+		}
+	}
+	args = append(args,
 		"--report-output-dir", outputDir,
 		"--cache", "type=build;format=volume;name=" + cacheNames[0] + ";type=launch;format=volume;name=" + cacheNames[1],
-	}
+	)
 	logFile, err := os.CreateTemp(workspace, "buildpack-log-*")
 	if err != nil {
 		return BuildOutput{}, Error{Code: "DISK_OUTPUT_FAILURE", Phase: "infrastructure", Message: "Buildpacks log cannot be created"}

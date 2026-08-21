@@ -2,6 +2,7 @@ package registry
 
 import (
 	"strings"
+	"context"
 	"testing"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -113,16 +114,16 @@ func TestBrowserHTTPUsesSameOriginPathOnly(t *testing.T) {
 func TestServiceConfigurationValidationRoutesEnvironmentAndConflicts(t *testing.T) {
 	source, target := configurationServices()
 	target.Configuration = appliedConfiguration(ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/api"}})
-	if _, _, err := validateServiceConfiguration(source, ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/"}}, []ServiceRecord{source, target}); err != nil {
+	if _, _, err := validateServiceConfiguration(context.Background(), nil, source, ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/"}}, []ServiceRecord{source, target}); err != nil {
 		t.Fatalf("managed / and /api should coexist: %v", err)
 	}
-	if _, _, err := validateServiceConfiguration(source, ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/api"}}, []ServiceRecord{source, target}); !hasAPIErrorCode(err, "PUBLIC_ROUTE_CONFLICT") {
+	if _, _, err := validateServiceConfiguration(context.Background(), nil, source, ServiceConfigurationDraft{PublicRoute: &PublicRouteIntent{Hostname: "apps.example.com", Path: "/api"}}, []ServiceRecord{source, target}); !hasAPIErrorCode(err, "PUBLIC_ROUTE_CONFLICT") {
 		t.Fatalf("exact duplicate err=%v", err)
 	}
-	if _, _, err := validateServiceConfiguration(source, ServiceConfigurationDraft{Environment: []deploymentv1.EnvironmentVariable{{Name: "API_TOKEN", Value: "must-not-persist"}}}, []ServiceRecord{source, target}); !hasAPIErrorCode(err, "ENVIRONMENT_INVALID") {
+	if _, _, err := validateServiceConfiguration(context.Background(), nil, source, ServiceConfigurationDraft{Environment: []deploymentv1.EnvironmentVariable{{Name: "API_TOKEN", Value: "must-not-persist"}}}, []ServiceRecord{source, target}); !hasAPIErrorCode(err, "ENVIRONMENT_INVALID") {
 		t.Fatalf("secret-like plain env err=%v", err)
 	}
-	if _, _, err := validateServiceConfiguration(source, ServiceConfigurationDraft{Environment: []deploymentv1.EnvironmentVariable{{Name: "API_HOST", Value: "override"}}, Bindings: []ServiceBinding{{Kind: ServiceBindingInternalHTTP, TargetServiceID: target.ID, TargetServiceKey: target.Name, EnvPrefix: "API"}}}, []ServiceRecord{source, target}); !hasAPIErrorCode(err, "GENERATED_ENV_OVERRIDE") {
+	if _, _, err := validateServiceConfiguration(context.Background(), nil, source, ServiceConfigurationDraft{Environment: []deploymentv1.EnvironmentVariable{{Name: "API_HOST", Value: "override"}}, Bindings: []ServiceBinding{{Kind: ServiceBindingInternalHTTP, TargetServiceID: target.ID, TargetServiceKey: target.Name, EnvPrefix: "API"}}}, []ServiceRecord{source, target}); !hasAPIErrorCode(err, "GENERATED_ENV_OVERRIDE") {
 		t.Fatalf("generated override err=%v", err)
 	}
 }

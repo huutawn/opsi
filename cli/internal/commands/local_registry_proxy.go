@@ -268,6 +268,9 @@ func localToCloudPath(u *url.URL) (string, string, error) {
 	if strings.HasPrefix(path, "/projects/") && strings.Contains(path, "/applications/") && strings.Contains(path, "/build-jobs") {
 		return "/v1" + path, u.RawQuery, nil
 	}
+	if strings.HasPrefix(path, "/projects/") && (strings.Contains(path, "/dependencies/") || strings.Contains(path, "/source-risk-report") || strings.Contains(path, "/source-risk-reports/")) && !strings.Contains(path, "/services/") {
+		return "/v1" + path, u.RawQuery, nil
+	}
 	if strings.HasPrefix(path, "/projects/") {
 		return "/api" + path, u.RawQuery, nil
 	}
@@ -279,7 +282,7 @@ func isMutation(method string) bool {
 }
 
 func isPlacementPreview(path string) bool {
-	for _, suffix := range []string{"/topology/plan", "/topology/validate", "/topology/diff", "/configuration/preview", "/configuration/validate", "/configuration/diff", "/deployment-policies/preview", "/deployment-policies/diff", "/deployments/preview", "/deployments/diff", "/exposures/preview", "/exposures/diff", "/routing-decisions"} {
+	for _, suffix := range []string{"/topology/plan", "/topology/validate", "/topology/diff", "/configuration/preview", "/configuration/validate", "/configuration/diff", "/deployment-policies/preview", "/deployment-policies/diff", "/deployments/preview", "/deployments/diff", "/deployments/preflight", "/exposures/preview", "/exposures/diff", "/routing-decisions", "/dependencies/review"} {
 		if strings.HasSuffix(path, suffix) {
 			return true
 		}

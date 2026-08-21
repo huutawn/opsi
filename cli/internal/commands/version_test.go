@@ -27,12 +27,12 @@ func TestManualHelpTreeHasSupportedCommandsAndNoBackendGapCommands(t *testing.T)
 	for _, command := range root.Commands() {
 		commands[command.Name()] = true
 	}
-	for _, name := range []string{"auth", "project", "runtime", "node", "server", "github", "service", "topology", "policy", "build-record", "deploy", "exposure", "telemetry", "incident", "audit", "version"} {
+	for _, name := range []string{"auth", "project", "runtime", "node", "server", "github", "service", "topology", "policy", "build-record", "deploy", "exposure", "telemetry", "incident", "audit", "mcp", "version"} {
 		if !commands[name] {
 			t.Fatalf("supported command %q missing from help tree", name)
 		}
 	}
-	for _, name := range []string{"member", "organization", "mcp", "ai"} {
+	for _, name := range []string{"member", "organization", "ai"} {
 		if commands[name] {
 			t.Fatalf("backend-gap command %q must not exist", name)
 		}

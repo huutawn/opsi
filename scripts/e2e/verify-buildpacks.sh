@@ -67,5 +67,5 @@ export OPSI_TEST_DATABASE_URL="postgres://opsi:opsi@127.0.0.1:${postgres_port}/o
 export OPSI_REQUIRE_POSTGRES_TESTS=1
 
 cd cloud
-go test -tags buildkitintegration -count=1 -run '^TestBuildpacksNodeGoJavaPythonRegistryEvidence$' -v ./internal/buildexecutor
-go test -tags postgresintegration -count=1 -run '^TestPostgresBuildpackEvidenceFinalizesRecords$' -v ./internal/buildjob
+go test -tags buildkitintegration -timeout 30m -count=1 -run '^TestBuildpack' -v ./internal/buildexecutor
+go test -tags postgresintegration -timeout 10m -count=1 -run '^TestPostgresBuildpack' -v ./internal/buildjob

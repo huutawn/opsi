@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -48,6 +49,7 @@ func NewPostgresRegistryPullCredentialVault(db *sql.DB, key string) (RegistryPul
 
 type ManagedResourceCredentialVault interface {
 	Ensure(context.Context, string) (resourcev1.ManagedResourceCredential, error)
+	EnsureBinding(context.Context, resourcev1.BindingCredentialSpec) (resourcev1.ManagedResourceCredential, error)
 	Get(context.Context, string) (resourcev1.ManagedResourceCredential, error)
 	Delete(context.Context, string) error
 }
@@ -63,8 +65,16 @@ func NewPostgresManagedResourceCredentialVault(db *sql.DB, key string) (ManagedR
 }
 
 func (s postgresManagedResourceCredentialVault) Ensure(ctx context.Context, id string) (resourcev1.ManagedResourceCredential, error) {
+	resourceID := strings.TrimPrefix(id, "mrcred-")
 	credential, err := s.Get(ctx, id)
 	if err == nil {
+		if (credential.Purpose != "" && credential.Purpose != resourcev1.CredentialPurposeResourceManagement) || (credential.OwnerID != "" && credential.OwnerID != resourceID) || (credential.ResourceID != "" && credential.ResourceID != resourceID) {
+			return resourcev1.ManagedResourceCredential{}, errors.New("management credential identity conflict")
+		}
+		if credential.Purpose == "" || credential.OwnerID == "" || credential.ResourceID == "" {
+			credential.Purpose, credential.OwnerID, credential.ResourceID = resourcev1.CredentialPurposeResourceManagement, resourceID, resourceID
+			return s.update(ctx, credential)
+		}
 		return credential, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -74,16 +84,68 @@ func (s postgresManagedResourceCredentialVault) Ensure(ctx context.Context, id s
 	if _, err := io.ReadFull(rand.Reader, password); err != nil {
 		return resourcev1.ManagedResourceCredential{}, err
 	}
-	credential = resourcev1.ManagedResourceCredential{CredentialID: id, Username: "opsi", Password: base64.RawURLEncoding.EncodeToString(password)}
+	credential = resourcev1.ManagedResourceCredential{CredentialID: id, Purpose: resourcev1.CredentialPurposeResourceManagement, OwnerID: resourceID, ResourceID: resourceID, Username: "opsi", Password: base64.RawURLEncoding.EncodeToString(password), Database: "opsi"}
+	stored, err := s.insert(ctx, credential)
+	if err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	if stored.Purpose != resourcev1.CredentialPurposeResourceManagement || stored.OwnerID != resourceID || stored.ResourceID != resourceID {
+		return resourcev1.ManagedResourceCredential{}, errors.New("management credential identity conflict")
+	}
+	return stored, nil
+}
+
+func (s postgresManagedResourceCredentialVault) EnsureBinding(ctx context.Context, spec resourcev1.BindingCredentialSpec) (resourcev1.ManagedResourceCredential, error) {
+	credential, err := s.Get(ctx, spec.CredentialID)
+	if err == nil {
+		if credential.ValidateBinding(spec.BindingID, spec.ResourceID) != nil || credential.Username != spec.Username || credential.Database != spec.Database {
+			return resourcev1.ManagedResourceCredential{}, errors.New("binding credential identity conflict")
+		}
+		return credential, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	password := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, password); err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	credential = resourcev1.ManagedResourceCredential{CredentialID: spec.CredentialID, Purpose: resourcev1.CredentialPurposeResourceBinding, OwnerID: spec.BindingID, ResourceID: spec.ResourceID, Username: spec.Username, Password: base64.RawURLEncoding.EncodeToString(password), Database: spec.Database}
+	stored, err := s.insert(ctx, credential)
+	if err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	if stored.ValidateBinding(spec.BindingID, spec.ResourceID) != nil || stored.Username != spec.Username || stored.Database != spec.Database {
+		return resourcev1.ManagedResourceCredential{}, errors.New("binding credential identity conflict")
+	}
+	return stored, nil
+}
+
+func (s postgresManagedResourceCredentialVault) insert(ctx context.Context, credential resourcev1.ManagedResourceCredential) (resourcev1.ManagedResourceCredential, error) {
 	ciphertext, nonce, err := s.seal(credential)
 	if err != nil {
 		return resourcev1.ManagedResourceCredential{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_resource_credentials(id,ciphertext,nonce,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT(id) DO NOTHING`, id, ciphertext, nonce)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_resource_credentials(id,ciphertext,nonce,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT(id) DO NOTHING`, credential.CredentialID, ciphertext, nonce)
 	if err != nil {
 		return resourcev1.ManagedResourceCredential{}, err
 	}
-	return s.Get(ctx, id)
+	return s.Get(ctx, credential.CredentialID)
+}
+
+func (s postgresManagedResourceCredentialVault) update(ctx context.Context, credential resourcev1.ManagedResourceCredential) (resourcev1.ManagedResourceCredential, error) {
+	ciphertext, nonce, err := s.seal(credential)
+	if err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE managed_resource_credentials SET ciphertext=$1,nonce=$2,updated_at=now() WHERE id=$3`, ciphertext, nonce, credential.CredentialID)
+	if err != nil {
+		return resourcev1.ManagedResourceCredential{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return resourcev1.ManagedResourceCredential{}, sql.ErrNoRows
+	}
+	return credential, nil
 }
 
 func (s postgresManagedResourceCredentialVault) Get(ctx context.Context, id string) (resourcev1.ManagedResourceCredential, error) {

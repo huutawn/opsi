@@ -20,6 +20,7 @@ import (
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
@@ -451,5 +452,144 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	strict := call(http.MethodPost, "/api/projects/"+project.ID+"/exposures/preview", "owner-pat", "", unsafe)
 	if strict.Code != http.StatusBadRequest {
 		t.Fatalf("unsafe status=%d body=%s", strict.Code, strict.Body.String())
+	}
+}
+
+func TestResolvedDeploymentRejectsStaleBuildPhaseDependency(t *testing.T) {
+	server, projectID, service, plan, _ := deploymentResolutionFixture(t)
+	// Add an API backend service that the service depends on at build time
+	apiService, err := server.Registry.CreateService(projectID, registry.ServiceDraft{Name: "backend-api", ContainerPort: 8080}, "api-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiCfg, err := server.Registry.GetServiceConfiguration(projectID, apiService.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Give API service a public route
+	if _, err := server.Registry.ApplyServiceConfiguration(projectID, apiService.ID, "owner", "api-key", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			PublicRoute: &registry.PublicRouteIntent{Hostname: "api.example.com", Path: "/v1"},
+		},
+		ExpectedRevision:  apiCfg.Revision,
+		ExpectedStateHash: apiCfg.StateHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure build-phase public_http dependency on service
+	svcCfg, err := server.Registry.GetServiceConfiguration(projectID, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dep := serviceconfigurationv1.PublicHTTPPreset("backend", apiService.ID, serviceconfigurationv1.AccessContextBrowser, "BACKEND_URL", true)
+	dep.InjectionPhase = serviceconfigurationv1.InjectionPhaseBuild
+	appliedSvcCfg, err := server.Registry.ApplyServiceConfiguration(projectID, service.ID, "owner", "svc-key", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			Dependencies: []serviceconfigurationv1.ApplicationDependency{dep},
+		},
+		ExpectedRevision:  svcCfg.Revision,
+		ExpectedStateHash: svcCfg.StateHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Compute expected build record with matching build dependency state
+	services, _ := server.Registry.ListServices(projectID)
+	buildDepState := registry.ComputeBuildDependencyState(appliedSvcCfg.Configuration, services)
+	configHash := registry.ComputeBuildConfigHash(strings.Repeat("a", 40), "", service.Dockerfile, service.BuildContext, "ghcr.io/o/r/api", buildDepState)
+
+	record := buildrecordv1.Record{
+		SchemaVersion: buildrecordv1.SchemaVersion,
+		ID:            "br-build-dep-fresh",
+		ProjectID:     projectID,
+		RepositoryID:  7,
+		RepositoryOwnerID: 8,
+		ActiveBindingID: "binding-1",
+		ServiceID:     service.ID,
+		ServiceKey:    service.Name,
+		CreatedAt:     time.Now().UTC(),
+		Workload: buildrecordv1.WorkloadIdentity{
+			RepositoryID: 7,
+			RepositoryOwnerID: 8,
+			Ref: "refs/heads/main",
+			SHA: strings.Repeat("a", 40),
+			EventName: "push",
+			WorkflowRef: "o/r/.github/workflows/cd.yml@refs/heads/main",
+		},
+		Build: buildrecordv1.BuildMetadata{
+			ConfigHash:    configHash,
+			PlanHash:      strings.Repeat("b", 64),
+			BuildJobID:    "job-1",
+			Platform:      "linux/amd64",
+			OCIRepository: "ghcr.io/o/r/api",
+			OCIDigest:     "sha256:" + strings.Repeat("c", 64),
+			Status:        "succeeded",
+		},
+	}
+	if _, _, err := server.BuildRecords.Store.Create(context.Background(), "payload", record); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update policy to allow the new config hash
+	if _, err := server.Policies.Apply(context.Background(), projectID, "owner", "policy-key-2", deploymentpolicyv1.ApplyRequest{
+		Draft: deploymentpolicyv1.Draft{
+			SchemaVersion:          deploymentpolicyv1.SchemaVersion,
+			ProjectID:              projectID,
+			RepositoryID:           record.RepositoryID,
+			ServiceKeys:            []string{service.Name},
+			WorkflowRefs:           []string{record.Workload.WorkflowRef},
+			AllowedEvents:          []string{record.Workload.EventName},
+			AllowedGitRefs:         []string{record.Workload.Ref},
+			EnvironmentID:          plan.Assignments[0].EnvironmentID,
+			AllowedRuntimeIDs:      []string{plan.Assignments[0].RuntimeID},
+			AllowedOCIRepositories: []string{record.Build.OCIRepository},
+			AllowedPlatforms:       []string{"linux/amd64"},
+			AllowedConfigHashes:    []string{record.Build.ConfigHash},
+			AllowedBuildPlanHashes: []string{record.Build.PlanHash},
+			Enabled:                true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh build record passes preview
+	request := deploymentv1.CreateRequest{
+		SchemaVersion:                  deploymentv1.JobSchemaVersion,
+		BuildRecordID:                  record.ID,
+		EnvironmentID:                  plan.Assignments[0].EnvironmentID,
+		ExpectedTopologyRevision:       plan.Revision,
+		ExpectedTopologyHash:           plan.PlanHash,
+		ExpectedConfigurationRevision:  appliedSvcCfg.Configuration.Revision,
+		ExpectedConfigurationStateHash: appliedSvcCfg.Configuration.StateHash,
+	}
+	preview, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", request)
+	if err != nil {
+		t.Fatalf("expected fresh build record preview to pass, got err: %v", err)
+	}
+	if !preview.Eligible {
+		t.Fatalf("expected eligible preview")
+	}
+
+	// 2. Change target API public route -> causes build dependency state to change
+	updatedAPICfg, err := server.Registry.GetServiceConfiguration(projectID, apiService.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.ApplyServiceConfiguration(projectID, apiService.ID, "owner", "api-key-2", registry.ServiceConfigurationApplyRequest{
+		Draft: registry.ServiceConfigurationDraft{
+			PublicRoute: &registry.PublicRouteIntent{Hostname: "api.example.com", Path: "/v2"},
+		},
+		ExpectedRevision:  updatedAPICfg.Revision,
+		ExpectedStateHash: updatedAPICfg.StateHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Deployment preview now must fail with BUILD_DEPENDENCY_STALE
+	_, err = server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", request)
+	if deploymentAPIErrorCode(err) != "BUILD_DEPENDENCY_STALE" {
+		t.Fatalf("expected BUILD_DEPENDENCY_STALE after target route change, got err: %v", err)
 	}
 }

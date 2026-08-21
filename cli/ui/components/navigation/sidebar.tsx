@@ -1,59 +1,209 @@
-import { projectDestinations, routeHref, type ConsoleRoute } from "@/features/console/navigation";
-import type { Project } from "@/lib/contracts/registry";
-import { ProjectSwitcher } from "@/components/navigation/project-switcher";
-import type { RefObject } from "react";
+"use client";
 
-export function Sidebar({ agentConnected, cloudConnected, drawerRef, environment, environmentID, environments, onBrowse, onClose, onEnvironment, onNavigate, onSelectProject, open, orgID, project, projects, route }: {
+import { MouseEvent } from "react";
+import { routeHref, type ConsoleRoute } from "@/features/console/navigation";
+import type { Project } from "@/lib/contracts/registry";
+import { ProjectSwitcher } from "./project-switcher";
+import { Icon } from "@/components/ui/primitives";
+
+export function Sidebar({
+  agentConnected,
+  cloudConnected,
+  drawerRef,
+  environment,
+  environmentID,
+  environments,
+  onBrowse,
+  onClose,
+  onEnvironment,
+  onNavigate,
+  onSelectProject,
+  open,
+  orgID,
+  project,
+  projects,
+  route,
+}: {
   agentConnected: string;
   cloudConnected: string;
-  drawerRef: RefObject<HTMLElement | null>;
+  drawerRef: React.RefObject<HTMLElement | null>;
   environment: string;
   environmentID: string;
-  environments: Array<{ id: string; name: string }>;
+  environments: { id: string; name: string }[];
   onBrowse: () => void;
   onClose: () => void;
-  onEnvironment: (environmentID: string) => void;
+  onEnvironment: (id: string) => void;
   onNavigate: (route: Partial<ConsoleRoute>) => void;
-  onSelectProject: (projectID: string) => void;
+  onSelectProject: (id: string) => void;
   open: boolean;
   orgID: string;
   project: Project | null;
   projects: Project[];
   route: ConsoleRoute;
 }) {
-  function navigate(event: React.MouseEvent<HTMLAnchorElement>, next: Partial<ConsoleRoute>) {
+  const projectID = project?.id ?? "";
+  const navigate = (event: MouseEvent<HTMLAnchorElement>, target: Partial<ConsoleRoute>) => {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
-    onNavigate(next);
+    onNavigate(target);
     onClose();
-  }
-  const projectID = project?.id ?? "";
+  };
+
+  const projectDestinations = [
+    { id: "topology", label: "Topology", icon: "account_tree" },
+    { id: "overview", label: "Overview", icon: "dashboard" },
+    { id: "services", label: "Services", icon: "layers" },
+    { id: "delivery", label: "Delivery", icon: "rocket_launch" },
+    { id: "infrastructure", label: "Infrastructure", icon: "dns" },
+    { id: "observability", label: "Observability", icon: "monitoring" },
+    { id: "security", label: "Security", icon: "security" },
+  ] as const;
+
   const systemLive = cloudConnected === "ok" && (!project || agentConnected === "ok");
-  return <>
-    <button aria-label="Close navigation" className={`sidebarBackdrop ${open ? "open" : ""}`} onClick={onClose} tabIndex={-1} type="button" />
-    <aside aria-label="Primary navigation" aria-modal={open ? "true" : undefined} className={`sidebar ${open ? "open" : ""}`} ref={drawerRef} role={open ? "dialog" : undefined}>
-      <div className="brandRow"><a aria-label="Opsi home" className="brand" href={routeHref({ view: "home" })} onClick={(event) => navigate(event, { view: "home", projectID: "" })}><span aria-hidden="true">O</span><b>Opsi</b></a><button aria-label="Close navigation" className="iconButton mobileOnly" onClick={onClose} type="button"><Icon kind="close" /></button></div>
-      <ProjectSwitcher onBrowse={onBrowse} onSelect={onSelectProject} orgID={orgID} project={project} projects={projects} />
-      {project ? <label className="environmentPicker"><span>Environment</span><select aria-label="Current environment" onChange={(event) => onEnvironment(event.target.value)} value={environmentID}><option value="">Choose environment</option>{environments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
-      <nav aria-label={project ? "Project" : "Workspace"} className="navSection">
-        {!project ? <>
-          <NavItem active={route.view === "home"} href={routeHref({ view: "home" })} icon="home" label="Home" onClick={(event) => navigate(event, { view: "home", projectID: "" })} />
-          <NavItem active={route.view === "projects"} href={routeHref({ view: "projects" })} icon="projects" label="Projects" onClick={(event) => navigate(event, { view: "projects", projectID: "" })} />
-        </> : projectDestinations.map((item) => <NavItem active={route.view === item.id} href={routeHref({ ...route, projectID, view: item.id, tab: "" })} icon={item.id} key={item.id} label={item.label} onClick={(event) => navigate(event, { projectID, view: item.id, tab: "" })} />)}
-      </nav>
-      <div className="sidebarBottom">
-        <nav className="sidebarFooter" aria-label="Settings"><NavItem active={route.view === "settings"} href={routeHref({ ...route, projectID, view: "settings", tab: "general" })} icon="settings" label="Settings" onClick={(event) => navigate(event, { projectID, view: "settings", tab: "general" })} /></nav>
-        <div className="systemFact" data-state={systemLive ? "live" : "degraded"} role="status"><i aria-hidden="true" /><span><strong>{systemLive ? "System live" : "System degraded"}</strong><small>{project ? `${environment} / ${project.id}` : orgID || "Organization unavailable"}</small></span></div>
-      </div>
-    </aside>
-  </>;
+
+  return (
+    <>
+      {open && (
+        <div 
+          className="fixed inset-0 z-40 bg-surface/80 backdrop-blur-sm lg:hidden"
+          onClick={onClose}
+        />
+      )}
+      
+      <aside
+        className={`
+          sidebar fixed top-0 bottom-0 left-0 z-50 w-72 bg-surface-container-low border-r border-outline-variant/30 flex flex-col shadow-2xl transition-transform duration-300 ease-in-out
+          ${open ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
+        `}
+        ref={drawerRef}
+      >
+        <div className="flex items-center justify-between px-6 py-6 border-b border-outline-variant/20">
+          <a
+            className="flex items-center gap-3 cursor-pointer min-h-[40px]"
+            href={routeHref({ view: "home" })}
+            onClick={(e) => navigate(e, { view: "home", projectID: "" })}
+          >
+            <div className="w-8 h-8 rounded-lg bg-white flex flex-col items-center justify-center shadow-sm p-1">
+              <svg className="w-5 h-5 text-[#00a6e0]" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M24 4L40 13.24V31.76L24 41L8 31.76V13.24L24 4Z" stroke="#00354a" strokeWidth="3.5" fill="#c4e7ff" />
+                <path d="M24 4V22.5M24 22.5L40 13.24M24 22.5L8 13.24" stroke="#00354a" strokeWidth="3.5" />
+                <path d="M24 22.5V41" stroke="#00354a" strokeWidth="3.5" />
+                <circle cx="24" cy="22.5" r="3.5" fill="#00a6e0" />
+              </svg>
+            </div>
+            <span className="text-xl font-bold tracking-tight text-on-surface font-headline-md">OPSI</span>
+          </a>
+          {open && (
+            <button
+              aria-label="Close navigation"
+              className="lg:hidden p-2 text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors min-h-[40px] min-w-[40px]"
+              onClick={onClose}
+              type="button"
+            >
+              <Icon name="close" className="text-[20px]" />
+            </button>
+          )}
+        </div>
+
+        <div className="p-4 flex flex-col gap-3">
+          <ProjectSwitcher
+            onBrowse={onBrowse}
+            onSelect={onSelectProject}
+            orgID={orgID}
+            project={project}
+            projects={projects}
+          />
+          {project && environments.length > 0 && (
+            <div className="bg-surface-container-high rounded-xl p-2 flex items-center border border-outline-variant/20 relative">
+              <div className="flex-1 px-2 py-1">
+                <span className="text-[11px] text-on-surface-variant uppercase tracking-wider block font-medium">Environment</span>
+                <select
+                  aria-label="Current environment"
+                  className="environmentPicker w-full bg-transparent text-sm text-on-surface font-medium border-0 p-0 focus:outline-none appearance-none cursor-pointer min-h-[40px]"
+                  onChange={(e) => onEnvironment(e.target.value)}
+                  value={environmentID}
+                >
+                  <option value="" className="bg-surface-container-high text-on-surface">Choose environment</option>
+                  {environments.map((item) => (
+                    <option key={item.id} value={item.id} className="bg-surface-container-high text-on-surface">{item.name}</option>
+                  ))}
+                </select>
+              </div>
+              <Icon name="unfold_more" className="text-on-surface-variant text-[20px] pointer-events-none absolute right-2" />
+            </div>
+          )}
+        </div>
+
+        <nav className="navSection flex-1 px-3 py-2 space-y-1 overflow-y-auto">
+          {!project ? (
+            <>
+              <NavItem active={route.view === "home"} href={routeHref({ view: "home" })} icon="home" label="Home" onClick={(e) => navigate(e, { view: "home", projectID: "" })} />
+              <NavItem active={route.view === "projects"} href={routeHref({ view: "projects" })} icon="grid_view" label="Projects" onClick={(e) => navigate(e, { view: "projects", projectID: "" })} />
+            </>
+          ) : (
+            projectDestinations.map((item) => {
+              const iconMap: Record<string, string> = {
+                topology: "account_tree",
+                overview: "dashboard",
+                services: "layers",
+                delivery: "rocket_launch",
+                infrastructure: "dns",
+                observability: "monitoring",
+                security: "security",
+              };
+              return (
+                <NavItem
+                  key={item.id}
+                  active={route.view === item.id}
+                  href={routeHref({ ...route, projectID, view: item.id, tab: "" })}
+                  icon={iconMap[item.id] || "folder"}
+                  label={item.label}
+                  onClick={(e) => navigate(e, { projectID, view: item.id, tab: "" })}
+                />
+              );
+            })
+          )}
+        </nav>
+
+        <div className="p-4 border-t border-outline-variant/20 flex flex-col gap-3">
+          <NavItem
+            active={route.view === "settings"}
+            href={routeHref({ ...route, projectID, view: "settings", tab: "general" })}
+            icon="settings"
+            label="Settings"
+            onClick={(e) => navigate(e, { projectID, view: "settings", tab: "general" })}
+          />
+          <div className={`flex items-center gap-3 p-3 rounded-xl border ${systemLive ? "bg-state-live-bg border-border-live/40" : "bg-surface-container border-status-warning/30"}`}>
+            <div className={`w-2.5 h-2.5 rounded-full ${systemLive ? "bg-status-ready animate-pulse" : "bg-status-warning"}`} />
+            <div className="flex flex-col min-w-0">
+              <span className={`text-xs font-semibold ${systemLive ? "text-border-live" : "text-status-warning"}`}>
+                {systemLive ? "SYSTEM LIVE" : "SYSTEM DEGRADED"}
+              </span>
+              <span className="text-[11px] text-on-surface-variant font-mono truncate">
+                {project ? `${environment || "Prod"} • ${project.slug || project.id}` : orgID || "Ready"}
+              </span>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
 }
 
-function NavItem({ active, href, icon, label, onClick }: { active: boolean; href: string; icon: string; label: string; onClick: React.MouseEventHandler<HTMLAnchorElement> }) {
-  return <a aria-current={active ? "page" : undefined} className={active ? "active" : ""} href={href} onClick={onClick} title={label}><Icon kind={icon} /><span>{label}</span></a>;
-}
-
-function Icon({ kind }: { kind: string }) {
-  const path = kind === "home" ? "M3 9.5 10 3l7 6.5V17H5V9.5" : kind === "projects" ? "M3 5h14v11H3zM6 5V3h8v2" : kind === "settings" ? "M10 3v2m0 10v2M3 10h2m10 0h2M5 5l1.5 1.5m7 7L15 15m0-10-1.5 1.5m-7 7L5 15M10 7a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" : kind === "close" ? "m5 5 10 10M15 5 5 15" : kind === "overview" ? "M3 4h6v6H3zm8 0h6v3h-6zm0 5h6v7h-6zM3 12h6v4H3z" : kind === "services" ? "M4 5h12v4H4zm0 6h12v4H4z" : kind === "delivery" ? "M3 10h11m-4-4 4 4-4 4m6-9v10" : kind === "infrastructure" ? "M10 3v4m0 6v4M3 10h4m6 0h4M7 7h6v6H7z" : kind === "observability" ? "M3 13h3l2-6 3 8 2-5h4" : "M10 3 4 6v4c0 4 2.5 6 6 7 3.5-1 6-3 6-7V6z";
-  return <svg aria-hidden="true" viewBox="0 0 20 20"><path d={path} /></svg>;
+function NavItem({ active, href, icon, label, onClick }: { active: boolean; href: string; icon: string; label: string; onClick: (e: MouseEvent<HTMLAnchorElement>) => void }) {
+  return (
+    <a
+      aria-current={active ? "page" : undefined}
+      href={href}
+      onClick={onClick}
+      className={`flex items-center px-4 py-3 rounded-lg text-sm transition-all group ${
+        active 
+          ? "bg-primary-container text-primary font-bold border-l-4 border-primary" 
+          : "text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface font-medium"
+      }`}
+    >
+      <span aria-hidden="true" className={`mr-3 material-symbols-outlined text-[20px] before:content-[attr(data-icon)] select-none ${active ? "text-primary" : "text-on-surface-variant group-hover:text-on-surface"}`} data-icon={icon} />
+      <span>{label}</span>
+    </a>
+  );
 }

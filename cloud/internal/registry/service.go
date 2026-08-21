@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -622,6 +623,7 @@ type Service struct {
 	deployEvents            map[string][]DeploymentEvent
 	deployLocks             map[string]deploymentLock
 	audit                   []AuditEvent
+	DependencyResolver DependencyTargetResolver
 	idempotency             map[string]any
 	githubInstallations     map[int64]GitHubInstallation
 	githubRepositories      map[int64]GitHubRepository
@@ -2345,8 +2347,11 @@ func (s *Service) Audit(orgID, projectID, actorUserID, action, resourceType, res
 }
 
 func machineAuditActor(actorUserID string) (string, string) {
-	if actorUserID == "agent" || actorUserID == "worker" {
-		return actorUserID, ""
+	if actorUserID == "agent" || strings.HasPrefix(actorUserID, "agent") {
+		return "agent", ""
+	}
+	if actorUserID == "worker" || strings.HasPrefix(actorUserID, "worker") {
+		return "worker", ""
 	}
 	return "user", actorUserID
 }

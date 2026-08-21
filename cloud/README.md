@@ -31,6 +31,7 @@ remain in memory. The flow has not yet been exercised against a real GitHub App.
 
 - Registry APIs for organizations, projects, memberships, nodes, services, bootstrap sessions, deployments, node lifecycle jobs, GitHub inventory, repository claims, and service bindings.
 - Durable PostgreSQL migrations and stores when `database_url` is set.
+- PostgreSQL logical backup authority: `POST /api/projects/{project}/resources/{resource}/backups` requires an idempotency key and targets only the canonical `opsi` database of a factually Ready managed PostgreSQL Resource. Cloud persists `queued -> leased -> running -> succeeded|failed`; the existing Agent lease transport runs PostgreSQL 18 `pg_dump -Fc --no-owner --no-privileges`, uploads to operator-configured S3-compatible storage, verifies remote size and SHA-256 by full download, then requires `pg_restore --list` before success. The artifact contains database schema/data, not Opsi credential, Secret, Vault, or binding authority. Role creation, ownership, and GRANT reconciliation remain Opsi-managed. This slice does not implement restore, PITR, WAL archive, schedules, retention cleanup, or backup deletion.
 - GitHub App intake at `/v1/webhooks/github-app` uses the separate App-wide webhook secret, verifies `X-Hub-Signature-256` before JSON decoding, and parses typed `installation`, `installation_repositories`, and `repository` mutations. Unknown events/actions are ignored with `202`. Supported mutations atomically insert the delivery ID and apply inventory changes in one registry transaction; PostgreSQL uniqueness deduplicates delivery after Cloud restart. The bounded P08 in-memory replay store remains as the fast in-process layer.
 - A ready Dockerfile BuildJob can be dispatched to an Opsi-owned GitHub-hosted executor configured by `OPSI_BUILD_EXECUTOR_*`. `OPSI_BUILD_REGISTRY_HOST=ghcr.io`, `OPSI_BUILD_REGISTRY_NAMESPACE`, `OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX=builds`, and `OPSI_BUILD_REGISTRY_VISIBILITY=private` define the Opsi-owned publication namespace. The workflow uses its short-lived `GITHUB_TOKEN`, pushes directly from pinned BuildKit, verifies the remote manifest digest, and submits only the canonical digest evidence under the runner lease. Cloud atomically creates the accepted BuildRecord and marks the BuildJob succeeded.
 - `opsi-build-executor` reuses the P05B2B1 deterministic build core. It fetches only `resolved_commit_sha` with temporary `GIT_ASKPASS`, verifies detached `HEAD`, removes credentials and `.git`, preserves the repository-root monorepo layout, then runs `docker buildx build` for `linux/amd64` with plain progress and an isolated Docker config. Tests may retain the OCI archive exporter; production uses only the canonical registry exporter and structured BuildKit metadata, never `--load`, user tags, host networking build flags, build entitlements, SSH forwarding, BuildKit secrets, or inferred build args. The canonical `opsi` builder uses Buildx `v0.36.1`, the `docker-container` driver, and `moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8` on bridge networking. Its only daemon entitlement flag is `--allow-insecure-entitlement=network.host`; Opsi never grants that capability to a build request, and runtime identity mismatch fails closed.
@@ -72,6 +73,13 @@ Run configuration validation without starting either daemon:
 go run ./cmd/opsi-cloud --check --config config.example.json
 go run ./cmd/opsi-bootstrap-worker --check --config ../deploy/dev-control-plane/config/bootstrap-worker.json
 ```
+
+`backup_store` is optional. When enabled, `bucket`, `region`,
+`access_key_file`, and `secret_key_file` are required; `endpoint` supports
+S3-compatible providers, `ca_file` supplies a private CA, and plaintext HTTP
+requires `allow_insecure=true` and is rejected in production. Credential file
+contents are loaded by Cloud and sent only inside an authenticated Backup
+lease, never stored in the Backup record or WorkloadSpec.
 
 The Bootstrap Worker example intentionally contains operator placeholders. The
 development workflow generates the ignored runtime JSON, substitutes a

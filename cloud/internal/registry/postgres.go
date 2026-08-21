@@ -17,6 +17,7 @@ import (
 
 type PostgresService struct {
 	DB  *sql.DB
+	DependencyResolver DependencyTargetResolver
 	Now func() time.Time
 }
 

@@ -26,6 +26,7 @@ type ManagedLease struct {
 	Action     string                                `json:"action"`
 	LeaseToken string                                `json:"lease_token"`
 	Credential *resourcev1.ManagedResourceCredential `json:"credential,omitempty"`
+	Bindings   []resourcev1.PostgresBindingOperation `json:"bindings,omitempty"`
 }
 
 type ManagedResult struct {
@@ -34,6 +35,7 @@ type ManagedResult struct {
 	Evidence       *resourcev1.ManagedResourceEvidence `json:"evidence,omitempty"`
 	FailureCode    string                              `json:"failure_code,omitempty"`
 	FailureMessage string                              `json:"failure_message_redacted,omitempty"`
+	BindingResults []resourcev1.PostgresBindingResult  `json:"binding_results,omitempty"`
 }
 
 func (s Service) ValidateTopologyProvisioning(ctx context.Context, projectID string, draft topologyv1.Draft) error {
@@ -107,7 +109,7 @@ func (s Service) ReconcileTopology(ctx context.Context, projectID string, plan t
 			return invalid("MANAGED_RESOURCE_ASSIGNMENT_INVALID", "managed resource assignment has no unique factual Agent target")
 		}
 		credentialID := ""
-		if value.Type == resourcev1.TypeRedis {
+		if managedCredentialRequired(value.Type) {
 			if s.Credentials == nil {
 				return invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential authority is unavailable")
 			}
@@ -163,19 +165,28 @@ func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedReso
 	configurationHash := hashValue(value.Managed.ServiceConfig)
 	serviceName := deploymentv1.StableDNSName("opsi-mr", value.ID, assignment.RuntimeID)
 	host := internalHost(value.ProjectID, value.EnvironmentID, serviceName)
-	portName, protocol, connectionURL := "nats", resourcev1.ProtocolNATS, "nats://"+host+":"+strconv.Itoa(definition.DefaultPort)
+	portName, protocol, database, connectionURL := "nats", resourcev1.ProtocolNATS, "", "nats://"+host+":"+strconv.Itoa(definition.DefaultPort)
 	if value.Type == resourcev1.TypeRedis {
 		portName, protocol, connectionURL = "redis", resourcev1.ProtocolRedis, ""
 		if credentialID == "" {
 			return resourcev1.ManagedResourceSpec{}, invalid(resourcev1.FailureCredentialUnavailable, "managed Redis credential identity is unavailable")
 		}
+	} else if value.Type == resourcev1.TypePostgres {
+		portName, protocol, database, connectionURL = "postgres", resourcev1.ProtocolPostgres, "opsi", ""
+		if credentialID == "" {
+			return resourcev1.ManagedResourceSpec{}, invalid(resourcev1.FailureCredentialUnavailable, "managed PostgreSQL credential identity is unavailable")
+		}
+	}
+	storage := value.Managed.Storage
+	if value.Type == resourcev1.TypePostgres && storage.PolicyRef == "" {
+		storage.PolicyRef = resourcev1.StoragePolicyDefault
 	}
 	spec := resourcev1.ManagedResourceSpec{
 		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion, ResourceID: value.ID, ProjectID: value.ProjectID, EnvironmentID: value.EnvironmentID,
 		ResourceType: value.Type, Profile: profile, Version: version, Image: image, Assignment: assignment,
 		Replicas: value.Managed.Replicas, CPUMillicores: value.Managed.CPUMillicores, MemoryBytes: value.Managed.MemoryBytes,
-		Ports: []resourcev1.ManagedResourcePort{{Name: portName, Port: int32(definition.DefaultPort), Protocol: protocol}}, Storage: value.Managed.Storage,
-		Connection:        resourcev1.ManagedResourceConnection{ServiceName: serviceName, Host: host, Port: int32(definition.DefaultPort), Protocol: protocol, URL: connectionURL},
+		Ports: []resourcev1.ManagedResourcePort{{Name: portName, Port: int32(definition.DefaultPort), Protocol: protocol}}, Storage: storage,
+		Connection:        resourcev1.ManagedResourceConnection{ServiceName: serviceName, Host: host, Port: int32(definition.DefaultPort), Protocol: protocol, Database: database, URL: connectionURL},
 		CredentialID:      credentialID,
 		ConfigurationHash: configurationHash, TopologyRevision: topologyRevision, TopologyHash: topologyHash,
 	}
@@ -199,7 +210,7 @@ func (s Service) LeaseManaged(ctx context.Context, projectID, nodeID string) (Ma
 		action = "delete"
 	}
 	lease := ManagedLease{Spec: value.Runtime.Spec, Action: action, LeaseToken: token}
-	if action == "apply" && value.Type == resourcev1.TypeRedis {
+	if action == "apply" && managedCredentialRequired(value.Type) {
 		if s.Credentials == nil {
 			return ManagedLease{}, false, invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential authority is unavailable")
 		}
@@ -209,7 +220,39 @@ func (s Service) LeaseManaged(ctx context.Context, projectID, nodeID string) (Ma
 		}
 		lease.Credential = &credential
 	}
+	if action == "apply" && value.Type == resourcev1.TypePostgres {
+		bindings, err := s.postgresBindingOperations(ctx, value)
+		if err != nil {
+			return ManagedLease{}, false, err
+		}
+		lease.Bindings = bindings
+	}
 	return lease, true, nil
+}
+
+func (s Service) postgresBindingOperations(ctx context.Context, target resourcev1.Resource) ([]resourcev1.PostgresBindingOperation, error) {
+	bindings, err := s.ListBindings(ctx, target.ProjectID, target.EnvironmentID)
+	if err != nil {
+		return nil, err
+	}
+	operations := []resourcev1.PostgresBindingOperation{}
+	for _, binding := range bindings {
+		if binding.Target.ID != target.ID || binding.CredentialID == "" {
+			continue
+		}
+		operation := resourcev1.PostgresBindingOperation{BindingID: binding.ID, CredentialID: binding.CredentialID, RoleName: binding.RoleName, Database: binding.Database, Action: resourcev1.PostgresBindingEnsure, Create: binding.Lifecycle == resourcev1.LifecycleProvisioning}
+		if binding.Lifecycle == resourcev1.LifecycleDeleting {
+			operation.Action = resourcev1.PostgresBindingRevoke
+		} else {
+			credential, getErr := s.Credentials.Get(ctx, binding.CredentialID)
+			if getErr != nil || credential.ValidateBinding(binding.ID, target.ID) != nil {
+				return nil, invalid(resourcev1.FailureBindingCredentialUnavailable, "PostgreSQL binding credential is unavailable")
+			}
+			operation.Credential = &credential
+		}
+		operations = append(operations, operation)
+	}
+	return operations, nil
 }
 
 func (s Service) CompleteManaged(ctx context.Context, projectID, resourceID string, result ManagedResult) (resourcev1.Resource, error) {
@@ -227,6 +270,16 @@ func (s Service) CompleteManaged(ctx context.Context, projectID, resourceID stri
 		if value.Runtime.Spec.CredentialID != "" && (s.Credentials == nil || s.Credentials.Delete(ctx, value.Runtime.Spec.CredentialID) != nil) {
 			return resourcev1.Resource{}, invalid(resourcev1.FailureCredentialUnavailable, "managed resource credential could not be deleted")
 		}
+		if value.Type == resourcev1.TypePostgres {
+			retained, retainedErr := retainedStorageFromDeletion(value, result.Evidence, s.clock())
+			if retainedErr != nil {
+				return resourcev1.Resource{}, retainedErr
+			}
+			if err := s.Store.RetainAndDeleteClaimed(ctx, value, retained, result.LeaseToken); err != nil {
+				return resourcev1.Resource{}, err
+			}
+			return resourcev1.Resource{}, nil
+		}
 		if err := s.Store.DeleteClaimed(ctx, projectID, resourceID, result.LeaseToken); err != nil {
 			return resourcev1.Resource{}, err
 		}
@@ -242,12 +295,74 @@ func (s Service) CompleteManaged(ctx context.Context, projectID, resourceID stri
 	} else {
 		value.Lifecycle = resourcev1.LifecycleUnknown
 	}
+	if retry, bindingErr := s.completePostgresBindings(ctx, value, result.BindingResults); bindingErr != nil {
+		return resourcev1.Resource{}, bindingErr
+	} else if retry {
+		value.Lifecycle = resourcev1.LifecyclePlanned
+	}
 	value.UpdatedAt = s.clock()
 	return s.Store.UpdateClaimed(ctx, value, result.LeaseToken)
 }
 
+func (s Service) completePostgresBindings(ctx context.Context, target resourcev1.Resource, results []resourcev1.PostgresBindingResult) (bool, error) {
+	if target.Type != resourcev1.TypePostgres {
+		return false, nil
+	}
+	byID := make(map[string]resourcev1.PostgresBindingResult, len(results))
+	for _, result := range results {
+		byID[result.BindingID] = result
+	}
+	bindings, err := s.ListBindings(ctx, target.ProjectID, target.EnvironmentID)
+	if err != nil {
+		return false, err
+	}
+	retry := false
+	for _, binding := range bindings {
+		if binding.Target.ID != target.ID || binding.CredentialID == "" {
+			continue
+		}
+		result, ok := byID[binding.ID]
+		if !ok {
+			if binding.Lifecycle != resourcev1.LifecycleReady {
+				retry = true
+			}
+			continue
+		}
+		if result.Status != "ready" {
+			binding.FailureCode = result.FailureCode
+			if binding.Lifecycle != resourcev1.LifecycleDeleting {
+				binding.Lifecycle = resourcev1.LifecycleFailed
+			}
+			binding.UpdatedAt = s.clock()
+			if _, err := s.Store.UpdateBinding(ctx, binding); err != nil {
+				return false, err
+			}
+			retry = true
+			continue
+		}
+		if result.Action == resourcev1.PostgresBindingRevoke {
+			if err := s.Credentials.Delete(ctx, binding.CredentialID); err != nil {
+				return false, invalid(resourcev1.FailureBindingCredentialUnavailable, "PostgreSQL binding credential could not be removed")
+			}
+			if err := s.Store.DeleteBinding(ctx, target.ProjectID, binding.ID); err != nil {
+				return false, err
+			}
+			continue
+		}
+		binding.Lifecycle, binding.FailureCode, binding.UpdatedAt = resourcev1.LifecycleReady, "", s.clock()
+		if _, err := s.Store.UpdateBinding(ctx, binding); err != nil {
+			return false, err
+		}
+	}
+	return retry, nil
+}
+
 func factualReady(spec resourcev1.ManagedResourceSpec, evidence *resourcev1.ManagedResourceEvidence) bool {
-	return evidence != nil && evidence.ObservedSpecHash == spec.SpecHash && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (spec.ResourceType != resourcev1.TypeRedis || evidence.SecretReady && evidence.AuthReady) && evidence.Image == spec.Image && imageIDMatches(evidence.ImageID, spec.Image) && evidence.AvailableReplicas >= spec.Replicas
+	return evidence != nil && evidence.ObservedSpecHash == spec.SpecHash && evidence.WorkloadReady && evidence.PodReady && evidence.ServiceReady && (!managedCredentialRequired(spec.ResourceType) || evidence.SecretReady && evidence.AuthReady) && (spec.ResourceType != resourcev1.TypePostgres || evidence.StorageReady && evidence.VolumeMounted && evidence.PVCName != "" && evidence.PVName != "") && evidence.Image == spec.Image && imageIDMatches(evidence.ImageID, spec.Image) && evidence.AvailableReplicas >= spec.Replicas
+}
+
+func managedCredentialRequired(resourceType resourcev1.Type) bool {
+	return resourceType == resourcev1.TypeRedis || resourceType == resourcev1.TypePostgres
 }
 
 func imageIDMatches(imageID, reference string) bool {

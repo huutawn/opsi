@@ -159,7 +159,27 @@ const (
 	FailureReadinessFailed              = "MANAGED_RESOURCE_READINESS_FAILED"
 	FailureRuntimeMismatch              = "MANAGED_RESOURCE_RUNTIME_MISMATCH"
 	FailureDeleteFailed                 = "MANAGED_RESOURCE_DELETE_FAILED"
+	FailureStorageRequired              = "MANAGED_RESOURCE_STORAGE_REQUIRED"
+	FailureStorageInvalid               = "MANAGED_RESOURCE_STORAGE_INVALID"
+	FailurePVCApplyFailed               = "MANAGED_RESOURCE_PVC_APPLY_FAILED"
+	FailurePVCNotBound                  = "MANAGED_RESOURCE_PVC_NOT_BOUND"
+	FailureVolumeMountFailed            = "MANAGED_RESOURCE_VOLUME_MOUNT_FAILED"
+	FailureDatabaseInitFailed           = "MANAGED_RESOURCE_DATABASE_INIT_FAILED"
+	FailureStorageResizeUnsupported     = "MANAGED_RESOURCE_STORAGE_RESIZE_UNSUPPORTED"
+	FailureVersionUpgradeUnsupported    = "MANAGED_RESOURCE_VERSION_UPGRADE_UNSUPPORTED"
+	FailurePersistentDeleteUnsupported  = "MANAGED_RESOURCE_PERSISTENT_DELETE_UNSUPPORTED"
+	FailureBindingCredentialUnavailable = "RESOURCE_BINDING_CREDENTIAL_UNAVAILABLE"
+	FailureBindingRoleCreate            = "RESOURCE_BINDING_ROLE_CREATE_FAILED"
+	FailureBindingRoleReconcile         = "RESOURCE_BINDING_ROLE_RECONCILE_FAILED"
+	FailureBindingAuth                  = "RESOURCE_BINDING_AUTH_FAILED"
 	FailureBindingSecretMaterialization = "RESOURCE_BINDING_SECRET_MATERIALIZATION_FAILED"
+	FailureBindingRoleRevoke            = "RESOURCE_BINDING_ROLE_REVOKE_FAILED"
+	FailureBindingActive                = "RESOURCE_BINDING_ACTIVE"
+)
+
+const (
+	CredentialPurposeResourceManagement = "resource_management"
+	CredentialPurposeResourceBinding    = "resource_binding"
 )
 
 type ManagedResourceAssignment struct {
@@ -172,13 +192,42 @@ type ManagedResourceAssignment struct {
 // part of Resource, TopologyPlan, ManagedResourceSpec, or WorkloadSpec.
 type ManagedResourceCredential struct {
 	CredentialID string `json:"credential_id"`
+	Purpose      string `json:"purpose,omitempty"`
+	OwnerID      string `json:"owner_id,omitempty"`
+	ResourceID   string `json:"resource_id,omitempty"`
 	Username     string `json:"username"`
 	Password     string `json:"password"`
+	Database     string `json:"database,omitempty"`
 }
 
 func (c ManagedResourceCredential) Validate() error {
-	if c.CredentialID == "" || c.Username == "" || c.Password == "" || len(c.Username) > 128 || len(c.Password) > 1024 || strings.ContainsAny(c.Username+c.Password, "\x00\r\n") {
+	if c.CredentialID == "" || c.Username == "" || c.Password == "" || len(c.Username) > 128 || len(c.Password) > 1024 || len(c.Database) > 128 || strings.ContainsAny(c.Username+c.Password+c.Database, "\x00\r\n") {
 		return errors.New("managed resource credential is invalid")
+	}
+	return nil
+}
+
+func (c ManagedResourceCredential) ValidateBinding(bindingID, resourceID string) error {
+	if err := c.ValidateFor(TypePostgres); err != nil || c.Purpose != CredentialPurposeResourceBinding || c.OwnerID != bindingID || c.ResourceID != resourceID {
+		return errors.New("PostgreSQL binding credential is invalid")
+	}
+	return nil
+}
+
+type BindingCredentialSpec struct {
+	CredentialID string
+	BindingID    string
+	ResourceID   string
+	Username     string
+	Database     string
+}
+
+func (c ManagedResourceCredential) ValidateFor(resourceType Type) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if resourceType == TypePostgres && c.Database == "" {
+		return errors.New("managed PostgreSQL credential is invalid")
 	}
 	return nil
 }
@@ -194,6 +243,7 @@ type ManagedResourceConnection struct {
 	Host        string   `json:"host"`
 	Port        int32    `json:"port"`
 	Protocol    Protocol `json:"protocol"`
+	Database    string   `json:"database,omitempty"`
 	URL         string   `json:"url,omitempty"`
 }
 
@@ -232,23 +282,37 @@ func (s ManagedResourceSpec) Hash() (string, error) {
 }
 
 func (s ManagedResourceSpec) Validate() error {
-	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || (s.ResourceType != TypeNATS && s.ResourceType != TypeRedis) {
+	if s.SchemaVersion != ManagedResourceSpecSchemaVersion || s.ResourceID == "" || s.ProjectID == "" || s.EnvironmentID == "" || (s.ResourceType != TypeNATS && s.ResourceType != TypeRedis && s.ResourceType != TypePostgres) {
 		return errors.New("managed resource identity is invalid")
 	}
 	expectedVersion, expectedImage := NATSVersion, NATSImage
 	if s.ResourceType == TypeRedis {
 		expectedVersion, expectedImage = ValkeyVersion, ValkeyImage
+	} else if s.ResourceType == TypePostgres {
+		expectedVersion, expectedImage = PostgresVersion, PostgresImage
 	}
 	if s.Profile != "single-node-experimental" || s.Version != expectedVersion || s.Image != expectedImage || !strings.Contains(s.Image, "@sha256:") {
 		return errors.New("managed resource image authority is invalid")
 	}
-	if s.Assignment.RuntimeID == "" || s.Assignment.NodeID == "" || s.Assignment.AgentID == "" || s.Replicas != 1 || s.CPUMillicores < 1 || s.MemoryBytes < 1 || s.Storage.Persistent || s.Storage.SizeBytes != 0 {
+	if s.Assignment.RuntimeID == "" || s.Assignment.NodeID == "" || s.Assignment.AgentID == "" || s.Replicas != 1 || s.CPUMillicores < 1 || s.MemoryBytes < 1 {
+		return errors.New("managed resource runtime intent is invalid")
+	}
+	if s.ResourceType == TypePostgres {
+		if !s.Storage.Persistent || s.Storage.SizeBytes < 1 || s.Storage.PolicyRef != StoragePolicyDefault {
+			return errors.New("managed PostgreSQL storage intent is invalid")
+		}
+	} else if s.Storage.Persistent || s.Storage.SizeBytes != 0 || s.Storage.PolicyRef != "" {
 		return errors.New("managed resource runtime intent is invalid")
 	}
 	portName, port, protocol := "nats", int32(4222), ProtocolNATS
 	if s.ResourceType == TypeRedis {
 		portName, port, protocol = "redis", 6379, ProtocolRedis
 		if s.CredentialID == "" || s.Connection.URL != "" {
+			return errors.New("managed resource credential authority is invalid")
+		}
+	} else if s.ResourceType == TypePostgres {
+		portName, port, protocol = "postgres", 5432, ProtocolPostgres
+		if s.CredentialID == "" || s.Connection.Database != "opsi" || s.Connection.URL != "" {
 			return errors.New("managed resource credential authority is invalid")
 		}
 	}
@@ -275,6 +339,19 @@ type ManagedResourceEvidence struct {
 	Image             string    `json:"image"`
 	ImageID           string    `json:"image_id,omitempty"`
 	AvailableReplicas int32     `json:"available_replicas"`
+	StorageReady      bool      `json:"storage_ready,omitempty"`
+	VolumeMounted     bool      `json:"volume_mounted,omitempty"`
+	Namespace         string    `json:"namespace,omitempty"`
+	PVCName           string    `json:"pvc_name,omitempty"`
+	PVCUID            string    `json:"pvc_uid,omitempty"`
+	PVName            string    `json:"pv_name,omitempty"`
+	PVUID             string    `json:"pv_uid,omitempty"`
+	StorageClass      string    `json:"storage_class,omitempty"`
+	ReclaimPolicy     string    `json:"reclaim_policy,omitempty"`
+	RequestedBytes    int64     `json:"requested_bytes,omitempty"`
+	ActualStorage     string    `json:"actual_storage,omitempty"`
+	StorageHash       string    `json:"storage_hash,omitempty"`
+	StorageRetained   bool      `json:"storage_retained,omitempty"`
 	Deleted           bool      `json:"deleted,omitempty"`
 	ObservedAt        time.Time `json:"observed_at"`
 }
@@ -318,6 +395,7 @@ type ManagedResourceRuntime struct {
 	Evidence       *ManagedResourceEvidence `json:"evidence,omitempty"`
 	FailureCode    string                   `json:"failure_code,omitempty"`
 	FailureMessage string                   `json:"failure_message,omitempty"`
+	DeleteActor    string                   `json:"delete_actor,omitempty"`
 	LeaseToken     string                   `json:"-"`
 	LeaseExpiresAt time.Time                `json:"-"`
 }
@@ -358,9 +436,36 @@ type Binding struct {
 	Target        EndpointReference            `json:"target"`
 	Protocol      Protocol                     `json:"protocol"`
 	LogicalName   string                       `json:"logical_name"`
+	Lifecycle     LifecycleState               `json:"lifecycle"`
+	CredentialID  string                       `json:"credential_id,omitempty"`
+	RoleName      string                       `json:"role_name,omitempty"`
+	Database      string                       `json:"database,omitempty"`
+	FailureCode   string                       `json:"failure_code,omitempty"`
 	RuntimeRefs   []RuntimeConnectionReference `json:"runtime_refs"`
 	CreatedAt     time.Time                    `json:"created_at"`
 	UpdatedAt     time.Time                    `json:"updated_at"`
+}
+
+const (
+	PostgresBindingEnsure = "ensure"
+	PostgresBindingRevoke = "revoke"
+)
+
+type PostgresBindingOperation struct {
+	BindingID    string                     `json:"binding_id"`
+	CredentialID string                     `json:"credential_id"`
+	RoleName     string                     `json:"role_name"`
+	Database     string                     `json:"database"`
+	Action       string                     `json:"action"`
+	Create       bool                       `json:"create,omitempty"`
+	Credential   *ManagedResourceCredential `json:"credential,omitempty"`
+}
+
+type PostgresBindingResult struct {
+	BindingID   string `json:"binding_id"`
+	Action      string `json:"action"`
+	Status      string `json:"status"`
+	FailureCode string `json:"failure_code,omitempty"`
 }
 
 type CreateBindingRequest struct {

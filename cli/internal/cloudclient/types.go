@@ -11,11 +11,20 @@ import (
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
+	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
 
 type BuildRecord = buildrecordv1.Record
 type BuildRecordList = buildrecordv1.ListResult
+type ManagedResource = resourcev1.Resource
+type ManagedResourceBinding = resourcev1.Binding
+type ApplicationDependency = serviceconfigurationv1.ApplicationDependency
+type DependencyVerificationContract = serviceconfigurationv1.DependencyVerificationContract
+type DependencyInjectionMapping = serviceconfigurationv1.DependencyInjectionMapping
+type VerificationRun = verificationv1.VerificationRun
 type TopologyDraft = topologyv1.Draft
 type TopologyPlan = topologyv1.Plan
 type TopologyPreview = topologyv1.Preview
@@ -38,6 +47,8 @@ type RoutingDecision = deploymentpolicyv1.RoutingDecision
 type PlacementFacts = topologyv1.PlacementFacts
 type DeploymentCreateRequest = deploymentv1.CreateRequest
 type DeploymentPreview = deploymentv1.Preview
+type PreflightResult = deploymentv1.PreflightResult
+type PreflightCheck = deploymentv1.PreflightCheck
 type WorkloadSpec = deploymentv1.WorkloadSpec
 type WorkloadResources = deploymentv1.Resources
 type WorkloadResourceValues = deploymentv1.ResourceValues
@@ -173,11 +184,54 @@ type PublicRouteIntent struct {
 	Path     string `json:"path"`
 }
 
+type ServiceConfigurationResourceBinding = serviceconfigurationv1.ResourceBinding
+
 type ServiceConfigurationDraft struct {
-	SchemaVersion string                             `json:"schema_version"`
-	Environment   []deploymentv1.EnvironmentVariable `json:"environment,omitempty"`
-	PublicRoute   *PublicRouteIntent                 `json:"public_route,omitempty"`
-	Bindings      []ServiceBinding                   `json:"bindings,omitempty"`
+	SchemaVersion    string                                 `json:"schema_version"`
+	Environment      []deploymentv1.EnvironmentVariable     `json:"environment,omitempty"`
+	PublicRoute      *PublicRouteIntent                     `json:"public_route,omitempty"`
+	Bindings         []ServiceBinding                       `json:"bindings,omitempty"`
+	ResourceBindings []ServiceConfigurationResourceBinding  `json:"resource_bindings,omitempty"`
+	Dependencies     []ApplicationDependency                `json:"dependencies,omitempty"`
+}
+
+type SourceRiskFinding struct {
+	FindingID             string `json:"finding_id"`
+	RuleID                string `json:"rule_id"`
+	Severity              string `json:"severity"`
+	Confidence            string `json:"confidence"`
+	Category              string `json:"category"`
+	DependencyLogicalName string `json:"dependency_logical_name,omitempty"`
+	File                  string `json:"file"`
+	Line                  int    `json:"line"`
+	Column                int    `json:"column,omitempty"`
+	SafeEvidence          string `json:"safe_evidence"`
+	RemediationCode       string `json:"remediation_code,omitempty"`
+}
+
+type SourceRiskEnvReference struct {
+	EnvKey string `json:"env_key"`
+	File   string `json:"file"`
+	Line   int    `json:"line"`
+}
+
+type SourceRiskReport struct {
+	ID              string                   `json:"id"`
+	ProjectID       string                   `json:"project_id"`
+	ApplicationID   string                   `json:"application_id"`
+	RepositoryID    int64                    `json:"repository_id"`
+	CommitSHA       string                   `json:"commit_sha"`
+	ApplicationRoot string                   `json:"application_root"`
+	ScannerVersion  string                   `json:"scanner_version"`
+	BuildJobID      string                   `json:"build_job_id,omitempty"`
+	AnalysisStatus  string                   `json:"analysis_status"`
+	FilesScanned    int                      `json:"files_scanned"`
+	BytesScanned    int64                    `json:"bytes_scanned"`
+	Truncated       bool                     `json:"truncated"`
+	Findings        []SourceRiskFinding      `json:"findings"`
+	EnvReferences   []SourceRiskEnvReference `json:"env_references"`
+	ReportHash      string                   `json:"report_hash"`
+	CreatedAt       time.Time                `json:"created_at"`
 }
 
 type ServiceConfiguration struct {
