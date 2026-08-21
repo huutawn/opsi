@@ -771,6 +771,14 @@ func (s *Server) handleSourceRiskReport(ctx context.Context, _ *Server, args map
 	}
 	commitSHA, _ := args["commit_sha"].(string)
 
+	services, _ := client.ListServices(ctx, projectID)
+	for _, svc := range services {
+		if svc.ID == appID || svc.Name == appID {
+			appID = svc.ID
+			break
+		}
+	}
+
 	report, err := client.GetSourceRiskReport(ctx, projectID, appID, commitSHA)
 	if err != nil {
 		return nil, mapAPIError(err)
@@ -794,7 +802,18 @@ func (s *Server) handleDependencyVerificationLatest(ctx context.Context, _ *Serv
 		return nil, &DomainError{Code: ErrCodeInvalidArgument, Message: "dependency_logical_name is required"}
 	}
 	appID, _ := args["application_id"].(string)
+	appID = strings.TrimSpace(appID)
 	envID, _ := args["environment_id"].(string)
+
+	if appID != "" {
+		services, _ := client.ListServices(ctx, projectID)
+		for _, svc := range services {
+			if svc.ID == appID || svc.Name == appID {
+				appID = svc.ID
+				break
+			}
+		}
+	}
 
 	run, err := client.GetDependencyVerification(ctx, projectID, depName, envID, appID)
 	if err != nil {
