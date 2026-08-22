@@ -626,7 +626,7 @@ export function TopologyDesignCanvas({
 
   return (
     <section
-      className="topologyCanvas relative w-full rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col lg:flex-row shadow-xl"
+      className="topologyCanvas relative w-full rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col shadow-xl"
       aria-labelledby="topology-design-heading"
     >
       <div className="flex-1 flex flex-col min-w-0 relative">
@@ -688,7 +688,7 @@ export function TopologyDesignCanvas({
           </div>
         ) : null}
 
-        <div className="topologyFlow w-full h-full flex-1">
+        <div className="topologyFlow w-full flex-1">
           <CanvasFlow
             edges={edges}
             facts={facts}
@@ -828,7 +828,7 @@ export function LiveTopologyCanvas({
   const edges = buildLiveEdges(console.state.services, renderedNodes);
 
   return (
-    <div className="topologyCanvas relative w-full rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col lg:flex-row shadow-xl">
+    <div className="topologyCanvas relative w-full rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col shadow-xl">
       <div className="flex-1 relative h-full flex flex-col bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:24px_24px] bg-[position:-12px_-12px]">
         <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-10 pointer-events-none">
           <div className="flex items-center gap-3 bg-surface-container/90 backdrop-blur-md px-4 py-2 rounded-xl border border-outline-variant/20 shadow-md pointer-events-auto">

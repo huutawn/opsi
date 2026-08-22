@@ -103,8 +103,30 @@
 .topologyDetailsLink:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
 .topologyCanvas {
+  height: auto;
+  min-height: 0;
+}
+
+.topologyCanvas > :first-child {
   height: clamp(24rem, calc(100svh - 18rem), 46rem);
-  min-height: 24rem;
+  min-height: clamp(24rem, calc(100svh - 18rem), 46rem);
+}
+
+.topologyFlow {
+  min-width: 0;
+  min-height: 0;
+}
+
+@media (min-width: 90rem) {
+  .topologyCanvas {
+    height: clamp(24rem, calc(100svh - 18rem), 46rem);
+    flex-direction: row;
+  }
+
+  .topologyCanvas > :first-child {
+    height: auto;
+    min-height: 0;
+  }
 }
 
 .topologyDeploymentHint {
@@ -116,6 +138,142 @@
   color: var(--color-on-surface-variant);
   font-size: .75rem;
   line-height: 1.25rem;
+}
+
+.deploymentReview {
+  display: grid;
+  gap: 1rem;
+  padding: 1.25rem;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+  border-radius: .75rem;
+  background: var(--color-surface-container-low);
+}
+
+.deploymentReview .sectionHeading {
+  align-items: start;
+  gap: 1rem;
+}
+
+.deploymentReviewToolbar {
+  flex-wrap: wrap;
+  padding-top: 1rem;
+  border-top: 1px solid color-mix(in srgb, var(--color-outline-variant) 30%, transparent);
+}
+
+.deploymentReviewToolbar > :last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.deploymentReviewList {
+  display: grid;
+  gap: .75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.deploymentReviewRow {
+  display: grid;
+  grid-template-columns: minmax(9rem, .7fr) minmax(13rem, 1.1fr) minmax(14rem, 1.4fr) minmax(15rem, 1.2fr);
+  gap: 1rem;
+  align-items: start;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+  border-radius: .625rem;
+  background: var(--color-surface-container-lowest);
+}
+
+.deploymentReviewSelect,
+.deploymentReviewBuild,
+.deploymentReviewMeta,
+.deploymentReviewStatus,
+.deploymentPhase {
+  display: grid;
+  gap: .375rem;
+  min-width: 0;
+}
+
+.deploymentReviewSelect {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.deploymentReviewSelect small {
+  grid-column: 2;
+  color: var(--color-on-surface-variant);
+}
+
+.deploymentReviewBuild,
+.deploymentReviewMeta,
+.deploymentReviewStatus,
+.deploymentPhase {
+  color: var(--color-on-surface-variant);
+  font-size: .75rem;
+  line-height: 1.25rem;
+}
+
+.deploymentReviewBuild select {
+  width: 100%;
+  min-height: 2.5rem;
+  padding: .5rem .625rem;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent);
+  border-radius: .5rem;
+  background: var(--color-surface-container);
+  color: var(--color-on-surface);
+  font: inherit;
+}
+
+.deploymentReviewMeta code,
+.deploymentReviewMeta small,
+.deploymentPhase small {
+  overflow-wrap: anywhere;
+}
+
+.deploymentReviewStatus {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.deploymentPhase {
+  padding: .625rem;
+  border-radius: .5rem;
+  background: var(--color-surface-container);
+}
+
+.deploymentPhase b {
+  color: var(--color-on-surface);
+}
+
+@media (max-width: 89.999rem) {
+  .deploymentReviewRow {
+    grid-template-columns: minmax(9rem, 1fr) minmax(13rem, 1.25fr);
+  }
+
+  .deploymentReviewMeta,
+  .deploymentReviewStatus {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 39.999rem) {
+  .deploymentReview {
+    padding: 1rem;
+  }
+
+  .deploymentReviewToolbar {
+    align-items: stretch;
+  }
+
+  .deploymentReviewToolbar > :last-child,
+  .deploymentReviewToolbar > :last-child > * {
+    width: 100%;
+  }
+
+  .deploymentReviewRow,
+  .deploymentReviewStatus {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 63.999rem) {
@@ -130,7 +288,7 @@
 
 @media (max-width: 39.999rem) {
   .topologyNextStep { align-items: flex-start; flex-direction: column; }
-  .topologyCanvas { height: 30rem; }
+  .topologyCanvas > :first-child { height: 30rem; min-height: 30rem; }
 }
 
 /* Shared master/detail and setup layouts.  Delivery, infrastructure, and

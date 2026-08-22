@@ -95,7 +95,7 @@ test("truthful project summaries cover required factual fixtures", async ({ page
       await expect(page.getByText(/incident/i).first()).toBeVisible();
     }
     if (next === "unavailable") {
-      await expect(page.getByText("Agent unavailable", { exact: true })).toBeVisible();
+      await expect(page.getByText("Local Edge Agent unavailable", { exact: true })).toBeVisible();
       await expect(page.locator(".statusStrip > div").nth(3).getByText("Unavailable", { exact: true })).toBeVisible();
       await expect(page.getByText("Incident source missing", { exact: true })).toBeVisible();
       await page.getByRole("link", { name: "Services", exact: true }).click();

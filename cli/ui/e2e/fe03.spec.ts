@@ -150,7 +150,7 @@ test("Application edges review internal and same-origin browser HTTP without cre
 	await expect(page.getByLabel("Cloud service configuration review").getByText("generated environment", { exact: true }).first()).toBeVisible();
 	await page.getByRole("button", { name: "Apply service configuration" }).click();
 	await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
-	await expect(page.getByText("Internal · applied", { exact: true })).toBeVisible();
+	await expect(page.getByText("Service configuration applied for api.", { exact: true })).toBeVisible();
 	expect(data.deployments).toHaveLength(1);
 
 	await page.locator(".react-flow__edge").first().click({ force: true });
@@ -159,7 +159,7 @@ test("Application edges review internal and same-origin browser HTTP without cre
 	await expect(page.getByLabel("Environment name")).toHaveValue("WORKER_BASE_URL");
 	await page.getByRole("button", { name: "Review connection" }).click();
 	await page.getByRole("button", { name: "Apply service configuration" }).click();
-	await expect(page.getByText("Browser · applied", { exact: true })).toBeVisible();
+	await expect(page.getByText("Service configuration applied for api.", { exact: true })).toBeVisible();
 	const appliedDraft = (applyBodies.at(-1)?.draft ?? {}) as { bindings?: Array<Record<string, unknown>> };
 	expect(appliedDraft.bindings?.[0]).toMatchObject({ kind: "browser_http", path: "/api", env_name: "WORKER_BASE_URL" });
 	expect(data.deployments).toHaveLength(1);
@@ -342,7 +342,7 @@ test("Topology onboarding exposes the factual next action for every state", asyn
       expect(actionBox!.y).toBeLessThan(onboardingBox!.y + onboardingBox!.height / 2);
     }
     if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Connect Server" })).toBeVisible(); await page.getByRole("button", { name: "Close connect server dialog" }).click(); }
-    if (next === "bootstrap") { await expect(page.locator(".topologyContextBar").getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=bootstrap/); await expect(page.getByRole("heading", { name: "203.0.113.10" })).toBeVisible(); }
+    if (next === "bootstrap") { await expect(page.locator(".topologyContextBar").getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=bootstrap/); await expect(page.locator(".bootstrapDetail h2").filter({ hasText: "203.0.113.10" })).toBeVisible(); }
     if (next === "failed") { await button.click(); await expect(page.getByRole("dialog", { name: /retry bootstrap session/i })).toBeVisible(); await page.getByRole("button", { name: "Confirm and submit" }).click(); await expect(page.getByText(/Bootstrap boot-failed returned status pending/)).toBeVisible(); await page.getByRole("button", { name: "Close" }).click(); }
     if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add application" })).toBeVisible(); await page.getByRole("button", { name: "Close application wizard" }).click(); }
     if (next === "placement") { await button.click(); await expect(page.getByRole("dialog", { name: "Plan placement" })).toBeVisible(); await page.getByRole("button", { name: "Close placement dialog" }).click(); }
@@ -359,7 +359,7 @@ test("Topology polling moves an active bootstrap to ready and moves bootstrap hi
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith("/bootstrap-sessions") && route.request().method() === "GET") {
       sessionReads += 1;
-      if (sessionReads > 1) { await new Promise((resolve) => setTimeout(resolve, 250)); ready = true; }
+      if (sessionReads > 1) await new Promise((resolve) => setTimeout(resolve, 250));
       const session = { id: "boot-1", status: ready ? "succeeded" : "installing", public_host: "203.0.113.10", role: "first_server", checkpoint: { plan_version: "v1", next_step_index: ready ? 4 : 2, last_completed_step: ready ? "agent_ready" : "preflight" }, created_at: "2026-07-30T08:10:00Z" };
       await route.fulfill({ body: JSON.stringify({ sessions: [session] }), contentType: "application/json", status: 200 });
       return;
@@ -370,7 +370,8 @@ test("Topology polling moves an active bootstrap to ready and moves bootstrap hi
     await respondWithData(route, data, "proj-1");
   });
   await page.goto("/?project=proj-1&view=topology");
-  await expect(page.getByText("Bootstrapping", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Bootstrapping", { exact: true })).toBeVisible();
+  ready = true;
   await expect(page.locator(".topologyContextBar").getByText("Server Ready", { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole("button", { name: "Add application" })).toBeVisible();
   await expect(page.locator(".topologyWorkspace").getByText("Recent Events", { exact: true })).toHaveCount(0);
@@ -421,7 +422,7 @@ test("bootstrap polling is sequential and stops after a project switch", async (
     await respondWithData(route, data, projectID);
   });
   await page.goto("/?project=proj-1&view=topology");
-  await expect(page.getByText("Bootstrapping", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Bootstrapping", { exact: true })).toBeVisible();
   await expect.poll(() => projectOneReads, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
   expect(maxActiveRequests).toBe(1);
   await page.getByLabel("Switch project").click();

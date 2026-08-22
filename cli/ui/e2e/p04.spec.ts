@@ -27,7 +27,7 @@ test("P04 Design and Live keep separate authority, preserve CanvasDraft, fail fu
   const liveRuntime = page.locator('.topologyResourceNode[data-resource-mode="live"][data-resource-kind="server"]').filter({ hasText: "Primary runtime" });
   await expect(liveRuntime).toHaveAttribute("data-resource-state", "factual");
   await expect(page.locator('.topologyResourceNode[data-resource-mode="live"][data-draft-state]')).toHaveCount(0);
-  await expectMinimumTarget(page.locator(".liveOverviewStatus button"));
+  await expectMinimumTarget(liveRuntime);
 
   await page.getByRole("button", { name: "Design", exact: true }).click();
   await expect(page.getByLabel("Replicas")).toHaveValue("3");

@@ -124,9 +124,12 @@ export function TopologyTab({ bindings, builds, console, environment, error, fac
           <LiveTopology console={console} environment={environment} facts={facts} />
         </>
       )}
-      {mode === "design" && (hasPlacedApplication || unpublishedChanges > 0) && topology ? (
-        <DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "Default"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} />
-      ) : mode === "design" ? (
+      {topology ? (
+        <div hidden={mode !== "design" || !(hasPlacedApplication || unpublishedChanges > 0)}>
+          <DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "Default"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} />
+        </div>
+      ) : null}
+      {mode === "design" && !(hasPlacedApplication || unpublishedChanges > 0) ? (
         <p className="topologyDeploymentHint" role="status">
           Deployment review will appear after an application is placed or a canvas change is waiting to be published.
         </p>
