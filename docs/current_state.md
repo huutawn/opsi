@@ -1093,9 +1093,20 @@ are not claimed.
 
 Application Dependency Contract foundation implemented.
 
-## MCP-01 Read-Only Context Surface
+## MCP-01 + MCP-02 Read-Only Context and Proposal Surface
 
 The MCP capability (`opsi mcp` / `opsi mcp serve`) is implemented at the local Opsi Edge boundary:
-- Read-only protocol supporting 18 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), and exact commit-bound source file listing, reading, and literal searching.
+- Read-only protocol supporting 20 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), exact commit-bound source file listing, reading, and literal searching, plus bounded dependency analysis context and advisory dependency-proposal validation.
 - Strict security constraints: zero domain mutations exposed, zero secret credentials exposed (regex redaction for URI credentials, bearer tokens, private keys, and passwords), path traversal protection against `..` or escaping `ApplicationRoot`, binary file classification, size-bounded reading (max 256 KiB), bounded search (max 50 matches), and exact commit provenance (returns `SOURCE_SNAPSHOT_UNAVAILABLE` rather than falling back to uncommitted working trees).
 - Transports: stdio JSON-RPC 2.0 (default) with stderr diagnostic logging, and local loopback HTTP (`127.0.0.1` / `localhost`).
+
+MCP-02 remains advisory: an external MCP client performs reasoning and sends a
+typed, client-side proposal. Opsi neither embeds an LLM nor persists proposals.
+It hashes exact BuildRecord source, `ApplicationRoot`, current configuration and
+dependency contract, compatible targets, and topology facts; stale proposals
+fail closed with `action=NONE`. Validation invokes the canonical non-mutating
+ADC configuration validation/diff authority, so manual dependency management
+remains independent and authoritative. No MCP tool can apply a dependency,
+realize a binding, create a resource, build, deploy, acknowledge warnings,
+trigger verification, patch source, access secrets, execute a shell, or fetch an
+arbitrary URL.

@@ -19,24 +19,26 @@ type ToolHandler func(ctx context.Context, s *Server, args map[string]any) (any,
 
 func (s *Server) registerHandlers() map[string]ToolHandler {
 	return map[string]ToolHandler{
-		"project_context":                  s.handleProjectContext,
-		"topology":                         s.handleTopology,
-		"applications_list":                s.handleApplicationsList,
-		"application_get":                  s.handleApplicationGet,
-		"application_dependencies":         s.handleApplicationDependencies,
-		"managed_resources_list":           s.handleManagedResourcesList,
-		"managed_resource_get":             s.handleManagedResourceGet,
-		"build_records_list":               s.handleBuildRecordsList,
-		"build_record_get":                 s.handleBuildRecordGet,
-		"deployments_list":                 s.handleDeploymentsList,
-		"deployment_get":                   s.handleDeploymentGet,
-		"deployment_preflight":             s.handleDeploymentPreflight,
-		"source_risk_report":               s.handleSourceRiskReport,
-		"dependency_verification_latest":   s.handleDependencyVerificationLatest,
-		"dependency_verification_history":  s.handleDependencyVerificationHistory,
-		"source_files_list":                s.handleSourceFilesList,
-		"source_file_read":                 s.handleSourceFileRead,
-		"source_search":                    s.handleSourceSearch,
+		"project_context":                 s.handleProjectContext,
+		"topology":                        s.handleTopology,
+		"applications_list":               s.handleApplicationsList,
+		"application_get":                 s.handleApplicationGet,
+		"application_dependencies":        s.handleApplicationDependencies,
+		"managed_resources_list":          s.handleManagedResourcesList,
+		"managed_resource_get":            s.handleManagedResourceGet,
+		"build_records_list":              s.handleBuildRecordsList,
+		"build_record_get":                s.handleBuildRecordGet,
+		"deployments_list":                s.handleDeploymentsList,
+		"deployment_get":                  s.handleDeploymentGet,
+		"deployment_preflight":            s.handleDeploymentPreflight,
+		"source_risk_report":              s.handleSourceRiskReport,
+		"dependency_verification_latest":  s.handleDependencyVerificationLatest,
+		"dependency_verification_history": s.handleDependencyVerificationHistory,
+		"source_files_list":               s.handleSourceFilesList,
+		"source_file_read":                s.handleSourceFileRead,
+		"source_search":                   s.handleSourceSearch,
+		"dependency_analysis_context":     s.handleDependencyAnalysisContext,
+		"validate_dependency_proposal":    s.handleValidateDependencyProposal,
 	}
 }
 
@@ -258,13 +260,13 @@ func (s *Server) handleApplicationsList(ctx context.Context, _ *Server, args map
 		}
 
 		summary := ApplicationSummary{
-			ID:                  svc.ID,
-			Name:                svc.Name,
-			Status:              svc.Status,
-			SourceBinding:       bindingDoc,
-			PlacementRuntimeID:  runtimeID,
-			LatestDeploymentID:  latestDepID,
-			LatestDeployStatus:  latestDepStatus,
+			ID:                 svc.ID,
+			Name:               svc.Name,
+			Status:             svc.Status,
+			SourceBinding:      bindingDoc,
+			PlacementRuntimeID: runtimeID,
+			LatestDeploymentID: latestDepID,
+			LatestDeployStatus: latestDepStatus,
 		}
 
 		// Count dependencies if configuration exists

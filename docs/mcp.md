@@ -1,10 +1,17 @@
-# Opsi MCP-01: Read-Only Model Context Protocol Surface
+# Opsi MCP-01 + MCP-02: Read-Only Model Context Protocol Surface
 
 ## Overview
 
 Opsi Model Context Protocol (MCP) server provides AI agents and external tools with a safe, read-only window into Opsi project topology, source snapshots, deployment preflight evaluations, and 5-layer dependency verifications.
 
-MCP-01 is strictly **read-only**. It introduces zero mutations into the Opsi control plane or running environments.
+MCP-01 and MCP-02 are strictly **non-operational**. They introduce zero mutations into the Opsi control plane or running environments.
+
+MCP-02 adds an advisory dependency-proposal boundary. Opsi provides bounded,
+exact-source-bound facts and deterministically validates a typed candidate with
+the same Cloud-side ADC validation and diff authority used by manual review.
+An external MCP-capable AI client performs any reasoning; Opsi does not invoke
+or configure an LLM. Proposals are client-side, non-authoritative, and are not
+persisted.
 
 ---
 
@@ -70,7 +77,7 @@ opsi mcp serve --addr 127.0.0.1:9781
 
 ---
 
-## Available Read-Only Tools (18)
+## Available Read-Only Tools (20)
 
 | Tool Name | Scope / Purpose | Key Safeguards & Bounds |
 | :--- | :--- | :--- |
@@ -92,6 +99,32 @@ opsi mcp serve --addr 127.0.0.1:9781
 | `source_files_list` | List files inside `ApplicationRoot` at an exact commit SHA. | Bounded (max 200 files), ignores `.git/`, `.env*`. |
 | `source_file_read` | Read content of a file in `ApplicationRoot` at an exact commit SHA. | Max 256 KiB, binary detection, credential redaction, path traversal rejection. |
 | `source_search` | Deterministic literal text search at an exact commit SHA. | Max 50 matches, credential redaction in snippets, bounded scan. |
+| `dependency_analysis_context` | Bounded facts for external dependency analysis for one application/environment. | Current immutable BuildRecord commit, `ApplicationRoot`, configuration/dependency/topology hashes, compatible targets, bounded risk/verification facts; no source dump or secrets. |
+| `validate_dependency_proposal` | Validate an external typed dependency proposal. | Always `action: NONE`; detects stale provenance; reuses canonical ADC validation/diff endpoints; never applies, persists, builds, deploys, or realizes. |
+
+### MCP-02 proposal lifecycle
+
+```
+Opsi factual context -> external AI reasoning -> typed proposal -> Opsi deterministic validation
+```
+
+The proposal provenance contains the exact source commit, `ApplicationRoot`, and
+`analysis_inputs_hash`. The hash changes when relevant source, configuration,
+dependency contract, compatible target, or topology/route inputs change. An old
+proposal returns `STALE`; Opsi never rebases or retargets it. Results are one of
+`VALID`, `VALID_WITH_WARNINGS`, `INVALID`, `STALE`, or `NO_CHANGE_PROPOSED`,
+with explicit target resolution (`RESOLVED`, `TARGET_AMBIGUOUS`, or
+`TARGET_NOT_FOUND`) and no apply action.
+
+Evidence is limited to 20 redacted references with excerpts capped at 512 bytes.
+The only confidence values are `HIGH`, `MEDIUM`, and `LOW`; confidence is an AI
+client assertion, not an Opsi probability score. Source text, names, excerpts,
+and proposal fields are treated as data and cannot add capabilities.
+
+MCP-02 does not provide dependency apply, resource-binding realization,
+managed-resource creation, build, deployment, warning acknowledgement,
+verification trigger, source patching, shell execution, arbitrary HTTP, secret
+access, or a model-provider integration.
 
 ---
 
