@@ -202,7 +202,7 @@ function NavItem({ active, href, icon, label, onClick }: { active: boolean; href
           : "text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface font-medium"
       }`}
     >
-      <span aria-hidden="true" className={`mr-3 material-symbols-outlined text-[20px] before:content-[attr(data-icon)] select-none ${active ? "text-primary" : "text-on-surface-variant group-hover:text-on-surface"}`} data-icon={icon} />
+      <Icon name={icon} className={`mr-3 text-[20px] ${active ? "text-primary" : "text-on-surface-variant group-hover:text-on-surface"}`} />
       <span>{label}</span>
     </a>
   );

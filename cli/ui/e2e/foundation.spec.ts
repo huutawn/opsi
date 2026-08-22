@@ -147,6 +147,23 @@ test("required viewports have no horizontal overflow and produce review screensh
   }
 });
 
+test("product chrome uses inline SVG icons and never exposes Material ligature identifiers", async ({ page }) => {
+  const externalFontRequests: string[] = [];
+  page.on("request", (request) => {
+    if (/fonts\.googleapis\.com|fonts\.gstatic\.com/.test(request.url())) externalFontRequests.push(request.url());
+  });
+  await mockLocalAPI(page, "healthy");
+  await page.goto("/?project=proj-1&view=services");
+  const chrome = page.locator(".sidebar, header");
+  const chromeText = (await chrome.allTextContents()).join(" ");
+  expect(chromeText).not.toMatch(/account_tree|dashboard|layers|rocket_launch|dns|monitoring|security|search|refresh|notifications/);
+  const iconTags = await page.locator("[data-icon]").evaluateAll((nodes) => nodes.map((node) => node.tagName));
+  expect(iconTags.length).toBeGreaterThan(8);
+  expect(iconTags.every((tag) => tag === "svg")).toBe(true);
+  await expect(page.locator(".applicationCard").first()).not.toContainText(/error|warning|memory|database|verified_user|block|check_circle/);
+  expect(externalFontRequests).toEqual([]);
+});
+
 for (const staleResult of ["success", "error"] as const) {
   test(`project switch is latest-wins after stale ${staleResult}`, async ({ page }) => {
     let releaseOld!: () => void;

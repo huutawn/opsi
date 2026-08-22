@@ -18,9 +18,10 @@ test("Opsi Factual Systems foundation exposes required visual state tokens", asy
   ]) assert.match(css, new RegExp(`${token}:`));
   assert.match(css, /\.statusIcon/);
   assert.match(css, /backdrop-filter: blur/);
-  assert.match(css, /min-height: 40px/);
+  assert.match(css, /min-height: 0/);
   assert.match(shell, /grid-template-columns: 288px minmax\(0, 1fr\)/);
   assert.match(shell, /\.shellContent/);
   assert.match(shell, /\.systemFact/);
+  assert.doesNotMatch(shell, /fonts\.googleapis|Material Symbols/);
   assert.doesNotMatch(shell, /sidebarCollapsed|sidebarCollapse|sidebar\.collapsed/);
 });

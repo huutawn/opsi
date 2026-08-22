@@ -1,4 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap');
 @import "./design-system.css";
 @import "@xyflow/react/dist/style.css";
 
@@ -8,7 +7,7 @@
     padding: 0;
     background-color: var(--color-surface);
     color: var(--color-on-surface);
-    font-family: var(--font-inter), sans-serif;
+    font-family: var(--font-sans), "Segoe UI", sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overflow-x: hidden;
@@ -24,26 +23,399 @@
   scrollbar-width: none;
 }
 
-/* Material Symbols Outlined */
-.material-symbols-outlined {
-  font-family: 'Material Symbols Outlined';
-  font-weight: normal;
-  font-style: normal;
-  font-size: 24px;
-  line-height: 1;
-  letter-spacing: normal;
-  text-transform: none;
+.icon {
   display: inline-block;
-  white-space: nowrap;
-  word-wrap: normal;
-  direction: ltr;
-  -webkit-font-feature-settings: 'liga';
-  -webkit-font-smoothing: antialiased;
+  width: 1em;
+  height: 1em;
+  flex: none;
+  vertical-align: -0.125em;
 }
 
 .shellContent {
   display: grid;
   grid-template-columns: 288px minmax(0, 1fr);
+}
+
+/* The topology workspace keeps the operator's canvas as the primary surface.
+ * Context and deployment review stay compact, while detailed server evidence
+ * remains in the Bootstrap destination. */
+.topologyWorkspace {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+  max-width: 100rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.topologyContextBar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(20rem, .9fr);
+  gap: 1rem;
+  align-items: center;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+  border-radius: .75rem;
+  background: var(--color-surface-container-low);
+}
+
+.topologyNextStep {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.topologyPrimaryAction { flex: none; }
+
+.topologyServerSummary {
+  min-width: 0;
+  padding-left: 1rem;
+  border-left: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+}
+
+.topologyServerDiagnostic {
+  margin: .5rem 0 0;
+  color: var(--color-on-surface-variant);
+  font-size: .75rem;
+  line-height: 1.25rem;
+}
+
+.topologyContextBar[data-state="retry"] .topologyServerDiagnostic {
+  color: var(--color-error);
+}
+
+.topologyDetailsLink {
+  min-height: 2.5rem;
+  margin-top: .5rem;
+  padding: .25rem 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  font: inherit;
+  font-size: .75rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.topologyDetailsLink:hover { text-decoration: underline; }
+.topologyDetailsLink:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
+.topologyCanvas {
+  height: clamp(24rem, calc(100svh - 18rem), 46rem);
+  min-height: 24rem;
+}
+
+.topologyDeploymentHint {
+  margin: 0;
+  padding: .75rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+  border-radius: .625rem;
+  background: var(--color-surface-container-low);
+  color: var(--color-on-surface-variant);
+  font-size: .75rem;
+  line-height: 1.25rem;
+}
+
+@media (max-width: 63.999rem) {
+  .topologyContextBar { grid-template-columns: 1fr; }
+  .topologyServerSummary {
+    padding-top: .75rem;
+    padding-left: 0;
+    border-top: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 39.999rem) {
+  .topologyNextStep { align-items: flex-start; flex-direction: column; }
+  .topologyCanvas { height: 30rem; }
+}
+
+/* Shared master/detail and setup layouts.  Delivery, infrastructure, and
+ * source views use these same semantic structures so dense factual records
+ * remain scannable without per-screen positioning rules. */
+.deliveryPage {
+  display: grid;
+  gap: 1.5rem;
+  min-width: 0;
+}
+
+.deliveryToolbar,
+.destinationToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: .75rem;
+  padding: 1rem;
+  background: var(--color-surface-container-low);
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+  border-radius: .75rem;
+}
+
+.deliveryToolbar > p,
+.destinationToolbar > p {
+  flex: 1 1 15rem;
+  margin: 0;
+  color: var(--color-on-surface-variant);
+  font-size: .8125rem;
+  line-height: 1.3rem;
+}
+
+.deliveryToolbar label {
+  display: grid;
+  gap: .35rem;
+  min-width: 9rem;
+  color: var(--color-on-surface-variant);
+  font-size: .6875rem;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.deliveryToolbar input,
+.deliveryToolbar select,
+.sourceSection input,
+.sourceSection select,
+.sourceSection textarea {
+  box-sizing: border-box;
+  min-height: 2.5rem;
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent);
+  border-radius: .5rem;
+  padding: .55rem .7rem;
+  background: var(--color-surface-container-highest);
+  color: var(--color-on-surface);
+  font: inherit;
+}
+
+.deliveryToolbar input:focus-visible,
+.deliveryToolbar select:focus-visible,
+.sourceSection input:focus-visible,
+.sourceSection select:focus-visible,
+.sourceSection textarea:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.masterDetail {
+  display: grid;
+  grid-template-columns: minmax(18rem, .9fr) minmax(0, 1.25fr);
+  align-items: start;
+  gap: 1.5rem;
+  min-width: 0;
+}
+
+.masterList,
+.detailPanel,
+.sourceSection,
+.exposureTruth {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+  border-radius: .75rem;
+  background: var(--color-surface-container-low);
+  box-shadow: 0 1px 2px rgb(0 0 0 / .12);
+}
+
+.masterList,
+.detailPanel,
+.sourceSection { padding: 1.25rem; }
+.detailPanel { overflow-wrap: anywhere; }
+
+.sectionHeading,
+.detailHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: .875rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+}
+
+.sectionHeading h2,
+.sectionHeading h3,
+.detailHeading h2,
+.detailPanel h3,
+.sourceSection h3 {
+  margin: 0;
+  color: var(--color-on-surface);
+  font-size: 1rem;
+  line-height: 1.4;
+  font-weight: 650;
+}
+
+.sectionHeading > span,
+.detailHeading > p,
+.detailHeading p,
+.eyebrow {
+  margin: 0;
+  color: var(--color-on-surface-variant);
+  font-size: .75rem;
+}
+
+.eyebrow {
+  margin-bottom: .25rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.masterList ul,
+.policyList,
+.liveDeploymentList {
+  display: grid;
+  gap: .5rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.masterList li > button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: .75rem;
+  width: 100%;
+  padding: .875rem;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+  border-radius: .625rem;
+  background: var(--color-surface-container);
+  color: var(--color-on-surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.masterList li > button:hover,
+.masterList li > button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--color-primary) 65%, transparent);
+  background: var(--color-primary-container);
+}
+
+.masterList li > button > span:first-child,
+.masterList li > button > span:last-of-type,
+.inventoryRow > span,
+.bindingRow > span {
+  display: grid;
+  min-width: 0;
+  gap: .2rem;
+}
+
+.masterList strong,
+.inventoryRow strong,
+.bindingRow strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.masterList small,
+.inventoryRow small,
+.bindingRow small { color: var(--color-on-surface-variant); font-size: .75rem; line-height: 1.2; }
+.masterList code { align-self: center; max-width: 13rem; overflow: hidden; color: var(--color-on-surface-variant); font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
+
+.evidenceGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .875rem 1rem;
+  margin: .75rem 0 1.25rem;
+}
+
+.evidenceGrid > div,
+.evidenceGrid dt { min-width: 0; }
+.evidenceGrid dd { margin: .25rem 0 0; overflow-wrap: anywhere; color: var(--color-on-surface); font-size: .8125rem; }
+
+.detailPanel section + section { margin-top: 1.25rem; }
+.detailPanel section > h3 { margin-bottom: .5rem; }
+.detailActions { display: flex; flex-wrap: wrap; gap: .625rem; margin-top: 1.25rem; }
+
+.detailActions button,
+.destinationToolbar button,
+.sourceSection button,
+.deliveryToolbar > button,
+.masterList button:not([aria-pressed]) {
+  min-height: 2.25rem;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent);
+  border-radius: .5rem;
+  padding: .5rem .75rem;
+  background: var(--color-surface-container-high);
+  color: var(--color-on-surface);
+  font: inherit;
+  font-size: .8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.detailActions button:hover,
+.destinationToolbar button:hover,
+.sourceSection button:hover,
+.deliveryToolbar > button:hover { background: var(--color-surface-container-highest); }
+.detailActions .danger { color: var(--color-error); border-color: color-mix(in srgb, var(--color-error) 40%, transparent); }
+
+.setupRail {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(6rem, 1fr));
+  gap: .5rem;
+  padding: 0;
+  margin: 0;
+  overflow-x: auto;
+  list-style: none;
+  counter-reset: source-step;
+}
+
+.setupRail li {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  min-width: max-content;
+  color: var(--color-on-surface-variant);
+  font-size: .75rem;
+  white-space: nowrap;
+}
+
+.setupRail li::before {
+  display: grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  place-items: center;
+  border: 1px solid var(--color-outline-variant);
+  border-radius: 50%;
+  color: var(--color-primary);
+  content: counter(source-step);
+  counter-increment: source-step;
+}
+
+.sourceSection { display: grid; gap: 1rem; }
+.sourceInventory { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.inventoryRow,
+.bindingRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .75rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-outline-variant) 25%, transparent);
+}
+.inventoryRow:last-child,
+.bindingRow:last-child { border-bottom: 0; }
+.bindingRow code { min-width: 0; overflow: hidden; color: var(--color-on-surface-variant); font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
+.sourceSection details { padding: .75rem; border-radius: .5rem; background: var(--color-surface-container); }
+.sourceSection summary { cursor: pointer; color: var(--color-primary); font-size: .8125rem; font-weight: 600; }
+.sourceSection form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-top: .875rem; }
+.sourceSection form label { display: grid; gap: .35rem; color: var(--color-on-surface-variant); font-size: .75rem; }
+.sourceSection form button { width: max-content; align-self: end; }
+
+.exposureTruth { padding: 1rem; margin-bottom: 1rem; }
+.exposureTruth h2 { margin: 0 0 .5rem; color: var(--color-on-surface); font-size: .9375rem; }
+.exposureTruth p { margin: .25rem 0; color: var(--color-on-surface-variant); font-size: .8125rem; line-height: 1.4; }
+
+@media (max-width: 1023px) {
+  .masterDetail { grid-template-columns: 1fr; }
+  .masterList { max-height: none; }
+}
+
+@media (max-width: 639px) {
+  .deliveryToolbar { align-items: stretch; }
+  .deliveryToolbar > * { width: 100%; }
+  .evidenceGrid,
+  .sourceInventory,
+  .sourceSection form { grid-template-columns: 1fr; }
+  .bindingRow { align-items: flex-start; flex-direction: column; }
 }
 
 .systemFact {

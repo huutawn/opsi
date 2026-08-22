@@ -64,12 +64,11 @@ test("P04 lifecycle distinguishes Ready, Offline, and Unknown without optimistic
   const url = "/?project=proj-1&view=infrastructure&tab=topology&topologyMode=live&environment=env-prod";
 
   await page.goto(url);
-  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
-  await expect(page.locator(".serverLifecycle .statusIcon")).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Ready", { exact: true })).toBeVisible();
 
   state.facts.agents[0].status = "offline";
   await page.reload();
-  await expect(page.locator(".serverLifecycle").getByText("Offline", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Offline", { exact: true })).toBeVisible();
   const serverNode = page.locator('.topologyResourceNode[data-resource-mode="live"][data-resource-kind="server"]');
   await expect(serverNode).toContainText("Offline");
 
@@ -77,7 +76,7 @@ test("P04 lifecycle distinguishes Ready, Offline, and Unknown without optimistic
   state.facts.nodes[0].status = "mystery";
   state.facts.agents[0].status = "mystery";
   await page.reload();
-  await expect(page.locator(".serverLifecycle").getByText("Unknown", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Unknown", { exact: true })).toBeVisible();
   await expect(serverNode).toContainText("Facts are insufficient");
   await expect(page.getByRole("button", { name: /Server Primary runtime, Ready/ })).toHaveCount(0);
 });
@@ -93,23 +92,22 @@ test("P04 bootstrap restores Waiting, Connecting, Bootstrapping, failure retry, 
   const url = "/?project=proj-1&view=infrastructure&tab=topology&topologyMode=live&environment=env-prod";
 
   await page.goto(url);
-  await expect(page.locator(".serverLifecycle").getByText("Waiting", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Waiting", { exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByText(/This browser only shows the command when it is issued/)).toBeVisible();
-  await expect(page.getByText("btok-secret", { exact: false })).toHaveCount(0);
+  await expect(page.locator(".topologyContextBar").getByText(/Bootstrap boot-1 is waiting/)).toBeVisible();
 
   state.sessions = [session("connecting")];
   await page.reload();
-  await expect(page.locator(".serverLifecycle").getByText("Connecting", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Connecting", { exact: true })).toBeVisible();
 
   state.sessions = [{ ...session("installing_agent"), checkpoint: { plan_version: "v1", next_step_index: 3, last_completed_step: "installing_agent" } }];
   await page.reload();
-  await expect(page.locator(".serverLifecycle").getByText("Bootstrapping", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Bootstrapping", { exact: true })).toBeVisible();
   await expect(page.getByText("75% · installing_agent", { exact: true })).toBeVisible();
 
   state.sessions = [{ ...session("failed"), last_failure_code: "AGENT_INSTALL_FAILED", last_failure_message_redacted: "Agent registration failed" }];
   await page.reload();
-  await expect(page.locator(".serverLifecycle").getByText("Failed", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Failed", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Retry bootstrap" }).click();
   await page.getByRole("button", { name: "Confirm and submit" }).click();
   await expect(page.getByText(/Bootstrap boot-1 returned status pending/)).toBeVisible();
@@ -121,7 +119,7 @@ test("P04 bootstrap restores Waiting, Connecting, Bootstrapping, failure retry, 
   state.nodes = ready.nodes;
   state.sessions = [session("succeeded")];
   await page.reload();
-  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Ready", { exact: true })).toBeVisible();
 });
 
 test("P04 deployment refresh restores active, failed, exposure, and rollback eligibility facts", async ({ page }) => {

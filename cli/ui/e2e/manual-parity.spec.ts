@@ -59,7 +59,7 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
 
   await page.getByRole("link", { name: "Topology", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Topology", exact: true })).toBeVisible();
-  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyContextBar").getByText("Server Ready", { exact: true })).toBeVisible();
 
   await page.getByRole("link", { name: "Delivery", exact: true }).click();
   await page.getByRole("tab", { name: "Builds", exact: true }).click();
@@ -106,7 +106,7 @@ test("manual Local UI parity stays behind the Local backend", async ({ page }) =
   await fetch(`${controlURL}?agent=down`);
   await page.reload();
   await page.getByRole("link", { name: "Topology", exact: true }).click();
-  await expect(page.locator(".serverLifecycle")).toBeVisible();
+  await expect(page.locator(".topologyContextBar")).toBeVisible();
 
   await page.waitForLoadState("networkidle");
   await fetch(`${controlURL}?mode=cloud-outage&agent=up`);

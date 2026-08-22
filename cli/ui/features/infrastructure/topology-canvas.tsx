@@ -18,7 +18,7 @@ import {
   type NodeTypes,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { Button, StatusBadge } from "@/components/ui/primitives";
+import { Button, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { DependencyDialog } from "@/features/dependencies/dependency-dialog";
 import { RealizationReviewDialog } from "@/features/dependencies/realization-review-panel";
@@ -253,6 +253,7 @@ export function TopologyDesignCanvas({
   facts,
   onDraft,
   onReload,
+  onUnpublishedChanges,
   repositories,
   topology,
 }: {
@@ -263,6 +264,7 @@ export function TopologyDesignCanvas({
   facts: PlacementFacts;
   onDraft: (draft: CanvasDraft) => void;
   onReload: () => Promise<void>;
+  onUnpublishedChanges: (count: number) => void;
   repositories: GitHubRepository[];
   topology: TopologyPlan | null;
 }) {
@@ -286,6 +288,11 @@ export function TopologyDesignCanvas({
   const changeCount = Object.keys(draft).length;
   const configurationChangeCount = Object.keys(configurationDrafts).length;
   const unpublishedCount = changeCount + configurationChangeCount;
+
+  useEffect(() => {
+    onUnpublishedChanges(unpublishedCount);
+  }, [onUnpublishedChanges, unpublishedCount]);
+  useEffect(() => () => onUnpublishedChanges(0), [onUnpublishedChanges]);
 
   const select = (id: string) => {
     setSelectedDependency(null);
@@ -619,7 +626,7 @@ export function TopologyDesignCanvas({
 
   return (
     <section
-      className="relative w-full h-[640px] lg:h-[700px] rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col lg:flex-row shadow-xl"
+      className="topologyCanvas relative w-full rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col lg:flex-row shadow-xl"
       aria-labelledby="topology-design-heading"
     >
       <div className="flex-1 flex flex-col min-w-0 relative">
@@ -821,13 +828,13 @@ export function LiveTopologyCanvas({
   const edges = buildLiveEdges(console.state.services, renderedNodes);
 
   return (
-    <div className="relative w-full h-[640px] lg:h-[700px] rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col lg:flex-row shadow-xl">
+    <div className="topologyCanvas relative w-full rounded-2xl overflow-hidden border border-outline-variant/20 bg-surface-container-lowest flex flex-col lg:flex-row shadow-xl">
       <div className="flex-1 relative h-full flex flex-col bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:24px_24px] bg-[position:-12px_-12px]">
         <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-10 pointer-events-none">
           <div className="flex items-center gap-3 bg-surface-container/90 backdrop-blur-md px-4 py-2 rounded-xl border border-outline-variant/20 shadow-md pointer-events-auto">
-            <div className="flex items-center gap-2 text-xs font-label-sm text-status-ready font-semibold">
-              <span className="material-symbols-outlined text-[16px]">wifi</span>
-              <span>Agent Connected</span>
+            <div className="flex items-center gap-2 text-xs font-label-sm text-on-surface font-semibold">
+              <Icon name="network_check" className="text-[16px]" />
+              <span>Observed runtime facts</span>
             </div>
             <div className="w-px h-4 bg-outline-variant/30" />
             <span className="text-[11px] text-on-surface-variant font-code-md">Live Telemetry Active</span>

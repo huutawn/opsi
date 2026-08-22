@@ -43,6 +43,35 @@ test("Design renders applied placement, unplaced applications, factual servers, 
   await expect(page.getByRole("heading", { name: "Edge runtime" })).toBeVisible();
 });
 
+test("Topology keeps the primary action and canvas above the fold without horizontal overflow", async ({ page }) => {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 1024, height: 768 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto("/?project=proj-1&view=topology");
+    const action = page.locator(".topologyPrimaryAction");
+    const canvas = page.locator(".topologyCanvas");
+    const [actionBox, canvasBox] = await Promise.all([action.boundingBox(), canvas.boundingBox()]);
+    expect(actionBox).not.toBeNull();
+    expect(canvasBox).not.toBeNull();
+    expect(actionBox!.y).toBeLessThan(viewport.height);
+    expect(canvasBox!.y).toBeLessThan(viewport.height);
+    await expect(page.locator("html")).toHaveJSProperty("scrollWidth", viewport.width);
+  }
+});
+
+test("Deployment Review stays collapsed until placement or unpublished canvas changes exist", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  const data = fixture();
+  data.topology = { ...data.topology, assignments: [] };
+  await page.route("**/api/local/**", (route) => respondWithData(route, data, "proj-1"));
+
+  await page.goto("/?project=proj-1&view=topology");
+  await expect(page.getByRole("heading", { name: /Review deployment/i })).toHaveCount(0);
+  await expect(page.locator(".topologyDeploymentHint")).toBeVisible();
+
+  await dragNode(page, /Application reports, Unplaced, unchanged/, /Server Primary runtime/);
+  await expect(page.getByRole("heading", { name: /Review deployment/i })).toBeVisible();
+});
+
 test("Design moves an applied application through Unplaced without a backend write", async ({ page }) => {
   let applyRequests = 0;
   page.on("request", (request) => { if (new URL(request.url()).pathname.endsWith("/topology/apply")) applyRequests += 1; });
@@ -299,11 +328,21 @@ test("Topology onboarding exposes the factual next action for every state", asyn
   ] as Array<[OnboardingScenario, string, string]>) {
     scenario = next;
     await page.goto(`/?project=proj-1&view=infrastructure&tab=topology&case=${next}`);
-    await expect(page.locator(".topologyOnboarding")).toHaveAttribute("data-state", state);
+    await expect(page.locator(".topologyContextBar")).toHaveAttribute("data-state", state);
     const button = page.getByRole("button", { name: action, exact: true });
     await expect(button).toBeVisible();
+    if (next === "application") {
+      const onboardingBox = await page.locator(".topologyContextBar").boundingBox();
+      const actionBox = await button.boundingBox();
+      const canvasBox = await page.locator(".topologyFlow").boundingBox();
+      expect(onboardingBox).not.toBeNull();
+      expect(actionBox).not.toBeNull();
+      expect(canvasBox).not.toBeNull();
+      expect(onboardingBox!.y).toBeLessThan(canvasBox!.y);
+      expect(actionBox!.y).toBeLessThan(onboardingBox!.y + onboardingBox!.height / 2);
+    }
     if (next === "connect") { await button.click(); await expect(page.getByRole("dialog", { name: "Connect Server" })).toBeVisible(); await page.getByRole("button", { name: "Close connect server dialog" }).click(); }
-    if (next === "bootstrap") { await expect(page.locator(".topologyOnboarding").getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=topology/); await expect(page.getByRole("heading", { name: "203.0.113.10" })).toBeFocused(); }
+    if (next === "bootstrap") { await expect(page.locator(".topologyContextBar").getByText(/50% · preflight/)).toBeVisible(); await button.click(); await expect(page).toHaveURL(/tab=bootstrap/); await expect(page.getByRole("heading", { name: "203.0.113.10" })).toBeVisible(); }
     if (next === "failed") { await button.click(); await expect(page.getByRole("dialog", { name: /retry bootstrap session/i })).toBeVisible(); await page.getByRole("button", { name: "Confirm and submit" }).click(); await expect(page.getByText(/Bootstrap boot-failed returned status pending/)).toBeVisible(); await page.getByRole("button", { name: "Close" }).click(); }
     if (next === "application") { await button.click(); await expect(page.getByRole("dialog", { name: "Add application" })).toBeVisible(); await page.getByRole("button", { name: "Close application wizard" }).click(); }
     if (next === "placement") { await button.click(); await expect(page.getByRole("dialog", { name: "Plan placement" })).toBeVisible(); await page.getByRole("button", { name: "Close placement dialog" }).click(); }
@@ -311,7 +350,7 @@ test("Topology onboarding exposes the factual next action for every state", asyn
   }
 });
 
-test("Topology polling moves an active bootstrap to ready and keeps the five latest events inline", async ({ page }) => {
+test("Topology polling moves an active bootstrap to ready and moves bootstrap history to details", async ({ page }) => {
   await page.unroute("**/api/local/**");
   let sessionReads = 0;
   let ready = false;
@@ -332,11 +371,12 @@ test("Topology polling moves an active bootstrap to ready and keeps the five lat
   });
   await page.goto("/?project=proj-1&view=topology");
   await expect(page.getByText("Bootstrapping", { exact: true })).toBeVisible();
-  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".topologyContextBar").getByText("Server Ready", { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole("button", { name: "Add application" })).toBeVisible();
-  await expect(page.locator(".serverLifecycle > .eventTimeline li")).toHaveCount(5);
-  await expect(page.getByText("7 total", { exact: true })).toBeVisible();
-  await expect(page.getByText("Open full bootstrap details", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyWorkspace").getByText("Recent Events", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "View server details" }).click();
+  await expect(page).toHaveURL(/tab=bootstrap/);
+  await expect(page.locator(".bootstrapSessionDetail .eventTimeline li")).toHaveCount(7);
 });
 
 test("Ready factual server does not keep stale bootstrap as its primary session or poll it", async ({ page }) => {
@@ -350,9 +390,8 @@ test("Ready factual server does not keep stale bootstrap as its primary session 
     await respondWithData(route, fixture(), "proj-1");
   });
   await page.goto("/?project=proj-1&view=topology");
-  await expect(page.locator(".serverLifecycle").getByText("Ready", { exact: true })).toBeVisible();
-  await expect(page.locator(".serverLifecycle").getByText("Bootstrap status", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".serverLifecycle").getByText("Open full bootstrap details", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".topologyContextBar").getByText("Server Ready", { exact: true })).toBeVisible();
+  await expect(page.locator(".topologyWorkspace").getByText("Recent Events", { exact: true })).toHaveCount(0);
   await page.waitForTimeout(4_300);
   expect(sessionReads).toBe(1);
   expect(eventReads).toBe(1);

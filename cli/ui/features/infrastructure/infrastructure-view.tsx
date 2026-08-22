@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Empty, StatusBadge } from "@/components/ui/primitives";
+import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import { ApplicationWizard } from "@/features/applications/application-wizard";
 import type { ConsoleController } from "@/features/console/types";
 import { PlacementDialog } from "@/features/infrastructure/placement-dialog";
@@ -48,18 +48,25 @@ export function InfrastructureView({ console }: { console: ConsoleController }) 
 
 export function TopologyTab({ bindings, builds, console, environment, error, facts, mode, onAddService, onConnectServer, onMode, onPlanPlacement, onReload, policies, repositories, topology }: { bindings: ReturnType<typeof useInfrastructureData>["data"]["bindings"]; builds: ReturnType<typeof useInfrastructureData>["data"]["builds"]; console: ConsoleController; environment?: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>["environments"][number]; error: string; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; mode: "design" | "live"; onAddService: (trigger: HTMLButtonElement) => void; onConnectServer: (trigger: HTMLButtonElement) => void; onMode: (mode: "design" | "live") => void; onPlanPlacement: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void>; policies: ReturnType<typeof useInfrastructureData>["data"]["policies"]; repositories: ReturnType<typeof useInfrastructureData>["data"]["repositories"]; topology: ReturnType<typeof useInfrastructureData>["data"]["topology"] }) {
   const [draft, setDraft] = useState<CanvasDraft>({});
+  const [unpublishedChanges, setUnpublishedChanges] = useState(0);
   const lifecycle = serverLifecycle(facts, console.state.sessions);
   const onboarding = topologyOnboarding(facts, topology, console.state.sessions);
+  const hasPlacedApplication = Boolean(
+    topology?.assignments.some((assignment) => facts.services.some((service) => service.key === assignment.service_key))
+  );
+  useEffect(() => {
+    if (mode === "live") setUnpublishedChanges(0);
+  }, [mode]);
   function act(event: React.MouseEvent<HTMLButtonElement>) {
     if (onboarding.kind === "connect") onConnectServer(event.currentTarget);
-    else if (onboarding.kind === "bootstrap") { if (onboarding.sessionID) void console.actions.loadBootstrapEvents(onboarding.sessionID); window.requestAnimationFrame(() => document.getElementById("server-lifecycle-heading")?.focus()); }
+    else if (onboarding.kind === "bootstrap") console.navigate({ view: "infrastructure", tab: "bootstrap", session: onboarding.sessionID ?? "" });
     else if (onboarding.kind === "retry" && onboarding.sessionID) console.actions.retryBootstrap(onboarding.sessionID, onReload);
     else if (onboarding.kind === "application") onAddService(event.currentTarget);
     else if (onboarding.kind === "placement") onPlanPlacement(event.currentTarget);
     else { onMode("design"); window.requestAnimationFrame(() => document.getElementById("topology-heading")?.focus()); }
   }
   return (
-    <section className="space-y-6" aria-labelledby="topology-heading">
+    <section className="topologyWorkspace" aria-labelledby="topology-heading">
       <div className="flex flex-wrap items-center justify-between gap-4 pb-2 border-b border-outline-variant/15">
         <div>
           <h2 className="font-headline-lg text-2xl font-bold text-on-surface" id="topology-heading" tabIndex={-1}>
@@ -99,65 +106,76 @@ export function TopologyTab({ bindings, builds, console, environment, error, fac
         </div>
       </div>
 
+      {error ? <p className="topologyError p-3 bg-error-container/20 text-error border border-error/30 rounded-xl text-xs" role="alert">{error}</p> : null}
+      <TopologyContextBar
+        action={act}
+        console={console}
+        lifecycle={lifecycle}
+        onDetails={() => console.navigate({ view: "infrastructure", tab: "bootstrap", session: lifecycle.session?.id ?? "" })}
+        state={onboarding}
+      />
+
       {mode === "design" ? (
         <>
-          {error ? <p className="p-3 bg-error-container/20 text-error border border-error/30 rounded-xl text-xs" role="alert">{error}</p> : null}
-          {!topology ? (
-            <div className="p-4 bg-surface-container-low rounded-2xl border border-outline-variant/15 text-xs text-on-surface-variant flex items-center gap-3">
-              <span className="material-symbols-outlined text-primary text-xl">info</span>
-              <div>
-                <b className="text-on-surface block font-semibold">No TopologyPlan draft yet</b>
-                <span>Infrastructure facts are displayed without service placement edges.</span>
-              </div>
-            </div>
-          ) : null}
-          <TopologyDesignCanvas bindings={bindings} builds={builds} console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} repositories={repositories} topology={topology} />
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <TopologyOnboarding action={act} state={onboarding} />
-            <ServerLifecycleCard console={console} lifecycle={lifecycle} />
-          </div>
+          <TopologyDesignCanvas bindings={bindings} builds={builds} console={console} draft={draft} facts={facts} onDraft={setDraft} onReload={onReload} onUnpublishedChanges={setUnpublishedChanges} repositories={repositories} topology={topology} />
         </>
       ) : (
         <>
-          {error ? <p className="p-3 bg-error-container/20 text-error border border-error/30 rounded-xl text-xs" role="alert">{error}</p> : null}
-          <LiveTopology console={console} environment={environment} facts={facts} lifecycle={lifecycle} onConnectServer={onConnectServer} onReload={onReload} />
+          <LiveTopology console={console} environment={environment} facts={facts} />
         </>
       )}
-      {topology ? (
-        <div className="mt-4" hidden={mode !== "design"}>
-          <DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "Default"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} />
-        </div>
+      {mode === "design" && (hasPlacedApplication || unpublishedChanges > 0) && topology ? (
+        <DeploymentReview builds={builds} console={console} environmentID={environment?.id ?? ""} environmentName={environment?.name ?? "Default"} facts={facts} onLive={() => onMode("live")} policies={policies} topology={topology} />
+      ) : mode === "design" ? (
+        <p className="topologyDeploymentHint" role="status">
+          Deployment review will appear after an application is placed or a canvas change is waiting to be published.
+        </p>
       ) : null}
     </section>
   );
 }
 
-function TopologyOnboarding({ action, state }: { action: (event: React.MouseEvent<HTMLButtonElement>) => void; state: TopologyOnboardingState }) {
+function TopologyContextBar({ action, console, lifecycle, onDetails, state }: { action: (event: React.MouseEvent<HTMLButtonElement>) => void; console: ConsoleController; lifecycle: ServerLifecycle; onDetails: () => void; state: TopologyOnboardingState }) {
+  const nodeRecord = console.state.nodes.find((node) => node.id === lifecycle.node?.id);
+  const host = lifecycle.session?.public_host || nodeRecord?.public_host || lifecycle.node?.id || lifecycle.runtime?.name || "No server registered";
+  const heartbeat = lifecycle.agent?.last_seen_at || lifecycle.node?.last_seen_at || "Not reported";
+  const diagnostic = lifecycle.status === "Failed"
+    ? lifecycle.session?.last_failure_message_redacted || lifecycle.session?.last_failure_code || state.description
+    : state.progress
+      ? state.progress.percent === null ? state.progress.label : `${state.progress.percent}% · ${state.progress.label}`
+      : null;
   return (
     <section
-      aria-labelledby="topology-next-step"
-      className="topologyOnboarding p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 flex flex-col justify-between space-y-4 shadow-sm"
+      aria-label="Topology context"
+      className="topologyContextBar"
       data-state={state.kind}
     >
-      <div>
-        <p className="text-[11px] font-code-md text-primary uppercase font-bold tracking-wider">Guided Setup</p>
-        <h3 className="font-headline-md text-base font-bold text-on-surface mt-1" id="topology-next-step">{state.title}</h3>
-        <p className="font-body-md text-xs text-on-surface-variant mt-1.5 leading-relaxed">{state.description}</p>
-        {state.progress ? (
-          <div className="mt-3 bg-surface-container-highest p-3 rounded-xl border border-outline-variant/10 text-xs font-code-md" role="status">
-            <span className="text-on-surface font-medium">{state.progress.percent === null ? state.progress.label : `${state.progress.percent}% · ${state.progress.label}`}</span>
-            {state.progress.percent !== null ? (
-              <div className="w-full bg-surface-container rounded-full h-1.5 mt-2 overflow-hidden">
-                <div className="bg-primary h-full rounded-full transition-all" style={{ width: `${state.progress.percent}%` }} />
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-      <div>
-        <Button onClick={action} size="sm" variant="primary">
+      <div className="topologyNextStep">
+        <div>
+          <p className="text-[11px] font-code-md text-primary uppercase font-bold tracking-wider">Next step</p>
+          <h3 className="font-headline-md text-base font-bold text-on-surface mt-1" id="topology-next-step">{state.title}</h3>
+          <p className="font-body-md text-xs text-on-surface-variant mt-1 leading-relaxed">{state.description}</p>
+        </div>
+        <Button className="topologyPrimaryAction" onClick={action} size="sm" variant="primary">
+          <Icon name={state.kind === "application" ? "add" : state.kind === "placement" ? "account_tree" : state.kind === "retry" ? "refresh" : "arrow_forward"} className="text-[16px]" />
           {state.action}
         </Button>
+      </div>
+      <div className="topologyServerSummary">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[11px] font-code-md text-on-surface-variant uppercase font-bold tracking-wider">Registered server</p>
+            <p className="font-code-md text-sm font-semibold text-on-surface truncate mt-1" title={host}>{host}</p>
+          </div>
+          <StatusBadge label={`Server ${lifecycle.status}`} value={lifecycle.status === "Ready" ? "healthy" : lifecycle.status === "Failed" || lifecycle.status === "Offline" ? "failed" : "unknown"} />
+        </div>
+        <p className="text-xs text-on-surface-variant mt-2">
+          Registered Agent: <span className="font-code-md text-on-surface">{lifecycle.agent ? `${lifecycle.agent.id.slice(0, 8)} · ${lifecycle.agent.status}` : "Not reported"}</span>
+          <span aria-hidden="true"> · </span>
+          Last heartbeat: <span className="font-code-md text-on-surface">{heartbeat}</span>
+        </p>
+        {diagnostic ? <p className="topologyServerDiagnostic" role={lifecycle.status === "Failed" ? "alert" : "status"}>{diagnostic}</p> : null}
+        <button className="topologyDetailsLink" onClick={onDetails} type="button">View server details</button>
       </div>
     </section>
   );
@@ -210,7 +228,7 @@ function ServerLifecycleCard({ console, lifecycle }: { console: ConsoleControlle
           This browser only shows the command when it is issued. Waiting for server to report progress.
         </p>
       ) : null}
-      {recent.length ? (
+      {lifecycle.status !== "Ready" && recent.length ? (
         <>
           <div className="flex items-center justify-between text-[11px] font-label-sm text-on-surface-variant pt-2 border-t border-outline-variant/10">
             <span className="uppercase font-semibold">Recent Events</span>
@@ -262,37 +280,13 @@ function EventTimeline({ events }: { events: TimelineEvent[] }) {
   );
 }
 
-function LiveTopology({ console, environment, facts, lifecycle, onConnectServer, onReload }: { console: ConsoleController; environment?: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>["environments"][number]; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>; lifecycle: ServerLifecycle; onConnectServer: (trigger: HTMLButtonElement) => void; onReload: () => Promise<void> }) {
+function LiveTopology({ console, environment, facts }: { console: ConsoleController; environment?: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]>["environments"][number]; facts: NonNullable<ReturnType<typeof useInfrastructureData>["data"]["facts"]> }) {
   if (!environment) return <div className="p-4 bg-surface-container-low rounded-2xl border border-outline-variant/15 text-xs text-on-surface-variant">Choose the current environment to view live facts.</div>;
-  const runtimes = facts.runtimes.filter((runtime) => runtime.environment_id === environment.id);
   const connections = console.state.services.flatMap((service) => (service.configuration?.bindings ?? []).map((binding) => ({ source: service.name, target: binding.target_service_key, kind: binding.kind, route: binding.path || binding.env_prefix || "" })));
   const exposures = console.state.deployments.filter((deployment) => deployment.environment_id === environment.id && deployment.exposure_spec);
-  const lifecycleAction = lifecycle.status === "Failed" ? "Retry bootstrap" : ["Waiting", "Connecting", "Bootstrapping"].includes(lifecycle.status) ? "Inspect progress" : lifecycle.status === "Unknown" && !lifecycle.session ? "Connect Server" : "Refresh state";
-  function act(event: React.MouseEvent<HTMLButtonElement>) {
-    if (lifecycleAction === "Connect Server") onConnectServer(event.currentTarget);
-    else if (lifecycleAction === "Retry bootstrap" && lifecycle.session) console.actions.retryBootstrap(lifecycle.session.id, onReload);
-    else if (lifecycleAction === "Inspect progress" && lifecycle.session) { void console.actions.loadBootstrapEvents(lifecycle.session.id); window.requestAnimationFrame(() => document.getElementById("server-lifecycle-heading")?.focus()); }
-    else void onReload();
-  }
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4 p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 shadow-sm">
-        <div>
-          <span className="text-[11px] font-code-md text-primary font-bold">{console.state.project?.name} / {environment.name}</span>
-          <h3 className="font-headline-md text-base font-bold text-on-surface mt-0.5" id="live-overview-heading">Runtime Environment</h3>
-          <p className="font-body-md text-xs text-on-surface-variant mt-1">{runtimes.length} runtimes • {facts.nodes.filter((node) => runtimes.some((runtime) => runtime.id === node.runtime_id)).length} nodes connected</p>
-        </div>
-        <div className="liveOverviewStatus flex items-center gap-3">
-          <StatusBadge label={lifecycle.status} value={lifecycle.status === "Ready" ? "healthy" : "unknown"} />
-          <Button className="min-h-[40px] min-w-[40px]" onClick={act} size="sm" variant="primary">
-            {lifecycleAction}
-          </Button>
-        </div>
-      </div>
-
       <LiveTopologyCanvas console={console} environment={environment} facts={facts} />
-
-      <ServerLifecycleCard console={console} lifecycle={lifecycle} />
 
       <section aria-label="Connections and exposure" className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="p-5 bg-surface-container-low/90 backdrop-blur-md rounded-2xl border border-outline-variant/15 space-y-3 shadow-sm">
@@ -384,6 +378,11 @@ function BootstrapTab({ console, facts, onReload }: { console: ConsoleController
   const selected = console.state.sessions.find((item) => item.id === console.route.session) ?? console.state.sessions[0];
   const lifecycle = serverLifecycle(facts, console.state.sessions);
   const progress = bootstrapProgress(selected?.checkpoint, selected ? console.state.bootstrapEvents.length : 0);
+  useEffect(() => {
+    if (selected && console.state.bootstrapEventsSessionID !== selected.id) {
+      void console.actions.loadBootstrapEvents(selected.id);
+    }
+  }, [console.actions, console.state.bootstrapEventsSessionID, selected]);
   return <div className="bootstrapLayout"><section className="bootstrapInventory"><div className="sectionHeading"><div><p className="eyebrow">Connection history</p><h2>Bootstrap sessions</h2><p>Durable, project-scoped Cloud sessions. Credentials and plaintext commands are never reconstructed here.</p></div></div>{console.state.sessions.length ? <ul>{console.state.sessions.map((session) => { const state = bootstrapLifecycleStatus(session.status); return <li key={session.id}><button aria-pressed={selected?.id === session.id} onClick={() => { console.navigate({ session: session.id }); void console.actions.loadBootstrapEvents(session.id); }} type="button"><span><strong>{session.public_host || session.id}</strong><small>{session.role} · attempt {session.attempt_count ?? "?"}/{session.max_attempts ?? "?"}</small><small>{session.id}</small></span><StatusBadge label={state === "Unknown" ? session.status : state} value={session.status} /></button></li>; })}</ul> : <Empty title="No bootstrap sessions" text="Use Connect Server to generate the first one-time bootstrap command." />}</section><section className="bootstrapDetail"><div className="detailHeading"><div><p className="eyebrow">Factual server lifecycle</p><h2>{lifecycle.runtime?.name || lifecycle.session?.public_host || "Connect a server"}</h2></div><StatusBadge label={lifecycle.status} value={lifecycle.status === "Connecting" ? "bootstrapping" : lifecycle.status} /></div><ol aria-label="Server connection progress" className="bootstrapLifecycleRail">{["Waiting", "Connecting", "Bootstrapping", "Ready"].map((state) => <li aria-current={lifecycle.status === state ? "step" : undefined} data-state={lifecycle.status === state ? "current" : "idle"} key={state}><StatusBadge label={state} value={state === "Connecting" || state === "Bootstrapping" ? "bootstrapping" : state} /></li>)}</ol><ServerLifecycleCard console={console} lifecycle={lifecycle} />{selected ? <section className="bootstrapSessionDetail" aria-labelledby="selected-bootstrap-heading"><div className="sectionHeading"><div><p className="eyebrow">Selected session</p><h3 id="selected-bootstrap-heading">{selected.id}</h3></div><StatusBadge value={selected.status} /></div><dl className="evidenceGrid"><Fact label="Attempt" value={`${selected.attempt_count ?? "Unknown"}/${selected.max_attempts ?? "Unknown"}`} /><Fact label="Progress" value={progress.percent === null ? progress.label : `${progress.percent}% · ${progress.label}`} /><Fact label="Next step" value={selected.checkpoint ? `Step ${selected.checkpoint.next_step_index}` : "Not reported"} /><Fact label="Failure" value={selected.last_failure_message_redacted || selected.last_failure_code || "None reported"} /></dl><EventTimeline events={console.state.bootstrapEventsSessionID === selected.id ? console.state.bootstrapEvents : []} />{['failed', 'dead_letter'].includes(selected.status) ? <button className="primary" onClick={() => console.actions.retryBootstrap(selected.id, onReload)} type="button">Retry bootstrap</button> : null}</section> : null}</section></div>;
 }
 
@@ -425,7 +424,7 @@ export function BootstrapDialog({ console, onClose, onCreated }: { console: Cons
           onClick={onClose}
           type="button"
         >
-          <span className="material-symbols-outlined text-[20px]">close</span>
+          <Icon name="close" className="text-[20px]" />
         </button>
       </div>
 
