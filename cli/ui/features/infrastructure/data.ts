@@ -65,41 +65,46 @@ export function useInfrastructureData(console: ConsoleController) {
     if (failed) setError("Some infrastructure sources are unavailable; factual data already loaded is preserved.");
   }, [client, projectID]);
 
+  const loadedProjectID = useRef("");
   useEffect(() => {
-    sequence.current++;
-    queueMicrotask(() => {
+    if (!projectID) {
+      loadedProjectID.current = "";
       dataRef.current = emptyData;
       setData(emptyData);
-      setSource(projectID ? "loading" : "empty");
-      setError("");
+      setSource("empty");
+      return;
+    }
+    if (loadedProjectID.current !== projectID) {
+      loadedProjectID.current = projectID;
+      const initialFacts = console.state.foundation.placement?.project_id === projectID ? console.state.foundation.placement : null;
+      const initialTopology = console.state.foundation.topology?.project_id === projectID ? console.state.foundation.topology : null;
+      const initial = { ...emptyData, facts: initialFacts, topology: initialTopology };
+      dataRef.current = initial;
+      setData(initial);
+      setSource(initialFacts ? "ready" : "loading");
       void load();
-    });
-  }, [projectID]); // eslint-disable-line react-hooks/exhaustive-deps
+    }
+  }, [load, projectID, console.state.foundation.placement, console.state.foundation.topology]);
 
   const consoleFacts = console.state.foundation.placement;
   useEffect(() => {
     if (!consoleFacts || consoleFacts.project_id !== projectID) return;
-    queueMicrotask(() => {
-      const next = { ...dataRef.current, facts: consoleFacts };
-      dataRef.current = next;
-      setData(next);
-      setSource((state) => state === "unavailable" ? state : consoleFacts.runtimes.length || consoleFacts.environments.length ? "ready" : "empty");
-    });
+    const next = { ...dataRef.current, facts: consoleFacts };
+    dataRef.current = next;
+    setData(next);
+    setSource((state) => state === "unavailable" ? state : consoleFacts.runtimes.length || consoleFacts.environments.length ? "ready" : "empty");
   }, [consoleFacts, projectID]);
 
   const consoleTopology = console.state.foundation.topology;
   useEffect(() => {
     if (!consoleTopology || consoleTopology.project_id !== projectID) return;
-    queueMicrotask(() => {
-      const next = { ...dataRef.current, topology: consoleTopology };
-      dataRef.current = next;
-      setData(next);
-    });
+    const next = { ...dataRef.current, topology: consoleTopology };
+    dataRef.current = next;
+    setData(next);
   }, [consoleTopology, projectID]);
 
-  const currentFacts = consoleFacts?.project_id === projectID ? consoleFacts : data.facts;
-  const factualServerReady = currentFacts ? serverLifecycle(currentFacts, []).status === "Ready" : false;
-  const activeBootstrapID = factualServerReady ? "" : latestActiveBootstrap(console.state.sessions)?.id ?? "";
+  const factualServerReady = data.facts ? serverLifecycle(data.facts, []).status === "Ready" : false;
+  const activeBootstrapID = !data.facts || factualServerReady ? "" : latestActiveBootstrap(console.state.sessions)?.id ?? "";
   const isTopologyActive = console.route.view === "topology" || (console.route.view === "infrastructure" && console.route.tab === "topology");
   useEffect(() => {
     if (!projectID || !isTopologyActive || !activeBootstrapID) return;

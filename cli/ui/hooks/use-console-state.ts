@@ -137,7 +137,7 @@ export function useConsoleState() {
     }));
   }
 
-  async function load(selectedProjectID = selectedProject.current, operation = generation.current, forceSummaries = false) {
+  async function load(selectedProjectID = selectedProject.current, operation = ++generation.current, forceSummaries = false) {
     if (!isCurrent(operation, selectedProjectID)) return;
     patch(state.status === "ready" ? { message: "" } : { status: "loading", message: "" });
     try {
@@ -237,17 +237,17 @@ export function useConsoleState() {
 
   useEffect(() => {
     const initial = parseRoute(window.location.search);
-    queueMicrotask(() => {
-      // URL state is the external source of truth for refresh/deep-link restoration.
-      setRoute(initial);
-      currentRoute.current = initial;
-      if (!initial.projectID) { void enterWorkspace(initial, true); return; }
-      const operation = ++generation.current;
-      selectedProject.current = initial.projectID;
-      setSelectedProjectID(initial.projectID);
-      patch(clearProjectPatch("Loading project…"));
-      void load(initial.projectID, operation);
-    });
+    setRoute(initial);
+    currentRoute.current = initial;
+    if (!initial.projectID) {
+      void enterWorkspace(initial, true);
+      return;
+    }
+    const operation = ++generation.current;
+    selectedProject.current = initial.projectID;
+    setSelectedProjectID(initial.projectID);
+    patch(clearProjectPatch("Loading project…"));
+    void load(initial.projectID, operation);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

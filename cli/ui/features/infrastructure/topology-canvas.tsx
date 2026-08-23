@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BaseEdge,
@@ -25,6 +25,7 @@ import { RealizationReviewDialog } from "@/features/dependencies/realization-rev
 import { formatSymbolicSource } from "@/features/dependencies/types";
 import { liveDeploymentHealth } from "@/features/infrastructure/deployment-review-model";
 import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
+import { applicationConnectionEdgeID, applicationTopologyNodeID, dependencyTopologyEdgeID, topologyHandleIDs } from "@/features/infrastructure/topology-graph-identity";
 import type {
   ApplicationDependency,
   BuildRecord,
@@ -53,31 +54,18 @@ import {
   serverStatus,
   topologyResourcePresentation,
   updateCanvasPlacement,
-  type CanvasDraft,
-  type CanvasPlacement,
-  type TopologyResourcePresentation,
 } from "@/lib/presentation/infrastructure/model";
 
-type SelectData = { onSelect: () => void };
-type ResourceData = SelectData & {
-  canvasTarget?: string;
-  deployment?: DeploymentJob;
-  mode?: "design" | "live";
-  onPointerDown?: (e: React.PointerEvent | React.MouseEvent) => void;
-  presentation: TopologyResourcePresentation;
-  serviceKey?: string;
-};
-type UnplacedData = SelectData & { count: number };
-type ResourceFlowNode = Node<ResourceData, "resource">;
-type UnplacedFlowNode = Node<UnplacedData, "unplaced">;
-type CanvasNode = ResourceFlowNode | UnplacedFlowNode;
+type CanvasPlacement = ReturnType<typeof canvasPlacement>;
+type CanvasDraft = Record<string, CanvasPlacement>;
+type ConfigurationDrafts = Record<string, ServiceConfigurationDraft>;
 type DraftReview = {
   preview: TopologyPreview;
   validation: TopologyValidation;
   diff: TopologyDiff;
-  idempotencyKey: string;
   topologyRevision: number;
   topologyStateHash: string;
+  idempotencyKey: string;
 };
 type ConfigurationReview = {
   serviceID: string;
@@ -86,17 +74,30 @@ type ConfigurationReview = {
   diff: ServiceConfigurationDiff;
   idempotencyKey: string;
 };
-type ConfigurationDrafts = Record<string, ServiceConfigurationDraft>;
+
+type ResourceFlowNode = Node<
+  {
+    canvasTarget?: string;
+    deployment?: DeploymentJob;
+    mode?: "design" | "live";
+    onPointerDown?: (e: React.PointerEvent | React.MouseEvent) => void;
+    onSelect?: () => void;
+    presentation: ReturnType<typeof topologyResourcePresentation>;
+    serviceKey?: string;
+  },
+  "resource"
+>;
+type UnplacedFlowNode = Node<{ count: number; onSelect?: () => void }, "unplaced">;
+type CanvasNode = ResourceFlowNode | UnplacedFlowNode;
 type SelectedDependency = {
   sourceID: string;
   logicalName: string;
-  dependency?: ApplicationDependency;
+  dependency: ApplicationDependency;
+  status: string;
   isManaged: boolean;
-  hasBinding: boolean;
-  isLegacy?: boolean;
-  targetID?: string;
-  status?: string;
+  hasBinding?: boolean;
 };
+
 type PlacementResource = {
   id: string;
   key: string;
@@ -110,7 +111,7 @@ type PlacementResource = {
   memoryBytes?: number;
 };
 
-function CustomConnectionEdge({
+const CustomConnectionEdge = memo(function CustomConnectionEdge({
   id,
   label,
   selected,
@@ -132,7 +133,7 @@ function CustomConnectionEdge({
   });
   return (
     <>
-      <BaseEdge id={id} path={edgePath} style={style} />
+      <BaseEdge id={id} interactionWidth={30} path={edgePath} style={style} />
       {label ? (
         <EdgeLabelRenderer>
           <div
@@ -140,11 +141,12 @@ function CustomConnectionEdge({
             style={{
               position: "absolute",
               transform: "translate(-50%, -50%) translate(" + labelX + "px," + labelY + "px)",
-              pointerEvents: "all",
+              pointerEvents: "none",
               zIndex: 1000,
             }}
           >
             <span
+              data-edge-id={id}
               style={{
                 background: "var(--opsi-surface-lowest)",
                 border: selected
@@ -158,6 +160,7 @@ function CustomConnectionEdge({
                 color: "var(--opsi-on-surface)",
                 whiteSpace: "nowrap",
                 display: "inline-block",
+                pointerEvents: "none",
               }}
             >
               {label}
@@ -167,9 +170,9 @@ function CustomConnectionEdge({
       ) : null}
     </>
   );
-}
+});
 
-function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
+const TopologyResourceNode = memo(function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
   const { canvasTarget, mode, onPointerDown, onSelect, presentation, serviceKey } = data;
   const isServer = presentation.kind === "server";
   const isManaged = presentation.kind === "managed-service";
@@ -185,13 +188,13 @@ function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
       data-draft-state={mode === "live" ? undefined : presentation.draftState}
       data-service-key={serviceKey}
       onClick={onSelect}
-      onKeyDown={(e) => selectKeyDown(e, onSelect)}
-      onKeyUp={(e) => selectKeyUp(e, onSelect)}
+      onKeyDown={(e) => onSelect && selectKeyDown(e, onSelect)}
+      onKeyUp={(e) => onSelect && selectKeyUp(e, onSelect)}
       onPointerDown={onPointerDown}
       role="button"
       tabIndex={0}
     >
-      <Handle type="target" position={Position.Left} style={{ background: "var(--opsi-primary)" }} />
+      <Handle id={topologyHandleIDs.target} type="target" position={Position.Left} style={{ background: "var(--opsi-primary)" }} />
       <div className="nodeHeader">
         <div className="min-w-0">
           <span className="nodeKind">{presentation.kind.replace("_", " ")}</span>
@@ -213,12 +216,12 @@ function TopologyResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
       ) : null}
 
       {presentation.notice ? <p className="nodeNotice">{presentation.notice}</p> : null}
-      <Handle type="source" position={Position.Right} style={{ background: "var(--opsi-primary)" }} />
+      <Handle id={topologyHandleIDs.source} type="source" position={Position.Right} style={{ background: "var(--opsi-primary)" }} />
     </div>
   );
-}
+});
 
-function UnplacedGroup({ data, selected }: NodeProps<UnplacedFlowNode>) {
+const UnplacedGroup = memo(function UnplacedGroup({ data, selected }: NodeProps<UnplacedFlowNode>) {
   return (
     <div
       aria-label={`Unplaced applications, ${data.count} applications`}
@@ -226,8 +229,8 @@ function UnplacedGroup({ data, selected }: NodeProps<UnplacedFlowNode>) {
       className={"unplacedGroup " + (selected ? "selected" : "")}
       data-canvas-target="unplaced"
       onClick={data.onSelect}
-      onKeyDown={(e) => selectKeyDown(e, data.onSelect)}
-      onKeyUp={(e) => selectKeyUp(e, data.onSelect)}
+      onKeyDown={(e) => data.onSelect && selectKeyDown(e, data.onSelect)}
+      onKeyUp={(e) => data.onSelect && selectKeyUp(e, data.onSelect)}
       role="button"
       tabIndex={0}
     >
@@ -238,7 +241,7 @@ function UnplacedGroup({ data, selected }: NodeProps<UnplacedFlowNode>) {
       <p className="groupHint">Drag resources here to unassign them from servers.</p>
     </div>
   );
-}
+});
 
 const nodeTypes = { resource: TopologyResourceNode, unplaced: UnplacedGroup } satisfies NodeTypes;
 const edgeTypes = { default: CustomConnectionEdge } satisfies EdgeTypes;
@@ -294,11 +297,16 @@ export function TopologyDesignCanvas({
   }, [onUnpublishedChanges, unpublishedCount]);
   useEffect(() => () => onUnpublishedChanges(0), [onUnpublishedChanges]);
 
-  const select = (id: string) => {
+  const navigateRef = useRef(console.navigate);
+  useEffect(() => {
+    navigateRef.current = console.navigate;
+  }, [console.navigate]);
+
+  const select = useCallback((id: string) => {
     setSelectedDependency(null);
-    console.navigate({ topology: id });
+    navigateRef.current({ topology: id });
     window.requestAnimationFrame(() => document.getElementById("topology-inspector-heading")?.focus());
-  };
+  }, []);
 
   const draftRef = useRef(draft);
   useEffect(() => {
@@ -409,21 +417,24 @@ export function TopologyDesignCanvas({
     };
   });
 
-  const placements = new Map([
-    ...facts.services.map((service) => [service.key, canvasPlacement(topology, draft, service.key)] as const),
-    ...(facts.resources ?? [])
-      .filter((resource) => resource.kind === "managed_service")
-      .map((resource) => [resource.id, canvasPlacement(topology, draft, resource.id)] as const),
-  ]);
-  const nodes = buildNodes(console, facts, topology, draft, placements, selectedID, select);
-  const edges = buildConnectionEdges(console.state.services, configurationDrafts);
-  const canvasKey = "" + (topology?.revision ?? 0) + ":" + (topology?.state_hash ?? "none") + ":" + nodes
-    .map((node) =>
-      node.type === "resource"
-        ? node.id + ":" + (node.parentId ?? "root") + ":" + node.data.presentation.status + ":" + (node.data.presentation.draftState ?? "factual")
-        : node.id + ":" + node.data.count
-    )
-    .join("|") + ":" + edges.map((e) => e.id + ":" + e.label).join("|");
+  const placements = useMemo(
+    () =>
+      new Map([
+        ...facts.services.map((service) => [service.key, canvasPlacement(topology, draft, service.key)] as const),
+        ...(facts.resources ?? [])
+          .filter((resource) => resource.kind === "managed_service")
+          .map((resource) => [resource.id, canvasPlacement(topology, draft, resource.id)] as const),
+      ]),
+    [facts.resources, facts.services, topology, draft]
+  );
+  const nodes = useMemo(
+    () => buildNodes(console.state.services, console.state.nodes, facts, topology, draft, placements, selectedID, select),
+    [console.state.services, console.state.nodes, facts, topology, draft, placements, selectedID, select]
+  );
+  const edges = useMemo(
+    () => buildConnectionEdges(console.state.services, configurationDrafts, selectedID),
+    [console.state.services, configurationDrafts, selectedID]
+  );
 
   const selectedService = selectedID.startsWith("service:")
     ? facts.services.find((service) => service.key === selectedID.slice(8))
@@ -504,14 +515,13 @@ export function TopologyDesignCanvas({
         },
         reviewed.idempotencyKey
       );
+      await console.actions.load();
       setConfigurationDrafts((current) => {
         const next = { ...current };
         delete next[service.id];
         return next;
       });
       setConfigurationReview(null);
-      await console.actions.load();
-      await onReload();
       setMessage(`Service configuration applied for ${service.name}.`);
     } catch (error) {
       setMessage((error as Error).message);
@@ -692,7 +702,6 @@ export function TopologyDesignCanvas({
           <CanvasFlow
             edges={edges}
             facts={facts}
-            key={canvasKey}
             nodes={nodes}
             onConnect={connectApplications}
             onEdgeSelect={selectEdge}
@@ -1121,8 +1130,6 @@ function CanvasFlow({
       edgeTypes={edgeTypes}
       edges={edges}
       elementsSelectable
-      fitView
-      fitViewOptions={{ padding: 0.08 }}
       maxZoom={1.25}
       minZoom={0.65}
       nodeTypes={nodeTypes}
@@ -1134,6 +1141,7 @@ function CanvasFlow({
       onEdgesDelete={(removed) => removed.forEach(onRemoveEdge)}
       onInit={(flow) => {
         instance.current = flow;
+        flow.fitView({ padding: 0.08 });
       }}
       panOnDrag={[1, 2]}
     >
@@ -1143,7 +1151,8 @@ function CanvasFlow({
 }
 
 function buildNodes(
-  console: ConsoleController,
+  services: ServiceRecord[],
+  nodeRecords: Array<{ id: string; public_host?: string }>,
   facts: PlacementFacts,
   topology: TopologyPlan | null,
   draft: CanvasDraft,
@@ -1159,7 +1168,7 @@ function buildNodes(
   );
   const resources: PlacementResource[] = [
     ...facts.services.map((service) => {
-      const svc = console.state.services.find((item) => item.id === service.id || item.name === service.key);
+      const svc = services.find((item) => item.id === service.id || item.name === service.key);
       return {
         id: service.id,
         key: service.key,
@@ -1198,24 +1207,31 @@ function buildNodes(
     );
   const maxItems = Math.max(1, ...groupServices.values().map((services) => services.length));
   const groupHeight = Math.max(300, 150 + maxItems * appHeight);
+  const unplacedCount = groupServices.get("unplaced")?.length ?? 0;
   groups.push({
     id: "unplaced",
     type: "unplaced",
     position: { x: 24, y: 24 },
-    data: { count: groupServices.get("unplaced")?.length ?? 0, onSelect: () => select("unplaced") },
+    width: groupWidth,
+    height: groupHeight,
+    initialWidth: groupWidth,
+    initialHeight: groupHeight,
+    measured: { width: groupWidth, height: groupHeight },
+    data: { count: unplacedCount, onSelect: () => select("unplaced") },
     draggable: false,
     focusable: false,
     selected: selectedID === "unplaced",
     style: { width: groupWidth, height: groupHeight },
     zIndex: 0,
   });
+
   facts.runtimes.forEach((runtime, index) => {
     const factualNodes = facts.nodes.filter((node) => node.runtime_id === runtime.id);
     const agents = facts.agents.filter((agent) => agent.runtime_id === runtime.id);
     const assigned = groupServices.get(runtime.id) ?? [];
     const node = factualNodes[0];
     const agent = agents.find((item) => item.status === "active") ?? agents[0];
-    const record = console.state.nodes.find((item) => item.id === node?.id);
+    const record = nodeRecords.find((item) => item.id === node?.id);
     const status = serverStatus(factualNodes, agents, runtime.status);
     const id = "runtime:" + runtime.id;
     const presentation = topologyResourcePresentation({
@@ -1231,10 +1247,20 @@ function buildNodes(
         { label: "Agent", value: agent?.status ?? "Active" },
       ],
     });
+    const posX = 24 + (index + 1) * (groupWidth + 28);
     groups.push({
       id,
       type: "resource",
-      position: { x: 24 + (index + 1) * (groupWidth + 28), y: 24 },
+      position: { x: posX, y: 24 },
+      width: groupWidth,
+      height: groupHeight,
+      initialWidth: groupWidth,
+      initialHeight: groupHeight,
+      measured: { width: groupWidth, height: groupHeight },
+      handles: [
+        { id: "target", type: "target", position: Position.Left, x: 0, y: Math.floor(groupHeight / 2) - 6, width: 12, height: 12 },
+        { id: "source", type: "source", position: Position.Right, x: groupWidth - 12, y: Math.floor(groupHeight / 2) - 6, width: 12, height: 12 },
+      ],
       data: { canvasTarget: id, onSelect: () => select(id), presentation },
       draggable: false,
       focusable: false,
@@ -1243,17 +1269,18 @@ function buildNodes(
       zIndex: 0,
     });
   });
-  for (const [parent, services] of groupServices) {
+
+  for (const [parent, servicesList] of groupServices) {
     const parentIndex = parent === "unplaced" ? -1 : facts.runtimes.findIndex((r) => r.id === parent);
     const parentX = 24 + (parentIndex + 1) * (groupWidth + 28);
     const parentY = 24;
-    services.forEach((service, index) => {
+    servicesList.forEach((service, index) => {
       const placement = placements.get(service.key) ?? { runtime_id: null };
       const runtime = facts.runtimes.find((item) => item.id === placement.runtime_id);
       const sourceKind =
         service.kind === "managed_service"
           ? "managed_service"
-          : console.state.services.find((item) => item.id === service.id || item.name === service.key)?.type ||
+          : services.find((item) => item.id === service.id || item.name === service.key)?.type ||
             "application";
       const status = canvasDraftStatus(topology, draft, service.key);
       const id = service.kind === "managed_service" ? "resource:" + service.key : "service:" + service.key;
@@ -1282,10 +1309,24 @@ function buildNodes(
                 { label: "Memory", value: mib(placement.memory_request_bytes ?? 128 * 1024 * 1024) + " MiB" },
               ],
       });
+      const posX = parentX + 20;
+      const posY = parentY + 136 + index * appHeight;
+      const nodeHeight = issues ? 112 : 108;
+      const nodeWidth = groupWidth - 40;
+      const isSelected = selectedID === id;
       applications.push({
         id,
         type: "resource",
-        position: { x: parentX + 20, y: parentY + 136 + index * appHeight },
+        position: { x: posX, y: posY },
+        width: nodeWidth,
+        height: nodeHeight,
+        initialWidth: nodeWidth,
+        initialHeight: nodeHeight,
+        measured: { width: nodeWidth, height: nodeHeight },
+        handles: [
+          { id: "target", type: "target", position: Position.Left, x: 0, y: Math.floor(nodeHeight / 2) - 6, width: 12, height: 12 },
+          { id: "source", type: "source", position: Position.Right, x: nodeWidth - 12, y: Math.floor(nodeHeight / 2) - 6, width: 12, height: 12 },
+        ],
         data: {
           onPointerDown: onPointerDown ? (e) => onPointerDown(service.key, e) : undefined,
           onSelect: () => select(id),
@@ -1294,8 +1335,8 @@ function buildNodes(
         },
         draggable: presentation.capabilities.movable,
         focusable: false,
-        selected: selectedID === id,
-        style: { width: groupWidth - 40, height: issues ? 112 : 108 },
+        selected: isSelected,
+        style: { width: nodeWidth, height: nodeHeight },
         zIndex: 1,
       });
     });
@@ -1305,7 +1346,8 @@ function buildNodes(
 
 function buildConnectionEdges(
   services: ServiceRecord[],
-  drafts: ConfigurationDrafts = {}
+  drafts: ConfigurationDrafts = {},
+  selectedID = ""
 ): Edge[] {
   const edges: Edge[] = [];
 
@@ -1321,16 +1363,26 @@ function buildConnectionEdges(
       const target = services.find((service) => service.id === binding?.target_service_id || service.name === binding?.target_service_key);
       if (!binding || !target) continue;
       const status = !before ? "pending add" : !after ? "pending removal" : sameBinding(before, after) ? "applied" : "pending change";
+      const edgeId = applicationConnectionEdgeID(source.id, key);
+      const label = `${binding.kind === "internal_http" ? "Internal" : "Browser"} · ${status}`;
+      const animated = status === "pending add" || status === "pending change";
+      const stroke = status === "pending removal" ? "var(--color-error)" : status === "applied" ? "var(--color-status-ready)" : "var(--color-status-warning)";
+      const strokeDasharray = status === "pending removal" ? "6 5" : undefined;
+      const sourceNodeId = applicationTopologyNodeID(source.name);
+      const targetNodeId = applicationTopologyNodeID(target.name);
       edges.push({
-        id: `connection:${source.id}:${key}`,
-        source: `service:${source.name}`,
-        target: `service:${target.name}`,
-        label: `${binding.kind === "internal_http" ? "Internal" : "Browser"} · ${status}`,
+        id: edgeId,
+        source: sourceNodeId,
+        target: targetNodeId,
+        sourceHandle: topologyHandleIDs.source,
+        targetHandle: topologyHandleIDs.target,
+        label,
+        selected: selectedID === edgeId,
         data: { connectionKey: key, status, sourceID: source.id, targetID: target.id },
-        animated: status === "pending add" || status === "pending change",
+        animated,
         style: {
-          stroke: status === "pending removal" ? "var(--color-error)" : status === "applied" ? "var(--color-status-ready)" : "var(--color-status-warning)",
-          strokeDasharray: status === "pending removal" ? "6 5" : undefined,
+          stroke,
+          strokeDasharray,
           strokeWidth: 2,
         },
         labelStyle: { fill: "var(--color-on-surface)", fontSize: 11, fontWeight: 700 },
@@ -1353,12 +1405,18 @@ function buildConnectionEdges(
             dep.protocol === "postgres"
               ? "PostgreSQL · " + dep.logical_name
               : "Valkey · " + dep.logical_name;
-
+          const depEdgeId = dependencyTopologyEdgeID(source.id, dep.logical_name);
+          const stroke = isBound ? "var(--color-status-ready)" : "var(--color-status-warning)";
+          const strokeDasharray = isBound ? undefined : "6 4";
+          const sourceNodeId = "service:" + source.name;
           edges.push({
-            id: "dep:" + source.id + ":" + dep.logical_name,
-            source: "service:" + source.name,
+            id: depEdgeId,
+            source: sourceNodeId,
             target: targetNodeId,
+            sourceHandle: "source",
+            targetHandle: "target",
             label: label + " · " + status,
+            selected: selectedID === depEdgeId,
             data: {
               sourceID: source.id,
               logicalName: dep.logical_name,
@@ -1369,8 +1427,8 @@ function buildConnectionEdges(
             },
             animated: !isBound,
             style: {
-              stroke: isBound ? "var(--color-status-ready)" : "var(--color-status-warning)",
-              strokeDasharray: isBound ? undefined : "6 4",
+              stroke,
+              strokeDasharray,
               strokeWidth: 2,
             },
             labelStyle: { fill: "var(--color-on-surface)", fontSize: 11, fontWeight: 700 },
@@ -1384,12 +1442,17 @@ function buildConnectionEdges(
                 : dep.strategy === "internal_http"
                 ? "Internal HTTP"
                 : "Public HTTP";
-
+            const depEdgeId = dependencyTopologyEdgeID(source.id, dep.logical_name);
+            const sourceNodeId = "service:" + source.name;
+            const targetNodeId = "service:" + target.name;
             edges.push({
-              id: "dep:" + source.id + ":" + dep.logical_name,
-              source: "service:" + source.name,
-              target: "service:" + target.name,
+              id: depEdgeId,
+              source: sourceNodeId,
+              target: targetNodeId,
+              sourceHandle: "source",
+              targetHandle: "target",
               label: "HTTP · " + label,
+              selected: selectedID === depEdgeId,
               data: {
                 sourceID: source.id,
                 logicalName: dep.logical_name,

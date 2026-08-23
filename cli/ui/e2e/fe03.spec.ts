@@ -151,6 +151,7 @@ test("Application edges review internal and same-origin browser HTTP without cre
 	await page.getByRole("button", { name: "Apply service configuration" }).click();
 	await expect(page.getByText("0 unpublished changes", { exact: true })).toBeVisible();
 	await expect(page.getByText("Service configuration applied for api.", { exact: true })).toBeVisible();
+	await expectAppliedApplicationGraph(page);
 	expect(data.deployments).toHaveLength(1);
 
 	await page.locator(".react-flow__edge").first().click({ force: true });
@@ -160,13 +161,41 @@ test("Application edges review internal and same-origin browser HTTP without cre
 	await page.getByRole("button", { name: "Review connection" }).click();
 	await page.getByRole("button", { name: "Apply service configuration" }).click();
 	await expect(page.getByText("Service configuration applied for api.", { exact: true })).toBeVisible();
+	await expectAppliedApplicationGraph(page);
 	const appliedDraft = (applyBodies.at(-1)?.draft ?? {}) as { bindings?: Array<Record<string, unknown>> };
 	expect(appliedDraft.bindings?.[0]).toMatchObject({ kind: "browser_http", path: "/api", env_name: "WORKER_BASE_URL" });
 	expect(data.deployments).toHaveLength(1);
 
 	await page.locator(".react-flow__edge").first().click({ force: true });
+	await page.getByLabel("Runtime intent").selectOption("internal_http");
+	await page.getByRole("button", { name: "Review connection" }).click();
+	await page.getByRole("button", { name: "Apply service configuration" }).click();
+	await expect(page.getByText("Service configuration applied for api.", { exact: true })).toBeVisible();
+	await expectAppliedApplicationGraph(page);
+	const thirdAppliedDraft = (applyBodies.at(-1)?.draft ?? {}) as { bindings?: Array<Record<string, unknown>> };
+	expect(thirdAppliedDraft.bindings?.[0]).toMatchObject({ kind: "internal_http", env_prefix: "WORKER" });
+
+	await page.locator(".react-flow__edge").first().click({ force: true });
 	await page.getByRole("button", { name: "Remove connection" }).click();
-	await expect(page.getByText("Browser · pending removal", { exact: true })).toBeVisible();
+	await expect(page.getByText("Internal · pending removal", { exact: true })).toBeVisible();
+});
+
+test("Design retains the applied application edge through twenty Live mode switches", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  const data = fixture();
+  await page.route("**/api/local/**", (route) => respondWithData(route, data, "proj-1"));
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await connectApplications(page, /Application api, Assigned, unchanged/, /Application worker, Assigned, unchanged/);
+  await page.getByRole("button", { name: "Review connection" }).click();
+  await page.getByRole("button", { name: "Apply service configuration" }).click();
+  await expectAppliedApplicationGraph(page);
+
+  for (let switchCount = 0; switchCount < 20; switchCount += 1) {
+    await page.getByRole("button", { name: "Live", exact: true }).click();
+    await expect(page.getByLabel("Read-only factual topology canvas")).toBeVisible();
+    await page.getByRole("button", { name: "Design", exact: true }).click();
+    await expectAppliedApplicationGraph(page);
+  }
 });
 
 test("Design draft clears when the project changes", async ({ page }) => {
@@ -550,6 +579,55 @@ test("FE-03 visual acceptance screenshots and overflow", async ({ page }) => {
   await page.screenshot({ fullPage: true, path: "../../.tmp/ui-fe03/observability-mobile-390x844.png" });
 });
 
+test("FE-03 captures reconciled graph states after authoritative configuration applies", async ({ page }) => {
+  await page.unroute("**/api/local/**");
+  const data = fixture();
+  (data.facts as Record<string, unknown>).resources = [{
+    id: "postgres",
+    kind: "managed_service",
+    type: "postgres",
+    lifecycle: "ready",
+    name: "PostgreSQL",
+    version: "16",
+  }];
+  await page.route("**/api/local/**", (route) => respondWithData(route, data, "proj-1"));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?project=proj-1&view=infrastructure&tab=topology");
+  await expect(page.locator(".topologyFlow")).toBeVisible();
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/design-1440x900.png" });
+
+  await page.getByRole("button", { name: /Application api, Assigned, unchanged/ }).click();
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/application-selected-1440x900.png" });
+  await page.getByRole("button", { name: /Server Primary runtime, Ready, Agent active/ }).click();
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/server-selected-1440x900.png" });
+  await page.locator('[data-resource-kind="managed-service"]').click();
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/managed-resource-selected-1440x900.png" });
+
+  await connectApplications(page, /Application api, Assigned, unchanged/, /Application worker, Assigned, unchanged/);
+  await page.getByRole("button", { name: "Review connection" }).click();
+  await page.getByRole("button", { name: "Apply service configuration" }).click();
+  await expectAppliedApplicationGraph(page, 7);
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/design-after-apply-1-1440x900.png" });
+
+  await page.locator('.react-flow__edge[data-id="connection:api:worker"]').click({ force: true });
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/edge-selected-1440x900.png" });
+  await page.getByLabel("Runtime intent").selectOption("browser_http");
+  await page.getByRole("button", { name: "Review connection" }).click();
+  await page.getByRole("button", { name: "Apply service configuration" }).click();
+  await expectAppliedApplicationGraph(page, 7);
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/design-after-apply-2-1440x900.png" });
+
+  await page.getByRole("button", { name: "Live", exact: true }).click();
+  await expect(page.getByLabel("Read-only factual topology canvas")).toBeVisible();
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/live-1440x900.png" });
+
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.getByRole("button", { name: "Design", exact: true }).click();
+  await expectAppliedApplicationGraph(page, 7);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ fullPage: true, path: "../../.tmp/ui-rf03/design-1024x768.png" });
+});
+
 type OnboardingScenario = "base" | "connect" | "bootstrap" | "failed" | "application" | "placement" | "review";
 
 async function respond(route: Route, scenario: OnboardingScenario = "base") {
@@ -709,4 +787,10 @@ async function connectApplications(page: Page, sourceName: RegExp, targetName: R
 	await page.mouse.down();
 	await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 12 });
 	await page.mouse.up();
+}
+
+async function expectAppliedApplicationGraph(page: Page, expectedNodeCount = 6) {
+  await expect(page.locator(".react-flow__node")).toHaveCount(expectedNodeCount);
+  await expect(page.locator('.react-flow__edge[data-id="connection:api:worker"]')).toHaveCount(1);
+  await expect(page.locator('[data-edge-id="connection:api:worker"]')).toBeVisible();
 }
