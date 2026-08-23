@@ -39,6 +39,7 @@ func (s *Server) registerHandlers() map[string]ToolHandler {
 		"source_search":                   s.handleSourceSearch,
 		"dependency_analysis_context":     s.handleDependencyAnalysisContext,
 		"validate_dependency_proposal":    s.handleValidateDependencyProposal,
+		"validate_source_patch_proposal":  s.handleValidateSourcePatchProposal,
 	}
 }
 

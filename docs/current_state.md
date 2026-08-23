@@ -1093,10 +1093,10 @@ are not claimed.
 
 Application Dependency Contract foundation implemented.
 
-## MCP-01 + MCP-02 Read-Only Context and Proposal Surface
+## MCP-01 + MCP-02 + MCP-03 Read-Only Context and Proposal Surface
 
 The MCP capability (`opsi mcp` / `opsi mcp serve`) is implemented at the local Opsi Edge boundary:
-- Read-only protocol supporting 20 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), exact commit-bound source file listing, reading, and literal searching, plus bounded dependency analysis context and advisory dependency-proposal validation.
+- Read-only protocol supporting 21 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), exact commit-bound source file listing, reading, and literal searching, plus bounded dependency analysis context, advisory dependency-proposal validation, and exact-source patch-proposal validation.
 - Strict security constraints: zero domain mutations exposed, zero secret credentials exposed (regex redaction for URI credentials, bearer tokens, private keys, and passwords), path traversal protection against `..` or escaping `ApplicationRoot`, binary file classification, size-bounded reading (max 256 KiB), bounded search (max 50 matches), and exact commit provenance (returns `SOURCE_SNAPSHOT_UNAVAILABLE` rather than falling back to uncommitted working trees).
 - Transports: stdio JSON-RPC 2.0 (default) with stderr diagnostic logging, and local loopback HTTP (`127.0.0.1` / `localhost`).
 
@@ -1110,3 +1110,13 @@ remains independent and authoritative. No MCP tool can apply a dependency,
 realize a binding, create a resource, build, deploy, acknowledge warnings,
 trigger verification, patch source, access secrets, execute a shell, or fetch an
 arbitrary URL.
+
+MCP-03 keeps source-patch reasoning external. `validate_source_patch_proposal`
+accepts only typed, exact BuildRecord/commit/ApplicationRoot/blob-bound edits to
+existing text files and validates constrained unified diffs through an
+in-memory virtual apply. It returns `action=NONE` and structural status only;
+it never writes source, invokes `git apply`, stages/commits, executes source or
+tests, builds, deploys, or persists a proposal. Path, generated/binary, exact
+preimage, bounded-size, secret-literal, dependency-proposal staleness, and
+prompt-injection boundaries fail closed. A valid patch explicitly states that a
+new BuildRecord is required if a human later applies it.

@@ -1,10 +1,10 @@
-# Opsi MCP-01 + MCP-02: Read-Only Model Context Protocol Surface
+# Opsi MCP-01 + MCP-02 + MCP-03: Read-Only Model Context Protocol Surface
 
 ## Overview
 
 Opsi Model Context Protocol (MCP) server provides AI agents and external tools with a safe, read-only window into Opsi project topology, source snapshots, deployment preflight evaluations, and 5-layer dependency verifications.
 
-MCP-01 and MCP-02 are strictly **non-operational**. They introduce zero mutations into the Opsi control plane or running environments.
+MCP-01, MCP-02, and MCP-03 are strictly **non-operational**. They introduce zero mutations into the Opsi control plane or running environments.
 
 MCP-02 adds an advisory dependency-proposal boundary. Opsi provides bounded,
 exact-source-bound facts and deterministically validates a typed candidate with
@@ -12,6 +12,12 @@ the same Cloud-side ADC validation and diff authority used by manual review.
 An external MCP-capable AI client performs any reasoning; Opsi does not invoke
 or configure an LLM. Proposals are client-side, non-authoritative, and are not
 persisted.
+
+MCP-03 adds the same bounded advisory boundary for source patches. An external
+client reasons over MCP-01 facts and optional MCP-02 intent, then submits a
+typed exact-source patch candidate. Opsi validates provenance, Git blob
+preimages, constrained unified diff syntax, and a virtual in-memory apply. A
+patch is never written, applied, committed, compiled, or tested by MCP.
 
 ---
 
@@ -50,7 +56,7 @@ The MCP server runs at the **local Opsi Edge boundary** (the CLI on the operator
 
 ### Security & Isolation Principles
 - **Local Boundary**: MCP clients never receive raw Cloud PATs, Agent TLS certificates, kubeconfigs, or database passwords.
-- **Zero Domain Mutations**: MCP-01 exposes 0 mutation tools. There are no tools to create, update, delete, apply, deploy, build, rotate secrets, acknowledge preflight warnings, or trigger verifications.
+- **Zero Domain Mutations**: MCP exposes 0 mutation tools. There are no tools to create, update, delete, apply, deploy, build, rotate secrets, acknowledge preflight warnings, or trigger verifications.
 - **Exact Source Provenance**: Source file listing, reading, and searching require an explicit or resolved immutable Git commit SHA. If the exact commit is unavailable, the server returns `SOURCE_SNAPSHOT_UNAVAILABLE` rather than falling back to uncommitted local working trees.
 - **Strict Secret Redaction**: All source reads, search snippets, and evidence outputs pass through regex scanners that redact URI credentials (`postgres://user:[REDACTED]@host`), tokens, and private keys.
 - **Path Traversal Protection**: Any path containing `..`, absolute paths, null bytes, or escaping `ApplicationRoot` is strictly rejected with `SOURCE_PATH_INVALID`.
@@ -77,7 +83,7 @@ opsi mcp serve --addr 127.0.0.1:9781
 
 ---
 
-## Available Read-Only Tools (20)
+## Available Read-Only Tools (21)
 
 | Tool Name | Scope / Purpose | Key Safeguards & Bounds |
 | :--- | :--- | :--- |
@@ -101,6 +107,7 @@ opsi mcp serve --addr 127.0.0.1:9781
 | `source_search` | Deterministic literal text search at an exact commit SHA. | Max 50 matches, credential redaction in snippets, bounded scan. |
 | `dependency_analysis_context` | Bounded facts for external dependency analysis for one application/environment. | Current immutable BuildRecord commit, `ApplicationRoot`, configuration/dependency/topology hashes, compatible targets, bounded risk/verification facts; no source dump or secrets. |
 | `validate_dependency_proposal` | Validate an external typed dependency proposal. | Always `action: NONE`; detects stale provenance; reuses canonical ADC validation/diff endpoints; never applies, persists, builds, deploys, or realizes. |
+| `validate_source_patch_proposal` | Validate an external typed exact-source patch proposal. | Always `action: NONE`; max 8 files, 32 hunks, 128 KiB, and 1000 changed lines; exact blob preimage and virtual apply only; never writes, applies, persists, builds, or tests. |
 
 ### MCP-02 proposal lifecycle
 
@@ -126,6 +133,33 @@ managed-resource creation, build, deployment, warning acknowledgement,
 verification trigger, source patching, shell execution, arbitrary HTTP, secret
 access, or a model-provider integration.
 
+### MCP-03 source patch lifecycle
+
+```
+MCP-01 source facts + optional MCP-02 intent -> external AI reasoning -> typed patch -> deterministic virtual validation
+```
+
+Each patch binds to the current exact `BuildRecord`, source commit,
+`ApplicationRoot`, current analysis-inputs hash, and canonical Git blob ID for
+every modified file. If a referenced MCP-02 proposal is relevant, its proposal
+hash and analysis hash are bound too. Changed source, blobs, or relevant
+configuration causes `STALE`; unrelated project state does not.
+
+Only existing UTF-8 text files inside `ApplicationRoot` may be modified. The
+validator rejects traversal, `.git`, cross-application paths, symlink/mode,
+rename, create/delete, binary, generated/vendor output, malformed diffs,
+oversized patches, and credential-like added literals. Hunk context must match
+the immutable preimage at its declared line exactly—there is no fuzzy rebase.
+Added lines, rationale, evidence, and previews are secret-scanned/redacted.
+
+Results are `VALID`, `VALID_WITH_WARNINGS`, `INVALID`, `STALE`, or
+`NO_SOURCE_CHANGE_PROPOSED`; all include `action: NONE`. Validity is structural
+only: `PATCH_HAS_NOT_BEEN_COMPILED_OR_EXECUTED` remains explicit. A patch that
+uses an un-applied MCP-02 mapping returns
+`DEPENDS_ON_UNAPPLIED_DEPENDENCY_PROPOSAL`; a configuration-only alternative is
+reported rather than hidden. Source and proposal prompt-injection text is data
+only and cannot expand MCP capabilities.
+
 ---
 
 ## Standard Error Codes
@@ -138,4 +172,8 @@ access, or a model-provider integration.
 - `SOURCE_PATH_INVALID`: The requested file path is invalid, absolute, contains `..`, or escapes `ApplicationRoot`.
 - `SOURCE_BINARY_UNSUPPORTED`: The requested file is binary and cannot be returned as text.
 - `INVALID_ARGUMENT`: A required parameter was missing or malformed.
+- `PATCH_MALFORMED`: The constrained unified diff is malformed or requests an unsupported patch operation.
+- `PATCH_PREIMAGE_MISMATCH`: An exact hunk or declared base blob no longer matches immutable source; the result is `STALE`.
+- `SECRET_LITERAL_INTRODUCED`: Rationale, evidence, or an added line contains a credential-like literal.
+- `PATCH_TARGET_GENERATED`: The patch targets generated, vendor, or build output.
 - `AUTHORITY_UNAVAILABLE`: The underlying Cloud or local authority returned an unexpected error.

@@ -132,6 +132,8 @@ func TestSourceService_ReadFile_PathTraversalProtection(t *testing.T) {
 		"../outside.txt",
 		"../../etc/passwd",
 		"/etc/passwd",
+		`C:\\outside.txt`,
+		`..\\outside.txt`,
 		"src/../../outside.txt",
 		"..",
 		".",

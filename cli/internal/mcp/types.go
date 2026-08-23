@@ -8,7 +8,7 @@ import (
 const (
 	ProtocolVersion = "2024-11-05"
 	ServerName      = "opsi-mcp"
-	SurfaceVersion  = "mcp-02"
+	SurfaceVersion  = "mcp-03"
 )
 
 // Standard JSON-RPC 2.0 error codes
@@ -34,6 +34,10 @@ const (
 	ErrCodeAuthorityUnavailable      = "AUTHORITY_UNAVAILABLE"
 	ErrCodeInvalidArgument           = "INVALID_ARGUMENT"
 	ErrCodeProposalStale             = "PROPOSAL_STALE"
+	ErrCodePatchMalformed            = "PATCH_MALFORMED"
+	ErrCodePatchPreimageMismatch     = "PATCH_PREIMAGE_MISMATCH"
+	ErrCodeSecretLiteralIntroduced   = "SECRET_LITERAL_INTRODUCED"
+	ErrCodePatchTargetGenerated      = "PATCH_TARGET_GENERATED"
 )
 
 type JSONRPCRequest struct {
@@ -248,6 +252,81 @@ type DependencySemanticChange struct {
 	Name   string `json:"name"`
 	Before string `json:"before,omitempty"`
 	After  string `json:"after,omitempty"`
+}
+
+// SourcePatchProposal is an external, transport-only patch candidate. It is
+// never persisted and cannot authorize a write, build, deployment, or apply.
+type SourcePatchProposal struct {
+	ProjectID     string                    `json:"project_id"`
+	EnvironmentID string                    `json:"environment_id"`
+	ApplicationID string                    `json:"application_id"`
+	Provenance    SourcePatchProvenance     `json:"provenance"`
+	Rationale     SourcePatchRationale      `json:"rationale"`
+	Files         []SourcePatchFile         `json:"files"`
+	Evidence      []SourcePatchEvidence     `json:"evidence"`
+	Impact        SourcePatchProposedImpact `json:"impact"`
+}
+
+type SourcePatchProvenance struct {
+	BuildRecordID                        string `json:"build_record_id"`
+	SourceCommit                         string `json:"source_commit"`
+	ApplicationRoot                      string `json:"application_root"`
+	AnalysisInputsHash                   string `json:"analysis_inputs_hash"`
+	DependencyProposalHash               string `json:"dependency_proposal_hash,omitempty"`
+	DependencyProposalAnalysisInputsHash string `json:"dependency_proposal_analysis_inputs_hash,omitempty"`
+}
+
+type SourcePatchRationale struct {
+	ObservedSource string `json:"observed_source"`
+	OpsiFacts      string `json:"opsi_facts"`
+	Inference      string `json:"inference"`
+}
+
+type SourcePatchFile struct {
+	Path        string `json:"path"`
+	BaseBlobSHA string `json:"base_blob_sha"`
+	UnifiedDiff string `json:"unified_diff"`
+}
+
+type SourcePatchEvidence struct {
+	Type        string `json:"type"`
+	File        string `json:"file"`
+	Line        int    `json:"line"`
+	SafeExcerpt string `json:"safe_excerpt,omitempty"`
+	Symbol      string `json:"symbol,omitempty"`
+	Reason      string `json:"reason"`
+}
+
+type SourcePatchProposedImpact struct {
+	AlternativeConfigurationOnlySolution bool `json:"alternative_configuration_only_solution,omitempty"`
+	DependsOnUnappliedDependencyProposal bool `json:"depends_on_unapplied_dependency_proposal,omitempty"`
+}
+
+type SourcePatchValidation struct {
+	Status                  string               `json:"status"`
+	Action                  string               `json:"action"`
+	PatchAnalysisInputsHash string               `json:"patch_analysis_inputs_hash"`
+	SourcePatchProposalHash string               `json:"source_patch_proposal_hash"`
+	StructuralValidation    string               `json:"structural_validation"`
+	ProvenanceValidation    string               `json:"provenance_validation"`
+	SecurityValidation      string               `json:"security_validation"`
+	DependencyAlignment     string               `json:"dependency_alignment"`
+	Impact                  []string             `json:"impact"`
+	Issues                  []SourcePatchIssue   `json:"issues,omitempty"`
+	Warnings                []SourcePatchIssue   `json:"warnings,omitempty"`
+	Preview                 []SourcePatchPreview `json:"preview,omitempty"`
+}
+
+type SourcePatchIssue struct {
+	Code    string `json:"code"`
+	Field   string `json:"field,omitempty"`
+	Message string `json:"message"`
+}
+
+type SourcePatchPreview struct {
+	Path         string `json:"path"`
+	ChangedLines int    `json:"changed_lines"`
+	UnifiedDiff  string `json:"unified_diff,omitempty"`
 }
 
 type CallToolParams struct {
