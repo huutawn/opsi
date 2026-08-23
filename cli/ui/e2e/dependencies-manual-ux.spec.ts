@@ -247,7 +247,7 @@ async function handleLocalAPI(route: Route, state: ReturnType<typeof fixtureData
   let body: unknown = {};
 
   if (path === "/api/local/session") {
-    body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: "proj-1" };
+    body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: "proj-1", role: "developer" };
   } else if (path === "/api/local/projects") {
     body = { projects: [state.project] };
   } else if (path.endsWith("/readiness")) {
@@ -681,4 +681,88 @@ test("Test N: Static Source Risk Warnings Scan Presentation", async ({ page }) =
   await expect(page.getByText("SOURCE_EMBEDDED_CREDENTIAL_SUSPECTED")).toBeVisible();
   await expect(page.getByText("[REDACTED]")).toBeVisible();
   await expect(page.getByText("src/db/database.go:14")).toBeVisible();
+});
+
+test("Proposal review persists a human rejection without configuration or delivery mutation", async ({ page }) => {
+  const state = fixtureData();
+  let created = 0;
+  let rejected = 0;
+  let applied = 0;
+  const review = {
+    id: "review-1", project_id: "proj-1", environment_id: "env-1", application_id: "srv-api", kind: "dependency",
+    status: "review_required", proposal_hash: hash("p"), analysis_inputs_hash: hash("i"), normalized_payload: {}, reviewed_payload_hash: hash("e"),
+    expected_configuration_revision: 1, expected_configuration_state_hash: hash("a"), created_by: "human-1", created_at: "2026-08-08T08:00:00Z", expires_at: "2026-08-09T08:00:00Z",
+  };
+  await page.route("**/api/local/**", (route) => handleLocalAPI(route, state, async (path, candidate) => {
+    if (path.endsWith("/services/srv-api/proposal-reviews") && candidate.request().method() === "POST") {
+      created++;
+      await candidate.fulfill({ json: review, status: 201 });
+      return true;
+    }
+    if (path.endsWith("/proposal-reviews/review-1/reject")) {
+      rejected++;
+      await candidate.fulfill({ json: { ...review, status: "rejected", rejected_by: "human-1", rejected_at: "2026-08-08T08:01:00Z" } });
+      return true;
+    }
+    if (path.endsWith("/proposal-reviews/review-1/apply")) {
+      applied++;
+      await candidate.fulfill({ json: review });
+      return true;
+    }
+    return false;
+  }));
+
+  const proposal = {
+    project_id: "proj-1", environment_id: "env-1", application_id: "srv-api",
+    provenance: { source_commit: hash("c").slice(0, 40), application_root: "api", analysis_inputs_hash: hash("i") },
+    candidate: { logical_name: "database", dependency_kind: "managed_service", target_id: "res-pg", protocol: "postgres", phase: "runtime", required: true, mappings: [{ env_name: "DATABASE_URL", symbolic_source: "connection.url" }] },
+    evidence: [{ type: "source", file: "main.go", line: 10, reason: "DATABASE_URL is read" }], confidence: "HIGH",
+  };
+  await page.goto("/?project=proj-1&view=services&service=srv-api&tab=dependencies");
+  await page.getByRole("button", { name: "Review proposal" }).click();
+  await page.getByLabel("Proposal review envelope").fill(JSON.stringify(proposal));
+  await page.getByRole("dialog", { name: "Review AI proposal" }).getByRole("button", { name: "Review proposal", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Review AI proposal" })).toBeVisible();
+  await expect(page.getByText("Human review")).toBeVisible();
+  await expect(page.getByText("Current → proposed")).toBeVisible();
+  await page.screenshot({ path: "../../.tmp/evidence/mcp04/20260823T121249Z/dependency-review.png" });
+  await page.getByRole("dialog", { name: "Review AI proposal" }).getByRole("button", { name: "Reject", exact: true }).click();
+  await expect(page.getByText("Dependency proposal rejected. No configuration, build, deployment, or verification state was changed.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply Dependency Change" })).toBeDisabled();
+  expect(created).toBe(1);
+  expect(rejected).toBe(1);
+  expect(applied).toBe(0);
+});
+
+test("Source proposal review is Copy Patch only and persists no source-write action", async ({ page }) => {
+  const state = fixtureData();
+  let created = 0;
+  const review = {
+    id: "review-source-1", project_id: "proj-1", environment_id: "env-1", application_id: "srv-api", kind: "source_patch",
+    status: "review_required", proposal_hash: hash("p"), analysis_inputs_hash: hash("i"), normalized_payload: {}, reviewed_payload_hash: hash("e"),
+    created_by: "human-1", created_at: "2026-08-08T08:00:00Z", expires_at: "2026-08-09T08:00:00Z",
+  };
+  await page.route("**/api/local/**", (route) => handleLocalAPI(route, state, async (path, candidate) => {
+    if (path.endsWith("/services/srv-api/proposal-reviews") && candidate.request().method() === "POST") {
+      created++;
+      await candidate.fulfill({ json: review, status: 201 });
+      return true;
+    }
+    return false;
+  }));
+  const patch = {
+    project_id: "proj-1", environment_id: "env-1", application_id: "srv-api",
+    provenance: { build_record_id: "build-api", source_commit: hash("c").slice(0, 40), application_root: "api", analysis_inputs_hash: hash("i") },
+    rationale: { observed_source: "DATABASE_URL is read", opsi_facts: "dependency missing", inference: "add configuration" },
+    files: [{ path: "main.go", base_blob_sha: hash("d").slice(0, 40), unified_diff: "@@ -1 +1 @@\n-old\n+new" }],
+  };
+  await page.goto("/?project=proj-1&view=services&service=srv-api&tab=source");
+  await page.getByRole("button", { name: "Review proposal" }).click();
+  await page.getByLabel("Proposal review envelope").fill(JSON.stringify(patch));
+  await page.getByRole("dialog", { name: "Review AI proposal" }).getByRole("button", { name: "Review proposal", exact: true }).click();
+  await expect(page.getByText("Opsi does not currently modify source repositories. Copy Patch is the only source action.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy Patch" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Apply Dependency Change/ })).toHaveCount(0);
+  await page.screenshot({ path: "../../.tmp/evidence/mcp04/20260823T121249Z/source-review.png" });
+  expect(created).toBe(1);
 });

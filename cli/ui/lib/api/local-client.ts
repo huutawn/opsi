@@ -19,6 +19,9 @@ import type {
   ServiceConfigurationValidation,
   ServiceConfigurationDiff,
   ServiceConfigurationApplyResult,
+  ProposalReviewAudit,
+  ProposalReview,
+  ProposalReviewCreateRequest,
   DependencyReviewResult,
   PreflightResult,
   VerifyDependencyRequest,
@@ -307,7 +310,13 @@ export class LocalClient {
   serviceConfigurationPreview(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationPreview>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/preview`, { method: "POST", body: JSON.stringify(draft) }); }
   serviceConfigurationValidate(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationValidation>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/validate`, { method: "POST", body: JSON.stringify(draft) }); }
   serviceConfigurationDiff(projectID: string, serviceID: string, draft: ServiceConfigurationDraft) { return this.call<ServiceConfigurationDiff>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/diff`, { method: "POST", body: JSON.stringify(draft) }); }
-  serviceConfigurationApply(projectID: string, serviceID: string, body: { draft: ServiceConfigurationDraft; expected_revision: number; expected_state_hash: string }, idempotencyKey: string) { return this.call<ServiceConfigurationApplyResult>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/apply`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
+  serviceConfigurationApply(projectID: string, serviceID: string, body: { draft: ServiceConfigurationDraft; expected_revision: number; expected_state_hash: string; proposal_review?: ProposalReviewAudit }, idempotencyKey: string) { return this.call<ServiceConfigurationApplyResult>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/configuration/apply`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }); }
+  proposalReviews(projectID: string, serviceID: string) { return this.call<{ reviews: ProposalReview[] }>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/proposal-reviews`); }
+  proposalReview(projectID: string, reviewID: string) { return this.call<ProposalReview>(`/api/local/projects/${projectID}/proposal-reviews/${encodeURIComponent(reviewID)}`); }
+  createProposalReview(projectID: string, serviceID: string, request: ProposalReviewCreateRequest, idempotencyKey: string) { return this.call<ProposalReview>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/proposal-reviews`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(request) }); }
+  approveProposalReview(projectID: string, reviewID: string, idempotencyKey: string) { return this.call<ProposalReview>(`/api/local/projects/${projectID}/proposal-reviews/${encodeURIComponent(reviewID)}/approve`, { method: "POST", write: true, idempotencyKey, body: "{}" }); }
+  rejectProposalReview(projectID: string, reviewID: string, idempotencyKey: string) { return this.call<ProposalReview>(`/api/local/projects/${projectID}/proposal-reviews/${encodeURIComponent(reviewID)}/reject`, { method: "POST", write: true, idempotencyKey, body: "{}" }); }
+  applyProposalReview(projectID: string, reviewID: string, idempotencyKey: string) { return this.call<ProposalReview>(`/api/local/projects/${projectID}/proposal-reviews/${encodeURIComponent(reviewID)}/apply`, { method: "POST", write: true, idempotencyKey, body: "{}" }); }
 
   dependenciesReview(projectID: string, serviceID: string) {
     return this.call<DependencyReviewResult>(`/api/local/projects/${projectID}/services/${encodeURIComponent(serviceID)}/dependencies/review`, {

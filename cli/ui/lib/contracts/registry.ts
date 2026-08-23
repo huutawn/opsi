@@ -121,6 +121,21 @@ export type ServiceConfigurationPreview = { configuration: ServiceConfigurationD
 export type ServiceConfigurationValidation = { valid: boolean; issues?: { code: string; field?: string; message: string }[] };
 export type ServiceConfigurationChange = { kind: "connection" | "dependency" | "resource_binding" | "generated_environment" | "public_route" | "user_environment"; action: string; name?: string; before?: string; after?: string };
 export type ServiceConfigurationDiff = { changes: ServiceConfigurationChange[] };
+export type ProposalReviewAudit = { proposal_hash: string; reviewed_payload_hash: string; proposer_origin?: "mcp_client" };
+export type ProposalReviewStatus = "review_required" | "approved" | "rejected" | "stale" | "expired" | "applied" | "apply_failed";
+export type ProposalReview = {
+  id: string; project_id: string; environment_id: string; application_id: string;
+  kind: "dependency" | "source_patch"; status: ProposalReviewStatus;
+  proposal_hash: string; analysis_inputs_hash: string; source_commit?: string; application_root?: string;
+  normalized_payload: unknown; reviewed_payload_hash: string;
+  expected_configuration_revision?: number; expected_configuration_state_hash?: string;
+  created_by?: string; created_at: string; expires_at: string; approved_by?: string; approved_at?: string;
+  rejected_by?: string; rejected_at?: string; applied_at?: string; resulting_configuration_revision?: number;
+};
+export type ProposalReviewCreateRequest = {
+  environment_id: string; kind: "dependency" | "source_patch"; analysis_inputs_hash: string;
+  source_commit?: string; application_root?: string; dependency_draft?: ServiceConfigurationDraft; source_patch?: unknown;
+};
 export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
 
 export type DependencyRealizationProjection = {

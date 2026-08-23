@@ -72,6 +72,9 @@ func (s PostgresService) DiffServiceConfiguration(projectID, serviceID string, d
 }
 
 func (s PostgresService) ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request ServiceConfigurationApplyRequest) (ServiceConfigurationApplyResult, error) {
+	if request.ProposalReview != nil && !validProposalReviewAudit(*request.ProposalReview) {
+		return ServiceConfigurationApplyResult{}, APIError{Status: 400, Code: "PROPOSAL_REVIEW_INVALID", Message: "proposal review audit metadata is invalid"}
+	}
 	ctx := context.Background()
 	payload, _ := json.Marshal(request)
 	sum := sha256.Sum256(payload)
@@ -128,6 +131,9 @@ func (s PostgresService) ApplyServiceConfiguration(projectID, serviceID, actorUs
 	normalized, _, err := validateServiceConfiguration(ctx, s.DependencyResolver, source, request.Draft, services)
 	if err != nil {
 		return ServiceConfigurationApplyResult{}, err
+	}
+	if request.ProposalReview != nil && request.ProposalReview.ReviewedPayloadHash != serviceConfigurationHash(normalized) {
+		return ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "PROPOSAL_REVIEW_PAYLOAD_MISMATCH", Message: "reviewed payload hash does not match the canonical configuration"}
 	}
 	now := s.clock()
 	configuration := ServiceConfiguration{ServiceConfigurationDraft: normalized, Revision: current.Revision + 1, StateHash: serviceConfigurationHash(normalized), AppliedBy: actorUserID, AppliedAt: &now}

@@ -10,6 +10,7 @@ import { acceptedDigest, applicationFacts, buildState, deploymentState, exactSou
 import { DependencyDialog } from "@/features/dependencies/dependency-dialog";
 import { RealizationReviewDialog } from "@/features/dependencies/realization-review-panel";
 import { DependencyVerificationPanel } from "@/features/dependencies/verification-panel";
+import { ProposalReviewDialog } from "@/features/dependencies/proposal-review-dialog";
 import { SourceRiskPanel } from "@/features/dependencies/source-risk-panel";
 import { formatSymbolicSource } from "@/features/dependencies/types";
 import { LocalClient } from "@/lib/api/local-client";
@@ -700,11 +701,13 @@ function DependenciesTab({
   const service = facts.service;
   const dependencies = service.configuration?.dependencies ?? [];
   const projectID = console.state.project?.id || "proj-1";
+  const canMutate = ["owner", "admin", "developer"].includes((console.session?.role ?? "").toLowerCase());
   const [depModal, setDepModal] = useState<{
     consumer: ServiceRecord;
     existingDependency?: ApplicationDependency;
   } | null>(null);
   const [realizationModal, setRealizationModal] = useState<ServiceRecord | null>(null);
+  const [proposalReview, setProposalReview] = useState(false);
 
   const boundLogicalNames = new Set(
     (service.configuration?.resource_bindings ?? [])
@@ -751,14 +754,16 @@ function DependenciesTab({
             Explicit dependency contracts for databases, caches, and internal HTTP services.
           </p>
         </div>
-        <Button
-          onClick={() => setDepModal({ consumer: service })}
-          size="sm"
-          variant="primary"
-        >
-          <Icon name="add" className="text-[16px]" />
-          Add Dependency
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setProposalReview(true)} size="sm" variant="secondary">
+            <Icon name="fact_check" className="text-[16px]" />
+            Review proposal
+          </Button>
+          <Button onClick={() => setDepModal({ consumer: service })} size="sm" variant="primary">
+            <Icon name="add" className="text-[16px]" />
+            Add Dependency
+          </Button>
+        </div>
       </div>
 
       {dependencies.length ? (
@@ -897,6 +902,17 @@ function DependenciesTab({
           projectID={projectID}
         />
       ) : null}
+
+      {proposalReview ? (
+        <ProposalReviewDialog
+          application={service}
+          canMutate={canMutate}
+          environmentID={facts.assignment?.environment_id}
+          onApplied={async () => { await console.actions.load(); }}
+          onClose={() => setProposalReview(false)}
+          projectID={projectID}
+        />
+      ) : null}
     </div>
   );
 }
@@ -911,6 +927,8 @@ function SourceTab({
   onResume: () => void;
 }) {
   const projectID = console.state.project?.id || "proj-1";
+  const canMutate = ["owner", "admin", "developer"].includes((console.session?.role ?? "").toLowerCase());
+  const [proposalReview, setProposalReview] = useState(false);
 
   if (!facts.binding) {
     return (
@@ -928,6 +946,13 @@ function SourceTab({
 
   return (
     <div className="space-y-6">
+      <section className="bg-surface-container rounded-xl p-5 border border-outline-variant/20 flex flex-col sm:flex-row gap-4 sm:items-center sm:justify-between">
+        <div>
+          <h3 className="font-headline-md text-sm font-semibold text-on-surface">Source patch review</h3>
+          <p className="text-xs text-on-surface-variant mt-1">Review an MCP patch proposal safely. Opsi does not modify source repositories.</p>
+        </div>
+        <Button onClick={() => setProposalReview(true)} variant="secondary"><Icon name="fact_check" className="text-[16px]" />Review proposal</Button>
+      </section>
       <section className="bg-surface-container rounded-xl p-5 border border-outline-variant/20 space-y-4">
         <h3 className="font-headline-md text-sm font-semibold text-on-surface">Canonical Source Binding</h3>
         <dl className="grid grid-cols-2 gap-4 text-xs">
@@ -965,6 +990,16 @@ function SourceTab({
         currentCommitSHA={exactSourceSHA(facts)}
         projectID={projectID}
       />
+      {proposalReview ? (
+        <ProposalReviewDialog
+          application={facts.service}
+          canMutate={canMutate}
+          environmentID={facts.assignment?.environment_id}
+          onApplied={async () => { await console.actions.load(); }}
+          onClose={() => setProposalReview(false)}
+          projectID={projectID}
+        />
+      ) : null}
     </div>
   );
 }

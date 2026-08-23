@@ -623,7 +623,7 @@ type Service struct {
 	deployEvents            map[string][]DeploymentEvent
 	deployLocks             map[string]deploymentLock
 	audit                   []AuditEvent
-	DependencyResolver DependencyTargetResolver
+	DependencyResolver      DependencyTargetResolver
 	idempotency             map[string]any
 	githubInstallations     map[int64]GitHubInstallation
 	githubRepositories      map[int64]GitHubRepository
@@ -631,6 +631,7 @@ type Service struct {
 	githubRepositoryClaims  map[int64]GitHubRepositoryClaim
 	githubServiceBindings   map[string]GitHubServiceBinding
 	githubWebhookDeliveries map[string]GitHubWebhookDelivery
+	proposalReviews         map[string]ProposalReview
 	now                     func() time.Time
 }
 
@@ -673,6 +674,12 @@ type API interface {
 	ValidateServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationValidation, error)
 	DiffServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationDiff, error)
 	ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request ServiceConfigurationApplyRequest) (ServiceConfigurationApplyResult, error)
+	CreateProposalReview(projectID, applicationID, actorUserID string, request ProposalReviewCreateRequest) (ProposalReview, error)
+	GetProposalReview(projectID, reviewID string) (ProposalReview, error)
+	ListProposalReviews(projectID, applicationID string, limit int) ([]ProposalReview, error)
+	ApproveProposalReview(projectID, reviewID, actorUserID string) (ProposalReview, error)
+	RejectProposalReview(projectID, reviewID, actorUserID string) (ProposalReview, error)
+	ApplyProposalReview(projectID, reviewID, actorUserID string) (ProposalReview, ServiceConfigurationApplyResult, error)
 	RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error)
 	LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error)
 	CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error)
@@ -723,6 +730,7 @@ func NewService() *Service {
 		githubRepositoryClaims:  map[int64]GitHubRepositoryClaim{},
 		githubServiceBindings:   map[string]GitHubServiceBinding{},
 		githubWebhookDeliveries: map[string]GitHubWebhookDelivery{},
+		proposalReviews:         map[string]ProposalReview{},
 	}
 }
 

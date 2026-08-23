@@ -57,7 +57,6 @@ type DependencyTargetResolver interface {
 	ResolveDependencyTarget(ctx context.Context, projectID, targetIdentity string, targetKind string) (DependencyTargetFacts, error)
 }
 
-
 type ServiceConfigurationPreview struct {
 	Configuration        ServiceConfigurationDraft `json:"configuration"`
 	GeneratedEnvironment []GeneratedEnvironment    `json:"generated_environment,omitempty"`
@@ -93,6 +92,16 @@ type ServiceConfigurationApplyRequest struct {
 	Draft             ServiceConfigurationDraft `json:"draft"`
 	ExpectedRevision  uint64                    `json:"expected_revision"`
 	ExpectedStateHash string                    `json:"expected_state_hash"`
+	ProposalReview    *ProposalReviewAudit      `json:"proposal_review,omitempty"`
+}
+
+// ProposalReviewAudit is factual, bounded metadata from a human review UI.
+// It is advisory only: the canonical draft, revision, state hash, validation,
+// and idempotency checks below remain the sole configuration authority.
+type ProposalReviewAudit struct {
+	ProposalHash        string `json:"proposal_hash"`
+	ReviewedPayloadHash string `json:"reviewed_payload_hash"`
+	ProposerOrigin      string `json:"proposer_origin,omitempty"`
 }
 
 type ServiceConfigurationApplyResult struct {
@@ -931,9 +940,13 @@ func configurationDiff(current ServiceConfigurationDraft, next ServiceConfigurat
 				changes = append(changes, ServiceConfigurationChange{Kind: "dependency_phase", Action: "change", Name: name})
 			}
 			currMappings := map[string]string{}
-			for _, m := range currentDep.InjectionMappings { currMappings[m.EnvName] = m.SymbolicSource }
+			for _, m := range currentDep.InjectionMappings {
+				currMappings[m.EnvName] = m.SymbolicSource
+			}
 			nextMappings := map[string]string{}
-			for _, m := range nextDep.InjectionMappings { nextMappings[m.EnvName] = m.SymbolicSource }
+			for _, m := range nextDep.InjectionMappings {
+				nextMappings[m.EnvName] = m.SymbolicSource
+			}
 			for envName, sym := range currMappings {
 				if nextSym, ok := nextMappings[envName]; !ok {
 					changes = append(changes, ServiceConfigurationChange{Kind: "dependency_mapping", Action: "remove", Name: name + ":" + envName, Before: sym})
@@ -1024,6 +1037,9 @@ func (s *Service) DiffServiceConfiguration(projectID, serviceID string, draft Se
 }
 
 func (s *Service) ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request ServiceConfigurationApplyRequest) (ServiceConfigurationApplyResult, error) {
+	if request.ProposalReview != nil && !validProposalReviewAudit(*request.ProposalReview) {
+		return ServiceConfigurationApplyResult{}, APIError{Status: 400, Code: "PROPOSAL_REVIEW_INVALID", Message: "proposal review audit metadata is invalid"}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	payload, _ := json.Marshal(request)
@@ -1050,6 +1066,9 @@ func (s *Service) ApplyServiceConfiguration(projectID, serviceID, actorUserID, k
 	if err != nil {
 		return ServiceConfigurationApplyResult{}, err
 	}
+	if request.ProposalReview != nil && request.ProposalReview.ReviewedPayloadHash != serviceConfigurationHash(normalized) {
+		return ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "PROPOSAL_REVIEW_PAYLOAD_MISMATCH", Message: "reviewed payload hash does not match the canonical configuration"}
+	}
 	now := s.clock()
 	configuration := ServiceConfiguration{ServiceConfigurationDraft: normalized, Revision: current.Revision + 1, StateHash: serviceConfigurationHash(normalized), AppliedBy: actorUserID, AppliedAt: &now}
 	service.Configuration = configuration
@@ -1058,6 +1077,19 @@ func (s *Service) ApplyServiceConfiguration(projectID, serviceID, actorUserID, k
 	result := ServiceConfigurationApplyResult{Configuration: configuration}
 	s.idempotency[replayKey] = configurationReplay{PayloadHash: payloadHash, Result: result}
 	return result, nil
+}
+
+func validProposalReviewAudit(value ProposalReviewAudit) bool {
+	if len(value.ProposalHash) != 64 || len(value.ReviewedPayloadHash) != 64 {
+		return false
+	}
+	if _, err := hex.DecodeString(value.ProposalHash); err != nil {
+		return false
+	}
+	if _, err := hex.DecodeString(value.ReviewedPayloadHash); err != nil {
+		return false
+	}
+	return value.ProposerOrigin == "" || value.ProposerOrigin == "mcp_client"
 }
 
 func (s *Service) configurationScopeLocked(projectID, serviceID string) (ServiceRecord, []ServiceRecord, error) {
