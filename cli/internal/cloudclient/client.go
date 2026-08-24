@@ -495,6 +495,16 @@ func (c *Client) StartInstallationClaim(ctx context.Context, projectID string, i
 	return response, err
 }
 
+func (c *Client) StartInstallationDiscovery(ctx context.Context, projectID, localCallback, localState string) (InstallationClaimStart, error) {
+	request := struct {
+		LocalCallback string `json:"local_callback"`
+		LocalState    string `json:"local_state"`
+	}{localCallback, localState}
+	var response InstallationClaimStart
+	err := c.do(ctx, http.MethodPost, []string{"v1", "projects", projectID, "github", "installations", "discover", "start"}, request, "installation-discovery-start", &response)
+	return response, err
+}
+
 func (c *Client) RedeemInstallationClaim(ctx context.Context, grant, localState string) (InstallationClaimResult, error) {
 	request := struct {
 		Grant string `json:"grant"`
@@ -503,6 +513,18 @@ func (c *Client) RedeemInstallationClaim(ctx context.Context, grant, localState 
 	var response InstallationClaimResult
 	err := c.do(ctx, http.MethodPost, []string{"v1", "github", "installations", "claim", "redeem"}, request, "installation-claim-redeem", &response)
 	return response, err
+}
+
+func (c *Client) RedeemInstallationDiscovery(ctx context.Context, grant, localState string) ([]GitHubInstallation, error) {
+	request := struct {
+		Grant string `json:"grant"`
+		State string `json:"state"`
+	}{grant, localState}
+	var response struct {
+		Installations []GitHubInstallation `json:"installations"`
+	}
+	err := c.do(ctx, http.MethodPost, []string{"v1", "github", "installations", "discover", "redeem"}, request, "installation-discovery-redeem", &response)
+	return response.Installations, err
 }
 
 func (c *Client) ClaimRepository(ctx context.Context, projectID string, repositoryID int64) (RepositoryClaim, error) {
