@@ -53,22 +53,23 @@ type DependencyVerificationContract struct {
 }
 
 type ApplicationDependency struct {
-	LogicalName          string                           `json:"logical_name"`
-	TargetKind           string                           `json:"target_kind"`
-	TargetIdentity       string                           `json:"target_identity"`
-	Protocol             string                           `json:"protocol"`
-	Strategy             string                           `json:"strategy,omitempty"`
-	AccessContext        string                           `json:"access_context,omitempty"`
-	Path                 string                           `json:"path,omitempty"`
-	Required             bool                             `json:"required"`
-	InjectionPhase       string                           `json:"injection_phase"`
-	InjectionMappings    []DependencyInjectionMapping     `json:"injection_mappings,omitempty"`
-	VerificationContract *DependencyVerificationContract  `json:"verification_contract,omitempty"`
+	LogicalName          string                          `json:"logical_name"`
+	TargetKind           string                          `json:"target_kind"`
+	TargetIdentity       string                          `json:"target_identity"`
+	Protocol             string                          `json:"protocol"`
+	Strategy             string                          `json:"strategy,omitempty"`
+	AccessContext        string                          `json:"access_context,omitempty"`
+	Path                 string                          `json:"path,omitempty"`
+	Required             bool                            `json:"required"`
+	InjectionPhase       string                          `json:"injection_phase"`
+	InjectionMappings    []DependencyInjectionMapping    `json:"injection_mappings,omitempty"`
+	VerificationContract *DependencyVerificationContract `json:"verification_contract,omitempty"`
 }
 
 type ServiceConfigurationDraft struct {
 	SchemaVersion    string                             `json:"schema_version"`
 	Environment      []deploymentv1.EnvironmentVariable `json:"environment,omitempty"`
+	SecretReferences []deploymentv1.SecretReference     `json:"secret_references,omitempty"`
 	PublicRoute      *PublicRouteIntent                 `json:"public_route,omitempty"`
 	Bindings         []Binding                          `json:"bindings,omitempty"`
 	ResourceBindings []ResourceBinding                  `json:"resource_bindings,omitempty"`
@@ -88,9 +89,11 @@ type Draft = ServiceConfigurationDraft
 func Normalize(draft ServiceConfigurationDraft) ServiceConfigurationDraft {
 	draft.SchemaVersion = SchemaVersion
 	draft.Environment = append([]deploymentv1.EnvironmentVariable(nil), draft.Environment...)
+	draft.SecretReferences = append([]deploymentv1.SecretReference(nil), draft.SecretReferences...)
 	draft.Bindings = append([]Binding(nil), draft.Bindings...)
 	draft.ResourceBindings = append([]ResourceBinding(nil), draft.ResourceBindings...)
 	sort.Slice(draft.Environment, func(i, j int) bool { return draft.Environment[i].Name < draft.Environment[j].Name })
+	sort.Slice(draft.SecretReferences, func(i, j int) bool { return draft.SecretReferences[i].EnvName < draft.SecretReferences[j].EnvName })
 	if draft.PublicRoute != nil {
 		route := *draft.PublicRoute
 		if hostname, err := exposurev1.NormalizeHostname(route.Hostname); err == nil {

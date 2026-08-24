@@ -27,6 +27,7 @@ var cloudEnvNames = append([]string{
 	"OPSI_CLOUD_TTL",
 	"OPSI_CLOUD_DATABASE_URL",
 	"OPSI_CLOUD_PUBLIC_BASE_URL",
+	"OPSI_CLOUD_DEPLOYMENT_DOMAIN",
 	"OPSI_CLOUD_PRODUCTION",
 	"OPSI_CLOUD_ENABLE_DEBUG_UI",
 	"OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES",
@@ -136,6 +137,24 @@ func TestLoadConfigProductionNormalizesPublicBaseURLForAudience(t *testing.T) {
 	}
 	if cfg.PublicBaseURL != "https://cloud.example.test" || cfg.GitHubOIDC.Audience != cfg.PublicBaseURL+buildRecordPath {
 		t.Fatalf("public_base_url=%q audience=%q", cfg.PublicBaseURL, cfg.GitHubOIDC.Audience)
+	}
+}
+
+func TestLoadConfigNormalizesDeploymentDomain(t *testing.T) {
+	clearCloudEnv(t)
+	t.Setenv("OPSI_CLOUD_DEPLOYMENT_DOMAIN", "*.Apps.Example.Test")
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DeploymentDomain != "apps.example.test" {
+		t.Fatalf("deployment_domain=%q", cfg.DeploymentDomain)
+	}
+	if err := os.Unsetenv("OPSI_CLOUD_DEPLOYMENT_DOMAIN"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(writeCloudConfig(t, `{"deployment_domain":"https://apps.example.test"}`)); err == nil {
+		t.Fatal("expected invalid deployment domain to fail")
 	}
 }
 

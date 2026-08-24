@@ -337,32 +337,32 @@ export function deriveAuditCrossLinks(event: AuditEvent): { label: string; route
   const metadata = event.metadata_redacted ?? {};
 
   if (resourceType === "service" || resourceType === "application") {
-    return { label: "Open Application", route: { view: "services", service: resourceID } };
+    return { label: "Open Application", route: { view: "deploy", service: resourceID } };
   }
   if (resourceType === "build_record" || resourceType === "build_job") {
-    return { label: "Open Build in Delivery", route: { view: "delivery", tab: "builds", build: resourceID } };
+    return { label: "Open Build in Deploy", route: { view: "deploy", build: resourceID } };
   }
   if (resourceType === "deployment_job" || resourceType === "deployment") {
-    return { label: "Open Deployment in Delivery", route: { view: "delivery", tab: "deployments", deployment: resourceID } };
+    return { label: "Open Deployment in Deploy", route: { view: "deploy", deployment: resourceID } };
   }
   if (resourceType === "node" || resourceType === "server") {
-    return { label: "Open Server in Infrastructure", route: { view: "infrastructure", tab: "servers", server: resourceID } };
+    return { label: "Open Server in Observability", route: { view: "observability", tab: "servers", server: resourceID } };
   }
   if (resourceType === "bootstrap_session") {
-    return { label: "Open Server Bootstrap", route: { view: "infrastructure", tab: "servers", session: resourceID } };
+    return { label: "Open Server Bootstrap", route: { view: "observability", tab: "servers", session: resourceID } };
   }
   if (resourceType === "resource" || resourceType === "managed_service" || resourceType === "resource_binding") {
     const resID = (metadata.resource_id as string) || (metadata.target_resource_id as string) || resourceID;
-    return { label: "Open Resource in Infrastructure", route: { view: "infrastructure", tab: "resources", resource: resID } };
+    return { label: "Open Resource in Observability", route: { view: "observability", tab: "resources", resource: resID } };
   }
   if (resourceType === "retained_storage") {
-    return { label: "Open Retained Storage", route: { view: "infrastructure", tab: "storage", storage: resourceID } };
+    return { label: "Open Retained Storage", route: { view: "observability", tab: "resources", storage: resourceID } };
   }
   if (resourceType === "backup" || resourceType === "restore" || resourceType === "restore_review") {
-    return { label: "Open Managed Resources", route: { view: "infrastructure", tab: "resources" } };
+    return { label: "Open Managed Resources", route: { view: "observability", tab: "resources" } };
   }
   if (metadata.service_id && typeof metadata.service_id === "string") {
-    return { label: "Open Application", route: { view: "services", service: metadata.service_id } };
+    return { label: "Open Application", route: { view: "deploy", service: metadata.service_id } };
   }
 
   return null;

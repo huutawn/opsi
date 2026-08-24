@@ -262,7 +262,7 @@ func (s *Server) ExecuteDependencyVerification(ctx context.Context, projectID, e
 		}
 	}
 
-	runID := "dvr-" + hex.EncodeToString(sha256Hash([]byte(projectID+":"+consumerApp.ID+":"+dep.LogicalName+":"+strconv.FormatInt(now.UnixNano(), 10)))[:12])
+	runID := "dvr-" + hex.EncodeToString(sha256Hash([]byte(projectID + ":" + consumerApp.ID + ":" + dep.LogicalName + ":" + strconv.FormatInt(now.UnixNano(), 10)))[:12])
 
 	run := verificationv1.VerificationRun{
 		SchemaVersion:         verificationv1.SchemaVersion,

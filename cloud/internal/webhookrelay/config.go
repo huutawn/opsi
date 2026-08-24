@@ -14,6 +14,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
+	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 )
 
 const (
@@ -27,6 +28,7 @@ type Config struct {
 	TTL                    Duration                `json:"ttl"`
 	DatabaseURL            string                  `json:"database_url"`
 	PublicBaseURL          string                  `json:"public_base_url"`
+	DeploymentDomain       string                  `json:"deployment_domain,omitempty"`
 	Production             bool                    `json:"production"`
 	OTP                    OTPConfig               `json:"otp"`
 	SMTP                   SMTPConfig              `json:"smtp"`
@@ -174,6 +176,7 @@ func applyEnvOverrides(cfg *Config) error {
 		return err
 	}
 	applyStringEnv("OPSI_CLOUD_PUBLIC_BASE_URL", &cfg.PublicBaseURL)
+	applyStringEnv("OPSI_CLOUD_DEPLOYMENT_DOMAIN", &cfg.DeploymentDomain)
 	if err := applyBoolEnv("OPSI_CLOUD_PRODUCTION", &cfg.Production); err != nil {
 		return err
 	}
@@ -398,6 +401,13 @@ func applyDurationEnv(name string, target *Duration) error {
 }
 
 func validateConfig(cfg *Config) error {
+	if cfg.DeploymentDomain != "" {
+		domain, err := exposurev1.NormalizeHostname(strings.TrimPrefix(strings.TrimSpace(cfg.DeploymentDomain), "*."))
+		if err != nil {
+			return fmt.Errorf("deployment_domain must be a valid DNS suffix: %w", err)
+		}
+		cfg.DeploymentDomain = domain
+	}
 	if time.Duration(cfg.TTL) <= 0 {
 		cfg.TTL = Duration(24 * time.Hour)
 	}

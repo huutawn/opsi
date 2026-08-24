@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ConsoleRouter } from "@/features/console/console-router";
 import type { ConsoleController } from "@/features/console/types";
 import { ContextHeader } from "@/components/layout/context-header";
@@ -333,6 +334,7 @@ function MutationDialog({ console }: { console: ConsoleController }) {
 }
 
 function AuthGate({ message, checking = false }: { message: string; checking?: boolean }) {
+  const router = useRouter();
   const client = useMemo(() => new LocalClient(), []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(() => authErrorMessage(callbackErrorCode()));
@@ -395,7 +397,7 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
     setError("");
     try {
       await client.selectProject(selectionID, selectedProject);
-      window.location.assign(`/?auth=ok&project=${encodeURIComponent(selectedProject)}`);
+      router.push(`/?auth=ok&project=${encodeURIComponent(selectedProject)}`);
     } catch (cause) {
       setBusy(false);
       setError((cause as Error).message || "Failed to select project. Please try again.");

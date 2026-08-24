@@ -31,6 +31,10 @@ type previewCleanupStore interface {
 	StartPreviewCleanup(string, string, string, string, deploymentv1.PreviewCleanupRequest) (registry.DeploymentJob, bool, error)
 }
 
+type firstDeployCleanupStore interface {
+	StartFirstDeployCleanup(string, string, string, string, string) (registry.DeploymentJob, bool, error)
+}
+
 type exposureLifecycleStore interface {
 	PreviewExposure(string, string, deploymentv1.ExposureMutationRequest) (deploymentv1.ExposurePreview, error)
 	StartExposureRollout(string, string, string, string, deploymentv1.ExposureMutationRequest) (registry.DeploymentJob, bool, error)
@@ -395,6 +399,14 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 		clientWorkload := request.Workload.Normalize()
 		if err := clientWorkload.Validate(); err != nil {
 			return result, registry.APIError{Status: 400, Code: "WORKLOAD_SPEC_INVALID", Message: err.Error(), RequestID: r.Header.Get("X-Request-ID")}
+		}
+		// Probes are platform-owned runtime defaults. A client may omit them,
+		// but any supplied probe must still equal the Cloud-compiled value.
+		if clientWorkload.ReadinessProbe == nil {
+			clientWorkload.ReadinessProbe = workload.ReadinessProbe
+		}
+		if clientWorkload.LivenessProbe == nil {
+			clientWorkload.LivenessProbe = workload.LivenessProbe
 		}
 		if !reflect.DeepEqual(clientWorkload, workload) {
 			return result, registry.APIError{Status: 409, Code: "WORKLOAD_CANONICAL_MISMATCH", Message: "client WorkloadSpec does not exactly match the Cloud-compiled canonical spec", NextAction: "refresh_cli_spec", RequestID: r.Header.Get("X-Request-ID")}

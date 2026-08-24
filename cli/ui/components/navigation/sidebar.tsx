@@ -50,11 +50,7 @@ export function Sidebar({
   };
 
   const projectDestinations = [
-    { id: "topology", label: "Topology", icon: "account_tree" },
-    { id: "overview", label: "Overview", icon: "dashboard" },
-    { id: "services", label: "Services", icon: "layers" },
-    { id: "delivery", label: "Delivery", icon: "rocket_launch" },
-    { id: "infrastructure", label: "Infrastructure", icon: "dns" },
+    { id: "deploy", label: "Deploy", icon: "rocket_launch" },
     { id: "observability", label: "Observability", icon: "monitoring" },
     { id: "security", label: "Security", icon: "security" },
   ] as const;
@@ -143,11 +139,7 @@ export function Sidebar({
           ) : (
             projectDestinations.map((item) => {
               const iconMap: Record<string, string> = {
-                topology: "account_tree",
-                overview: "dashboard",
-                services: "layers",
-                delivery: "rocket_launch",
-                infrastructure: "dns",
+                deploy: "rocket_launch",
                 observability: "monitoring",
                 security: "security",
               };
@@ -202,7 +194,7 @@ function NavItem({ active, href, icon, label, onClick }: { active: boolean; href
           : "text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface font-medium"
       }`}
     >
-      <span aria-hidden="true" className={`mr-3 material-symbols-outlined text-[20px] before:content-[attr(data-icon)] select-none ${active ? "text-primary" : "text-on-surface-variant group-hover:text-on-surface"}`} data-icon={icon} />
+      <Icon name={icon} className={`mr-3 text-[20px] ${active ? "text-primary" : "text-on-surface-variant group-hover:text-on-surface"}`} />
       <span>{label}</span>
     </a>
   );

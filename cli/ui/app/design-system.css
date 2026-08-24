@@ -26,7 +26,7 @@
   --color-status-failed: #EF4444;
   --color-status-progress: #6366F1;
   --color-status-warning: #F59E0B;
-  --color-status-unknown: #64748B;
+  --color-status-unknown: #94A3B8;
   
   --color-state-draft-bg: #1E293B;
   --color-state-live-bg: #0F172A;
@@ -72,8 +72,10 @@
 }
 
 :root {
-  --opsi-font-ui: var(--font-inter), sans-serif;
-  --opsi-font-mono: var(--font-mono), monospace;
+  --font-sans: "Segoe UI", "Noto Sans", system-ui, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --opsi-font-ui: var(--font-sans);
+  --opsi-font-mono: var(--font-mono);
   --opsi-draft-bg: #1E293B;
   --opsi-live-bg: #0F172A;
   --opsi-ready: #10B981;
@@ -84,7 +86,7 @@
 }
 
 .statusIcon {
-  min-height: 40px;
+  min-height: 0;
 }
 
 .backdropBlur {

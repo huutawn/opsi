@@ -23,10 +23,10 @@ async def run_mcp_client_suite():
         with open(cfg_path, "w") as f:
             f.write("cloud_url: https://cloud.opsi.dev\n")
 
-        # Build opsi binary if not present
+        # Build from the checked source on every run; an existing binary may
+        # describe an older MCP surface and must not satisfy this protocol test.
         bin_path = os.path.abspath("./bin/opsi")
-        if not os.path.exists(bin_path):
-            subprocess.run(["go", "build", "-o", bin_path, "./cli/cmd/opsi"], check=True)
+        subprocess.run(["go", "build", "-o", bin_path, "./cli/cmd/opsi"], check=True)
 
         # Connect real MCP client over stdio
         env = {
@@ -58,12 +58,12 @@ async def run_mcp_client_suite():
                 # 3. List Tools Discovery (Section 4 & 5)
                 tools_res = await session.list_tools()
                 print(f"[2] Tool Discovery: {len(tools_res.tools)} tools found")
-                assert len(tools_res.tools) == 18, f"Expected 18 tools, got {len(tools_res.tools)}"
+                assert len(tools_res.tools) == 22, f"Expected 22 tools, got {len(tools_res.tools)}"
 
                 tool_names = [t.name for t in tools_res.tools]
                 print(f"    Discovered Tools: {', '.join(tool_names)}")
 
-                # Verify all 18 tools are strictly read-only
+                # Verify all factual and advisory tools are strictly non-operational.
                 mutation_keywords = ["create_", "update_", "delete_", "apply_", "build_start", "execute_", "patch_", "mutate_"]
                 for t in tools_res.tools:
                     for kw in mutation_keywords:
@@ -72,7 +72,10 @@ async def run_mcp_client_suite():
                     # Schema verification
                     assert t.inputSchema is not None
                     assert t.inputSchema.get("type") == "object"
-                print("    ✓ All 18 tools verified strictly read-only with typed schemas")
+                assert "dependency_analysis_context" in tool_names
+                assert "validate_dependency_proposal" in tool_names
+                assert "validate_source_patch_proposal" in tool_names
+                print("    ✓ All 22 tools verified strictly non-operational with typed schemas")
 
                 # 4. Unauthenticated Cloud-Authority Tools (Section 8)
                 print("[3] Testing AUTH_REQUIRED on Cloud tools when unauthenticated...")

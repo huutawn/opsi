@@ -24,9 +24,11 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
 	"github.com/opsi-dev/opsi/cloud/internal/sourcereport"
@@ -55,6 +57,8 @@ type Server struct {
 	RegistryPullCredentials RegistryPullCredentialProvider
 	Topology                topology.Service
 	Policies                deploymentpolicy.Service
+	DeploymentRuns          deploymentworkflow.Service
+	RepositoryAnalyzer      repositoryanalysis.Detector
 	SourceReports           sourcereport.Store
 	Verifications           verificationstore.Store
 	OIDC                    interface {
@@ -132,6 +136,7 @@ func NewServer(cfg Config) *Server {
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
 		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
+		DeploymentRuns:          deploymentworkflow.Service{Store: deploymentworkflow.NewMemoryStore()},
 		SourceReports:           sourcereport.NewMemoryStore(),
 		Verifications:           verificationstore.NewMemoryStore(),
 		OIDC:                    verifier,
@@ -210,6 +215,7 @@ func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
 	s.githubAppClient = client
 	s.BuildJobs.Repository = client
 	s.BuildJobs.Dispatcher = client
+	s.RepositoryAnalyzer = repositoryanalysis.Detector{Repository: client, Limits: repositoryanalysis.DefaultLimits()}
 }
 
 func (s *Server) SetActionDeviceStore(store actiondevice.Store) {
@@ -466,7 +472,7 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	if ok {
 		s.resolveRegistryPullCredential(r.Context(), lease.Command)
 		if lease.Command != nil && len(lease.Command.Workload.SecretReferences) > 0 {
-			materials, err := s.Resources.ResolveSecretMaterials(r.Context(), projectID, lease.Command.Workload.SecretReferences)
+			materials, err := s.Resources.ResolveSecretMaterials(r.Context(), projectID, lease.Deployment.ServiceID, lease.Command.Workload.SecretReferences)
 			if err != nil {
 				writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureBindingSecretMaterialization})
 				return

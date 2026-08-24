@@ -29,6 +29,7 @@ const (
 	DispatchStateClaimed     = "claimed"
 	DispatchStateSucceeded   = "succeeded"
 	DispatchStateFailed      = "failed"
+	DispatchStateCancelled   = "cancelled"
 )
 
 var ociDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -137,6 +138,10 @@ type Dispatcher interface {
 	DispatchWorkflow(context.Context, ExecutorConfig, string, string) (DispatchFacts, error)
 }
 
+type WorkflowCanceller interface {
+	CancelWorkflow(context.Context, ExecutorConfig, uint64) error
+}
+
 type RunnerIdentity struct {
 	Repository  string
 	WorkflowRef string
@@ -225,8 +230,8 @@ type ExecutorResult struct {
 }
 
 type RunnerResult struct {
-	BuildJobID        string         `json:"build_job_id"`
-	AttemptID         string         `json:"attempt_id"`
+	BuildJobID        string                `json:"build_job_id"`
+	AttemptID         string                `json:"attempt_id"`
 	RegistryReference string                `json:"registry_reference"`
 	Digest            string                `json:"digest"`
 	Executor          ExecutorResult        `json:"executor"`

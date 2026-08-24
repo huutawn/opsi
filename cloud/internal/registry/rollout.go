@@ -335,7 +335,7 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 			return fmt.Errorf("successful rollout result lacks factual known-good metadata")
 		}
 	case deploymentv1.RolloutStateCleaned:
-		if job.RolloutIntent.Operation != deploymentv1.RolloutOperationCleanup || result.FailureCode != "" || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
+		if (job.RolloutIntent.Operation != deploymentv1.RolloutOperationCleanup && job.RolloutIntent.Operation != deploymentv1.RolloutOperationFirstDeployCleanup) || result.FailureCode != "" || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
 			return fmt.Errorf("cleaned preview result is invalid")
 		}
 	case deploymentv1.RolloutStateRolledBack:

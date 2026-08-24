@@ -32,22 +32,22 @@ func TestServiceDependenciesAPI_ReviewAndApply(t *testing.T) {
 	now := time.Now().UTC()
 	// Create PostgreSQL resource
 	pgSpec := resourcev1.ManagedResourceSpec{
-		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion,
-		ResourceID:    "res-pg-api",
-		ProjectID:     project.ID,
-		EnvironmentID: app.EnvironmentID,
-		ResourceType:  resourcev1.TypePostgres,
-		Profile:       "single-node-experimental",
-		Version:       resourcev1.PostgresVersion,
-		Image:         resourcev1.PostgresImage,
-		Assignment:    resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
-		Replicas:      1,
-		CPUMillicores: 250,
-		MemoryBytes:   256 * 1024 * 1024,
-		Storage:       resourcev1.StorageRequest{Persistent: true, SizeBytes: 10 * 1024 * 1024 * 1024, PolicyRef: resourcev1.StoragePolicyDefault},
-		Ports:         []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}},
-		Connection:    resourcev1.ManagedResourceConnection{ServiceName: "postgres-svc", Host: "postgres.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
-		CredentialID:  "mrcred-res-pg-api",
+		SchemaVersion:    resourcev1.ManagedResourceSpecSchemaVersion,
+		ResourceID:       "res-pg-api",
+		ProjectID:        project.ID,
+		EnvironmentID:    app.EnvironmentID,
+		ResourceType:     resourcev1.TypePostgres,
+		Profile:          "single-node-experimental",
+		Version:          resourcev1.PostgresVersion,
+		Image:            resourcev1.PostgresImage,
+		Assignment:       resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
+		Replicas:         1,
+		CPUMillicores:    250,
+		MemoryBytes:      256 * 1024 * 1024,
+		Storage:          resourcev1.StorageRequest{Persistent: true, SizeBytes: 10 * 1024 * 1024 * 1024, PolicyRef: resourcev1.StoragePolicyDefault},
+		Ports:            []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}},
+		Connection:       resourcev1.ManagedResourceConnection{ServiceName: "postgres-svc", Host: "postgres.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
+		CredentialID:     "mrcred-res-pg-api",
 		TopologyRevision: 1,
 	}
 	pgSpec.ConfigurationHash = strings.Repeat("a", 64)
@@ -185,7 +185,7 @@ func TestServiceDependenciesAPI_ReviewAndApply(t *testing.T) {
 	}
 
 	// 7. Verify materials resolution
-	materials, err := server.Resources.ResolveSecretMaterials(context.Background(), project.ID, secRefs)
+	materials, err := server.Resources.ResolveSecretMaterials(context.Background(), project.ID, "", secRefs)
 	if err != nil {
 		t.Fatalf("materials resolution failed: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestApplicationToApplicationDependencies(t *testing.T) {
 		Draft: registry.ServiceConfigurationDraft{
 			PublicRoute: &registry.PublicRouteIntent{Hostname: "app.example.com", Path: "/api"},
 		},
-		ExpectedRevision: apiCfg.Revision,
+		ExpectedRevision:  apiCfg.Revision,
 		ExpectedStateHash: apiCfg.StateHash,
 	}, "api-cfg-1")
 	if applyAPICfg.Code != http.StatusOK {
@@ -243,8 +243,8 @@ func TestApplicationToApplicationDependencies(t *testing.T) {
 		},
 	}
 	applyWebCfg := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+webApp.ID+"/configuration/apply", registry.ServiceConfigurationApplyRequest{
-		Draft: sameOriginDraft,
-		ExpectedRevision: webCfg.Revision,
+		Draft:             sameOriginDraft,
+		ExpectedRevision:  webCfg.Revision,
 		ExpectedStateHash: webCfg.StateHash,
 	}, "web-cfg-1")
 	if applyWebCfg.Code != http.StatusOK {

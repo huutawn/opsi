@@ -27,7 +27,7 @@ export type ResourceCatalogItem = {
 };
 
 export const POSTGRES_VERSION = "18.6";
-export const POSTGRES_STORAGE_POLICY = "standard";
+export const POSTGRES_STORAGE_POLICY = "default";
 
 export function resourceTypeCatalog(): ResourceCatalogItem[] {
   return [

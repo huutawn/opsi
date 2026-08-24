@@ -97,10 +97,17 @@ export function ContextHeader({
           </div>
         )}
 
-        {project && !agentConnected && (
-          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-status-warning/10 text-status-warning text-[11px] font-medium border border-status-warning/30">
-            <span className="w-1.5 h-1.5 rounded-full bg-status-warning" />
-            <span>Agent unavailable</span>
+        {project && (
+          <div
+            aria-label="Current Local Edge Agent connection"
+            className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border ${
+              agentConnected
+                ? "bg-status-ready/10 text-status-ready border-status-ready/30"
+                : "bg-status-warning/10 text-status-warning border-status-warning/30"
+            }`}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${agentConnected ? "bg-status-ready" : "bg-status-warning"}`} />
+            <span>Local Edge Agent {agentConnected ? "connected" : "unavailable"}</span>
           </div>
         )}
 

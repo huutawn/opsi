@@ -161,6 +161,47 @@ func (a ProductionAdapter) CleanupPreview(ctx context.Context, snapshot deployme
 	return nil
 }
 
+// CleanupFirstDeploy removes only the exact Opsi-owned workload and exposure
+// objects rendered by the failed first rollout. It deliberately preserves the
+// namespace, PVCs, managed resources, and encrypted workload-secret authority.
+func (a ProductionAdapter) CleanupFirstDeploy(ctx context.Context, snapshot deploymentv1.RuntimeSnapshot) error {
+	if snapshot.Preview != nil || snapshot.Validate() != nil {
+		return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeInvalid, "first deploy cleanup authority is invalid", false)
+	}
+	plan, err := a.PrepareRollout(ctx, snapshot)
+	if err != nil {
+		return err
+	}
+	a = a.withDefaults()
+	for index := len(plan.Observed) - 1; index >= 0; index-- {
+		observed := plan.Observed[index]
+		if !observed.Exists || observed.Kind == "Namespace" {
+			continue
+		}
+		current, readErr := a.observeRolloutObject(ctx, observed.rolloutObject)
+		if readErr != nil {
+			return readErr
+		}
+		if !current.Exists {
+			continue
+		}
+		if current.UID != observed.UID || current.ResourceVersion != observed.ResourceVersion || current.Functional != observed.Functional {
+			return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeResourceChanged, observed.Kind+"/"+observed.Name+" changed after cleanup preflight", false)
+		}
+		if err := a.verifyRolloutOwnership(current.Object, observed.rolloutObject, snapshot); err != nil {
+			return err
+		}
+		args := []string{"delete", strings.ToLower(observed.Kind), observed.Name, "--ignore-not-found=true", "--wait=true", "--timeout=2m"}
+		if observed.Namespace != "" {
+			args = append(args, "--namespace", observed.Namespace)
+		}
+		if _, runErr := a.Runner.Run(ctx, nil, a.KubectlPath, args...); runErr != nil {
+			return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "failed rollout object deletion failed", true)
+		}
+	}
+	return nil
+}
+
 type RolloutPlan struct {
 	Snapshot       deploymentv1.RuntimeSnapshot
 	Command        deploymentv1.AgentCommand

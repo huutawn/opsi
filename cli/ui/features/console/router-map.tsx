@@ -1,36 +1,17 @@
-import { DeliveryView } from "@/features/delivery/delivery-view";
-import { InfrastructureView } from "@/features/infrastructure/infrastructure-view";
-import { InfrastructureCenterView } from "@/features/infrastructure/infrastructure-center";
-import { TopologyView } from "@/features/infrastructure/topology-view";
+import { DeployView } from "@/features/deploy/deploy-view";
 import { ObservabilityView } from "@/features/observability/observability-view";
 import { SecurityView } from "@/features/security/security-view";
 import { SettingsView } from "@/features/settings/settings-view";
 import { groupedTabs, routeHref, type ConsoleRoute } from "@/features/console/navigation";
-import { OverviewView } from "@/features/overview/overview-view";
 import { ProjectsView, WorkspaceHomeView } from "@/features/projects/projects-view";
 import { Tabs, tabPanelProps } from "@/components/navigation/tabs";
-import { ServicesView } from "@/features/services/services-view";
-import { Button, Icon } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 
 export const coreViewMap = {
-  overview: OverviewView,
-  services: ServicesView,
-  topology: TopologyView,
+  deploy: DeployView,
 } as const;
 
 const tabViewMap: Record<string, Record<string, (props: { console: ConsoleController }) => React.ReactNode>> = {
-  delivery: { pipeline: DeliveryView, builds: DeliveryView, deployments: DeliveryView, exposure: DeliveryView, source: DeliveryView },
-  infrastructure: {
-    servers: InfrastructureCenterView,
-    resources: InfrastructureCenterView,
-    storage: InfrastructureCenterView,
-    // backward-compatibility mappings
-    topology: TopologyView,
-    runtimes: InfrastructureView,
-    nodes: InfrastructureView,
-    bootstrap: InfrastructureView,
-  },
   observability: {
     overview: ObservabilityView,
     applications: ObservabilityView,
@@ -46,32 +27,6 @@ const tabViewMap: Record<string, Record<string, (props: { console: ConsoleContro
 };
 
 const legacyTabGroups: Record<string, Record<string, ReadonlyArray<{ id: string; label: string }>>> = {
-  infrastructure: {
-    topology: [
-      { id: "topology", label: "Topology" },
-      { id: "runtimes", label: "Runtimes" },
-      { id: "nodes", label: "Nodes" },
-      { id: "bootstrap", label: "Bootstrap" },
-    ],
-    runtimes: [
-      { id: "topology", label: "Topology" },
-      { id: "runtimes", label: "Runtimes" },
-      { id: "nodes", label: "Nodes" },
-      { id: "bootstrap", label: "Bootstrap" },
-    ],
-    nodes: [
-      { id: "topology", label: "Topology" },
-      { id: "runtimes", label: "Runtimes" },
-      { id: "nodes", label: "Nodes" },
-      { id: "bootstrap", label: "Bootstrap" },
-    ],
-    bootstrap: [
-      { id: "topology", label: "Topology" },
-      { id: "runtimes", label: "Runtimes" },
-      { id: "nodes", label: "Nodes" },
-      { id: "bootstrap", label: "Bootstrap" },
-    ],
-  },
   observability: {
     health: [
       { id: "health", label: "Health" },
@@ -128,16 +83,6 @@ export function routeView(route: ConsoleRoute, console: ConsoleController) {
             {groupedDescription(route.view)}
           </p>
         </div>
-        {route.view === "delivery" && (
-          <Button
-            onClick={() => console.navigate({ view: "services" })}
-            size="md"
-            variant="primary"
-          >
-            <Icon name="rocket_launch" className="text-[18px]" />
-            New Deployment
-          </Button>
-        )}
       </div>
       <Tabs
         items={tabs.map((tab) => ({ ...tab, href: routeHref({ ...route, tab: tab.id }) }))}
@@ -162,8 +107,6 @@ function groupedTitle(view: string) {
 
 function groupedDescription(view: string) {
   const descriptions: Record<string, string> = {
-    delivery: "Commit, artifact, rollout, and exposure evidence.",
-    infrastructure: "Factual server execution capacity, managed resources, and persistent database storage.",
     observability: "Factual runtime health, application diagnostics, server telemetry, and managed resource readiness.",
     security: "Security visibility, authenticated identity boundaries, safe credential status, and audit history.",
   };

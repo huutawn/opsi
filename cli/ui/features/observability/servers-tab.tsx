@@ -206,7 +206,7 @@ function ServerDetailDrawer({
 
           <div className="flex items-center gap-2">
             <Button
-              onClick={() => console.navigate({ projectID, view: "infrastructure", tab: "servers", server: server.id })}
+              onClick={() => console.navigate({ projectID, view: "observability", tab: "servers", server: server.id })}
               size="sm"
               variant="outline"
             >

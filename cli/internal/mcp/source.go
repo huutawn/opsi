@@ -31,6 +31,8 @@ var (
 	// ADC-05 embedded credential patterns
 	credURIPattern     = regexp.MustCompile(`([a-zA-Z0-9+.-]+://)([^/\s:@]*):([^/\s:@]+)@([^\s"'\` + "`" + `]+)`)
 	credEnvPattern     = regexp.MustCompile(`(?i)(password|secret|token|api_key|pat)\s*[:=]\s*["']([^"']+)["']`)
+	privateKeyPattern  = regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----`)
+	knownTokenPattern  = regexp.MustCompile(`(?i)\b(?:opsi_(?:pat|agent_token)|registry_auth_basic|source_embedded_pass)[a-z0-9_-]*`)
 	commonBinaryExtMap = map[string]bool{
 		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".ico": true,
 		".webp": true, ".svgz": true, ".pdf": true, ".zip": true, ".tar": true,
@@ -43,6 +45,15 @@ var (
 
 type SourceService struct {
 	Runner repository.CommandRunner
+}
+
+// SourceBlob is an immutable Git blob resolved through an exact commit.
+// Its content is intentionally never read from the working tree.
+type SourceBlob struct {
+	ObjectID string
+	Content  []byte
+	IsBinary bool
+	Mode     string
 }
 
 func NewSourceService(runner repository.CommandRunner) *SourceService {
@@ -61,6 +72,9 @@ func CleanRelativePath(rel string) (string, error) {
 	}
 	if strings.ContainsRune(rel, 0) {
 		return "", errors.New("path contains null bytes")
+	}
+	if strings.Contains(rel, "\\") {
+		return "", errors.New("backslash paths are not supported")
 	}
 	if strings.Contains(rel, "..") {
 		return "", errors.New("path traversal with '..' is not allowed")
@@ -292,6 +306,45 @@ func (s *SourceService) ReadFile(ctx context.Context, repoRoot, commitSHA, appli
 	}, nil
 }
 
+// ReadBlob resolves a text blob and its canonical Git object ID at an exact
+// commit. It is the source authority used by virtual patch validation.
+func (s *SourceService) ReadBlob(ctx context.Context, repoRoot, commitSHA, applicationRoot, relativePath string) (SourceBlob, error) {
+	if err := s.VerifyCommitExists(ctx, repoRoot, commitSHA); err != nil {
+		return SourceBlob{}, fmt.Errorf("%s: %w", ErrCodeSourceSnapshotUnavailable, err)
+	}
+	cleanedRel, err := CleanRelativePath(relativePath)
+	if err != nil {
+		return SourceBlob{}, fmt.Errorf("%s: %w", ErrCodeSourcePathInvalid, err)
+	}
+	fullPath := JoinApplicationPath(applicationRoot, cleanedRel)
+	entry, err := s.Runner.Run(ctx, "git", "-C", repoRoot, "ls-tree", commitSHA, "--", fullPath)
+	if err != nil {
+		return SourceBlob{}, fmt.Errorf("%s: source tree entry is unavailable", ErrCodeSourceSnapshotUnavailable)
+	}
+	entryFields := strings.Fields(string(entry))
+	if len(entryFields) < 3 || entryFields[1] != "blob" || (entryFields[0] != "100644" && entryFields[0] != "100755") {
+		return SourceBlob{}, fmt.Errorf("%s: source path is not a regular text file", ErrCodeSourcePathInvalid)
+	}
+	objectID, err := s.Runner.Run(ctx, "git", "-C", repoRoot, "rev-parse", "--verify", commitSHA+":"+fullPath)
+	if err != nil {
+		return SourceBlob{}, fmt.Errorf("%s: file %q not found in exact source", ErrCodeNotFound, cleanedRel)
+	}
+	objectID = bytes.TrimSpace(objectID)
+	if len(objectID) != 40 && len(objectID) != 64 {
+		return SourceBlob{}, fmt.Errorf("%s: source blob identity is invalid", ErrCodeSourceSnapshotUnavailable)
+	}
+	for _, value := range objectID {
+		if !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') || (value >= 'A' && value <= 'F')) {
+			return SourceBlob{}, fmt.Errorf("%s: source blob identity is invalid", ErrCodeSourceSnapshotUnavailable)
+		}
+	}
+	content, err := s.Runner.Run(ctx, "git", "-C", repoRoot, "cat-file", "-p", string(objectID))
+	if err != nil {
+		return SourceBlob{}, fmt.Errorf("%s: exact source blob is unavailable", ErrCodeSourceSnapshotUnavailable)
+	}
+	return SourceBlob{ObjectID: string(objectID), Content: content, IsBinary: isBinaryData(content, cleanedRel), Mode: entryFields[0]}, nil
+}
+
 // Search performs literal text search across files in the commit.
 func (s *SourceService) Search(ctx context.Context, repoRoot, commitSHA, applicationRoot, query, pathPrefix string, limit int) (SourceSearchResult, error) {
 	if err := s.VerifyCommitExists(ctx, repoRoot, commitSHA); err != nil {
@@ -397,6 +450,14 @@ func RedactSourceSecrets(input string) (string, bool) {
 	output = credEnvPattern.ReplaceAllStringFunc(output, func(m string) string {
 		redacted = true
 		return credEnvPattern.ReplaceAllString(m, `$1="[REDACTED]"`)
+	})
+	output = privateKeyPattern.ReplaceAllStringFunc(output, func(string) string {
+		redacted = true
+		return "[REDACTED_PRIVATE_KEY]"
+	})
+	output = knownTokenPattern.ReplaceAllStringFunc(output, func(string) string {
+		redacted = true
+		return "[REDACTED]"
 	})
 	return output, redacted
 }

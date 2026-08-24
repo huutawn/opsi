@@ -18,13 +18,13 @@ import (
 )
 
 type verificationTestFixture struct {
-	server      *Server
-	projectID   string
-	envID       string
-	appID       string
-	resourceID  string
-	depName     string
-	pgResource  resourcev1.Resource
+	server     *Server
+	projectID  string
+	envID      string
+	appID      string
+	resourceID string
+	depName    string
+	pgResource resourcev1.Resource
 }
 
 func setupVerificationFixture(t *testing.T) verificationTestFixture {

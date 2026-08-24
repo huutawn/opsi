@@ -124,7 +124,7 @@ export function ProjectsView({ console }: { console: ConsoleController }) {
                       <td className="py-3.5 px-4">
                         <a
                           className="flex flex-col group font-body-md text-sm text-on-surface font-semibold hover:text-primary transition-colors cursor-pointer"
-                          href={routeHref({ projectID: project.id, view: "topology" })}
+                          href={routeHref({ projectID: project.id, view: "deploy" })}
                           onClick={(event) => openProject(event, project.id)}
                         >
                           <strong className="block" title={project.name}>{project.name}</strong>

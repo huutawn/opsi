@@ -56,6 +56,37 @@ func TestServiceConfigurationReviewedApplyReloadsWithoutDeployment(t *testing.T)
 	}
 }
 
+func TestServiceConfigurationProposalAuditIsBoundToCanonicalApply(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-review", "Review", "review", "user-1", "project-review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := server.Registry.CreateService(project.ID, registry.ServiceDraft{Name: "api", ContainerPort: 8080}, "service-review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := server.Registry.CreateProposalReview(project.ID, service.ID, "user-1", registry.ProposalReviewCreateRequest{EnvironmentID: service.EnvironmentID, Kind: registry.ProposalReviewDependency, AnalysisInputsHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", DependencyDraft: &registry.ServiceConfigurationDraft{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.ApproveProposalReview(project.ID, created.ID, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	applied, result, err := server.Registry.ApplyProposalReview(project.ID, created.ID, "user-1")
+	if err != nil || applied.Status != registry.ReviewApplied || result.Configuration.Revision != 1 {
+		t.Fatalf("durable apply review=%+v result=%+v err=%v", applied, result, err)
+	}
+	request := registry.ServiceConfigurationApplyRequest{Draft: registry.ServiceConfigurationDraft{}, ProposalReview: &registry.ProposalReviewAudit{ProposalHash: created.ProposalHash, ReviewedPayloadHash: created.ReviewedPayloadHash, ProposerOrigin: "mcp_client"}}
+	response := configurationRequest(t, server, http.MethodPost, "/api/projects/"+project.ID+"/services/"+service.ID+"/configuration/apply", request, "proposal-review-bypass")
+	if response.Code != http.StatusBadRequest || !bytes.Contains(response.Body.Bytes(), []byte("PROPOSAL_REVIEW_APPLY_REQUIRED")) {
+		t.Fatalf("direct review bypass status=%d body=%s", response.Code, response.Body.String())
+	}
+	if deployments, err := server.Registry.ListDeployments(project.ID); err != nil || len(deployments) != 0 {
+		t.Fatalf("proposal apply created deployments=%+v err=%v", deployments, err)
+	}
+}
+
 func configurationRequest(t *testing.T, server *Server, method, path string, body any, idempotencyKey string) *httptest.ResponseRecorder {
 	t.Helper()
 	var data []byte

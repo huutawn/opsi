@@ -178,11 +178,11 @@ func TestPostgresBindingCredentialRoleIsolationAndRevocationLifecycle(t *testing
 	if err != nil || len(environment) != 3 || len(secrets) != 3 || environment[0].Name != "DATABASE_HOST" || environment[1].Name != "DATABASE_NAME" || environment[2].Name != "DATABASE_PORT" || secrets[0].EnvName != "DATABASE_PASSWORD" || secrets[1].EnvName != "DATABASE_URL" || secrets[2].EnvName != "DATABASE_USER" {
 		t.Fatalf("environment=%+v secrets=%+v err=%v", environment, secrets, err)
 	}
-	materials, err := service.ResolveSecretMaterials(context.Background(), "project-1", secrets)
+	materials, err := service.ResolveSecretMaterials(context.Background(), "project-1", "", secrets)
 	if err != nil || len(materials) != 1 || materials[0].SecretID != first.CredentialID || !strings.HasPrefix(materials[0].Values["DATABASE_URL"], "postgres://") || !strings.Contains(materials[0].Values["DATABASE_URL"], "/opsi?sslmode=disable") {
 		t.Fatalf("materials=%+v err=%v", materials, err)
 	}
-	if _, err := service.ResolveSecretMaterials(context.Background(), "project-1", []deploymentv1.SecretReference{{EnvName: "DATABASE_PASSWORD", SecretID: postgres.Runtime.Spec.CredentialID}}); err == nil || !strings.Contains(err.Error(), resourcev1.FailureBindingSecretMaterialization) {
+	if _, err := service.ResolveSecretMaterials(context.Background(), "project-1", "", []deploymentv1.SecretReference{{EnvName: "DATABASE_PASSWORD", SecretID: postgres.Runtime.Spec.CredentialID}}); err == nil || !strings.Contains(err.Error(), resourcev1.FailureBindingSecretMaterialization) {
 		t.Fatalf("PostgreSQL management credential was accepted as application material: %v", err)
 	}
 	second := create("postgres-binding-b", "ANALYTICS")

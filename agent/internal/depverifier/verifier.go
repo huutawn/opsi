@@ -144,8 +144,8 @@ func (v Verifier) executePostgresProbe(ctx context.Context, lease cloudrelay.Dep
 	script := `set -eu
 IFS= read -r PGPASSWORD
 export PGPASSWORD
-out=$(psql -v ON_ERROR_STOP=1 -qAt -h "$1" -p "$2" -U "$3" -d "$4" -c 'SELECT 1')
-test "$out" = "1"
+out=$(psql -v ON_ERROR_STOP=1 -qAt -h "$1" -p "$2" -U "$3" -d "$4" -c 'BEGIN; CREATE TEMP TABLE opsi_dependency_probe(value text) ON COMMIT DROP; INSERT INTO opsi_dependency_probe(value) VALUES ('\''opsi-write-read'\''); SELECT value FROM opsi_dependency_probe; ROLLBACK;')
+test "$out" = "opsi-write-read"
 `
 	input := []byte(password + "\n")
 	_, err := v.run(ctx, input, "run", probePodName, "-n", consumerNS,
@@ -157,7 +157,7 @@ test "$out" = "1"
 	if err != nil {
 		return verificationv1.LayerStatusFailed, latency, verificationv1.FailureConnectionFailed, "PostgreSQL protocol verification failed"
 	}
-	return verificationv1.LayerStatusVerified, latency, "", "PostgreSQL protocol and SELECT 1 verified from consumer network context"
+	return verificationv1.LayerStatusVerified, latency, "", "PostgreSQL connect and transactional write/read verified from consumer network context"
 }
 
 func (v Verifier) executeValkeyProbe(ctx context.Context, lease cloudrelay.DepVerificationLease) (status string, latencyMs int64, failCode, msg string) {
@@ -207,29 +207,40 @@ func (v Verifier) executeValkeyProbe(ctx context.Context, lease cloudrelay.DepVe
 
 	script := `set -eu
 IFS= read -r pass
-if [ -n "$pass" ]; then
+if [ -n "$pass" ]; then export REDISCLI_AUTH="$pass"; fi
+cleanup() {
   if [ -n "$3" ]; then
-    out=$(valkey-cli -h "$1" -p "$2" --user "$3" -a "$pass" --no-auth-warning PING)
+    valkey-cli -h "$1" -p "$2" --user "$3" DEL "$4" >/dev/null 2>&1 || true
   else
-    export REDISCLI_AUTH="$pass"
-    out=$(valkey-cli -h "$1" -p "$2" PING)
+    valkey-cli -h "$1" -p "$2" DEL "$4" >/dev/null 2>&1 || true
   fi
+}
+trap 'cleanup "$1" "$2" "$3" "$4"' EXIT
+if [ -n "$3" ]; then
+  pong=$(valkey-cli -h "$1" -p "$2" --user "$3" PING)
+  stored=$(valkey-cli -h "$1" -p "$2" --user "$3" SET "$4" opsi-write-read EX 30 NX)
+  loaded=$(valkey-cli -h "$1" -p "$2" --user "$3" GET "$4")
 else
-  out=$(valkey-cli -h "$1" -p "$2" PING)
+  pong=$(valkey-cli -h "$1" -p "$2" PING)
+  stored=$(valkey-cli -h "$1" -p "$2" SET "$4" opsi-write-read EX 30 NX)
+  loaded=$(valkey-cli -h "$1" -p "$2" GET "$4")
 fi
-test "$out" = "PONG"
+test "$pong" = "PONG"
+test "$stored" = "OK"
+test "$loaded" = "opsi-write-read"
 `
 	input := []byte(password + "\n")
+	probeKey := "opsi:dependency-probe:" + sanitizeResourceName(lease.ID)
 	_, err := v.run(ctx, input, "run", probePodName, "-n", consumerNS,
 		"--image="+resourcev1.ValkeyImage,
 		"--labels=opsi.dev/probe=dep-verification,opsi.dev/lease-id="+sanitizeResourceName(lease.ID),
-		"--restart=Never", "--rm", "-i", "--", "sh", "-ec", script, "vk-probe", targetHost, strconv.Itoa(targetPort), username)
+		"--restart=Never", "--rm", "-i", "--", "sh", "-ec", script, "vk-probe", targetHost, strconv.Itoa(targetPort), username, probeKey)
 	latency := time.Since(start).Milliseconds()
 
 	if err != nil {
 		return verificationv1.LayerStatusFailed, latency, verificationv1.FailureConnectionFailed, "Valkey connection probe failed"
 	}
-	return verificationv1.LayerStatusVerified, latency, "", "Valkey PING/PONG verified from consumer network context"
+	return verificationv1.LayerStatusVerified, latency, "", "Valkey PING and ephemeral SET/GET with cleanup verified from consumer network context"
 }
 
 func (v Verifier) executeAppDependencyProbe(ctx context.Context, lease cloudrelay.DepVerificationLease) (status string, latencyMs int64, failCode, msg string) {

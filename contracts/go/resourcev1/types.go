@@ -180,6 +180,7 @@ const (
 const (
 	CredentialPurposeResourceManagement = "resource_management"
 	CredentialPurposeResourceBinding    = "resource_binding"
+	CredentialPurposeWorkloadSecret     = "workload_secret"
 )
 
 type ManagedResourceAssignment struct {
@@ -220,6 +221,40 @@ type BindingCredentialSpec struct {
 	ResourceID   string
 	Username     string
 	Database     string
+}
+
+type WorkloadSecretSpec struct {
+	CredentialID string
+	ProjectID    string
+	ServiceID    string
+	LogicalName  string
+}
+
+type WorkloadSecretMetadata struct {
+	ID          string    `json:"id"`
+	Reference   string    `json:"reference"`
+	ProjectID   string    `json:"project_id"`
+	ServiceID   string    `json:"service_id"`
+	LogicalName string    `json:"logical_name"`
+	Revision    uint64    `json:"revision"`
+	Status      string    `json:"status"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type WorkloadSecretUpsert struct {
+	CredentialID   string
+	ProjectID      string
+	ServiceID      string
+	LogicalName    string
+	Value          string
+	IdempotencyKey string
+}
+
+func (c ManagedResourceCredential) ValidateWorkloadSecret(projectID, serviceID string) error {
+	if err := c.Validate(); err != nil || c.Purpose != CredentialPurposeWorkloadSecret || c.ResourceID != projectID || c.OwnerID != serviceID {
+		return errors.New("workload secret credential is invalid")
+	}
+	return nil
 }
 
 func (c ManagedResourceCredential) ValidateFor(resourceType Type) error {

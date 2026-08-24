@@ -623,7 +623,7 @@ type Service struct {
 	deployEvents            map[string][]DeploymentEvent
 	deployLocks             map[string]deploymentLock
 	audit                   []AuditEvent
-	DependencyResolver DependencyTargetResolver
+	DependencyResolver      DependencyTargetResolver
 	idempotency             map[string]any
 	githubInstallations     map[int64]GitHubInstallation
 	githubRepositories      map[int64]GitHubRepository
@@ -631,6 +631,7 @@ type Service struct {
 	githubRepositoryClaims  map[int64]GitHubRepositoryClaim
 	githubServiceBindings   map[string]GitHubServiceBinding
 	githubWebhookDeliveries map[string]GitHubWebhookDelivery
+	proposalReviews         map[string]ProposalReview
 	now                     func() time.Time
 }
 
@@ -673,6 +674,12 @@ type API interface {
 	ValidateServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationValidation, error)
 	DiffServiceConfiguration(projectID, serviceID string, draft ServiceConfigurationDraft) (ServiceConfigurationDiff, error)
 	ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request ServiceConfigurationApplyRequest) (ServiceConfigurationApplyResult, error)
+	CreateProposalReview(projectID, applicationID, actorUserID string, request ProposalReviewCreateRequest) (ProposalReview, error)
+	GetProposalReview(projectID, reviewID string) (ProposalReview, error)
+	ListProposalReviews(projectID, applicationID string, limit int) ([]ProposalReview, error)
+	ApproveProposalReview(projectID, reviewID, actorUserID string) (ProposalReview, error)
+	RejectProposalReview(projectID, reviewID, actorUserID string) (ProposalReview, error)
+	ApplyProposalReview(projectID, reviewID, actorUserID string) (ProposalReview, ServiceConfigurationApplyResult, error)
 	RollbackDeployment(projectID, deploymentID, requestedBy, key, requestID string) (DeploymentJob, error)
 	LeaseDeployment(projectID, nodeID string) (DeploymentLease, bool, error)
 	CompleteDeployment(projectID, nodeID, deploymentID, requestID string, result DeploymentResult) (DeploymentJob, error)
@@ -723,6 +730,7 @@ func NewService() *Service {
 		githubRepositoryClaims:  map[int64]GitHubRepositoryClaim{},
 		githubServiceBindings:   map[string]GitHubServiceBinding{},
 		githubWebhookDeliveries: map[string]GitHubWebhookDelivery{},
+		proposalReviews:         map[string]ProposalReview{},
 	}
 }
 
@@ -1682,6 +1690,47 @@ func (s *Service) StartPreviewCleanup(projectID, actorUserID, key, requestID str
 	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: id, OrgID: base.OrgID, ProjectID: projectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceID: base.ServiceID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationCleanup, IdempotencyKey: key, RequestedBy: actorUserID, AgentID: base.AgentID, NodeID: base.NodeID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: base.SpecHash, PayloadHash: payloadHash, IntentHash: canonical.IntentHash, BaseDeploymentID: base.ID, RolloutIntent: &canonical, RolloutState: deploymentv1.RolloutStatePrepared, DesiredDigest: base.DesiredDigest, CreatedAt: now, UpdatedAt: now}
 	s.deployments[job.ID] = job
 	s.deployEvents[job.ID] = []DeploymentEvent{rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable preview cleanup prepared", 0, requestID, now, "")}
+	s.idempotency[scope] = job
+	return job, false, nil
+}
+
+func (s *Service) StartFirstDeployCleanup(projectID, actorUserID, key, requestID, deploymentID string) (DeploymentJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !validDeploymentIdempotencyKey(key) || !validDeploymentIdempotencyKey(deploymentID) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "FIRST_DEPLOY_CLEANUP_INVALID", Message: "first deploy cleanup identity is invalid", RequestID: requestID}
+	}
+	payloadHash := hashJSON(struct {
+		DeploymentID string `json:"deployment_id"`
+	}{deploymentID})
+	scope := "first-deploy-cleanup:v1:" + projectID + ":" + key
+	if existing, ok := s.idempotency[scope].(DeploymentJob); ok {
+		if existing.PayloadHash != payloadHash {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used with a different cleanup payload", RequestID: requestID}
+		}
+		if current, exists := s.deployments[existing.ID]; exists {
+			existing = current
+		}
+		existing.Reused = true
+		return existing, true, nil
+	}
+	base, ok := s.deployments[deploymentID]
+	if !ok || base.ProjectID != projectID || base.Snapshot == nil || base.Snapshot.Preview != nil || base.RolloutIntent == nil || base.RollbackEligible || base.PreviousDigest != "" || base.KnownGoodID != "" {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "FIRST_DEPLOY_CLEANUP_NOT_ALLOWED", Message: "deployment has known-good authority or is not a failed first production rollout", RequestID: requestID}
+	}
+	now := s.clock()
+	id := newID("dep")
+	desired := base.RolloutIntent.Desired
+	desired.DeploymentJobID = id
+	intent := deploymentv1.RolloutIntent{SchemaVersion: deploymentv1.RolloutSchemaVersion, RolloutID: "rol-" + hashJSON(id)[:32], Operation: deploymentv1.RolloutOperationFirstDeployCleanup, Target: desired.Target, Desired: desired, Attempt: 1, CreatedAt: now}
+	canonical, err := intent.Canonicalize()
+	if err != nil {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "FIRST_DEPLOY_CLEANUP_INVALID", Message: "first deploy cleanup authority is invalid", RequestID: requestID}
+	}
+	snapshot := *base.Snapshot
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: id, OrgID: base.OrgID, ProjectID: projectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceID: base.ServiceID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationFirstDeployCleanup, IdempotencyKey: key, RequestedBy: actorUserID, AgentID: base.AgentID, NodeID: base.NodeID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: base.SpecHash, PayloadHash: payloadHash, IntentHash: canonical.IntentHash, BaseDeploymentID: base.ID, RolloutIntent: &canonical, RolloutState: deploymentv1.RolloutStatePrepared, DesiredDigest: base.DesiredDigest, CreatedAt: now, UpdatedAt: now}
+	s.deployments[job.ID] = job
+	s.deployEvents[job.ID] = []DeploymentEvent{rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable first deploy cleanup prepared", 0, requestID, now, "")}
 	s.idempotency[scope] = job
 	return job, false, nil
 }
