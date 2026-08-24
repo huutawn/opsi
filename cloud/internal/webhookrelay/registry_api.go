@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
@@ -1061,6 +1062,11 @@ func writeRegistryResult[T any](w http.ResponseWriter, r *http.Request, value T,
 }
 
 func writeRegistryFailure(w http.ResponseWriter, r *http.Request, err error) {
+	var policyErr deploymentpolicy.Error
+	if errors.As(err, &policyErr) {
+		writeRegistryError(w, registry.APIError{Status: policyErr.Status, Code: policyErr.Code, Message: policyErr.Message, RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
 	var apiErr registry.APIError
 	if errors.As(err, &apiErr) {
 		writeRegistryError(w, apiErr)
