@@ -412,6 +412,17 @@ export class LocalClient {
     );
   }
 
+  startGitHubInstallationDiscovery(projectID: string, idempotencyKey?: string) {
+    return this.call<{ authorization_url: string; status: string; expires_at: string }>(
+      `/api/local/projects/${projectID}/github/installations/discover/start`,
+      { method: "POST", write: true, idempotencyKey, body: "{}" },
+    );
+  }
+
+  githubInstallationDiscovery(projectID: string) {
+    return this.call<{ installations: GitHubInstallation[] }>(`/api/local/projects/${projectID}/github/installations/discover`);
+  }
+
   githubRepositories(projectID: string) {
     return this.call<{ repositories: GitHubRepository[] }>(`/api/local/projects/${projectID}/github/repositories`);
   }

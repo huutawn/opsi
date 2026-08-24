@@ -2303,6 +2303,23 @@ func TestBoundedLocalAPIRejectsOversizedBodiesAndResponses(t *testing.T) {
 	}
 }
 
+func TestBoundedLocalAPIPreservesFlatCloudErrorCode(t *testing.T) {
+	server := httptest.NewServer(boundedLocalAPI(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error_code":"DEPLOYMENT_LOCKED","message":"existing deployment is active","next_action":"watch_existing_deployment"}`)
+	})))
+	defer server.Close()
+	res, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte(`"DEPLOYMENT_LOCKED"`)) || !bytes.Contains(body, []byte(`"watch_existing_deployment"`)) {
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+}
+
 func TestResolveUIDirUsesEnv(t *testing.T) {
 	t.Setenv("OPSI_UI_DIR", "/tmp/opsi-ui")
 	if got := resolveUIDir(); !strings.HasSuffix(got, "opsi-ui") {

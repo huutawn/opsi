@@ -28,6 +28,7 @@ export function ApplicationWizard({
   const projectID = console.state.project?.id ?? "";
   const [step, setStep] = useState<Step>(resumeService ? "application" : "source");
   const [installations, setInstallations] = useState<GitHubInstallation[]>([]);
+	const [linkedInstallationIDs, setLinkedInstallationIDs] = useState<Set<number>>(() => new Set());
   const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
   const [bindings, setBindings] = useState<GitHubBinding[]>([]);
   const [services, setServices] = useState<ServiceRecord[]>([]);
@@ -61,18 +62,24 @@ export function ApplicationWizard({
       setLoading(true);
       setError("");
       try {
-        const [inst, repos, binds, srvs] = await Promise.all([
+        const [inst, repos, binds, srvs, discovered] = await Promise.all([
           client.githubInstallations(projectID),
           client.githubRepositories(projectID),
           client.githubBindings(projectID),
           client.services(projectID),
+			client.githubInstallationDiscovery(projectID),
         ]);
         if (!active) return;
-        setInstallations(inst.installations || []);
+        const linked = inst.installations || [];
+        const discoveredByID = new Map((discovered.installations || []).map((item) => [item.installation_id, item]));
+        for (const item of linked) discoveredByID.set(item.installation_id, item);
+        const availableInstallations = [...discoveredByID.values()];
+        setInstallations(availableInstallations);
+		setLinkedInstallationIDs(new Set(linked.map((item) => item.installation_id)));
         setRepositories(repos.repositories || []);
         setBindings(binds.bindings || []);
         setServices(srvs.services || []);
-        const firstInst = inst.installations?.[0];
+        const firstInst = availableInstallations[0];
         const nextInstID = firstInst?.installation_id ?? 0;
         setInstallationID(nextInstID);
         const firstRepo = (repos.repositories || []).find((item) => !nextInstID || item.installation_id === nextInstID);
@@ -96,6 +103,7 @@ export function ApplicationWizard({
   }, [client, projectID, resumeService]);
 
   const installation = installations.find((item) => item.installation_id === installationID);
+	const installationNeedsClaim = Boolean(installation && !linkedInstallationIDs.has(installation.installation_id));
   const availableRepositories = repositories.filter((item) => !installationID || item.installation_id === installationID);
   const repository = repositories.find((item) => item.repository_id === repositoryID);
   const existingService = services.find((item) => item.name === serviceKey);
@@ -130,27 +138,45 @@ export function ApplicationWizard({
     }
   }
 
-  function connectGitHub(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const nextInstallationID = Number(new FormData(event.currentTarget).get("installation_id"));
-    if (!nextInstallationID) return;
+  function discoverGitHub() {
     console.reviewMutation(
       {
         project: console.state.project?.name || projectID,
         targetType: "GitHub installation",
-        targetID: String(nextInstallationID),
-        operation: "connect",
-        diff: [`Connect GitHub installation ${nextInstallationID}`],
-        risk: "Starts GitHub authorization through the existing Local API flow.",
+		targetID: "discover",
+		operation: "discover",
+		diff: ["Open GitHub to discover installations available to the signed-in account"],
+		risk: "Starts GitHub authorization; no installation, repository, application, build, or deployment is changed yet.",
       },
       async (key) => {
-        const started = await client.startGitHubInstallationClaim(projectID, nextInstallationID, key);
+		const started = await client.startGitHubInstallationDiscovery(projectID, key);
         window.location.assign(started.authorization_url);
-        return "GitHub authorization started.";
+		return "GitHub installation discovery started.";
       }
     );
     onClose();
   }
+
+	function claimDiscoveredInstallation() {
+		if (!installation || !installationNeedsClaim) return;
+		const installationLabel = installation.account_login || `Installation ${installation.installation_id}`;
+		console.reviewMutation(
+			{
+				project: console.state.project?.name || projectID,
+				targetType: "GitHub installation",
+				targetID: installationLabel,
+				operation: "connect",
+				diff: [`Connect GitHub installation for ${installationLabel}`],
+				risk: "GitHub verifies the signed-in identity and installation access before repositories are synced.",
+			},
+			async (key) => {
+				const started = await client.startGitHubInstallationClaim(projectID, installation.installation_id, key);
+				window.location.assign(started.authorization_url);
+				return "GitHub installation connection started.";
+			},
+		);
+		onClose();
+	}
 
   function reviewApplication(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -366,28 +392,39 @@ spec:
           {/* Step 1: Source */}
           {!loading && step === "source" ? (
             installations.length === 0 ? (
-              <form className="flex flex-col gap-4" onSubmit={connectGitHub}>
-                <SectionTitle number="1" text="No active GitHub installation is connected to this project." title="Connect GitHub" />
-                <div className="flex flex-col gap-2">
-                  <label className="font-label-sm text-xs text-on-surface-variant uppercase">Installation ID</label>
-                  <input
-                    className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg p-3 font-body-md text-sm text-on-surface focus:outline-none focus:border-primary/50"
-                    inputMode="numeric"
-                    min="1"
-                    name="installation_id"
-                    required
-                    type="number"
-                  />
-                </div>
+              <section className="flex flex-col gap-4" aria-labelledby="connect-github-heading">
+                <SectionTitle number="1" text="Authorize GitHub and Opsi will show the installations available to your account." title="Connect GitHub" />
+                <p className="text-xs text-on-surface-variant" id="connect-github-heading">
+                  You do not need an installation ID. GitHub confirms account access before Opsi can show repositories.
+                </p>
                 <Actions>
                   <Button onClick={onClose} type="button" variant="secondary">Cancel</Button>
-                  <Button type="submit" variant="primary">Connect GitHub</Button>
+                  <Button onClick={discoverGitHub} type="button" variant="primary">Continue with GitHub</Button>
                 </Actions>
-              </form>
+              </section>
             ) : (
               <div className="flex flex-col gap-5">
-                <SectionTitle number="1" text="Select repository and branch from authorized GitHub sources." title="Source Repository" />
+                <SectionTitle number="1" text="Select a GitHub installation, repository, and branch from authorized sources." title="Source Repository" />
                 <div className="flex flex-col gap-4">
+                  {installationNeedsClaim ? (
+                    <section className="flex flex-col gap-3 rounded-lg border border-outline-variant/30 bg-surface-container p-4" aria-label="Connect discovered GitHub installation">
+                      <label className="flex flex-col gap-2 text-xs font-label-sm uppercase text-on-surface-variant">
+                        GitHub installation
+                        <select
+                          aria-label="GitHub installation"
+                          className="w-full rounded-lg border border-outline-variant/30 bg-surface-container-highest p-3 font-body-md text-sm normal-case text-on-surface focus:outline-none focus:border-primary/50"
+                          onChange={(event) => chooseInstallation(event.target.value)}
+                          value={installationID}
+                        >
+                          {installations.map((item) => <option key={item.installation_id} value={item.installation_id}>{item.account_login}</option>)}
+                        </select>
+                      </label>
+                      <p className="text-sm font-medium text-on-surface">Connect {installation?.account_login}</p>
+                      <p className="text-xs text-on-surface-variant">GitHub found this installation. Continue once to verify access and load its repositories.</p>
+                      <Button onClick={claimDiscoveredInstallation} type="button" variant="primary">Connect this GitHub installation</Button>
+                    </section>
+                  ) : (
+                  <>
                   <div className="flex flex-col gap-2">
                     <label htmlFor="wizard-installation-select" className="font-label-sm text-xs text-on-surface-variant uppercase">GitHub installation</label>
                     <select
@@ -447,12 +484,14 @@ spec:
                       value={selectedRef}
                     />
                   </div>
+                  </>
+                  )}
                 </div>
 
                 <Actions>
                   <Button onClick={onClose} type="button" variant="secondary">Cancel</Button>
                   <Button
-                    disabled={!installation || !repository || !repositoryUsable(repository) || !selectedRef}
+                    disabled={installationNeedsClaim || !installation || !repository || !repositoryUsable(repository) || !selectedRef}
                     onClick={() => setStep("application")}
                     type="button"
                     variant="primary"

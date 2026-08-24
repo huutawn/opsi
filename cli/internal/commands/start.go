@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
+	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
@@ -140,9 +141,11 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	agentResolver := newAgentConfigResolver(cfg, configPath)
 	localSession := newLocalSessionToken()
 	authFlow := &localAuthFlow{
-		states:             map[string]time.Time{},
-		installationClaims: map[string]time.Time{},
-		selections:         map[string]localSelectionState{},
+		states:                  map[string]time.Time{},
+		installationClaims:      map[string]time.Time{},
+		installationDiscoveries: map[string]localInstallationDiscoveryPending{},
+		discoveredInstallations: map[string]localInstallationDiscoveryResult{},
+		selections:              map[string]localSelectionState{},
 	}
 	routes := http.NewServeMux()
 	routes.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -253,6 +256,9 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	})
 	routes.HandleFunc("/api/local/github/installations/claim/callback", func(w http.ResponseWriter, r *http.Request) {
 		completeLocalInstallationClaim(w, r, cfg, factory, authFlow)
+	})
+	routes.HandleFunc("/api/local/github/installations/discover/callback", func(w http.ResponseWriter, r *http.Request) {
+		completeLocalInstallationDiscovery(w, r, cfg, factory, authFlow)
 	})
 	routes.HandleFunc("/api/local/session/logout", func(w http.ResponseWriter, r *http.Request) {
 		if !requireLocalSession(w, r, localSession) {
@@ -469,20 +475,34 @@ func writeNormalizedLocalError(w http.ResponseWriter, r *http.Request, status in
 			Message    string `json:"message"`
 			NextAction string `json:"next_action"`
 		} `json:"error"`
+		Code       string `json:"error_code"`
+		Message    string `json:"message"`
+		NextAction string `json:"next_action"`
 	}
 	_ = json.Unmarshal(body, &payload)
 	code := strings.TrimSpace(payload.Error.Code)
 	if code == "" {
+		code = strings.TrimSpace(payload.Code)
+	}
+	if code == "" {
 		code = "DOWNSTREAM_REQUEST_FAILED"
 	}
-	message := strings.TrimSpace(redactLocalTelemetryText(payload.Error.Message))
+	messageValue := payload.Error.Message
+	if messageValue == "" {
+		messageValue = payload.Message
+	}
+	message := strings.TrimSpace(redactLocalTelemetryText(messageValue))
 	if message == "" {
 		message = http.StatusText(status)
 	}
 	if len(message) > 512 {
 		message = message[:512]
 	}
-	nextAction := strings.TrimSpace(payload.Error.NextAction)
+	nextActionValue := payload.Error.NextAction
+	if nextActionValue == "" {
+		nextActionValue = payload.NextAction
+	}
+	nextAction := strings.TrimSpace(nextActionValue)
 	if nextAction == "" {
 		nextAction = localNextAction(status)
 	}
@@ -521,12 +541,24 @@ type localSelectionState struct {
 	ExpiresAt           time.Time
 }
 
+type localInstallationDiscoveryPending struct {
+	ProjectID string
+	ExpiresAt time.Time
+}
+
+type localInstallationDiscoveryResult struct {
+	Installations []cloudclient.GitHubInstallation
+	ExpiresAt     time.Time
+}
+
 type localAuthFlow struct {
-	mu                 sync.Mutex
-	states             map[string]time.Time
-	installationClaims map[string]time.Time
-	selections         map[string]localSelectionState
-	currentSession     localSessionIdentity
+	mu                      sync.Mutex
+	states                  map[string]time.Time
+	installationClaims      map[string]time.Time
+	installationDiscoveries map[string]localInstallationDiscoveryPending
+	discoveredInstallations map[string]localInstallationDiscoveryResult
+	selections              map[string]localSelectionState
+	currentSession          localSessionIdentity
 }
 
 type localSessionIdentity struct {
