@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 const hash = (value: string) => value.repeat(64).slice(0, 64);
@@ -49,6 +50,16 @@ test("viewer can inspect the reviewed plan but sees no mutation control", async 
 	await expect(page.getByText("Your role has read-only access to this run.")).toBeVisible();
 	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toHaveCount(0);
 	await expect(page.getByLabel("Canonical key").first()).toBeDisabled();
+});
+
+test("review plan has no WCAG 2.1 A or AA axe violations", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	await mockDeployAPI(page, () => run, () => run);
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("heading", { name: "Review plan" })).toBeVisible();
+	const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
+	expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);
 });
 
 test("warning acknowledgement submits the exact preflight hash", async ({ page }) => {
