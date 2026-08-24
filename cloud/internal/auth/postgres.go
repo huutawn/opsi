@@ -3,14 +3,28 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
 type PostgresStore struct {
-	DB *sql.DB
+	DB  *sql.DB
+	Now func() time.Time
+}
+
+func (s PostgresStore) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (s PostgresStore) OAuthUser(ctx context.Context, provider, subject string) (string, error) {
@@ -20,6 +34,79 @@ func (s PostgresStore) OAuthUser(ctx context.Context, provider, subject string) 
 		return "", ErrOAuthIdentity
 	}
 	return userID, err
+}
+
+// ProvisionOAuthUser creates an isolated personal organization and its default
+// project for a first-time OAuth identity. A browser callback cannot use this
+// path to attach the user to a client-selected project.
+func (s PostgresStore) ProvisionOAuthUser(ctx context.Context, provider, subject string) (string, error) {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	subject = strings.TrimSpace(subject)
+	if s.DB == nil || provider == "" || subject == "" {
+		return "", ErrOAuthIdentity
+	}
+
+	hash := sha256.Sum256([]byte(provider + "\x00" + subject))
+	hashText := hex.EncodeToString(hash[:])
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, hashText); err != nil {
+		return "", err
+	}
+	var existingUserID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT user_id
+		FROM oauth_identities
+		WHERE provider = $1 AND subject = $2
+		FOR UPDATE`, provider, subject).Scan(&existingUserID)
+	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return "", err
+		}
+		return existingUserID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	now := s.now()
+	userID := newID("user")
+	organizationID := newID("org")
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (id, email, created_at)
+		VALUES ($1, $2, $3)`,
+		userID, "github-"+hashText[:24]+"@users.noreply.opsi.invalid", now); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO organizations (id, name, slug, status, created_at, updated_at)
+		VALUES ($1, $2, $3, 'active', $4, $4)`,
+		organizationID, "Personal workspace", "personal-"+hashText[:24], now); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO user_memberships (id, org_id, user_id, role, status, created_at, updated_at)
+		VALUES ($1, $2, $3, 'owner', 'active', $4, $4)`,
+		newID("member"), organizationID, userID, now); err != nil {
+		return "", err
+	}
+	if _, err := registry.CreateProjectInTx(ctx, tx, organizationID, "Default", "default", userID, now); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO oauth_identities (id, user_id, provider, subject, created_at)
+		VALUES ($1, $2, $3, $4, $5)`,
+		newID("oauth"), userID, provider, subject, now); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return userID, nil
 }
 
 func (s PostgresStore) PATCandidates(ctx context.Context, projectID string) ([]Candidate, error) {
