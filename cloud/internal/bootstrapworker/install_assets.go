@@ -369,20 +369,22 @@ if command -v k3s >/dev/null 2>&1; then
 	current_output="$($SUDO k3s --version 2>/dev/null)" || fail_code K3S_VERSION_VERIFICATION_FAILED
 	current_version="$(printf '%s\n' "$current_output" | awk 'NR == 1 { print $3 }')"
 fi
-if [ "$current_version" != "$OPSI_K3S_VERSION" ]; then
+if [ "$current_version" != "$OPSI_K3S_VERSION" ] || ! $SUDO test -s /var/lib/rancher/k3s/server/cred/encryption-config.json; then
 	download_file "$OPSI_K3S_INSTALLER_URL" "$installer"
 	if ! printf '%s  %s\n' "$OPSI_K3S_INSTALLER_SHA256" "$installer" | sha256sum --check -; then
 		fail_code K3S_INSTALLER_CHECKSUM_MISMATCH
 	fi
 	chmod 0700 "$installer"
 	if [ "${OPSI_REMOTE_USERNAME}" = root ]; then
-		INSTALL_K3S_VERSION="$OPSI_K3S_VERSION" INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640' sh "$installer"
+		INSTALL_K3S_VERSION="$OPSI_K3S_VERSION" INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640 --secrets-encryption' sh "$installer"
 	else
-		sudo -n env INSTALL_K3S_VERSION="$OPSI_K3S_VERSION" INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640' sh "$installer"
+		sudo -n env INSTALL_K3S_VERSION="$OPSI_K3S_VERSION" INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640 --secrets-encryption' sh "$installer"
 	fi
 fi
 $SUDO systemctl enable --now k3s
 $SUDO systemctl is-active --quiet k3s
+$SUDO test -s /var/lib/rancher/k3s/server/cred/encryption-config.json || fail_code K3S_SECRETS_ENCRYPTION_NOT_ENABLED
+$SUDO k3s secrets-encrypt status | grep -q 'Encryption Status: Enabled' || fail_code K3S_SECRETS_ENCRYPTION_NOT_ENABLED
 installed_output="$($SUDO k3s --version 2>/dev/null)" || fail_code K3S_VERSION_VERIFICATION_FAILED
 installed_version="$(printf '%s\n' "$installed_output" | awk 'NR == 1 { print $3 }')"
 [ "$installed_version" = "$OPSI_K3S_VERSION" ] || fail_code K3S_VERSION_VERIFICATION_FAILED
@@ -542,7 +544,7 @@ secret:
   namespace: default
   kubectl_path: kubectl
   totp_namespace: default
-  encryption_at_rest_confirmed: false
+  encryption_at_rest_confirmed: true
 EOF
 	"$target_binary" --config "$config_tmp" --check >/dev/null 2>&1 || fail_code AGENT_REGISTRATION_STATE_INVALID
 	$SUDO install -d -m 0750 /etc/opsi /var/lib/opsi
