@@ -1,10 +1,10 @@
-# Opsi MCP-01 + MCP-02 + MCP-03: Read-Only Model Context Protocol Surface
+# Opsi MCP-01 through MCP-05: Read-Only Model Context Protocol Surface
 
 ## Overview
 
 Opsi Model Context Protocol (MCP) server provides AI agents and external tools with a safe, read-only window into Opsi project topology, source snapshots, deployment preflight evaluations, and 5-layer dependency verifications.
 
-MCP-01, MCP-02, and MCP-03 are strictly **non-operational**. They introduce zero mutations into the Opsi control plane or running environments.
+MCP-01 through MCP-05 are strictly **non-operational**. They introduce zero mutations into the Opsi control plane or running environments.
 
 MCP-02 adds an advisory dependency-proposal boundary. Opsi provides bounded,
 exact-source-bound facts and deterministically validates a typed candidate with
@@ -83,10 +83,11 @@ opsi mcp serve --addr 127.0.0.1:9781
 
 ---
 
-## Available Read-Only Tools (21)
+## Available Read-Only Tools (22)
 
 | Tool Name | Scope / Purpose | Key Safeguards & Bounds |
 | :--- | :--- | :--- |
+| `deployment_readiness_context` | Single bounded snapshot of current source, configuration/dependency realization, BuildRecord, placement, canonical preflight, deployment, and verification facts for one application/environment. | Always `action: NONE`; derives facts on each read; no persisted AI workflow, reasoning, acknowledgement, or operational action. A PASS still requires the human to use the canonical deployment review surface. |
 | `project_context` | High-level project summary, counts, topology revision, deployment state. | Redacted facts, zero credentials. |
 | `topology` | Applied topology plan (runtimes, nodes, assignments, state hashes). | Canonical applied plan only. |
 | `applications_list` | List applications with source bindings and placement runtimes. | Bounded list (max 100). |
@@ -159,6 +160,39 @@ uses an un-applied MCP-02 mapping returns
 `DEPENDS_ON_UNAPPLIED_DEPENDENCY_PROPOSAL`; a configuration-only alternative is
 reported rather than hidden. Source and proposal prompt-injection text is data
 only and cannot expand MCP capabilities.
+
+---
+
+## MCP-05 operator readiness
+
+`deployment_readiness_context` is the one MCP-05 addition. It is a compact
+read of one application and target environment, not an AI workflow or a second
+deployment state machine. It reuses the same factual authorities exposed by
+the rest of Opsi:
+
+| Readiness field | Canonical source | Meaning |
+| :--- | :--- | :--- |
+| `source` | immutable BuildRecord provenance and source binding | An exact commit is either bound to the selected record or unavailable; MCP never uses a mutable branch or working tree. |
+| `dependencies` | ServiceConfiguration and ResourceBinding realization facts | The configuration contract and required managed-resource binding state. Final deployability remains canonical preflight. |
+| `build` | BuildRecord | `CURRENT` means a succeeded immutable BuildRecord; `REQUIRED`, `FAILED`, and `NOT_ACCEPTED` cannot be used for deployment. |
+| `placement` | applied Topology | The currently applied runtime assignment, if one exists. |
+| `preflight` | ADC-04 `deployments/preflight` | Fresh `PASS`, `PASS_WITH_WARNINGS`, or `BLOCKED` result for the current BuildRecord and environment. Warnings remain unacknowledged in this read. |
+| `deployment` | DeploymentJob | Durable rollout facts only; `COMPLETED` is not a verification claim. |
+| `verification` | latest ADC-05 runs | `VERIFIED`, `PARTIALLY_VERIFIED`, `FAILED`, `STALE`, or `NOT_RUN`; stale never becomes current success. |
+
+The context always returns `action: "NONE"`. It intentionally does not return
+`READY_TO_DEPLOY`: a PASS means that the human may open the existing Deployment
+Review, which creates the exact current review and, where applicable, provides
+the explicit warning acknowledgement. A `PASS_WITH_WARNINGS` result never
+contains an acknowledgement, and a `BLOCKED` result is passed through with its
+canonical checks and remediation codes.
+
+An external AI may use these facts to explain a workflow such as dependency
+review, source change required, build required, placement required, preflight
+blocked, warning acknowledgement required, deployment in progress, or
+verification failure. Opsi stores none of that interpretation. A source patch
+review remains a stopping point: the human can copy it and make a repository
+commit outside Opsi; no MCP or Cloud source-write authority exists.
 
 ---
 

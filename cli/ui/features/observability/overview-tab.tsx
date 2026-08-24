@@ -180,8 +180,8 @@ export function OverviewTab({
         {/* KPI 4: Delivery Ops */}
         <a
           className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 shadow-sm hover:shadow-md transition-all flex flex-col justify-between space-y-4 cursor-pointer"
-          href={routeHref({ projectID, view: "delivery", tab: "deployments" })}
-          onClick={(e) => follow(e, { view: "delivery", tab: "deployments" })}
+          href={routeHref({ projectID, view: "deploy" })}
+          onClick={(e) => follow(e, { view: "deploy" })}
         >
           <div className="flex items-center justify-between">
             <span className="font-label-sm text-xs text-on-surface-variant uppercase tracking-wider">Delivery Rollouts</span>

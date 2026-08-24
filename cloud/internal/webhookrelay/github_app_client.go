@@ -27,6 +27,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
 )
 
 const (
@@ -35,7 +36,15 @@ const (
 	githubResponseMaxBytes         = 1 << 20
 	githubInstallationTokenSkew    = 2 * time.Minute
 	githubSharedRequestTimeout     = 30 * time.Second
+	githubRepositoryTreeMaxBytes   = 8 << 20
 )
+
+// RepositoryTreeFile is immutable metadata for one blob in an exact commit
+// tree. Symlinks and submodules are intentionally excluded by ListFiles.
+type RepositoryTreeFile struct {
+	Path string
+	Size int64
+}
 
 type GitHubPullRequest struct {
 	Number           int
@@ -99,7 +108,79 @@ func (c *GitHubAppClient) RepositoryFileExists(ctx context.Context, installation
 	return payload.Type == "file", nil
 }
 
+// ListFiles returns regular blobs from the exact commit tree. It never checks
+// out the repository and never invokes repository code.
+func (c *GitHubAppClient) ListFiles(ctx context.Context, installationID int64, repository, commitSHA string) ([]repositoryanalysis.File, bool, error) {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 || !validGitHubPathPart(parts[0]) || !validGitHubPathPart(parts[1]) || !validSHA40(commitSHA) {
+		return nil, false, buildjob.Error{Code: "GITHUB_TREE_METADATA_INVALID", Status: 409, Message: "Repository tree metadata is invalid.", Cause: "github_tree"}
+	}
+	body, status, err := c.repositoryAPIGetLimit(ctx, installationID, parts, "/git/trees/"+url.PathEscape(commitSHA)+"?recursive=1", githubRepositoryTreeMaxBytes)
+	if err != nil {
+		return nil, false, err
+	}
+	if status != http.StatusOK {
+		return nil, false, buildjob.Error{Code: "GITHUB_REPOSITORY_UNAVAILABLE", Status: 409, Message: "GitHub repository tree is unavailable.", Cause: "github_repository"}
+	}
+	var payload struct {
+		Truncated bool `json:"truncated"`
+		Tree      []struct {
+			Path string `json:"path"`
+			Mode string `json:"mode"`
+			Type string `json:"type"`
+			Size int64  `json:"size"`
+		} `json:"tree"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return nil, false, buildjob.Error{Code: "GITHUB_TREE_METADATA_INVALID", Status: 409, Message: "Repository tree metadata is invalid.", Cause: "github_tree"}
+	}
+	files := make([]repositoryanalysis.File, 0, len(payload.Tree))
+	for _, item := range payload.Tree {
+		if item.Type != "blob" || !validGitHubRepositoryFilePath(item.Path) || item.Size < 0 {
+			continue
+		}
+		files = append(files, repositoryanalysis.File{Path: item.Path, Size: item.Size, Mode: item.Mode})
+	}
+	return files, payload.Truncated, nil
+}
+
+// ReadFile reads a bounded regular file from an exact commit. The returned
+// bytes are content only; GitHub credentials and response metadata are omitted.
+func (c *GitHubAppClient) ReadFile(ctx context.Context, installationID int64, repository, commitSHA, filePath string, maxBytes int64) ([]byte, error) {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 || !validGitHubPathPart(parts[0]) || !validGitHubPathPart(parts[1]) || !validSHA40(commitSHA) || !validGitHubRepositoryFilePath(filePath) || maxBytes < 1 || maxBytes > githubRepositoryTreeMaxBytes {
+		return nil, buildjob.Error{Code: "GITHUB_FILE_METADATA_INVALID", Status: 409, Message: "Repository file metadata is invalid.", Cause: "github_file"}
+	}
+	escaped := make([]string, 0, len(strings.Split(filePath, "/")))
+	for _, segment := range strings.Split(filePath, "/") {
+		escaped = append(escaped, url.PathEscape(segment))
+	}
+	body, status, err := c.repositoryAPIGetLimit(ctx, installationID, parts, "/contents/"+strings.Join(escaped, "/")+"?ref="+url.QueryEscape(commitSHA), maxBytes*2+4096)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, buildjob.Error{Code: "GITHUB_FILE_UNAVAILABLE", Status: 409, Message: "Repository file is unavailable at the exact commit.", Cause: "github_file"}
+	}
+	var payload struct {
+		Type, Path, Encoding, Content string
+		Size                          int64 `json:"size"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Type != "file" || payload.Path != filePath || payload.Encoding != "base64" || payload.Size < 0 || payload.Size > maxBytes {
+		return nil, buildjob.Error{Code: "GITHUB_FILE_METADATA_INVALID", Status: 409, Message: "Repository file metadata is invalid.", Cause: "github_file"}
+	}
+	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(payload.Content, "\n", ""))
+	if err != nil || int64(len(content)) > maxBytes {
+		return nil, buildjob.Error{Code: "GITHUB_FILE_METADATA_INVALID", Status: 409, Message: "Repository file content is invalid.", Cause: "github_file"}
+	}
+	return content, nil
+}
+
 func (c *GitHubAppClient) repositoryAPIGet(ctx context.Context, installationID int64, repository []string, suffix string) ([]byte, int, error) {
+	return c.repositoryAPIGetLimit(ctx, installationID, repository, suffix, githubResponseMaxBytes)
+}
+
+func (c *GitHubAppClient) repositoryAPIGetLimit(ctx context.Context, installationID int64, repository []string, suffix string, limit int64) ([]byte, int, error) {
 	token, _, err := c.InstallationToken(ctx, installationID)
 	if err != nil {
 		return nil, 0, buildjob.Error{Code: "GITHUB_INSTALLATION_UNAVAILABLE", Status: 409, Message: "The bound GitHub installation is unavailable.", Cause: "github_installation"}
@@ -118,8 +199,8 @@ func (c *GitHubAppClient) repositoryAPIGet(ctx context.Context, installationID i
 		return nil, 0, buildjob.Error{Code: "GITHUB_REPOSITORY_UNAVAILABLE", Status: 409, Message: "GitHub repository metadata is unavailable.", Cause: "github_repository"}
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, githubResponseMaxBytes+1))
-	if err != nil || len(body) > githubResponseMaxBytes {
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil || int64(len(body)) > limit {
 		return nil, 0, buildjob.Error{Code: "GITHUB_REPOSITORY_UNAVAILABLE", Status: 409, Message: "GitHub repository metadata is unavailable.", Cause: "github_repository"}
 	}
 	return body, response.StatusCode, nil

@@ -56,6 +56,43 @@ export type ServiceRecord = {
   configuration?: ServiceConfiguration;
 };
 
+export type RepositoryEvidence = { path: string; kind: string; reason: string; confidence: "high" | "medium" | "low" };
+export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number }; exposure?: { mode?: string; hostname?: string }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DependencyVerification = { type: string; path?: string; expected_status?: number };
+export type DetectedDependency = { from: string; to: string; protocol: string; strategy?: string; path?: string; required: boolean; injections?: Array<{ environment_name: string; symbolic_source: string }>; verification?: DependencyVerification; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DetectedBinding = { from: string; to: string; kind: string; path?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type AnalysisIssue = { code: string; message: string; path?: string; resolution?: string; blocking: boolean };
+export type DeploymentPlan = {
+  schema_version: "opsi.deployment_plan/v2"; hash: string;
+  source: { repository_id: number; installation_id: number; repository: string; selected_ref: string; commit_sha: string };
+  applications: DetectedApplication[]; resources: DetectedResource[]; dependencies: DetectedDependency[]; bindings: DetectedBinding[];
+  secrets: Array<{ name: string; application_key: string; environment_name: string; generated: boolean; secret_ref?: string; revision?: number; display: string; confidence: string; reason: string; evidence: RepositoryEvidence[] }>;
+  issues: AnalysisIssue[];
+  target: { environment_id: string; runtime_id?: string; node_id?: string; hostname?: string; exposure: string; cpu_milli?: number; memory_bytes?: number };
+  authority_revisions: { source_commit_sha: string; repository_updated_at?: string; topology_revision?: number; topology_hash?: string; policy_revision?: number; policy_hash?: string; resource_revision?: number; resource_hash?: string };
+  failure_policy: { fail_fast: boolean; rollback_known_good: boolean; retain_persistent_data: boolean; max_attempts: number };
+};
+export type DeploymentRunState = "analyzing" | "awaiting_input" | "awaiting_approval" | "provisioning" | "building" | "preflighting" | "awaiting_warning_ack" | "deploying" | "verifying" | "succeeded" | "stale" | "failed" | "rolling_back" | "cleaning_up" | "rolled_back" | "cancelled";
+export type DeploymentRun = {
+  schema_version: "opsi.deployment_run/v2"; id: string; project_id: string; created_by: string; state: DeploymentRunState;
+  plan: DeploymentPlan; analysis: { authority?: string; issues?: AnalysisIssue[]; files_inspected?: number; bytes_inspected?: number; truncated?: boolean };
+  approval?: { actor: string; plan_hash: string; approved_at: string };
+  warning_acknowledgement?: { actor: string; preflight_hash: string; acknowledged_at: string };
+  preflight_hash?: string; preflight_warnings?: string[];
+  authority_refs: { checkpoints?: Array<{ kind: string; id: string; revision?: number; state_hash?: string; step: DeploymentRunState }> };
+  failure?: { step: DeploymentRunState; code: string; message: string; next_action?: string; retryable: boolean };
+  attempt: number; revision: number; created_at: string; updated_at: string; finished_at?: string;
+};
+export type WorkloadSecretMetadata = { id: string; reference: string; project_id: string; service_id: string; logical_name: string; revision: number; status: string; updated_at: string };
+export type DeploymentRunEvent = { id: string; project_id: string; run_id: string; state: DeploymentRunState; level: string; message: string; metadata?: Record<string, unknown>; created_at: string };
+export type DeploymentRunResult = {
+  run_id: string; state: DeploymentRunState; source_sha: string; public_url?: string;
+  applications: Array<{ service_key: string; service_id: string; build_record_id: string; build_digest: string; build_log_url?: string; deployment_job_id?: string; deployment_status?: string; application_image_id?: string; available_replicas?: number; readiness_evidence_hash?: string; digest_matches_image_id: boolean }>;
+  verifications: Array<{ id: string; dependency_logical_name: string; overall_status: string; provider_health: { status: string; provider_kind: string; safe_evidence?: Record<string,string> }; connection: { status: string; protocol?: string; latency_ms?: number }; consumer_assertion: { status: string; assertion_path?: string; status_code?: number; expected_code?: number } }>;
+  capacity: Array<{ runtime_id: string; source: string; reserved_cpu_millicores: number; reserved_memory_bytes: number; assigned_cpu_millicores: number; assigned_memory_bytes: number; requested_cpu_millicores: number; requested_memory_bytes: number; available_cpu_millicores?: number; available_memory_bytes?: number; unknown_capacity: boolean; oversubscribed: boolean }>;
+};
+
 export type EnvironmentVariable = { name: string; value: string };
 
 export type ServiceBinding = {
@@ -87,7 +124,7 @@ export type DependencyVerificationContract = {
 
 export type ApplicationDependency = {
   logical_name: string;
-  target_kind: "managed_service" | "application" | string;
+  target_kind: "managed_resource" | "application" | string;
   target_identity: string;
   protocol: "postgres" | "redis" | "http" | string;
   strategy?: "same_origin" | "internal_http" | "public_http" | string;

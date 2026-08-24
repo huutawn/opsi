@@ -108,6 +108,24 @@ func TestRolloutFailureWithoutKnownGoodIsTerminalFailed(t *testing.T) {
 	}
 }
 
+func TestFirstDeployCleanupIsDurableAndDoesNotCreateKnownGood(t *testing.T) {
+	store := openTestStore(t)
+	runtime := newFakeRolloutRuntime()
+	snapshot := testRuntimeSnapshot(t, "job-cleanup", "c")
+	intent := deploymentv1.RolloutIntent{SchemaVersion: deploymentv1.RolloutSchemaVersion, RolloutID: "rollout-cleanup", Operation: deploymentv1.RolloutOperationFirstDeployCleanup, Target: snapshot.Target, Desired: snapshot, Attempt: 1, CreatedAt: time.Now().UTC()}
+	intent, err := intent.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second}).ReconcileRollout(context.Background(), intent, nil)
+	if err != nil || record.State != deploymentv1.RolloutStateCleaned || record.TerminalAt == nil || runtime.cleanupCalls != 1 {
+		t.Fatalf("record=%+v cleanup_calls=%d err=%v", record, runtime.cleanupCalls, err)
+	}
+	if known, getErr := store.CurrentKnownGood(context.Background(), snapshot.Target); getErr != nil || known != nil {
+		t.Fatalf("cleanup created known-good=%+v err=%v", known, getErr)
+	}
+}
+
 func TestRolloutPreWALFailuresReturnNoRecordAndDoNotMutate(t *testing.T) {
 	t.Run("stale previous known-good", func(t *testing.T) {
 		store := openTestStore(t)
@@ -835,6 +853,7 @@ type fakeRolloutRuntime struct {
 	prepareCalls     int
 	applyCalls       int
 	rollbackCalls    int
+	cleanupCalls     int
 	rollbackTargetID string
 }
 
@@ -1015,6 +1034,12 @@ func (f *fakeRolloutRuntime) ObserveReadiness(_ context.Context, plan RolloutPla
 	}
 	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: true, LocalRoutingReady: true, WorkloadEvidenceHash: strings.Repeat("1", 64), ServiceEvidenceHash: strings.Repeat("2", 64), ExposureEvidenceHash: strings.Repeat("3", 64), ApplicationImageIDHash: strings.Repeat("4", 64), LocalProbeEvidenceHash: strings.Repeat("5", 64), ObservedAt: time.Now().UTC()}
 	return evidence, fakeResourceIdentities(f.resourceVersion), nil
+}
+
+func (f *fakeRolloutRuntime) CleanupFirstDeploy(_ context.Context, _ deploymentv1.RuntimeSnapshot) error {
+	f.cleanupCalls++
+	f.current = deploymentv1.RuntimeSnapshot{}
+	return nil
 }
 
 func fakeResourceIdentities(version int) []deploymentv1.ResourceIdentity {

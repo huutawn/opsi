@@ -3,6 +3,8 @@ package mcp
 import (
 	"encoding/json"
 	"time"
+
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 const (
@@ -480,6 +482,74 @@ type ApplicationDetailResult struct {
 	PlacementRuntimeID        string                     `json:"placement_runtime_id,omitempty"`
 	DependenciesSummary       []ApplicationDependencyDoc `json:"dependencies_summary,omitempty"`
 	LatestVerificationSummary *VerificationSummary       `json:"latest_verification_summary,omitempty"`
+}
+
+// DeploymentReadinessContext is a snapshot, not a workflow authority. Each
+// field is derived from the canonical authority named by the field itself.
+type DeploymentReadinessContext struct {
+	Action        string                          `json:"action"`
+	ProjectID     string                          `json:"project_id"`
+	EnvironmentID string                          `json:"environment_id"`
+	Application   DeploymentReadinessApplication  `json:"application"`
+	Source        DeploymentReadinessSource       `json:"source"`
+	Dependencies  DeploymentReadinessDependencies `json:"dependencies"`
+	Build         DeploymentReadinessBuild        `json:"build"`
+	Placement     DeploymentReadinessPlacement    `json:"placement"`
+	Preflight     DeploymentReadinessPreflight    `json:"preflight"`
+	Deployment    DeploymentReadinessDeployment   `json:"deployment"`
+	Verification  DeploymentReadinessVerification `json:"verification"`
+}
+
+type DeploymentReadinessApplication struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type DeploymentReadinessSource struct {
+	Status          string `json:"status"`
+	CommitSHA       string `json:"commit_sha,omitempty"`
+	BuildRecordID   string `json:"build_record_id,omitempty"`
+	ApplicationRoot string `json:"application_root,omitempty"`
+}
+
+type DeploymentReadinessDependencies struct {
+	Status     string `json:"status"`
+	Total      int    `json:"total"`
+	Required   int    `json:"required"`
+	Unresolved int    `json:"unresolved"`
+	Unrealized int    `json:"unrealized"`
+}
+
+type DeploymentReadinessBuild struct {
+	Status      string `json:"status"`
+	RecordID    string `json:"record_id,omitempty"`
+	CommitSHA   string `json:"commit_sha,omitempty"`
+	ImageDigest string `json:"image_digest,omitempty"`
+	BuildStatus string `json:"build_status,omitempty"`
+}
+
+type DeploymentReadinessPlacement struct {
+	Status    string `json:"status"`
+	RuntimeID string `json:"runtime_id,omitempty"`
+}
+
+type DeploymentReadinessPreflight struct {
+	Status string                        `json:"status"`
+	Result *deploymentv1.PreflightResult `json:"result,omitempty"`
+}
+
+type DeploymentReadinessDeployment struct {
+	Status           string `json:"status"`
+	DeploymentID     string `json:"deployment_id,omitempty"`
+	DeploymentStatus string `json:"deployment_status,omitempty"`
+	RolloutState     string `json:"rollout_state,omitempty"`
+	DesiredDigest    string `json:"desired_digest,omitempty"`
+	CurrentDigest    string `json:"current_digest,omitempty"`
+}
+
+type DeploymentReadinessVerification struct {
+	Status          string `json:"status"`
+	DependencyCount int    `json:"dependency_count"`
 }
 
 type PublicRouteSummary struct {

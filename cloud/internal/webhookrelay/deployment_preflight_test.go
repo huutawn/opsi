@@ -694,6 +694,20 @@ func TestADC04DynamicRevalidationOnApply(t *testing.T) {
 	}
 }
 
+func TestPreflightTargetNodeUsesExactRoutedNode(t *testing.T) {
+	nodes := []registry.Node{
+		{ID: "historical-offline", RuntimeID: "runtime-1", Status: registry.NodeOffline},
+		{ID: "routed-healthy", RuntimeID: "runtime-1", Status: registry.NodeHealthy},
+	}
+	matched := preflightTargetNode(nodes, "runtime-1", "routed-healthy")
+	if matched == nil || matched.ID != "routed-healthy" || matched.Status != registry.NodeHealthy {
+		t.Fatalf("matched=%+v", matched)
+	}
+	if matched = preflightTargetNode(nodes, "runtime-1", "missing-node"); matched != nil {
+		t.Fatalf("missing routed node fell back to runtime node: %+v", matched)
+	}
+}
+
 // 6. Zero Mutation Guarantee
 func TestADC04ZeroMutationDuringPreflightReview(t *testing.T) {
 	f := setupPreflightFixture(t)
@@ -1151,7 +1165,7 @@ func TestADC04BatchMemberWithNoBuildRecordBlocked(t *testing.T) {
 		RepositoryID: 3, RepositoryOwnerID: 3, ActiveBindingID: "bind-web2",
 		ServiceID: web2.ID, ServiceKey: web2.Name, CreatedAt: now,
 		Workload: buildrecordv1.WorkloadIdentity{RepositoryID: 3, RepositoryOwnerID: 3, Ref: "refs/heads/main", SHA: strings.Repeat("a", 40), EventName: "push", WorkflowRef: "o/r2/.github/workflows/cd.yml@refs/heads/main"},
-		Build: buildrecordv1.BuildMetadata{ConfigHash: strings.Repeat("a", 64), PlanHash: strings.Repeat("b", 64), Platform: "linux/amd64", OCIRepository: "ghcr.io/o/r2/web2", OCIDigest: "sha256:" + strings.Repeat("a", 64), Status: "succeeded"},
+		Build:    buildrecordv1.BuildMetadata{ConfigHash: strings.Repeat("a", 64), PlanHash: strings.Repeat("b", 64), Platform: "linux/amd64", OCIRepository: "ghcr.io/o/r2/web2", OCIDigest: "sha256:" + strings.Repeat("a", 64), Status: "succeeded"},
 	}
 	_, _, _ = recordStore2.Create(ctx, "web2-build", web2Build)
 	// NOTE: api3 has NO build record at all
@@ -1335,13 +1349,13 @@ func TestADC04AppTargetAlreadyRunningOutsideBatchPasses(t *testing.T) {
 	// Mark API as already deployed and running
 	apiCfg, _ := f.store.GetServiceConfiguration(f.projectID, f.apiService.ID)
 	workload := deploymentv1.WorkloadSpec{
-		SchemaVersion:                 deploymentv1.WorkloadSchemaVersion,
-		ServiceKey:                    f.apiService.Name,
-		Replicas:                      1,
-		ApplicationContainerName:      deploymentv1.ApplicationContainer,
-		ContainerPort:                 8080,
-		TerminationGracePeriodSecond:  30,
-		Exposure:                      deploymentv1.ExposureIntent{Mode: "internal"},
+		SchemaVersion:                deploymentv1.WorkloadSchemaVersion,
+		ServiceKey:                   f.apiService.Name,
+		Replicas:                     1,
+		ApplicationContainerName:     deploymentv1.ApplicationContainer,
+		ContainerPort:                8080,
+		TerminationGracePeriodSecond: 30,
+		Exposure:                     deploymentv1.ExposureIntent{Mode: "internal"},
 		Resources: deploymentv1.Resources{
 			Requests: deploymentv1.ResourceValues{CPU: "100m", Memory: "128Mi"},
 			Limits:   deploymentv1.ResourceValues{CPU: "500m", Memory: "512Mi"},

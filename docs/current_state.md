@@ -1,26 +1,36 @@
 # Opsi Current State
 
-## Topology project workspace
+## Repository to Running deployment workflow
 
-Project creation and selection now land on the existing
-`Infrastructure / Topology` route. Topology is the first project navigation
-destination, the header shows `Projects / project / environment / Topology`,
-and the workspace separates Design facts (TopologyPlan and unassigned services)
-from Live runtime, node, Agent, and deployment facts. Design now opens on one
-focal `@xyflow/react` canvas with explicit project, environment, revision/hash,
-unpublished-change, validation, Review, and Apply context. Reported servers show
-capacity and Agent state without presenting fabricated live workload state;
-application nodes show placement, replicas, CPU, memory, and exposure intent,
-while unassigned applications remain in Unplaced. The selected resource and
-connection inspector owns edits for placement and service configuration.
-Server and application facts are normalized through one
-`TopologyResourcePresentation` and rendered by one resource-node primitive;
-future or unknown kinds remain visibly unsupported until backed by factual
-domain data.
-Dragging creates an in-memory `CanvasDraft`; Cloud preview/validate/diff is
-required before Apply, stale or conflicting reviews are invalidated, and no
-topology backend write occurs before Apply. Project and applied-topology
-identity changes retain the existing draft isolation rules.
+The default project destination is now `Deploy`. A durable `DeploymentRun`
+owns the user workflow from an exact GitHub commit through repository analysis,
+review, one approval, resource reconciliation, immutable builds, preflight,
+rollout, and verification. It stores immutable plan intent and factual IDs only;
+BuildRecord, Resource, TopologyPlan, DeploymentPolicy, DeploymentJob, and
+Verification remain the operational authorities. PostgreSQL leases and
+idempotency keys allow a different Cloud process to resume a run after restart.
+
+Repository analysis is read-only through the GitHub App and never executes or
+writes source. Authority order is `.opsi/opsi-cd.yaml`, Compose, then bounded
+Dockerfile/framework/source inspection. Findings include evidence, confidence,
+ambiguity, and unsupported dependencies. Generated workload secrets are stored
+by the existing encrypted credential vault; plans, APIs, events, and workload
+specs contain typed references only, and plaintext is delivered transiently to
+the assigned Agent.
+
+Project navigation exposes Deploy, Observability, and Security. Former
+Services, Infrastructure, Topology, and Delivery URLs normalize to Deploy and
+may carry factual IDs into Technical details; they are no longer independent
+mutation paths. The Deploy view has role-gated single actions, exact plan and
+warning hashes, a reconnectable timeline, responsive review panels, and
+redacted generated-secret presentation. This source state is covered by Go and
+UI tests; the real `identity-service` K3s acceptance described in the roadmap
+has not been run in this workspace.
+
+For automatic public hostnames, configure `deployment_domain` or
+`OPSI_CLOUD_DEPLOYMENT_DOMAIN` with the wildcard DNS suffix. Cloud derives a
+deterministic project-scoped hostname. Without that authority, analysis blocks
+approval until the operator enters an explicit hostname in Review plan.
 
 ## R5-014 Local API/UI parity checkpoint
 
@@ -208,7 +218,7 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-08-05 |
+| Last updated | 2026-08-24 |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 
@@ -878,10 +888,14 @@ source of truth is `docs/opsi_roadmap_v5_production.md`.
 ## R5-006 repository CD checkpoint
 
 R5-006 implements one repository-owned application path for monorepo CD intent.
-`.opsi/opsi-cd.yaml` v2 is strict and deterministic: it contains only version,
-service keys, build context/Dockerfile/platform, watch/shared paths, dependency
-keys, and production/preview intent. v1 `ServiceBuild` files migrate without
-dropping a service or adding infrastructure identity; unknown fields, invalid
+`.opsi/opsi-cd.yaml` v2 remains strict and deterministic. In addition to service
+build context/Dockerfile/platform, watch/shared paths, build-dependency keys,
+and production/preview intent, it accepts optional repository-owned resource
+intent and service runtime declarations: port, non-secret environment,
+capacity, exposure, symbolic secret references, bindings, runtime dependencies,
+injection mappings, and verification contracts. Existing build-only v2 files
+retain their canonical render and hash. v1 `ServiceBuild` files migrate without
+dropping a service or adding Cloud authority identity; unknown fields, invalid
 paths, traversal, escaping symlinks, duplicate keys, missing dependencies, and
 dependency cycles fail closed. `opsi init` now has a local repository mode for
 create, v1 migration, add, update, dry-run, atomic apply, and idempotent repeat;
@@ -900,10 +914,10 @@ empty trusted diff is the only empty plan. CLI `opsi cd plan` and Local API
 The generated workflow has read-only contents permission, immutable action and
 Opsi planner source revisions, bounded plan/build jobs, deterministic
 concurrency and fork-safe behavior;
-it performs no OIDC, GHCR push, Cloud call, or deployment. Local UI repository CD
-setup displays all services, previews config/migration/workflow changes, applies
-with local session/idempotency confirmation, and previews affected services with
-the same plan hash as CLI. The R5-007 focused entry review strengthened that
+it performs no OIDC, GHCR push, Cloud call, or deployment. The former Local UI
+repository editor was removed when Deploy became the single operational path;
+CLI repository bootstrap and changed-service planning remain available. The
+R5-007 focused entry review strengthened that
 apply boundary: preview returns a hash over the canonical mutation, current and
 rendered managed-file hashes, and ordered file actions; apply recomputes it from
 the current filesystem, rejects stale previews before write, and uses a bounded
@@ -911,12 +925,13 @@ in-memory ledger so exact retries reuse the result while conflicting key reuse
 returns a typed conflict. Live GitHub runner execution was accepted in the
 R5-008 checkpoint.
 
-Capability matrix (R5-006): config v1/v2 parser-validator-writer and atomic
+Capability matrix (R5-006 plus the expanded v2 contract): config v1/v2
+parser-validator-writer and atomic
 mutation path: implemented; `opsi init` create/add/update/migrate/dry-run/apply:
 implemented; workflow renderer: deterministic secure changed-service matrix;
 Git adapter: fixed-argv bounded diff parser; Local API: config/mutation/workflow/
-plan preview plus confirmed apply; Local UI: service editor and plan/workflow
-preview with loading/error/retry state and stable preview-bound apply retries.
+plan preview plus confirmed apply; Dashboard: read-only repository analysis and
+editable deployment-plan review through the single Deploy workflow.
 
 ## R5-007 trusted BuildRecord checkpoint
 
@@ -1093,10 +1108,10 @@ are not claimed.
 
 Application Dependency Contract foundation implemented.
 
-## MCP-01 + MCP-02 + MCP-03 Read-Only Context and Proposal Surface
+## MCP-01 through MCP-05 Read-Only Context and Proposal Surface
 
 The MCP capability (`opsi mcp` / `opsi mcp serve`) is implemented at the local Opsi Edge boundary:
-- Read-only protocol supporting 21 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), exact commit-bound source file listing, reading, and literal searching, plus bounded dependency analysis context, advisory dependency-proposal validation, and exact-source patch-proposal validation.
+- Read-only protocol supporting 22 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), exact commit-bound source file listing, reading, and literal searching, bounded deployment readiness context, advisory dependency-proposal validation, and exact-source patch-proposal validation.
 - Strict security constraints: zero domain mutations exposed, zero secret credentials exposed (regex redaction for URI credentials, bearer tokens, private keys, and passwords), path traversal protection against `..` or escaping `ApplicationRoot`, binary file classification, size-bounded reading (max 256 KiB), bounded search (max 50 matches), and exact commit provenance (returns `SOURCE_SNAPSHOT_UNAVAILABLE` rather than falling back to uncommitted working trees).
 - Transports: stdio JSON-RPC 2.0 (default) with stderr diagnostic logging, and local loopback HTTP (`127.0.0.1` / `localhost`).
 

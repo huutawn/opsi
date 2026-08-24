@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/opsi-dev/opsi/agent/internal/deploy"
 	backupv1 "github.com/opsi-dev/opsi/contracts/go/backupv1"
 	cutoverv1 "github.com/opsi-dev/opsi/contracts/go/cutoverv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -495,7 +496,7 @@ func (c Client) CompleteDeployment(ctx context.Context, nodeID, deploymentID str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("complete deployment: status %d", resp.StatusCode)
+		return cloudResponseError("complete deployment", resp)
 	}
 	return nil
 }
@@ -532,9 +533,31 @@ func (c Client) ProgressDeployment(ctx context.Context, nodeID, deploymentID str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("deployment progress: status %d", resp.StatusCode)
+		return cloudResponseError("deployment progress", resp)
 	}
 	return nil
+}
+
+// cloudResponseError preserves Cloud's bounded, public error code for Agent
+// diagnostics. Its message is redacted before it can reach the service journal.
+func cloudResponseError(operation string, response *http.Response) error {
+	const maxResponseBytes = 4096
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
+	if err != nil || len(body) == 0 {
+		return fmt.Errorf("%s: status %d", operation, response.StatusCode)
+	}
+	var cloudError struct {
+		Code    string `json:"error_code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &cloudError) != nil || cloudError.Code == "" {
+		return fmt.Errorf("%s: status %d", operation, response.StatusCode)
+	}
+	message := deploy.RedactSensitive(cloudError.Message)
+	if message == "" {
+		return fmt.Errorf("%s: status %d (%s)", operation, response.StatusCode, cloudError.Code)
+	}
+	return fmt.Errorf("%s: status %d (%s: %s)", operation, response.StatusCode, cloudError.Code, message)
 }
 
 func (c Client) CompleteNodeLifecycle(ctx context.Context, nodeID, jobID string, result NodeLifecycleResult) error {

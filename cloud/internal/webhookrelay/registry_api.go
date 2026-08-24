@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
@@ -213,6 +214,12 @@ func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID
 
 func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts []string, principal auth.VerifyResult) {
 	projectID := parts[1]
+	if s.handleDeploymentRunAPI(w, r, projectID, parts, principal) {
+		return
+	}
+	if s.handleWorkloadSecretAPI(w, r, projectID, parts, principal) {
+		return
+	}
 	if s.handleProposalReviewAPI(w, r, projectID, parts, principal) {
 		return
 	}
@@ -1141,6 +1148,11 @@ func writeRegistryResult[T any](w http.ResponseWriter, r *http.Request, value T,
 }
 
 func writeRegistryFailure(w http.ResponseWriter, r *http.Request, err error) {
+	var workflowErr deploymentworkflow.Error
+	if errors.As(err, &workflowErr) {
+		writeRegistryError(w, registry.APIError{Status: workflowErr.Status, Code: workflowErr.Code, Message: workflowErr.Message, NextAction: workflowErr.NextAction, RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
 	var apiErr registry.APIError
 	if errors.As(err, &apiErr) {
 		writeRegistryError(w, apiErr)

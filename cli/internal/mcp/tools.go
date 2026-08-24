@@ -3,6 +3,15 @@ package mcp
 func AllTools() []Tool {
 	return []Tool{
 		{
+			Name:        "deployment_readiness_context",
+			Description: "Get one bounded, fail-closed deployment-readiness snapshot derived from existing source, configuration, BuildRecord, topology, canonical preflight, deployment, and verification facts. It is read-only, returns action NONE, and never acknowledges warnings or initiates work.",
+			InputSchema: ToolInputSchema{Type: "object", Properties: map[string]PropertyDoc{
+				"application_id": {Type: "string", Description: "The application ID or name to inspect."},
+				"environment_id": {Type: "string", Description: "The target environment ID used for canonical preflight."},
+				"project_id":     {Type: "string", Description: "Optional project ID. Inferred from active session if omitted."},
+			}, Required: []string{"application_id", "environment_id"}},
+		},
+		{
 			Name:        "dependency_analysis_context",
 			Description: "Get a bounded, exact-source-bound dependency analysis context for one application. This is non-operational and read-only; reasoning remains external to Opsi.",
 			InputSchema: ToolInputSchema{Type: "object", Properties: map[string]PropertyDoc{

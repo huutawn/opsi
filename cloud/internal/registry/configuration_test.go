@@ -1,8 +1,8 @@
 package registry
 
 import (
-	"strings"
 	"context"
+	"strings"
 	"testing"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -46,6 +46,19 @@ func TestCompileServiceRuntimeSpecsProducesNextDeploymentAuthoritiesOnly(t *test
 	}
 	if workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.ReadinessProbe.Path != source.HealthPath || workload.LivenessProbe.Port != int32(source.ContainerPort) {
 		t.Fatalf("health probes were not compiled from the service boundary: %+v", workload)
+	}
+}
+
+func TestCompileServiceRuntimeSpecsCarriesSecretReferencesWithoutValues(t *testing.T) {
+	source, target := configurationServices()
+	assignment := topologyv1.Assignment{ServiceKey: source.Name, EnvironmentID: "env-1", RuntimeID: "rt-1", Replicas: 1, CPURequestMillicores: 100, MemoryRequestBytes: 128 << 20, Exposure: topologyv1.ExposureIntent{Mode: "none"}}
+	draft := ServiceConfigurationDraft{SecretReferences: []deploymentv1.SecretReference{{EnvName: "JWT_KEY", SecretID: "wsecret-1"}}}
+	workload, err := CompileServiceRuntimeSpecs(source, assignment, []topologyv1.Assignment{assignment}, appliedConfiguration(draft), []ServiceRecord{source, target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workload.SecretReferences) != 1 || workload.SecretReferences[0].SecretID != "wsecret-1" || len(workload.Environment) != 0 {
+		t.Fatalf("workload=%+v", workload)
 	}
 }
 

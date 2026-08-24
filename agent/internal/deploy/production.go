@@ -306,7 +306,7 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 	deployment := map[string]any{
 		"apiVersion": "apps/v1", "kind": "Deployment",
 		"metadata": map[string]any{"name": resourceName, "namespace": namespace, "labels": labels, "annotations": annotations},
-		"spec":     map[string]any{"replicas": spec.Replicas, "selector": map[string]any{"matchLabels": selector}, "template": map[string]any{"metadata": map[string]any{"labels": selector, "annotations": annotations}, "spec": podSpec}},
+		"spec":     map[string]any{"replicas": spec.Replicas, "selector": map[string]any{"matchLabels": selector}, "template": map[string]any{"metadata": map[string]any{"labels": labels, "annotations": annotations}, "spec": podSpec}},
 	}
 	service := map[string]any{
 		"apiVersion": "v1", "kind": "Service",

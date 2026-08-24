@@ -155,7 +155,12 @@ export function updateCanvasPlacement(plan: TopologyPlan | null, draft: CanvasDr
   return updated;
 }
 
-export function compileCanvasDraft(projectID: string, plan: TopologyPlan | null, draft: CanvasDraft): TopologyDraft {
+export function compileCanvasDraft(
+  projectID: string,
+  plan: TopologyPlan | null,
+  draft: CanvasDraft,
+  resources: PlacementFacts["resources"] = [],
+): TopologyDraft {
   const assignments = new Map((plan?.assignments ?? []).map((assignment) => [assignment.service_key, assignment]));
   for (const [serviceKey, placement] of Object.entries(draft)) {
     if (!placement.runtime_id) {
@@ -172,6 +177,20 @@ export function compileCanvasDraft(projectID: string, plan: TopologyPlan | null,
       memory_request_bytes: finiteInteger(placement.memory_request_bytes),
       exposure: { mode: placement.exposure?.mode ?? "none" },
       ...rationale,
+    });
+  }
+  // Managed-resource capacity is owned by the resource authority. A prior
+  // topology revision must not keep stale CPU/memory requests after a resize.
+  for (const resource of resources ?? []) {
+    if (resource.kind !== "managed_service") continue;
+    const assignment = assignments.get(resource.id);
+    if (!assignment || resource.runtime_id !== assignment.runtime_id) continue;
+    assignments.set(resource.id, {
+      ...assignment,
+      replicas: resource.replicas ?? assignment.replicas,
+      cpu_request_millicores: resource.cpu_millicores ?? assignment.cpu_request_millicores,
+      memory_request_bytes: resource.memory_bytes ?? assignment.memory_request_bytes,
+      exposure: { mode: "none" },
     });
   }
   return { schema_version: "opsi.topology_plan/v1", project_id: projectID, assignments: [...assignments.values()].sort((a, b) => a.service_key < b.service_key ? -1 : a.service_key > b.service_key ? 1 : 0) };

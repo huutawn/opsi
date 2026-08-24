@@ -38,22 +38,22 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	now := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
 	// 1. Create PostgreSQL Managed Resource
 	pgSpec := resourcev1.ManagedResourceSpec{
-		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion,
-		ResourceID:    "res-pg",
-		ProjectID:     "proj-1",
-		EnvironmentID: "env-1",
-		ResourceType:  resourcev1.TypePostgres,
-		Profile:       "single-node-experimental",
-		Version:       resourcev1.PostgresVersion,
-		Image:         resourcev1.PostgresImage,
-		Assignment:    resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
-		Replicas:      1,
-		CPUMillicores: 250,
-		MemoryBytes:   256 * 1024 * 1024,
-		Storage:       resourcev1.StorageRequest{Persistent: true, SizeBytes: 10 * 1024 * 1024 * 1024, PolicyRef: resourcev1.StoragePolicyDefault},
-		Ports:         []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}},
-		Connection:    resourcev1.ManagedResourceConnection{ServiceName: "postgres-svc", Host: "postgres.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
-		CredentialID:  "mrcred-res-pg",
+		SchemaVersion:    resourcev1.ManagedResourceSpecSchemaVersion,
+		ResourceID:       "res-pg",
+		ProjectID:        "proj-1",
+		EnvironmentID:    "env-1",
+		ResourceType:     resourcev1.TypePostgres,
+		Profile:          "single-node-experimental",
+		Version:          resourcev1.PostgresVersion,
+		Image:            resourcev1.PostgresImage,
+		Assignment:       resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
+		Replicas:         1,
+		CPUMillicores:    250,
+		MemoryBytes:      256 * 1024 * 1024,
+		Storage:          resourcev1.StorageRequest{Persistent: true, SizeBytes: 10 * 1024 * 1024 * 1024, PolicyRef: resourcev1.StoragePolicyDefault},
+		Ports:            []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}},
+		Connection:       resourcev1.ManagedResourceConnection{ServiceName: "postgres-svc", Host: "postgres.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
+		CredentialID:     "mrcred-res-pg",
 		TopologyRevision: 1,
 	}
 	pgSpec.ConfigurationHash = strings.Repeat("a", 64)
@@ -96,21 +96,21 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 
 	// 2. Create Valkey Managed Resource
 	valkeySpec := resourcev1.ManagedResourceSpec{
-		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion,
-		ResourceID:    "res-valkey",
-		ProjectID:     "proj-1",
-		EnvironmentID: "env-1",
-		ResourceType:  resourcev1.TypeRedis,
-		Profile:       "single-node-experimental",
-		Version:       resourcev1.ValkeyVersion,
-		Image:         resourcev1.ValkeyImage,
-		Assignment:    resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
-		Replicas:      1,
-		CPUMillicores: 250,
-		MemoryBytes:   256 * 1024 * 1024,
-		Ports:         []resourcev1.ManagedResourcePort{{Name: "redis", Port: 6379, Protocol: resourcev1.ProtocolRedis}},
-		Connection:    resourcev1.ManagedResourceConnection{ServiceName: "valkey-svc", Host: "valkey.local", Port: 6379, Protocol: resourcev1.ProtocolRedis},
-		CredentialID:  "mrcred-res-valkey",
+		SchemaVersion:    resourcev1.ManagedResourceSpecSchemaVersion,
+		ResourceID:       "res-valkey",
+		ProjectID:        "proj-1",
+		EnvironmentID:    "env-1",
+		ResourceType:     resourcev1.TypeRedis,
+		Profile:          "single-node-experimental",
+		Version:          resourcev1.ValkeyVersion,
+		Image:            resourcev1.ValkeyImage,
+		Assignment:       resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
+		Replicas:         1,
+		CPUMillicores:    250,
+		MemoryBytes:      256 * 1024 * 1024,
+		Ports:            []resourcev1.ManagedResourcePort{{Name: "redis", Port: 6379, Protocol: resourcev1.ProtocolRedis}},
+		Connection:       resourcev1.ManagedResourceConnection{ServiceName: "valkey-svc", Host: "valkey.local", Port: 6379, Protocol: resourcev1.ProtocolRedis},
+		CredentialID:     "mrcred-res-valkey",
 		TopologyRevision: 1,
 	}
 	valkeySpec.ConfigurationHash = strings.Repeat("c", 64)
@@ -260,7 +260,7 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	}
 
 	// 5. Test ResolveSecretMaterials
-	materials, err := service.ResolveSecretMaterials(context.Background(), "proj-1", secRefs)
+	materials, err := service.ResolveSecretMaterials(context.Background(), "proj-1", "", secRefs)
 	if err != nil {
 		t.Fatalf("ResolveSecretMaterials failed: %v", err)
 	}

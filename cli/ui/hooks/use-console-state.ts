@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
 import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
-import { deploymentPollInterval, terminalDeployment } from "@/features/delivery/polling-model";
+import { deploymentPollInterval, terminalDeployment } from "@/features/deploy/deployment-polling";
 import { buildFailure } from "@/lib/presentation/build";
 import { deriveProjectSummary, emptyFoundation, normalizeStatus, PROJECT_SUMMARY_TTL_MS, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
 import type { BootstrapSession, ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
@@ -237,6 +237,8 @@ export function useConsoleState() {
 
   useEffect(() => {
     const initial = parseRoute(window.location.search);
+		const canonicalURL = routeHref(initial);
+		if (window.location.pathname + window.location.search !== canonicalURL) window.history.replaceState({}, "", canonicalURL);
     setRoute(initial);
     currentRoute.current = initial;
     if (!initial.projectID) {
@@ -254,6 +256,8 @@ export function useConsoleState() {
   useEffect(() => {
     function restoreRoute() {
       const next = parseRoute(window.location.search);
+		const canonicalURL = routeHref(next);
+		if (window.location.pathname + window.location.search !== canonicalURL) window.history.replaceState({}, "", canonicalURL);
       clearSensitive();
       setReview(null);
       if (next.projectID === selectedProject.current) {
@@ -413,7 +417,7 @@ export function useConsoleState() {
   async function diagnostics(nodeID: string) {
     if (!currentProject) return;
     patch({ nodeDetail: await client.node(currentProject.id, nodeID) });
-    navigate({ view: "infrastructure", tab: "nodes", node: nodeID });
+    navigate({ view: "observability", tab: "servers", node: nodeID });
   }
 
   function nodeAction(nodeID: string, action: "offline" | "drain" | "remove") {

@@ -107,6 +107,14 @@ func TestResolvedDeploymentCompilesCanonicalSnapshotAndRejectsStaleOrClientSpec(
 	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", client); deploymentAPIErrorCode(err) != "WORKLOAD_CANONICAL_MISMATCH" {
 		t.Fatalf("client mismatch err=%v", err)
 	}
+	client = request
+	omittedProbeWorkload := preview.Snapshot.Workload
+	client.Workload = &omittedProbeWorkload
+	client.Workload.ReadinessProbe = nil
+	client.Workload.LivenessProbe = nil
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", client); err != nil {
+		t.Fatalf("client with omitted platform probes err=%v", err)
+	}
 	_, err = server.Registry.ApplyServiceConfiguration(projectID, service.ID, "owner", "config-change", registry.ServiceConfigurationApplyRequest{Draft: registry.ServiceConfigurationDraft{Environment: []deploymentv1.EnvironmentVariable{{Name: "LOG_LEVEL", Value: "debug"}}}, ExpectedRevision: configuration.Revision, ExpectedStateHash: configuration.StateHash})
 	if err != nil {
 		t.Fatal(err)
@@ -501,22 +509,22 @@ func TestResolvedDeploymentRejectsStaleBuildPhaseDependency(t *testing.T) {
 	configHash := registry.ComputeBuildConfigHash(strings.Repeat("a", 40), "", service.Dockerfile, service.BuildContext, "ghcr.io/o/r/api", buildDepState)
 
 	record := buildrecordv1.Record{
-		SchemaVersion: buildrecordv1.SchemaVersion,
-		ID:            "br-build-dep-fresh",
-		ProjectID:     projectID,
-		RepositoryID:  7,
+		SchemaVersion:     buildrecordv1.SchemaVersion,
+		ID:                "br-build-dep-fresh",
+		ProjectID:         projectID,
+		RepositoryID:      7,
 		RepositoryOwnerID: 8,
-		ActiveBindingID: "binding-1",
-		ServiceID:     service.ID,
-		ServiceKey:    service.Name,
-		CreatedAt:     time.Now().UTC(),
+		ActiveBindingID:   "binding-1",
+		ServiceID:         service.ID,
+		ServiceKey:        service.Name,
+		CreatedAt:         time.Now().UTC(),
 		Workload: buildrecordv1.WorkloadIdentity{
-			RepositoryID: 7,
+			RepositoryID:      7,
 			RepositoryOwnerID: 8,
-			Ref: "refs/heads/main",
-			SHA: strings.Repeat("a", 40),
-			EventName: "push",
-			WorkflowRef: "o/r/.github/workflows/cd.yml@refs/heads/main",
+			Ref:               "refs/heads/main",
+			SHA:               strings.Repeat("a", 40),
+			EventName:         "push",
+			WorkflowRef:       "o/r/.github/workflows/cd.yml@refs/heads/main",
 		},
 		Build: buildrecordv1.BuildMetadata{
 			ConfigHash:    configHash,

@@ -804,7 +804,7 @@ fetch("http://localhost:8080/api/health/dependencies/database").then(r => r.json
 
                 tools_res = await session.list_tools()
                 ctx.log(f"Tool Discovery: {len(tools_res.tools)} tools found")
-                assert len(tools_res.tools) == 21, f"Expected 21 tools, got {len(tools_res.tools)}"
+                assert len(tools_res.tools) == 22, f"Expected 22 tools, got {len(tools_res.tools)}"
                 tool_names = [t.name for t in tools_res.tools]
                 mutation_keywords = ["create_", "update_", "delete_", "apply_", "build_start", "execute_", "patch_", "mutate_"]
                 for t in tools_res.tools:
@@ -813,7 +813,8 @@ fetch("http://localhost:8080/api/health/dependencies/database").then(r => r.json
                 assert "dependency_analysis_context" in tool_names
                 assert "validate_dependency_proposal" in tool_names
                 assert "validate_source_patch_proposal" in tool_names
-                ctx.log("✓ All 21 tools verified strictly non-operational")
+                assert "deployment_readiness_context" in tool_names
+                ctx.log("✓ All 22 tools verified strictly non-operational")
 
                 ctx.log("\n=== SECTION 5: PROJECT CONTEXT THROUGH MCP ===")
                 # 1. project_context
@@ -850,6 +851,24 @@ fetch("http://localhost:8080/api/health/dependencies/database").then(r => r.json
                 assert "PORT" in data["environment_variables_safe"]
                 assert data["public_route"]["path"] == "/api"
                 ctx.log("✓ application_get (api): exact commit, safe env keys, public route verified")
+
+                # MCP-05 is an aggregate factual read. It does not create a
+                # deployment review, acknowledge a warning, or make an action
+                # available to the MCP client.
+                is_err, readiness, text = await call_tool_safe(session, "deployment_readiness_context", {
+                    "project_id": ctx.project_id,
+                    "application_id": "api",
+                    "environment_id": ctx.env_id,
+                })
+                assert not is_err, f"deployment_readiness_context error: {text}"
+                assert readiness["action"] == "NONE"
+                assert readiness["source"]["commit_sha"] == ctx.commit_sha
+                assert readiness["build"]["status"] == "CURRENT"
+                assert readiness["preflight"]["status"] in ("PASS", "PASS_WITH_WARNINGS", "BLOCKED")
+                assert readiness["preflight"]["result"]["status"] == readiness["preflight"]["status"]
+                for secret in SYNTHETIC_SECRETS.values():
+                    assert secret not in text
+                ctx.log(f"✓ deployment_readiness_context: preflight={readiness['preflight']['status']}, action=NONE")
 
                 # 5. application_dependencies
                 is_err, data, text = await call_tool_safe(session, "application_dependencies", {"project_id": ctx.project_id, "application_id": "api"})

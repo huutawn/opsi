@@ -386,7 +386,7 @@ func main() {
 					"build": map[string]any{
 						"build_strategy": "dockerfile",
 						"oci_digest":     "sha256:api0000000000000000000000000000000000000000000000000000000000000",
-						"status":         "accepted",
+						"status":         "succeeded",
 					},
 				},
 			},
@@ -406,7 +406,7 @@ func main() {
 			"build": map[string]any{
 				"build_strategy": "dockerfile",
 				"oci_digest":     "sha256:api0000000000000000000000000000000000000000000000000000000000000",
-				"status":         "accepted",
+				"status":         "succeeded",
 			},
 		})
 	})
@@ -867,6 +867,39 @@ func TestMCP01_PreflightThreeStatesAndZeroMutation(t *testing.T) {
 	}
 	if !strings.Contains(resBlock.Content[0].Text, "BLOCKED") || !strings.Contains(resBlock.Content[0].Text, "PLACEMENT_UNSATISFIABLE") {
 		t.Errorf("expected BLOCKED status and placement error, got: %s", resBlock.Content[0].Text)
+	}
+}
+
+func TestMCP05_DeploymentReadinessContextIsDerivedAndNonOperational(t *testing.T) {
+	f := setupComprehensiveFixture(t)
+	defer f.server.Close()
+	s := f.createServer(t, "")
+
+	res, err := callMCPTool(context.Background(), s, "deployment_readiness_context", map[string]any{
+		"project_id":     f.projectID,
+		"application_id": "svc-api",
+		"environment_id": "production",
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("deployment_readiness_context failed: %v, content: %+v", err, res)
+	}
+	text := res.Content[0].Text
+	for _, expected := range []string{
+		`"action": "NONE"`,
+		`"commit_sha": "` + f.commitSHA + `"`,
+		`"status": "CURRENT"`,
+		`"status": "PASS"`,
+		`"status": "COMPLETED"`,
+		`"status": "FAILED"`,
+	} {
+		if !strings.Contains(text, expected) {
+			t.Errorf("expected readiness fact %s, got: %s", expected, text)
+		}
+	}
+	for _, secret := range []string{f.cloudPAT, f.agentToken, f.dbPassword, f.valkeyPass, f.regCred, f.sourceSecret} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("SECURITY VIOLATION: readiness context leaked secret %q: %s", secret, text)
+		}
 	}
 }
 

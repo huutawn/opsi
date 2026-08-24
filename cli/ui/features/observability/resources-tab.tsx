@@ -190,7 +190,7 @@ function ResourceDetailDrawer({
 
           <div className="flex items-center gap-2">
             <Button
-              onClick={() => console.navigate({ projectID, view: "infrastructure", tab: "resources", resource: resource.id })}
+              onClick={() => console.navigate({ projectID, view: "observability", tab: "resources", resource: resource.id })}
               size="sm"
               variant="outline"
             >

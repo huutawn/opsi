@@ -50,11 +50,7 @@ export function Sidebar({
   };
 
   const projectDestinations = [
-    { id: "topology", label: "Topology", icon: "account_tree" },
-    { id: "overview", label: "Overview", icon: "dashboard" },
-    { id: "services", label: "Services", icon: "layers" },
-    { id: "delivery", label: "Delivery", icon: "rocket_launch" },
-    { id: "infrastructure", label: "Infrastructure", icon: "dns" },
+    { id: "deploy", label: "Deploy", icon: "rocket_launch" },
     { id: "observability", label: "Observability", icon: "monitoring" },
     { id: "security", label: "Security", icon: "security" },
   ] as const;
@@ -143,11 +139,7 @@ export function Sidebar({
           ) : (
             projectDestinations.map((item) => {
               const iconMap: Record<string, string> = {
-                topology: "account_tree",
-                overview: "dashboard",
-                services: "layers",
-                delivery: "rocket_launch",
-                infrastructure: "dns",
+                deploy: "rocket_launch",
                 observability: "monitoring",
                 security: "security",
               };

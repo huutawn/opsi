@@ -270,7 +270,7 @@ func setupCutoverAPITestServer(t *testing.T) (*Server, string, string, string, s
 			TopologyPlanID:                "topology-1",
 			TopologyRevision:              1,
 			TopologyHash:                  strings.Repeat("1", 64),
-			ServiceConfigurationRevision: appliedCfg.Configuration.Revision,
+			ServiceConfigurationRevision:  appliedCfg.Configuration.Revision,
 			ServiceConfigurationStateHash: appliedCfg.Configuration.StateHash,
 			DeploymentPolicyID:            "policy-1",
 			DeploymentPolicyRevision:      1,
@@ -403,9 +403,9 @@ func TestCutoverReviewAPIEndToEnd(t *testing.T) {
 		t.Fatalf("expected agent lease 200 OK, got %d: %s", agentResp.Code, agentResp.Body.String())
 	}
 	var leasePayload struct {
-		Kind            string                   `json:"kind"`
-		LeaseToken      string                   `json:"lease_token"`
-		Review          cutoverv1.ApplicationCutoverReview `json:"review"`
+		Kind             string                                `json:"kind"`
+		LeaseToken       string                                `json:"lease_token"`
+		Review           cutoverv1.ApplicationCutoverReview    `json:"review"`
 		SourceCredential *resourcev1.ManagedResourceCredential `json:"source_credential"`
 		TargetCredential *resourcev1.ManagedResourceCredential `json:"target_credential"`
 	}

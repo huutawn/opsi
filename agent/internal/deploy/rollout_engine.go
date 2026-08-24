@@ -18,7 +18,7 @@ func (e *Engine) ReconcileRollout(ctx context.Context, intent deploymentv1.Rollo
 	if err != nil {
 		return deploymentv1.RolloutRecord{}, preMutationRolloutFailure(err, deploymentv1.RolloutCodeInvalid)
 	}
-	if canonical.Operation == deploymentv1.RolloutOperationCleanup {
+	if cleanupOperation(canonical.Operation) {
 		return e.reconcileCleanup(ctx, canonical, progress)
 	}
 	existing, err := e.Store.GetRollout(ctx, canonical.RolloutID)
@@ -29,7 +29,7 @@ func (e *Engine) ReconcileRollout(ctx context.Context, intent deploymentv1.Rollo
 		if existing.Intent.IntentHash != canonical.IntentHash {
 			return deploymentv1.RolloutRecord{}, preMutationRolloutFailure(deploymentv1.NewRolloutError(deploymentv1.RolloutCodeConflict, "rollout id already has a different intent", false), deploymentv1.RolloutCodeConflict)
 		}
-		if existing.Intent.Operation == deploymentv1.RolloutOperationCleanup {
+		if cleanupOperation(existing.Intent.Operation) {
 			return e.resumeCleanup(ctx, *existing, progress)
 		}
 		if existing.TerminalAt != nil {
@@ -72,8 +72,8 @@ func (e *Engine) reconcileCleanup(ctx context.Context, intent deploymentv1.Rollo
 		}
 		return e.resumeCleanup(ctx, *existing, progress)
 	}
-	if err := intent.Desired.Validate(); err != nil || intent.Desired.Preview == nil {
-		return deploymentv1.RolloutRecord{}, deploymentv1.NewRolloutError(deploymentv1.RolloutCodeInvalid, "preview cleanup authority is invalid", false)
+	if err := intent.Desired.Validate(); err != nil || intent.Operation == deploymentv1.RolloutOperationCleanup && intent.Desired.Preview == nil || intent.Operation == deploymentv1.RolloutOperationFirstDeployCleanup && intent.Desired.Preview != nil {
+		return deploymentv1.RolloutRecord{}, deploymentv1.NewRolloutError(deploymentv1.RolloutCodeInvalid, "cleanup authority is invalid", false)
 	}
 	record, err := e.Store.BeginRollout(ctx, intent, nil)
 	if err != nil {
@@ -95,19 +95,31 @@ func (e *Engine) resumeCleanup(ctx context.Context, record deploymentv1.RolloutR
 		_ = emitRolloutProgress(progress, record, PhaseApplying, "deleting exact Opsi-owned preview", 50, nil)
 	}
 	if record.State == deploymentv1.RolloutStateApplying {
-		cleaner, ok := e.Reconciler.(interface {
-			CleanupPreview(context.Context, deploymentv1.RuntimeSnapshot) error
-		})
-		if !ok {
-			return record, deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "preview cleanup is not supported", false)
+		var cleanupErr error
+		if record.Intent.Operation == deploymentv1.RolloutOperationCleanup {
+			cleaner, ok := e.Reconciler.(interface {
+				CleanupPreview(context.Context, deploymentv1.RuntimeSnapshot) error
+			})
+			if !ok {
+				return record, deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "preview cleanup is not supported", false)
+			}
+			cleanupErr = cleaner.CleanupPreview(ctx, record.Intent.Desired)
+		} else {
+			cleaner, ok := e.Reconciler.(interface {
+				CleanupFirstDeploy(context.Context, deploymentv1.RuntimeSnapshot) error
+			})
+			if !ok {
+				return record, deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "first deploy cleanup is not supported", false)
+			}
+			cleanupErr = cleaner.CleanupFirstDeploy(ctx, record.Intent.Desired)
 		}
-		if err := cleaner.CleanupPreview(ctx, record.Intent.Desired); err != nil {
-			failure := boundedRolloutFailure(err)
+		if cleanupErr != nil {
+			failure := boundedRolloutFailure(cleanupErr)
 			terminal, transitionErr := e.Store.TransitionRollout(context.WithoutCancel(ctx), record.Intent.RolloutID, deploymentv1.RolloutStateFailed, failure, nil, nil, true)
 			if transitionErr != nil {
 				return record, transitionErr
 			}
-			return *terminal, err
+			return *terminal, cleanupErr
 		}
 		transitioned, err := e.Store.TransitionRollout(ctx, record.Intent.RolloutID, deploymentv1.RolloutStateWaiting, nil, nil, nil, false)
 		if err != nil {
@@ -120,7 +132,7 @@ func (e *Engine) resumeCleanup(ctx context.Context, record deploymentv1.RolloutR
 		if err != nil {
 			return record, err
 		}
-		_ = emitRolloutProgress(progress, *cleaned, PhaseSuccess, "preview resources removed", 100, nil)
+		_ = emitRolloutProgress(progress, *cleaned, PhaseSuccess, "failed rollout resources removed", 100, nil)
 		return *cleaned, nil
 	}
 	return record, deploymentv1.NewRolloutError(deploymentv1.RolloutCodeInvalidTransition, "cleanup rollout state is not reconcilable", false)
@@ -140,7 +152,7 @@ func (e *Engine) ReconcilePending(ctx context.Context, progress ProgressFunc) ([
 	for _, record := range records {
 		var result deploymentv1.RolloutRecord
 		var reconcileErr error
-		if record.Intent.Operation == deploymentv1.RolloutOperationCleanup {
+		if cleanupOperation(record.Intent.Operation) {
 			result, reconcileErr = e.resumeCleanup(ctx, record, progress)
 		} else if record.Intent.Operation == deploymentv1.RolloutOperationRollback && record.State == deploymentv1.RolloutStatePrepared {
 			result, reconcileErr = e.startExplicitRollback(context.WithoutCancel(ctx), record, progress)
@@ -153,6 +165,10 @@ func (e *Engine) ReconcilePending(ctx context.Context, progress ProgressFunc) ([
 		}
 	}
 	return results, nil
+}
+
+func cleanupOperation(operation string) bool {
+	return operation == deploymentv1.RolloutOperationCleanup || operation == deploymentv1.RolloutOperationFirstDeployCleanup
 }
 
 func (e *Engine) startExplicitRollback(ctx context.Context, record deploymentv1.RolloutRecord, progress ProgressFunc) (deploymentv1.RolloutRecord, error) {

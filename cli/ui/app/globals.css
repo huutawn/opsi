@@ -971,3 +971,142 @@ dialog {
   color: var(--color-on-surface-variant);
   margin: 0;
 }
+
+/* Resource detail is an operator drawer, not a long unstyled page appendix. */
+.resourceDetailPanel {
+  position: fixed;
+  z-index: 50;
+  inset: 0 0 0 auto;
+  width: min(42rem, 100vw);
+  height: 100dvh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 1.5rem;
+  background: var(--color-surface-container-low);
+  border-left: 1px solid color-mix(in srgb, var(--color-outline-variant) 45%, transparent);
+  box-shadow: -1.5rem 0 3rem rgba(0, 0, 0, .35);
+}
+
+.inspectorHeading,
+.inspectorHeaderActions,
+.sectionActionBar,
+.buttonRow {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+}
+
+.inspectorHeading {
+  align-items: flex-start;
+  justify-content: space-between;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-outline-variant) 35%, transparent);
+}
+
+.canvasPath,
+.sectionHint,
+.resourceDetailPanel small {
+  margin: 0;
+  color: var(--color-on-surface-variant);
+  font-size: .75rem;
+  line-height: 1.35;
+}
+
+.canvasNodeKind {
+  display: block;
+  margin-top: .75rem;
+  color: var(--color-primary);
+  font-size: .6875rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.resourceDetailPanel h2 {
+  margin: .25rem 0 0;
+  color: var(--color-on-surface);
+  font-size: 1.25rem;
+  line-height: 1.4;
+}
+
+.draftState {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.75rem;
+  padding: 0 .625rem;
+  border-radius: 999px;
+  font-size: .75rem;
+  font-weight: 700;
+}
+.draftState.ready { color: var(--color-status-ready); background: color-mix(in srgb, var(--color-status-ready) 14%, transparent); }
+.draftState.failed { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 14%, transparent); }
+.draftState.warning, .draftState.bootstrapping { color: var(--color-status-warning); background: color-mix(in srgb, var(--color-status-warning) 14%, transparent); }
+.draftState.neutral { color: var(--color-on-surface-variant); background: var(--color-surface-container-high); }
+
+.resourceTabs {
+  display: flex;
+  gap: .25rem;
+  margin: 1rem 0;
+  padding-bottom: .75rem;
+  overflow-x: auto;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-outline-variant) 25%, transparent);
+}
+.resourceTabs button {
+  flex: none;
+  min-height: 2.25rem;
+  padding: 0 .625rem;
+  border: 0;
+  border-radius: .375rem;
+  background: transparent;
+  color: var(--color-on-surface-variant);
+  font: inherit;
+  font-size: .8125rem;
+  cursor: pointer;
+}
+.resourceTabs button:hover,
+.resourceTabs button[aria-selected="true"] { background: var(--color-surface-container-high); color: var(--color-on-surface); }
+.resourceTabs button[aria-selected="true"] { box-shadow: inset 0 -2px var(--color-primary); }
+
+.detailSection { display: grid; gap: 1rem; padding-bottom: 2rem; }
+.inspectorSection {
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 30%, transparent);
+  border-radius: .75rem;
+  background: var(--color-surface-container);
+}
+.inspectorSection h4 { margin: 0 0 .75rem; color: var(--color-on-surface); font-size: .875rem; }
+.factsGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .875rem 1rem; margin: 0; }
+.factsGrid div { min-width: 0; }
+.factsGrid dt { color: var(--color-on-surface-variant); font-size: .6875rem; text-transform: uppercase; letter-spacing: .045em; }
+.factsGrid dd { margin: .25rem 0 0; color: var(--color-on-surface); font-size: .8125rem; overflow-wrap: anywhere; }
+.secondaryFacts dd { color: var(--color-on-surface-variant); font-family: var(--font-mono), monospace; font-size: .75rem; }
+.sectionActionBar { justify-content: space-between; align-items: flex-start; }
+.sectionActionBar h4 { margin-bottom: .25rem; }
+.buttonRow { justify-content: flex-end; flex-wrap: wrap; margin-top: .875rem; }
+.resourceDetailPanel button.primary,
+.resourceDetailPanel button.secondary {
+  min-height: 2.25rem;
+  padding: .5rem .75rem;
+  border-radius: .5rem;
+  font: inherit;
+  font-size: .8125rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+.resourceDetailPanel button.primary { border: 1px solid var(--color-primary); background: var(--color-primary); color: var(--color-on-primary); }
+.resourceDetailPanel button.secondary { border: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent); background: var(--color-surface-container-high); color: var(--color-on-surface); }
+.resourceDetailPanel button.destructive { color: var(--color-error); border-color: color-mix(in srgb, var(--color-error) 55%, transparent); }
+.resourceDetailPanel button:disabled { cursor: not-allowed; opacity: .55; }
+.dangerSection { border-color: color-mix(in srgb, var(--color-error) 35%, transparent); }
+.truthCallout { margin-top: 1rem; }
+
+.dialogBackdrop { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; padding: 1rem; background: rgba(0, 0, 0, .7); }
+.dialogPanel { display: grid; gap: 1rem; width: min(28rem, 100%); padding: 1.25rem; border: 1px solid color-mix(in srgb, var(--color-outline-variant) 45%, transparent); border-radius: .75rem; background: var(--color-surface-container-low); box-shadow: 0 1rem 3rem rgba(0, 0, 0, .45); }
+.dialogPanel h3 { margin: 0; color: var(--color-on-surface); font-size: 1rem; }
+.dialogPanel label { display: grid; gap: .375rem; color: var(--color-on-surface-variant); font-size: .75rem; }
+.dialogPanel input { min-height: 2.5rem; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent); border-radius: .5rem; padding: .5rem .625rem; background: var(--color-surface-container-highest); color: var(--color-on-surface); font: inherit; }
+
+@media (max-width: 42rem) {
+  .resourceDetailPanel { width: 100vw; padding: 1rem; }
+  .factsGrid { grid-template-columns: 1fr; }
+}

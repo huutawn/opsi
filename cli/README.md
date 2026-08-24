@@ -62,10 +62,14 @@ the exact displayed phrase. Pending grants remain in the OS secure store and
 are removed after a terminal Agent result. No browser approve/execute API,
 MCP, AI approval, `--yes`, or automatic approval path is implemented.
 
-The command writes `.opsi/opsi-cd.yaml` with build/deployment intent only and
-`.github/workflows/opsi-cd.yaml` as a manual bootstrap status workflow. Neither
-file contains Cloud infrastructure identity or secrets. Existing different
+The command writes the strict `.opsi/opsi-cd.yaml` v2 repository contract and
+`.github/workflows/opsi-cd.yaml` as a manual bootstrap status workflow. The v2
+contract can include optional resource intent and per-service runtime,
+capacity, exposure, symbolic secret, binding, dependency-injection, and
+verification declarations. It never contains Cloud authority IDs or plaintext
+secrets. Existing different
 content is never overwritten unless both `--force` and `--yes` are present;
 `--dry-run` prints a secret-free JSON plan without mutation or file writes.
-P10 does not implement Actions OIDC, BuildRecord, image build/push, Agent
-deployment, or real CD.
+`opsi init` remains repository bootstrap only. Repository-to-running execution
+is owned by the Dashboard Deploy workflow and the Cloud deployment controller;
+the CLI command does not create a second deployment path.

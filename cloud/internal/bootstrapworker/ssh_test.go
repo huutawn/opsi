@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -76,6 +77,23 @@ func TestSSHConnectUsesPinnedAlgorithmWhenServerOffersMultipleKeys(t *testing.T)
 		t.Fatal(err)
 	}
 	_ = session.Close()
+}
+
+func TestSSHConnectPinnedRSAHostKeyAllowsRSASHA2(t *testing.T) {
+	rsaSigner := newRSASigner(t)
+	modernRSASigner, err := ssh.NewSignerWithAlgorithms(rsaSigner.(ssh.AlgorithmSigner), []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port := startSSHServer(t, modernRSASigner)
+	knownHosts := writeKnownHosts(t, net.JoinHostPort(host, strconv.Itoa(port)), rsaSigner.PublicKey(), 0o600)
+	session, err := (SSHExecutor{KnownHostsPath: knownHosts}).Connect(context.Background(), RemoteTarget{Host: host, Port: port, Username: "root", Password: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSSHConnectUnknownHostFailsClosed(t *testing.T) {
@@ -174,6 +192,19 @@ func newSSHSigner(t *testing.T) ssh.Signer {
 func newECDSASigner(t *testing.T) ssh.Signer {
 	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
+func newRSASigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}

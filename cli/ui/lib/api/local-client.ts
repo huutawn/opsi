@@ -64,6 +64,11 @@ import type {
   ApplicationCutover,
   ApplicationCutoverRollback,
   ApplicationCutoverFinalization,
+  DeploymentRun,
+  DeploymentRunEvent,
+  DeploymentRunResult,
+  DeploymentPlan,
+	WorkloadSecretMetadata,
 } from "@/lib/contracts/registry";
 
 type RequestOptions = RequestInit & { write?: boolean; idempotencyKey?: string };
@@ -118,48 +123,6 @@ export class LocalAPIError extends Error {
   nextAction = "Retry after checking Local backend connectivity.";
   retryable = false;
 }
-
-export type RepositoryCDService = {
-  key: string;
-  build: { context: string; dockerfile: string; platform: string };
-  watch_paths: string[];
-  shared_paths: string[];
-  dependencies: string[];
-  deploy: {
-    production: { enabled: boolean; branches: string[] };
-    preview: { enabled: boolean; pull_requests: boolean };
-  };
-};
-
-export type RepositoryCDConfig = { version: 2; services: RepositoryCDService[] };
-
-export type RepositoryMutationPreview = {
-  config: RepositoryCDConfig;
-  migrated_v1: boolean;
-  files: Array<{ path: string; action: "created" | "updated" | "unchanged"; old_sha256?: string; new_sha256: string }>;
-  config_hash: string;
-  config_yaml: string;
-  workflow_yaml: string;
-  config_diff: string;
-  workflow_diff: string;
-  preview_hash: string;
-};
-
-export type RepositoryMutationApplyResult = RepositoryMutationPreview & { reused: boolean };
-
-export type RepositoryCDPlan = {
-  schema_version: string;
-  base: string;
-  head: string;
-  event: "initial" | "push" | "pull_request" | "merge";
-  config_hash: string;
-  plan_hash: string;
-  full_build: boolean;
-  affected_service_keys: string[];
-  reason_codes: string[];
-  services: Array<{ key: string; reasons: Array<{ code: string; explanation: string; path?: string; dependency?: string }> }>;
-  explanation: string;
-};
 
 export type SelectableProject = {
   id: string;
@@ -389,6 +352,15 @@ export class LocalClient {
     return this.call<BuildJob>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/build-jobs/${encodeURIComponent(buildJobID)}`);
   }
 
+  dispatchBuildJob(projectID: string, applicationID: string, buildJobID: string, idempotencyKey: string) {
+    return this.call<{ attempt_id: string; last_state: string }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/build-jobs/${encodeURIComponent(buildJobID)}/dispatch`, {
+      method: "POST",
+      write: true,
+      idempotencyKey,
+      body: "{}",
+    });
+  }
+
   placementFacts(projectID: string) { return this.call<PlacementFacts>(`/api/local/projects/${projectID}/topology/facts`); }
   topology(projectID: string) { return this.call<TopologyPlan>(`/api/local/projects/${projectID}/topology`); }
   topologyPlan(projectID: string, draft: TopologyDraft) { return this.call<TopologyPreview>(`/api/local/projects/${projectID}/topology/plan`, { method: "POST", body: JSON.stringify({ draft }) }); }
@@ -436,6 +408,42 @@ export class LocalClient {
     return this.call<{ repositories: GitHubRepository[] }>(`/api/local/projects/${projectID}/github/repositories`);
   }
 
+  deploymentRuns(projectID: string) {
+    return this.call<{ deployment_runs: DeploymentRun[] }>(`/api/local/projects/${projectID}/deployment-runs?limit=50`);
+  }
+
+  deploymentRun(projectID: string, runID: string) {
+    return this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}`);
+  }
+
+  deploymentRunEvents(projectID: string, runID: string) {
+    return this.call<{ events: DeploymentRunEvent[] }>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/events`);
+  }
+
+  deploymentRunResult(projectID: string, runID: string) {
+    return this.call<DeploymentRunResult>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/result`);
+  }
+
+  createDeploymentRun(projectID: string, body: { repository_id: number; selected_ref: string; target: { hostname?: string } }, idempotencyKey: string) {
+    return this.call<{ deployment_run: DeploymentRun; reused: boolean }>(`/api/local/projects/${projectID}/deployment-runs`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
+  }
+
+  updateDeploymentPlan(projectID: string, runID: string, revision: number, expectedPlanHash: string, plan: DeploymentPlan, idempotencyKey: string) {
+	return this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/plan`, { method: "PUT", write: true, idempotencyKey, headers: { "If-Match": `"${revision}"` }, body: JSON.stringify({ expected_plan_hash: expectedPlanHash, plan }) });
+  }
+
+  deploymentRunAction(projectID: string, runID: string, action: "analyze" | "approve" | "acknowledge" | "retry" | "cancel", body: Record<string, unknown>, idempotencyKey: string) {
+    return this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/${action}`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
+  }
+
+	workloadSecrets(projectID: string, applicationID: string) {
+		return this.call<{ workload_secrets: WorkloadSecretMetadata[] }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/workload-secrets`);
+	}
+
+	upsertWorkloadSecret(projectID: string, applicationID: string, logicalName: string, value: string, idempotencyKey: string) {
+		return this.call<{ workload_secret: WorkloadSecretMetadata; reused: boolean }>(`/api/local/projects/${projectID}/applications/${encodeURIComponent(applicationID)}/workload-secrets`, { method: "PUT", write: true, idempotencyKey, body: JSON.stringify({ logical_name: logicalName, value }) });
+	}
+
   claimGitHubRepository(projectID: string, repositoryID: number, idempotencyKey?: string) {
     return this.call<{ repository_id: number; project_id: string; status: string }>(
       `/api/local/projects/${projectID}/github/repositories/${repositoryID}/claim`,
@@ -478,33 +486,6 @@ export class LocalClient {
       method: "DELETE",
       write: true,
       idempotencyKey,
-    });
-  }
-
-  repositoryCDConfig() {
-    return this.call<{ config: RepositoryCDConfig; migrated_v1: boolean; config_hash: string }>("/api/local/repository/config");
-  }
-
-  previewRepositoryMutation(service: RepositoryCDService) {
-    return this.call<RepositoryMutationPreview>("/api/local/repository/config/preview", {
-      method: "POST",
-      body: JSON.stringify({ service }),
-    });
-  }
-
-  applyRepositoryMutation(service: RepositoryCDService, previewHash: string, idempotencyKey: string) {
-    return this.call<RepositoryMutationApplyResult>("/api/local/repository/apply", {
-      method: "POST",
-      write: true,
-      idempotencyKey,
-      body: JSON.stringify({ service, confirm: true, preview_hash: previewHash }),
-    });
-  }
-
-  previewRepositoryPlan(body: { event: RepositoryCDPlan["event"]; base: string; head: string }) {
-    return this.call<RepositoryCDPlan>("/api/local/repository/plan/preview", {
-      method: "POST",
-      body: JSON.stringify(body),
     });
   }
 

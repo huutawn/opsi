@@ -443,7 +443,7 @@ func isPlacementPreview(path string) bool {
 }
 
 func copyProxyHeaders(dst, src http.Header) {
-	for _, key := range []string{"Content-Type", "X-Request-ID", "Idempotency-Key"} {
+	for _, key := range []string{"Content-Type", "X-Request-ID", "Idempotency-Key", "If-Match"} {
 		if value := src.Get(key); value != "" {
 			dst.Set(key, value)
 		}

@@ -22,6 +22,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
 	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/postgres"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
@@ -146,6 +147,7 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.Verifications = verificationstore.PostgresStore{DB: db}
 		relay.Topology = topology.Service{Store: topology.PostgresStore{DB: db}, Facts: postgresRegistry, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 		relay.Policies = deploymentpolicy.Service{Store: deploymentpolicy.PostgresStore{DB: db}, BuildRecords: relay.BuildRecords.Store, Bindings: postgresRegistry, Topology: relay.Topology}
+		relay.DeploymentRuns.Store = deploymentworkflow.PostgresStore{DB: db}
 		relay.Cutovers.Deployments = postgresRegistry
 		relay.Cutovers.BuildRecords = relay.BuildRecords.Store
 		relay.Cutovers.Topology = relay.Topology
@@ -195,6 +197,7 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go relay.RunDeploymentWorkflow(ctx, fmt.Sprintf("cloud-%d", os.Getpid()))
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("cloud relay listening", "addr", addr)

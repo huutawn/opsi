@@ -110,6 +110,7 @@ type Store interface {
 	GetRunnerJob(context.Context, RunnerAccess, time.Time) (Job, error)
 	CompleteRunner(context.Context, Completion, RegistryConfig, ExecutorConfig) (CompletionResult, error)
 	FailRunner(context.Context, RunnerFailure, []byte, time.Time) error
+	Cancel(context.Context, string, string, string, time.Time) (Job, *DispatchAttempt, error)
 }
 
 type Service struct {
@@ -181,6 +182,27 @@ func (s Service) Get(ctx context.Context, projectID, applicationID, jobID string
 		return Job{}, invalid("BUILD_JOB_ID_INVALID", "project, application, or build job is invalid", "request")
 	}
 	return s.Store.Get(ctx, projectID, applicationID, jobID)
+}
+
+// Cancel atomically makes a BuildJob terminal before asking an optional
+// external executor to stop. A late runner result is then rejected by the
+// existing terminal-state checks and cannot create a BuildRecord.
+func (s Service) Cancel(ctx context.Context, projectID, applicationID, jobID string) (Job, error) {
+	if s.Store == nil || !validOpaqueID(projectID) || !validOpaqueID(applicationID) || !validOpaqueID(jobID) {
+		return Job{}, invalid("BUILD_JOB_ID_INVALID", "project, application, or build job is invalid", "request")
+	}
+	job, attempt, err := s.Store.Cancel(ctx, projectID, applicationID, jobID, s.clock())
+	if err != nil {
+		return Job{}, err
+	}
+	if attempt != nil && attempt.RunID != 0 {
+		if canceller, ok := s.Dispatcher.(WorkflowCanceller); ok {
+			if err := canceller.CancelWorkflow(ctx, s.Executor, attempt.RunID); err != nil {
+				return job, Error{Code: "EXECUTOR_CANCEL_FAILED", Status: 502, Message: "BuildJob is cancelled, but the external executor did not confirm cancellation.", Cause: "executor_cancel"}
+			}
+		}
+	}
+	return job, nil
 }
 
 func (s Service) List(ctx context.Context, projectID, applicationID, status string, limit int) ([]Job, error) {

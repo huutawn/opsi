@@ -110,8 +110,9 @@ type ServiceConfigurationApplyResult struct {
 }
 
 type CompiledServiceRuntime struct {
-	Environment []deploymentv1.EnvironmentVariable `json:"environment"`
-	PublicRoute *PublicRouteIntent                 `json:"public_route,omitempty"`
+	Environment      []deploymentv1.EnvironmentVariable `json:"environment"`
+	SecretReferences []deploymentv1.SecretReference     `json:"secret_references,omitempty"`
+	PublicRoute      *PublicRouteIntent                 `json:"public_route,omitempty"`
 }
 
 type configurationReplay struct {
@@ -330,7 +331,7 @@ func checkDependencyCycle(sourceID, targetID string, targetDeps []serviceconfigu
 
 func validateServiceConfiguration(ctx context.Context, resolver DependencyTargetResolver, source ServiceRecord, draft ServiceConfigurationDraft, services []ServiceRecord) (ServiceConfigurationDraft, []GeneratedEnvironment, error) {
 	draft = normalizeServiceConfigurationDraft(draft)
-	if err := deploymentv1.ValidateEnvironment(draft.Environment, nil); err != nil {
+	if err := deploymentv1.ValidateEnvironment(draft.Environment, draft.SecretReferences); err != nil {
 		return draft, nil, configurationError("ENVIRONMENT_INVALID", "environment", err.Error())
 	}
 	if len(draft.Bindings) > 64 {
@@ -783,10 +784,10 @@ func CompileServiceRuntime(source ServiceRecord, assignment topologyv1.Assignmen
 	}
 
 	sort.Slice(environment, func(i, j int) bool { return environment[i].Name < environment[j].Name })
-	if err := deploymentv1.ValidateEnvironment(environment, nil); err != nil {
+	if err := deploymentv1.ValidateEnvironment(environment, draft.SecretReferences); err != nil {
 		return CompiledServiceRuntime{}, err
 	}
-	return CompiledServiceRuntime{Environment: environment, PublicRoute: draft.PublicRoute}, nil
+	return CompiledServiceRuntime{Environment: environment, SecretReferences: append([]deploymentv1.SecretReference(nil), draft.SecretReferences...), PublicRoute: draft.PublicRoute}, nil
 }
 
 // CompileServiceRuntimeSpecs is the single source of truth for immutable workloads.
@@ -815,7 +816,7 @@ func CompileServiceRuntimeSpecs(source ServiceRecord, assignment topologyv1.Assi
 	memory := strconv.FormatInt((assignment.MemoryRequestBytes+1024*1024-1)/(1024*1024), 10) + "Mi"
 	readiness := &deploymentv1.Probe{Path: source.HealthPath, Port: int32(source.ContainerPort), InitialDelaySeconds: 2, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 6}
 	liveness := *readiness
-	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: source.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(source.ContainerPort), ReadinessProbe: readiness, LivenessProbe: &liveness, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}, Limits: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}}, TerminationGracePeriodSecond: 30, Environment: compiled.Environment, Exposure: deploymentv1.ExposureIntent{Mode: workloadExposure}}
+	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: source.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(source.ContainerPort), ReadinessProbe: readiness, LivenessProbe: &liveness, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}, Limits: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}}, TerminationGracePeriodSecond: 30, Environment: compiled.Environment, SecretReferences: compiled.SecretReferences, Exposure: deploymentv1.ExposureIntent{Mode: workloadExposure}}
 	if err := workload.Validate(); err != nil {
 		return deploymentv1.WorkloadSpec{}, err
 	}

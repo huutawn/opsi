@@ -153,7 +153,7 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 	decision, err := s.Policies.Route(ctx, record.ProjectID, deploymentpolicyv1.RoutingRequest{BuildRecordID: record.ID, Automatic: true})
 	if err != nil || !decision.Eligible {
 		var policyErr deploymentpolicy.Error
-		if isAutomaticDisabled(err) || errors.As(err, &policyErr) && (policyErr.Code == "ROUTING_AUTOMATIC_DISABLED" || policyErr.Code == "ROUTING_BUILD_RECORD_NOT_FOUND") || !decision.Eligible && decision.DecisionCode == "ROUTING_AUTOMATIC_DISABLED" {
+		if isAutomaticDisabled(err) || automaticRoutingDeferred(err) || errors.As(err, &policyErr) && (policyErr.Code == "ROUTING_AUTOMATIC_DISABLED" || policyErr.Code == "ROUTING_BUILD_RECORD_NOT_FOUND") || !decision.Eligible && decision.DecisionCode == "ROUTING_AUTOMATIC_DISABLED" {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -242,6 +242,13 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 		s.Registry.Audit(job.OrgID, record.ProjectID, "github-actions", action, "deployment_job", job.ID, "success", map[string]any{"build_record_id": record.ID, "reused": false, "oci_digest": record.Build.OCIDigest})
 	}
 	return &job, reused, nil
+}
+
+// A routing conflict means topology or policy still requires the normal human
+// preflight/deploy flow. It must not make a durable BuildRecord appear rejected.
+func automaticRoutingDeferred(err error) bool {
+	var policyErr deploymentpolicy.Error
+	return errors.As(err, &policyErr) && policyErr.Status == http.StatusConflict
 }
 
 func automaticDeliveryError(err error) error {

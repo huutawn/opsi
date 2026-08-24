@@ -261,6 +261,10 @@ func (s *SecretService) CreateSecret(ctx context.Context, req *agentv1.SecretReq
 	}
 	value, err := s.service.Create(ctx, auth, refFromSecretRequest(req, s.cfg))
 	if err != nil {
+		// secret.Service redacts generated values before returning storage errors.
+		// Keep that sanitized cause server-side while retaining the deliberately
+		// generic error returned through the local facade.
+		slog.Error("agent secret create failed", "project_id", req.ProjectID, "service_id", req.ServiceID, "namespace", firstNonEmpty(req.Namespace, s.cfg.Secret.Namespace, s.cfg.Deployment.Namespace), "secret_name", req.Name, "error", err)
 		return nil, mapSecretError(err)
 	}
 	return secretResponse(req, s.cfg, value, false), nil

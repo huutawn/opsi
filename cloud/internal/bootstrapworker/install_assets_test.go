@@ -44,8 +44,10 @@ func TestBootstrapPlanV2Contract(t *testing.T) {
 	}
 	for _, required := range []string{
 		"INSTALL_K3S_VERSION=\"$OPSI_K3S_VERSION\"",
-		"INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640'",
+		"INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640 --secrets-encryption'",
 		"systemctl is-active --quiet k3s",
+		"encryption-config.json",
+		"k3s secrets-encrypt status",
 		"k3s kubectl get nodes",
 	} {
 		if !strings.Contains(installK3sScript, required) {
@@ -123,6 +125,9 @@ func TestRegisterAgentConfigMatchesCurrentAgent(t *testing.T) {
 		if strings.Contains(config, retired) {
 			t.Fatalf("generated config contains retired field %q", retired)
 		}
+	}
+	if !strings.Contains(config, "encryption_at_rest_confirmed: true") {
+		t.Fatal("generated Agent config does not confirm verified K3s secrets encryption")
 	}
 }
 
@@ -216,8 +221,8 @@ func TestBootstrapPlanFingerprintInputsAndSecrets(t *testing.T) {
 
 func TestRemoteInstallIdempotencyContracts(t *testing.T) {
 	contracts := map[string][]string{
-		"K3s exact version skips reinstall": {
-			"if [ \"$current_version\" != \"$OPSI_K3S_VERSION\" ]; then",
+		"K3s version and encryption skip reinstall": {
+			"if [ \"$current_version\" != \"$OPSI_K3S_VERSION\" ] || ! $SUDO test -s /var/lib/rancher/k3s/server/cred/encryption-config.json; then",
 			"systemctl enable --now k3s",
 		},
 		"K3s mismatch verified upgrade": {

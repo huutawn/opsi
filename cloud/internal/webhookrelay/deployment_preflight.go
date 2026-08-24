@@ -6,14 +6,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/sourcescanner"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
-	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
-	"github.com/opsi-dev/opsi/cloud/internal/registry"
-	"github.com/opsi-dev/opsi/cloud/internal/sourcescanner"
+	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
 func (s *Server) runPreflight(ctx context.Context, projectID string, request deploymentv1.CreateRequest) (deploymentv1.PreflightResult, error) {
@@ -278,6 +279,57 @@ func (s *Server) runPreflight(ctx context.Context, projectID string, request dep
 			targetRuntimeID = assign.RuntimeID
 		}
 	}
+	if planErr == nil && targetRuntimeID != "" {
+		validation, validationErr := s.Topology.Validate(ctx, projectID, topologyv1.Draft{
+			SchemaVersion: topologyv1.SchemaVersion,
+			ProjectID:     projectID,
+			Assignments:   append([]topologyv1.Assignment(nil), plan.Assignments...),
+		}, false)
+		if validationErr != nil {
+			result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
+				ID:              "chk:capacity:" + targetRuntimeID + ":CAPACITY_AUTHORITY_UNAVAILABLE",
+				Code:            "CAPACITY_AUTHORITY_UNAVAILABLE",
+				Severity:        deploymentv1.CheckSeverityBlock,
+				ScopeKind:       deploymentv1.ScopeKindTopology,
+				ScopeID:         targetRuntimeID,
+				Message:         "capacity authority could not validate requested placement",
+				RemediationCode: deploymentv1.RemediationPlanPlacement,
+			})
+		} else {
+			for _, runtime := range validation.Runtimes {
+				if runtime.RuntimeID != targetRuntimeID {
+					continue
+				}
+				capacity := runtime.Capacity
+				evidence := map[string]string{
+					"requested_cpu_millicores": strconv.FormatInt(capacity.RequestedCPUMillicores, 10),
+					"requested_memory_bytes":   strconv.FormatInt(capacity.RequestedMemoryBytes, 10),
+					"assigned_cpu_millicores":  strconv.FormatInt(capacity.AssignedCPUMillicores, 10),
+					"assigned_memory_bytes":    strconv.FormatInt(capacity.AssignedMemoryBytes, 10),
+					"reserved_cpu_millicores":  strconv.FormatInt(capacity.ReservedCPUMillicores, 10),
+					"reserved_memory_bytes":    strconv.FormatInt(capacity.ReservedMemoryBytes, 10),
+					"available_cpu_millicores": strconv.FormatInt(capacity.AvailableCPUMillicores, 10),
+					"available_memory_bytes":   strconv.FormatInt(capacity.AvailableMemoryBytes, 10),
+					"capacity_source":          capacity.Source,
+				}
+				severity, code, message := deploymentv1.CheckSeverityPass, "CAPACITY_HEADROOM_VALID", "requested, assigned, reserved, and available capacity are within the target runtime headroom"
+				if !runtime.Eligible || capacity.Oversubscribed || capacity.UnknownCapacity {
+					severity, code, message = deploymentv1.CheckSeverityBlock, "CAPACITY_HEADROOM_BLOCKED", "requested placement exceeds or cannot establish factual target runtime headroom"
+				}
+				result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
+					ID:              "chk:capacity:" + targetRuntimeID + ":" + code,
+					Code:            code,
+					Severity:        severity,
+					ScopeKind:       deploymentv1.ScopeKindTopology,
+					ScopeID:         targetRuntimeID,
+					Message:         message,
+					RemediationCode: deploymentv1.RemediationPlanPlacement,
+					SafeEvidence:    evidence,
+				})
+				break
+			}
+		}
+	}
 	nodes, nodeErr := s.Registry.ListNodes(projectID)
 	if nodeErr != nil || len(nodes) == 0 {
 		result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
@@ -290,13 +342,7 @@ func (s *Server) runPreflight(ctx context.Context, projectID string, request dep
 			RemediationCode: deploymentv1.RemediationWaitForServer,
 		})
 	} else {
-		var matchedNode *registry.Node
-		for _, n := range nodes {
-			if (targetRuntimeID != "" && n.RuntimeID == targetRuntimeID) || (decision.NodeID != "" && n.ID == decision.NodeID) {
-				matchedNode = &n
-				break
-			}
-		}
+		matchedNode := preflightTargetNode(nodes, targetRuntimeID, decision.NodeID)
 		if matchedNode == nil {
 			result.Checks = append(result.Checks, deploymentv1.PreflightCheck{
 				ID:              "chk:runtime:" + targetRuntimeID + ":RUNTIME_NOT_FOUND",
@@ -871,7 +917,9 @@ func (s *Server) runPreflight(ctx context.Context, projectID string, request dep
 	}
 	if routeErr == nil {
 		revisions["policy_revision"] = strconv.FormatUint(decision.DeploymentPolicyRevision, 10)
-		if policy, err := s.Policies.Get(ctx, projectID, decision.DeploymentPolicyID); err == nil { revisions["policy_hash"] = policy.PolicyHash }
+		if policy, err := s.Policies.Get(ctx, projectID, decision.DeploymentPolicyID); err == nil {
+			revisions["policy_hash"] = policy.PolicyHash
+		}
 		revisions["routing_decision_hash"] = decision.DecisionHash
 	}
 	batchList := append([]string{service.Name}, request.DeploymentBatch...)
@@ -879,4 +927,24 @@ func (s *Server) runPreflight(ctx context.Context, projectID string, request dep
 	result.AuthorityFingerprint = result.PreflightHash
 
 	return result, nil
+}
+
+// preflightTargetNode checks the exact Node selected by routing when present.
+// Historical/offline nodes can share a runtime but must neither block nor
+// satisfy a preflight for the routed Agent target.
+func preflightTargetNode(nodes []registry.Node, runtimeID, routedNodeID string) *registry.Node {
+	if routedNodeID != "" {
+		for index := range nodes {
+			if nodes[index].ID == routedNodeID {
+				return &nodes[index]
+			}
+		}
+		return nil
+	}
+	for index := range nodes {
+		if runtimeID != "" && nodes[index].RuntimeID == runtimeID {
+			return &nodes[index]
+		}
+	}
+	return nil
 }

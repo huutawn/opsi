@@ -328,6 +328,56 @@ func (s PostgresStore) FailRunner(ctx context.Context, failure RunnerFailure, le
 	return nil
 }
 
+func (s PostgresStore) Cancel(ctx context.Context, projectID, applicationID, jobID string, now time.Time) (Job, *DispatchAttempt, error) {
+	if s.DB == nil {
+		return Job{}, nil, unavailable()
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, nil, unavailable()
+	}
+	defer tx.Rollback()
+	job, err := scanJob(tx.QueryRowContext(ctx, selectJobColumns+` WHERE project_id=$1 AND application_id=$2 AND id=$3 FOR UPDATE`, projectID, applicationID, jobID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, nil, Error{Code: "BUILD_JOB_NOT_FOUND", Status: 404, Message: "BuildJob was not found.", Cause: "build_job"}
+	}
+	if err != nil {
+		return Job{}, nil, unavailable()
+	}
+	if job.Status == StatusSucceeded || job.Status == StatusFailed || job.Status == StatusCancelled {
+		if err := tx.Commit(); err != nil {
+			return Job{}, nil, unavailable()
+		}
+		return job, nil, nil
+	}
+	var attempt *DispatchAttempt
+	current, scanErr := scanAttempt(tx.QueryRowContext(ctx, `SELECT `+selectAttemptColumns+` FROM build_executor_attempts WHERE build_job_id=$1 AND last_state IN ('dispatching','dispatched','claimed') ORDER BY dispatched_at DESC,attempt_id DESC LIMIT 1 FOR UPDATE`, jobID))
+	if scanErr == nil {
+		attempt = &current
+	} else if !errors.Is(scanErr, sql.ErrNoRows) {
+		return Job{}, nil, unavailable()
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE build_jobs SET status='cancelled',failure_code='BUILD_CANCELLED',failure_message_redacted='Build was cancelled by the deployment workflow.',failure_cause='workflow_cancel',completed_at=$4,updated_at=$4 WHERE project_id=$1 AND application_id=$2 AND id=$3 AND status NOT IN ('succeeded','failed','cancelled')`, projectID, applicationID, jobID, now)
+	if err != nil {
+		return Job{}, nil, unavailable()
+	}
+	count, _ := result.RowsAffected()
+	if count != 1 {
+		return Job{}, nil, unavailable()
+	}
+	if attempt != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE build_executor_attempts SET last_state='cancelled',failure_code='BUILD_CANCELLED',lease_token_hash=NULL,lease_expires_at=NULL,completed_at=$2,updated_at=$2 WHERE attempt_id=$1`, attempt.AttemptID, now); err != nil {
+			return Job{}, nil, unavailable()
+		}
+		attempt.LastState, attempt.FailureCode, attempt.CompletedAt, attempt.LeaseHash, attempt.LeaseExpiresAt = DispatchStateCancelled, "BUILD_CANCELLED", &now, nil, time.Time{}
+	}
+	if err := tx.Commit(); err != nil {
+		return Job{}, nil, unavailable()
+	}
+	job.Status, job.FailureCode, job.FailureMessageRedacted, job.FailureCause, job.CompletedAt, job.UpdatedAt = StatusCancelled, "BUILD_CANCELLED", "Build was cancelled by the deployment workflow.", "workflow_cancel", &now, now
+	return job, attempt, nil
+}
+
 type BuildConfigInput struct {
 	Commit        string `json:"commit"`
 	Strategy      string `json:"strategy"`

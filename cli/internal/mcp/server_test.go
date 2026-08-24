@@ -85,8 +85,8 @@ func TestMCPServer_InitializeAndListTools(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected []Tool in result, got %T", toolsMap["tools"])
 	}
-	if len(toolsList) != 21 {
-		t.Errorf("expected exactly 21 tools, got %d", len(toolsList))
+	if len(toolsList) != 22 {
+		t.Errorf("expected exactly 22 tools, got %d", len(toolsList))
 	}
 
 	// Invariant: all MCP-01 facts and MCP-02 advisory tools are non-operational.

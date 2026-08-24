@@ -144,7 +144,7 @@ function IncidentDetail({
             View Logs
           </Button>
           <Button
-            onClick={() => console.navigate({ view: "delivery", tab: "deployments", service: incident.service_id || "" })}
+            onClick={() => console.navigate({ view: "deploy", service: incident.service_id || "" })}
             size="sm"
             variant="secondary"
           >

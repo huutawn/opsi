@@ -196,7 +196,7 @@ R5-005.
 
 **Quy trình thực hiện:**
 
-1. Freeze `.opsi/opsi-cd.yaml` v2: services, context, Dockerfile, platform, watch/shared paths, dependencies, production/preview intent; không chứa project/VPS/Cloud URL/secret.
+1. Giữ `.opsi/opsi-cd.yaml` v2 strict và tương thích: services, context, Dockerfile, platform, watch/shared paths, build dependencies, production/preview intent; các field optional resource/runtime/binding/runtime dependency/verification/opaque secret reference mở rộng trực tiếp v2, không chứa project/VPS/Cloud URL hoặc plaintext secret.
 2. Migrate v1 -> v2; `opsi init` add/update một service mà không xóa service khác.
 3. Implement resolver nhận event/base/head và `git diff --name-status -z`.
 4. Xử lý push, PR, merge, rename, delete, initial build, shallow/missing base, shared path và dependency closure.

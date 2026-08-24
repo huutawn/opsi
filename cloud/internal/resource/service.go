@@ -66,6 +66,11 @@ type Store interface {
 type CredentialAuthority interface {
 	Ensure(context.Context, string) (resourcev1.ManagedResourceCredential, error)
 	EnsureBinding(context.Context, resourcev1.BindingCredentialSpec) (resourcev1.ManagedResourceCredential, error)
+	EnsureWorkloadSecret(context.Context, resourcev1.WorkloadSecretSpec) (resourcev1.ManagedResourceCredential, error)
+	ListWorkloadSecrets(context.Context, string, string) ([]resourcev1.WorkloadSecretMetadata, error)
+	GetWorkloadSecret(context.Context, string, string, string) (resourcev1.WorkloadSecretMetadata, error)
+	UpsertWorkloadSecret(context.Context, resourcev1.WorkloadSecretUpsert) (resourcev1.WorkloadSecretMetadata, bool, error)
+	BindWorkloadSecret(context.Context, string, string, string, string) (resourcev1.WorkloadSecretMetadata, error)
 	Get(context.Context, string) (resourcev1.ManagedResourceCredential, error)
 	Delete(context.Context, string) error
 }

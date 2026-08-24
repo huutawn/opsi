@@ -162,7 +162,7 @@ func (s Service) ApplicationRuntimeConfiguration(ctx context.Context, projectID,
 	return environment, secrets, nil
 }
 
-func (s Service) ResolveSecretMaterials(ctx context.Context, projectID string, references []deploymentv1.SecretReference) ([]deploymentv1.SecretMaterial, error) {
+func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceID string, references []deploymentv1.SecretReference) ([]deploymentv1.SecretMaterial, error) {
 	if len(references) == 0 {
 		return nil, nil
 	}
@@ -202,12 +202,16 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID string, r
 		authority, ok := byCredential[reference.SecretID]
 		redisManagement := ok && authority.binding == nil && authority.target.Type == resourcev1.TypeRedis && authority.target.Runtime != nil && authority.target.Runtime.Spec.CredentialID == reference.SecretID
 		postgresBinding := ok && authority.binding != nil && authority.target.Type == resourcev1.TypePostgres
-		if !redisManagement && !postgresBinding {
-			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding secret reference is unavailable")
-		}
 		credential, err := s.Credentials.Get(ctx, reference.SecretID)
 		if err != nil {
 			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding credential is unavailable")
+		}
+		workloadSecret := false
+		if !redisManagement && !postgresBinding {
+			workloadSecret = credential.ValidateWorkloadSecret(projectID, serviceID) == nil
+			if !workloadSecret {
+				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "workload secret reference is unavailable")
+			}
 		}
 		if postgresBinding && credential.ValidateBinding(authority.binding.ID, authority.target.ID) != nil {
 			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "PostgreSQL binding credential authority is invalid")
@@ -234,6 +238,8 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID string, r
 		upper := strings.ToUpper(reference.EnvName)
 		value := ""
 		switch {
+		case workloadSecret:
+			value = credential.Password
 		case mappedSource == "credential.username" || strings.HasSuffix(upper, "_USER") || upper == "USER" || upper == "PGUSER":
 			value = credential.Username
 		case mappedSource == "credential.password" || strings.HasSuffix(upper, "_PASSWORD") || strings.HasSuffix(upper, "_PASS") || upper == "PASSWORD" || upper == "PGPASSWORD" || upper == "PASS":

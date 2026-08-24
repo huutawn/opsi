@@ -92,7 +92,7 @@ test("Security & Audit Center loads canonical overview, audit explorer, and acce
   const crossLink = drawer.getByRole("button", { name: /Open Application/i });
   await expect(crossLink).toBeVisible();
   await crossLink.click();
-  await expect(page).toHaveURL(/view=services/);
+  await expect(page).toHaveURL(/view=deploy/);
 
   // 12. Access Tab loads in strictly read-only mode
   await page.goto("/?project=proj-1&view=security&tab=access");
@@ -116,7 +116,7 @@ test("Security & Audit Center loads canonical overview, audit explorer, and acce
   // 14. Access tab cross-links work
   await expect(page.getByRole("button", { name: /Open Server/i }).first()).toBeVisible();
   await page.getByRole("button", { name: /Open Server/i }).first().click();
-  await expect(page).toHaveURL(/view=infrastructure&tab=servers/);
+  await expect(page).toHaveURL(/view=observability&tab=servers/);
 
   // 15. No destructive action buttons duplicated in Security
   await page.goto("/?project=proj-1&view=security&tab=access");

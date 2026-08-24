@@ -130,15 +130,14 @@ test("Events timeline and bounded logs with replica identity are visible", async
   await expect(drawer.getByText("HTTP server listening on :8080")).toHaveCount(0);
 });
 
-test("Cross-center navigation links to Delivery and Infrastructure work properly", async ({ page }) => {
+test("Cross-center navigation links to Deploy", async ({ page }) => {
   await page.goto("/?project=proj-1&view=observability&tab=applications&service=svc-web");
 
   const drawer = page.getByTestId("application-detail-drawer");
   await expect(drawer).toBeVisible();
 
-  // Click Open in Delivery
-  await drawer.getByRole("link", { name: "Open in Delivery" }).click();
-  await expect(page).toHaveURL(/view=delivery/);
+  await drawer.getByRole("link", { name: "Open in Deploy" }).click();
+  await expect(page).toHaveURL(/view=deploy/);
 });
 
 // Mock Fixture

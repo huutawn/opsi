@@ -155,6 +155,33 @@ func (s *MemoryStore) FailRunner(_ context.Context, failure RunnerFailure, lease
 	return Error{Code: "RUNNER_LEASE_INVALID", Status: 401, Message: "Runner lease is invalid.", Cause: "runner_lease"}
 }
 
+func (s *MemoryStore) Cancel(_ context.Context, projectID, applicationID, jobID string, now time.Time) (Job, *DispatchAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.byID[jobID]
+	if !ok || job.ProjectID != projectID || job.ApplicationID != applicationID {
+		return Job{}, nil, Error{Code: "BUILD_JOB_NOT_FOUND", Status: 404, Message: "BuildJob was not found.", Cause: "build_job"}
+	}
+	if job.Status == StatusSucceeded || job.Status == StatusFailed || job.Status == StatusCancelled {
+		return job, nil, nil
+	}
+	job.Status, job.FailureCode, job.FailureMessageRedacted, job.FailureCause = StatusCancelled, "BUILD_CANCELLED", "Build was cancelled by the deployment workflow.", "workflow_cancel"
+	job.CompletedAt, job.UpdatedAt = &now, now
+	s.byID[jobID] = job
+	var target *DispatchAttempt
+	for id, attempt := range s.attempts {
+		if attempt.BuildJobID != jobID || attempt.LastState != DispatchStateDispatching && attempt.LastState != DispatchStateDispatched && attempt.LastState != DispatchStateClaimed {
+			continue
+		}
+		attempt.LastState, attempt.FailureCode, attempt.CompletedAt = DispatchStateCancelled, "BUILD_CANCELLED", &now
+		attempt.LeaseHash, attempt.LeaseExpiresAt = nil, time.Time{}
+		s.attempts[id] = attempt
+		copy := attempt
+		target = &copy
+	}
+	return job, target, nil
+}
+
 func (s *MemoryStore) Create(_ context.Context, job Job) (Job, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
