@@ -546,38 +546,73 @@ func (s *Server) verifyGitHubInstallationAccess(ctx context.Context, accessToken
 }
 
 func (s *Server) findGitHubUserInstallation(ctx context.Context, accessToken string, installationID int64) (githubUserInstallationPayload, error) {
+	installations, err := s.listGitHubUserInstallationPayloads(ctx, accessToken)
+	if err != nil {
+		return githubUserInstallationPayload{}, err
+	}
+	for _, installation := range installations {
+		if installation.ID == installationID {
+			return installation, nil
+		}
+	}
+	return githubUserInstallationPayload{}, errGitHubInstallationAccessDenied
+}
+
+func (s *Server) listGitHubUserInstallationPayloads(ctx context.Context, accessToken string) ([]githubUserInstallationPayload, error) {
 	seen := map[int64]struct{}{}
+	installations := make([]githubUserInstallationPayload, 0)
 	for page := 1; page <= 20; page++ {
 		var response struct {
 			TotalCount    int                             `json:"total_count"`
 			Installations []githubUserInstallationPayload `json:"installations"`
 		}
 		if err := s.githubUserAPIJSON(ctx, accessToken, githubUserInstallationsURL, page, &response); err != nil {
-			return githubUserInstallationPayload{}, err
+			return nil, err
 		}
 		if response.TotalCount < 0 || response.Installations == nil || response.TotalCount < len(seen)+len(response.Installations) {
-			return githubUserInstallationPayload{}, errors.New("github installation pagination is invalid")
+			return nil, errors.New("github installation pagination is invalid")
 		}
 		for _, installation := range response.Installations {
 			if installation.ID <= 0 || installation.Account == nil || installation.Account.ID <= 0 || !validMetadata(installation.Account.Login, 255, true) || !validMetadata(installation.Account.Type, 64, true) {
-				return githubUserInstallationPayload{}, errors.New("github installation response is invalid")
+				return nil, errors.New("github installation response is invalid")
 			}
 			if _, duplicate := seen[installation.ID]; duplicate {
-				return githubUserInstallationPayload{}, errors.New("github installation pagination is invalid")
+				return nil, errors.New("github installation pagination is invalid")
 			}
 			seen[installation.ID] = struct{}{}
-			if installation.ID == installationID {
-				return installation, nil
-			}
+			installations = append(installations, installation)
 		}
 		if len(seen) >= response.TotalCount {
-			return githubUserInstallationPayload{}, errGitHubInstallationAccessDenied
+			return installations, nil
 		}
 		if len(response.Installations) == 0 || page == 20 {
-			return githubUserInstallationPayload{}, errors.New("github installation pagination exceeds limit")
+			return nil, errors.New("github installation pagination exceeds limit")
 		}
 	}
-	return githubUserInstallationPayload{}, errors.New("github installation pagination exceeds limit")
+	return nil, errors.New("github installation pagination exceeds limit")
+}
+
+func (s *Server) listGitHubUserInstallations(ctx context.Context, accessToken string, githubUserID int64) ([]registry.GitHubInstallation, error) {
+	payloads, err := s.listGitHubUserInstallationPayloads(ctx, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	installations := make([]registry.GitHubInstallation, 0, len(payloads))
+	for _, installation := range payloads {
+		if installation.Account.Type == "User" && installation.Account.ID != githubUserID {
+			continue
+		}
+		if installation.Account.Type != "User" && installation.Account.Type != "Organization" {
+			continue
+		}
+		status, suspended := registry.GitHubInstallationActive, false
+		if installation.SuspendedAt != nil {
+			status, suspended = registry.GitHubInstallationSuspended, true
+		}
+		now := s.clock()
+		installations = append(installations, registry.GitHubInstallation{InstallationID: installation.ID, AccountID: installation.Account.ID, AccountLogin: installation.Account.Login, AccountType: installation.Account.Type, Status: status, Suspended: suspended, CreatedAt: now, UpdatedAt: now})
+	}
+	return installations, nil
 }
 
 func (s *Server) listGitHubUserInstallationRepositories(ctx context.Context, accessToken string, installationID int64) ([]registry.GitHubRepository, error) {
