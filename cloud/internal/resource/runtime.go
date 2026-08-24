@@ -163,7 +163,10 @@ func compileManaged(value resourcev1.Resource, assignment resourcev1.ManagedReso
 		return resourcev1.ManagedResourceSpec{}, invalid("MANAGED_RESOURCE_IMAGE_UNAVAILABLE", "managed resource version/profile does not resolve to a trusted image")
 	}
 	configurationHash := hashValue(value.Managed.ServiceConfig)
-	serviceName := deploymentv1.StableDNSName("opsi-mr", value.ID, assignment.RuntimeID)
+	// StatefulSet controller-revision labels append their own hash to the
+	// workload name. Keep managed resource names compact so those labels stay
+	// within Kubernetes' 63-character limit.
+	serviceName := deploymentv1.StableDNSName("omr", value.ID)
 	host := internalHost(value.ProjectID, value.EnvironmentID, serviceName)
 	portName, protocol, database, connectionURL := "nats", resourcev1.ProtocolNATS, "", "nats://"+host+":"+strconv.Itoa(definition.DefaultPort)
 	if value.Type == resourcev1.TypeRedis {
