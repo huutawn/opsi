@@ -212,7 +212,12 @@ func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID, actor 
 		}
 	}
 	if current.Runtime == nil {
-		return resourcev1.Resource{}, invalid("MANAGED_RESOURCE_DELETE_FAILED", "managed resource runtime authority is unavailable")
+		if err := s.Store.Delete(ctx, projectID, resourceID); err != nil {
+			return resourcev1.Resource{}, err
+		}
+		current.Lifecycle = resourcev1.LifecycleDeleting
+		current.UpdatedAt = s.clock()
+		return current, nil
 	}
 	current.Lifecycle = resourcev1.LifecycleDeleting
 	current.Runtime.DeleteActor = actor

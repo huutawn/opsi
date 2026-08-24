@@ -74,6 +74,22 @@ func TestNATSCompilerLeaseReadinessDeleteAndBinding(t *testing.T) {
 	}
 }
 
+func TestUnplacedManagedResourceDeletesWithoutRuntimeAuthority(t *testing.T) {
+	service := testService()
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "unplaced-delete", managedRequest(resourcev1.TypeRedis))
+	if err != nil || created.Runtime != nil || created.Lifecycle != resourcev1.LifecycleUnplaced {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+
+	deleted, err := service.DeleteIntent(context.Background(), "project-1", created.ID, "user-1")
+	if err != nil || deleted.Lifecycle != resourcev1.LifecycleDeleting {
+		t.Fatalf("deleted=%+v err=%v", deleted, err)
+	}
+	if _, err := service.Get(context.Background(), "project-1", created.ID); err != ErrNotFound {
+		t.Fatalf("resource still exists: %v", err)
+	}
+}
+
 func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing.T) {
 	service := testService()
 	postgres, _, err := service.Create(context.Background(), "project-1", "user-1", "postgres-runtime", managedRequest(resourcev1.TypePostgres))
