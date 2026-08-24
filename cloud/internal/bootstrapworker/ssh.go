@@ -125,13 +125,25 @@ func pinnedHostKeyAlgorithms(callback ssh.HostKeyCallback, target RemoteTarget) 
 	}
 	algorithms := make([]string, 0, len(keyErr.Want))
 	seen := make(map[string]struct{}, len(keyErr.Want))
-	for _, known := range keyErr.Want {
-		algorithm := known.Key.Type()
+	appendAlgorithm := func(algorithm string) {
 		if _, ok := seen[algorithm]; ok {
-			continue
+			return
 		}
 		seen[algorithm] = struct{}{}
 		algorithms = append(algorithms, algorithm)
+	}
+	for _, known := range keyErr.Want {
+		switch known.Key.Type() {
+		case ssh.KeyAlgoRSA:
+			// An RSA host key is identified by the same pinned public key when
+			// negotiated with modern rsa-sha2 signatures. Keep the legacy
+			// algorithm last for older servers, without accepting another key.
+			appendAlgorithm(ssh.KeyAlgoRSASHA512)
+			appendAlgorithm(ssh.KeyAlgoRSASHA256)
+			appendAlgorithm(ssh.KeyAlgoRSA)
+		default:
+			appendAlgorithm(known.Key.Type())
+		}
 	}
 	return algorithms, nil
 }
