@@ -187,6 +187,23 @@ func TestResolveOAuthUserIsReadOnlyAndRequiresPrelinkedIdentity(t *testing.T) {
 	}
 }
 
+func TestEnsureOAuthUserCreatesOnlyPersonalWorkspaceForFirstLogin(t *testing.T) {
+	store := &MemoryStore{}
+	service := Service{Store: store}
+	userID, created, err := service.EnsureOAuthUser(context.Background(), "github", "143307746")
+	if err != nil || !created || userID == "" {
+		t.Fatalf("userID=%q created=%t err=%v", userID, created, err)
+	}
+	projects, err := service.UserProjects(context.Background(), userID)
+	if err != nil || len(projects) != 1 || projects[0].Role != "owner" {
+		t.Fatalf("projects=%+v err=%v", projects, err)
+	}
+	reusedUserID, created, err := service.EnsureOAuthUser(context.Background(), "github", "143307746")
+	if err != nil || created || reusedUserID != userID || len(store.Candidates) != 1 {
+		t.Fatalf("reused=%q created=%t candidates=%+v err=%v", reusedUserID, created, store.Candidates, err)
+	}
+}
+
 func TestUserProjectsReturnsAccessibleCandidates(t *testing.T) {
 	store := &MemoryStore{
 		Candidates: []Candidate{
