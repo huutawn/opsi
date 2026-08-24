@@ -80,13 +80,15 @@ type Server struct {
 	authGrants              map[string]authGrant
 	authSelectionGrants     map[string]authGrant
 	installationClaimGrants map[string]installationClaimGrant
-	now                     func() time.Time
-	random                  io.Reader
-	actionDeviceMu          sync.Mutex
-	actionDevices           actiondevice.Store
-	bootstrapInstall        bootstrapworker.InstallConfig
-	bootstrapRunnerPath     string
-	bootstrapRunnerSHA256   string
+
+	installationDiscoveryGrants map[string]installationDiscoveryGrant
+	now                         func() time.Time
+	random                      io.Reader
+	actionDeviceMu              sync.Mutex
+	actionDevices               actiondevice.Store
+	bootstrapInstall            bootstrapworker.InstallConfig
+	bootstrapRunnerPath         string
+	bootstrapRunnerSHA256       string
 }
 
 func NewServer(cfg Config) *Server {
@@ -146,7 +148,9 @@ func NewServer(cfg Config) *Server {
 		authGrants:              map[string]authGrant{},
 		authSelectionGrants:     map[string]authGrant{},
 		installationClaimGrants: map[string]installationClaimGrant{},
-		random:                  rand.Reader,
+
+		installationDiscoveryGrants: map[string]installationDiscoveryGrant{},
+		random:                      rand.Reader,
 	}
 	server.Cutovers.Deployments = registryService
 	server.Cutovers.BuildRecords = buildRecordService.Store
@@ -226,6 +230,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)
 	mux.HandleFunc("/v1/auth/browser/redeem", s.handleBrowserAuthRedeem)
 	mux.HandleFunc("/v1/auth/browser/select-project", s.handleBrowserAuthSelectProject)
+	mux.HandleFunc("/v1/projects/{project_id}/github/installations/discover/start", s.handleInstallationDiscoveryStart)
+	mux.HandleFunc("/v1/github/installations/discover/redeem", s.handleInstallationDiscoveryRedeem)
 	mux.HandleFunc("/v1/projects/{project_id}/github/installations/{installation_id}/claim/start", s.handleInstallationClaimStart)
 	mux.HandleFunc("/v1/github/installations/claim/redeem", s.handleInstallationClaimRedeem)
 	mux.HandleFunc("/v1/projects/{project_id}/github/installations", s.handleGitHubInstallationsAPI)
