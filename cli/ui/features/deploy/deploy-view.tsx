@@ -1,7 +1,7 @@
 "use client";
 
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, ErrorState, Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
+import { Button, Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
 import { DeploymentTimeline } from "@/features/deploy/deployment-timeline";
 import { PlanReview } from "@/features/deploy/plan-review";
 import { SourceStep } from "@/features/deploy/source-step";
@@ -26,9 +26,11 @@ export function DeployView({ console }: { console: ConsoleController }) {
   const [refName, setRefName] = useState("main");
   const [hostname, setHostname] = useState("");
   const [busy, setBusy] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<DeployFailure | null>(null);
+  const [loadFailure, setLoadFailure] = useState<DeployFailure | null>(null);
   const [showNew, setShowNew] = useState(false);
 	const [showConnect, setShowConnect] = useState(false);
+	const [sourceDraftProject, setSourceDraftProject] = useState("");
 	const targetResume = useRef(false);
 	const connectTrigger = useRef<HTMLButtonElement>(null);
   const canMutate = ["owner", "admin", "developer"].includes(console.session?.role || "");
@@ -62,25 +64,63 @@ export function DeployView({ console }: { console: ConsoleController }) {
         setEvents(timeline.events || []);
         setResult(projection);
       } else { setEvents([]); setResult(null); setDraftPlan(null); }
-      setError("");
-    } catch (cause) { setError((cause as Error).message); }
+      setError(null);
+      setLoadFailure(null);
+    } catch (cause) { setLoadFailure(deployFailure(cause)); }
   }, [client, installationID, projectID, run?.id]);
 
   useEffect(() => { void load(true); }, [projectID]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    setSourceDraftProject("");
+    const saved = readSourceDraft(projectID);
+    setInstallationID(saved?.installationID || 0);
+    setRepositoryID(saved?.repositoryID || 0);
+    setRefName(saved?.refName || "main");
+    setHostname(saved?.hostname || "");
+    setSourceDraftProject(projectID);
+  }, [projectID]);
+  useEffect(() => {
+    if (sourceDraftProject === projectID) writeSourceDraft(projectID, { installationID, repositoryID, refName, hostname });
+  }, [hostname, installationID, projectID, refName, repositoryID, sourceDraftProject]);
   useEffect(() => {
     if (!run || ["succeeded", "rolled_back", "cancelled", "awaiting_approval", "awaiting_input", "awaiting_warning_ack", "failed", "stale"].includes(run.state)) return;
     const timer = window.setInterval(() => void load(), 2500);
     return () => window.clearInterval(timer);
   }, [load, run]);
 
-  async function start() { await mutate("create", async () => (await client.createDeploymentRun(projectID, { repository_id: repositoryID, selected_ref: refName.trim(), target: { hostname: hostname.trim() || undefined } }, crypto.randomUUID())).deployment_run); setShowNew(false); }
-  async function discoverGitHub() { setBusy("github-discover"); setError(""); try { const started = await client.startGitHubInstallationDiscovery(projectID, crypto.randomUUID()); window.location.assign(started.authorization_url); } catch (cause) { setError((cause as Error).message); setBusy(""); } }
-  async function connectInstallation() { if (!installationID) return; setBusy("github-connect"); setError(""); try { const started = await client.startGitHubInstallationClaim(projectID, installationID, crypto.randomUUID()); window.location.assign(started.authorization_url); } catch (cause) { setError((cause as Error).message); setBusy(""); } }
-  async function sourceAction() { const repository = repositories.find((item) => item.repository_id === repositoryID); if (!repository) return; if (repository.claim_status === "available") { setBusy("repository-claim"); setError(""); try { await client.claimGitHubRepository(projectID, repository.repository_id, crypto.randomUUID()); await load(); } catch (cause) { setError((cause as Error).message); } finally { setBusy(""); } return; } await start(); }
+  async function start() { const next = await mutate("create", async () => (await client.createDeploymentRun(projectID, { repository_id: repositoryID, selected_ref: refName.trim(), target: { hostname: hostname.trim() || undefined } }, crypto.randomUUID())).deployment_run); if (next) { clearSourceDraft(projectID); setShowNew(false); } }
+  async function discoverGitHub() { setBusy("github-discover"); setError(null); try { const started = await client.startGitHubInstallationDiscovery(projectID, crypto.randomUUID()); window.location.assign(started.authorization_url); } catch (cause) { setError(deployFailure(cause)); setBusy(""); } }
+  async function connectInstallation() { if (!installationID) return; setBusy("github-connect"); setError(null); try { const started = await client.startGitHubInstallationClaim(projectID, installationID, crypto.randomUUID()); window.location.assign(started.authorization_url); } catch (cause) { setError(deployFailure(cause)); setBusy(""); } }
+  async function sourceAction() {
+    const repository = repositories.find((item) => item.repository_id === repositoryID);
+    if (!repository) return;
+    if (repository.claim_status === "conflict") {
+      setError({ code: "GITHUB_REPOSITORY_ALREADY_CLAIMED", message: "This repository is claimed by another project. Select a different repository or release it from the owning project.", nextAction: "Select a repository available to this project.", status: 409 });
+      return;
+    }
+    if (repository.claim_status === "available") {
+      setBusy("repository-claim");
+      setError(null);
+      try {
+        await client.claimGitHubRepository(projectID, repository.repository_id, crypto.randomUUID());
+        const inventory = await client.githubRepositories(projectID);
+        const refreshed = inventory.repositories || [];
+        setRepositories(refreshed);
+        if (!refreshed.some((item) => item.repository_id === repository.repository_id && item.claim_status === "active")) {
+          throw new Error("Cloud accepted the claim but factual repository inventory has not converged. Retry claim and analysis.");
+        }
+        await start();
+      } catch (cause) { setError(deployFailure(cause)); }
+      finally { setBusy(""); }
+      return;
+    }
+    await start();
+  }
+  async function login(setFailure: (failure: DeployFailure) => void) { setBusy("login"); try { const started = await client.startLogin(projectID); window.location.assign(started.auth_url); } catch (cause) { setFailure(deployFailure(cause)); setBusy(""); } }
   async function action(name: "analyze" | "approve" | "acknowledge" | "retry" | "cancel", body: Record<string, unknown> = {}) { if (!run) return; await mutate(name, () => client.deploymentRunAction(projectID, run.id, name, body, crypto.randomUUID())); }
   async function saveDraft() { if (!run || !draftPlan) return; await mutate("plan", () => client.updateDeploymentPlan(projectID, run.id, run.revision, run.plan.hash, draftPlan, crypto.randomUUID())); }
   async function resolveSecret(applicationID: string, logicalName: string, value: string): Promise<WorkloadSecretMetadata> { const response = await client.upsertWorkloadSecret(projectID, applicationID, logicalName, value, crypto.randomUUID()); return response.workload_secret; }
-  async function mutate(name: string, operation: () => Promise<DeploymentRun>) { setBusy(name); setError(""); try { const next = await operation(); setRun(next); setDraftPlan(structuredClone(next.plan)); setRuns((current) => [next, ...current.filter((item) => item.id !== next.id)]); const [timeline, projection] = await Promise.all([client.deploymentRunEvents(projectID, next.id), client.deploymentRunResult(projectID, next.id)]); setEvents(timeline.events || []); setResult(projection); } catch (cause) { const apiError = cause as LocalAPIError; setError(apiError.nextAction && apiError.nextAction !== "Retry after checking Local backend connectivity." ? `${apiError.message} ${apiError.nextAction}` : apiError.message); } finally { setBusy(""); } }
+  async function mutate(name: string, operation: () => Promise<DeploymentRun>) { setBusy(name); setError(null); try { const next = await operation(); setRun(next); setDraftPlan(structuredClone(next.plan)); setRuns((current) => [next, ...current.filter((item) => item.id !== next.id)]); const [timeline, projection] = await Promise.all([client.deploymentRunEvents(projectID, next.id), client.deploymentRunResult(projectID, next.id)]); setEvents(timeline.events || []); setResult(projection); return next; } catch (cause) { setError(deployFailure(cause)); return null; } finally { setBusy(""); } }
 
 	useEffect(() => {
 		if (!needsServer || !canMutate || !run) { targetResume.current = false; return; }
@@ -98,13 +138,13 @@ export function DeployView({ console }: { console: ConsoleController }) {
 		return () => window.clearInterval(timer);
 	}, [canMutate, client, needsServer, projectID, run?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (error && !run && runs.length === 0) return <div className="p-4 lg:p-margin-desktop"><ErrorState retry={() => void load(true)} text={error} title="Deployment workflow unavailable" /></div>;
+  if (loadFailure && !run && runs.length === 0) return <DeployLoadFailure busy={busy} failure={loadFailure} onLogin={() => void login(setLoadFailure)} onRetry={() => void load(true)} projectName={console.state.project?.name} />;
   const sourceOnly = showNew || !run;
   return (
     <main className="mx-auto max-w-7xl space-y-6 p-4 lg:p-margin-desktop">
-      <PageHeader action={!sourceOnly && <Button onClick={() => { setShowNew(true); setError(""); }} variant="outline"><Icon name="add" />New deployment</Button>} description="One reviewable path from an exact repository commit to verified runtime." eyebrow={console.state.project?.name} icon="rocket_launch" title="Deploy" />
-      {error && <div className="border border-status-failed/40 bg-error-container/10 p-3 text-sm text-error" role="alert">{error}</div>}
-      {sourceOnly ? <SourceStep busy={busy} canMutate={canMutate} hostname={hostname} installationID={installationID} installations={installations} linkedInstallationIDs={linkedInstallationIDs} onConnectInstallation={() => void connectInstallation()} onDiscover={() => void discoverGitHub()} onHostname={setHostname} onInstallation={setInstallationID} onRef={setRefName} onRepository={setRepositoryID} onStart={() => void sourceAction()} refName={refName} repositories={repositories} repositoryID={repositoryID} /> : run && <>
+      <PageHeader action={!sourceOnly && <Button onClick={() => { setShowNew(true); setError(null); }} variant="outline"><Icon name="add" />New deployment</Button>} description="One reviewable path from an exact repository commit to verified runtime." eyebrow={console.state.project?.name} icon="rocket_launch" title="Deploy" />
+      {error && <DeployActionFailure busy={busy} failure={error} onLogin={() => void login(setError)} />}
+      {sourceOnly ? <SourceStep busy={busy} canMutate={canMutate && !isAuthFailure(error)} hostname={hostname} installationID={installationID} installations={installations} linkedInstallationIDs={linkedInstallationIDs} onConnectInstallation={() => void connectInstallation()} onDiscover={() => void discoverGitHub()} onHostname={setHostname} onInstallation={setInstallationID} onRef={setRefName} onRepository={setRepositoryID} onStart={() => void sourceAction()} refName={refName} repositories={repositories} repositoryID={repositoryID} /> : run && <>
 		<RunHeader onSelect={(id) => { const selected = runs.find((item) => item.id === id) || null; setRun(selected); setDraftPlan(selected ? structuredClone(selected.plan) : null); setHostname(selected?.plan.target.hostname || ""); if (selected) void Promise.all([client.deploymentRunEvents(projectID, selected.id), client.deploymentRunResult(projectID, selected.id)]).then(([timeline, projection]) => { setEvents(timeline.events || []); setResult(projection); }); }} run={run} runs={runs} />
         {(run.state === "awaiting_input" || run.state === "awaiting_approval") && draftPlan && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><PlanReview canEdit={canMutate} dirty={JSON.stringify(draftPlan) !== JSON.stringify(run.plan)} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} saving={busy === "plan"} services={console.state.services} /></div>}
 		{needsServer && console.state.bootstrapCommand && <BootstrapCommand command={console.state.bootstrapCommand} />}
@@ -116,6 +156,49 @@ export function DeployView({ console }: { console: ConsoleController }) {
       </>}
     </main>
   );
+}
+
+type DeployFailure = { code: string; message: string; nextAction: string; status: number };
+
+function deployFailure(cause: unknown): DeployFailure {
+  const error = cause as LocalAPIError;
+  const nextAction = error.nextAction && error.nextAction !== "Retry after checking Local backend connectivity." ? error.nextAction : "";
+  return { code: error.code || "LOCAL_REQUEST_FAILED", message: error.message || "Deployment request failed.", nextAction, status: error.status || 0 };
+}
+
+function isAuthFailure(failure: DeployFailure | null) {
+  return Boolean(failure && (failure.status === 401 || failure.code === "CLOUD_AUTH_REQUIRED" || failure.code === "CLOUD_PAT_REQUIRED" || failure.code === "LOCAL_CREDENTIAL_MISSING"));
+}
+
+type SourceDraft = { installationID: number; repositoryID: number; refName: string; hostname: string };
+
+function sourceDraftKey(projectID: string) { return `opsi:deploy-source:${projectID}`; }
+
+function readSourceDraft(projectID: string): SourceDraft | null {
+  if (!projectID) return null;
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(sourceDraftKey(projectID)) || "null") as Partial<SourceDraft> | null;
+    if (!value) return null;
+    return { installationID: Number(value.installationID) || 0, repositoryID: Number(value.repositoryID) || 0, refName: String(value.refName || "main"), hostname: String(value.hostname || "") };
+  } catch { return null; }
+}
+
+function writeSourceDraft(projectID: string, draft: SourceDraft) {
+  if (!projectID) return;
+  try { window.sessionStorage.setItem(sourceDraftKey(projectID), JSON.stringify(draft)); } catch { /* Browser storage is an optional convenience; controlled state remains authoritative for this tab. */ }
+}
+
+function clearSourceDraft(projectID: string) {
+  try { window.sessionStorage.removeItem(sourceDraftKey(projectID)); } catch { /* Browser storage is optional. */ }
+}
+
+function DeployActionFailure({ busy, failure, onLogin }: { busy: string; failure: DeployFailure; onLogin: () => void }) {
+  return <div className="flex flex-col gap-3 border border-status-failed/40 bg-error-container/10 p-4 text-sm text-error sm:flex-row sm:items-center sm:justify-between" role="alert"><div><p>{failure.message}</p>{failure.nextAction && <p className="mt-1 text-error/80">{failure.nextAction}</p>}</div>{isAuthFailure(failure) && <Button disabled={Boolean(busy)} onClick={onLogin} variant="danger">{busy === "login" ? "Opening GitHub…" : "Sign in again"}</Button>}</div>;
+}
+
+function DeployLoadFailure({ busy, failure, onLogin, onRetry, projectName }: { busy: string; failure: DeployFailure; onLogin: () => void; onRetry: () => void; projectName?: string }) {
+  const auth = isAuthFailure(failure);
+  return <main className="mx-auto max-w-7xl space-y-6 p-4 lg:p-margin-desktop"><PageHeader description="One reviewable path from an exact repository commit to verified runtime." eyebrow={projectName} icon="rocket_launch" title="Deploy" /><section className="flex flex-col items-center justify-center border border-status-failed/40 bg-error-container/10 p-8 text-center" role="alert"><Icon className="mb-3 text-[36px] text-error" name="error" /><h2 className="text-lg font-semibold text-error">{auth ? "Cloud sign-in required" : "Deployment data unavailable"}</h2><p className="mt-2 max-w-lg text-sm text-error/80">{failure.message}</p>{failure.nextAction && <p className="mt-1 max-w-lg text-sm text-error/80">{failure.nextAction}</p>}<Button className="mt-5" disabled={Boolean(busy)} onClick={auth ? onLogin : onRetry} variant="danger">{busy === "login" ? "Opening GitHub…" : auth ? "Sign in again" : "Retry"}</Button></section></main>;
 }
 
 function RunHeader({ onSelect, run, runs }: { onSelect: (id: string) => void; run: DeploymentRun; runs: DeploymentRun[] }) { return <div className="flex flex-col gap-3 border-y border-outline-variant/30 py-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs uppercase tracking-wider text-on-surface-variant">Exact source</p><p className="mt-1 font-medium">{run.plan.source.repository} · {run.plan.source.selected_ref}</p><p className="mt-1 font-mono text-xs text-on-surface-variant">{run.plan.source.commit_sha.slice(0, 12)}</p></div><div className="flex items-center gap-3"><StatusBadge label={run.state.replaceAll("_", " ")} status={run.state === "succeeded" ? "ready" : run.state === "failed" || run.state === "stale" ? "failed" : run.state.startsWith("awaiting") ? "pending" : "in_progress"} /><label className="sr-only" htmlFor="deployment-run-select">Deployment run</label><select className="min-h-10 border border-outline-variant/30 bg-surface-container-low px-3 text-sm" id="deployment-run-select" onChange={(event) => onSelect(event.target.value)} value={run.id}>{runs.map((item) => <option key={item.id} value={item.id}>{new Date(item.created_at).toLocaleString()} · {item.state}</option>)}</select></div></div>; }

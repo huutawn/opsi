@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
+import { expectHTTPFailure, expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
 
 const hash = (value: string) => value.repeat(64).slice(0, 64);
 
@@ -119,20 +119,93 @@ test("stale review, safe retry, and cancellation each expose one factual action"
 	expect(actions).toEqual(["analyze", "retry", "cancel"]);
 });
 
-async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploymentRun>, action: (body: Record<string, unknown>, name?: string) => ReturnType<typeof deploymentRun>, role = "owner", secretAction?: (body: Record<string, unknown>) => Record<string, unknown>) {
+test("available repository is claimed and analyzed without a page reload", async ({ page }) => {
+	let run: ReturnType<typeof deploymentRun> | null = null;
+	let claimed = false;
+	let createCount = 0;
+	await mockDeployAPI(page, () => run, () => run ?? deploymentRun("awaiting_approval"), "owner", undefined, {
+		repository: () => sourceRepository(claimed ? "active" : "available"),
+		onClaim: () => { claimed = true; },
+		onCreate: () => { createCount += 1; run = deploymentRun("awaiting_approval"); return run; },
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByLabel("Repository", { exact: true }).selectOption("7");
+	await page.getByLabel("Branch or ref").fill("developer");
+	await page.getByLabel("Hostname (optional)").fill("identity.example.test");
+	await page.reload();
+	await expect(page.getByLabel("Repository", { exact: true })).toHaveValue("7");
+	await expect(page.getByLabel("Branch or ref")).toHaveValue("developer");
+	await expect(page.getByLabel("Hostname (optional)")).toHaveValue("identity.example.test");
+	await page.getByRole("button", { name: "Claim & analyze repository" }).click();
+	await expect(page.getByRole("heading", { name: "Review plan" })).toBeVisible();
+	expect(claimed).toBe(true);
+	expect(createCount).toBe(1);
+	expect(await page.evaluate(() => window.sessionStorage.getItem("opsi:deploy-source:proj-1"))).toBeNull();
+});
+
+test("repository conflict cannot enter analysis", async ({ page }) => {
+	await mockDeployAPI(page, () => null, () => deploymentRun("awaiting_approval"), "owner", undefined, {
+		repository: () => sourceRepository("conflict"),
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	const conflict = page.getByRole("option", { name: /claimed by another project/ });
+	await expect(conflict).toBeDisabled();
+	await expect(page.getByRole("button", { name: "Analyze repository" })).toBeDisabled();
+});
+
+test("claim auth failure keeps Source visible and offers sign-in", async ({ page }) => {
+	let loginStarts = 0;
+	await mockDeployAPI(page, () => null, () => deploymentRun("awaiting_approval"), "owner", undefined, {
+		repository: () => sourceRepository("available"),
+		claimFailure: true,
+		onLoginStart: () => { loginStarts += 1; },
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByLabel("Repository", { exact: true }).selectOption("7");
+	expectHTTPFailure(page, { method: "POST", path: "/api/local/projects/proj-1/github/repositories/7/claim", status: 401 });
+	await page.getByRole("button", { name: "Claim & analyze repository" }).click();
+	await expect(page.getByRole("heading", { name: "Choose a repository to deploy" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Sign in again" })).toBeVisible();
+	await expect(page.getByText("Cloud rejected the saved credential", { exact: true })).toBeVisible();
+	const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
+	expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);
+	await page.getByRole("button", { name: "Sign in again" }).click();
+	await expect.poll(() => loginStarts).toBe(1);
+	await expect(page).toHaveURL(/project=proj-1.*view=deploy/);
+	await expect(page.getByLabel("Repository", { exact: true })).toHaveValue("7");
+});
+
+type SourceBehavior = {
+	repository: () => ReturnType<typeof sourceRepository>;
+	onClaim?: () => void;
+	onCreate?: () => ReturnType<typeof deploymentRun>;
+	claimFailure?: boolean;
+	onLoginStart?: () => void;
+};
+
+async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploymentRun> | null, action: (body: Record<string, unknown>, name?: string) => ReturnType<typeof deploymentRun>, role = "owner", secretAction?: (body: Record<string, unknown>) => Record<string, unknown>, source?: SourceBehavior) {
 	await page.route("**/api/local/**", async (route) => {
 		const request = route.request();
 		const path = new URL(request.url()).pathname;
 		let body: unknown = {};
 		if (/\/workload-secrets$/.test(path) && request.method() === "PUT" && secretAction) body = { workload_secret: secretAction(request.postDataJSON()), reused: false };
+		else if (path === "/api/local/session/login/start" && request.method() === "POST" && source) { source.onLoginStart?.(); body = { auth_url: "/?project=proj-1&view=deploy&auth=ok", status: "pending" }; }
+		else if (/\/github\/repositories\/7\/claim$/.test(path) && request.method() === "POST" && source?.claimFailure) return fulfill(route, { error: { code: "CLOUD_AUTH_REQUIRED", message: "Cloud rejected the saved credential", next_action: "Sign in again." } }, 401);
+		else if (/\/github\/repositories\/7\/claim$/.test(path) && request.method() === "POST" && source) { source.onClaim?.(); body = { repository_id: 7, project_id: "proj-1", status: "active" }; }
+		else if (path.endsWith("/deployment-runs") && request.method() === "POST" && source?.onCreate) body = { deployment_run: source.onCreate(), reused: false };
 		else if (path === "/api/local/session") body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: "proj-1", role, capabilities: [] };
 		else if (path === "/api/local/session/project") body = { status: "selected", project_id: "proj-1" };
 		else if (path === "/api/local/projects") body = { projects: [{ id: "proj-1", org_id: "org-1", name: "Identity", slug: "identity", status: "ready" }] };
 		else if (path.endsWith("/readiness")) body = { project_id: "proj-1", status: "ready", can_deploy: true };
-		else if (path.endsWith("/github/repositories")) body = { repositories: [{ repository_id: 7, installation_id: 9, full_name: "acme/identity-service", default_branch: "main", status: "active", claim_status: "active", archived: false, disabled: false }] };
-		else if (path.endsWith("/deployment-runs")) body = { deployment_runs: [current()] };
-		else if (/\/deployment-runs\/run-1\/events$/.test(path)) body = { events: [{ id: "event-1", project_id: "proj-1", run_id: "run-1", state: current().state, level: "info", message: current().state === "provisioning" ? "Plan approved; provisioning started." : "Repository analysis is ready for review.", created_at: "2026-08-24T00:00:00Z" }] };
-		else if (/\/deployment-runs\/run-1\/result$/.test(path)) body = { run_id: "run-1", state: current().state, source_sha: hash("d").slice(0, 40), applications: [], verifications: [], capacity: [] };
+		else if (path.endsWith("/github/installations/discover")) body = { installations: [] };
+		else if (path.endsWith("/github/installations")) body = { installations: [{ installation_id: 9, account_login: "acme", account_type: "Organization", status: "active" }] };
+		else if (path.endsWith("/github/repositories")) body = { repositories: [source?.repository() ?? sourceRepository("active")] };
+		else if (path.endsWith("/deployment-runs")) body = { deployment_runs: current() ? [current()] : [] };
+		else if (/\/deployment-runs\/run-1\/events$/.test(path)) { const run = current(); body = { events: run ? [{ id: "event-1", project_id: "proj-1", run_id: "run-1", state: run.state, level: "info", message: run.state === "provisioning" ? "Plan approved; provisioning started." : "Repository analysis is ready for review.", created_at: "2026-08-24T00:00:00Z" }] : [] }; }
+		else if (/\/deployment-runs\/run-1\/result$/.test(path)) { const run = current(); body = { run_id: "run-1", state: run?.state ?? "awaiting_input", source_sha: hash("d").slice(0, 40), applications: [], verifications: [], capacity: [] }; }
 		else if (/\/deployment-runs\/run-1\/(approve|acknowledge|analyze|retry|cancel)$/.test(path)) body = action(request.postDataJSON(), path.split("/").at(-1));
 		else if (/\/deployment-runs\/run-1$/.test(path)) body = current();
 		else if (path.endsWith("/topology/facts")) body = placementFacts();
@@ -149,8 +222,12 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 	});
 }
 
-async function fulfill(route: Route, body: unknown) {
-	await route.fulfill({ body: JSON.stringify(body), contentType: "application/json", status: 200 });
+async function fulfill(route: Route, body: unknown, status = 200) {
+	await route.fulfill({ body: JSON.stringify(body), contentType: "application/json", status });
+}
+
+function sourceRepository(claimStatus: "active" | "available" | "conflict") {
+	return { repository_id: 7, installation_id: 9, full_name: "acme/identity-service", default_branch: "main", status: "active", claim_status: claimStatus, archived: false, disabled: false };
 }
 
 function placementFacts() {

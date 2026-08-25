@@ -18,7 +18,9 @@ test("Deploy exposes one role-gated action for each actionable run state", async
 test("Deploy result and technical details use factual authority records", async () => {
   const source = await readFile(view, "utf8");
   for (const value of ["Repository is running", "digest_matches_image_id", "Raw build log", "Image digests", "Build records", "Requested", "Assigned", "Reserved", "Available"]) assert.match(source, new RegExp(value));
-  assert.doesNotMatch(source, /localStorage|sessionStorage|dangerouslySetInnerHTML/);
+  assert.doesNotMatch(source, /localStorage|dangerouslySetInnerHTML/);
+  assert.match(source, /opsi:deploy-source/);
+  assert.match(source, /clearSourceDraft\(projectID\)/);
 });
 
 test("Target reuses canonical bootstrap and resumes analysis when a runtime becomes Ready", async () => {
@@ -43,7 +45,9 @@ test("generated secrets remain redacted and workflow calls only Local API", asyn
 
 test("Source owns GitHub discovery, installation connection, and repository claim", async () => {
   const [viewSource, source, api] = await Promise.all([readFile(view, "utf8"), readFile(sourceStep, "utf8"), readFile(client, "utf8")]);
-  for (const label of ["Continue with GitHub", "Connect installation", "Claim repository", "Analyze repository"]) assert.match(source, new RegExp(label));
+  for (const label of ["Continue with GitHub", "Connect installation", "Claim & analyze repository", "Analyze repository", "claimed by another project"]) assert.match(source, new RegExp(label.replace("&", "\\&")));
   for (const method of ["startGitHubInstallationDiscovery", "startGitHubInstallationClaim", "claimGitHubRepository"]) assert.match(viewSource, new RegExp(method));
+  assert.match(viewSource, /await client\.claimGitHubRepository[\s\S]+await client\.githubRepositories[\s\S]+await start\(\)/);
+  assert.match(viewSource, /Sign in again/);
   assert.match(api, /\/api\/local\/projects\/\$\{projectID\}\/github\/installations\/discover/);
 });
