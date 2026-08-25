@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { LocalClient } from "../../lib/api/local-client.ts";
@@ -66,4 +67,16 @@ test("LocalClient getSelectableProjects and selectProject generate correct reque
   assert.equal(calls[1].path, "/api/local/session/select-project");
   assert.equal(calls[1].options.method, "POST");
   assert.equal(calls[1].options.body, JSON.stringify({ selection_id: "sel-123", project_id: "proj-1" }));
+});
+
+test("project selection resumes through console state without Next document navigation", async () => {
+  const [shell, consoleState] = await Promise.all([
+    readFile(new URL("../../components/layout/app-shell.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../../hooks/use-console-state.ts", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(shell, /useRouter|router\.push/);
+  assert.match(shell, /window\.history\.replaceState\([^\n]+view=deploy/);
+  assert.match(shell, /await onAuthenticated\(projectID\)/);
+  assert.match(consoleState, /setProjectID: async/);
+  assert.match(consoleState, /return loaded/);
 });

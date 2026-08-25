@@ -320,25 +320,28 @@ export function useConsoleState() {
   }
 
   async function selectProject(id: string, destination = normalizeRoute({ projectID: id }), replace = false) {
-    if (!id) return;
+    if (!id) return false;
     clearSensitive();
     const operation = ++generation.current;
     selectedProject.current = id;
     setSelectedProjectID(id);
     updateRoute(destination, replace);
     patch(clearProjectPatch("Switching project…"));
+    let loaded = false;
     const queued = switchQueue.current.catch(() => undefined).then(async () => {
       if (!isCurrent(operation, id)) return;
       try {
         await client.switchProject(id, crypto.randomUUID());
         if (!isCurrent(operation, id)) return;
         await load(id, operation);
+        loaded = currentSession.current?.authenticated === true && currentSession.current.project_id === id;
       } catch (error) {
         loadError(error as Error & { status?: number }, operation, id);
       }
     });
     switchQueue.current = queued;
     await queued;
+    return loaded;
   }
 
   function loadError(error: Error & { status?: number }, operation = generation.current, id = selectedProject.current) {
@@ -603,9 +606,9 @@ export function useConsoleState() {
         })()
       : null,
     navigate,
-    setProjectID: (id: string) => {
+    setProjectID: async (id: string) => {
       setReview(null);
-      void selectProject(id);
+      return selectProject(id);
     },
     setServiceDetail: (serviceDetail: ServiceRecord | null) => {
       patch({ serviceDetail });

@@ -178,6 +178,19 @@ test("claim auth failure keeps Source visible and offers sign-in", async ({ page
 	await expect(page.getByLabel("Repository", { exact: true })).toHaveValue("7");
 });
 
+test("project selection enters Deploy without reload or a stuck signing state", async ({ page }) => {
+	const selection = { authenticated: false, selections: 0 };
+	await mockDeployAPI(page, () => null, () => deploymentRun("awaiting_approval"), "owner", undefined, undefined, selection);
+
+	await page.goto("/?auth=select_project&selection_id=selection-1");
+	await expect(page.getByRole("heading", { name: "Choose a Project" })).toBeVisible();
+	await page.getByRole("button", { name: "Continue with Selected Project" }).click();
+	await expect(page.getByRole("heading", { name: "Deploy", exact: true })).toBeVisible();
+	await expect(page).toHaveURL(/project=proj-1.*view=deploy/);
+	await expect(page.getByText("Signing in…")).toHaveCount(0);
+	expect(selection.selections).toBe(1);
+});
+
 type SourceBehavior = {
 	repository: () => ReturnType<typeof sourceRepository>;
 	onClaim?: () => void;
@@ -186,17 +199,21 @@ type SourceBehavior = {
 	onLoginStart?: () => void;
 };
 
-async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploymentRun> | null, action: (body: Record<string, unknown>, name?: string) => ReturnType<typeof deploymentRun>, role = "owner", secretAction?: (body: Record<string, unknown>) => Record<string, unknown>, source?: SourceBehavior) {
+type AuthSelectionBehavior = { authenticated: boolean; selections: number };
+
+async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploymentRun> | null, action: (body: Record<string, unknown>, name?: string) => ReturnType<typeof deploymentRun>, role = "owner", secretAction?: (body: Record<string, unknown>) => Record<string, unknown>, source?: SourceBehavior, authSelection?: AuthSelectionBehavior) {
 	await page.route("**/api/local/**", async (route) => {
 		const request = route.request();
 		const path = new URL(request.url()).pathname;
 		let body: unknown = {};
 		if (/\/workload-secrets$/.test(path) && request.method() === "PUT" && secretAction) body = { workload_secret: secretAction(request.postDataJSON()), reused: false };
 		else if (path === "/api/local/session/login/start" && request.method() === "POST" && source) { source.onLoginStart?.(); body = { auth_url: "/?project=proj-1&view=deploy&auth=ok", status: "pending" }; }
+		else if (path === "/api/local/session/selection" && authSelection) body = { selection_id: "selection-1", projects: [{ id: "proj-1", name: "dada", role }] };
+		else if (path === "/api/local/session/select-project" && request.method() === "POST" && authSelection) { authSelection.authenticated = true; authSelection.selections += 1; body = { authenticated: true, session: { user_id: "user-1", org_id: "org-1", project_id: "proj-1", role } }; }
 		else if (/\/github\/repositories\/7\/claim$/.test(path) && request.method() === "POST" && source?.claimFailure) return fulfill(route, { error: { code: "CLOUD_AUTH_REQUIRED", message: "Cloud rejected the saved credential", next_action: "Sign in again." } }, 401);
 		else if (/\/github\/repositories\/7\/claim$/.test(path) && request.method() === "POST" && source) { source.onClaim?.(); body = { repository_id: 7, project_id: "proj-1", status: "active" }; }
 		else if (path.endsWith("/deployment-runs") && request.method() === "POST" && source?.onCreate) body = { deployment_run: source.onCreate(), reused: false };
-		else if (path === "/api/local/session") body = { authenticated: true, cloud_connected: "ok", agent_connected: "ok", org_id: "org-1", project_id: "proj-1", role, capabilities: [] };
+		else if (path === "/api/local/session") body = authSelection && !authSelection.authenticated ? { authenticated: false, cloud_connected: "ok", agent_connected: "ok", token_status: "missing", local_session: "local-session" } : { authenticated: true, cloud_connected: "ok", agent_connected: "ok", token_status: "valid", local_session: "local-session", user_id: "user-1", org_id: "org-1", project_id: "proj-1", role, capabilities: [] };
 		else if (path === "/api/local/session/project") body = { status: "selected", project_id: "proj-1" };
 		else if (path === "/api/local/projects") body = { projects: [{ id: "proj-1", org_id: "org-1", name: "Identity", slug: "identity", status: "ready" }] };
 		else if (path.endsWith("/readiness")) body = { project_id: "proj-1", status: "ready", can_deploy: true };

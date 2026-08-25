@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { ConsoleRouter } from "@/features/console/console-router";
 import type { ConsoleController } from "@/features/console/types";
 import { ContextHeader } from "@/components/layout/context-header";
@@ -57,16 +56,16 @@ export function AppShell() {
   }, [navigationOpen]);
 
   if (!console.session && console.state.status === "loading") {
-    return <AuthGate checking message="Checking local credentials and Cloud session…" />;
+    return <AuthGate checking message="Checking local credentials and Cloud session…" onAuthenticated={console.setProjectID} />;
   }
   if (console.session && !console.session.authenticated) {
-    return <AuthGate message={console.state.message || "Sign in with GitHub to continue."} />;
+    return <AuthGate message={console.state.message || "Sign in with GitHub to continue."} onAuthenticated={console.setProjectID} />;
   }
   if (console.state.status === "permission") {
-    return <AuthGate message={console.state.message} />;
+    return <AuthGate message={console.state.message} onAuthenticated={console.setProjectID} />;
   }
   if (!console.session) {
-    return <AuthGate message={console.state.message || "The local Opsi backend is unavailable."} />;
+    return <AuthGate message={console.state.message || "The local Opsi backend is unavailable."} onAuthenticated={console.setProjectID} />;
   }
 
   const environments = console.state.foundation.placement?.environments ?? [];
@@ -333,17 +332,26 @@ function MutationDialog({ console }: { console: ConsoleController }) {
   );
 }
 
-function AuthGate({ message, checking = false }: { message: string; checking?: boolean }) {
-  const router = useRouter();
+function AuthGate({ message, onAuthenticated, checking = false }: { message: string; onAuthenticated: (projectID: string) => Promise<boolean>; checking?: boolean }) {
   const client = useMemo(() => new LocalClient(), []);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(() => authErrorMessage(callbackErrorCode()));
-  const [selectionID, setSelectionID] = useState(() => callbackSelectionID());
+  const [error, setError] = useState("");
+  const [selectionID, setSelectionID] = useState("");
   const [projects, setProjects] = useState<SelectableProject[] | null>(null);
   const [selectedProject, setSelectedProject] = useState<string>("");
-  const [loadingProjects, setLoadingProjects] = useState(() => Boolean(callbackSelectionID()));
+  const [loadingProjects, setLoadingProjects] = useState(false);
+  const [callbackReady, setCallbackReady] = useState(false);
 
   useEffect(() => {
+    setError(authErrorMessage(callbackErrorCode()));
+    const callbackSelection = callbackSelectionID();
+    setSelectionID(callbackSelection);
+    setLoadingProjects(Boolean(callbackSelection));
+    setCallbackReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!callbackReady) return;
     if (!selectionID) {
       const params = new URLSearchParams(window.location.search);
       if (!params.has("auth") && !params.has("auth_error")) return;
@@ -376,7 +384,7 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
     return () => {
       ignore = true;
     };
-  }, [client, selectionID]);
+  }, [callbackReady, client, selectionID]);
 
   async function signIn() {
     setBusy(true);
@@ -396,8 +404,14 @@ function AuthGate({ message, checking = false }: { message: string; checking?: b
     setBusy(true);
     setError("");
     try {
-      await client.selectProject(selectionID, selectedProject);
-      router.push(`/?auth=ok&project=${encodeURIComponent(selectedProject)}`);
+      const selected = await client.selectProject(selectionID, selectedProject);
+      const projectID = selected.session.project_id || selectedProject;
+      window.history.replaceState({}, "", `/?project=${encodeURIComponent(projectID)}&view=deploy`);
+      if (!await onAuthenticated(projectID)) throw new Error("The authenticated project could not be loaded. Try signing in again.");
+      setSelectionID("");
+      setProjects(null);
+      setSelectedProject("");
+      setBusy(false);
     } catch (cause) {
       setBusy(false);
       setError((cause as Error).message || "Failed to select project. Please try again.");
