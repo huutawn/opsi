@@ -38,7 +38,7 @@ export function DeployView({ console }: { console: ConsoleController }) {
   const canMutate = ["owner", "admin", "developer"].includes(console.session?.role || "");
   const needsServer = Boolean(run?.plan.issues.some((issue) => issue.code === "TARGET_SERVER_REQUIRED" && issue.blocking));
   const bootstrapSession = useMemo(() => [...console.state.sessions].sort((a, b) => b.created_at.localeCompare(a.created_at))[0], [console.state.sessions]);
-  const bootstrapActive = Boolean(bootstrapSession && !terminalBootstrap(bootstrapSession));
+  const bootstrapActive = Boolean(needsServer && bootstrapSession && !terminalBootstrap(bootstrapSession));
   const bootstrapEvents = bootstrapSession && console.state.bootstrapEventsSessionID === bootstrapSession.id ? console.state.bootstrapEvents : [];
 
   const load = useCallback(async (selectLatest = false) => {

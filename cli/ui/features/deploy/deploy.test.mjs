@@ -35,6 +35,7 @@ test("Target reuses canonical bootstrap and resumes analysis when a runtime beco
   assert.match(source, /client\.placementFacts/);
   assert.match(source, /runtime\.status === "ready"/);
   assert.match(source, /deploymentRunAction\(projectID, run\.id, "analyze"/);
+  assert.match(source, /bootstrapActive\s*=\s*Boolean\(needsServer\s*&&\s*bootstrapSession/);
 });
 
 test("generated secrets remain redacted and workflow calls only Local API", async () => {
