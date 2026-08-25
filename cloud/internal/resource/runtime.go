@@ -122,6 +122,9 @@ func (s Service) ReconcileTopology(ctx context.Context, projectID string, plan t
 		if err != nil {
 			return err
 		}
+		if value.Runtime != nil && value.Runtime.Spec.SpecHash == spec.SpecHash {
+			continue
+		}
 		value.Runtime = &resourcev1.ManagedResourceRuntime{Spec: spec}
 		value.Lifecycle = resourcev1.LifecyclePlanned
 		value.UpdatedAt = s.clock()

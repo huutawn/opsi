@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
@@ -290,5 +291,16 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	}
 	if !strings.HasPrefix(materialValues["APP_REDIS_URL"], "redis://") || !strings.Contains(materialValues["APP_REDIS_URL"], valkeyCred.Password+"@valkey.local:6379") {
 		t.Fatalf("expected valid Redis URL, got %s", materialValues["APP_REDIS_URL"])
+	}
+
+	config := configs["app-1"]
+	config.Dependencies[1].InjectionMappings = append(config.Dependencies[1].InjectionMappings, serviceconfigurationv1.DependencyInjectionMapping{EnvName: "SignalR__Redis__ConnectionString", SymbolicSource: "connection.url"})
+	configs["app-1"] = config
+	managementMaterials, err := service.ResolveSecretMaterials(context.Background(), "proj-1", "app-1", []deploymentv1.SecretReference{{EnvName: "SignalR__Redis__ConnectionString", SecretID: valkeySpec.CredentialID}})
+	if err != nil || len(managementMaterials) != 1 {
+		t.Fatalf("resolve Redis management connection string: materials=%+v err=%v", managementMaterials, err)
+	}
+	if value := managementMaterials[0].Values["SignalR__Redis__ConnectionString"]; !strings.HasPrefix(value, "redis://") || !strings.Contains(value, valkeyCred.Password+"@valkey.local:6379") {
+		t.Fatalf("expected mapped Redis management URL, got %q", value)
 	}
 }

@@ -251,45 +251,6 @@ func (s *Server) completeBrowserLogin(w http.ResponseWriter, r *http.Request, pe
 		redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
 		return
 	}
-	if pending.ProjectID != "" {
-		issued, err := s.Auth.IssuePATForOAuth(r.Context(), githubProvider, subject, pending.ProjectID, 90*24*time.Hour)
-		if err != nil {
-			s.auditAuth("", "", pending.ProjectID, "token_issued", "failure", map[string]any{
-				"provider": githubProvider,
-				"reason":   "identity_or_membership_not_found",
-			})
-			switch {
-			case errors.Is(err, auth.ErrOAuthIdentity):
-				redirectBrowserAuthError(w, r, pending, "GITHUB_ACCOUNT_UNLINKED")
-			case errors.Is(err, auth.ErrNoMembership):
-				redirectBrowserAuthError(w, r, pending, "OPSI_MEMBERSHIP_REQUIRED")
-			case errors.Is(err, auth.ErrProjectChoice):
-				redirectBrowserAuthError(w, r, pending, "PROJECT_SELECTION_REQUIRED")
-			default:
-				redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
-			}
-			return
-		}
-
-		s.authMu.Lock()
-		s.authGrants[grantCode] = authGrant{
-			Purpose:   oauthPurposeLogin,
-			Token:     issued.Token,
-			Session:   issued.Session,
-			ExpiresAt: s.clock().Add(authGrantTTL),
-		}
-		s.authMu.Unlock()
-		s.auditAuth(issued.Session.OrgID, issued.Session.UserID, issued.Session.ProjectID, "token_issued", "success", map[string]any{"provider": githubProvider})
-
-		callback, _ := url.Parse(pending.LocalCallback)
-		query := callback.Query()
-		query.Set("code", grantCode)
-		query.Set("state", pending.LocalState)
-		callback.RawQuery = query.Encode()
-		http.Redirect(w, r, callback.String(), http.StatusFound)
-		return
-	}
-
 	projects, err := s.Auth.UserProjects(r.Context(), userID)
 	if err != nil {
 		redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
@@ -303,8 +264,18 @@ func (s *Server) completeBrowserLogin(w http.ResponseWriter, r *http.Request, pe
 		redirectBrowserAuthError(w, r, pending, "OPSI_MEMBERSHIP_REQUIRED")
 		return
 	}
-	if len(projects) == 1 {
-		issued, err := s.Auth.IssuePATForOAuth(r.Context(), githubProvider, subject, projects[0].ID, 90*24*time.Hour)
+	projectID := ""
+	for _, project := range projects {
+		if project.ID == pending.ProjectID {
+			projectID = project.ID
+			break
+		}
+	}
+	if projectID == "" && len(projects) == 1 {
+		projectID = projects[0].ID
+	}
+	if projectID != "" {
+		issued, err := s.Auth.IssuePATForOAuth(r.Context(), githubProvider, subject, projectID, 90*24*time.Hour)
 		if err != nil {
 			redirectBrowserAuthError(w, r, pending, "AUTH_UNAVAILABLE")
 			return

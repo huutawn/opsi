@@ -2,13 +2,72 @@ package repositoryanalysis
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
 func inferDependencies(result *Result, files []File, read func(string) ([]byte, error)) {
+	if result.Authority == "explicit_config" {
+		return
+	}
 	existing := map[string]bool{}
 	for _, dep := range result.Dependencies {
 		existing[dep.From+"\x00"+dep.To] = true
+	}
+	contents := make(map[string][]byte, len(files))
+	for _, file := range files {
+		data, err := read(file.Path)
+		if err == nil {
+			contents[file.Path] = data
+		}
+	}
+	proxyConfiguration := map[string]File{}
+	for _, file := range files {
+		text := string(contents[file.Path])
+		if !isApplicationProxyConfiguration(text) {
+			continue
+		}
+		for _, app := range result.Applications {
+			if underRoot(file.Path, app.Root) {
+				proxyConfiguration[app.Key] = file
+			}
+		}
+	}
+	for _, app := range result.Applications {
+		file, ok := proxyConfiguration[app.Key]
+		if !ok {
+			continue
+		}
+		for _, target := range result.Applications {
+			if target.Key == app.Key {
+				continue
+			}
+			reason := "The web container proxies browser routes to an internal backend URL."
+			dependency := Dependency{
+				From: app.Key, To: target.Key, Protocol: "http", Strategy: "internal_http", Path: "/api", Required: true,
+				Injections:   []Injection{{EnvironmentName: "BACKEND_URL", SymbolicSource: "application.internal_url"}},
+				Verification: &VerificationContract{Type: "consumer_http", Path: "/api", ExpectedStatus: 200},
+				Confidence:   ConfidenceHigh, Reason: reason,
+				Evidence: []Evidence{
+					{Path: file.Path, Kind: "application_proxy", Reason: "The server-side proxy maps /api to BACKEND_URL.", Confidence: ConfidenceHigh},
+					{Path: file.Path, Kind: "application_proxy", Reason: "The server-side proxy maps /hubs to BACKEND_URL.", Confidence: ConfidenceHigh},
+				},
+			}
+			replaced := false
+			for index := range result.Dependencies {
+				current := result.Dependencies[index]
+				if current.From == app.Key && current.To == target.Key && current.Protocol == "http" && current.Strategy == "" && hasEvidenceKind(current.Evidence, "compose_dependency") {
+					result.Dependencies[index] = dependency
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				result.Dependencies = append(result.Dependencies, dependency)
+			}
+			existing[app.Key+"\x00"+target.Key] = true
+			break
+		}
 	}
 	resource := func(name, kind, path string, confidence Confidence) string {
 		for _, r := range result.Resources {
@@ -21,15 +80,19 @@ func inferDependencies(result *Result, files []File, read func(string) ([]byte, 
 		return name
 	}
 	for _, file := range files {
-		data, err := read(file.Path)
-		if err != nil {
+		data, ok := contents[file.Path]
+		if !ok {
 			continue
 		}
 		text := string(data)
+		if kafkaIsDisabled(data) {
+			markKafkaDisabled(result, file.Path)
+		}
 		for _, app := range result.Applications {
 			if !underRoot(file.Path, app.Root) {
 				continue
 			}
+			inferJWTConfiguration(result, app.Key, file.Path, data)
 			if strings.Contains(text, "ConnectionStrings__Database") || strings.Contains(text, "ConnectionStrings:Database") || strings.Contains(text, "ConnectionStrings\":") {
 				logicalName := resource("database", "postgres", file.Path, ConfidenceHigh)
 				key := app.Key + "\x00" + logicalName
@@ -52,7 +115,11 @@ func inferDependencies(result *Result, files []File, read func(string) ([]byte, 
 					addInjection(result, app.Key, logicalName, Injection{EnvironmentName: "SignalR__Redis__ConnectionString", SymbolicSource: "resource." + logicalName + ".connection_string"}, file.Path)
 				}
 			}
-			if strings.Contains(text, "/hubs/notifications") || strings.Contains(text, "/api") {
+			if isBrowserRouteConsumer(text) && (strings.Contains(text, "/hubs/notifications") || strings.Contains(text, "/api")) {
+				if _, proxied := proxyConfiguration[app.Key]; proxied {
+					addApplicationProxyRouteEvidence(result, app.Key, file.Path, text)
+					continue
+				}
 				for _, target := range result.Applications {
 					if target.Key == app.Key {
 						continue
@@ -76,36 +143,177 @@ func inferDependencies(result *Result, files []File, read func(string) ([]byte, 
 					break
 				}
 			}
-			if kafkaIsDisabled(data) {
-				for i := range result.Issues {
-					if result.Issues[i].Code == "KAFKA_UNSUPPORTED" {
-						result.Issues[i].Blocking = false
-						result.Issues[i].Resolution = "Kafka__Enabled=false"
-					}
-				}
-				for i := range result.Resources {
-					if result.Resources[i].Type == "kafka" {
-						result.Resources[i].Managed = false
-						result.Resources[i].Required = false
-						result.Resources[i].Recommendation = "Detected but disabled by Kafka__Enabled=false"
-						result.Resources[i].Evidence = append(result.Resources[i].Evidence, Evidence{Path: file.Path, Kind: "disabled_configuration", Reason: "Application configuration explicitly disables Kafka.", Confidence: ConfidenceHigh})
-					}
-				}
+		}
+	}
+}
+
+func inferJWTConfiguration(result *Result, applicationKey, path string, data []byte) {
+	text := string(data)
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "jwt") {
+		return
+	}
+	secretEnvironment := ""
+	if strings.Contains(text, "Jwt:Key") || strings.Contains(text, "Jwt__Key") {
+		secretEnvironment = "Jwt__Key"
+	} else if strings.Contains(text, "Jwt:SigningKey") || strings.Contains(text, "Jwt__SigningKey") || strings.Contains(text, "SigningKey") {
+		secretEnvironment = "Jwt__SigningKey"
+	}
+	var document map[string]any
+	if json.Unmarshal(data, &document) == nil {
+		if jwt, ok := lookupObject(document, "jwt"); ok {
+			if _, ok := lookupValue(jwt, "key"); ok {
+				secretEnvironment = "Jwt__Key"
+			} else if _, ok := lookupValue(jwt, "signingkey"); ok && secretEnvironment == "" {
+				secretEnvironment = "Jwt__SigningKey"
 			}
-			if strings.Contains(strings.ToLower(text), "jwt") && (strings.Contains(text, "SigningKey") || strings.Contains(text, "JWT")) {
-				found := false
-				for _, s := range result.Secrets {
-					if s.Name == "jwt-signing-key" {
-						found = true
+			for _, key := range []string{"Issuer", "Audience", "AccessTokenMinutes", "RefreshTokenDays"} {
+				value, ok := lookupValue(jwt, strings.ToLower(key))
+				if !ok {
+					continue
+				}
+				serialized := ""
+				switch typed := value.(type) {
+				case string:
+					serialized = strings.TrimSpace(typed)
+				case float64:
+					if typed > 0 && typed == float64(int64(typed)) {
+						serialized = fmt.Sprintf("%d", int64(typed))
 					}
 				}
-				if !found {
-					reason := "Application configuration requires a JWT signing key."
-					result.Secrets = append(result.Secrets, Secret{Name: "jwt-signing-key", ApplicationKey: app.Key, EnvironmentName: "Jwt__SigningKey", Generated: true, SecretRef: "generated://jwt-signing-key", Display: "Generated and securely stored", Confidence: ConfidenceMedium, Reason: reason, Evidence: []Evidence{{Path: file.Path, Kind: "configuration_key", Reason: reason, Confidence: ConfidenceMedium}}})
+				if serialized != "" {
+					setApplicationEnvironment(result, applicationKey, "Jwt__"+key, serialized)
 				}
 			}
 		}
 	}
+	if secretEnvironment == "" || hasApplicationSecret(result.Secrets, applicationKey, "jwt-signing-key") {
+		return
+	}
+	reason := "Application configuration requires a JWT signing key."
+	result.Secrets = append(result.Secrets, Secret{Name: "jwt-signing-key", ApplicationKey: applicationKey, EnvironmentName: secretEnvironment, Generated: true, SecretRef: "generated://jwt-signing-key", Display: "Generated and securely stored", Confidence: ConfidenceMedium, Reason: reason, Evidence: []Evidence{{Path: path, Kind: "configuration_key", Reason: reason, Confidence: ConfidenceMedium}}})
+}
+
+func lookupObject(values map[string]any, key string) (map[string]any, bool) {
+	value, ok := lookupValue(values, key)
+	object, objectOK := value.(map[string]any)
+	return object, ok && objectOK
+}
+
+func lookupValue(values map[string]any, key string) (any, bool) {
+	for name, value := range values {
+		if strings.EqualFold(name, key) {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func setApplicationEnvironment(result *Result, applicationKey, name, value string) {
+	for index := range result.Applications {
+		if result.Applications[index].Key != applicationKey {
+			continue
+		}
+		if result.Applications[index].Environment == nil {
+			result.Applications[index].Environment = map[string]string{}
+		}
+		result.Applications[index].Environment[name] = value
+		return
+	}
+}
+
+func hasApplicationSecret(secrets []Secret, applicationKey, name string) bool {
+	for _, secret := range secrets {
+		if secret.ApplicationKey == applicationKey && secret.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func addApplicationProxyRouteEvidence(result *Result, applicationKey, filePath, text string) {
+	for index := range result.Dependencies {
+		dependency := &result.Dependencies[index]
+		if dependency.From != applicationKey || dependency.Strategy != "internal_http" || !hasInjection(dependency.Injections, "BACKEND_URL", "application.internal_url") {
+			continue
+		}
+		for _, route := range []string{"/api", "/hubs/notifications"} {
+			if strings.Contains(text, route) {
+				dependency.Evidence = append(dependency.Evidence, Evidence{Path: filePath, Kind: "browser_route", Reason: "Browser source uses " + route + " through the application proxy.", Confidence: ConfidenceHigh})
+			}
+		}
+	}
+}
+
+func hasInjection(injections []Injection, environmentName, symbolicSource string) bool {
+	for _, injection := range injections {
+		if injection.EnvironmentName == environmentName && injection.SymbolicSource == symbolicSource {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEvidenceKind(evidence []Evidence, kind string) bool {
+	for _, item := range evidence {
+		if item.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func isApplicationProxyConfiguration(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "backend_url") && strings.Contains(lower, "rewrites") && strings.Contains(lower, "destination") && strings.Contains(lower, "/api") && strings.Contains(lower, "/hubs")
+}
+
+func isBrowserRouteConsumer(text string) bool {
+	lower := strings.ToLower(text)
+	for _, marker := range []string{
+		"fetch(",
+		"axios(",
+		"axios.",
+		"xmlhttprequest",
+		"hubconnectionbuilder",
+		".withurl(",
+		"destination:",
+		"rewrites()",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func markKafkaDisabled(result *Result, evidencePath string) {
+	for i := range result.Issues {
+		if result.Issues[i].Code == "KAFKA_UNSUPPORTED" {
+			result.Issues[i].Blocking = false
+			result.Issues[i].Resolution = "Kafka__Enabled=false"
+		}
+	}
+	for i := range result.Resources {
+		if result.Resources[i].Type != "kafka" {
+			continue
+		}
+		result.Resources[i].Managed = false
+		result.Resources[i].Required = false
+		result.Resources[i].Recommendation = "Detected but disabled by Kafka__Enabled=false"
+		if !hasEvidence(result.Resources[i].Evidence, evidencePath, "disabled_configuration") {
+			result.Resources[i].Evidence = append(result.Resources[i].Evidence, Evidence{Path: evidencePath, Kind: "disabled_configuration", Reason: "Repository configuration explicitly disables Kafka.", Confidence: ConfidenceHigh})
+		}
+	}
+}
+
+func hasEvidence(evidence []Evidence, evidencePath, kind string) bool {
+	for _, item := range evidence {
+		if item.Path == evidencePath && item.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func kafkaIsDisabled(data []byte) bool {

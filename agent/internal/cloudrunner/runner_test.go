@@ -165,6 +165,14 @@ type fakeRolloutEngine struct {
 	reconcileErr   error
 }
 
+type failingSecretEnsurer struct {
+	err error
+}
+
+func (f failingSecretEnsurer) Ensure(context.Context, deploymentv1.AgentCommand) error {
+	return f.err
+}
+
 type sequenceRolloutEngine struct {
 	records []deploymentv1.RolloutRecord
 	errors  []error
@@ -295,6 +303,70 @@ func TestRunnerReportsCanonicalPreMutationFailureWithoutWAL(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsCanonicalPreMutationFailureBeforeEngine(t *testing.T) {
+	tests := []struct {
+		name            string
+		configureIntent func(*deploymentv1.RolloutIntent)
+		configureRunner func(*Runner)
+		wantCode        string
+	}{
+		{
+			name: "registry credential delivery",
+			configureIntent: func(intent *deploymentv1.RolloutIntent) {
+				intent.Desired.Workload.RegistryPullCredential = &deploymentv1.RegistryPullCredentialReference{Provider: "github", Registry: "ghcr.io", CredentialID: "installation-1"}
+			},
+			configureRunner: func(runner *Runner) {
+				runner.RegistryPullSecrets = failingSecretEnsurer{err: deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRegistryCredentialUnavailable, "registry credential is unavailable", false)}
+			},
+			wantCode: deploymentv1.RolloutCodeRegistryCredentialUnavailable,
+		},
+		{
+			name: "workload secret delivery",
+			configureIntent: func(intent *deploymentv1.RolloutIntent) {
+				intent.Desired.Workload.SecretReferences = []deploymentv1.SecretReference{{EnvName: "JWT_KEY", SecretID: "secret-1"}}
+			},
+			configureRunner: func(runner *Runner) {
+				runner.WorkloadSecrets = failingSecretEnsurer{err: errors.New("workload secret material is unavailable")}
+			},
+			wantCode: resourcev1.FailureBindingSecretMaterialization,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			intent := testCloudRolloutIntent(t)
+			tt.configureIntent(&intent)
+			workloadHash, err := intent.Desired.Workload.Hash()
+			if err != nil {
+				t.Fatal(err)
+			}
+			intent.Desired.WorkloadSpecHash = workloadHash
+			intent.IntentHash = ""
+			intent, err = intent.Canonicalize()
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := intent.Desired.AgentCommand()
+			command.Rollout = &intent
+			command.LeaseToken = "lease-prerequisite"
+			lease := cloudrelay.DeploymentLease{Kind: "deployment", Action: intent.Operation, LeaseToken: command.LeaseToken, Deployment: cloudrelay.DeploymentJobEnvelope{ID: intent.Desired.DeploymentJobID}, Command: &command}
+			engine := &fakeRolloutEngine{}
+			runner := Runner{Engine: engine, NodeID: intent.Target.NodeID}
+			tt.configureRunner(&runner)
+
+			result, terminal := runner.executeRollout(context.Background(), lease)
+			if !terminal || result.RolloutResult == nil {
+				t.Fatalf("result=%+v terminal=%v", result, terminal)
+			}
+			if engine.reconcileCalls != 0 || result.Status != deploymentv1.StateFailed || result.FailureCode != tt.wantCode || result.RolloutResult.FailureCode != tt.wantCode || result.RolloutResult.FailurePhase != deploymentv1.FailurePhasePreMutation {
+				t.Fatalf("engine calls=%d result=%+v", engine.reconcileCalls, result)
+			}
+			if result.RolloutResult.IntentHash != intent.IntentHash || result.RolloutResult.RolloutID != intent.RolloutID || result.RolloutResult.StateHash == "" || len(result.RolloutResult.Resources) != 0 {
+				t.Fatalf("canonical pre-mutation identity missing: %+v", result.RolloutResult)
+			}
+		})
+	}
+}
+
 func TestRunnerDoesNotCompleteNonterminalFailedRollout(t *testing.T) {
 	intent := testCloudRolloutIntent(t)
 	intent.PreviousKnownGoodID = "known-good-a"
@@ -391,6 +463,27 @@ func TestRunnerFreshFailureKeepsPrimaryResult(t *testing.T) {
 
 	result, terminal := Runner{Engine: &fakeRolloutEngine{record: record, reconcileErr: primary}, NodeID: intent.Target.NodeID}.executeRollout(context.Background(), lease)
 	if !terminal || result.Status != deploymentv1.StateFailed || result.FailureCode != primary.Code || result.FailureMessageRedacted != primary.Message || result.RolloutResult == nil || result.RolloutResult.FailureCode != primary.Code || result.RolloutResult.FailureMessageRedacted != primary.Message {
+		t.Fatalf("result=%+v terminal=%v", result, terminal)
+	}
+}
+
+func TestRunnerCompletesFirstDeployCleanupWithoutPreviewNamespace(t *testing.T) {
+	intent := testCloudRolloutIntent(t)
+	intent.Operation = deploymentv1.RolloutOperationFirstDeployCleanup
+	intent.IntentHash = ""
+	intent, err := intent.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := intent.Desired.AgentCommand()
+	command.Rollout = &intent
+	command.LeaseToken = "lease-cleanup"
+	lease := cloudrelay.DeploymentLease{Kind: "deployment", Action: intent.Operation, LeaseToken: command.LeaseToken, Deployment: cloudrelay.DeploymentJobEnvelope{ID: intent.Desired.DeploymentJobID}, Command: &command}
+	now := time.Now().UTC()
+	record := deploymentv1.RolloutRecord{SchemaVersion: deploymentv1.RolloutRecordVersion, Intent: intent, State: deploymentv1.RolloutStateCleaned, Version: 3, StateHash: strings.Repeat("c", 64), CreatedAt: now, UpdatedAt: now, TerminalAt: &now}
+
+	result, terminal := Runner{Engine: &fakeRolloutEngine{record: record}, NodeID: intent.Target.NodeID}.executeRollout(context.Background(), lease)
+	if !terminal || result.Status != deploymentv1.RolloutStateCleaned || result.Namespace != "" || result.RolloutResult == nil || result.RolloutResult.RolloutState != deploymentv1.RolloutStateCleaned || result.RolloutResult.Namespace != "" {
 		t.Fatalf("result=%+v terminal=%v", result, terminal)
 	}
 }

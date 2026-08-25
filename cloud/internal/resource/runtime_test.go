@@ -90,6 +90,46 @@ func TestUnplacedManagedResourceDeletesWithoutRuntimeAuthority(t *testing.T) {
 	}
 }
 
+func TestReconcileTopologyPreservesUnchangedInFlightAndReadyResource(t *testing.T) {
+	service := testService()
+	request := managedRequest(resourcev1.TypeNATS)
+	request.Managed.CredentialRefs = nil
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "nats-idempotent-reconcile", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := topologyv1.Plan{ProjectID: "project-1", Revision: 1, PlanHash: strings.Repeat("9", 64), Assignments: []topologyv1.Assignment{{ServiceKey: created.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20}}}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	lease, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
+	if err != nil || !ok {
+		t.Fatalf("lease=%+v ok=%t err=%v", lease, ok, err)
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	inFlight, err := service.Get(context.Background(), "project-1", created.ID)
+	if err != nil || inFlight.Lifecycle != resourcev1.LifecycleProvisioning || inFlight.Runtime == nil || inFlight.Runtime.LeaseToken != lease.LeaseToken {
+		t.Fatalf("in-flight resource was reset: resource=%+v err=%v", inFlight, err)
+	}
+	evidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: lease.Spec.SpecHash, WorkloadReady: true, PodReady: true, ServiceReady: true, Image: lease.Spec.Image, ImageID: lease.Spec.Image, AvailableReplicas: 1, ObservedAt: time.Now().UTC()}
+	ready, err := service.CompleteManaged(context.Background(), "project-1", created.ID, ManagedResult{Status: "ready", LeaseToken: lease.LeaseToken, Evidence: evidence})
+	if err != nil || ready.Lifecycle != resourcev1.LifecycleReady {
+		t.Fatalf("ready=%+v err=%v", ready, err)
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := service.Get(context.Background(), "project-1", created.ID)
+	if err != nil || unchanged.Lifecycle != resourcev1.LifecycleReady || unchanged.Runtime == nil || unchanged.Runtime.Evidence == nil || unchanged.Runtime.Evidence.ObservedSpecHash != lease.Spec.SpecHash {
+		t.Fatalf("ready resource was reset: resource=%+v err=%v", unchanged, err)
+	}
+	if next, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1"); err != nil || ok {
+		t.Fatalf("unchanged ready resource was leased again: lease=%+v ok=%t err=%v", next, ok, err)
+	}
+}
+
 func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing.T) {
 	service := testService()
 	postgres, _, err := service.Create(context.Background(), "project-1", "user-1", "postgres-runtime", managedRequest(resourcev1.TypePostgres))

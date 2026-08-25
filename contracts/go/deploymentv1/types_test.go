@@ -71,6 +71,25 @@ func TestWorkloadSpecRejectsUnsafeAndInlineSecretShapes(t *testing.T) {
 	}
 }
 
+func TestValidateEnvironmentPreservesCaseSensitiveFrameworkMappings(t *testing.T) {
+	if err := ValidateEnvironment(
+		[]EnvironmentVariable{
+			{Name: "Jwt__Issuer", Value: "identity-service"},
+			{Name: "Jwt__Audience", Value: "identity-api"},
+			{Name: "Jwt__AccessTokenMinutes", Value: "15"},
+			{Name: "Jwt__RefreshTokenDays", Value: "30"},
+		},
+		[]SecretReference{{EnvName: "Jwt__SigningKey", SecretID: "wsecret-123"}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Database_Password", "Jwt__Key", "Jwt__SigningKey", "ConnectionStrings__Database"} {
+		if err := ValidateEnvironment([]EnvironmentVariable{{Name: name, Value: "inline-secret"}}, nil); err == nil {
+			t.Fatalf("secret-like environment name %q accepted an inline value", name)
+		}
+	}
+}
+
 func TestRegistryPullCredentialRequiresTypedNonSecretReference(t *testing.T) {
 	ref := RegistryPullCredentialReference{Provider: "ghcr", CredentialID: "hosted-opsi", Registry: "ghcr.io"}
 	spec := validWorkload()

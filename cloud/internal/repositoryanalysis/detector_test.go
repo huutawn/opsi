@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 type memoryRepository map[string]string
@@ -125,6 +127,115 @@ func TestComposeIdentityServiceInference(t *testing.T) {
 	}
 	if !foundPostgres || !foundValkeyResource || !foundDB || !foundValkey || !foundAPI || !foundHub || !foundJWT || !kafkaDisabled {
 		t.Fatalf("dependencies=%+v secrets=%+v", result.Dependencies, result.Secrets)
+	}
+}
+
+func TestAcceptanceProfileExcludesLowSignalSourceAndReadsRootDocs(t *testing.T) {
+	files := memoryRepository{
+		"compose.yaml": `services:
+  postgres: {image: postgres:17}
+  redis: {image: redis:7}
+  kafka: {image: apache/kafka:4}
+  kafka-init: {image: apache/kafka:4}
+`,
+		"be/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+		"be/src/IdentityService.Api/appsettings.json":                           `{"Kafka":{"Enabled":true}}`,
+		"be/src/IdentityService.Api/appsettings.Development.json":               `{"ConnectionStrings":{"Database":""},"SignalR":{"Redis":{"ConnectionString":""}},"Jwt":{"Issuer":"identity-service","Audience":"identity-api","Key":"must-not-be-copied","AccessTokenMinutes":15,"RefreshTokenDays":30}}`,
+		"be/src/IdentityService.Api/Program.cs":                                 `builder.Configuration["Jwt:Issuer"]; builder.Configuration["Jwt:Audience"]; builder.Configuration["Jwt:Key"]; app.MapHub<NotificationHub>("/hubs/notifications");`,
+		"docs/opsi-acceptance-profile.md":                                       "Set `Kafka__Enabled=false` for this acceptance profile.",
+		"tcip-fake/Dockerfile":                                                  "FROM scratch\nEXPOSE 3000\n",
+		"tcip-fake/next.config.ts":                                              `const backend = process.env.BACKEND_URL; async rewrites() { return [{source: "/api/:path*", destination: backend + "/api/:path*"}, {source: "/hubs/:path*", destination: backend + "/hubs/:path*"}] }`,
+		"tcip-fake/features/notifications/services/notification-hub.service.ts": `new HubConnectionBuilder().withUrl("/hubs/notifications");`,
+	}
+	for i := 0; i < 160; i++ {
+		files[fmt.Sprintf("be/src/IdentityService.Api/Services/Impl/Service%03d.cs", i)] = "sealed class Service {}"
+	}
+	result := analyzeRepository(t, "owner/learn-asp-.net", files)
+	if result.Truncated || result.EvidenceCoverage.CandidatesFound >= DefaultLimits().MaxFiles {
+		t.Fatalf("coverage=%+v truncation=%q", result.EvidenceCoverage, result.TruncationReason)
+	}
+	if len(result.Applications) != 2 {
+		t.Fatalf("applications=%+v", result.Applications)
+	}
+	applicationByRoot := map[string]string{}
+	postgresStorageValid := false
+	for _, application := range result.Applications {
+		applicationByRoot[application.Root] = application.Key
+	}
+	for _, resource := range result.Resources {
+		postgresStorageValid = postgresStorageValid || resource.Type == "postgres" && resource.Persistence != nil && resource.Persistence.Persistent && resource.Persistence.SizeBytes == resourcev1.DefaultPostgresStorageBytes && resource.Persistence.PolicyRef == resourcev1.StoragePolicyDefault
+	}
+	if !postgresStorageValid {
+		t.Fatalf("PostgreSQL storage default was not materialized in the reviewed plan: %+v", result.Resources)
+	}
+	backendKey, frontendKey := applicationByRoot["be"], applicationByRoot["tcip-fake"]
+	for _, application := range result.Applications {
+		if application.Key != backendKey {
+			continue
+		}
+		want := map[string]string{"Jwt__Issuer": "identity-service", "Jwt__Audience": "identity-api", "Jwt__AccessTokenMinutes": "15", "Jwt__RefreshTokenDays": "30"}
+		for name, value := range want {
+			if application.Environment[name] != value {
+				t.Fatalf("backend environment %s=%q, want %q: %+v", name, application.Environment[name], value, application.Environment)
+			}
+		}
+		for _, value := range application.Environment {
+			if value == "must-not-be-copied" {
+				t.Fatalf("JWT key leaked into environment: %+v", application.Environment)
+			}
+		}
+	}
+	foundJWTKey := false
+	for _, secret := range result.Secrets {
+		foundJWTKey = foundJWTKey || secret.ApplicationKey == backendKey && secret.Name == "jwt-signing-key" && secret.EnvironmentName == "Jwt__Key" && secret.Generated
+	}
+	if !foundJWTKey {
+		t.Fatalf("exact JWT key reference was not inferred: %+v", result.Secrets)
+	}
+	proxyDependencies := 0
+	for _, dependency := range result.Dependencies {
+		if dependency.From == backendKey && dependency.To == frontendKey {
+			t.Fatalf("server route declaration must not become a browser dependency: %+v", dependency)
+		}
+		if dependency.From == frontendKey && dependency.To == backendKey {
+			proxyDependencies++
+			if dependency.Strategy != "internal_http" || dependency.Path != "/api" || len(dependency.Injections) != 1 || dependency.Injections[0].EnvironmentName != "BACKEND_URL" || dependency.Injections[0].SymbolicSource != "application.internal_url" {
+				t.Fatalf("proxy dependency=%+v", dependency)
+			}
+			evidence := strings.Builder{}
+			for _, item := range dependency.Evidence {
+				evidence.WriteString(item.Reason)
+			}
+			if !strings.Contains(evidence.String(), "/api") || !strings.Contains(evidence.String(), "/hubs/notifications") {
+				t.Fatalf("proxy routes missing from evidence: %+v", dependency.Evidence)
+			}
+		}
+	}
+	if proxyDependencies != 1 {
+		t.Fatalf("proxy dependencies=%d all=%+v", proxyDependencies, result.Dependencies)
+	}
+	kafkaResources, kafkaIssues := 0, 0
+	for _, resource := range result.Resources {
+		if resource.Type == "kafka" {
+			kafkaResources++
+			if resource.LogicalName != "kafka" || resource.Managed || resource.Required {
+				t.Fatalf("kafka resource=%+v", resource)
+			}
+		}
+	}
+	for _, issue := range result.Issues {
+		if issue.Code == "KAFKA_UNSUPPORTED" {
+			kafkaIssues++
+			if issue.Blocking || issue.Resolution != "Kafka__Enabled=false" {
+				t.Fatalf("kafka issue=%+v", issue)
+			}
+		}
+		if issue.Code == "ANALYSIS_TRUNCATED" {
+			t.Fatalf("unexpected truncation issue=%+v", issue)
+		}
+	}
+	if kafkaResources != 1 || kafkaIssues != 1 {
+		t.Fatalf("resources=%+v issues=%+v", result.Resources, result.Issues)
 	}
 }
 

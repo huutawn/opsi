@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 const (
@@ -342,7 +344,7 @@ func ValidatePlan(plan Plan) error {
 			}
 		}
 		for name, value := range application.Environment {
-			if secretLikePlanName(name) || strings.ContainsAny(value, "\x00\r\n") {
+			if deploymentv1.IsSecretLikeEnvironmentName(name) || strings.ContainsAny(value, "\x00\r\n") {
 				return errors.New("deployment plan environment contains secret-like or invalid data")
 			}
 		}
@@ -351,6 +353,31 @@ func ValidatePlan(plan Plan) error {
 	for _, resource := range plan.Resources {
 		if resource.LogicalName == "" || resource.Type == "" || resources[resource.LogicalName] {
 			return errors.New("deployment plan resource intent is invalid")
+		}
+		if resource.Managed {
+			resourceType := resourcev1.Type(resource.Type)
+			if resourceType == "valkey" {
+				resourceType = resourcev1.TypeRedis
+			}
+			definition, ok := resourcev1.Definition(resourceType)
+			if !ok || !definition.Provisioning.Implemented {
+				return errors.New("deployment plan managed resource type is unsupported")
+			}
+			persistence := resource.Persistence
+			if definition.Storage.Required && (persistence == nil || !persistence.Persistent) {
+				return errors.New("deployment plan managed resource requires persistent storage")
+			}
+			if persistence != nil {
+				if persistence.SizeBytes < 0 || persistence.SizeBytes > resourcev1.MaxManagedStorageBytes || persistence.Persistent != (persistence.SizeBytes > 0) || (!persistence.Persistent && persistence.PolicyRef != "") {
+					return errors.New("deployment plan managed resource storage intent is invalid")
+				}
+				if persistence.Persistent && !definition.Storage.Supported {
+					return errors.New("deployment plan managed resource storage is unsupported")
+				}
+				if resourceType == resourcev1.TypePostgres && persistence.PolicyRef != resourcev1.StoragePolicyDefault {
+					return errors.New("deployment plan managed PostgreSQL storage policy is invalid")
+				}
+			}
 		}
 		resources[resource.LogicalName] = true
 	}
@@ -380,16 +407,6 @@ func ValidatePlan(plan Plan) error {
 		return errors.New("deployment plan hash is invalid")
 	}
 	return nil
-}
-
-func secretLikePlanName(value string) bool {
-	name := strings.ToLower(strings.ReplaceAll(value, "_", ""))
-	for _, marker := range []string{"password", "passwd", "secret", "token", "privatekey", "signingkey", "apikey", "connectionstring"} {
-		if strings.Contains(name, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 func Terminal(state State) bool {

@@ -72,7 +72,13 @@ func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analy
 	}
 	run.Approval = nil
 	run.WarningAcknowledgement = nil
+	run.Refs = AuthorityRefs{}
+	run.PreflightHash = ""
+	run.PreflightWarnings = nil
 	run.Failure = nil
+	run.Attempt = 0
+	run.RetryAfterAt = nil
+	run.FinishedAt = nil
 	if err := refreshHash(&run.Plan); err != nil {
 		return Run{}, unavailable()
 	}

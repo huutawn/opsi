@@ -75,14 +75,27 @@ func analysisCandidateRank(value string) (int, bool) {
 		return 4, true
 	case strings.HasPrefix(base, "appsettings") && strings.HasSuffix(base, ".json") || strings.HasSuffix(base, ".env.example") || base == ".env.example" || strings.Contains(base, "config") && supportedTextExtension(base):
 		return 5, true
-	case base == "readme" || strings.HasPrefix(base, "readme.") || strings.Contains(lower, "/docs/") && strings.HasSuffix(base, ".md"):
+	case base == "readme" || strings.HasPrefix(base, "readme.") || (strings.HasPrefix(lower, "docs/") || strings.Contains(lower, "/docs/")) && strings.HasSuffix(base, ".md"):
 		return 6, true
-	case (strings.Contains(base, "route") || strings.Contains(base, "client") || strings.Contains(base, "startup") || strings.Contains(base, "program")) && supportedSourceExtension(base):
+	case (strings.Contains(base, "route") || strings.Contains(base, "client") || strings.Contains(base, "startup") || strings.Contains(base, "program") || strings.Contains(base, "hub")) && supportedSourceExtension(base):
 		return 7, true
-	case supportedSourceExtension(base) || strings.HasSuffix(base, ".json") || strings.HasSuffix(base, ".md"):
+	case conventionalSourceEntrypoint(base):
 		return 8, true
 	default:
 		return 0, false
+	}
+}
+
+func conventionalSourceEntrypoint(base string) bool {
+	if !supportedSourceExtension(base) {
+		return false
+	}
+	stem := strings.TrimSuffix(base, path.Ext(base))
+	switch stem {
+	case "app", "application", "bootstrap", "index", "main", "server", "worker":
+		return true
+	default:
+		return false
 	}
 }
 

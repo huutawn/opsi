@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -453,7 +455,7 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			evidence := Evidence{Path: composePath, Kind: "compose_image", Reason: "Compose declares image " + service.Image + ".", Confidence: ConfidenceHigh}
 			var persistence *Persistence
 			if (len(service.Volumes) > 0 || kind == "postgres") && kind != "kafka" {
-				persistence = &Persistence{Persistent: true}
+				persistence = &Persistence{Persistent: true, SizeBytes: resourcev1.DefaultPostgresStorageBytes, PolicyRef: resourcev1.StoragePolicyDefault}
 				if len(service.Volumes) > 0 {
 					evidence.Reason += " A persistent volume is mounted."
 				} else {
@@ -602,7 +604,7 @@ func composeEnvironment(node yaml.Node) (map[string]string, []string) {
 		var raw map[string]any
 		_ = node.Decode(&raw)
 		for name, value := range raw {
-			if secretLikeEnvironment(name) {
+			if deploymentv1.IsSecretLikeEnvironmentName(name) {
 				unsafe = append(unsafe, name)
 				continue
 			}
@@ -615,7 +617,7 @@ func composeEnvironment(node yaml.Node) (map[string]string, []string) {
 		_ = node.Decode(&raw)
 		for _, entry := range raw {
 			name, value, found := strings.Cut(entry, "=")
-			if secretLikeEnvironment(name) {
+			if deploymentv1.IsSecretLikeEnvironmentName(name) {
 				unsafe = append(unsafe, name)
 				continue
 			}
@@ -629,16 +631,6 @@ func composeEnvironment(node yaml.Node) (map[string]string, []string) {
 		values = nil
 	}
 	return values, unsafe
-}
-
-func secretLikeEnvironment(value string) bool {
-	name := strings.ToLower(strings.ReplaceAll(value, "_", ""))
-	for _, marker := range []string{"password", "passwd", "secret", "token", "privatekey", "signingkey", "apikey", "connectionstring"} {
-		if strings.Contains(name, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 func composeInjections(node yaml.Node, protocol, target string) []Injection {

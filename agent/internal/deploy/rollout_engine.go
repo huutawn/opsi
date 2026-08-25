@@ -126,6 +126,7 @@ func (e *Engine) resumeCleanup(ctx context.Context, record deploymentv1.RolloutR
 			return record, err
 		}
 		record = *transitioned
+		_ = emitRolloutProgress(progress, record, PhaseWatching, "cleanup mutation completed; verifying absence", 90, nil)
 	}
 	if record.State == deploymentv1.RolloutStateWaiting {
 		cleaned, err := e.Store.TransitionRollout(ctx, record.Intent.RolloutID, deploymentv1.RolloutStateCleaned, nil, nil, nil, true)

@@ -488,6 +488,32 @@ func CanTransitionRollout(from, to string) bool {
 	return allowed[from][to]
 }
 
+// CanCompleteRollout accepts a factual terminal result when best-effort
+// progress reports were lost, while still requiring a canonical state path.
+func CanCompleteRollout(from, to string) bool {
+	if from == to {
+		return true
+	}
+	states := []string{RolloutStatePrepared, RolloutStateApplying, RolloutStateWaiting, RolloutStateFailed, RolloutStateRollingBack, RolloutStateSucceeded, RolloutStateRolledBack, RolloutStateRollbackFailed, RolloutStateCleaned}
+	seen := map[string]bool{from: true}
+	queue := []string{from}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, next := range states {
+			if seen[next] || !CanTransitionRollout(current, next) {
+				continue
+			}
+			if next == to {
+				return true
+			}
+			seen[next] = true
+			queue = append(queue, next)
+		}
+	}
+	return false
+}
+
 type ExposureMutationRequest struct {
 	SchemaVersion       string                  `json:"schema_version"`
 	BaseDeploymentJobID string                  `json:"base_deployment_job_id"`

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Badge, Button, Icon, Input } from "@/components/ui/primitives";
 import type { DeploymentPlan, ServiceRecord, WorkloadSecretMetadata } from "@/lib/contracts/registry";
 
@@ -7,6 +7,22 @@ type Props = {
   onPlan: (plan: DeploymentPlan) => void; onSave: () => void;
   onResolveSecret: (applicationID: string, logicalName: string, value: string) => Promise<WorkloadSecretMetadata>;
 };
+
+export function ApprovalPlanSummary({ children, plan }: { children: ReactNode; plan: DeploymentPlan }) {
+  const managedResources = plan.resources.filter((resource) => resource.managed);
+  const warnings = plan.issues.filter((issue) => !issue.blocking);
+  return <section aria-labelledby="approval-summary-title" className="border border-outline-variant/30 bg-surface-container p-4 sm:p-5">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="eyebrow">Plan ready</p><h2 className="text-lg font-semibold" id="approval-summary-title">Ready to deploy</h2><p className="mt-1 text-sm text-on-surface-variant">The detected draft is pinned to the exact commit and connected server.</p></div><Badge>awaiting approval</Badge></div>
+    <dl className="mt-4 grid gap-3 border-y border-outline-variant/20 py-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+      <div><dt className="text-xs uppercase tracking-wide text-on-surface-variant">Source</dt><dd className="mt-1 font-medium">{plan.source.repository}</dd><dd className="font-mono text-xs text-on-surface-variant">{plan.source.commit_sha.slice(0, 12)}</dd></div>
+      <div><dt className="text-xs uppercase tracking-wide text-on-surface-variant">Applications</dt><dd className="mt-1 font-medium">{plan.applications.map((application) => `${application.name}:${application.port}`).join(" · ")}</dd></div>
+      <div><dt className="text-xs uppercase tracking-wide text-on-surface-variant">Managed resources</dt><dd className="mt-1 font-medium">{managedResources.length ? managedResources.map((resource) => resource.logical_name).join(" · ") : "None"}</dd></div>
+      <div><dt className="text-xs uppercase tracking-wide text-on-surface-variant">Target</dt><dd className="mt-1 font-medium">Connected</dd><dd className="font-mono text-xs text-on-surface-variant">{plan.target.node_id || plan.target.runtime_id || "Ready runtime"}</dd></div>
+    </dl>
+    {warnings.length > 0 && <p className="mt-3 text-xs text-on-surface-variant" role="status">{warnings.length} non-blocking notice{warnings.length === 1 ? "" : "s"}: {warnings.map((issue) => issue.message).join(" ")}</p>}
+    <details className="mt-3 border-t border-outline-variant/20 pt-2"><summary className="min-h-10 cursor-pointer py-2 text-sm font-medium text-on-surface-variant">View or edit full detected configuration</summary><div className="mt-3 space-y-4 border-t border-outline-variant/20 pt-4">{children}</div></details>
+  </section>;
+}
 
 export function PlanReview({ canEdit, dirty, onPlan, onResolveSecret, onSave, plan, saving, services }: Props) {
   const update = (change: (draft: DeploymentPlan) => void) => { const draft = structuredClone(plan); change(draft); onPlan(draft); };

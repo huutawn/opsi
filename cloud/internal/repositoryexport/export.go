@@ -14,6 +14,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -121,7 +122,7 @@ func Render(plan deploymentworkflow.Plan) ([]byte, error) {
 	for _, item := range plan.Resources {
 		settings := map[string]string{}
 		for name, value := range item.Settings {
-			if !secretLike(name) {
+			if !deploymentv1.IsSecretLikeEnvironmentName(name) {
 				settings[name] = value
 			}
 		}
@@ -218,7 +219,7 @@ func NewPreview(run deploymentworkflow.Run, targetBranch string, current []byte)
 func copySafeEnvironment(input map[string]string) map[string]string {
 	out := map[string]string{}
 	for name, value := range input {
-		if !secretLike(name) {
+		if !deploymentv1.IsSecretLikeEnvironmentName(name) {
 			out[name] = value
 		}
 	}
@@ -226,15 +227,6 @@ func copySafeEnvironment(input map[string]string) map[string]string {
 		return nil
 	}
 	return out
-}
-func secretLike(value string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(value, "_", ""))
-	for _, marker := range []string{"password", "passwd", "secret", "token", "privatekey", "signingkey", "apikey", "connectionstring"} {
-		if strings.Contains(normalized, marker) {
-			return true
-		}
-	}
-	return false
 }
 func textDiff(name string, oldData, newData []byte) string {
 	if bytes.Equal(oldData, newData) {

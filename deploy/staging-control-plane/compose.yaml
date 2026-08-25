@@ -82,6 +82,16 @@ services:
       OPSI_CLOUD_GITHUB_APP_ID: ${OPSI_CLOUD_GITHUB_APP_ID:?set OPSI_CLOUD_GITHUB_APP_ID}
       OPSI_CLOUD_GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app-private-key.pem
       OPSI_CLOUD_GITHUB_APP_WEBHOOK_SECRET_FILE: /run/secrets/github-app-webhook-secret
+      OPSI_BUILD_EXECUTOR_OWNER: ${OPSI_BUILD_EXECUTOR_OWNER:?set OPSI_BUILD_EXECUTOR_OWNER}
+      OPSI_BUILD_EXECUTOR_REPOSITORY: ${OPSI_BUILD_EXECUTOR_REPOSITORY:?set OPSI_BUILD_EXECUTOR_REPOSITORY}
+      OPSI_BUILD_EXECUTOR_WORKFLOW: ${OPSI_BUILD_EXECUTOR_WORKFLOW:?set OPSI_BUILD_EXECUTOR_WORKFLOW}
+      OPSI_BUILD_EXECUTOR_REF: ${OPSI_BUILD_EXECUTOR_REF:?set OPSI_BUILD_EXECUTOR_REF}
+      OPSI_BUILD_REGISTRY_HOST: ${OPSI_BUILD_REGISTRY_HOST:?set OPSI_BUILD_REGISTRY_HOST}
+      OPSI_BUILD_REGISTRY_NAMESPACE: ${OPSI_BUILD_REGISTRY_NAMESPACE:?set OPSI_BUILD_REGISTRY_NAMESPACE}
+      OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX: ${OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX:?set OPSI_BUILD_REGISTRY_REPOSITORY_PREFIX}
+      OPSI_BUILD_REGISTRY_VISIBILITY: ${OPSI_BUILD_REGISTRY_VISIBILITY:?set OPSI_BUILD_REGISTRY_VISIBILITY}
+      OPSI_CLOUD_GHCR_PULL_USERNAME_FILE: /run/secrets/opsi-ghcr-pull-username
+      OPSI_CLOUD_GHCR_PULL_TOKEN_FILE: /run/secrets/opsi-ghcr-pull-token
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,6 +109,8 @@ services:
       - source: github-app-private-key
         target: github-app-private-key.pem
       - github-app-webhook-secret
+      - opsi-ghcr-pull-username
+      - opsi-ghcr-pull-token
     <<: *service-hardening
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9800/health"]
@@ -196,6 +208,10 @@ secrets:
     file: ./secrets/github-app-private-key.pem
   github-app-webhook-secret:
     file: ./secrets/github-app-webhook-secret
+  opsi-ghcr-pull-username:
+    file: ./secrets/opsi-ghcr-pull-username
+  opsi-ghcr-pull-token:
+    file: ./secrets/opsi-ghcr-pull-token
   ssh-known-hosts:
     file: ./secrets/ssh_known_hosts
   origin-certificate:

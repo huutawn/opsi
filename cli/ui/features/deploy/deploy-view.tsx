@@ -3,13 +3,14 @@
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
 import { DeploymentTimeline } from "@/features/deploy/deployment-timeline";
-import { PlanReview } from "@/features/deploy/plan-review";
+import { ApprovalPlanSummary, PlanReview } from "@/features/deploy/plan-review";
 import { SourceStep } from "@/features/deploy/source-step";
 import type { ConsoleController } from "@/features/console/types";
-import { BootstrapCommand, BootstrapDialog } from "@/features/deploy/target-bootstrap";
+import { BootstrapCommand, BootstrapDialog, BootstrapProgress } from "@/features/deploy/target-bootstrap";
 import { RefineAnalysis, RepositoryExport } from "@/features/deploy/analysis-tools";
 import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
 import type { AnalysisScope, DeploymentPlan, DeploymentRun, DeploymentRunEvent, DeploymentRunResult, GitHubInstallation, GitHubRepository, RepositoryExportPreview, RepositoryExportResult, WorkloadSecretMetadata } from "@/lib/contracts/registry";
+import { terminalBootstrap } from "@/lib/presentation/infrastructure/model";
 
 export function DeployView({ console }: { console: ConsoleController }) {
   const client = useMemo(() => new LocalClient(), []);
@@ -36,6 +37,9 @@ export function DeployView({ console }: { console: ConsoleController }) {
   const connectTrigger = useRef<HTMLButtonElement>(null);
   const canMutate = ["owner", "admin", "developer"].includes(console.session?.role || "");
   const needsServer = Boolean(run?.plan.issues.some((issue) => issue.code === "TARGET_SERVER_REQUIRED" && issue.blocking));
+  const bootstrapSession = useMemo(() => [...console.state.sessions].sort((a, b) => b.created_at.localeCompare(a.created_at))[0], [console.state.sessions]);
+  const bootstrapActive = Boolean(bootstrapSession && !terminalBootstrap(bootstrapSession));
+  const bootstrapEvents = bootstrapSession && console.state.bootstrapEventsSessionID === bootstrapSession.id ? console.state.bootstrapEvents : [];
 
   const load = useCallback(async (selectLatest = false) => {
     if (!projectID) return;
@@ -133,19 +137,25 @@ export function DeployView({ console }: { console: ConsoleController }) {
 
 	useEffect(() => {
 		if (!needsServer || !canMutate || !run) { targetResume.current = false; return; }
+		let checking = false;
 		const inspect = async () => {
+			if (checking) return;
+			checking = true;
 			try {
+				if (bootstrapSession) await console.actions.refreshBootstrap(bootstrapSession.id);
 				const facts = await client.placementFacts(projectID);
 				if (!targetResume.current && facts.runtimes.some((runtime) => runtime.status === "ready")) {
 					targetResume.current = true;
-					await mutate("analyze", () => client.deploymentRunAction(projectID, run.id, "analyze", {}, crypto.randomUUID()));
+					const resumed = await mutate("analyze", () => client.deploymentRunAction(projectID, run.id, "analyze", {}, crypto.randomUUID()));
+					if (!resumed) targetResume.current = false;
 				}
 			} catch { targetResume.current = false; /* The visible run issue remains the factual next action. */ }
+			finally { checking = false; }
 		};
 		void inspect();
 		const timer = window.setInterval(() => void inspect(), 2500);
 		return () => window.clearInterval(timer);
-	}, [canMutate, client, needsServer, projectID, run?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+	}, [bootstrapSession?.id, canMutate, client, needsServer, projectID, run?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loadFailure && !run && runs.length === 0) return <DeployLoadFailure busy={busy} failure={loadFailure} onLogin={() => void login(setLoadFailure)} onRetry={() => void load(true)} projectName={console.state.project?.name} />;
   const sourceOnly = showNew || !run;
@@ -155,17 +165,19 @@ export function DeployView({ console }: { console: ConsoleController }) {
       {error && <DeployActionFailure busy={busy} failure={error} onLogin={() => void login(setError)} />}
       {sourceOnly ? <SourceStep busy={busy} canMutate={canMutate && !isAuthFailure(error)} hostname={hostname} installationID={installationID} installations={installations} linkedInstallationIDs={linkedInstallationIDs} onConnectInstallation={() => void connectInstallation()} onDiscover={() => void discoverGitHub()} onHostname={(value) => { setHostname(value); updateSourceDraft(projectID, { hostname: value }); }} onInstallation={(value) => { setInstallationID(value); updateSourceDraft(projectID, { installationID: value }); }} onRef={(value) => { setRefName(value); updateSourceDraft(projectID, { refName: value }); }} onRepository={(value) => { setRepositoryID(value); updateSourceDraft(projectID, { repositoryID: value }); }} onStart={() => void sourceAction()} refName={refName} repositories={repositories} repositoryID={repositoryID} /> : run && <>
         <RunHeader onSelect={(id) => { const selected = runs.find((item) => item.id === id) || null; setRun(selected); setExportResult(null); setDraftPlan(selected ? structuredClone(selected.plan) : null); setHostname(selected?.plan.target.hostname || ""); if (selected) void Promise.all([client.deploymentRunEvents(projectID, selected.id), client.deploymentRunResult(projectID, selected.id)]).then(([timeline, projection]) => { setEvents(timeline.events || []); setResult(projection); }); }} run={run} runs={runs} />
-        {(run.state === "awaiting_input" || run.state === "awaiting_approval") && draftPlan && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><PlanReview canEdit={canMutate} dirty={JSON.stringify(draftPlan) !== JSON.stringify(run.plan)} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} saving={busy === "plan"} services={console.state.services} /></div>}
+        {run.state === "awaiting_input" && draftPlan && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><PlanReview canEdit={canMutate} dirty={JSON.stringify(draftPlan) !== JSON.stringify(run.plan)} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} saving={busy === "plan"} services={console.state.services} /></div>}
+        {run.state === "awaiting_approval" && draftPlan && <ApprovalPlanSummary plan={draftPlan}><PlanReview canEdit={canMutate} dirty={JSON.stringify(draftPlan) !== JSON.stringify(run.plan)} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} saving={busy === "plan"} services={console.state.services} /><RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} /></ApprovalPlanSummary>}
         {run.plan.issues.some((issue) => issue.code === "ANALYSIS_TRUNCATED") && <RefineAnalysis
           busy={busy === "analyze"}
           initialScope={run.plan.analysis_scope || { application_roots: [], exclude_paths: [] }}
           onRefine={(scope) => void refine(scope)}
         />}
-        <RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} />
+        {run.state === "awaiting_input" && <RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} />}
+		{needsServer && bootstrapSession && <BootstrapProgress events={bootstrapEvents} session={bootstrapSession} />}
 		{needsServer && console.state.bootstrapCommand && <BootstrapCommand command={console.state.bootstrapCommand} />}
         {!['awaiting_input','awaiting_approval'].includes(run.state) && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><DeploymentTimeline events={events} run={run} /></div>}
         {run.state === "succeeded" && result && <DeploymentResult result={result} />}
-        <PrimaryAction busy={busy} canMutate={canMutate} connectTrigger={connectTrigger} needsServer={needsServer} onAction={action} onConnect={() => setShowConnect(true)} run={run} />
+        <PrimaryAction bootstrapActive={bootstrapActive} busy={busy} canMutate={canMutate} connectTrigger={connectTrigger} needsServer={needsServer} onAction={action} onConnect={() => setShowConnect(true)} onNew={() => { setShowNew(true); setError(null); }} run={run} />
         <TechnicalDetails events={events} result={result} run={run} />
 		{showConnect && <BootstrapDialog console={console} onClose={() => { setShowConnect(false); window.requestAnimationFrame(() => connectTrigger.current?.focus()); }} onCreated={async () => { await console.actions.load(); }} />}
       </>}
@@ -236,7 +248,23 @@ function DeployLoadFailure({ busy, failure, onLogin, onRetry, projectName }: { b
 
 function RunHeader({ onSelect, run, runs }: { onSelect: (id: string) => void; run: DeploymentRun; runs: DeploymentRun[] }) { return <div className="flex flex-col gap-3 border-y border-outline-variant/30 py-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs uppercase tracking-wider text-on-surface-variant">Exact source</p><p className="mt-1 font-medium">{run.plan.source.repository} · {run.plan.source.selected_ref}</p><p className="mt-1 font-mono text-xs text-on-surface-variant">{run.plan.source.commit_sha.slice(0, 12)}</p></div><div className="flex items-center gap-3"><StatusBadge label={run.state.replaceAll("_", " ")} status={run.state === "succeeded" ? "ready" : run.state === "failed" || run.state === "stale" ? "failed" : run.state.startsWith("awaiting") ? "pending" : "in_progress"} /><label className="sr-only" htmlFor="deployment-run-select">Deployment run</label><select className="min-h-10 border border-outline-variant/30 bg-surface-container-low px-3 text-sm" id="deployment-run-select" onChange={(event) => onSelect(event.target.value)} value={run.id}>{runs.map((item) => <option key={item.id} value={item.id}>{new Date(item.created_at).toLocaleString()} · {item.state}</option>)}</select></div></div>; }
 
-function PrimaryAction({ busy, canMutate, connectTrigger, needsServer, onAction, onConnect, run }: { busy: string; canMutate: boolean; connectTrigger: RefObject<HTMLButtonElement | null>; needsServer: boolean; onAction: (name: "analyze" | "approve" | "acknowledge" | "retry" | "cancel", body?: Record<string, unknown>) => void; onConnect: () => void; run: DeploymentRun }) { let label="", action: Parameters<typeof onAction>[0]|""="", body:Record<string,unknown>={};if(run.state==="awaiting_input"&&needsServer){label="Connect server"}else if(run.state==="awaiting_input"||run.state==="stale"){label="Analyze again";action="analyze"}else if(run.state==="awaiting_approval"){label="Approve & Deploy";action="approve";body={plan_hash:run.plan.hash}}else if(run.state==="awaiting_warning_ack"){label="Acknowledge & Continue";action="acknowledge";body={preflight_hash:run.preflight_hash}}else if(run.state==="failed"&&run.failure?.retryable){label="Retry failed step";action="retry"}else if(["analyzing","provisioning","building","preflighting","deploying","verifying","cleaning_up"].includes(run.state)){label="Cancel run";action="cancel"}if(!label)return null;if(!canMutate)return <div className="border border-outline-variant/30 bg-surface-container-low p-4 text-sm text-on-surface-variant" role="status">Your role has read-only access to this run.</div>;const working=Boolean(action)&&busy===action;return <div className="sticky bottom-4 z-10 flex items-center justify-between gap-4 border border-outline-variant/40 bg-surface-container-high p-4 shadow-lg"><p className="text-sm text-on-surface-variant">This is the only action needed for the current state.</p><Button disabled={Boolean(busy)} onClick={() => action ? onAction(action,body) : onConnect()} ref={!action ? connectTrigger : undefined} size="lg" variant={action === "cancel" ? "outline" : "primary"}>{working?"Working…":label}</Button></div>; }
+function PrimaryAction({ bootstrapActive, busy, canMutate, connectTrigger, needsServer, onAction, onConnect, onNew, run }: { bootstrapActive: boolean; busy: string; canMutate: boolean; connectTrigger: RefObject<HTMLButtonElement | null>; needsServer: boolean; onAction: (name: "analyze" | "approve" | "acknowledge" | "retry" | "cancel", body?: Record<string, unknown>) => void; onConnect: () => void; onNew: () => void; run: DeploymentRun }) {
+  let label = "";
+  let action: Parameters<typeof onAction>[0] | "" = "";
+  let body: Record<string, unknown> = {};
+  let newDeployment = false;
+  if (run.state === "awaiting_input" && needsServer) label = bootstrapActive ? "Connecting server…" : "Connect server";
+  else if (run.state === "awaiting_input" || run.state === "stale") { label = "Analyze again"; action = "analyze"; }
+  else if (run.state === "awaiting_approval") { label = "Approve & Deploy"; action = "approve"; body = { plan_hash: run.plan.hash }; }
+  else if (run.state === "awaiting_warning_ack") { label = "Acknowledge & Continue"; action = "acknowledge"; body = { preflight_hash: run.preflight_hash }; }
+  else if (run.state === "failed" && run.failure?.retryable && run.attempt < run.plan.failure_policy.max_attempts) { label = "Retry failed step"; action = "retry"; }
+  else if (run.state === "failed") { label = "New deployment"; newDeployment = true; }
+  else if (["analyzing", "provisioning", "building", "preflighting", "deploying", "verifying", "cleaning_up"].includes(run.state)) { label = "Cancel run"; action = "cancel"; }
+  if (!label) return null;
+  if (!canMutate) return <div className="border border-outline-variant/30 bg-surface-container-low p-4 text-sm text-on-surface-variant" role="status">Your role has read-only access to this run.</div>;
+  const working = Boolean(action) && busy === action;
+  return <div className="sticky bottom-4 z-10 flex items-center justify-between gap-4 border border-outline-variant/40 bg-surface-container-high p-4 shadow-lg"><p className="text-sm text-on-surface-variant">{bootstrapActive ? "Opsi is connecting and verifying the server." : newDeployment ? "This run reached its bounded retry limit." : "This is the only action needed for the current state."}</p><Button disabled={Boolean(busy) || bootstrapActive} onClick={() => action ? onAction(action, body) : newDeployment ? onNew() : onConnect()} ref={!action && !newDeployment ? connectTrigger : undefined} size="lg" variant={action === "cancel" ? "outline" : "primary"}>{working ? "Working…" : label}</Button></div>;
+}
 
 function DeploymentResult({ result }: { result: DeploymentRunResult }) { return <section aria-labelledby="deployment-result-title" className="border border-status-ready/40 bg-state-live-bg p-4 sm:p-6"><p className="text-xs font-medium uppercase tracking-wider text-status-ready">Verified result</p><h2 className="mt-2 text-xl font-semibold" id="deployment-result-title">Repository is running</h2>{result.public_url && <a className="mt-3 inline-flex min-h-11 items-center gap-2 text-primary underline underline-offset-4" href={result.public_url} rel="noreferrer" target="_blank"><Icon name="open_in_new" />{result.public_url}</a>}<ul className="mt-4 grid gap-2 sm:grid-cols-2">{result.applications.map((application) => <li className="border border-status-ready/30 bg-surface-container p-3 text-sm" key={application.service_id}><p className="font-medium">{application.service_key}</p><p className="mt-1 text-on-surface-variant">{application.deployment_status} · {application.available_replicas || 0} replica(s) ready</p><p className={application.digest_matches_image_id ? "mt-1 text-status-ready" : "mt-1 text-error"}>{application.digest_matches_image_id ? "K3s imageID matches the immutable build digest" : "Image digest evidence does not match"}</p>{application.build_log_url && <a className="mt-2 inline-flex min-h-10 items-center text-primary underline" href={application.build_log_url} rel="noreferrer" target="_blank">Raw build log</a>}</li>)}</ul>{result.verifications.length > 0 && <ul className="mt-4 grid gap-2 sm:grid-cols-2">{result.verifications.map((verification) => <li className="border border-status-ready/30 bg-surface-container p-3 text-sm" key={verification.id}><p className="font-medium">{verification.dependency_logical_name}</p><p className="mt-1 text-on-surface-variant">{verification.overall_status} · {verification.connection.protocol || verification.provider_health.provider_kind} {verification.connection.latency_ms ? `· ${verification.connection.latency_ms} ms` : ""}</p></li>)}</ul>}</section>; }
 

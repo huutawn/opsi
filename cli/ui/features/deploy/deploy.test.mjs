@@ -12,8 +12,8 @@ const client = new URL("../../lib/api/local-client.ts", import.meta.url);
 test("Deploy exposes one role-gated action for each actionable run state", async () => {
   const source = await readFile(view, "utf8");
   for (const value of ["Approve & Deploy", "Acknowledge & Continue", "Retry failed step", "Cancel run", "read-only access"]) assert.match(source, new RegExp(value));
-  assert.match(source, /plan_hash:run\.plan\.hash/);
-  assert.match(source, /preflight_hash:run\.preflight_hash/);
+  assert.match(source, /plan_hash:\s*run\.plan\.hash/);
+  assert.match(source, /preflight_hash:\s*run\.preflight_hash/);
   assert.match(source, /\["owner", "admin", "developer"\]/);
 });
 

@@ -20,7 +20,6 @@ const (
 	maxReplicas      = 20
 	maxCPUMillicores = int64(1_000_000)
 	maxMemoryBytes   = int64(1 << 50)
-	maxStorageBytes  = int64(1 << 50)
 )
 
 var ErrNotFound = errors.New("resource not found")
@@ -410,7 +409,7 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 	if spec.Replicas < 1 || spec.Replicas > maxReplicas || spec.CPUMillicores < 1 || spec.CPUMillicores > maxCPUMillicores || spec.MemoryBytes < 1 || spec.MemoryBytes > maxMemoryBytes {
 		return invalid("RESOURCE_CAPACITY_INVALID", "replicas, CPU, or memory request is invalid")
 	}
-	if spec.Storage.SizeBytes < 0 || spec.Storage.SizeBytes > maxStorageBytes || (spec.Storage.Persistent && spec.Storage.SizeBytes == 0) || (!spec.Storage.Persistent && (spec.Storage.SizeBytes != 0 || spec.Storage.PolicyRef != "")) {
+	if spec.Storage.SizeBytes < 0 || spec.Storage.SizeBytes > resourcev1.MaxManagedStorageBytes || (spec.Storage.Persistent && spec.Storage.SizeBytes == 0) || (!spec.Storage.Persistent && (spec.Storage.SizeBytes != 0 || spec.Storage.PolicyRef != "")) {
 		return invalid(resourcev1.FailureStorageInvalid, "persistent storage requires a bounded positive size")
 	}
 	if definition.Storage.Required && !spec.Storage.Persistent {

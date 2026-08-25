@@ -504,7 +504,7 @@ func workflowTarget(ctx context.Context, authority registry.API, projectID strin
 		target.Exposure = "public"
 	}
 	if target.CPUMilli == 0 {
-		target.CPUMilli = 250
+		target.CPUMilli = 100
 	}
 	if target.MemoryBytes == 0 {
 		target.MemoryBytes = 256 << 20

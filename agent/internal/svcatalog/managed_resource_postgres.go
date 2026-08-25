@@ -152,7 +152,6 @@ func postgresManagedResourceObjects(spec resourcev1.ManagedResourceSpec, credent
 			"resources":   map[string]any{"requests": map[string]any{"storage": strconv.FormatInt(spec.Storage.SizeBytes, 10)}},
 		},
 	}
-	readiness := `u=$(cat /run/opsi-postgres/username); d=$(cat /run/opsi-postgres/database); export PGPASSWORD=$(cat /run/opsi-postgres/password); pg_isready -q -h 127.0.0.1 -U "$u" -d "$d" && test "$(psql -h 127.0.0.1 -U "$u" -d "$d" -tAc 'SELECT 1')" = 1`
 	container := map[string]any{
 		"name": "postgres", "image": spec.Image, "imagePullPolicy": "IfNotPresent",
 		"ports": []any{map[string]any{"name": "postgres", "containerPort": int32(5432), "protocol": "TCP"}},
@@ -168,7 +167,7 @@ func postgresManagedResourceObjects(spec resourcev1.ManagedResourceSpec, credent
 			map[string]any{"name": postgresDataVolume, "mountPath": postgresDataMount},
 			map[string]any{"name": "server-credential", "mountPath": postgresSecretDir, "readOnly": true},
 		},
-		"readinessProbe": map[string]any{"exec": map[string]any{"command": []any{"sh", "-ec", readiness}}, "initialDelaySeconds": 2, "periodSeconds": 2, "timeoutSeconds": 3, "failureThreshold": 30},
+		"readinessProbe": map[string]any{"tcpSocket": map[string]any{"port": "postgres"}, "initialDelaySeconds": 2, "periodSeconds": 2, "timeoutSeconds": 1, "failureThreshold": 30},
 	}
 	podSpec := map[string]any{
 		"containers": []any{container},

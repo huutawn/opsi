@@ -101,6 +101,16 @@ func preMutationFailureRecord(intent deploymentv1.RolloutIntent, err error) depl
 	return record
 }
 
+func preMutationResult(intent deploymentv1.RolloutIntent, lease cloudrelay.DeploymentLease, code, message string, retryable bool) cloudrelay.DeploymentResult {
+	failure := deploymentv1.NewRolloutError(code, deploy.RedactSensitive(message), retryable)
+	failure.FailurePhase = deploymentv1.FailurePhasePreMutation
+	result, terminal := resultFromRollout(intent, deploymentv1.RolloutRecord{}, failure, lease)
+	if !terminal {
+		return deploymentFailure(lease, code, message)
+	}
+	return result
+}
+
 func rolloutFailure(err error, fallbackCode string) *deploymentv1.RolloutError {
 	var typed *deploymentv1.RolloutError
 	if errors.As(err, &typed) && typed.Code != "" {

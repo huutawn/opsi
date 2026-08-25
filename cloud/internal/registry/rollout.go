@@ -320,7 +320,7 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 	if result.WorkloadSpecHash != job.RolloutIntent.Desired.WorkloadSpecHash || result.ExposureSpecHash != job.RolloutIntent.Desired.ExposureSpecHash || result.DesiredDigest != job.RolloutIntent.Desired.Image.Digest || result.PreviousDigest != job.RolloutIntent.PreviousDigest || !validRolloutHash(result.StateHash) || !validOptionalRolloutHash(result.ReadinessEvidenceHash) || result.Attempt != job.RolloutIntent.Attempt || !validSanitizedResources(result.Resources) || len(result.FailureCode) > 128 || len(result.FailureMessageRedacted) > deploymentv1.MaxRolloutErrorBytes {
 		return fmt.Errorf("rollout result hashes or digests do not match the leased intent")
 	}
-	if result.RolloutState != job.RolloutState && !deploymentv1.CanTransitionRollout(job.RolloutState, result.RolloutState) {
+	if !deploymentv1.CanCompleteRollout(job.RolloutState, result.RolloutState) {
 		return fmt.Errorf("rollout terminal result is out of order")
 	}
 	if result.FailureCode == "" && result.FailurePhase != "" || result.FailureCode != "" && !deploymentv1.IsRolloutFailurePhase(result.FailurePhase) {

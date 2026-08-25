@@ -88,6 +88,9 @@ func TestRolloutIntentAndTransitionAllowlist(t *testing.T) {
 	if !CanTransitionRollout(RolloutStatePrepared, RolloutStateApplying) || CanTransitionRollout(RolloutStatePrepared, RolloutStateSucceeded) || CanTransitionRollout(RolloutStateSucceeded, RolloutStateApplying) {
 		t.Fatal("rollout state transition allowlist is not fail-closed")
 	}
+	if !CanCompleteRollout(RolloutStateApplying, RolloutStateCleaned) || !CanCompleteRollout(RolloutStateApplying, RolloutStateSucceeded) || CanCompleteRollout(RolloutStateSucceeded, RolloutStateCleaned) {
+		t.Fatal("rollout terminal reachability is not fail-closed")
+	}
 	changed := intent
 	changed.Desired.Image.Digest = "sha256:" + strings.Repeat("e", 64)
 	changed.Desired.Image.Reference = changed.Desired.Image.Repository + "@" + changed.Desired.Image.Digest

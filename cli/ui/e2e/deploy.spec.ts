@@ -19,10 +19,8 @@ test("Deploy replaces legacy action URLs and approves the exact reviewed plan", 
 	await page.goto("/?project=proj-1&view=delivery&tab=pipeline");
 	await expect(page).toHaveURL(/view=deploy/);
 	await expect(page.getByRole("heading", { name: "Deploy", exact: true })).toBeVisible();
-	await expect(page.getByRole("heading", { name: "Review plan" })).toBeVisible();
-	await expect(page.getByText("identity-api", { exact: true }).first()).toBeVisible();
-	await expect(page.getByText("identity-web", { exact: true }).first()).toBeVisible();
-	await expect(page.getByText("Generated and securely stored", { exact: true })).toBeVisible();
+	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
+	await expect(page.getByText("identity-api:8080 · identity-web:3000", { exact: true })).toBeVisible();
 	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toBeEnabled();
 
 	const approve = page.getByRole("button", { name: "Approve & Deploy" });
@@ -46,9 +44,10 @@ test("viewer can inspect the reviewed plan but sees no mutation control", async 
 	await mockDeployAPI(page, () => run, () => run, "viewer");
 
 	await page.goto("/?project=proj-1&view=deploy");
-	await expect(page.getByRole("heading", { name: "Review plan" })).toBeVisible();
+	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
 	await expect(page.getByText("Your role has read-only access to this run.")).toBeVisible();
 	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toHaveCount(0);
+	await page.getByText("View or edit full detected configuration").click();
 	await expect(page.getByLabel("Canonical key").first()).toBeDisabled();
 });
 
@@ -60,6 +59,31 @@ test("missing target shows Connect server before any mutation is running", async
 	await page.goto("/?project=proj-1&view=deploy");
 	await expect(page.getByRole("button", { name: "Connect server" })).toBeVisible();
 	await expect(page.getByRole("button", { name: "Working…" })).toHaveCount(0);
+});
+
+test("SSH bootstrap reports live progress and resumes analysis when the runtime is ready", async ({ page }) => {
+	let run = deploymentRun("awaiting_input");
+	(run.plan.issues as Array<Record<string, unknown>>).push({ code: "TARGET_SERVER_REQUIRED", message: "No Ready project server is available.", resolution: "Connect a server.", blocking: true });
+	let bootstrapStatus = "installing_agent";
+	let runtimeStatus = "provisioning";
+	await mockDeployAPI(page, () => run, (_body, name) => {
+		if (name === "analyze") run = deploymentRun("awaiting_approval");
+		return run;
+	}, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		bootstrapSession: () => ({ id: "boot-1", status: bootstrapStatus, public_host: "103.252.137.163", role: "first_server", auth_method: "private_key", attempt_count: 1, max_attempts: 3, created_at: "2026-08-25T00:00:00Z" }),
+		bootstrapEvents: () => [{ id: `event-${bootstrapStatus}`, step: bootstrapStatus, message_redacted: bootstrapStatus === "completed" ? "bootstrap completed after verified Agent heartbeat" : "staging verified Opsi Agent release", progress_percent: bootstrapStatus === "completed" ? 100 : 65, created_at: "2026-08-25T00:00:01Z" }],
+		placement: () => ({ ...placementFacts(), runtimes: [{ ...placementFacts().runtimes[0], status: runtimeStatus }] }),
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("heading", { name: "Connecting 103.252.137.163" })).toBeVisible();
+	await expect(page.getByRole("progressbar", { name: "Server bootstrap progress" })).toHaveAttribute("value", "65");
+	await expect(page.getByRole("button", { name: "Connecting server…" })).toBeDisabled();
+
+	bootstrapStatus = "completed";
+	runtimeStatus = "ready";
+	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toBeVisible({ timeout: 8_000 });
 });
 
 test("truncated analysis submits a canonical scope on the same run", async ({ page }) => {
@@ -88,6 +112,7 @@ test("export is previewed before an operator creates a pull request", async ({ p
 	});
 
 	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
 	await page.getByRole("button", { name: "Export configuration" }).click();
 	const dialog = page.getByRole("dialog", { name: "Review configuration export" });
 	await expect(dialog).toBeVisible();
@@ -102,7 +127,7 @@ test("review plan has no WCAG 2.1 A or AA axe violations", async ({ page }) => {
 	await mockDeployAPI(page, () => run, () => run);
 
 	await page.goto("/?project=proj-1&view=deploy");
-	await expect(page.getByRole("heading", { name: "Review plan" })).toBeVisible();
+	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
 	const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
 	expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);
 });
@@ -132,6 +157,7 @@ test("external secret input is submitted once and removed from rendered state", 
 	});
 
 	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
 	const input = page.getByLabel("Value for oauth-client");
 	await input.fill("one-time-browser-secret");
 	await page.getByRole("button", { name: "Store securely" }).click();
@@ -164,6 +190,18 @@ test("stale review, safe retry, and cancellation each expose one factual action"
 	expect(actions).toEqual(["analyze", "retry", "cancel"]);
 });
 
+test("failed run at the retry limit offers a new deployment instead of an invalid retry", async ({ page }) => {
+	const run = deploymentRun("failed");
+	run.attempt = run.plan.failure_policy.max_attempts;
+	await mockDeployAPI(page, () => run, () => run);
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("button", { name: "Retry failed step" })).toHaveCount(0);
+	await expect(page.getByRole("button", { name: "Export configuration" })).toHaveCount(0);
+	await page.getByRole("button", { name: "New deployment" }).last().click();
+	await expect(page.getByRole("heading", { name: "Choose a repository to deploy" })).toBeVisible();
+});
+
 test("available repository is claimed and analyzed without a page reload", async ({ page }) => {
 	let run: ReturnType<typeof deploymentRun> | null = null;
 	let claimed = false;
@@ -184,7 +222,7 @@ test("available repository is claimed and analyzed without a page reload", async
 	await expect(page.getByLabel("Branch or ref")).toHaveValue("developer");
 	await expect(page.getByLabel("Hostname (optional)")).toHaveValue("identity.example.test");
 	await page.getByRole("button", { name: "Claim & analyze repository" }).click();
-	await expect(page.getByRole("heading", { name: "Review plan" })).toBeVisible();
+	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
 	expect(claimed).toBe(true);
 	expect(createCount).toBe(1);
 	expect(await page.evaluate(() => window.sessionStorage.getItem("opsi:deploy-source:proj-1"))).toBeNull();
@@ -208,7 +246,7 @@ test("main ref with absent optional detections opens review without crashing", a
 	await page.getByLabel("Repository", { exact: true }).selectOption("7");
 	await expect(page.getByLabel("Branch or ref")).toHaveValue("main");
 	await page.getByRole("button", { name: "Analyze repository" }).click();
-	await expect(page.getByRole("heading", { name: "Review plan" })).toBeVisible();
+	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
 	await expect(page).toHaveURL("/?project=proj-1&view=deploy");
 });
 
@@ -266,6 +304,9 @@ type SourceBehavior = {
 	claimFailure?: boolean;
 	onLoginStart?: () => void;
 	onExport?: () => void;
+	bootstrapSession?: () => Record<string, unknown>;
+	bootstrapEvents?: () => Array<Record<string, unknown>>;
+	placement?: () => ReturnType<typeof placementFacts>;
 };
 
 type AuthSelectionBehavior = { authenticated: boolean; selections: number };
@@ -296,12 +337,13 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		else if (/\/deployment-runs\/run-1\/result$/.test(path)) { const run = current(); body = { run_id: "run-1", state: run?.state ?? "awaiting_input", source_sha: hash("d").slice(0, 40), applications: [], verifications: [], capacity: [] }; }
 		else if (/\/deployment-runs\/run-1\/(approve|acknowledge|analyze|retry|cancel)$/.test(path)) body = action(request.postDataJSON(), path.split("/").at(-1));
 		else if (/\/deployment-runs\/run-1$/.test(path)) body = current();
-		else if (path.endsWith("/topology/facts")) body = placementFacts();
+		else if (path.endsWith("/topology/facts")) body = source?.placement?.() ?? placementFacts();
 		else if (path.endsWith("/topology")) body = { schema_version: "opsi.topology_plan/v1", id: "topology-1", project_id: "proj-1", revision: 1, state_hash: hash("b"), plan_hash: hash("c"), assignments: [] };
 		else if (path.endsWith("/nodes")) body = { nodes: [] };
 		else if (path.endsWith("/services")) body = { services: [] };
 		else if (path.endsWith("/deployments")) body = { deployments: [] };
-		else if (path.endsWith("/bootstrap-sessions")) body = { sessions: [] };
+		else if (/\/bootstrap-sessions\/boot-1\/events$/.test(path) && source?.bootstrapEvents) body = source.bootstrapEvents();
+		else if (path.endsWith("/bootstrap-sessions")) body = { sessions: source?.bootstrapSession ? [source.bootstrapSession()] : [] };
 		else if (path.endsWith("/build-records")) body = { records: [] };
 		else if (path.endsWith("/audit")) body = { events: [] };
 		else if (path.endsWith("/incidents")) body = { source: "agent", payload_policy: "redacted", incidents: [] };

@@ -18,6 +18,7 @@ import (
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
 
@@ -43,12 +44,20 @@ func (e deploymentWorkflowExecutor) Execute(ctx context.Context, run deploymentw
 		}
 	}
 	if step == deploymentworkflow.StateProvisioning {
-		current, err := e.server.currentWorkflowAuthority(ctx, run.ProjectID, run.ID)
-		if err != nil {
-			return failedStep("PLAN_AUTHORITY_UNAVAILABLE", "The approved plan authority could not be confirmed.", "Restore Cloud authority storage and retry.", true), err
-		}
-		if current != run.Approval.AuthorityRevisions {
-			return deploymentworkflow.StepResult{Stale: true, FailureMessage: "A canonical plan authority changed after approval.", NextAction: "Analyze and review the current plan again."}, nil
+		if provisioningAuthorityEstablished(run.Refs) {
+			if reason, err := e.checkpointStale(ctx, run); err != nil {
+				return failedStep("AUTHORITY_CHECKPOINT_UNAVAILABLE", "A provisioning authority checkpoint could not be read.", "Restore authority storage and retry.", true), err
+			} else if reason != "" {
+				return deploymentworkflow.StepResult{Stale: true, FailureMessage: reason, NextAction: "Analyze and review the current canonical facts again."}, nil
+			}
+		} else {
+			current, err := e.server.currentWorkflowAuthority(ctx, run.ProjectID, run.ID)
+			if err != nil {
+				return failedStep("PLAN_AUTHORITY_UNAVAILABLE", "The approved plan authority could not be confirmed.", "Restore Cloud authority storage and retry.", true), err
+			}
+			if current != run.Approval.AuthorityRevisions {
+				return deploymentworkflow.StepResult{Stale: true, FailureMessage: "A canonical plan authority changed after approval.", NextAction: "Analyze and review the current plan again."}, nil
+			}
 		}
 	}
 	switch step {
@@ -69,6 +78,15 @@ func (e deploymentWorkflowExecutor) Execute(ctx context.Context, run deploymentw
 	default:
 		return failedStep("DEPLOYMENT_STEP_INVALID", "The deployment workflow step is invalid.", "Create a new deployment run.", false), nil
 	}
+}
+
+func provisioningAuthorityEstablished(refs deploymentworkflow.AuthorityRefs) bool {
+	for _, checkpoint := range refs.Checkpoints {
+		if checkpoint.Step == deploymentworkflow.StateProvisioning && (checkpoint.Kind == deploymentworkflow.AuthorityResource || checkpoint.Kind == deploymentworkflow.AuthorityTopologyPlan) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e deploymentWorkflowExecutor) checkpointStale(ctx context.Context, run deploymentworkflow.Run) (string, error) {
@@ -191,14 +209,16 @@ func (e deploymentWorkflowExecutor) build(ctx context.Context, run deploymentwor
 		if byID[applicationID].ID == "" {
 			return failedStep("BUILD_SOURCE_STALE", "An approved application source no longer exists.", "Analyze and review the plan again.", false), nil
 		}
-		job, _, createErr := e.server.BuildJobs.Create(ctx, run.ProjectID, applicationID, run.CreatedBy, workflowKey(run.ID, "build", fmt.Sprintf("%s-attempt-%d", applicationID, run.Attempt)))
+		job, _, createErr := e.server.BuildJobs.Create(ctx, run.ProjectID, applicationID, run.CreatedBy, workflowExecutionKey(run, "build", fmt.Sprintf("%s-attempt-%d", applicationID, run.Attempt)))
 		if createErr != nil {
 			return workflowFailure(createErr, "BUILD_CREATE_FAILED", "Correct the build source and retry."), createErr
 		}
 		refs.Checkpoints = append(refs.Checkpoints, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityBuildJob, job.ID, 0, authorityStateHash(job), deploymentworkflow.StateBuilding))
 		if job.Status == buildjob.StatusReady {
 			if _, dispatchErr := e.server.BuildJobs.Dispatch(ctx, run.ProjectID, applicationID, job.ID); dispatchErr != nil {
-				return workflowFailure(dispatchErr, "BUILD_DISPATCH_FAILED", "Restore the configured build executor and retry."), dispatchErr
+				if buildjob.Code(dispatchErr) != "DUPLICATE_ACTIVE_DISPATCH" {
+					return workflowFailure(dispatchErr, "BUILD_DISPATCH_FAILED", "Restore the configured build executor and retry."), dispatchErr
+				}
 			}
 			pending = true
 			continue
@@ -278,13 +298,44 @@ func (e deploymentWorkflowExecutor) ensurePolicies(ctx context.Context, run depl
 		if record.Build.PlanHash == "" {
 			draft.AllowedBuildPlanHashes = nil
 		}
-		result, err := e.server.Policies.Apply(ctx, run.ProjectID, run.CreatedBy, workflowKey(run.ID, "policy", record.ServiceKey), deploymentpolicyv1.ApplyRequest{Draft: draft})
+		preview, err := e.server.Policies.Preview(ctx, run.ProjectID, draft)
+		if err != nil {
+			return nil, err
+		}
+		policies, err := e.server.Policies.List(ctx, run.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		if policy, duplicates, ok := reusableWorkflowPolicy(policies, preview.PolicyHash); ok {
+			for _, duplicate := range duplicates {
+				if _, err := e.server.Policies.Disable(ctx, run.ProjectID, duplicate.ID, run.CreatedBy, workflowExecutionKey(run, "policy-deduplicate", duplicate.ID), deploymentpolicyv1.DisableRequest{ExpectedRevision: duplicate.Revision, ExpectedStateHash: duplicate.StateHash}); err != nil {
+					return nil, err
+				}
+			}
+			refs = append(refs, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityDeploymentPolicy, policy.ID, policy.Revision, policy.StateHash, deploymentworkflow.StatePreflighting))
+			continue
+		}
+		result, err := e.server.Policies.Apply(ctx, run.ProjectID, run.CreatedBy, workflowExecutionKey(run, "policy", record.ServiceKey), deploymentpolicyv1.ApplyRequest{Draft: draft})
 		if err != nil {
 			return nil, err
 		}
 		refs = append(refs, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityDeploymentPolicy, result.Policy.ID, result.Policy.Revision, result.Policy.StateHash, deploymentworkflow.StatePreflighting))
 	}
 	return refs, nil
+}
+
+func reusableWorkflowPolicy(policies []deploymentpolicyv1.Policy, policyHash string) (deploymentpolicyv1.Policy, []deploymentpolicyv1.Policy, bool) {
+	matches := make([]deploymentpolicyv1.Policy, 0, 2)
+	for _, policy := range policies {
+		if policy.Draft.Enabled && policy.PolicyHash == policyHash {
+			matches = append(matches, policy)
+		}
+	}
+	if len(matches) == 0 {
+		return deploymentpolicyv1.Policy{}, nil, false
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	return matches[0], matches[1:], true
 }
 
 func (e deploymentWorkflowExecutor) resolvePreflights(ctx context.Context, run deploymentworkflow.Run, acknowledge bool) ([]deploymentv1.PreflightResult, error) {
@@ -330,10 +381,10 @@ func (e deploymentWorkflowExecutor) deploy(ctx context.Context, run deploymentwo
 		if index < len(deploymentJobIDs) {
 			job, err = reader.GetDeployment(run.ProjectID, deploymentJobIDs[index])
 			if err == nil && job.Status == deploymentv1.StateFailed && run.Attempt > 1 {
-				job, _, err = reader.RetryDeployment(run.ProjectID, job.ID, workflowKey(run.ID, "deployment-retry", fmt.Sprintf("%s-attempt-%d", job.ID, run.Attempt)), run.ID)
+				job, _, err = reader.RetryDeployment(run.ProjectID, job.ID, workflowExecutionKey(run, "deployment-retry", fmt.Sprintf("%s-attempt-%d", job.ID, run.Attempt)), run.ID)
 			}
 		} else {
-			request := deploymentv1.CreateRequest{SchemaVersion: deploymentv1.JobSchemaVersion, BuildRecordID: recordID, EnvironmentID: run.Plan.Target.EnvironmentID, DeploymentBatch: applicationKeys(run), ExpectedPreflightHash: preflights[index].PreflightHash, WarningAcknowledgements: preflights[index].WarningIDs(), IdempotencyKey: workflowKey(run.ID, "deploy", recordID)}
+			request := deploymentv1.CreateRequest{SchemaVersion: deploymentv1.JobSchemaVersion, BuildRecordID: recordID, EnvironmentID: run.Plan.Target.EnvironmentID, DeploymentBatch: applicationKeys(run), ExpectedPreflightHash: preflights[index].PreflightHash, WarningAcknowledgements: preflights[index].WarningIDs(), IdempotencyKey: workflowExecutionKey(run, "deploy", recordID)}
 			plan, authorityErr := e.server.Topology.Get(ctx, run.ProjectID)
 			if authorityErr != nil {
 				return workflowFailure(authorityErr, "TOPOLOGY_READ_FAILED", "Review current placement and retry."), authorityErr
@@ -495,6 +546,14 @@ func workflowKey(runID, authority, subject string) string {
 	return runID + "-" + authority + "-" + hex.EncodeToString(sum[:6])
 }
 
+func workflowExecutionKey(run deploymentworkflow.Run, authority, subject string) string {
+	execution := run.Plan.Hash
+	if run.Approval != nil && !run.Approval.ApprovedAt.IsZero() {
+		execution = run.Approval.ApprovedAt.UTC().String()
+	}
+	return workflowKey(run.ID, authority, execution+"\x00"+subject)
+}
+
 func applicationKeys(run deploymentworkflow.Run) []string {
 	values := make([]string, 0, len(run.Plan.Applications))
 	for _, app := range run.Plan.Applications {
@@ -513,7 +572,7 @@ func applicationExposure(run deploymentworkflow.Run, key string) string {
 		return run.Plan.Target.Exposure
 	}
 	for _, dependency := range run.Plan.Dependencies {
-		if dependency.From == key && dependency.Strategy == "same_origin" {
+		if dependency.From == key && (dependency.Strategy == "same_origin" || isApplicationProxyDependency(dependency)) {
 			return "public"
 		}
 	}
@@ -521,6 +580,18 @@ func applicationExposure(run deploymentworkflow.Run, key string) string {
 		return "public"
 	}
 	return "internal"
+}
+
+func isApplicationProxyDependency(dependency repositoryanalysis.Dependency) bool {
+	if dependency.Strategy != serviceconfigurationv1.StrategyInternalHTTP {
+		return false
+	}
+	for _, injection := range dependency.Injections {
+		if injection.EnvironmentName == "BACKEND_URL" && injection.SymbolicSource == "application.internal_url" {
+			return true
+		}
+	}
+	return false
 }
 
 func applicationHostname(run deploymentworkflow.Run, key string) string {

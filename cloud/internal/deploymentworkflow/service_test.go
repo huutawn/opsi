@@ -43,6 +43,28 @@ func TestPlanHashDeterministicAndSecretRedacted(t *testing.T) {
 	_ = service
 }
 
+func TestApprovalRejectsInvalidManagedStorageBeforeProvisioning(t *testing.T) {
+	service, run, authority := fixture(t)
+	run.Plan.Resources = []repositoryanalysis.Resource{{LogicalName: "postgres", Type: "postgres", Managed: true, Required: true, Persistence: &repositoryanalysis.Persistence{Persistent: true}}}
+	if err := refreshHash(&run.Plan); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := service.Store.Save(context.Background(), run, run.Revision, Event{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Approve(context.Background(), stored.ProjectID, stored.ID, "user-1", stored.Plan.Hash, authority); errorCode(err) != "DEPLOYMENT_PLAN_INVALID" {
+		t.Fatalf("approval error=%v", err)
+	}
+	current, err := service.Get(context.Background(), stored.ProjectID, stored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != StateAwaitingApproval || current.Attempt != 0 || current.Approval != nil {
+		t.Fatalf("invalid plan crossed approval boundary: %+v", current)
+	}
+}
+
 func TestPlanHashBindsAnalysisScopeCoverageAndTruncationReason(t *testing.T) {
 	_, run, _ := fixture(t)
 	base := run.Plan.Hash
@@ -99,6 +121,14 @@ func TestStaleRunCanBeAnalyzedAgainAndRequiresFreshApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stale.Attempt = 2
+	stale.Refs = Checkpoints(AuthorityBinding, StateProvisioning, "binding-from-previous-attempt")
+	stale.PreflightHash = "preflight-from-previous-attempt"
+	stale.PreflightWarnings = []string{"warning from previous attempt"}
+	stale, err = service.Store.Save(context.Background(), stale, stale.Revision, Event{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	analysis := stale.Analysis
 	analysis.CommitSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	changed.SourceCommitSHA = analysis.CommitSHA
@@ -106,8 +136,11 @@ func TestStaleRunCanBeAnalyzedAgainAndRequiresFreshApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reviewed.State != StateAwaitingApproval || reviewed.Approval != nil || reviewed.Plan.Source.CommitSHA != analysis.CommitSHA || reviewed.Plan.Hash == stale.Plan.Hash {
+	if reviewed.State != StateAwaitingApproval || reviewed.Approval != nil || reviewed.Attempt != 0 || reviewed.Plan.Source.CommitSHA != analysis.CommitSHA || reviewed.Plan.Hash == stale.Plan.Hash {
 		t.Fatalf("reanalyzed=%+v", reviewed)
+	}
+	if len(reviewed.Refs.Checkpoints) != 0 || reviewed.PreflightHash != "" || len(reviewed.PreflightWarnings) != 0 || reviewed.FinishedAt != nil {
+		t.Fatalf("reanalyzed run retained execution facts: %+v", reviewed)
 	}
 }
 

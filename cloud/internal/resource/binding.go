@@ -2,6 +2,7 @@ package resource
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -220,10 +221,16 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 		var mappedSource string
 		if reader, ok := s.Scopes.(interface {
 			GetServiceConfiguration(projectID, serviceID string) (serviceconfigurationv1.Configuration, error)
-		}); ok && authority.binding != nil {
-			if cfg, err := reader.GetServiceConfiguration(projectID, authority.binding.Source.ID); err == nil {
+		}); ok {
+			configurationServiceID := serviceID
+			if authority.binding != nil {
+				configurationServiceID = authority.binding.Source.ID
+			}
+			if cfg, err := reader.GetServiceConfiguration(projectID, configurationServiceID); err == nil {
 				for _, dep := range cfg.Dependencies {
-					if dep.LogicalName == authority.binding.LogicalName {
+					matchesAuthority := authority.binding != nil && dep.LogicalName == authority.binding.LogicalName
+					matchesAuthority = matchesAuthority || authority.binding == nil && dep.TargetKind == "managed_resource" && dep.TargetIdentity == authority.target.ID
+					if matchesAuthority {
 						for _, m := range dep.InjectionMappings {
 							if m.EnvName == reference.EnvName {
 								mappedSource = m.SymbolicSource
@@ -292,7 +299,7 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 				}
 				value = connection.String()
 			} else {
-				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding secret name is unsupported")
+				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, fmt.Sprintf("resource binding secret mapping is unsupported for %s (%s)", reference.EnvName, mappedSource))
 			}
 		}
 		if grouped[reference.SecretID] == nil {

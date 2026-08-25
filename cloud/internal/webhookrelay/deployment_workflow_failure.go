@@ -37,7 +37,7 @@ func (e deploymentWorkflowExecutor) rollback(_ context.Context, run deploymentwo
 		job := rollbacks[source.ID]
 		var err error
 		if job.ID == "" {
-			job, err = e.server.Registry.RollbackDeployment(run.ProjectID, source.ID, run.CreatedBy, workflowKey(run.ID, "rollback", source.ID), run.ID)
+			job, err = e.server.Registry.RollbackDeployment(run.ProjectID, source.ID, run.CreatedBy, workflowExecutionKey(run, "rollback", source.ID), run.ID)
 			if err != nil {
 				return workflowFailure(err, "ROLLBACK_FAILED", "Restore the exact known-good deployment manually."), err
 			}
@@ -80,7 +80,7 @@ func (e deploymentWorkflowExecutor) cleanupFirstDeploy(_ context.Context, run de
 		cleanup := cleanups[source.ID]
 		var err error
 		if cleanup.ID == "" {
-			cleanup, _, err = store.StartFirstDeployCleanup(run.ProjectID, run.CreatedBy, workflowKey(run.ID, "first-cleanup", source.ID), run.ID, source.ID)
+			cleanup, _, err = store.StartFirstDeployCleanup(run.ProjectID, run.CreatedBy, workflowExecutionKey(run, "first-cleanup", source.ID), run.ID, source.ID)
 			if err != nil {
 				return workflowFailure(err, "FIRST_DEPLOY_CLEANUP_FAILED", "Inspect the exact failed deployment before manual cleanup."), err
 			}

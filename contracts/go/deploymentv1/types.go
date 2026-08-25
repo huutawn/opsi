@@ -40,13 +40,12 @@ const (
 var (
 	serviceKeyPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	shaPattern            = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	envNamePattern        = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+	envNamePattern        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 	digestPattern         = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	repositoryPattern     = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$`)
 	cpuQuantityPattern    = regexp.MustCompile(`^(?:[1-9][0-9]{0,6}m|[1-9][0-9]{0,3})$`)
 	memoryQuantityPattern = regexp.MustCompile(`^[1-9][0-9]{0,9}(?:Ki|Mi|Gi|Ti)?$`)
 	opaqueIDPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	sensitiveEnvPattern   = regexp.MustCompile(`(^|_)(TOKEN|PASSWORD|SECRET|PRIVATE_KEY|ACCESS_KEY|API_KEY|CREDENTIAL)(_|$)`)
 )
 
 type ImmutableImage struct {
@@ -279,7 +278,7 @@ func ValidateEnvironment(environment []EnvironmentVariable, secretReferences []S
 		if !envNamePattern.MatchString(item.Name) || len(item.Value) > 4096 || strings.ContainsRune(item.Value, '\x00') {
 			return errors.New("environment entry is invalid")
 		}
-		if sensitiveEnvPattern.MatchString(item.Name) {
+		if IsSecretLikeEnvironmentName(item.Name) {
 			return errors.New("secret-like environment names require a secret reference")
 		}
 		if _, exists := seen[item.Name]; exists {
@@ -297,6 +296,31 @@ func ValidateEnvironment(environment []EnvironmentVariable, secretReferences []S
 		seen[item.EnvName] = struct{}{}
 	}
 	return nil
+}
+
+// IsSecretLikeEnvironmentName reports whether a plain environment value could
+// contain secret material. Configuration names that merely describe token
+// lifetimes (for example Jwt__AccessTokenMinutes) remain valid, while terminal
+// secret names and connection strings must use SecretReference.
+func IsSecretLikeEnvironmentName(value string) bool {
+	normalized := strings.ToLower(value)
+	parts := strings.FieldsFunc(normalized, func(r rune) bool { return r == '_' })
+	for _, part := range parts {
+		switch part {
+		case "password", "passwd", "secret", "token", "credential":
+			return true
+		}
+	}
+	compact := strings.ReplaceAll(normalized, "_", "")
+	if strings.Contains(compact, "connectionstring") {
+		return true
+	}
+	for _, suffix := range []string{"password", "passwd", "secret", "token", "credential", "privatekey", "signingkey", "accesskey", "apikey", "key"} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateProbe(probe *Probe, containerPort int32) error {

@@ -473,13 +473,15 @@ func TestBrowserAuthUsesGitHubProviderAndOnboardsFirstLogin(t *testing.T) {
 		}
 	})
 
-	t.Run("first login cannot join requested project", func(t *testing.T) {
+	t.Run("first login ignores stale requested project", func(t *testing.T) {
 		server, projectID, store := linkedGitHubServer(t, successfulGitHubTransport(t))
 		store.OAuthIdentities = map[string]string{"generic\x00" + testGitHubUserID: "user-1"}
 		_, authorizeURL, _ := startBrowserAuth(t, server, projectID)
 		response := callbackRequest(server, authorizeURL.Query().Get("state"), "code")
-		requireBrowserAuthErrorRedirect(t, response, "OPSI_MEMBERSHIP_REQUIRED")
-		if store.OAuthIdentities[githubProvider+"\x00"+testGitHubUserID] == "" || len(store.Candidates) != 2 {
+		if response.Code != http.StatusFound || urlQuery(response.Header().Get("Location"), "code") == "" {
+			t.Fatalf("status=%d location=%s", response.Code, response.Header().Get("Location"))
+		}
+		if store.OAuthIdentities[githubProvider+"\x00"+testGitHubUserID] == "" || len(store.Candidates) != 3 || store.Candidates[2].ProjectID != "proj-oauth-2" {
 			t.Fatalf("unexpected requested-project onboarding state: candidates=%+v identities=%+v", store.Candidates, store.OAuthIdentities)
 		}
 	})
@@ -992,8 +994,8 @@ func TestBrowserAuthMultiProjectSelectionFlow(t *testing.T) {
 	server.HTTPClient = newGitHubHTTPClient()
 	server.HTTPClient.Transport = transport
 
-	// Start auth without project specified
-	_, authURL, _ := startBrowserAuth(t, server, "")
+	// A stale URL project must not bypass membership or block project selection.
+	_, authURL, _ := startBrowserAuth(t, server, "stale-project")
 	state := authURL.Query().Get("state")
 
 	// Callback from GitHub

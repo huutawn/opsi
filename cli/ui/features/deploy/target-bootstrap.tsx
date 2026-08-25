@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Button, Icon } from "@/components/ui/primitives";
+import { Button, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
+import type { BootstrapSession, TimelineEvent } from "@/lib/contracts/registry";
 
 export function BootstrapDialog({ console, onClose, onCreated }: { console: ConsoleController; onClose: () => void; onCreated: () => Promise<void> }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -21,4 +22,18 @@ export function BootstrapCommand({ command }: { command: string }) {
   const [copyState, setCopyState] = useState("Copy command");
   async function copy() { try { await navigator.clipboard.writeText(command); setCopyState("Copied"); } catch { setCopyState("Copy failed"); } }
   return <section aria-labelledby="bootstrap-command-title" className="bootstrapCommand"><div><div><p className="eyebrow">One-time scoped command</p><h4 id="bootstrap-command-title">Copy, then run on the VPS as root</h4></div><button className="primary" onClick={() => void copy()} type="button">{copyState}</button></div><code>{command}</code><p role="status">Waiting for server. Refresh restores lifecycle facts, not this one-time command.</p></section>;
+}
+
+export function BootstrapProgress({ events, session }: { events: TimelineEvent[]; session: BootstrapSession }) {
+  const recentEvents = events.slice(-4).reverse();
+  const latest = events.at(-1);
+  const progress = latest?.progress_percent ?? Math.min(100, Math.max(0, (session.checkpoint?.next_step_index ?? 0) * 25));
+  return <section aria-busy={session.status !== "completed"} aria-labelledby="bootstrap-progress-title" aria-live="polite" className="space-y-4 border border-outline-variant/30 bg-surface-container-low p-4 sm:p-5">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div><p className="eyebrow">Server connection</p><h3 className="text-base font-bold text-on-surface" id="bootstrap-progress-title">Connecting {session.public_host || "server"}</h3><p className="mt-1 text-xs text-on-surface-variant">Session {session.id} · attempt {session.attempt_count || 1} of {session.max_attempts || 1}</p></div>
+      <StatusBadge value={session.status} />
+    </div>
+    <div className="space-y-1.5"><div className="flex justify-between text-xs text-on-surface-variant"><span>{latest?.message_redacted || "Waiting for the bootstrap worker."}</span><span>{progress}%</span></div><progress aria-label="Server bootstrap progress" className="h-2 w-full accent-primary" max={100} value={progress} /></div>
+    {recentEvents.length > 0 && <ol aria-label="Latest bootstrap events" className="space-y-2 border-t border-outline-variant/20 pt-3">{recentEvents.map((event) => <li className="flex items-start justify-between gap-4 text-xs" key={event.id}><span className="text-on-surface">{event.message_redacted}</span><span className="shrink-0 font-mono text-on-surface-variant">{event.progress_percent}%</span></li>)}</ol>}
+  </section>;
 }
