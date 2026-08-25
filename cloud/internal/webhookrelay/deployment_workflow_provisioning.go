@@ -331,10 +331,6 @@ func (e deploymentWorkflowExecutor) ensureConfigurations(ctx context.Context, ru
 	sort.Strings(applicationKeys)
 	for _, key := range applicationKeys {
 		service := apps[key]
-		current, err := e.server.Registry.GetServiceConfiguration(run.ProjectID, service.ID)
-		if err != nil {
-			return nil, nil, err
-		}
 		draft := serviceconfigurationv1.ServiceConfigurationDraft{SchemaVersion: serviceconfigurationv1.SchemaVersion}
 		for _, application := range run.Plan.Applications {
 			if application.Key != key {
@@ -421,7 +417,14 @@ func (e deploymentWorkflowExecutor) ensureConfigurations(ctx context.Context, ru
 			}
 			draft.Bindings = append(draft.Bindings, serviceconfigurationv1.Binding{Kind: binding.Kind, TargetServiceID: target.ID, TargetServiceKey: binding.To, Path: binding.Path})
 		}
-		_, err = e.server.Registry.ApplyServiceConfiguration(run.ProjectID, service.ID, run.CreatedBy, workflowExecutionKey(run, "config", key), registry.ServiceConfigurationApplyRequest{Draft: draft, ExpectedRevision: current.Revision, ExpectedStateHash: current.StateHash})
+		preview, err := e.server.Registry.PreviewServiceConfiguration(run.ProjectID, service.ID, draft)
+		if err != nil {
+			return nil, nil, err
+		}
+		if preview.CurrentStateHash == preview.DraftStateHash {
+			continue
+		}
+		_, err = e.server.Registry.ApplyServiceConfiguration(run.ProjectID, service.ID, run.CreatedBy, workflowExecutionKey(run, "config", key), registry.ServiceConfigurationApplyRequest{Draft: preview.Configuration, ExpectedRevision: preview.CurrentRevision, ExpectedStateHash: preview.CurrentStateHash})
 		if err != nil {
 			return nil, nil, err
 		}

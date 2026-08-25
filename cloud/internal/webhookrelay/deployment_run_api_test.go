@@ -221,6 +221,59 @@ func TestProvisioningDefersApplicationCheckpointUntilConfigurationIsApplied(t *t
 	}
 }
 
+func TestProvisioningReusesCanonicalServiceConfigurationOnRetry(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-1", "Configuration", "workflow-configuration", "owner", "workflow-configuration-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := repositoryanalysis.Application{
+		Key:  "owner-repo-api",
+		Name: "api",
+		Environment: map[string]string{
+			"LOG_LEVEL": "info",
+		},
+	}
+	run := deploymentworkflow.Run{
+		ID:        "run-configuration-retry",
+		ProjectID: project.ID,
+		CreatedBy: "owner",
+		Approval:  &deploymentworkflow.Approval{ApprovedAt: time.Unix(100, 0).UTC()},
+		Plan: deploymentworkflow.Plan{
+			Applications: []repositoryanalysis.Application{application},
+			Target:       deploymentworkflow.Target{EnvironmentID: "env-1", RuntimeID: "runtime-1"},
+		},
+	}
+	service, err := server.Registry.CreateService(project.ID, applicationServiceDraft(run, application), "workflow-configuration-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applications := map[string]registry.ServiceRecord{application.Key: service}
+	executor := deploymentWorkflowExecutor{server: server}
+
+	if _, _, err = executor.ensureConfigurations(t.Context(), run, applications, nil); err != nil {
+		t.Fatal(err)
+	}
+	first, err := server.Registry.GetServiceConfiguration(project.ID, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision != 1 {
+		t.Fatalf("first revision=%d", first.Revision)
+	}
+
+	if _, _, err = executor.ensureConfigurations(t.Context(), run, applications, nil); err != nil {
+		t.Fatalf("retry reapplied the same configuration: %v", err)
+	}
+	reused, err := server.Registry.GetServiceConfiguration(project.ID, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.Revision != first.Revision || reused.StateHash != first.StateHash {
+		t.Fatalf("retry mutated canonical configuration: first=%+v reused=%+v", first, reused)
+	}
+}
+
 func TestProvisioningWaitsForStableResourceBindings(t *testing.T) {
 	bindings := []resourcev1.Binding{
 		{ID: "rbind-ready", LogicalName: "redis", Lifecycle: resourcev1.LifecycleReady},
