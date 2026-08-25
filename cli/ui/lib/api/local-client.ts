@@ -966,6 +966,8 @@ function normalizeDeploymentRun(run: DeploymentRun): DeploymentRun {
   run.plan.secrets ??= [];
   run.plan.issues ??= [];
   run.plan.analysis_scope ??= { application_roots: [], exclude_paths: [] };
+  run.plan.analysis_scope.application_roots ??= [];
+  run.plan.analysis_scope.exclude_paths ??= [];
   run.plan.evidence_coverage ??= { candidates_found: 0, candidates_selected: 0, files_inspected: run.analysis?.files_inspected || 0, bytes_inspected: run.analysis?.bytes_inspected || 0 };
   run.authority_refs ??= {};
   return run;

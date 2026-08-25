@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { LocalClient } from "../../lib/api/local-client.ts";
+
 const view = new URL("./deploy-view.tsx", import.meta.url);
 const review = new URL("./plan-review.tsx", import.meta.url);
 const sourceStep = new URL("./source-step.tsx", import.meta.url);
@@ -56,4 +58,29 @@ test("Source owns GitHub discovery, installation connection, and repository clai
   assert.match(viewSource, /await client\.claimGitHubRepository[\s\S]+await client\.githubRepositories[\s\S]+await start\(\)/);
   assert.match(viewSource, /Sign in again/);
   assert.match(api, /\/api\/local\/projects\/\$\{projectID\}\/github\/installations\/discover/);
+});
+
+test("deployment run normalization fills empty analysis scope arrays", async () => {
+  const client = new LocalClient();
+  client.call = async () => ({
+    deployment_runs: [{
+      id: "run-1",
+      plan: {
+        applications: [],
+        resources: [],
+        dependencies: [],
+        bindings: [],
+        secrets: [],
+        issues: [{ code: "ANALYSIS_TRUNCATED", blocking: true }],
+        analysis_scope: {},
+      },
+      analysis: {},
+    }],
+  });
+
+  const response = await client.deploymentRuns("proj-1");
+  assert.deepEqual(response.deployment_runs[0].plan.analysis_scope, {
+    application_roots: [],
+    exclude_paths: [],
+  });
 });
