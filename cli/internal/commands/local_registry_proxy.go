@@ -168,12 +168,12 @@ func startLocalInstallationClaim(w http.ResponseWriter, r *http.Request, cfg con
 	}
 	expiresAt := time.Now().UTC().Add(5 * time.Minute)
 	flow.mu.Lock()
-	for pendingState, expiry := range flow.installationClaims {
-		if time.Now().UTC().After(expiry) {
+	for pendingState, pending := range flow.installationClaims {
+		if time.Now().UTC().After(pending.ExpiresAt) {
 			delete(flow.installationClaims, pendingState)
 		}
 	}
-	flow.installationClaims[state] = expiresAt
+	flow.installationClaims[state] = localInstallationClaimPending{ProjectID: projectID, ExpiresAt: expiresAt}
 	flow.mu.Unlock()
 	writeLocalJSON(w, http.StatusOK, map[string]any{"authorization_url": started.AuthorizationURL, "status": "started", "expires_at": expiresAt})
 	return true
@@ -243,12 +243,12 @@ func completeLocalInstallationClaim(w http.ResponseWriter, r *http.Request, cfg 
 	}
 	grant, state := r.URL.Query().Get("grant"), r.URL.Query().Get("state")
 	flow.mu.Lock()
-	expiresAt, ok := flow.installationClaims[state]
+	pending, ok := flow.installationClaims[state]
 	if ok {
 		delete(flow.installationClaims, state)
 	}
 	flow.mu.Unlock()
-	if !ok || grant == "" || time.Now().UTC().After(expiresAt) {
+	if !ok || grant == "" || time.Now().UTC().After(pending.ExpiresAt) {
 		writeLocalError(w, r, http.StatusUnauthorized, "GITHUB_INSTALLATION_CALLBACK_INVALID", "installation authorization callback expired, was reused, or is invalid")
 		return
 	}
@@ -269,7 +269,10 @@ func completeLocalInstallationClaim(w http.ResponseWriter, r *http.Request, cfg 
 		writeLocalError(w, r, localCloudStatus(err), "GITHUB_INSTALLATION_CLAIM_REDEEM_FAILED", "Cloud rejected the one-time installation grant; restart the connection flow")
 		return
 	}
-	location := "/?github=claimed&installation_id=" + strconv.FormatInt(result.Installation.InstallationID, 10)
+	location := localDeployCallbackRedirect(pending.ProjectID, url.Values{
+		"github":          {"claimed"},
+		"installation_id": {strconv.FormatInt(result.Installation.InstallationID, 10)},
+	})
 	http.Redirect(w, r, location, http.StatusFound)
 }
 
@@ -309,7 +312,13 @@ func completeLocalInstallationDiscovery(w http.ResponseWriter, r *http.Request, 
 	flow.mu.Lock()
 	flow.discoveredInstallations[pending.ProjectID] = localInstallationDiscoveryResult{Installations: installations, ExpiresAt: time.Now().UTC().Add(90 * time.Second)}
 	flow.mu.Unlock()
-	http.Redirect(w, r, "/?github=discovered", http.StatusFound)
+	http.Redirect(w, r, localDeployCallbackRedirect(pending.ProjectID, url.Values{"github": {"discovered"}}), http.StatusFound)
+}
+
+func localDeployCallbackRedirect(projectID string, query url.Values) string {
+	query.Set("project", projectID)
+	query.Set("view", "deploy")
+	return "/?" + query.Encode()
 }
 
 func localInstallationClaimIDs(path string) (string, int64, bool) {

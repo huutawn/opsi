@@ -142,7 +142,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	localSession := newLocalSessionToken()
 	authFlow := &localAuthFlow{
 		states:                  map[string]time.Time{},
-		installationClaims:      map[string]time.Time{},
+		installationClaims:      map[string]localInstallationClaimPending{},
 		installationDiscoveries: map[string]localInstallationDiscoveryPending{},
 		discoveredInstallations: map[string]localInstallationDiscoveryResult{},
 		selections:              map[string]localSelectionState{},
@@ -548,6 +548,11 @@ type localInstallationDiscoveryPending struct {
 	ExpiresAt time.Time
 }
 
+type localInstallationClaimPending struct {
+	ProjectID string
+	ExpiresAt time.Time
+}
+
 type localInstallationDiscoveryResult struct {
 	Installations []cloudclient.GitHubInstallation
 	ExpiresAt     time.Time
@@ -556,7 +561,7 @@ type localInstallationDiscoveryResult struct {
 type localAuthFlow struct {
 	mu                      sync.Mutex
 	states                  map[string]time.Time
-	installationClaims      map[string]time.Time
+	installationClaims      map[string]localInstallationClaimPending
 	installationDiscoveries map[string]localInstallationDiscoveryPending
 	discoveredInstallations map[string]localInstallationDiscoveryResult
 	selections              map[string]localSelectionState

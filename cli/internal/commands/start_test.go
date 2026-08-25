@@ -930,7 +930,8 @@ func TestLocalGitHubInstallationClaimRedeemsOnceWithoutBrowserCredential(t *test
 		t.Fatal(err)
 	}
 	_ = res.Body.Close()
-	if res.StatusCode != http.StatusFound || strings.Contains(res.Header.Get("Location"), "grant") {
+	location, parseErr := url.Parse(res.Header.Get("Location"))
+	if res.StatusCode != http.StatusFound || parseErr != nil || strings.Contains(res.Header.Get("Location"), "grant") || location.Query().Get("project") != "proj-1" || location.Query().Get("view") != "deploy" || location.Query().Get("github") != "claimed" || location.Query().Get("installation_id") != "77" {
 		t.Fatalf("callback status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
 	}
 	res, err = client.Get(callback)
@@ -940,6 +941,75 @@ func TestLocalGitHubInstallationClaimRedeemsOnceWithoutBrowserCredential(t *test
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("reused callback status=%d", res.StatusCode)
+	}
+}
+
+func TestLocalGitHubInstallationDiscoveryReturnsToDeploy(t *testing.T) {
+	var callbackURL, localState string
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer keychain-pat" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch r.URL.Path {
+		case "/v1/projects/proj-1/github/installations/discover/start":
+			var body struct {
+				LocalCallback string `json:"local_callback"`
+				LocalState    string `json:"local_state"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			callbackURL, localState = body.LocalCallback, body.LocalState
+			_, _ = w.Write([]byte(`{"authorization_url":"https://github.com/login/oauth/authorize?client_id=test"}`))
+		case "/v1/github/installations/discover/redeem":
+			var body struct {
+				Grant string `json:"grant"`
+				State string `json:"state"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Grant != "one-time-grant" || body.State != localState {
+				t.Fatalf("redeem = %+v", body)
+			}
+			_, _ = w.Write([]byte(`{"installations":[{"installation_id":77,"status":"active"}]}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer cloud.Close()
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("keychain-pat"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) { return store, nil }))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/github/installations/discover/start", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Idempotency-Key", "discover-start")
+	req.Header.Set("X-Local-Session", localTestSession(t, server.URL))
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || callbackURL == "" || localState == "" {
+		t.Fatalf("status=%d callback=%q state=%q", res.StatusCode, callbackURL, localState)
+	}
+
+	callback := callbackURL + "?grant=one-time-grant&state=" + url.QueryEscape(localState)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err = client.Get(callback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	location, parseErr := url.Parse(res.Header.Get("Location"))
+	if res.StatusCode != http.StatusFound || parseErr != nil || location.Query().Get("project") != "proj-1" || location.Query().Get("view") != "deploy" || location.Query().Get("github") != "discovered" {
+		t.Fatalf("callback status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
 	}
 }
 
