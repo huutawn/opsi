@@ -382,6 +382,7 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 	}
 	managedEnvironment, managedSecrets, err := s.Resources.ApplicationRuntimeConfiguration(r.Context(), projectID, request.EnvironmentID, service.ID)
 	if err != nil {
+		s.observeConnectionCompileError(err)
 		return result, err
 	}
 	workload.Environment = append(workload.Environment, managedEnvironment...)

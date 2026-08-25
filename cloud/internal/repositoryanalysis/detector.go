@@ -955,6 +955,10 @@ func validateDetected(result *Result) {
 	}
 	for dependencyIndex := range result.Dependencies {
 		dependency := &result.Dependencies[dependencyIndex]
+		if dependency.Protocol != serviceconfigurationv1.ProtocolHTTP && !resourcecompiler.ValidManagedProtocol(dependency.Protocol) {
+			result.Issues = append(result.Issues, Issue{Code: "CONNECTION_PROTOCOL_UNSUPPORTED", Message: "Dependency " + dependency.To + " uses an unsupported managed connection protocol.", Resolution: "Select PostgreSQL, Redis/Valkey, or NATS, or use HTTP for an application dependency.", Blocking: true})
+			continue
+		}
 		for injectionIndex := range dependency.Injections {
 			injection := &dependency.Injections[injectionIndex]
 			if dependency.Protocol == serviceconfigurationv1.ProtocolHTTP {

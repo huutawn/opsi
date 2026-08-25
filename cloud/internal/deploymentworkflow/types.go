@@ -18,6 +18,7 @@ import (
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
 
 const (
@@ -386,6 +387,9 @@ func ValidatePlan(plan Plan) error {
 	for _, dependency := range plan.Dependencies {
 		if !applications[dependency.From] || dependency.To == dependency.From || (!applications[dependency.To] && !resources[dependency.To]) || dependency.Protocol == "" {
 			return errors.New("deployment plan dependency intent is invalid")
+		}
+		if dependency.Protocol != serviceconfigurationv1.ProtocolHTTP && !resourcecompiler.ValidManagedProtocol(dependency.Protocol) {
+			return errors.New("deployment plan managed dependency protocol is unsupported")
 		}
 		if dependency.Required && dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Verification == nil {
 			return errors.New("required dependency verification contract is missing")

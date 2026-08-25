@@ -1,8 +1,6 @@
 package connection
 
 import (
-	"errors"
-	"fmt"
 	"net"
 	"net/url"
 	"strconv"
@@ -79,8 +77,8 @@ var applicationSources = map[string]map[string]bool{
 
 func LookupSource(protocol, source, template string) (SourceDescriptor, error) {
 	protocol, source = strings.TrimSpace(protocol), strings.TrimSpace(source)
-	if protocol == serviceconfigurationv1.ProtocolHTTP {
-		return SourceDescriptor{}, errors.New("HTTP application sources require a strategy")
+	if !ValidManagedProtocol(protocol) {
+		return SourceDescriptor{}, compileError(ErrorUnsupportedProtocol, "managed connection protocol is unsupported")
 	}
 	if source == serviceconfigurationv1.SourceConnectionTemplate {
 		sensitive, err := validateConnectionTemplate(template)
@@ -88,7 +86,7 @@ func LookupSource(protocol, source, template string) (SourceDescriptor, error) {
 			return SourceDescriptor{}, err
 		}
 		if protocol == serviceconfigurationv1.ProtocolNATS && sensitive {
-			return SourceDescriptor{}, errors.New("managed NATS templates cannot reference credentials")
+			return SourceDescriptor{}, compileError(ErrorInvalidTemplate, "managed NATS templates cannot reference credentials")
 		}
 		return SourceDescriptor{Source: source, Protocol: protocol, Sensitivity: sensitivity(sensitive), compile: func(facts ConnectionFacts) (string, error) {
 			return executeConnectionTemplate(template, facts)
@@ -96,14 +94,14 @@ func LookupSource(protocol, source, template string) (SourceDescriptor, error) {
 	}
 	if descriptor, ok := sourceCatalog[protocol+"\x00"+source]; ok {
 		if template != "" {
-			return SourceDescriptor{}, errors.New("template is only allowed for connection.template")
+			return SourceDescriptor{}, compileError(ErrorUnsupportedSource, "template is only allowed for connection.template")
 		}
 		return descriptor, nil
 	}
 	if source == serviceconfigurationv1.SourceConnectionURL || legacyConnectionSource(source) {
 		canonical := legacyURIForProtocol(protocol)
 		if canonical == "" || template != "" {
-			return SourceDescriptor{}, fmt.Errorf("symbolic source %s is invalid for protocol %s", source, protocol)
+			return SourceDescriptor{}, compileError(ErrorUnsupportedSource, "symbolic source is invalid for the managed connection protocol")
 		}
 		descriptor := sourceCatalog[protocol+"\x00"+canonical]
 		descriptor.Source, descriptor.Deprecated = source, true
@@ -112,7 +110,16 @@ func LookupSource(protocol, source, template string) (SourceDescriptor, error) {
 		}
 		return descriptor, nil
 	}
-	return SourceDescriptor{}, fmt.Errorf("symbolic source %s is invalid for protocol %s", source, protocol)
+	return SourceDescriptor{}, compileError(ErrorUnsupportedSource, "symbolic source is invalid for the managed connection protocol")
+}
+
+func ValidManagedProtocol(protocol string) bool {
+	switch strings.TrimSpace(protocol) {
+	case serviceconfigurationv1.ProtocolPostgres, serviceconfigurationv1.ProtocolRedis, serviceconfigurationv1.ProtocolNATS:
+		return true
+	default:
+		return false
+	}
 }
 
 func ValidApplicationSource(strategy, source, template string) bool {
@@ -177,16 +184,16 @@ func compileNpgsql(facts ConnectionFacts) (string, error) {
 }
 
 func compileStackExchange(facts ConnectionFacts) (string, error) {
-	for name, value := range map[string]string{"username": facts.Username, "password": facts.Password} {
+	for _, value := range []string{facts.Username, facts.Password} {
 		if strings.Contains(value, ",") || strings.TrimSpace(value) != value {
-			return "", fmt.Errorf("%s cannot be represented safely in a StackExchange.Redis configuration string", name)
+			return "", compileError(ErrorUnrepresentableValue, "credential cannot be represented safely in a StackExchange.Redis configuration string")
 		}
 	}
 	value := hostPort(facts.Host, facts.Port) + ",user=" + facts.Username + ",password=" + facts.Password
 	if facts.Database != "" {
 		database, databaseErr := strconv.Atoi(facts.Database)
 		if databaseErr != nil || database < 0 {
-			return "", errors.New("StackExchange.Redis database index is invalid")
+			return "", compileError(ErrorInvalidFact, "database index is invalid")
 		}
 		value += ",defaultDatabase=" + facts.Database
 	}
@@ -198,28 +205,28 @@ func compileJDBC(facts ConnectionFacts) (string, error) {
 }
 
 func compilePDODSN(facts ConnectionFacts) (string, error) {
-	for name, value := range map[string]string{"host": facts.Host, "database": facts.Database} {
+	for _, value := range []string{facts.Host, facts.Database} {
 		if strings.ContainsAny(value, ";='") {
-			return "", fmt.Errorf("%s cannot be represented safely in a PDO DSN", name)
+			return "", compileError(ErrorUnrepresentableValue, "connection fact cannot be represented safely in a PDO DSN")
 		}
 	}
 	return "pgsql:host=" + facts.Host + ";port=" + facts.Port + ";dbname=" + facts.Database, nil
 }
 
 func validateFacts(facts ConnectionFacts) error {
-	for name, value := range map[string]string{"host": facts.Host, "port": facts.Port, "database": facts.Database, "username": facts.Username, "password": facts.Password} {
+	for _, value := range []string{facts.Host, facts.Port, facts.Database, facts.Username, facts.Password} {
 		if strings.IndexFunc(value, unicode.IsControl) >= 0 {
-			return fmt.Errorf("%s contains control characters", name)
+			return compileError(ErrorInvalidFact, "connection fact contains control characters")
 		}
 	}
 	if facts.Port != "" {
 		port, err := strconv.Atoi(facts.Port)
 		if err != nil || port < 1 || port > 65535 {
-			return errors.New("port is invalid")
+			return compileError(ErrorInvalidFact, "connection port is invalid")
 		}
 	}
 	if strings.ContainsAny(facts.Host, "/?#@") {
-		return errors.New("host is invalid")
+		return compileError(ErrorInvalidFact, "connection host is invalid")
 	}
 	return nil
 }
@@ -242,7 +249,7 @@ func factCompiler(name string) sourceCompiler {
 		case "password":
 			return facts.Password, nil
 		default:
-			return "", errors.New("connection fact compiler is unavailable")
+			return "", compileError(ErrorUnsupportedSource, "connection fact compiler is unavailable")
 		}
 	}
 }
@@ -252,12 +259,12 @@ func validateRequiredFacts(descriptor SourceDescriptor, facts ConnectionFacts) e
 	for _, name := range descriptor.RequiredFacts {
 		if name == "credential" {
 			if !facts.CredentialAvailable {
-				return errors.New("credential is unavailable")
+				return compileError(ErrorMissingCredential, "managed connection credential is unavailable")
 			}
 			continue
 		}
 		if values[name] == "" {
-			return fmt.Errorf("%s is required", name)
+			return compileError(ErrorMissingFact, "required connection fact is unavailable")
 		}
 	}
 	return nil

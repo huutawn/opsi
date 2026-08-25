@@ -858,12 +858,13 @@ func (s *Server) reviewDependencies(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	resolver := DependencyResolverAdapter{Registry: s.Registry, Resources: s.Resources}
-	plan, err := registry.PlanDependencyRealization(r.Context(), config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
+	plan, err := registry.PlanDependencyRealization(r.Context(), serviceID, config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
 		return s.Resources.Get(ctx, projectID, targetID)
 	}, func(ctx context.Context, targetID string) (registry.DependencyTargetFacts, error) {
 		return resolver.ResolveDependencyTarget(ctx, projectID, targetID, "application")
 	})
 	if err != nil {
+		s.observeConnectionCompileError(err)
 		writeRegistryFailure(w, r, err)
 		return
 	}
@@ -908,12 +909,13 @@ func (s *Server) applyDependencies(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	resolver := DependencyResolverAdapter{Registry: s.Registry, Resources: s.Resources}
-	plan, err := registry.PlanDependencyRealization(r.Context(), config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
+	plan, err := registry.PlanDependencyRealization(r.Context(), serviceID, config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
 		return s.Resources.Get(ctx, projectID, targetID)
 	}, func(ctx context.Context, targetID string) (registry.DependencyTargetFacts, error) {
 		return resolver.ResolveDependencyTarget(ctx, projectID, targetID, "application")
 	})
 	if err != nil {
+		s.observeConnectionCompileError(err)
 		writeRegistryFailure(w, r, err)
 		return
 	}

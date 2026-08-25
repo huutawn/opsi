@@ -3,6 +3,7 @@ package repositoryanalysis
 import (
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -50,6 +51,49 @@ func TestDialectDetectorDoesNotGuessFromLanguageManifest(t *testing.T) {
 	values, ambiguous := detectConnectionEvidence("src/config.go", `dsn := os.Getenv("DB_CONNECTION_STRING")`)
 	if len(values) != 0 || !ambiguous {
 		t.Fatalf("generic connection string values=%+v ambiguous=%t", values, ambiguous)
+	}
+}
+
+func TestASPNetDetectorExtractsExactKeysDeterministically(t *testing.T) {
+	got := []string{}
+	for path, text := range map[string]string{
+		"appsettings.json": `{"ConnectionStrings":{"Audit":"", "Primary_2":""}}`,
+		"Program.cs":       `var a = builder.Configuration.GetConnectionString("Tenant42"); var b = Environment.GetEnvironmentVariable("ConnectionStrings__Explicit"); var c = configuration["ConnectionStrings:Reporting"];`,
+	} {
+		values, ambiguous := detectConnectionEvidence(path, text)
+		if ambiguous {
+			t.Fatal("exact ASP.NET keys were marked ambiguous")
+		}
+		for _, value := range values {
+			if value.SymbolicSource == serviceconfigurationv1.SourcePostgresNpgsql {
+				got = append(got, value.EnvironmentName)
+			}
+		}
+	}
+	sort.Strings(got)
+	want := []string{"ConnectionStrings__Audit", "ConnectionStrings__Explicit", "ConnectionStrings__Primary_2", "ConnectionStrings__Reporting", "ConnectionStrings__Tenant42"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("keys=%v want=%v", got, want)
+	}
+}
+
+func TestASPNetDetectorBlocksDynamicMalformedAndUnrepresentableKeys(t *testing.T) {
+	tests := []string{
+		`configuration.GetConnectionString(connectionName)`,
+		`configuration.GetConnectionString("")`,
+		`{"ConnectionStrings":{"tenant-name":""}}`,
+		`ConnectionStrings__`,
+	}
+	for _, text := range tests {
+		values, ambiguous := detectConnectionEvidence("settings.cs", text)
+		if !ambiguous {
+			t.Fatalf("unsafe ASP.NET key was not blocked: values=%+v", values)
+		}
+		for _, value := range values {
+			if value.EnvironmentName == "ConnectionStrings__Database" {
+				t.Fatal("unsafe ASP.NET key fell back to Database")
+			}
+		}
 	}
 }
 

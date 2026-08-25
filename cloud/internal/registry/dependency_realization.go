@@ -49,7 +49,7 @@ type DependencyApplyResult struct {
 }
 
 // PlanDependencyRealization builds the deterministic zero-mutation dependency realization plan.
-func PlanDependencyRealization(ctx context.Context, config serviceconfigurationv1.Configuration, bindings []resourcev1.Binding, getTarget func(ctx context.Context, targetID string) (resourcev1.Resource, error), getAppTarget ...func(ctx context.Context, targetID string) (DependencyTargetFacts, error)) (DependencyReviewResult, error) {
+func PlanDependencyRealization(ctx context.Context, sourceServiceID string, config serviceconfigurationv1.Configuration, bindings []resourcev1.Binding, getTarget func(ctx context.Context, targetID string) (resourcev1.Resource, error), getAppTarget ...func(ctx context.Context, targetID string) (DependencyTargetFacts, error)) (DependencyReviewResult, error) {
 	result := DependencyReviewResult{
 		Dependencies: make([]DependencyRealizationPlanItem, 0, len(config.Dependencies)),
 		Conflicts:    []string{},
@@ -58,6 +58,10 @@ func PlanDependencyRealization(ctx context.Context, config serviceconfigurationv
 	var getApp func(ctx context.Context, targetID string) (DependencyTargetFacts, error)
 	if len(getAppTarget) > 0 && getAppTarget[0] != nil {
 		getApp = getAppTarget[0]
+	}
+	selectedBindings := make(map[string]string, len(config.ResourceBindings))
+	for _, selected := range config.ResourceBindings {
+		selectedBindings[selected.LogicalName] = selected.BindingID
 	}
 
 	for _, dep := range config.Dependencies {
@@ -82,14 +86,16 @@ func PlanDependencyRealization(ctx context.Context, config serviceconfigurationv
 			}
 			item.ProviderType = string(target.Type)
 
-			// Find matching binding
+			selectedID := selectedBindings[dep.LogicalName]
+			matched, bindingFound := resourcecompiler.SelectBinding(bindings, resourcecompiler.BindingIdentity{
+				SourceServiceID: sourceServiceID, TargetResourceID: dep.TargetIdentity, LogicalName: dep.LogicalName,
+				Protocol: dep.Protocol, Lifecycle: resourcev1.LifecycleReady, SelectedBindingID: selectedID,
+			})
 			var matchingBinding *resourcev1.Binding
-			for i := range bindings {
-				b := &bindings[i]
-				if b.Target.ID == dep.TargetIdentity && b.LogicalName == dep.LogicalName && b.Protocol == resourcev1.Protocol(dep.Protocol) && b.Lifecycle != resourcev1.LifecycleDeleting {
-					matchingBinding = b
-					break
-				}
+			if bindingFound {
+				matchingBinding = &matched
+			} else if selectedID != "" {
+				return result, configurationError("DEPENDENCY_BINDING_INVALID", dep.LogicalName, "selected resource binding no longer matches the dependency authority")
 			}
 
 			if matchingBinding != nil {
@@ -121,7 +127,7 @@ func PlanDependencyRealization(ctx context.Context, config serviceconfigurationv
 				}
 				descriptor, lookupErr := resourcecompiler.LookupSource(dep.Protocol, m.SymbolicSource, m.Template)
 				if lookupErr != nil {
-					return result, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", m.EnvName, lookupErr.Error())
+					return result, configurationErrorCause("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", m.EnvName, "connection mapping is invalid", lookupErr)
 				}
 				proj.Sensitivity = string(descriptor.Sensitivity)
 				if descriptor.Sensitivity == resourcev1.ValueSecret {
@@ -129,7 +135,7 @@ func PlanDependencyRealization(ctx context.Context, config serviceconfigurationv
 				} else {
 					compiled, compileErr := resourcecompiler.CompileConnection(dep.Protocol, m.SymbolicSource, m.Template, resourcecompiler.ConnectionFacts{Host: host, Port: port, Database: db})
 					if compileErr != nil && item.BindingAction != "create" {
-						return result, configurationError("DEPENDENCY_CONNECTION_COMPILE_FAILED", m.EnvName, compileErr.Error())
+						return result, configurationErrorCause("DEPENDENCY_CONNECTION_COMPILE_FAILED", m.EnvName, "connection mapping could not be compiled", compileErr)
 					}
 					if compileErr == nil {
 						proj.ValuePreview = compiled.Value

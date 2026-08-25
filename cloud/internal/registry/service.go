@@ -103,6 +103,7 @@ type APIError struct {
 	Message    string `json:"message"`
 	NextAction string `json:"next_action,omitempty"`
 	RequestID  string `json:"request_id,omitempty"`
+	Cause      error  `json:"-"`
 }
 
 func legacyDeploymentRetiredError(requestID string) error {
@@ -114,6 +115,7 @@ func retryTargetRetiredError(requestID string) error {
 }
 
 func (e APIError) Error() string { return e.Code + ": " + e.Message }
+func (e APIError) Unwrap() error { return e.Cause }
 
 type Project struct {
 	ID        string    `json:"id"`

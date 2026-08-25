@@ -491,7 +491,7 @@ func TestPlanDependencyRealization_ZeroMutationAndSafety(t *testing.T) {
 	}
 
 	// 1. Without existing binding: action = create
-	plan, err := PlanDependencyRealization(context.Background(), config, nil, getTarget)
+	plan, err := PlanDependencyRealization(context.Background(), "app-1", config, nil, getTarget)
 	if err != nil {
 		t.Fatalf("plan failed: %v", err)
 	}
@@ -527,13 +527,14 @@ func TestPlanDependencyRealization_ZeroMutationAndSafety(t *testing.T) {
 	// 2. With existing compatible binding: action = reused
 	existingBinding := resourcev1.Binding{
 		ID:          "rbind-pg-existing",
+		Source:      resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: "app-1"},
 		Target:      resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: "res-pg-1"},
 		LogicalName: "database",
 		Protocol:    resourcev1.ProtocolPostgres,
 		Lifecycle:   resourcev1.LifecycleReady,
 	}
 
-	planReused, err := PlanDependencyRealization(context.Background(), config, []resourcev1.Binding{existingBinding}, getTarget)
+	planReused, err := PlanDependencyRealization(context.Background(), "app-1", config, []resourcev1.Binding{existingBinding}, getTarget)
 	if err != nil {
 		t.Fatalf("plan with existing binding failed: %v", err)
 	}

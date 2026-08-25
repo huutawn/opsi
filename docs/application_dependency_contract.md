@@ -27,7 +27,7 @@ ADC-02 bridges declared application dependency intent with runtime environment a
 3. **Symbolic Source Resolution**:
    - `resource.host`, `resource.port`, `credential.database` project into non-secret `deploymentv1.EnvironmentVariable`.
    - `credential.username`, `credential.password`, and compound sources containing credentials project into `deploymentv1.SecretReference` referencing the binding credential.
-   - `connection.template` accepts at most 1 KiB of literals and whitelisted placeholders. Credential placeholders require `url_userinfo`, `url_query`, or `kv_quote`; expressions, environment expansion, command substitution, and literal credentials are rejected.
+   - `connection.template` accepts at most 1 KiB of literals and whitelisted placeholders. Credential assignments must use the matching `username` or `password` placeholder as the entire value, with `url_userinfo`, `url_query`, or `kv_quote`; expressions, nesting, extra encoder segments, raw URL userinfo, and literal credentials are rejected. Managed templates are limited to PostgreSQL, Redis/Valkey, and NATS, and NATS templates cannot reference credentials.
 4. **Workload Secret Delivery & Injection**:
    - The deployment compiler resolves secret materials via `ResolveSecretMaterials` without leaking credentials into `WorkloadSpec` or diffs.
    - The Agent materializes Kubernetes Secrets (`opsi-<serviceKey>-<runtimeID>-binding-<secretID>`) with keys matching the mapped environment variable names.
@@ -40,7 +40,9 @@ ADC-02 bridges declared application dependency intent with runtime environment a
 
 ### Compatibility
 
-`connection.url` and `resource.<name>.connection_string` remain accepted for immutable and existing configurations with their historical URI semantics. New analysis and export use the protocol-specific source names above, and review reports the legacy aliases as deprecated. The source and optional template are part of the canonical configuration hash, so editing either invalidates prior approval.
+`connection.url` and `resource.<name>.connection_string` remain accepted for immutable and existing configurations with their historical URI semantics. New analysis and export use the protocol-specific source names above. The source and optional template are part of the canonical configuration hash; templates are hashed and compiled byte-for-byte, so every whitespace edit invalidates prior approval.
+
+Runtime projection and Secret materialization use the same binding identity: source service, target resource, logical name, protocol, Ready lifecycle, and selected binding ID must all match. A missing or stale binding fails closed for required dependencies and is omitted for optional dependencies. Secret delivery revalidates this identity before resolving credential material.
 
 ## ADC-03: App→App HTTP Networking & Direct Resolution
 

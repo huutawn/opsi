@@ -1,7 +1,9 @@
 package repositoryanalysis
 
 import (
+	"encoding/json"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -14,6 +16,14 @@ type connectionEvidence struct {
 	SymbolicSource  string
 	Reason          string
 }
+
+var (
+	aspNetEnvironmentKey = regexp.MustCompile(`ConnectionStrings__([^\s"'` + "`" + `:;,)}\]]*)`)
+	aspNetColonKey       = regexp.MustCompile(`ConnectionStrings\s*:\s*([^\s"'` + "`" + `:;,)}\]]*)`)
+	aspNetLiteralGetter  = regexp.MustCompile(`GetConnectionString\s*\(\s*"([^"]*)"\s*\)`)
+	aspNetAnyGetter      = regexp.MustCompile(`GetConnectionString\s*\(`)
+	aspNetKeyName        = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+)
 
 func detectConnectionEvidence(filePath, text string) ([]connectionEvidence, bool) {
 	base := strings.ToLower(path.Base(filePath))
@@ -38,9 +48,7 @@ func detectConnectionEvidence(filePath, text string) ([]connectionEvidence, bool
 		return false
 	}
 
-	if containsAny("ConnectionStrings__Database", "ConnectionStrings:Database", `"ConnectionStrings"`, "GetConnectionString(") {
-		add("postgres", "ConnectionStrings__Database", serviceconfigurationv1.SourcePostgresNpgsql, "ASP.NET configuration requires an Npgsql connection string.")
-	}
+	aspNetAmbiguous := detectASPNetConnectionStrings(text, add)
 	if containsAny("SignalR__Redis__ConnectionString", "SignalR:Redis:ConnectionString") || strings.Contains(text, "SignalR") && strings.Contains(text, "Redis") && strings.Contains(text, "ConnectionString") {
 		add("redis", "SignalR__Redis__ConnectionString", serviceconfigurationv1.SourceRedisStackExchange, "ASP.NET SignalR configuration requires a StackExchange.Redis connection string.")
 	}
@@ -106,13 +114,54 @@ func detectConnectionEvidence(filePath, text string) ([]connectionEvidence, bool
 	sort.Slice(values, func(i, j int) bool {
 		return values[i].Protocol+"\x00"+values[i].EnvironmentName < values[j].Protocol+"\x00"+values[j].EnvironmentName
 	})
-	ambiguous := false
+	ambiguous := aspNetAmbiguous
 	for _, marker := range []string{"DB_CONNECTION_STRING", "DATABASE_CONNECTION_STRING", "CONNECTION_STRING"} {
 		if strings.Contains(text, marker) && !strings.Contains(text, "ConnectionStrings__") && !strings.Contains(text, "SignalR__Redis__") {
 			ambiguous = true
 		}
 	}
 	return values, ambiguous
+}
+
+func detectASPNetConnectionStrings(text string, add func(protocol, environment, source, reason string)) bool {
+	ambiguous := false
+	addKey := func(name string) {
+		if !aspNetKeyName.MatchString(name) || len("ConnectionStrings__"+name) > 128 {
+			ambiguous = true
+			return
+		}
+		add("postgres", "ConnectionStrings__"+name, serviceconfigurationv1.SourcePostgresNpgsql, "ASP.NET configuration declares an exact Npgsql connection string key.")
+	}
+	for _, match := range aspNetEnvironmentKey.FindAllStringSubmatch(text, -1) {
+		addKey(match[1])
+	}
+	for _, match := range aspNetColonKey.FindAllStringSubmatch(text, -1) {
+		addKey(match[1])
+	}
+	getterFree := aspNetLiteralGetter.ReplaceAllStringFunc(text, func(value string) string {
+		match := aspNetLiteralGetter.FindStringSubmatch(value)
+		addKey(match[1])
+		return ""
+	})
+	if aspNetAnyGetter.MatchString(getterFree) {
+		ambiguous = true
+	}
+	var document map[string]json.RawMessage
+	if json.Unmarshal([]byte(text), &document) == nil {
+		if raw, ok := document["ConnectionStrings"]; ok {
+			var values map[string]json.RawMessage
+			if json.Unmarshal(raw, &values) != nil {
+				ambiguous = true
+			} else {
+				for name := range values {
+					addKey(name)
+				}
+			}
+		}
+	} else if strings.Contains(text, `"ConnectionStrings"`) {
+		ambiguous = true
+	}
+	return ambiguous
 }
 
 func containsIdentifier(text, identifier string) bool {
@@ -139,9 +188,6 @@ func identifierCharacter(value byte) bool {
 
 func sourceForEnvironment(protocol, environment string) (string, bool) {
 	text := environment
-	if environment == "ConnectionStrings__Database" {
-		text += ` "ConnectionStrings"`
-	}
 	if environment == "SignalR__Redis__ConnectionString" {
 		text += " SignalR Redis ConnectionString"
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
 	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -167,6 +168,9 @@ func Render(plan deploymentworkflow.Plan) ([]byte, error) {
 		}
 		for _, value := range plan.Dependencies {
 			if value.From == app.Key {
+				if value.Protocol != serviceconfigurationv1.ProtocolHTTP && !resourcecompiler.ValidManagedProtocol(value.Protocol) {
+					return nil, errors.New("repository export contains an unsupported managed connection protocol")
+				}
 				target := keyByCanonical[value.To]
 				if target == "" {
 					target = value.To
@@ -180,7 +184,7 @@ func Render(plan deploymentworkflow.Plan) ([]byte, error) {
 					} else if _, lookupErr := resourcecompiler.LookupSource(value.Protocol, inject.SymbolicSource, inject.Template); lookupErr != nil {
 						return nil, errors.New("repository export contains an invalid connection mapping")
 					}
-					mapped.Injections = append(mapped.Injections, injection{EnvironmentName: inject.EnvironmentName, SymbolicSource: canonicalExportSource(value.Protocol, inject.SymbolicSource), Template: inject.Template})
+					mapped.Injections = append(mapped.Injections, injection{EnvironmentName: inject.EnvironmentName, SymbolicSource: resourcecompiler.CanonicalSource(value.Protocol, inject.SymbolicSource), Template: inject.Template})
 				}
 				rt.Dependencies = append(rt.Dependencies, mapped)
 			}
@@ -208,20 +212,6 @@ func Render(plan deploymentworkflow.Plan) ([]byte, error) {
 		return nil, err
 	}
 	return output.Bytes(), nil
-}
-
-func canonicalExportSource(protocol, source string) string {
-	if source == "connection.url" || strings.HasPrefix(source, "resource.") && strings.HasSuffix(source, ".connection_string") {
-		switch protocol {
-		case "postgres":
-			return "connection.postgres.uri"
-		case "redis":
-			return "connection.redis.uri"
-		case "nats":
-			return "connection.nats.uri"
-		}
-	}
-	return source
 }
 
 func NewPreview(run deploymentworkflow.Run, targetBranch string, current []byte) (Preview, error) {

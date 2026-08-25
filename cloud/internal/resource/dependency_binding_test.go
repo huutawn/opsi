@@ -313,4 +313,32 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	if value := managementMaterials[0].Values["SignalR__Redis__ConnectionString"]; !strings.HasPrefix(value, "valkey.local:6379,") || !strings.Contains(value, "user="+valkeyCred.Username) || !strings.Contains(value, "password="+valkeyCred.Password) || strings.Contains(value, "://") {
 		t.Fatalf("expected typed StackExchange.Redis connection string, got %q", value)
 	}
+
+	if _, err := service.ResolveSecretMaterials(context.Background(), "proj-1", "app-1", []deploymentv1.SecretReference{{EnvName: "DB_PASSWORD", SecretID: valkeySpec.CredentialID}}); err == nil {
+		t.Fatal("cross-resource credential was injected through a PostgreSQL mapping")
+	}
+
+	identityConfig := configs["app-1"]
+	identityConfig.ResourceBindings[1].BindingID = "stale-optional-binding"
+	configs["app-1"] = identityConfig
+	optionalEnvironment, optionalSecrets, err := service.ApplicationRuntimeConfiguration(context.Background(), "proj-1", "env-1", "app-1")
+	if err != nil {
+		t.Fatalf("optional missing binding did not get omitted: %v", err)
+	}
+	for _, value := range optionalEnvironment {
+		if strings.HasPrefix(value.Name, "CACHE_") {
+			t.Fatalf("optional missing binding emitted environment: %+v", optionalEnvironment)
+		}
+	}
+	for _, value := range optionalSecrets {
+		if strings.HasPrefix(value.EnvName, "CACHE_") || value.EnvName == "APP_REDIS_URL" {
+			t.Fatalf("optional missing binding emitted secret reference: %+v", optionalSecrets)
+		}
+	}
+
+	identityConfig.ResourceBindings[0].BindingID = valkeyBinding.ID
+	configs["app-1"] = identityConfig
+	if _, _, err := service.ApplicationRuntimeConfiguration(context.Background(), "proj-1", "env-1", "app-1"); err == nil {
+		t.Fatal("required dependency accepted a selected binding with mismatched target and protocol")
+	}
 }

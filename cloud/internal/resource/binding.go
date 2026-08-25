@@ -2,7 +2,6 @@ package resource
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,40 +38,26 @@ func (s Service) ApplicationRuntimeConfiguration(ctx context.Context, projectID,
 			selectedBindings[rb.LogicalName] = rb.BindingID
 		}
 
-		bindingsByID := make(map[string]resourcev1.Binding, len(bindings))
-		bindingsByLogical := make(map[string]resourcev1.Binding, len(bindings))
-		for _, b := range bindings {
-			if b.Source.ID == applicationID {
-				bindingsByID[b.ID] = b
-				bindingsByLogical[b.LogicalName] = b
-			}
-		}
-
 		for _, dep := range config.Dependencies {
 			if dep.InjectionPhase != "runtime" || dep.TargetKind != "managed_resource" {
 				continue
 			}
-			var b resourcev1.Binding
-			var ok bool
-			if targetBindingID, hasSelected := selectedBindings[dep.LogicalName]; hasSelected {
-				b, ok = bindingsByID[targetBindingID]
-			} else {
-				b, ok = bindingsByLogical[dep.LogicalName]
-				if !ok || b.Target.ID != dep.TargetIdentity {
-					for _, candidate := range bindings {
-						if candidate.Source.ID == applicationID && candidate.Target.ID == dep.TargetIdentity && candidate.LogicalName == dep.LogicalName {
-							b = candidate
-							ok = true
-							break
-						}
-					}
+			selectedID := selectedBindings[dep.LogicalName]
+			b, ok := resourcecompiler.SelectBinding(bindings, resourcecompiler.BindingIdentity{
+				SourceServiceID: applicationID, TargetResourceID: dep.TargetIdentity, LogicalName: dep.LogicalName,
+				Protocol: dep.Protocol, Lifecycle: resourcev1.LifecycleReady, SelectedBindingID: selectedID,
+			})
+			if selectedID == "" || !ok {
+				if dep.Required {
+					return nil, nil, invalid(resourcev1.FailureBindingSecretMaterialization, "required resource binding authority is unavailable")
 				}
-			}
-			if !ok || b.Lifecycle == resourcev1.LifecycleDeleting {
 				continue
 			}
 			target, getErr := s.Get(ctx, projectID, dep.TargetIdentity)
 			if getErr != nil {
+				if dep.Required {
+					return nil, nil, invalid(resourcev1.FailureBindingSecretMaterialization, "required resource target is unavailable")
+				}
 				continue
 			}
 
@@ -105,7 +90,7 @@ func (s Service) ApplicationRuntimeConfiguration(ctx context.Context, projectID,
 			for _, mapping := range dep.InjectionMappings {
 				descriptor, lookupErr := resourcecompiler.LookupSource(dep.Protocol, mapping.SymbolicSource, mapping.Template)
 				if lookupErr != nil {
-					return nil, nil, invalid(resourcev1.FailureBindingSecretMaterialization, lookupErr.Error())
+					return nil, nil, invalidCause(resourcev1.FailureBindingSecretMaterialization, "connection mapping is invalid", lookupErr)
 				}
 				if descriptor.Sensitivity == resourcev1.ValueSecret {
 					if credID == "" {
@@ -116,7 +101,7 @@ func (s Service) ApplicationRuntimeConfiguration(ctx context.Context, projectID,
 				}
 				compiled, compileErr := resourcecompiler.CompileConnection(dep.Protocol, mapping.SymbolicSource, mapping.Template, facts)
 				if compileErr != nil {
-					return nil, nil, invalid(resourcev1.FailureBindingSecretMaterialization, compileErr.Error())
+					return nil, nil, invalidCause(resourcev1.FailureBindingSecretMaterialization, "connection mapping could not be compiled", compileErr)
 				}
 				environment = append(environment, deploymentv1.EnvironmentVariable{Name: mapping.EnvName, Value: compiled.Value})
 			}
@@ -130,13 +115,16 @@ func (s Service) ApplicationRuntimeConfiguration(ctx context.Context, projectID,
 			}
 		}
 		for _, binding := range bindings {
-			if binding.Source.ID != applicationID || binding.Lifecycle != resourcev1.LifecycleReady {
-				continue
-			}
+			selectedID := ""
 			if selectedBindings != nil {
-				if targetID, ok := selectedBindings[binding.LogicalName]; ok && binding.ID != targetID {
-					continue
-				}
+				selectedID = selectedBindings[binding.LogicalName]
+			}
+			selected, ok := resourcecompiler.SelectBinding(bindings, resourcecompiler.BindingIdentity{
+				SourceServiceID: applicationID, TargetResourceID: binding.Target.ID, LogicalName: binding.LogicalName,
+				Protocol: string(binding.Protocol), Lifecycle: resourcev1.LifecycleReady, SelectedBindingID: selectedID,
+			})
+			if !ok || selected.ID != binding.ID {
+				continue
 			}
 			prefix := environmentPrefix(binding.LogicalName)
 			for _, reference := range binding.RuntimeRefs {
@@ -165,97 +153,60 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 	if err != nil {
 		return nil, err
 	}
-	type secretAuthority struct {
-		target  resourcev1.Resource
-		binding *resourcev1.Binding
-	}
-	byCredential := map[string]secretAuthority{}
+	resourcesByID := make(map[string]resourcev1.Resource, len(resources))
 	for _, value := range resources {
-		if value.Runtime != nil && value.Runtime.Spec.CredentialID != "" {
-			byCredential[value.Runtime.Spec.CredentialID] = secretAuthority{target: value}
-		}
+		resourcesByID[value.ID] = value
 	}
 	bindings, err := s.ListBindings(ctx, projectID, "")
 	if err != nil {
 		return nil, err
 	}
-	for index := range bindings {
-		binding := &bindings[index]
-		if binding.Lifecycle == resourcev1.LifecycleReady && binding.CredentialID != "" {
-			target, getErr := s.Get(ctx, projectID, binding.Target.ID)
-			if getErr != nil {
-				return nil, getErr
-			}
-			byCredential[binding.CredentialID] = secretAuthority{target: target, binding: binding}
-		}
+	reader, hasConfiguration := s.Scopes.(interface {
+		GetServiceConfiguration(projectID, serviceID string) (serviceconfigurationv1.Configuration, error)
+	})
+	if serviceID == "" {
+		serviceID = inferSecretMaterialService(references, bindings, resourcesByID)
 	}
 	grouped := map[string]map[string]string{}
-	resolvedServiceID := serviceID
 	for _, reference := range references {
-		authority, ok := byCredential[reference.SecretID]
-		if ok && authority.binding != nil {
-			if resolvedServiceID != "" && resolvedServiceID != authority.binding.Source.ID {
-				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding does not belong to the workload")
-			}
-			resolvedServiceID = authority.binding.Source.ID
-		}
-		redisManagement := ok && authority.binding == nil && authority.target.Type == resourcev1.TypeRedis && authority.target.Runtime != nil && authority.target.Runtime.Spec.CredentialID == reference.SecretID
-		postgresBinding := ok && authority.binding != nil && authority.target.Type == resourcev1.TypePostgres
-		credential, err := s.Credentials.Get(ctx, reference.SecretID)
-		if err != nil {
+		credential, credentialErr := s.Credentials.Get(ctx, reference.SecretID)
+		if credentialErr != nil {
 			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding credential is unavailable")
 		}
-		workloadSecret := false
-		if !redisManagement && !postgresBinding {
-			workloadSecret = credential.ValidateWorkloadSecret(projectID, serviceID) == nil
-			if !workloadSecret {
-				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "workload secret reference is unavailable")
-			}
-		}
-		if postgresBinding && credential.ValidateBinding(authority.binding.ID, authority.target.ID) != nil {
-			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "PostgreSQL binding credential authority is invalid")
-		}
-
-		var mappedSource, mappedTemplate, mappedProtocol string
-		if reader, ok := s.Scopes.(interface {
-			GetServiceConfiguration(projectID, serviceID string) (serviceconfigurationv1.Configuration, error)
-		}); ok {
-			configurationServiceID := resolvedServiceID
-			if authority.binding != nil {
-				configurationServiceID = authority.binding.Source.ID
-			}
-			if cfg, err := reader.GetServiceConfiguration(projectID, configurationServiceID); err == nil {
-				for _, dep := range cfg.Dependencies {
-					matchesAuthority := authority.binding != nil && dep.LogicalName == authority.binding.LogicalName
-					matchesAuthority = matchesAuthority || authority.binding == nil && dep.TargetKind == "managed_resource" && dep.TargetIdentity == authority.target.ID
-					if matchesAuthority {
-						for _, m := range dep.InjectionMappings {
-							if m.EnvName == reference.EnvName {
-								mappedSource, mappedTemplate, mappedProtocol = m.SymbolicSource, m.Template, dep.Protocol
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-		if mappedSource == "" && authority.binding != nil {
-			mappedSource = legacyBindingSource(*authority.binding, reference.EnvName)
-			mappedProtocol = string(authority.binding.Protocol)
-		}
-
 		value := ""
-		if workloadSecret {
+		if serviceID != "" && credential.ValidateWorkloadSecret(projectID, serviceID) == nil {
 			value = credential.Password
 		} else {
-			if mappedSource == "" {
-				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, fmt.Sprintf("resource binding secret mapping is unsupported for %s", reference.EnvName))
+			if serviceID == "" {
+				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding authority is unavailable")
 			}
-			facts := connectionFacts(authority.target, authority.binding)
+			config := serviceconfigurationv1.Configuration{}
+			if hasConfiguration {
+				var configErr error
+				config, configErr = reader.GetServiceConfiguration(projectID, serviceID)
+				if configErr != nil {
+					return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding authority is unavailable")
+				}
+			}
+			mapping, binding, target, mappingErr := selectSecretMapping(config, serviceID, reference, bindings, resourcesByID)
+			if mappingErr != nil && len(config.Dependencies) == 0 {
+				mapping, binding, target, mappingErr = selectLegacySecretMapping(config, serviceID, reference, bindings, resourcesByID)
+			}
+			if mappingErr != nil {
+				return nil, mappingErr
+			}
+			if target.Type == resourcev1.TypePostgres {
+				if credential.ValidateBinding(binding.ID, target.ID) != nil {
+					return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "PostgreSQL binding credential authority is invalid")
+				}
+			} else if target.Runtime == nil || credential.ValidateFor(target.Type) != nil || credential.Purpose != resourcev1.CredentialPurposeResourceManagement || credential.OwnerID != target.ID || credential.ResourceID != target.ID {
+				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "managed resource credential authority is invalid")
+			}
+			facts := connectionFacts(target, &binding)
 			facts.Username, facts.Password, facts.CredentialAvailable = credential.Username, credential.Password, true
-			compiled, compileErr := resourcecompiler.CompileConnection(mappedProtocol, mappedSource, mappedTemplate, facts)
+			compiled, compileErr := resourcecompiler.CompileConnection(string(binding.Protocol), mapping.SymbolicSource, mapping.Template, facts)
 			if compileErr != nil {
-				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, fmt.Sprintf("compile %s: %v", mappedSource, compileErr))
+				return nil, invalidCause(resourcev1.FailureBindingSecretMaterialization, "connection mapping could not be compiled", compileErr)
 			}
 			if compiled.Sensitivity != resourcev1.ValueSecret {
 				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "non-secret resource mapping cannot be materialized as a Secret")
@@ -275,21 +226,139 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 	return result, nil
 }
 
-func legacyBindingSource(binding resourcev1.Binding, environmentName string) string {
-	prefix := environmentPrefix(binding.LogicalName) + "_"
-	if !strings.HasPrefix(environmentName, prefix) {
+func inferSecretMaterialService(references []deploymentv1.SecretReference, bindings []resourcev1.Binding, resources map[string]resourcev1.Resource) string {
+	candidates := map[string]struct{}{}
+	for _, reference := range references {
+		for _, binding := range bindings {
+			if binding.Lifecycle != resourcev1.LifecycleReady {
+				continue
+			}
+			target := resources[binding.Target.ID]
+			targetCredential := ""
+			if target.Runtime != nil {
+				targetCredential = target.Runtime.Spec.CredentialID
+			}
+			if reference.SecretID == binding.CredentialID || reference.SecretID == targetCredential {
+				candidates[binding.Source.ID] = struct{}{}
+			}
+		}
+	}
+	if len(candidates) != 1 {
 		return ""
 	}
-	switch strings.TrimPrefix(environmentName, prefix) {
-	case "USER":
-		return serviceconfigurationv1.SourceCredentialUsername
-	case "PASSWORD":
-		return serviceconfigurationv1.SourceCredentialPassword
-	case "URL":
-		return serviceconfigurationv1.SourceConnectionURL
-	default:
-		return ""
+	for candidate := range candidates {
+		return candidate
 	}
+	return ""
+}
+
+func selectSecretMapping(config serviceconfigurationv1.Configuration, serviceID string, reference deploymentv1.SecretReference, bindings []resourcev1.Binding, resources map[string]resourcev1.Resource) (serviceconfigurationv1.DependencyInjectionMapping, resourcev1.Binding, resourcev1.Resource, error) {
+	selected := make(map[string]string, len(config.ResourceBindings))
+	for _, value := range config.ResourceBindings {
+		selected[value.LogicalName] = value.BindingID
+	}
+	type candidate struct {
+		mapping serviceconfigurationv1.DependencyInjectionMapping
+		binding resourcev1.Binding
+		target  resourcev1.Resource
+	}
+	var matches []candidate
+	for _, dep := range config.Dependencies {
+		if dep.TargetKind != serviceconfigurationv1.TargetKindManagedResource || dep.InjectionPhase != serviceconfigurationv1.InjectionPhaseRuntime {
+			continue
+		}
+		selectedID := selected[dep.LogicalName]
+		if selectedID == "" {
+			continue
+		}
+		binding, ok := resourcecompiler.SelectBinding(bindings, resourcecompiler.BindingIdentity{
+			SourceServiceID: serviceID, TargetResourceID: dep.TargetIdentity, LogicalName: dep.LogicalName,
+			Protocol: dep.Protocol, Lifecycle: resourcev1.LifecycleReady, SelectedBindingID: selectedID,
+		})
+		if !ok {
+			continue
+		}
+		target, ok := resources[dep.TargetIdentity]
+		if !ok {
+			continue
+		}
+		credentialID := binding.CredentialID
+		if credentialID == "" && target.Runtime != nil {
+			credentialID = target.Runtime.Spec.CredentialID
+		}
+		if credentialID != reference.SecretID {
+			continue
+		}
+		for _, mapping := range dep.InjectionMappings {
+			if mapping.EnvName != reference.EnvName {
+				continue
+			}
+			descriptor, lookupErr := resourcecompiler.LookupSource(dep.Protocol, mapping.SymbolicSource, mapping.Template)
+			if lookupErr != nil {
+				return serviceconfigurationv1.DependencyInjectionMapping{}, resourcev1.Binding{}, resourcev1.Resource{}, invalidCause(resourcev1.FailureBindingSecretMaterialization, "connection mapping is invalid", lookupErr)
+			}
+			if descriptor.Sensitivity == resourcev1.ValueSecret {
+				matches = append(matches, candidate{mapping: mapping, binding: binding, target: target})
+			}
+		}
+	}
+	if len(matches) != 1 {
+		return serviceconfigurationv1.DependencyInjectionMapping{}, resourcev1.Binding{}, resourcev1.Resource{}, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding secret mapping authority is unavailable")
+	}
+	return matches[0].mapping, matches[0].binding, matches[0].target, nil
+}
+
+func selectLegacySecretMapping(config serviceconfigurationv1.Configuration, serviceID string, reference deploymentv1.SecretReference, bindings []resourcev1.Binding, resources map[string]resourcev1.Resource) (serviceconfigurationv1.DependencyInjectionMapping, resourcev1.Binding, resourcev1.Resource, error) {
+	selected := make(map[string]string, len(config.ResourceBindings))
+	for _, value := range config.ResourceBindings {
+		selected[value.LogicalName] = value.BindingID
+	}
+	type candidate struct {
+		mapping serviceconfigurationv1.DependencyInjectionMapping
+		binding resourcev1.Binding
+		target  resourcev1.Resource
+	}
+	var matches []candidate
+	for _, binding := range bindings {
+		selectedBinding, ok := resourcecompiler.SelectBinding(bindings, resourcecompiler.BindingIdentity{
+			SourceServiceID: serviceID, TargetResourceID: binding.Target.ID, LogicalName: binding.LogicalName,
+			Protocol: string(binding.Protocol), Lifecycle: resourcev1.LifecycleReady, SelectedBindingID: selected[binding.LogicalName],
+		})
+		if !ok || selectedBinding.ID != binding.ID {
+			continue
+		}
+		target, ok := resources[binding.Target.ID]
+		if !ok {
+			continue
+		}
+		credentialID := binding.CredentialID
+		if credentialID == "" && target.Runtime != nil {
+			credentialID = target.Runtime.Spec.CredentialID
+		}
+		if credentialID != reference.SecretID {
+			continue
+		}
+		prefix := environmentPrefix(binding.LogicalName) + "_"
+		if !strings.HasPrefix(reference.EnvName, prefix) {
+			continue
+		}
+		source := ""
+		switch strings.TrimPrefix(reference.EnvName, prefix) {
+		case "USER":
+			source = serviceconfigurationv1.SourceCredentialUsername
+		case "PASSWORD":
+			source = serviceconfigurationv1.SourceCredentialPassword
+		case "URL":
+			source = serviceconfigurationv1.SourceConnectionURL
+		}
+		if source != "" {
+			matches = append(matches, candidate{mapping: serviceconfigurationv1.DependencyInjectionMapping{EnvName: reference.EnvName, SymbolicSource: source}, binding: binding, target: target})
+		}
+	}
+	if len(matches) != 1 {
+		return serviceconfigurationv1.DependencyInjectionMapping{}, resourcev1.Binding{}, resourcev1.Resource{}, invalid(resourcev1.FailureBindingSecretMaterialization, "legacy resource binding secret mapping authority is unavailable")
+	}
+	return matches[0].mapping, matches[0].binding, matches[0].target, nil
 }
 
 func connectionFacts(target resourcev1.Resource, binding *resourcev1.Binding) resourcecompiler.ConnectionFacts {

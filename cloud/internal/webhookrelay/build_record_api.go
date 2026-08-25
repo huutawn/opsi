@@ -191,6 +191,7 @@ func (s *Server) ensureAutomaticDelivery(ctx context.Context, record buildrecord
 	}
 	managedEnvironment, managedSecrets, err := s.Resources.ApplicationRuntimeConfiguration(ctx, record.ProjectID, decision.EnvironmentID, service.ID)
 	if err != nil {
+		s.observeConnectionCompileError(err)
 		return nil, false, err
 	}
 	workload.Environment = append(workload.Environment, managedEnvironment...)

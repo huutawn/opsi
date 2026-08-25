@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 )
 
 type Observer struct {
@@ -64,6 +66,14 @@ func (o *Observer) Inc(name string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.counters[name]++
+}
+
+func (s *Server) observeConnectionCompileError(err error) {
+	code, ok := resourcecompiler.ErrorCode(err)
+	if !ok {
+		return
+	}
+	s.observer.Inc("connection_compile_error_" + code + "_total")
 }
 
 func (o *Observer) Snapshot() ObserverSnapshot {

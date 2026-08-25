@@ -88,7 +88,6 @@ func normalizeCandidate(candidate DependencyCandidate) DependencyCandidate {
 	for i := range candidate.Mappings {
 		candidate.Mappings[i].EnvName = strings.TrimSpace(candidate.Mappings[i].EnvName)
 		candidate.Mappings[i].SymbolicSource = strings.TrimSpace(candidate.Mappings[i].SymbolicSource)
-		candidate.Mappings[i].Template = strings.TrimSpace(candidate.Mappings[i].Template)
 	}
 	sort.Slice(candidate.Mappings, func(i, j int) bool { return candidate.Mappings[i].EnvName < candidate.Mappings[j].EnvName })
 	return candidate

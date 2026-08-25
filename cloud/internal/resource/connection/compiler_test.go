@@ -1,6 +1,7 @@
 package connection
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -145,6 +146,118 @@ func TestCompileFailsClosedForProtocolAndMissingFacts(t *testing.T) {
 		if _, err := CompileConnection(testCase.protocol, testCase.source, testCase.template, testCase.facts); err == nil {
 			t.Fatalf("%s accepted", name)
 		}
+	}
+}
+
+func TestTemplateCredentialValidationUsesParsedTokens(t *testing.T) {
+	valid := []string{
+		"PASSWORD \t = \t{{password|kv_quote}};Host={{host}}",
+		"User : {{username|url_query}}&Password:{{password|url_query}}",
+		"postgres://{{username|url_userinfo}}:{{password|url_userinfo}}@{{host}}:{{port}}/{{database}}",
+		"redis://:{{password|url_userinfo}}@{{host}}:{{port}}",
+	}
+	for _, template := range valid {
+		if _, err := LookupSource("postgres", serviceconfigurationv1.SourceConnectionTemplate, template); err != nil {
+			t.Fatalf("valid parsed credential template rejected: %v", err)
+		}
+	}
+	invalid := []string{
+		"password={{host}}",
+		"password=prefix{{password|kv_quote}}",
+		"password={{password|kv_quote}}suffix",
+		"password={{password|kv_quote}} suffix",
+		"password=literal;Password={{password|kv_quote}}",
+		"postgres://admin:{{password|url_userinfo}}@{{host}}:{{port}}",
+		"postgres://{{username|url_userinfo}}:literal@{{host}}:{{port}}",
+		"{{password|url_query|kv_quote}}",
+		"{{host {{port}} }}",
+	}
+	for _, template := range invalid {
+		if _, err := LookupSource("postgres", serviceconfigurationv1.SourceConnectionTemplate, template); err == nil {
+			t.Fatalf("unsafe parsed credential template accepted")
+		}
+	}
+}
+
+func TestCompileErrorCodesAreStableAndDoNotExposeFacts(t *testing.T) {
+	secretFact := "credential-do-not-leak"
+	cases := map[string]struct {
+		want string
+		err  error
+	}{
+		"protocol":           {ErrorUnsupportedProtocol, compileErrorFrom("kafka", serviceconfigurationv1.SourceConnectionTemplate, "password="+secretFact, ConnectionFacts{})},
+		"source":             {ErrorUnsupportedSource, compileErrorFrom("postgres", serviceconfigurationv1.SourceRedisURI, "", ConnectionFacts{})},
+		"template":           {ErrorInvalidTemplate, compileErrorFrom("postgres", serviceconfigurationv1.SourceConnectionTemplate, "password="+secretFact, ConnectionFacts{})},
+		"fact":               {ErrorInvalidFact, compileErrorFrom("nats", serviceconfigurationv1.SourceNATSURI, "", ConnectionFacts{Host: secretFact + "@", Port: "4222"})},
+		"missing fact":       {ErrorMissingFact, compileErrorFrom("postgres", serviceconfigurationv1.SourcePostgresJDBC, "", ConnectionFacts{Host: "host", Port: "5432"})},
+		"missing credential": {ErrorMissingCredential, compileErrorFrom("postgres", serviceconfigurationv1.SourcePostgresNpgsql, "", ConnectionFacts{Host: "host", Port: "5432", Database: "db"})},
+		"unrepresentable":    {ErrorUnrepresentableValue, compileErrorFrom("redis", serviceconfigurationv1.SourceRedisStackExchange, "", ConnectionFacts{Host: "host", Port: "6379", Username: "user", Password: secretFact + ",bad", CredentialAvailable: true})},
+	}
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			if testCase.err == nil {
+				t.Fatal("expected compile error")
+			}
+			var compileErr CompileError
+			if !errors.As(testCase.err, &compileErr) || compileErr.Code() != testCase.want {
+				t.Fatalf("error=%v code=%q want=%q", testCase.err, compileErr.Code(), testCase.want)
+			}
+			if strings.Contains(testCase.err.Error(), secretFact) {
+				t.Fatalf("compile error leaked a fact")
+			}
+		})
+	}
+}
+
+func TestTemplateCompilationPreservesBytesAroundPlaceholders(t *testing.T) {
+	facts := ConnectionFacts{Host: "db.internal", Port: "5432", Database: "app"}
+	first := " host={{host}}\nport={{port}} "
+	second := "host={{host}}\nport={{port}}"
+	compiledFirst, err := CompileConnection("postgres", serviceconfigurationv1.SourceConnectionTemplate, first, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiledSecond, err := CompileConnection("postgres", serviceconfigurationv1.SourceConnectionTemplate, second, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiledFirst.Value != " host=db.internal\nport=5432 " || compiledSecond.Value != "host=db.internal\nport=5432" || compiledFirst.Value == compiledSecond.Value {
+		t.Fatalf("template bytes were not preserved: first=%q second=%q", compiledFirst.Value, compiledSecond.Value)
+	}
+}
+
+func compileErrorFrom(protocol, source, template string, facts ConnectionFacts) error {
+	_, err := CompileConnection(protocol, source, template, facts)
+	return err
+}
+
+func TestSelectBindingRequiresCompleteIdentityAndRejectsAmbiguity(t *testing.T) {
+	identity := BindingIdentity{SourceServiceID: "app-1", TargetResourceID: "res-1", LogicalName: "database", Protocol: "postgres", Lifecycle: resourcev1.LifecycleReady, SelectedBindingID: "binding-1"}
+	valid := resourcev1.Binding{ID: "binding-1", Source: resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: "app-1"}, Target: resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: "res-1"}, LogicalName: "database", Protocol: resourcev1.ProtocolPostgres, Lifecycle: resourcev1.LifecycleReady}
+	if selected, ok := SelectBinding([]resourcev1.Binding{valid}, identity); !ok || selected.ID != valid.ID {
+		t.Fatalf("exact binding was not selected: %+v ok=%t", selected, ok)
+	}
+	mutations := []func(*resourcev1.Binding){
+		func(value *resourcev1.Binding) { value.Source.ID = "app-2" },
+		func(value *resourcev1.Binding) { value.Target.ID = "res-2" },
+		func(value *resourcev1.Binding) { value.LogicalName = "other" },
+		func(value *resourcev1.Binding) { value.Protocol = resourcev1.ProtocolRedis },
+		func(value *resourcev1.Binding) { value.Lifecycle = resourcev1.LifecycleDeleting },
+		func(value *resourcev1.Binding) { value.ID = "binding-stale" },
+	}
+	for _, mutate := range mutations {
+		candidate := valid
+		mutate(&candidate)
+		if _, ok := SelectBinding([]resourcev1.Binding{candidate}, identity); ok {
+			t.Fatalf("mismatched binding selected: %+v", candidate)
+		}
+	}
+	withoutSelection := identity
+	withoutSelection.SelectedBindingID = ""
+	duplicate := valid
+	duplicate.ID = "binding-2"
+	if _, ok := SelectBinding([]resourcev1.Binding{valid, duplicate}, withoutSelection); ok {
+		t.Fatal("ambiguous bindings with the same logical name were selected")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	"gopkg.in/yaml.v3"
 )
 
 func exportRun(t *testing.T) deploymentworkflow.Run {
@@ -97,5 +98,33 @@ func TestRenderRejectsUnsafeConnectionTemplate(t *testing.T) {
 	run.Plan.Hash, _ = deploymentworkflow.HashPlan(run.Plan)
 	if data, err := Render(run.Plan); err == nil || strings.Contains(string(data), "must-not-export") {
 		t.Fatalf("unsafe template data=%q err=%v", data, err)
+	}
+}
+
+func TestRenderPreservesConnectionTemplateWhitespace(t *testing.T) {
+	run := exportRun(t)
+	template := " host={{host}}\nport={{port}} "
+	run.Plan.Dependencies = []repositoryanalysis.Dependency{{From: "repo-api", To: "database", Protocol: "postgres", Required: true, Injections: []repositoryanalysis.Injection{{EnvironmentName: "DATABASE_DSN", SymbolicSource: "connection.template", Template: template}}}}
+	run.Plan.Hash, _ = deploymentworkflow.HashPlan(run.Plan)
+	data, err := Render(run.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded config
+	if err := yaml.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	got := decoded.Services[0].Runtime.Dependencies[0].Injections[0].Template
+	if got != template {
+		t.Fatalf("exported template=%q want=%q", got, template)
+	}
+}
+
+func TestRenderRejectsUnsupportedManagedProtocolWithoutMappings(t *testing.T) {
+	run := exportRun(t)
+	run.Plan.Dependencies = []repositoryanalysis.Dependency{{From: "repo-api", To: "database", Protocol: "kafka", Required: false}}
+	run.Plan.Hash, _ = deploymentworkflow.HashPlan(run.Plan)
+	if _, err := Render(run.Plan); err == nil {
+		t.Fatal("unsupported managed protocol was exported")
 	}
 }

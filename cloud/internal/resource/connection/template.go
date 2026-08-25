@@ -1,9 +1,8 @@
 package connection
 
 import (
-	"errors"
-	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -14,11 +13,11 @@ type templateToken struct {
 }
 
 func validateConnectionTemplate(template string) (bool, error) {
-	if containsRawCredentialLiteral(template) {
-		return false, errors.New("connection template must not contain literal credential values")
-	}
 	tokens, err := parseConnectionTemplate(template)
 	if err != nil {
+		return false, err
+	}
+	if err := validateCredentialPlacement(tokens); err != nil {
 		return false, err
 	}
 	sensitive := false
@@ -28,74 +27,110 @@ func validateConnectionTemplate(template string) (bool, error) {
 		}
 		sensitive = true
 		if token.encoder != "url_userinfo" && token.encoder != "url_query" && token.encoder != "kv_quote" {
-			return false, fmt.Errorf("credential placeholder %s requires url_userinfo, url_query, or kv_quote", token.placeholder)
+			return false, compileError(ErrorInvalidTemplate, "credential placeholders require an approved encoder")
 		}
 	}
 	return sensitive, nil
 }
 
-func containsRawCredentialLiteral(template string) bool {
-	lower := strings.ToLower(template)
-	for _, marker := range []string{"username=", "username:", "user=", "uid=", "password=", "password:", "passwd=", "pwd=", "secret=", "token="} {
-		index := strings.Index(lower, marker)
-		for index >= 0 {
-			remainder := strings.TrimSpace(template[index+len(marker):])
-			if !strings.HasPrefix(remainder, "{{") {
-				return true
+var (
+	credentialAssignmentPattern = regexp.MustCompile(`(?i)(username|user|uid|password|passwd|pwd|secret|token)\s*[:=]\s*$`)
+	credentialAssignmentAny     = regexp.MustCompile(`(?i)(username|user|uid|password|passwd|pwd|secret|token)\s*[:=]`)
+)
+
+func validateCredentialPlacement(tokens []templateToken) error {
+	for index, token := range tokens {
+		if token.placeholder != "" {
+			continue
+		}
+		match := credentialAssignmentPattern.FindStringSubmatchIndex(token.literal)
+		if match == nil {
+			if containsCredentialAssignment(token.literal) {
+				return compileError(ErrorInvalidTemplate, "connection template must not contain literal credential assignments")
 			}
-			next := strings.Index(lower[index+len(marker):], marker)
-			if next < 0 {
-				break
-			}
-			index += len(marker) + next
+			continue
+		}
+		if containsCredentialAssignment(token.literal[:match[0]]) {
+			return compileError(ErrorInvalidTemplate, "connection template must not contain literal credential assignments")
+		}
+		if index+1 >= len(tokens) || tokens[index+1].placeholder == "" {
+			return compileError(ErrorInvalidTemplate, "credential assignments must use an exact credential placeholder")
+		}
+		expected := "username"
+		assignmentName := strings.ToLower(token.literal[match[2]:match[3]])
+		if assignmentName != "username" && assignmentName != "user" && assignmentName != "uid" {
+			expected = "password"
+		}
+		next := tokens[index+1]
+		if next.placeholder != expected || !credentialEncoder(next.encoder) || !credentialValueTerminates(tokens, index+2) {
+			return compileError(ErrorInvalidTemplate, "credential assignments must use the matching encoded credential placeholder")
 		}
 	}
-	return containsRawURLUserinfo(template)
+	return validateURLUserinfo(tokens)
 }
 
-func containsRawURLUserinfo(template string) bool {
-	for offset := 0; offset < len(template); {
-		scheme := strings.Index(template[offset:], "://")
+func containsCredentialAssignment(literal string) bool {
+	return credentialAssignmentAny.FindStringIndex(literal) != nil
+}
+
+func credentialValueTerminates(tokens []templateToken, next int) bool {
+	if next >= len(tokens) {
+		return true
+	}
+	if tokens[next].placeholder != "" {
+		return false
+	}
+	literal := tokens[next].literal
+	if literal == "" {
+		return true
+	}
+	return strings.ContainsRune(";,&@\r\n", rune(literal[0]))
+}
+
+func validateURLUserinfo(tokens []templateToken) error {
+	var rendered strings.Builder
+	for _, token := range tokens {
+		if token.placeholder == "" {
+			rendered.WriteString(token.literal)
+			continue
+		}
+		rendered.WriteString("\x00" + token.placeholder + "|" + token.encoder + "\x00")
+	}
+	text := rendered.String()
+	for offset := 0; offset < len(text); {
+		scheme := strings.Index(text[offset:], "://")
 		if scheme < 0 {
-			return false
+			break
 		}
 		start := offset + scheme + 3
-		at := strings.Index(template[start:], "@")
+		at := strings.Index(text[start:], "@")
 		if at < 0 {
-			return false
+			break
 		}
-		userinfo := template[start : start+at]
-		var literal strings.Builder
-		for len(userinfo) > 0 {
-			placeholder := strings.Index(userinfo, "{{")
-			if placeholder < 0 {
-				literal.WriteString(userinfo)
-				break
-			}
-			literal.WriteString(userinfo[:placeholder])
-			end := strings.Index(userinfo[placeholder+2:], "}}")
-			if end < 0 {
-				break
-			}
-			userinfo = userinfo[placeholder+2+end+2:]
-		}
-		if strings.Trim(strings.TrimSpace(literal.String()), ":") != "" {
-			return true
+		userinfo := text[start : start+at]
+		username := "\x00username|url_userinfo\x00"
+		password := "\x00password|url_userinfo\x00"
+		if userinfo != username && userinfo != username+":"+password && userinfo != ":"+password {
+			return compileError(ErrorInvalidTemplate, "URL userinfo must use exact encoded credential placeholders")
 		}
 		offset = start + at + 1
 	}
-	return false
+	return nil
+}
+
+func credentialEncoder(value string) bool {
+	return value == "url_userinfo" || value == "url_query" || value == "kv_quote"
 }
 
 func parseConnectionTemplate(template string) ([]templateToken, error) {
 	if template == "" {
-		return nil, errors.New("connection template is required")
+		return nil, compileError(ErrorInvalidTemplate, "connection template is required")
 	}
 	if len(template) > MaxConnectionTemplateBytes {
-		return nil, errors.New("connection template exceeds 1 KiB")
+		return nil, compileError(ErrorInvalidTemplate, "connection template exceeds 1 KiB")
 	}
 	if strings.Contains(template, "${") || strings.Contains(template, "$(") || strings.Contains(template, "`") {
-		return nil, errors.New("connection template contains forbidden substitution syntax")
+		return nil, compileError(ErrorInvalidTemplate, "connection template contains forbidden substitution syntax")
 	}
 	allowed := map[string]bool{"host": true, "port": true, "database": true, "username": true, "password": true}
 	encoders := map[string]bool{"": true, "url_userinfo": true, "url_query": true, "kv_quote": true}
@@ -104,32 +139,32 @@ func parseConnectionTemplate(template string) ([]templateToken, error) {
 		start := strings.Index(template, "{{")
 		if start < 0 {
 			if strings.Contains(template, "}}") {
-				return nil, errors.New("connection template contains unmatched braces")
+				return nil, compileError(ErrorInvalidTemplate, "connection template contains unmatched braces")
 			}
 			tokens = append(tokens, templateToken{literal: template})
 			break
 		}
 		if strings.Contains(template[:start], "}}") {
-			return nil, errors.New("connection template contains unmatched braces")
+			return nil, compileError(ErrorInvalidTemplate, "connection template contains unmatched braces")
 		}
 		if start > 0 {
 			tokens = append(tokens, templateToken{literal: template[:start]})
 		}
 		end := strings.Index(template[start+2:], "}}")
 		if end < 0 {
-			return nil, errors.New("connection template contains unmatched braces")
+			return nil, compileError(ErrorInvalidTemplate, "connection template contains unmatched braces")
 		}
 		body := strings.TrimSpace(template[start+2 : start+2+end])
 		parts := strings.Split(body, "|")
 		if len(parts) > 2 {
-			return nil, errors.New("connection template placeholder is invalid")
+			return nil, compileError(ErrorInvalidTemplate, "connection template placeholder is invalid")
 		}
 		name, encoder := strings.TrimSpace(parts[0]), ""
 		if len(parts) == 2 {
 			encoder = strings.TrimSpace(parts[1])
 		}
 		if !allowed[name] || !encoders[encoder] || (encoder != "" && name != "username" && name != "password") {
-			return nil, fmt.Errorf("connection template placeholder %q is invalid", body)
+			return nil, compileError(ErrorInvalidTemplate, "connection template placeholder is invalid")
 		}
 		tokens = append(tokens, templateToken{placeholder: name, encoder: encoder})
 		template = template[start+2+end+2:]
@@ -150,10 +185,10 @@ func executeConnectionTemplate(template string, facts ConnectionFacts) (string, 
 		}
 		value := map[string]string{"host": facts.Host, "port": facts.Port, "database": facts.Database, "username": facts.Username, "password": facts.Password}[token.placeholder]
 		if value == "" && token.placeholder != "password" {
-			return "", fmt.Errorf("template fact %s is required", token.placeholder)
+			return "", compileError(ErrorMissingFact, "required template fact is unavailable")
 		}
 		if (token.placeholder == "username" || token.placeholder == "password") && !facts.CredentialAvailable {
-			return "", errors.New("template credential is unavailable")
+			return "", compileError(ErrorMissingCredential, "template credential is unavailable")
 		}
 		switch token.encoder {
 		case "url_userinfo":

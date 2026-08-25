@@ -150,7 +150,44 @@ test("connection mappings select protocol dialects and reject unsafe templates a
 	const mapping = page.getByRole("article").filter({ has: template }).last();
 	await expect(mapping).toContainText("Sensitivity: secret");
 	await expect(mapping).toContainText("connection.template · redacted");
+	await expect(mapping.getByRole("alert")).toHaveCount(0);
 	await expect(page.getByRole("button", { name: "Save draft" })).toBeEnabled();
+});
+
+test("connection mapping protocol changes clear stale sources and enforce row contract", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	await mockDeployAPI(page, () => run, () => run);
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+	const protocol = page.getByLabel("Protocol").first();
+	const dialect = page.getByLabel("Dialect / value").first();
+	await protocol.selectOption("nats");
+	await expect(dialect).toHaveValue("");
+	await expect(dialect).toBeFocused();
+	await expect(page.getByRole("button", { name: "Save draft" })).toBeDisabled();
+
+	await dialect.selectOption("connection.template");
+	const template = page.getByLabel("Safe connection template");
+	await template.fill("password={{password|kv_quote}}");
+	await expect(page.getByRole("alert").filter({ hasText: "NATS templates cannot" })).toBeVisible();
+	await template.fill("nats://{{host}}:{{port}}");
+	await expect(page.getByRole("button", { name: "Save draft" })).toBeEnabled();
+
+	const environment = page.getByLabel("Environment name").first();
+	await environment.fill("PORT");
+	await expect(page.getByRole("alert").filter({ hasText: "reserved by the platform" })).toBeVisible();
+	await expect(environment).toHaveAttribute("aria-invalid", "true");
+	await environment.fill("NATS_URL");
+	await protocol.selectOption("postgres");
+	await dialect.selectOption("connection.template");
+	await page.getByLabel("Safe connection template").fill("{{password|url_query|kv_quote}}");
+	await expect(page.getByRole("alert").filter({ hasText: "only one encoder segment" })).toBeVisible();
+	await page.getByLabel("Safe connection template").fill("Password={{password|kv_quote}}");
+	await page.getByRole("button", { name: "Add mapping" }).first().click();
+	const environments = page.getByLabel("Environment name");
+	await environments.nth(1).fill("NATS_URL");
+	await expect(page.getByRole("alert").filter({ hasText: "unique across dependency mappings" })).toHaveCount(2);
+	await expect(page.getByRole("button", { name: "Save draft" })).toBeDisabled();
 });
 
 test("warning acknowledgement submits the exact preflight hash", async ({ page }) => {

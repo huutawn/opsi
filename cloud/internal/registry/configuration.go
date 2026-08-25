@@ -340,6 +340,9 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 		if dep.Protocol == "" {
 			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].protocol", index), "protocol is required")
 		}
+		if dep.TargetKind == "managed_resource" && !resourcecompiler.ValidManagedProtocol(dep.Protocol) {
+			return draft, nil, configurationError("DEPENDENCY_PROTOCOL_UNSUPPORTED", fmt.Sprintf("dependencies[%d].protocol", index), "managed resource protocol is unsupported")
+		}
 		if dep.InjectionPhase != "runtime" && dep.InjectionPhase != "build" {
 			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_phase", index), "invalid injection phase")
 		}
@@ -516,7 +519,7 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			}
 			if dep.TargetKind == "managed_resource" {
 				if _, err := resourcecompiler.LookupSource(dep.Protocol, mapping.SymbolicSource, mapping.Template); err != nil {
-					return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), err.Error())
+					return draft, nil, configurationErrorCause("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), "connection mapping is invalid", err)
 				}
 			}
 			if dep.TargetKind == "application" {
@@ -788,6 +791,10 @@ func serviceAssignment(assignments []topologyv1.Assignment, serviceKey, environm
 
 func configurationError(code, field, message string) error {
 	return APIError{Status: 422, Code: code, Message: message, NextAction: field}
+}
+
+func configurationErrorCause(code, field, message string, cause error) error {
+	return APIError{Status: 422, Code: code, Message: message, NextAction: field, Cause: cause}
 }
 
 func configurationDiff(current ServiceConfigurationDraft, next ServiceConfigurationDraft, currentGenerated, nextGenerated []GeneratedEnvironment) ServiceConfigurationDiff {

@@ -49,3 +49,16 @@ func TestDependencyTemplateParticipatesInStateHash(t *testing.T) {
 		t.Fatal("template edit did not invalidate the state hash")
 	}
 }
+
+func TestDependencyTemplateWhitespaceChangesStateHashAndSurvivesNormalization(t *testing.T) {
+	draft := ServiceConfigurationDraft{Dependencies: []ApplicationDependency{{LogicalName: "database", TargetKind: TargetKindManagedResource, TargetIdentity: "res-1", Protocol: ProtocolPostgres, InjectionPhase: InjectionPhaseRuntime, InjectionMappings: []DependencyInjectionMapping{{EnvName: "DATABASE_DSN", SymbolicSource: SourceConnectionTemplate, Template: " host={{host}}\n"}}}}}
+	first := StateHash(draft)
+	normalized := Normalize(draft)
+	if normalized.Dependencies[0].InjectionMappings[0].Template != " host={{host}}\n" {
+		t.Fatalf("normalized template=%q", normalized.Dependencies[0].InjectionMappings[0].Template)
+	}
+	draft.Dependencies[0].InjectionMappings[0].Template = "host={{host}}\n"
+	if first == StateHash(draft) {
+		t.Fatal("leading whitespace did not change the state hash")
+	}
+}

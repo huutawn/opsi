@@ -28,9 +28,11 @@ type Error struct {
 	Code    string
 	Status  int
 	Message string
+	Cause   error
 }
 
 func (e Error) Error() string { return e.Code + ": " + e.Message }
+func (e Error) Unwrap() error { return e.Cause }
 
 type ScopeAuthority interface {
 	EnvironmentExists(context.Context, string, string) (bool, error)
@@ -638,6 +640,9 @@ func newID(prefix string) string {
 }
 
 func invalid(code, message string) Error { return Error{Code: code, Status: 400, Message: message} }
+func invalidCause(code, message string, cause error) Error {
+	return Error{Code: code, Status: 400, Message: message, Cause: cause}
+}
 func unavailable() Error {
 	return Error{Code: "RESOURCE_UNAVAILABLE", Status: 503, Message: "resource authority is unavailable"}
 }

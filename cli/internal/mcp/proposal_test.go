@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestNormalizeCandidatePreservesTemplateBytes(t *testing.T) {
+	candidate := DependencyCandidate{LogicalName: " database ", Protocol: " postgres ", Mappings: []DependencyInjectionMapping{{EnvName: " DATABASE_DSN ", SymbolicSource: " connection.template ", Template: " host={{host}}\n"}}}
+	normalized := normalizeCandidate(candidate)
+	if normalized.LogicalName != "database" || normalized.Protocol != "postgres" || normalized.Mappings[0].EnvName != "DATABASE_DSN" || normalized.Mappings[0].SymbolicSource != "connection.template" {
+		t.Fatalf("candidate identity was not normalized: %+v", normalized)
+	}
+	if normalized.Mappings[0].Template != " host={{host}}\n" {
+		t.Fatalf("template bytes changed: %q", normalized.Mappings[0].Template)
+	}
+}
+
 func TestMCP02ProposalEvidenceIsBoundedAndRedacted(t *testing.T) {
 	evidence, err := trimEvidence([]DependencyEvidence{{
 		Type: "ENV_REFERENCE", File: "main.go", Line: 12, Reason: "database URL read",
