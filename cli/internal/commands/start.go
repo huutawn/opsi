@@ -1627,7 +1627,18 @@ func newUIHandler(uiDir, devUI string) http.Handler {
 			http.Error(w, "Opsi UI build not found. Run `npm run build` in cli/ui first.", http.StatusServiceUnavailable)
 		})
 	}
-	return http.FileServer(http.Dir(uiDir))
+	files := http.FileServer(http.Dir(uiDir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/" || strings.HasSuffix(r.URL.Path, ".html"):
+			w.Header().Set("Cache-Control", "no-store")
+		case strings.HasPrefix(r.URL.Path, "/_next/static/"):
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		default:
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		files.ServeHTTP(w, r)
+	})
 }
 
 func resolveUIDir() string {

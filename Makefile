@@ -154,6 +154,8 @@ verify-agent-release:
 ui-build:
 	cd cli/ui && $(RUN) $(UI_NPM) ci
 	cd cli/ui && $(RUN) $(UI_NPM) run build
+	$(RUN) rm -rf bin/opsi-ui
+	$(RUN) cp -R cli/ui/out bin/opsi-ui
 
 ui-test:
 	cd cli/ui && $(RUN) $(UI_NPM) ci

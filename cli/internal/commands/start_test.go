@@ -603,6 +603,13 @@ func TestStartMuxServesHealthAndBuiltUI(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<!doctype html><title>Opsi Console</title>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	assetDir := filepath.Join(dir, "_next", "static", "chunks")
+	if err := os.MkdirAll(assetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetDir, "app-hash.js"), []byte("export{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(newStartMux(dir, "", config.Default(), nil))
 	defer server.Close()
 
@@ -615,13 +622,28 @@ func TestStartMuxServesHealthAndBuiltUI(t *testing.T) {
 	}
 	_ = res.Body.Close()
 
-	res, err = http.Get(server.URL + "/")
+	res, err = http.Get(server.URL + "/?project=proj-1&view=deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("ui status = %d", res.StatusCode)
+	}
+	if cache := res.Header.Get("Cache-Control"); cache != "no-store" {
+		t.Fatalf("ui cache policy = %q", cache)
+	}
+
+	res, err = http.Get(server.URL + "/_next/static/chunks/app-hash.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("ui status = %d", res.StatusCode)
+		t.Fatalf("asset status = %d", res.StatusCode)
+	}
+	if cache := res.Header.Get("Cache-Control"); cache != "public, max-age=31536000, immutable" {
+		t.Fatalf("asset cache policy = %q", cache)
 	}
 }
 
