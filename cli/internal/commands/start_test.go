@@ -1649,7 +1649,7 @@ func TestLocalSessionVerifiesPATBeforeReportingAuthenticated(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = res.Body.Close()
-	if valid["authenticated"] != true || valid["token_status"] != "valid" || valid["cloud_connected"] != "ok" {
+	if valid["authenticated"] != true || valid["token_status"] != "valid" || valid["cloud_connected"] != "ok" || valid["user_id"] != "user-1" || valid["role"] != "owner" {
 		t.Fatalf("valid session=%v", valid)
 	}
 
@@ -1705,7 +1705,7 @@ func TestLocalSessionResolvesProjectFromPATWithoutBrowserStorage(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&session); err != nil {
 		t.Fatal(err)
 	}
-	if session["authenticated"] != true || session["org_id"] != "org-1" || session["project_id"] != "proj-1" {
+	if session["authenticated"] != true || session["user_id"] != "user-1" || session["org_id"] != "org-1" || session["project_id"] != "proj-1" || session["role"] != "owner" {
 		t.Fatalf("projectless session=%v", session)
 	}
 }

@@ -333,8 +333,10 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			"cloud_connected": cloudState,
 			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
 			"token_status":    tokenState,
+			"user_id":         identity.UserID,
 			"org_id":          identity.OrgID,
 			"project_id":      identity.ProjectID,
+			"role":            identity.Role,
 			"local_session":   localSession,
 			"capabilities":    []string{"projects", "nodes", "services", "deployments", "github_app", "build_records", "topology", "deployment_policy", "routing_preflight", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
