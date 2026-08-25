@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -16,9 +17,13 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	"github.com/opsi-dev/opsi/cloud/internal/repositoryexport"
 )
 
 func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
+	if len(parts) >= 3 && parts[2] == "repository-export" {
+		return s.handleRepositoryExportAPI(w, r, projectID, parts, principal)
+	}
 	if len(parts) < 3 || parts[2] != "deployment-runs" {
 		return false
 	}
@@ -63,7 +68,7 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 				return true
 			}
 			if !reused {
-				if analyzed, analysisErr := s.analyzeDeploymentRun(r.Context(), projectID, run.ID); analysisErr == nil {
+				if analyzed, analysisErr := s.analyzeDeploymentRun(r.Context(), projectID, run.ID, nil); analysisErr == nil {
 					run = analyzed
 				} else {
 					writeRegistryFailure(w, r, analysisErr)
@@ -149,7 +154,13 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 	var err error
 	switch action {
 	case "analyze":
-		run, err = s.analyzeDeploymentRun(r.Context(), projectID, runID)
+		var request struct {
+			Scope *repositoryanalysis.Scope `json:"scope"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return true
+		}
+		run, err = s.analyzeDeploymentRun(r.Context(), projectID, runID, request.Scope)
 	case "approve":
 		var request struct {
 			PlanHash string `json:"plan_hash"`
@@ -196,6 +207,140 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 	}
 	writeRegistryResult(w, r, run, err, http.StatusOK)
 	return true
+}
+
+type repositoryExportPreviewResponse struct {
+	repositoryexport.Preview
+	ExportEnabled  bool   `json:"export_enabled"`
+	DisabledReason string `json:"disabled_reason,omitempty"`
+}
+
+func (s *Server) handleRepositoryExportAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
+	previewRoute := len(parts) == 4 && parts[3] == "preview"
+	if previewRoute && r.Method == http.MethodPost {
+		if !s.requireRole(w, r, principal, projectID, "repository_export", projectID, "owner", "admin", "developer", "viewer") {
+			return true
+		}
+		var request struct {
+			RunID        string `json:"run_id"`
+			TargetBranch string `json:"target_branch,omitempty"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return true
+		}
+		preview, repository, err := s.repositoryExportPreview(r.Context(), projectID, request.RunID, request.TargetBranch)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		response := repositoryExportPreviewResponse{Preview: preview, ExportEnabled: true}
+		if s.githubAppClient == nil {
+			response.ExportEnabled = false
+			response.DisabledReason = "Connect the project GitHub App installation to export configuration."
+		} else if _, _, permissionErr := s.githubAppClient.RepositoryWriteToken(r.Context(), repository.InstallationID, repository.RepositoryID); permissionErr != nil {
+			response.ExportEnabled = false
+			response.DisabledReason = "Approve Contents: write and Pull requests: write for this GitHub App installation. Deployments remain available without these permissions."
+		}
+		writeJSON(w, http.StatusOK, response)
+		return true
+	}
+	if len(parts) == 3 && r.Method == http.MethodPost {
+		if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "repository_export", projectID, "owner", "admin", "developer") {
+			return true
+		}
+		var request struct {
+			RunID        string `json:"run_id"`
+			RunRevision  uint64 `json:"run_revision"`
+			PlanHash     string `json:"plan_hash"`
+			PreviewHash  string `json:"preview_hash"`
+			TargetBranch string `json:"target_branch,omitempty"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return true
+		}
+		preview, repository, err := s.repositoryExportPreview(r.Context(), projectID, request.RunID, request.TargetBranch)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		if request.RunRevision != preview.RunRevision || request.PlanHash != preview.PlanHash || request.PreviewHash != preview.PreviewHash {
+			writeRegistryFailure(w, r, deploymentworkflow.Error{Code: "REPOSITORY_EXPORT_PREVIEW_STALE", Status: http.StatusConflict, Message: "Repository export no longer matches the exact deployment run and preview.", NextAction: "Refresh the export preview and review the diff again."})
+			return true
+		}
+		if s.githubAppClient == nil {
+			writeRegistryFailure(w, r, deploymentworkflow.Error{Code: "REPOSITORY_EXPORT_UNAVAILABLE", Status: http.StatusServiceUnavailable, Message: "GitHub App repository export is unavailable."})
+			return true
+		}
+		branch := "opsi/export-" + safeExportPart(request.RunID, 12) + "-" + preview.PreviewHash[:12]
+		exported, exportErr := s.githubAppClient.ExportRepositoryConfig(r.Context(), repository.InstallationID, repository.RepositoryID, repository.FullName, strings.ToLower(preview.SourceSHA), preview.TargetBranch, branch, []byte(preview.YAML))
+		if errors.Is(exportErr, errGitHubRepositoryWriteDenied) {
+			exportErr = deploymentworkflow.Error{Code: "REPOSITORY_EXPORT_PERMISSION_UPGRADE_REQUIRED", Status: http.StatusConflict, Message: "This GitHub App installation has not approved Contents: write and Pull requests: write.", NextAction: "Approve the requested GitHub App permissions, then retry Export configuration. Deployments are unaffected."}
+		}
+		if exportErr != nil {
+			writeRegistryFailure(w, r, exportErr)
+			return true
+		}
+		s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "REPOSITORY_CONFIGURATION_EXPORTED", "repository", strconv.FormatInt(repository.RepositoryID, 10), "success", map[string]any{"run_id": request.RunID, "run_revision": request.RunRevision, "plan_hash": request.PlanHash, "preview_hash": request.PreviewHash, "branch": exported.Branch, "pull_request_number": exported.PullRequestNumber, "reused": exported.Reused})
+		writeJSON(w, http.StatusCreated, map[string]any{"repository_export": exported})
+		return true
+	}
+	return false
+}
+
+func (s *Server) repositoryExportPreview(ctx context.Context, projectID, runID, targetBranch string) (repositoryexport.Preview, registry.GitHubRepository, error) {
+	run, err := s.DeploymentRuns.Get(ctx, projectID, runID)
+	if err != nil {
+		return repositoryexport.Preview{}, registry.GitHubRepository{}, err
+	}
+	repository, err := s.workflowRepository(projectID, run.Plan.Source.RepositoryID)
+	if err != nil {
+		return repositoryexport.Preview{}, registry.GitHubRepository{}, err
+	}
+	if repository.FullName != run.Plan.Source.Repository || repository.InstallationID != run.Plan.Source.InstallationID {
+		return repositoryexport.Preview{}, registry.GitHubRepository{}, deploymentworkflow.Error{Code: "REPOSITORY_EXPORT_SOURCE_MISMATCH", Status: http.StatusNotFound, Message: "Deployment run repository is not owned by this project."}
+	}
+	if targetBranch == "" {
+		targetBranch = repository.DefaultBranch
+	}
+	if targetBranch == "" || strings.TrimSpace(targetBranch) != targetBranch || strings.IndexAny(targetBranch, " \r\n\x00") >= 0 {
+		return repositoryexport.Preview{}, registry.GitHubRepository{}, deploymentworkflow.Error{Code: "REPOSITORY_EXPORT_BRANCH_INVALID", Status: http.StatusBadRequest, Message: "Repository export target branch is invalid."}
+	}
+	if s.githubAppClient == nil {
+		return repositoryexport.Preview{}, registry.GitHubRepository{}, deploymentworkflow.Error{Code: "REPOSITORY_EXPORT_UNAVAILABLE", Status: http.StatusServiceUnavailable, Message: "GitHub App repository export is unavailable."}
+	}
+	current := []byte(nil)
+	exists, existsErr := s.githubAppClient.RepositoryFileExists(ctx, repository.InstallationID, repository.FullName, run.Plan.Source.CommitSHA, repositoryexport.Path)
+	if existsErr != nil {
+		return repositoryexport.Preview{}, registry.GitHubRepository{}, existsErr
+	}
+	if exists {
+		current, err = s.githubAppClient.ReadFile(ctx, repository.InstallationID, repository.FullName, run.Plan.Source.CommitSHA, repositoryexport.Path, 512<<10)
+		if err != nil {
+			return repositoryexport.Preview{}, registry.GitHubRepository{}, err
+		}
+	}
+	preview, err := repositoryexport.NewPreview(run, targetBranch, current)
+	if err != nil {
+		return repositoryexport.Preview{}, registry.GitHubRepository{}, deploymentworkflow.Error{Code: "REPOSITORY_EXPORT_PLAN_INVALID", Status: http.StatusConflict, Message: err.Error(), NextAction: "Review and save a valid deployment plan before exporting."}
+	}
+	return preview, repository, nil
+}
+
+func safeExportPart(value string, limit int) string {
+	var b strings.Builder
+	for _, character := range strings.ToLower(value) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			b.WriteRune(character)
+		}
+	}
+	result := b.String()
+	if len(result) > limit {
+		return result[:limit]
+	}
+	if result == "" {
+		return "run"
+	}
+	return result
 }
 
 func deploymentRunIfMatch(value string) (uint64, error) {
@@ -257,7 +402,7 @@ func (s *Server) cancelWorkflowDeployments(projectID string, run deploymentworkf
 	return nil
 }
 
-func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID string) (deploymentworkflow.Run, error) {
+func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID string, requestedScope *repositoryanalysis.Scope) (deploymentworkflow.Run, error) {
 	run, err := s.DeploymentRuns.Get(ctx, projectID, runID)
 	if err != nil {
 		return run, err
@@ -269,11 +414,18 @@ func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID stri
 	if s.githubAppClient == nil || s.RepositoryAnalyzer.Repository == nil {
 		return run, deploymentworkflow.Error{Code: "REPOSITORY_ANALYSIS_UNAVAILABLE", Status: 503, Message: "GitHub App repository analysis is unavailable.", NextAction: "Connect the project GitHub App installation."}
 	}
-	sha, err := s.githubAppClient.ResolveCommit(ctx, repository.InstallationID, repository.FullName, run.Plan.Source.SelectedRef)
-	if err != nil {
-		return run, err
+	sha := run.Plan.Source.CommitSHA
+	if requestedScope == nil || len(sha) != 40 {
+		sha, err = s.githubAppClient.ResolveCommit(ctx, repository.InstallationID, repository.FullName, run.Plan.Source.SelectedRef)
+		if err != nil {
+			return run, err
+		}
 	}
-	analysis, err := s.RepositoryAnalyzer.Analyze(ctx, repositoryanalysis.Request{InstallationID: repository.InstallationID, RepositoryID: repository.RepositoryID, Repository: repository.FullName, SelectedRef: run.Plan.Source.SelectedRef, CommitSHA: sha})
+	scope := run.Analysis.Scope
+	if requestedScope != nil {
+		scope = *requestedScope
+	}
+	analysis, err := s.RepositoryAnalyzer.Analyze(ctx, repositoryanalysis.Request{InstallationID: repository.InstallationID, RepositoryID: repository.RepositoryID, Repository: repository.FullName, SelectedRef: run.Plan.Source.SelectedRef, CommitSHA: sha, Scope: scope})
 	if err != nil {
 		return run, err
 	}

@@ -43,6 +43,25 @@ func TestPlanHashDeterministicAndSecretRedacted(t *testing.T) {
 	_ = service
 }
 
+func TestPlanHashBindsAnalysisScopeCoverageAndTruncationReason(t *testing.T) {
+	_, run, _ := fixture(t)
+	base := run.Plan.Hash
+	mutations := []func(*Plan){
+		func(plan *Plan) { plan.AnalysisScope = repositoryanalysis.Scope{ApplicationRoots: []string{"api"}} },
+		func(plan *Plan) { plan.AnalysisScopeHash = "scope-hash" },
+		func(plan *Plan) { plan.EvidenceCoverage.FilesInspected++ },
+		func(plan *Plan) { plan.TruncationReason = "deadline" },
+	}
+	for index, mutate := range mutations {
+		plan := run.Plan
+		mutate(&plan)
+		hash, err := HashPlan(plan)
+		if err != nil || hash == base {
+			t.Fatalf("mutation %d was not bound by plan hash: hash=%q err=%v", index, hash, err)
+		}
+	}
+}
+
 func TestHashPlanDoesNotMutateDraftOrder(t *testing.T) {
 	_, run, _ := fixture(t)
 	run.Plan.Applications = []repositoryanalysis.Application{{Key: "web"}, {Key: "api"}}

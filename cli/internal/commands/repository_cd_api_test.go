@@ -206,9 +206,6 @@ func TestLocalRepositoryApplyRejectsStalePreviewWithoutWriting(t *testing.T) {
 	if string(current) != external {
 		t.Fatalf("stale apply changed config: %q", current)
 	}
-	if _, err := os.Stat(filepath.Join(root, defaultWorkflowPath)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stale apply wrote workflow: %v", err)
-	}
 }
 
 type localApplyResult struct {

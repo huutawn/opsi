@@ -11,9 +11,12 @@ Verification remain the operational authorities. PostgreSQL leases and
 idempotency keys allow a different Cloud process to resume a run after restart.
 
 Repository analysis is read-only through the GitHub App and never executes or
-writes source. Authority order is `.opsi/opsi-cd.yaml`, Compose, then bounded
-Dockerfile/framework/source inspection. Findings include evidence, confidence,
-ambiguity, and unsupported dependencies. Generated workload secrets are stored
+writes source. No repository file or GitHub Actions workflow is required.
+Authority order is optional `.opsi/opsi-cd.yaml`, Compose, then deterministic,
+bounded Dockerfile/framework/source inspection. Operators can refine a
+truncated analysis with persisted application roots and exclude paths on the
+same exact SHA. Findings include evidence coverage, confidence, ambiguity, and
+specific truncation reasons. Generated workload secrets are stored
 by the existing encrypted credential vault; plans, APIs, events, and workload
 specs contain typed references only, and plaintext is delivered transiently to
 the assigned Agent.
@@ -26,6 +29,13 @@ warning hashes, a reconnectable timeline, responsive review panels, and
 redacted generated-secret presentation. This source state is covered by Go and
 UI tests; the real `identity-service` K3s acceptance described in the roadmap
 has not been run in this workspace.
+
+Configuration export is the only source-write path. Viewer roles can inspect a
+canonical redacted YAML/diff preview; owner/admin/developer roles can explicitly
+create a branch, commit, and pull request. Export never merges and affects only
+future runs. The GitHub App installation needs `Contents: read and write` and
+`Pull requests: read and write` only for this endpoint; deployments remain
+available without those upgraded permissions.
 
 For automatic public hostnames, configure `deployment_domain` or
 `OPSI_CLOUD_DEPLOYMENT_DOMAIN` with the wildcard DNS suffix. Cloud derives a
@@ -354,8 +364,8 @@ artifacts. At this snapshot:
 - GitHub App user authorization, installation authentication/webhook intake,
   durable installation/repository inventory, secure installation claim, and
   project/service mapping are implemented. `opsi init` now performs safe local
-  GitHub origin matching, numeric repository claim, service binding, and atomic
-  repository bootstrap file generation. GitHub Actions OIDC, `BuildRecord`,
+  GitHub origin matching, numeric repository claim, and exact-SHA analysis
+  preview without writing source. The Opsi-owned executor and `BuildRecord`,
   manual `TopologyPlan`, exact-match `DeploymentPolicy`, and deterministic
   routing preflight are implemented. R5-010 adds the immutable-digest
   `DeploymentJob` path and has passed live Agent/K3s workload, CLI/Local UI
@@ -467,13 +477,11 @@ still unproven because no production fault-injection hook exists.
   detects only supported GitHub.com origins without reading credential helpers,
   and treats local `owner/repo` only as metadata for selecting a numeric Cloud
   repository ID. A missing repository can use the P09 OAuth installation-claim
-  flow through a one-time loopback callback.
-- Repository bootstrap validates service/binding conflicts and both output
-  files before repository-claim or binding mutation. It supports idempotent
-  reruns, secret-free JSON dry-run, explicit `--force --yes`, atomic writes, and
-  two-file rollback. The generated CD config contains build/deployment intent
-  only; the generated workflow is manual bootstrap status and does not request
-  OIDC, build, push, call Cloud, or deploy.
+  flow through a one-time loopback callback. It then creates an analyzed Draft
+  DeploymentPlan and does not write local or remote repository files.
+- Optional explicit config add/update remains under `opsi cd config upsert`.
+  Canonical export is a separate Cloud-backed preview/PR command and never
+  auto-merges. No user-repository workflow is generated.
 - OS-keychain PAT storage and Agent gRPC TLS/client-certificate/certificate-pin
   support.
 - `opsi start` localhost server with short local sessions, `/api/local/...`
@@ -887,8 +895,9 @@ source of truth is `docs/opsi_roadmap_v5_production.md`.
 
 ## R5-006 repository CD checkpoint
 
-R5-006 implements one repository-owned application path for monorepo CD intent.
-`.opsi/opsi-cd.yaml` v2 remains strict and deterministic. In addition to service
+R5-006's repository-owned workflow bootstrap has been replaced by the
+zero-configuration Repository-to-Running path. `.opsi/opsi-cd.yaml` v2 remains
+strict, deterministic, and optional. In addition to service
 build context/Dockerfile/platform, watch/shared paths, build-dependency keys,
 and production/preview intent, it accepts optional repository-owned resource
 intent and service runtime declarations: port, non-secret environment,
@@ -897,9 +906,8 @@ injection mappings, and verification contracts. Existing build-only v2 files
 retain their canonical render and hash. v1 `ServiceBuild` files migrate without
 dropping a service or adding Cloud authority identity; unknown fields, invalid
 paths, traversal, escaping symlinks, duplicate keys, missing dependencies, and
-dependency cycles fail closed. `opsi init` now has a local repository mode for
-create, v1 migration, add, update, dry-run, atomic apply, and idempotent repeat;
-the existing GitHub binding path uses the same repository mutation service.
+dependency cycles fail closed. Explicit add/update/migration remains available
+through `opsi cd config upsert`; it is not part of `opsi init` or deployment.
 
 The changed-service resolver runs the fixed argv form
 `git -C ROOT diff --name-status -z BASE HEAD`, parses add/modify/delete/type,
@@ -911,27 +919,21 @@ typed reasons; a truly
 empty trusted diff is the only empty plan. CLI `opsi cd plan` and Local API
 `/api/local/repository/plan/preview` use the same DTO and service.
 
-The generated workflow has read-only contents permission, immutable action and
-Opsi planner source revisions, bounded plan/build jobs, deterministic
-concurrency and fork-safe behavior;
-it performs no OIDC, GHCR push, Cloud call, or deployment. The former Local UI
-repository editor was removed when Deploy became the single operational path;
-CLI repository bootstrap and changed-service planning remain available. The
-R5-007 focused entry review strengthened that
-apply boundary: preview returns a hash over the canonical mutation, current and
-rendered managed-file hashes, and ordered file actions; apply recomputes it from
-the current filesystem, rejects stale previews before write, and uses a bounded
-in-memory ledger so exact retries reuse the result while conflicting key reuse
-returns a typed conflict. Live GitHub runner execution was accepted in the
-R5-008 checkpoint.
+The generated user-repository workflow, renderer, caller, tests, and Local API
+workflow preview were removed. The Opsi-owned executor is the sole build path:
+after approval it receives a BuildJob, checks out the exact approved SHA using
+a repository-scoped installation credential, and returns an immutable
+BuildRecord. The former Local UI repository editor was removed when Deploy
+became the single operational path; changed-service planning remains an
+advanced local inspection command and does not execute builds.
 
-Capability matrix (R5-006 plus the expanded v2 contract): config v1/v2
-parser-validator-writer and atomic
-mutation path: implemented; `opsi init` create/add/update/migrate/dry-run/apply:
-implemented; workflow renderer: deterministic secure changed-service matrix;
-Git adapter: fixed-argv bounded diff parser; Local API: config/mutation/workflow/
-plan preview plus confirmed apply; Dashboard: read-only repository analysis and
-editable deployment-plan review through the single Deploy workflow.
+Capability matrix: config v1/v2 parser-validator-writer and explicit atomic
+mutation path: implemented; `opsi init` claim plus exact-SHA analysis preview:
+implemented; repository workflow renderer/caller: removed; Git adapter:
+fixed-argv bounded diff parser; Local API: explicit config mutation and plan
+preview; Dashboard: read-only scoped repository analysis, optional audited
+Export PR, and editable deployment-plan review through the single Deploy
+workflow.
 
 ## R5-007 trusted BuildRecord checkpoint
 

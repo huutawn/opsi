@@ -130,23 +130,42 @@ type Issue struct {
 	Blocking   bool   `json:"blocking"`
 }
 
+// Scope narrows heuristic analysis without changing the immutable source
+// revision. Empty roots mean the whole repository. Excludes are repository-
+// relative path prefixes and are applied before candidate selection.
+type Scope struct {
+	ApplicationRoots []string `json:"application_roots,omitempty"`
+	ExcludePaths     []string `json:"exclude_paths,omitempty"`
+}
+
+type EvidenceCoverage struct {
+	CandidatesFound    int   `json:"candidates_found"`
+	CandidatesSelected int   `json:"candidates_selected"`
+	FilesInspected     int   `json:"files_inspected"`
+	BytesInspected     int64 `json:"bytes_inspected"`
+}
+
 type Result struct {
-	SchemaVersion  string        `json:"schema_version"`
-	RepositoryID   int64         `json:"repository_id"`
-	Repository     string        `json:"repository"`
-	SelectedRef    string        `json:"selected_ref"`
-	CommitSHA      string        `json:"commit_sha"`
-	Authority      string        `json:"authority"`
-	Applications   []Application `json:"applications"`
-	Resources      []Resource    `json:"resources"`
-	Dependencies   []Dependency  `json:"dependencies"`
-	Bindings       []Binding     `json:"bindings"`
-	Secrets        []Secret      `json:"secrets"`
-	Issues         []Issue       `json:"issues"`
-	FilesInspected int           `json:"files_inspected"`
-	BytesInspected int64         `json:"bytes_inspected"`
-	Truncated      bool          `json:"truncated"`
-	AnalyzedAt     time.Time     `json:"analyzed_at"`
+	SchemaVersion    string           `json:"schema_version"`
+	RepositoryID     int64            `json:"repository_id"`
+	Repository       string           `json:"repository"`
+	SelectedRef      string           `json:"selected_ref"`
+	CommitSHA        string           `json:"commit_sha"`
+	Authority        string           `json:"authority"`
+	Applications     []Application    `json:"applications"`
+	Resources        []Resource       `json:"resources"`
+	Dependencies     []Dependency     `json:"dependencies"`
+	Bindings         []Binding        `json:"bindings"`
+	Secrets          []Secret         `json:"secrets"`
+	Issues           []Issue          `json:"issues"`
+	Scope            Scope            `json:"scope"`
+	ScopeHash        string           `json:"scope_hash"`
+	EvidenceCoverage EvidenceCoverage `json:"evidence_coverage"`
+	FilesInspected   int              `json:"files_inspected"`
+	BytesInspected   int64            `json:"bytes_inspected"`
+	Truncated        bool             `json:"truncated"`
+	TruncationReason string           `json:"truncation_reason,omitempty"`
+	AnalyzedAt       time.Time        `json:"analyzed_at"`
 }
 
 func (r Result) NeedsInput() bool {

@@ -52,6 +52,51 @@ test("viewer can inspect the reviewed plan but sees no mutation control", async 
 	await expect(page.getByLabel("Canonical key").first()).toBeDisabled();
 });
 
+test("missing target shows Connect server before any mutation is running", async ({ page }) => {
+	const run = deploymentRun("awaiting_input");
+	(run.plan.issues as Array<Record<string, unknown>>).push({ code: "TARGET_SERVER_REQUIRED", message: "No Ready project server is available.", resolution: "Connect a server.", blocking: true });
+	await mockDeployAPI(page, () => run, () => run);
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("button", { name: "Connect server" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Working…" })).toHaveCount(0);
+});
+
+test("truncated analysis submits a canonical scope on the same run", async ({ page }) => {
+	let run = deploymentRun("awaiting_input");
+	(run.plan.issues as Array<Record<string, unknown>>).push({ code: "ANALYSIS_TRUNCATED", message: "Analysis reached the file limit.", resolution: "Refine analysis.", blocking: true });
+	let submitted: Record<string, unknown> | undefined;
+	await mockDeployAPI(page, () => run, (body, name) => {
+		if (name === "analyze") submitted = body;
+		run = deploymentRun("awaiting_approval");
+		return run;
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByLabel("Application roots").fill("tcip-fake\nbe\nbe");
+	await page.getByLabel("Exclude paths").fill("docs/archive");
+	await page.getByRole("button", { name: "Analyze exact commit with scope" }).click();
+	await expect.poll(() => submitted).toEqual({ scope: { application_roots: ["be", "tcip-fake"], exclude_paths: ["docs/archive"] } });
+});
+
+test("export is previewed before an operator creates a pull request", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	let exports = 0;
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		onExport: () => { exports += 1; },
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByRole("button", { name: "Export configuration" }).click();
+	const dialog = page.getByRole("dialog", { name: "Review configuration export" });
+	await expect(dialog).toBeVisible();
+	await expect(dialog.getByText("will not be merged automatically")).toBeVisible();
+	await dialog.getByRole("button", { name: "Create pull request" }).click();
+	await expect.poll(() => exports).toBe(1);
+	await expect(page.getByRole("link", { name: "Open pull request #9" })).toBeVisible();
+});
+
 test("review plan has no WCAG 2.1 A or AA axe violations", async ({ page }) => {
 	const run = deploymentRun("awaiting_approval");
 	await mockDeployAPI(page, () => run, () => run);
@@ -133,6 +178,7 @@ test("available repository is claimed and analyzed without a page reload", async
 	await page.getByLabel("Repository", { exact: true }).selectOption("7");
 	await page.getByLabel("Branch or ref").fill("developer");
 	await page.getByLabel("Hostname (optional)").fill("identity.example.test");
+	await expect(page).toHaveURL(/source_repository=7/);
 	await page.reload();
 	await expect(page.getByLabel("Repository", { exact: true })).toHaveValue("7");
 	await expect(page.getByLabel("Branch or ref")).toHaveValue("developer");
@@ -219,6 +265,7 @@ type SourceBehavior = {
 	onCreate?: () => ReturnType<typeof deploymentRun>;
 	claimFailure?: boolean;
 	onLoginStart?: () => void;
+	onExport?: () => void;
 };
 
 type AuthSelectionBehavior = { authenticated: boolean; selections: number };
@@ -229,11 +276,13 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		const path = new URL(request.url()).pathname;
 		let body: unknown = {};
 		if (/\/workload-secrets$/.test(path) && request.method() === "PUT" && secretAction) body = { workload_secret: secretAction(request.postDataJSON()), reused: false };
-		else if (path === "/api/local/session/login/start" && request.method() === "POST" && source) { source.onLoginStart?.(); body = { auth_url: "/?project=proj-1&view=deploy&auth=ok", status: "pending" }; }
+		else if (path === "/api/local/session/login/start" && request.method() === "POST" && source) { source.onLoginStart?.(); const login = request.postDataJSON(); const query = new URLSearchParams(String(login.return_query || "")); query.set("project", "proj-1"); query.set("view", "deploy"); query.set("auth", "ok"); body = { auth_url: "/?" + query.toString(), status: "pending" }; }
 		else if (path === "/api/local/session/selection" && authSelection) body = { selection_id: "selection-1", projects: [{ id: "proj-1", name: "dada", role }] };
 		else if (path === "/api/local/session/select-project" && request.method() === "POST" && authSelection) { authSelection.authenticated = true; authSelection.selections += 1; body = { authenticated: true, session: { user_id: "user-1", org_id: "org-1", project_id: "proj-1", role } }; }
 		else if (/\/github\/repositories\/7\/claim$/.test(path) && request.method() === "POST" && source?.claimFailure) return fulfill(route, { error: { code: "CLOUD_AUTH_REQUIRED", message: "Cloud rejected the saved credential", next_action: "Sign in again." } }, 401);
 		else if (/\/github\/repositories\/7\/claim$/.test(path) && request.method() === "POST" && source) { source.onClaim?.(); body = { repository_id: 7, project_id: "proj-1", status: "active" }; }
+		else if (path.endsWith("/repository-export/preview") && request.method() === "POST") body = { run_id: "run-1", run_revision: 3, plan_hash: hash("a"), source_sha: hash("d").slice(0, 40), repository_id: 7, target_branch: "main", path: ".opsi/opsi-cd.yaml", yaml: "version: 2\n", diff: "+version: 2\n", preview_hash: hash("e"), export_enabled: true };
+		else if (path.endsWith("/repository-export") && request.method() === "POST") { source?.onExport?.(); body = { repository_export: { branch: "opsi/export-run", commit_sha: hash("f").slice(0, 40), pull_request_number: 9, pull_request_url: "https://github.test/pr/9", reused: false } }; }
 		else if (path.endsWith("/deployment-runs") && request.method() === "POST" && source?.onCreate) body = { deployment_run: source.onCreate(), reused: false };
 		else if (path === "/api/local/session") body = authSelection && !authSelection.authenticated ? { authenticated: false, cloud_connected: "ok", agent_connected: "ok", token_status: "missing", local_session: "local-session" } : { authenticated: true, cloud_connected: "ok", agent_connected: "ok", token_status: "valid", local_session: "local-session", user_id: "user-1", org_id: "org-1", project_id: "proj-1", role, capabilities: [] };
 		else if (path === "/api/local/session/project") body = { status: "selected", project_id: "proj-1" };
@@ -273,7 +322,7 @@ function placementFacts() {
 	return { project_id: "proj-1", environments: [{ id: "env-1", project_id: "proj-1", name: "Production", type: "prod", status: "active" }], runtimes: [{ id: "runtime-1", project_id: "proj-1", environment_id: "env-1", name: "Primary", type: "k3s", status: "ready" }], nodes: [], agents: [], services: [] };
 }
 
-function deploymentRun(state: "awaiting_approval" | "awaiting_warning_ack" | "provisioning" | "building" | "deploying" | "failed" | "stale" | "cancelled") {
+function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting_warning_ack" | "provisioning" | "building" | "deploying" | "failed" | "stale" | "cancelled") {
 	return {
 		schema_version: "opsi.deployment_run/v2", id: "run-1", project_id: "proj-1", created_by: "user-1", state,
 		plan: {
@@ -287,7 +336,7 @@ function deploymentRun(state: "awaiting_approval" | "awaiting_warning_ack" | "pr
 			dependencies: [{ from: "identity-api", to: "postgres", protocol: "postgres", required: true, confidence: "high", reason: "Compose", evidence: [], injections: [{ environment_name: "ConnectionStrings__Database", symbolic_source: "resource.postgres.connection_string" }] }, { from: "identity-web", to: "identity-api", protocol: "http", strategy: "same_origin", path: "/api", required: true, verification: { type: "consumer_http", path: "/health", expected_status: 200 }, confidence: "high", reason: "Route", evidence: [] }],
 			bindings: [{ from: "identity-web", to: "identity-api", kind: "browser_http", path: "/api", confidence: "high", reason: "Route", evidence: [] }],
 			secrets: [{ name: "jwt-signing-key", application_key: "identity-api", environment_name: "Jwt__SigningKey", generated: true, secret_ref: "generated://jwt-signing-key", revision: 0, display: "Generated and securely stored", confidence: "high", reason: "Configuration", evidence: [] }],
-			issues: [], target: { environment_id: "env-1", runtime_id: "runtime-1", hostname: "identity.apps.example.test", exposure: "public", cpu_milli: 250, memory_bytes: 268435456 }, authority_revisions: { source_commit_sha: hash("d").slice(0, 40) }, failure_policy: { fail_fast: true, rollback_known_good: true, retain_persistent_data: true, max_attempts: 3 },
+			issues: [], analysis_scope: { application_roots: [], exclude_paths: [] }, analysis_scope_hash: hash("s"), evidence_coverage: { candidates_found: 6, candidates_selected: 6, files_inspected: 6, bytes_inspected: 2048 }, target: { environment_id: "env-1", runtime_id: "runtime-1", hostname: "identity.apps.example.test", exposure: "public", cpu_milli: 250, memory_bytes: 268435456 }, authority_revisions: { source_commit_sha: hash("d").slice(0, 40) }, failure_policy: { fail_fast: true, rollback_known_good: true, retain_persistent_data: true, max_attempts: 3 },
 		},
 		analysis: { authority: "compose", issues: [], files_inspected: 6, bytes_inspected: 2048, truncated: false }, authority_refs: { checkpoints: [] }, preflight_hash: state === "awaiting_warning_ack" ? hash("p") : undefined, failure: state === "failed" ? { step: "building", code: "BUILD_AUTHORITY_UNAVAILABLE", message: "Build authority unavailable.", next_action: "Retry the failed step.", retryable: true } : state === "stale" ? { step: "preflighting", code: "DEPLOYMENT_PLAN_STALE", message: "An authority changed.", next_action: "Analyze and review again.", retryable: false } : undefined, attempt: state === "awaiting_approval" ? 0 : 1, revision: state === "awaiting_approval" ? 3 : 4, created_at: "2026-08-24T00:00:00Z", updated_at: "2026-08-24T00:00:00Z",
 	};

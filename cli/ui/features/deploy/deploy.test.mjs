@@ -19,7 +19,8 @@ test("Deploy result and technical details use factual authority records", async 
   const source = await readFile(view, "utf8");
   for (const value of ["Repository is running", "digest_matches_image_id", "Raw build log", "Image digests", "Build records", "Requested", "Assigned", "Reserved", "Available"]) assert.match(source, new RegExp(value));
   assert.doesNotMatch(source, /localStorage|dangerouslySetInnerHTML/);
-  assert.match(source, /opsi:deploy-source/);
+  assert.doesNotMatch(source, /sessionStorage/);
+  assert.match(source, /source_project/);
   assert.match(source, /clearSourceDraft\(projectID\)/);
 });
 
@@ -27,7 +28,8 @@ test("Target reuses canonical bootstrap and resumes analysis when a runtime beco
   const source = await readFile(view, "utf8");
   assert.match(source, /BootstrapDialog/);
 	assert.match(source, /BootstrapCommand/);
-  assert.match(source, /Connect server/);
+	assert.match(source, /Connect server/);
+	assert.match(source, /Boolean\(action\)\s*&&\s*busy\s*===\s*action/);
   assert.match(source, /client\.placementFacts/);
   assert.match(source, /runtime\.status === "ready"/);
   assert.match(source, /deploymentRunAction\(projectID, run\.id, "analyze"/);

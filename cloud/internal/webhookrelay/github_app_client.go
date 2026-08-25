@@ -520,6 +520,7 @@ func (c *GitHubAppClient) requestInstallationToken(ctx context.Context, installa
 }
 
 var errGitHubRepositoryTokenDenied = errors.New("github repository token denied")
+var errGitHubRepositoryWriteDenied = errors.New("github repository write token denied")
 
 func (c *GitHubAppClient) RepositoryReadToken(ctx context.Context, installationID, repositoryID int64) (string, time.Time, error) {
 	if installationID <= 0 || repositoryID <= 0 {
@@ -533,6 +534,27 @@ func (c *GitHubAppClient) RepositoryReadToken(ctx context.Context, installationI
 		return "", time.Time{}, errors.New("repository token request unavailable")
 	}
 	token, err := c.requestInstallationTokenWithBody(ctx, installationID, string(body), true)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return token.Token, token.ExpiresAt, nil
+}
+
+func (c *GitHubAppClient) RepositoryWriteToken(ctx context.Context, installationID, repositoryID int64) (string, time.Time, error) {
+	if installationID <= 0 || repositoryID <= 0 {
+		return "", time.Time{}, errGitHubRepositoryWriteDenied
+	}
+	body, err := json.Marshal(struct {
+		RepositoryIDs []int64           `json:"repository_ids"`
+		Permissions   map[string]string `json:"permissions"`
+	}{RepositoryIDs: []int64{repositoryID}, Permissions: map[string]string{"contents": "write", "pull_requests": "write"}})
+	if err != nil {
+		return "", time.Time{}, errors.New("repository write token request unavailable")
+	}
+	token, err := c.requestInstallationTokenWithBody(ctx, installationID, string(body), true)
+	if errors.Is(err, errGitHubRepositoryTokenDenied) {
+		return "", time.Time{}, errGitHubRepositoryWriteDenied
+	}
 	if err != nil {
 		return "", time.Time{}, err
 	}

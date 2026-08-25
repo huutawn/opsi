@@ -16,11 +16,10 @@ import (
 )
 
 type localMutationRequest struct {
-	ConfigPath   string               `json:"config_path"`
-	WorkflowPath string               `json:"workflow_path"`
-	Service      repository.ServiceV2 `json:"service"`
-	Confirm      bool                 `json:"confirm"`
-	PreviewHash  string               `json:"preview_hash"`
+	ConfigPath  string               `json:"config_path"`
+	Service     repository.ServiceV2 `json:"service"`
+	Confirm     bool                 `json:"confirm"`
+	PreviewHash string               `json:"preview_hash"`
 }
 
 type localMutationLedgerEntry struct {
@@ -104,7 +103,7 @@ func registerRepositoryCDRoutesAt(mux *http.ServeMux, localSession, root string,
 		if !requireCanonicalMutationPaths(w, r, body) {
 			return
 		}
-		preview, err := service.PreviewMutation(repository.MutationRequest{Repository: repoRoot, ConfigPath: body.ConfigPath, WorkflowPath: body.WorkflowPath, Service: body.Service, Force: true, Confirmed: true})
+		preview, err := service.PreviewMutation(repository.MutationRequest{Repository: repoRoot, ConfigPath: body.ConfigPath, Service: body.Service, Force: true, Confirmed: true})
 		if err != nil {
 			writeLocalError(w, r, http.StatusUnprocessableEntity, "CONFIG_PREVIEW_FAILED", safeRepositoryError(repoRoot, err))
 			return
@@ -143,30 +142,6 @@ func registerRepositoryCDRoutesAt(mux *http.ServeMux, localSession, root string,
 		}
 		writeLocalJSON(w, http.StatusOK, plan)
 	})
-	mux.HandleFunc("/api/local/repository/workflow/preview", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
-			return
-		}
-		repoRoot, ok := requireRoot(w, r)
-		if !ok {
-			return
-		}
-		configPath := strings.TrimSpace(r.URL.Query().Get("config_path"))
-		if configPath == "" {
-			configPath = defaultConfigPath
-		}
-		if configPath != defaultConfigPath {
-			writeLocalError(w, r, http.StatusBadRequest, "CANONICAL_PATH_REQUIRED", "local repository API uses the canonical Opsi config path only")
-			return
-		}
-		cfg, _, rendered, err := repository.LoadConfig(repoRoot, configPath)
-		if err != nil {
-			writeLocalError(w, r, http.StatusUnprocessableEntity, "CONFIG_INVALID", safeRepositoryError(repoRoot, err))
-			return
-		}
-		writeLocalJSON(w, http.StatusOK, map[string]any{"workflow_yaml": string(repository.RenderWorkflow(cfg)), "config_hash": repository.ConfigHash(rendered)})
-	})
 	mux.HandleFunc("/api/local/repository/apply", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
@@ -201,7 +176,7 @@ func registerRepositoryCDRoutesAt(mux *http.ServeMux, localSession, root string,
 			return
 		}
 		preview, reused, conflict, err := ledger.apply(r.Header.Get("Idempotency-Key"), fingerprint, func() (repository.MutationPreview, error) {
-			return service.ApplyMutation(repository.MutationRequest{Repository: repoRoot, ConfigPath: body.ConfigPath, WorkflowPath: body.WorkflowPath, Service: body.Service, Force: true, Confirmed: true, PreviewHash: body.PreviewHash})
+			return service.ApplyMutation(repository.MutationRequest{Repository: repoRoot, ConfigPath: body.ConfigPath, Service: body.Service, Force: true, Confirmed: true, PreviewHash: body.PreviewHash})
 		})
 		if conflict {
 			writeLocalError(w, r, http.StatusConflict, "IDEMPOTENCY_KEY_CONFLICT", "Idempotency-Key was already used for a different repository mutation")
@@ -283,14 +258,11 @@ func defaultMutationPaths(body *localMutationRequest) {
 	if body.ConfigPath == "" {
 		body.ConfigPath = defaultConfigPath
 	}
-	if body.WorkflowPath == "" {
-		body.WorkflowPath = defaultWorkflowPath
-	}
 }
 
 func requireCanonicalMutationPaths(w http.ResponseWriter, r *http.Request, body localMutationRequest) bool {
-	if body.ConfigPath != defaultConfigPath || body.WorkflowPath != defaultWorkflowPath {
-		writeLocalError(w, r, http.StatusBadRequest, "CANONICAL_PATH_REQUIRED", "local repository mutations use canonical config and workflow paths only")
+	if body.ConfigPath != defaultConfigPath {
+		writeLocalError(w, r, http.StatusBadRequest, "CANONICAL_PATH_REQUIRED", "local repository mutations use the canonical config path only")
 		return false
 	}
 	return true

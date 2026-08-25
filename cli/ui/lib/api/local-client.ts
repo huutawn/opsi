@@ -68,6 +68,8 @@ import type {
   DeploymentRunEvent,
   DeploymentRunResult,
   DeploymentPlan,
+  RepositoryExportPreview,
+  RepositoryExportResult,
 	WorkloadSecretMetadata,
 } from "@/lib/contracts/registry";
 
@@ -155,10 +157,10 @@ export class LocalClient {
     });
   }
 
-  startLogin(projectID?: string) {
+  startLogin(projectID?: string, returnQuery = "") {
     return this.call<{ auth_url: string; status: string }>("/api/local/session/login/start", {
       method: "POST",
-      body: JSON.stringify({ project_id: projectID ?? "" }),
+      body: JSON.stringify({ project_id: projectID ?? "", return_query: returnQuery }),
     });
   }
 
@@ -436,6 +438,14 @@ export class LocalClient {
 
   async deploymentRunAction(projectID: string, runID: string, action: "analyze" | "approve" | "acknowledge" | "retry" | "cancel", body: Record<string, unknown>, idempotencyKey: string) {
     return normalizeDeploymentRun(await this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/${action}`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }));
+  }
+
+  repositoryExportPreview(projectID: string, runID: string, targetBranch = "") {
+    return this.call<RepositoryExportPreview>(`/api/local/projects/${projectID}/repository-export/preview`, { method: "POST", body: JSON.stringify({ run_id: runID, target_branch: targetBranch }) });
+  }
+
+  repositoryExport(projectID: string, preview: RepositoryExportPreview, idempotencyKey: string) {
+    return this.call<{ repository_export: RepositoryExportResult }>(`/api/local/projects/${projectID}/repository-export`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify({ run_id: preview.run_id, run_revision: preview.run_revision, plan_hash: preview.plan_hash, preview_hash: preview.preview_hash, target_branch: preview.target_branch }) });
   }
 
 	workloadSecrets(projectID: string, applicationID: string) {
@@ -955,6 +965,8 @@ function normalizeDeploymentRun(run: DeploymentRun): DeploymentRun {
   run.plan.bindings ??= [];
   run.plan.secrets ??= [];
   run.plan.issues ??= [];
+  run.plan.analysis_scope ??= { application_roots: [], exclude_paths: [] };
+  run.plan.evidence_coverage ??= { candidates_found: 0, candidates_selected: 0, files_inspected: run.analysis?.files_inspected || 0, bytes_inspected: run.analysis?.bytes_inspected || 0 };
   run.authority_refs ??= {};
   return run;
 }

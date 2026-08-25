@@ -14,34 +14,28 @@ import (
 var ErrStalePreview = errors.New("repository mutation preview is stale")
 
 type MutationRequest struct {
-	Repository   string
-	ConfigPath   string
-	WorkflowPath string
-	Service      ServiceV2
-	Force        bool
-	Confirmed    bool
-	PreviewHash  string
+	Repository  string
+	ConfigPath  string
+	Service     ServiceV2
+	Force       bool
+	Confirmed   bool
+	PreviewHash string
 }
 
 type MutationPreview struct {
-	Config       ConfigV2     `json:"config"`
-	MigratedV1   bool         `json:"migrated_v1"`
-	Files        []FileChange `json:"files"`
-	ConfigHash   string       `json:"config_hash"`
-	ConfigYAML   string       `json:"config_yaml"`
-	WorkflowYAML string       `json:"workflow_yaml"`
-	ConfigDiff   string       `json:"config_diff"`
-	WorkflowDiff string       `json:"workflow_diff"`
-	PreviewHash  string       `json:"preview_hash"`
-	filePlan     FilePlan
+	Config      ConfigV2     `json:"config"`
+	MigratedV1  bool         `json:"migrated_v1"`
+	Files       []FileChange `json:"files"`
+	ConfigHash  string       `json:"config_hash"`
+	ConfigYAML  string       `json:"config_yaml"`
+	ConfigDiff  string       `json:"config_diff"`
+	PreviewHash string       `json:"preview_hash"`
+	filePlan    FilePlan
 }
 
 func (s CDService) PreviewMutation(request MutationRequest) (MutationPreview, error) {
 	if err := ValidateConfigPath(request.ConfigPath); err != nil {
 		return MutationPreview{}, fmt.Errorf("config path: %w", err)
-	}
-	if err := ValidateWorkflowPath(request.WorkflowPath); err != nil {
-		return MutationPreview{}, fmt.Errorf("workflow path: %w", err)
 	}
 	root, err := filepath.EvalSymlinks(request.Repository)
 	if err != nil {
@@ -76,20 +70,15 @@ func (s CDService) PreviewMutation(request MutationRequest) (MutationPreview, er
 	if err != nil {
 		return MutationPreview{}, err
 	}
-	workflowBytes := RenderWorkflow(cfg)
-	oldWorkflow, err := readRepositoryFile(root, request.WorkflowPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return MutationPreview{}, fmt.Errorf("read workflow: %w", err)
-	}
-	filePlan, err := PrepareFiles(root, []FileSpec{{Path: request.ConfigPath, Content: configBytes}, {Path: request.WorkflowPath, Content: workflowBytes}}, true, true)
+	filePlan, err := PrepareFiles(root, []FileSpec{{Path: request.ConfigPath, Content: configBytes}}, true, true)
 	if err != nil {
 		return MutationPreview{}, err
 	}
-	previewHash, err := mutationPreviewHash(request, oldConfig, oldWorkflow, configBytes, workflowBytes, filePlan.Changes)
+	previewHash, err := mutationPreviewHash(request, oldConfig, configBytes, filePlan.Changes)
 	if err != nil {
 		return MutationPreview{}, err
 	}
-	return MutationPreview{Config: cfg, MigratedV1: migrated, Files: filePlan.Changes, ConfigHash: ConfigHash(configBytes), ConfigYAML: string(configBytes), WorkflowYAML: string(workflowBytes), ConfigDiff: boundedTextDiff(request.ConfigPath, oldConfig, configBytes), WorkflowDiff: boundedTextDiff(request.WorkflowPath, oldWorkflow, workflowBytes), PreviewHash: previewHash, filePlan: filePlan}, nil
+	return MutationPreview{Config: cfg, MigratedV1: migrated, Files: filePlan.Changes, ConfigHash: ConfigHash(configBytes), ConfigYAML: string(configBytes), ConfigDiff: boundedTextDiff(request.ConfigPath, oldConfig, configBytes), PreviewHash: previewHash, filePlan: filePlan}, nil
 }
 
 func (s CDService) ApplyMutation(request MutationRequest) (MutationPreview, error) {
@@ -120,7 +109,7 @@ func (s CDService) ApplyMutation(request MutationRequest) (MutationPreview, erro
 	return preview, nil
 }
 
-func mutationPreviewHash(request MutationRequest, oldConfig, oldWorkflow, configBytes, workflowBytes []byte, changes []FileChange) (string, error) {
+func mutationPreviewHash(request MutationRequest, oldConfig, configBytes []byte, changes []FileChange) (string, error) {
 	type fileAction struct {
 		Path      string `json:"path"`
 		Action    string `json:"action"`
@@ -132,18 +121,14 @@ func mutationPreviewHash(request MutationRequest, oldConfig, oldWorkflow, config
 		actions = append(actions, fileAction{Path: change.Path, Action: change.Action, OldSHA256: change.OldSHA256, NewSHA256: change.NewSHA256})
 	}
 	payload := struct {
-		ConfigPath           string       `json:"config_path"`
-		WorkflowPath         string       `json:"workflow_path"`
-		Service              ServiceV2    `json:"service"`
-		CurrentConfigHash    string       `json:"current_config_hash"`
-		CurrentWorkflowHash  string       `json:"current_workflow_hash"`
-		RenderedConfigHash   string       `json:"rendered_config_hash"`
-		RenderedWorkflowHash string       `json:"rendered_workflow_hash"`
-		FileActions          []fileAction `json:"file_actions"`
+		ConfigPath         string       `json:"config_path"`
+		Service            ServiceV2    `json:"service"`
+		CurrentConfigHash  string       `json:"current_config_hash"`
+		RenderedConfigHash string       `json:"rendered_config_hash"`
+		FileActions        []fileAction `json:"file_actions"`
 	}{
-		ConfigPath: request.ConfigPath, WorkflowPath: request.WorkflowPath, Service: request.Service,
-		CurrentConfigHash: ConfigHash(oldConfig), CurrentWorkflowHash: ConfigHash(oldWorkflow),
-		RenderedConfigHash: ConfigHash(configBytes), RenderedWorkflowHash: ConfigHash(workflowBytes), FileActions: actions,
+		ConfigPath: request.ConfigPath, Service: request.Service,
+		CurrentConfigHash: ConfigHash(oldConfig), RenderedConfigHash: ConfigHash(configBytes), FileActions: actions,
 	}
 	canonical, err := json.Marshal(payload)
 	if err != nil {

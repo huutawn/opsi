@@ -60,6 +60,10 @@ func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analy
 	run.Plan.Bindings = analysis.Bindings
 	run.Plan.Secrets = analysis.Secrets
 	run.Plan.Issues = analysis.Issues
+	run.Plan.AnalysisScope = analysis.Scope
+	run.Plan.AnalysisScopeHash = analysis.ScopeHash
+	run.Plan.EvidenceCoverage = analysis.EvidenceCoverage
+	run.Plan.TruncationReason = analysis.TruncationReason
 	run.Plan.Authority = authority
 	run.Plan.Target = target
 	run.State = StateAwaitingApproval
@@ -95,6 +99,10 @@ func (s Service) UpdatePlan(ctx context.Context, projectID, runID, actor, expect
 	}
 	draft.SchemaVersion = PlanSchemaVersion
 	draft.Authority = run.Plan.Authority
+	draft.AnalysisScope = run.Plan.AnalysisScope
+	draft.AnalysisScopeHash = run.Plan.AnalysisScopeHash
+	draft.EvidenceCoverage = run.Plan.EvidenceCoverage
+	draft.TruncationReason = run.Plan.TruncationReason
 	draft.Issues = reconcileDraftIssues(draft)
 	if err := refreshHash(&draft); err != nil {
 		return Run{}, invalid("DEPLOYMENT_PLAN_INVALID", err.Error())

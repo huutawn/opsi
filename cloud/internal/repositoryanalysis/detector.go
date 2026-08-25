@@ -2,6 +2,9 @@ package repositoryanalysis
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -31,6 +34,7 @@ type Request struct {
 	Repository     string
 	SelectedRef    string
 	CommitSHA      string
+	Scope          Scope
 }
 
 type Limits struct {
@@ -41,7 +45,7 @@ type Limits struct {
 }
 
 func DefaultLimits() Limits {
-	return Limits{MaxFiles: 5000, MaxFileBytes: 512 << 10, MaxTotalBytes: 8 << 20, MaxDuration: 20 * time.Second}
+	return Limits{MaxFiles: 128, MaxFileBytes: 512 << 10, MaxTotalBytes: 8 << 20, MaxDuration: 20 * time.Second}
 }
 
 type Detector struct {
@@ -63,21 +67,25 @@ func (d Detector) Analyze(ctx context.Context, request Request) (Result, error) 
 	}
 	analysisCtx, cancel := context.WithTimeout(ctx, limits.MaxDuration)
 	defer cancel()
+	scope, scopeHash, err := canonicalScope(request.Scope)
+	if err != nil {
+		return Result{}, err
+	}
+	request.Scope = scope
 	files, treeTruncated, err := d.Repository.ListFiles(analysisCtx, request.InstallationID, request.Repository, request.CommitSHA)
 	if err != nil {
 		return Result{}, fmt.Errorf("list exact repository snapshot: %w", err)
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	result := Result{
 		SchemaVersion: SchemaVersion, RepositoryID: request.RepositoryID, Repository: request.Repository,
 		SelectedRef: request.SelectedRef, CommitSHA: strings.ToLower(request.CommitSHA), Authority: "heuristics",
 		Applications: []Application{}, Resources: []Resource{}, Dependencies: []Dependency{},
 		Bindings: []Binding{}, Secrets: []Secret{}, Issues: []Issue{},
-		AnalyzedAt: d.clock(), Truncated: treeTruncated,
+		AnalyzedAt: d.clock(), Scope: scope, ScopeHash: scopeHash,
 	}
-	if len(files) > limits.MaxFiles {
-		files = files[:limits.MaxFiles]
-		result.Truncated = true
+	truncationReasons := map[string]bool{}
+	if treeTruncated {
+		truncationReasons["tree"] = true
 	}
 	fileSet := make(map[string]File, len(files))
 	for _, file := range files {
@@ -86,47 +94,92 @@ func (d Detector) Analyze(ctx context.Context, request Request) (Result, error) 
 			continue
 		}
 		if file.Mode == "120000" {
+			if !scopeIncludes(file.Path, scope) {
+				continue
+			}
 			result.Issues = append(result.Issues, Issue{Code: "REPOSITORY_SYMLINK_UNSUPPORTED", Message: "Repository analysis does not follow symbolic links.", Path: file.Path, Resolution: "Replace the symlink with a regular file or exclude it from deployable intent.", Blocking: true})
 			continue
 		}
-		fileSet[file.Path] = file
+		if scopeIncludes(file.Path, scope) {
+			fileSet[file.Path] = file
+		}
+	}
+	candidates := selectAnalysisCandidates(fileSet)
+	result.EvidenceCoverage.CandidatesFound = len(candidates)
+	if len(candidates) > limits.MaxFiles {
+		candidates = candidates[:limits.MaxFiles]
+		truncationReasons["file_count"] = true
+	}
+	selected := make([]File, 0, len(candidates))
+	var reservedBytes int64
+	for _, file := range candidates {
+		if file.Size > limits.MaxFileBytes {
+			truncationReasons["blob_size"] = true
+			continue
+		}
+		if reservedBytes+file.Size > limits.MaxTotalBytes {
+			truncationReasons["total_bytes"] = true
+			continue
+		}
+		reservedBytes += file.Size
+		selected = append(selected, file)
+	}
+	result.EvidenceCoverage.CandidatesSelected = len(selected)
+	contents, readErrors := d.readCandidates(analysisCtx, request, selected, limits.MaxFileBytes)
+	for _, file := range selected {
+		if readErr, ok := readErrors[file.Path]; ok {
+			if errors.Is(readErr, errBlobSizeLimit) {
+				truncationReasons["blob_size"] = true
+				continue
+			}
+			if analysisCtx.Err() != nil || errors.Is(readErr, context.DeadlineExceeded) || errors.Is(readErr, context.Canceled) {
+				truncationReasons["deadline"] = true
+				continue
+			}
+			return Result{}, fmt.Errorf("read repository candidate %s: %w", file.Path, readErr)
+		}
 	}
 	read := func(filePath string) ([]byte, error) {
-		file, ok := fileSet[filePath]
-		if !ok {
-			return nil, errors.New("file not found in exact snapshot")
+		if data, ok := contents[filePath]; ok {
+			return data, nil
 		}
-		if file.Size > limits.MaxFileBytes || result.BytesInspected+file.Size > limits.MaxTotalBytes {
-			result.Truncated = true
-			return nil, errors.New("analysis byte limit reached")
+		if readErr, ok := readErrors[filePath]; ok {
+			return nil, readErr
 		}
-		data, err := d.Repository.ReadFile(analysisCtx, request.InstallationID, request.Repository, request.CommitSHA, filePath, limits.MaxFileBytes)
-		if err == nil && int64(len(data)) > limits.MaxFileBytes {
-			result.Truncated = true
-			return nil, errors.New("repository returned a blob above the analysis limit")
-		}
-		if err == nil {
+		return nil, errors.New("file was not selected for bounded analysis")
+	}
+	for _, file := range selected {
+		if data, ok := contents[file.Path]; ok {
 			result.FilesInspected++
 			result.BytesInspected += int64(len(data))
+			if int64(len(data)) > limits.MaxFileBytes {
+				truncationReasons["blob_size"] = true
+			}
 		}
-		return data, err
+	}
+	result.EvidenceCoverage.FilesInspected = result.FilesInspected
+	result.EvidenceCoverage.BytesInspected = result.BytesInspected
+	if analysisCtx.Err() != nil {
+		truncationReasons["deadline"] = true
 	}
 
 	explicitAuthority := false
+	explicitUnavailable := false
 	if _, ok := fileSet[".opsi/opsi-cd.yaml"]; ok {
 		data, readErr := read(".opsi/opsi-cd.yaml")
 		if readErr != nil {
-			return Result{}, fmt.Errorf("read explicit repository config: %w", readErr)
-		}
-		explicit, parseErr := parseExplicit(data, fileSet)
-		if parseErr != nil {
+			explicitUnavailable = true
+			result.Authority = "explicit_config_unreadable"
+			result.Issues = append(result.Issues, Issue{Code: "EXPLICIT_CONFIG_UNREADABLE", Message: "The explicit repository configuration could not be read within the analysis limits.", Path: ".opsi/opsi-cd.yaml", Resolution: "Reduce the configuration file below the blob limit, then analyze the same commit again.", Blocking: true})
+		} else if explicit, parseErr := parseExplicit(data, fileSet); parseErr != nil {
 			result.Authority = "explicit_config_invalid"
 			result.Issues = append(result.Issues, Issue{Code: "EXPLICIT_CONFIG_INVALID", Message: parseErr.Error(), Path: ".opsi/opsi-cd.yaml", Resolution: "Correct the repository configuration at this commit, then analyze again.", Blocking: true})
 			return result, nil
+		} else {
+			result.Authority = "explicit_config"
+			explicitAuthority = true
+			result.Applications, result.Resources, result.Dependencies, result.Bindings, result.Secrets = explicit.Applications, explicit.Resources, explicit.Dependencies, explicit.Bindings, explicit.Secrets
 		}
-		result.Authority = "explicit_config"
-		explicitAuthority = true
-		result.Applications, result.Resources, result.Dependencies, result.Bindings, result.Secrets = explicit.Applications, explicit.Resources, explicit.Dependencies, explicit.Bindings, explicit.Secrets
 	}
 	if composePath := firstExisting(fileSet, "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"); composePath != "" {
 		data, readErr := read(composePath)
@@ -134,15 +187,16 @@ func (d Detector) Analyze(ctx context.Context, request Request) (Result, error) 
 			apps, resources, deps, issues := parseCompose(data, composePath, fileSet)
 			if explicitAuthority {
 				mergeCompose(&result, apps, resources, deps, issues)
-			} else if len(apps) > 0 || len(resources) > 0 {
+			} else if !explicitUnavailable && (len(apps) > 0 || len(resources) > 0) {
 				result.Authority, result.Applications, result.Resources, result.Dependencies, result.Issues = "compose", apps, resources, deps, issues
 			}
 		}
 	}
+	analysisFiles := selected
 	if len(result.Applications) == 0 {
-		result.Applications = dockerfileApplications(files, read)
+		result.Applications = dockerfileApplications(analysisFiles, read)
 		if len(result.Applications) == 0 {
-			result.Applications = frameworkOrManifestApplications(files, read)
+			result.Applications = frameworkOrManifestApplications(analysisFiles, read)
 		}
 		if len(result.Applications) == 0 {
 			result.Issues = append(result.Issues, Issue{Code: "NO_DEPLOYABLE_APPLICATION", Message: "No explicit service, Compose build, or Dockerfile could be identified.", Resolution: "Add .opsi/opsi-cd.yaml or select deployable application roots manually.", Blocking: true})
@@ -150,16 +204,56 @@ func (d Detector) Analyze(ctx context.Context, request Request) (Result, error) 
 	}
 	canonicalizeResult(request.Repository, &result)
 	enrichApplications(&result, fileSet, read)
-	inferDependencies(&result, files, read)
+	inferDependencies(&result, analysisFiles, read)
 	validateDetected(&result)
-	if analysisCtx.Err() != nil {
+	if len(truncationReasons) > 0 {
 		result.Truncated = true
-	}
-	if result.Truncated {
-		result.Issues = append(result.Issues, Issue{Code: "ANALYSIS_TRUNCATED", Message: "Repository analysis reached a deterministic file, byte, or GitHub tree limit.", Resolution: "Narrow the repository with explicit .opsi/opsi-cd.yaml configuration.", Blocking: true})
+		result.TruncationReason = firstTruncationReason(truncationReasons)
+		result.Issues = append(result.Issues, Issue{Code: "ANALYSIS_TRUNCATED", Message: "Repository analysis was truncated by the " + result.TruncationReason + " limit.", Resolution: "Refine analysis with application roots or exclude paths, then analyze the same exact commit again.", Blocking: true})
 	}
 	sortResult(&result)
 	return result, nil
+}
+
+func canonicalScope(scope Scope) (Scope, string, error) {
+	canonical := Scope{ApplicationRoots: append([]string(nil), scope.ApplicationRoots...), ExcludePaths: append([]string(nil), scope.ExcludePaths...)}
+	for i, root := range canonical.ApplicationRoots {
+		canonical.ApplicationRoots[i] = cleanRoot(root)
+		if !safePath(canonical.ApplicationRoots[i], true) {
+			return Scope{}, "", errors.New("analysis application root is invalid")
+		}
+	}
+	for i, excluded := range canonical.ExcludePaths {
+		canonical.ExcludePaths[i] = cleanRoot(excluded)
+		if !safePath(canonical.ExcludePaths[i], false) {
+			return Scope{}, "", errors.New("analysis exclude path is invalid")
+		}
+	}
+	canonical.ApplicationRoots = uniqueSorted(canonical.ApplicationRoots)
+	canonical.ExcludePaths = uniqueSorted(canonical.ExcludePaths)
+	encoded, _ := json.Marshal(canonical)
+	digest := sha256.Sum256(encoded)
+	return canonical, hex.EncodeToString(digest[:]), nil
+}
+
+func uniqueSorted(values []string) []string {
+	sort.Strings(values)
+	out := values[:0]
+	for _, value := range values {
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func firstTruncationReason(reasons map[string]bool) string {
+	for _, reason := range []string{"tree", "file_count", "blob_size", "total_bytes", "deadline"} {
+		if reasons[reason] {
+			return reason
+		}
+	}
+	return "deadline"
 }
 
 type explicitConfig struct {
@@ -323,7 +417,10 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 	resources := []Resource{}
 	deps := []Dependency{}
 	issues := []Issue{}
+	kafkaIssueAdded := false
+	kafkaDisabled := false
 	resourceNames := map[string]string{}
+	resourceLogicalNames := map[string]string{}
 	for name, node := range raw.Services {
 		var service struct {
 			Image       string    `yaml:"image"`
@@ -341,19 +438,42 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 		}
 		kind := imageResourceType(service.Image)
 		if kind != "" {
+			logicalName := name
+			if kind == "kafka" {
+				logicalName = "kafka"
+			}
 			recommendation := "Managed " + displayResource(kind)
 			if kind == "kafka" {
 				recommendation = "Set Kafka__Enabled=false unless an external Kafka endpoint is supplied"
-				issues = append(issues, Issue{Code: "KAFKA_UNSUPPORTED", Message: "Kafka was detected but is not a managed Opsi resource.", Path: composePath, Resolution: recommendation, Blocking: true})
+				if !kafkaIssueAdded {
+					issues = append(issues, Issue{Code: "KAFKA_UNSUPPORTED", Message: "Kafka was detected but is not a managed Opsi resource.", Path: composePath, Resolution: recommendation, Blocking: true})
+					kafkaIssueAdded = true
+				}
 			}
 			evidence := Evidence{Path: composePath, Kind: "compose_image", Reason: "Compose declares image " + service.Image + ".", Confidence: ConfidenceHigh}
 			var persistence *Persistence
-			if len(service.Volumes) > 0 && kind != "kafka" {
+			if (len(service.Volumes) > 0 || kind == "postgres") && kind != "kafka" {
 				persistence = &Persistence{Persistent: true}
-				evidence.Reason += " A persistent volume is mounted."
+				if len(service.Volumes) > 0 {
+					evidence.Reason += " A persistent volume is mounted."
+				} else {
+					evidence.Reason += " PostgreSQL uses persistent managed storage by default."
+				}
 			}
-			resources = append(resources, Resource{LogicalName: name, Type: kind, Managed: kind != "kafka", Required: kind != "kafka", Persistence: persistence, Recommendation: recommendation, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
+			merged := false
+			for i := range resources {
+				if resources[i].LogicalName == logicalName && resources[i].Type == kind {
+					resources[i].Evidence = append(resources[i].Evidence, evidence)
+					resources[i].Reason += " " + evidence.Reason
+					merged = true
+					break
+				}
+			}
+			if !merged {
+				resources = append(resources, Resource{LogicalName: logicalName, Type: kind, Managed: kind != "kafka", Required: kind != "kafka", Persistence: persistence, Recommendation: recommendation, Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}})
+			}
 			resourceNames[name] = kind
+			resourceLogicalNames[name] = logicalName
 			continue
 		}
 		contextPath, dockerfile := composeBuild(service.Build, name)
@@ -369,6 +489,7 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 		}
 		port := firstComposePort(service.Ports)
 		environment, unsafeEnvironment := composeEnvironment(service.Environment)
+		kafkaDisabled = kafkaDisabled || kafkaEnvironmentDisabled(environment)
 		for _, environmentName := range unsafeEnvironment {
 			issues = append(issues, Issue{Code: "COMPOSE_SECRET_VALUE_AMBIGUOUS", Message: "Compose environment " + environmentName + " may contain secret material and was not copied into the plan.", Path: composePath, Resolution: "Declare a generated or external symbolic runtime secret in .opsi/opsi-cd.yaml.", Blocking: true})
 		}
@@ -389,7 +510,11 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 				protocol = "http"
 			}
 			evidence := Evidence{Path: composePath, Kind: "compose_dependency", Reason: name + " depends on " + target + ".", Confidence: ConfidenceHigh}
-			dependency := Dependency{From: slug(name), To: target, Protocol: protocol, Required: protocol != "http", Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}}
+			logicalTarget := target
+			if resourceLogicalNames[target] != "" {
+				logicalTarget = resourceLogicalNames[target]
+			}
+			dependency := Dependency{From: slug(name), To: logicalTarget, Protocol: protocol, Required: protocol != "http" && protocol != "kafka", Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}}
 			dependency.Injections = composeInjections(node, protocol, target)
 			if contract := composeHealthVerification(node); contract != nil {
 				dependency.Verification = contract
@@ -397,7 +522,35 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 			deps = append(deps, dependency)
 		}
 	}
+	if kafkaDisabled {
+		for i := range issues {
+			if issues[i].Code == "KAFKA_UNSUPPORTED" {
+				issues[i].Blocking = false
+				issues[i].Resolution = "Kafka__Enabled=false"
+			}
+		}
+		for i := range resources {
+			if resources[i].Type == "kafka" {
+				resources[i].Managed = false
+				resources[i].Required = false
+				resources[i].Recommendation = "Detected but disabled by Kafka__Enabled=false"
+			}
+		}
+	}
 	return apps, resources, deps, issues
+}
+
+func kafkaEnvironmentDisabled(environment map[string]string) bool {
+	for name, value := range environment {
+		normalized := strings.ToLower(strings.ReplaceAll(name, "_", ":"))
+		if normalized == "kafka::enabled" || normalized == "kafka:enabled" {
+			enabled, err := strconv.ParseBool(value)
+			if err == nil && !enabled {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func composeBuild(node yaml.Node, fallback string) (string, string) {
@@ -522,7 +675,10 @@ func composeInjections(node yaml.Node, protocol, target string) []Injection {
 	return out
 }
 
-var healthURLPattern = regexp.MustCompile(`https?://[^/\s]+(/[^\s"']*)`)
+var (
+	healthURLPattern = regexp.MustCompile(`https?://[^/\s]+(/[^\s"']*)`)
+	errBlobSizeLimit = errors.New("repository blob exceeds analysis size limit")
+)
 
 func composeHealthVerification(node yaml.Node) *VerificationContract {
 	var service struct {
@@ -795,131 +951,6 @@ func enrichApplications(result *Result, files map[string]File, read func(string)
 			}
 		}
 	}
-}
-
-func inferDependencies(result *Result, files []File, read func(string) ([]byte, error)) {
-	existing := map[string]bool{}
-	for _, dep := range result.Dependencies {
-		existing[dep.From+"\x00"+dep.To] = true
-	}
-	resource := func(name, kind, path string, confidence Confidence) string {
-		for _, r := range result.Resources {
-			if r.Type == kind {
-				return r.LogicalName
-			}
-		}
-		reason := "Application configuration references " + kind + "."
-		result.Resources = append(result.Resources, Resource{LogicalName: name, Type: kind, Managed: true, Required: true, Recommendation: "Managed " + displayResource(kind), Confidence: confidence, Reason: reason, Evidence: []Evidence{{Path: path, Kind: "source_configuration", Reason: reason, Confidence: confidence}}})
-		return name
-	}
-	for _, file := range files {
-		if !analysisCandidate(file.Path) {
-			continue
-		}
-		data, err := read(file.Path)
-		if err != nil {
-			continue
-		}
-		text := string(data)
-		for _, app := range result.Applications {
-			if !underRoot(file.Path, app.Root) {
-				continue
-			}
-			if strings.Contains(text, "ConnectionStrings__Database") || strings.Contains(text, "ConnectionStrings:Database") || strings.Contains(text, "ConnectionStrings\":") {
-				logicalName := resource("database", "postgres", file.Path, ConfidenceHigh)
-				key := app.Key + "\x00" + logicalName
-				if !existing[key] {
-					reason := "The application reads ConnectionStrings:Database."
-					result.Dependencies = append(result.Dependencies, Dependency{From: app.Key, To: logicalName, Protocol: "postgres", Required: true, Injections: []Injection{{EnvironmentName: "ConnectionStrings__Database", SymbolicSource: "resource." + logicalName + ".connection_string"}}, Verification: inferredVerification(app, files), Confidence: ConfidenceHigh, Reason: reason, Evidence: []Evidence{{Path: file.Path, Kind: "configuration_key", Reason: reason, Confidence: ConfidenceHigh}}})
-					existing[key] = true
-				} else {
-					addInjection(result, app.Key, logicalName, Injection{EnvironmentName: "ConnectionStrings__Database", SymbolicSource: "resource." + logicalName + ".connection_string"}, file.Path)
-				}
-			}
-			if strings.Contains(text, "SignalR__Redis__ConnectionString") || strings.Contains(text, "SignalR:Redis:ConnectionString") || strings.Contains(text, "SignalR") && strings.Contains(text, "Redis") && strings.Contains(text, "ConnectionString") {
-				logicalName := resource("valkey", "redis", file.Path, ConfidenceHigh)
-				key := app.Key + "\x00" + logicalName
-				if !existing[key] {
-					reason := "The application reads the SignalR Redis connection string."
-					result.Dependencies = append(result.Dependencies, Dependency{From: app.Key, To: logicalName, Protocol: "redis", Required: true, Injections: []Injection{{EnvironmentName: "SignalR__Redis__ConnectionString", SymbolicSource: "resource." + logicalName + ".connection_string"}}, Verification: inferredVerification(app, files), Confidence: ConfidenceHigh, Reason: reason, Evidence: []Evidence{{Path: file.Path, Kind: "configuration_key", Reason: reason, Confidence: ConfidenceHigh}}})
-					existing[key] = true
-				} else {
-					addInjection(result, app.Key, logicalName, Injection{EnvironmentName: "SignalR__Redis__ConnectionString", SymbolicSource: "resource." + logicalName + ".connection_string"}, file.Path)
-				}
-			}
-			if strings.Contains(text, "/hubs/notifications") || strings.Contains(text, "/api") {
-				for _, target := range result.Applications {
-					if target.Key == app.Key {
-						continue
-					}
-					paths := []string{}
-					if strings.Contains(text, "/api") {
-						paths = append(paths, "/api")
-					}
-					if strings.Contains(text, "/hubs/notifications") {
-						paths = append(paths, "/hubs/notifications")
-					}
-					for _, p := range paths {
-						key := app.Key + "\x00" + target.Key + "\x00" + p
-						if !existing[key] {
-							reason := "Browser source uses a relative application route."
-							result.Dependencies = append(result.Dependencies, Dependency{From: app.Key, To: target.Key, Protocol: "http", Strategy: "same_origin", Path: p, Required: true, Verification: &VerificationContract{Type: "consumer_http", Path: p, ExpectedStatus: 200}, Confidence: ConfidenceMedium, Reason: reason, Evidence: []Evidence{{Path: file.Path, Kind: "same_origin_route", Reason: reason, Confidence: ConfidenceMedium}}})
-							result.Bindings = append(result.Bindings, Binding{From: app.Key, To: target.Key, Kind: "browser_http", Path: p, Confidence: ConfidenceMedium, Reason: reason, Evidence: []Evidence{{Path: file.Path, Kind: "same_origin_route", Reason: reason, Confidence: ConfidenceMedium}}})
-							existing[key] = true
-						}
-					}
-					break
-				}
-			}
-			if strings.Contains(text, "Kafka__Enabled") || strings.Contains(text, "Kafka:Enabled") {
-				for i := range result.Issues {
-					if result.Issues[i].Code == "KAFKA_UNSUPPORTED" && (strings.Contains(strings.ToLower(text), "kafka__enabled=false") || strings.Contains(strings.ToLower(text), "kafka is optional")) {
-						result.Issues[i].Blocking = false
-						result.Issues[i].Resolution = "Kafka__Enabled=false"
-					}
-				}
-			}
-			if strings.Contains(strings.ToLower(text), "jwt") && (strings.Contains(text, "SigningKey") || strings.Contains(text, "JWT")) {
-				found := false
-				for _, s := range result.Secrets {
-					if s.Name == "jwt-signing-key" {
-						found = true
-					}
-				}
-				if !found {
-					reason := "Application configuration requires a JWT signing key."
-					result.Secrets = append(result.Secrets, Secret{Name: "jwt-signing-key", ApplicationKey: app.Key, EnvironmentName: "Jwt__SigningKey", Generated: true, SecretRef: "generated://jwt-signing-key", Display: "Generated and securely stored", Confidence: ConfidenceMedium, Reason: reason, Evidence: []Evidence{{Path: file.Path, Kind: "configuration_key", Reason: reason, Confidence: ConfidenceMedium}}})
-				}
-			}
-		}
-	}
-}
-
-func addInjection(result *Result, from, to string, injection Injection, evidencePath string) {
-	for i := range result.Dependencies {
-		dependency := &result.Dependencies[i]
-		if dependency.From != from || dependency.To != to {
-			continue
-		}
-		for _, current := range dependency.Injections {
-			if current.EnvironmentName == injection.EnvironmentName {
-				return
-			}
-		}
-		dependency.Injections = append(dependency.Injections, injection)
-		dependency.Confidence = ConfidenceHigh
-		dependency.Evidence = append(dependency.Evidence, Evidence{Path: evidencePath, Kind: "configuration_key", Reason: "Application configuration identifies the exact injection mapping.", Confidence: ConfidenceHigh})
-		return
-	}
-}
-
-func inferredVerification(application Application, files []File) *VerificationContract {
-	for _, file := range files {
-		if underRoot(file.Path, application.Root) && strings.Contains(strings.ToLower(file.Path), "health") {
-			return &VerificationContract{Type: "consumer_http", Path: "/health/ready", ExpectedStatus: 200}
-		}
-	}
-	return nil
 }
 
 func validateDetected(result *Result) {

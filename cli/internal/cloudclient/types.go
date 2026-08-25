@@ -470,6 +470,52 @@ type RepositoryClaim struct {
 	Status       string `json:"status"`
 }
 
+type DeploymentRunPreview struct {
+	ID       string `json:"id"`
+	State    string `json:"state"`
+	Revision uint64 `json:"revision"`
+	Plan     struct {
+		Hash   string `json:"hash"`
+		Source struct {
+			Repository  string `json:"repository"`
+			SelectedRef string `json:"selected_ref"`
+			CommitSHA   string `json:"commit_sha"`
+		} `json:"source"`
+		Applications []struct {
+			Key  string `json:"key"`
+			Root string `json:"root"`
+			Port int    `json:"port"`
+		} `json:"applications"`
+		Issues []struct {
+			Code     string `json:"code"`
+			Message  string `json:"message"`
+			Blocking bool   `json:"blocking"`
+		} `json:"issues"`
+	} `json:"plan"`
+}
+
+type RepositoryExportPreview struct {
+	RunID          string `json:"run_id"`
+	RunRevision    uint64 `json:"run_revision"`
+	PlanHash       string `json:"plan_hash"`
+	SourceSHA      string `json:"source_sha"`
+	RepositoryID   int64  `json:"repository_id"`
+	TargetBranch   string `json:"target_branch"`
+	Path           string `json:"path"`
+	YAML           string `json:"yaml"`
+	Diff           string `json:"diff"`
+	PreviewHash    string `json:"preview_hash"`
+	ExportEnabled  bool   `json:"export_enabled"`
+	DisabledReason string `json:"disabled_reason,omitempty"`
+}
+type RepositoryExportResult struct {
+	Branch            string `json:"branch"`
+	CommitSHA         string `json:"commit_sha"`
+	PullRequestNumber int    `json:"pull_request_number"`
+	PullRequestURL    string `json:"pull_request_url"`
+	Reused            bool   `json:"reused"`
+}
+
 type InstallationClaimStart struct {
 	AuthorizationURL string `json:"authorization_url"`
 }

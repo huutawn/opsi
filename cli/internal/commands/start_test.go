@@ -1013,6 +1013,28 @@ func TestLocalGitHubInstallationDiscoveryReturnsToDeploy(t *testing.T) {
 	}
 }
 
+func TestCanonicalLocalReturnQueryPreservesOnlyBoundedDeploySourceState(t *testing.T) {
+	raw := "?project=proj-1&view=deploy&source_project=proj-1&source_installation=9&source_repository=7&source_ref=feature%2Fzero-config&source_hostname=app.example.test&auth=stale&redirect=https%3A%2F%2Fevil.test"
+	canonical := canonicalLocalReturnQuery(raw)
+	for _, expected := range []string{"project=proj-1", "view=deploy", "source_project=proj-1", "source_installation=9", "source_repository=7", "source_ref=feature%2Fzero-config", "source_hostname=app.example.test"} {
+		if !strings.Contains(canonical, expected) {
+			t.Fatalf("canonical return query omitted %q: %s", expected, canonical)
+		}
+	}
+	for _, forbidden := range []string{"auth=", "redirect=", "evil.test"} {
+		if strings.Contains(canonical, forbidden) {
+			t.Fatalf("canonical return query retained %q: %s", forbidden, canonical)
+		}
+	}
+	redirect := localBrowserAuthRedirect("proj-1", "auth", "ok", canonical)
+	if !strings.HasPrefix(redirect, "/?") || !strings.Contains(redirect, "auth=ok") || !strings.Contains(redirect, "source_repository=7") {
+		t.Fatalf("redirect=%s", redirect)
+	}
+	if canonicalLocalReturnQuery("?source_ref="+strings.Repeat("a", 513)) != "" {
+		t.Fatal("oversized return value was retained")
+	}
+}
+
 func TestLegacyLocalServiceDeploymentEndpointReturnsNotFound(t *testing.T) {
 	cloudCalled := false
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -8,11 +8,6 @@ import (
 	"time"
 )
 
-func analysisCandidate(value string) bool {
-	base := strings.ToLower(path.Base(value))
-	return strings.HasSuffix(base, ".json") || strings.HasSuffix(base, ".cs") || strings.HasSuffix(base, ".ts") || strings.HasSuffix(base, ".tsx") || strings.HasSuffix(base, ".js") || strings.HasSuffix(base, ".md") || strings.HasSuffix(base, ".env.example") || base == "readme"
-}
-
 func underRoot(value, root string) bool {
 	return root == "." || value == root || strings.HasPrefix(value, root+"/")
 }

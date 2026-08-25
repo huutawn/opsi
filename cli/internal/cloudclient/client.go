@@ -533,6 +533,27 @@ func (c *Client) ClaimRepository(ctx context.Context, projectID string, reposito
 	return response, err
 }
 
+func (c *Client) CreateDeploymentRun(ctx context.Context, projectID string, repositoryID int64, selectedRef, key string) (DeploymentRunPreview, error) {
+	var response struct {
+		DeploymentRun DeploymentRunPreview `json:"deployment_run"`
+	}
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployment-runs"}, map[string]any{"repository_id": repositoryID, "selected_ref": selectedRef, "target": map[string]any{}}, key, &response)
+	return response.DeploymentRun, err
+}
+func (c *Client) PreviewRepositoryExport(ctx context.Context, projectID, runID, targetBranch string) (RepositoryExportPreview, error) {
+	var response RepositoryExportPreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "repository-export", "preview"}, map[string]string{"run_id": runID, "target_branch": targetBranch}, "", &response)
+	return response, err
+}
+func (c *Client) ExportRepositoryConfiguration(ctx context.Context, projectID, key string, preview RepositoryExportPreview) (RepositoryExportResult, error) {
+	var response struct {
+		RepositoryExport RepositoryExportResult `json:"repository_export"`
+	}
+	body := map[string]any{"run_id": preview.RunID, "run_revision": preview.RunRevision, "plan_hash": preview.PlanHash, "preview_hash": preview.PreviewHash, "target_branch": preview.TargetBranch}
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "repository-export"}, body, key, &response)
+	return response.RepositoryExport, err
+}
+
 func (c *Client) ReleaseRepository(ctx context.Context, projectID string, repositoryID int64) error {
 	return c.do(ctx, http.MethodDelete, []string{"v1", "projects", projectID, "github", "repositories", strconv.FormatInt(repositoryID, 10), "claim"}, nil, fmt.Sprintf("repository-release:%s:%d", projectID, repositoryID), nil)
 }

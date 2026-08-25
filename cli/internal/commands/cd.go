@@ -68,7 +68,116 @@ func newCDCommand(configPath *string, options Options) *cobra.Command {
 	previewCleanup.Flags().StringVar(&read.reason, "reason", "manual", "manual, pr_closed, or ttl_expired")
 	preview.AddCommand(previewList, previewDetail, previewCleanup)
 	root.AddCommand(status, history, preview)
+	configCommand := &cobra.Command{Use: "config", Short: "Manage explicit repository configuration for advanced/manual use"}
+	configOptions := cdConfigOptions{RepoDir: ".", ConfigPath: defaultConfigPath, Context: ".", Dockerfile: "Dockerfile", Platform: "linux/amd64", Branch: "main"}
+	upsert := &cobra.Command{Use: "upsert", Short: "Explicitly add or update one service in .opsi/opsi-cd.yaml", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return runCDConfigUpsert(cmd, options, configOptions) }}
+	configFlags := upsert.Flags()
+	configFlags.StringVar(&configOptions.RepoDir, "repo-dir", ".", "local Git repository directory")
+	configFlags.StringVar(&configOptions.ConfigPath, "config-path", defaultConfigPath, "repository config path")
+	configFlags.StringVar(&configOptions.ServiceKey, "service-key", "", "service key")
+	configFlags.StringVar(&configOptions.Context, "build-context", ".", "repository-relative build context")
+	configFlags.StringVar(&configOptions.Dockerfile, "dockerfile", "Dockerfile", "repository-relative Dockerfile")
+	configFlags.StringVar(&configOptions.Platform, "platform", "linux/amd64", "build platform")
+	configFlags.StringVar(&configOptions.Branch, "branch", "main", "documented production branch")
+	configFlags.BoolVar(&configOptions.PreviewPRs, "preview-prs", false, "document preview intent")
+	configFlags.BoolVar(&configOptions.DryRun, "dry-run", false, "render and diff without writing")
+	configFlags.BoolVar(&configOptions.Force, "force", false, "replace an existing config when used with --yes")
+	configFlags.BoolVar(&configOptions.Yes, "yes", false, "confirm an explicit config replacement")
+	configFlags.BoolVar(&configOptions.JSON, "json", false, "emit JSON")
+	configCommand.AddCommand(upsert)
+	exportOptions := cdExportOptions{}
+	exportCommand := &cobra.Command{Use: "export", Short: "Export a canonical Cloud deployment run as a reviewable configuration pull request", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return runCDExport(cmd, configPath, options, exportOptions)
+	}}
+	exportFlags := exportCommand.Flags()
+	exportFlags.StringVar(&exportOptions.ProjectID, "project-id", "", "project id")
+	exportFlags.StringVar(&exportOptions.RunID, "run-id", "", "canonical deployment run id")
+	exportFlags.StringVar(&exportOptions.TargetBranch, "target-branch", "", "pull request base branch; defaults to repository default")
+	exportFlags.BoolVar(&exportOptions.Preview, "preview", false, "print canonical YAML and diff without creating a pull request")
+	exportFlags.BoolVar(&exportOptions.JSON, "json", false, "emit JSON")
+	root.AddCommand(configCommand, exportCommand)
 	return root
+}
+
+type cdConfigOptions struct {
+	RepoDir, ConfigPath, ServiceKey, Context, Dockerfile, Platform, Branch string
+	PreviewPRs, DryRun, Force, Yes, JSON                                   bool
+}
+
+func runCDConfigUpsert(cmd *cobra.Command, options Options, input cdConfigOptions) error {
+	if input.ServiceKey == "" {
+		return errors.New("service-key is required")
+	}
+	if input.Force && !input.Yes {
+		return errors.New("--force requires --yes")
+	}
+	root, err := repository.Root(cmd.Context(), options.GitRunner, input.RepoDir)
+	if err != nil {
+		return err
+	}
+	request := repository.MutationRequest{Repository: root, ConfigPath: input.ConfigPath, Force: input.Force, Confirmed: input.Yes, Service: repository.ServiceV2{Key: input.ServiceKey, Build: repository.BuildV2{Context: input.Context, Dockerfile: input.Dockerfile, Platform: input.Platform}, WatchPaths: []string{}, SharedPaths: []string{}, Dependencies: []string{}, Deploy: repository.DeployV2{Production: repository.ProductionV2{Enabled: true, Branches: []string{input.Branch}}, Preview: repository.PreviewV2{Enabled: input.PreviewPRs, PullRequests: input.PreviewPRs}}}}
+	service := repository.CDService{Runner: options.GitRunner}
+	result, err := service.PreviewMutation(request)
+	if err != nil {
+		return err
+	}
+	if !input.DryRun {
+		result, err = service.ApplyMutation(request)
+		if err != nil {
+			return err
+		}
+	}
+	if input.JSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+	}
+	if input.DryRun {
+		_, err = fmt.Fprint(cmd.OutOrStdout(), result.ConfigDiff)
+		return err
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Updated %s (config hash %s).\n", input.ConfigPath, result.ConfigHash)
+	return err
+}
+
+type cdExportOptions struct {
+	ProjectID, RunID, TargetBranch string
+	Preview, JSON                  bool
+}
+
+func runCDExport(cmd *cobra.Command, configPath *string, options Options, input cdExportOptions) error {
+	if input.RunID == "" {
+		return errors.New("run-id is required")
+	}
+	client, ctx, cancel, err := cdClient(cmd, configPath, options, input.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	preview, err := client.PreviewRepositoryExport(ctx, input.ProjectID, input.RunID, input.TargetBranch)
+	if err != nil {
+		return err
+	}
+	if input.Preview {
+		if input.JSON {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(preview)
+		}
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s\n%s", preview.YAML, preview.Diff)
+		return err
+	}
+	if !preview.ExportEnabled {
+		return errors.New(preview.DisabledReason)
+	}
+	if len(preview.PreviewHash) != 64 {
+		return errors.New("Cloud returned an invalid repository export preview hash")
+	}
+	result, err := client.ExportRepositoryConfiguration(ctx, input.ProjectID, "export:"+input.RunID+":"+preview.PreviewHash[:16], preview)
+	if err != nil {
+		return err
+	}
+	if input.JSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Created pull request %s from %s. No merge was performed.\n", result.PullRequestURL, result.Branch)
+	return err
 }
 
 type cdReadOptions struct {

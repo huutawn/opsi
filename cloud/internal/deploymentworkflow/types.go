@@ -81,18 +81,22 @@ type FailurePolicy struct {
 }
 
 type Plan struct {
-	SchemaVersion string                           `json:"schema_version"`
-	Hash          string                           `json:"hash"`
-	Source        Source                           `json:"source"`
-	Applications  []repositoryanalysis.Application `json:"applications"`
-	Resources     []repositoryanalysis.Resource    `json:"resources"`
-	Dependencies  []repositoryanalysis.Dependency  `json:"dependencies"`
-	Bindings      []repositoryanalysis.Binding     `json:"bindings"`
-	Secrets       []repositoryanalysis.Secret      `json:"secrets"`
-	Issues        []repositoryanalysis.Issue       `json:"issues"`
-	Target        Target                           `json:"target"`
-	Authority     AuthorityRevisions               `json:"authority_revisions"`
-	FailurePolicy FailurePolicy                    `json:"failure_policy"`
+	SchemaVersion     string                              `json:"schema_version"`
+	Hash              string                              `json:"hash"`
+	Source            Source                              `json:"source"`
+	Applications      []repositoryanalysis.Application    `json:"applications"`
+	Resources         []repositoryanalysis.Resource       `json:"resources"`
+	Dependencies      []repositoryanalysis.Dependency     `json:"dependencies"`
+	Bindings          []repositoryanalysis.Binding        `json:"bindings"`
+	Secrets           []repositoryanalysis.Secret         `json:"secrets"`
+	Issues            []repositoryanalysis.Issue          `json:"issues"`
+	AnalysisScope     repositoryanalysis.Scope            `json:"analysis_scope"`
+	AnalysisScopeHash string                              `json:"analysis_scope_hash"`
+	EvidenceCoverage  repositoryanalysis.EvidenceCoverage `json:"evidence_coverage"`
+	TruncationReason  string                              `json:"truncation_reason,omitempty"`
+	Target            Target                              `json:"target"`
+	Authority         AuthorityRevisions                  `json:"authority_revisions"`
+	FailurePolicy     FailurePolicy                       `json:"failure_policy"`
 }
 
 type Approval struct {

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type memoryRepository map[string]string
@@ -101,7 +104,7 @@ func TestComposeIdentityServiceInference(t *testing.T) {
 	}
 	foundPostgres, foundValkeyResource := false, false
 	for _, resource := range result.Resources {
-		foundPostgres = foundPostgres || resource.LogicalName == "postgres" && resource.Type == "postgres" && resource.Managed
+		foundPostgres = foundPostgres || resource.LogicalName == "postgres" && resource.Type == "postgres" && resource.Managed && resource.Persistence != nil && resource.Persistence.Persistent
 		foundValkeyResource = foundValkeyResource || resource.LogicalName == "valkey" && resource.Type == "redis" && resource.Managed
 	}
 	foundDB, foundValkey, foundAPI, foundHub, foundJWT := false, false, false, false, false
@@ -234,5 +237,177 @@ spec:
 	})
 	if len(result.Applications) != 1 || result.Applications[0].Build.Strategy != "image" || result.Applications[0].Key != "repo-worker" || result.NeedsInput() {
 		t.Fatalf("manifest-only detection failed: %+v", result)
+	}
+}
+
+func TestKafkaInitMergesIntoDisabledKafkaEvidence(t *testing.T) {
+	result := analyze(t, memoryRepository{
+		"compose.yaml": `services:
+  api:
+    build: {context: api, dockerfile: Dockerfile}
+    depends_on: [kafka-init]
+    environment: {Kafka__Enabled: "false"}
+  kafka: {image: apache/kafka:4}
+  kafka-init: {image: apache/kafka:4}
+`,
+		"api/Dockerfile": "FROM scratch\nEXPOSE 8080\n",
+	})
+	kafkaResources, kafkaIssues := 0, 0
+	for _, resource := range result.Resources {
+		if resource.Type == "kafka" {
+			kafkaResources++
+			if resource.LogicalName != "kafka" || resource.Managed || resource.Required || len(resource.Evidence) != 2 {
+				t.Fatalf("kafka resource=%+v", resource)
+			}
+		}
+	}
+	for _, issue := range result.Issues {
+		if issue.Code == "KAFKA_UNSUPPORTED" {
+			kafkaIssues++
+			if issue.Blocking || issue.Resolution != "Kafka__Enabled=false" {
+				t.Fatalf("kafka issue=%+v", issue)
+			}
+		}
+	}
+	if kafkaResources != 1 || kafkaIssues != 1 {
+		t.Fatalf("resources=%+v issues=%+v", result.Resources, result.Issues)
+	}
+	for _, dependency := range result.Dependencies {
+		if dependency.Protocol == "kafka" && (dependency.To != "kafka" || dependency.Required) {
+			t.Fatalf("dependency=%+v", dependency)
+		}
+	}
+}
+
+func TestScopedAnalysisUsesSameCommitAndCanonicalScopeHash(t *testing.T) {
+	files := memoryRepository{
+		"api/Dockerfile":       "FROM scratch\nEXPOSE 8080\n",
+		"web/Dockerfile":       "FROM scratch\nEXPOSE 3000\n",
+		"api/vendor/client.ts": "fetch('/ignored')",
+	}
+	detector := Detector{Repository: files, Now: func() time.Time { return time.Unix(1, 0).UTC() }}
+	request := Request{InstallationID: 1, RepositoryID: 2, Repository: "owner/repo", SelectedRef: "main", CommitSHA: strings.Repeat("a", 40), Scope: Scope{ApplicationRoots: []string{"api", "api"}, ExcludePaths: []string{"api/vendor"}}}
+	first, err := detector.Analyze(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Scope = Scope{ExcludePaths: []string{"api/vendor"}, ApplicationRoots: []string{"api"}}
+	second, err := detector.Analyze(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.CommitSHA != request.CommitSHA || first.ScopeHash == "" || first.ScopeHash != second.ScopeHash || len(first.Applications) != 1 || first.Applications[0].Root != "api" || first.EvidenceCoverage.CandidatesFound != 1 {
+		t.Fatalf("first=%+v second=%+v", first, second)
+	}
+}
+
+type delayedRepository struct {
+	files   memoryRepository
+	reverse bool
+	delay   time.Duration
+	mu      sync.Mutex
+	active  int
+	peak    int
+}
+
+func (r *delayedRepository) ListFiles(ctx context.Context, installationID int64, repository, sha string) ([]File, bool, error) {
+	return r.files.ListFiles(ctx, installationID, repository, sha)
+}
+
+func (r *delayedRepository) ReadFile(ctx context.Context, _ int64, _, _, name string, _ int64) ([]byte, error) {
+	r.mu.Lock()
+	r.active++
+	if r.active > r.peak {
+		r.peak = r.active
+	}
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.active--
+		r.mu.Unlock()
+	}()
+	delay := r.delay
+	if r.reverse == (name < "app-08/Dockerfile") {
+		delay += 15 * time.Millisecond
+	}
+	select {
+	case <-time.After(delay):
+		return []byte(r.files[name]), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestBoundedConcurrentReadsAreCompletionOrderIndependent(t *testing.T) {
+	files := memoryRepository{}
+	for i := 0; i < 16; i++ {
+		files[fmt.Sprintf("app-%02d/Dockerfile", i)] = fmt.Sprintf("FROM scratch\nEXPOSE %d\n", 8000+i)
+	}
+	now := func() time.Time { return time.Unix(10, 0).UTC() }
+	analyzeDelayed := func(reverse bool) (Result, int, time.Duration) {
+		repository := &delayedRepository{files: files, reverse: reverse, delay: 15 * time.Millisecond}
+		started := time.Now()
+		result, err := (Detector{Repository: repository, Now: now}).Analyze(context.Background(), Request{InstallationID: 1, RepositoryID: 2, Repository: "owner/repo", SelectedRef: "main", CommitSHA: strings.Repeat("a", 40)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result, repository.peak, time.Since(started)
+	}
+	first, peak, elapsed := analyzeDelayed(false)
+	second, secondPeak, _ := analyzeDelayed(true)
+	firstJSON, _ := json.Marshal(first)
+	secondJSON, _ := json.Marshal(second)
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("analysis changed with completion order\nfirst=%s\nsecond=%s", firstJSON, secondJSON)
+	}
+	if peak < 2 || peak > 8 || secondPeak > 8 || elapsed >= 250*time.Millisecond {
+		t.Fatalf("peak=%d second_peak=%d elapsed=%s", peak, secondPeak, elapsed)
+	}
+}
+
+func TestTruncationReasonsAreSpecific(t *testing.T) {
+	tests := []struct {
+		name   string
+		files  memoryRepository
+		limits Limits
+		reason string
+	}{
+		{name: "file_count", files: memoryRepository{"Dockerfile": "FROM scratch", "README.md": "docs"}, limits: Limits{MaxFiles: 1, MaxFileBytes: 100, MaxTotalBytes: 100, MaxDuration: time.Second}, reason: "file_count"},
+		{name: "blob_size", files: memoryRepository{"Dockerfile": "FROM scratch\nEXPOSE 8080"}, limits: Limits{MaxFiles: 10, MaxFileBytes: 4, MaxTotalBytes: 100, MaxDuration: time.Second}, reason: "blob_size"},
+		{name: "total_bytes", files: memoryRepository{"a/Dockerfile": "FROM scratch", "b/Dockerfile": "FROM scratch"}, limits: Limits{MaxFiles: 10, MaxFileBytes: 100, MaxTotalBytes: 15, MaxDuration: time.Second}, reason: "total_bytes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := (Detector{Repository: test.files, Limits: test.limits}).Analyze(context.Background(), Request{InstallationID: 1, RepositoryID: 2, Repository: "owner/repo", SelectedRef: "main", CommitSHA: strings.Repeat("a", 40)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Truncated || result.TruncationReason != test.reason {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
+}
+
+func TestOversizedExplicitConfigBlocksWithoutFallingBack(t *testing.T) {
+	result, err := (Detector{
+		Repository: memoryRepository{
+			".opsi/opsi-cd.yaml": "version: 2\nservices:\n  - key: api\n",
+			"compose.yaml":       "services:\n  api:\n    image: example/api:latest\n    ports: [\"8080:8080\"]\n",
+		},
+		Limits: Limits{MaxFiles: 10, MaxFileBytes: 8, MaxTotalBytes: 100, MaxDuration: time.Second},
+	}).Analyze(context.Background(), Request{InstallationID: 1, RepositoryID: 2, Repository: "owner/repo", SelectedRef: "main", CommitSHA: strings.Repeat("a", 40)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Authority != "explicit_config_unreadable" || result.TruncationReason != "blob_size" {
+		t.Fatalf("result=%+v", result)
+	}
+	issueCodes := map[string]bool{}
+	for _, issue := range result.Issues {
+		issueCodes[issue.Code] = issue.Blocking
+	}
+	if !issueCodes["EXPLICIT_CONFIG_UNREADABLE"] || !issueCodes["ANALYSIS_TRUNCATED"] {
+		t.Fatalf("issues=%+v", result.Issues)
 	}
 }

@@ -192,16 +192,13 @@ credentials are not GitHub OAuth credentials.
 
 ### 2.2 BuildRecord, ownership, and routing
 
-Repository-owned configuration defines build context, Dockerfile, platform,
-tests, service identifier, and optional deployment metadata. Cloud-owned
-configuration defines installation/repository identity, project/service
-mapping, allowed workflow/event/refs, environment/runtime, `DeploymentPolicy`,
-and OCI repository allowlist.
-
-The workflow submits an OIDC-bound `BuildRecord` with repository ID, commit SHA,
-ref, event, run ID/attempt, workflow identity, image repository/digest, and
-optional provenance digest. Cloud compares request-body values with verified
-claims and fails closed on mismatch.
+Cloud owns the canonical DeploymentPlan inferred from an exact repository SHA.
+Optional `.opsi/opsi-cd.yaml` provides an explicit repository-owned override;
+it is not required for analysis or build execution. After approval, the
+Opsi-owned executor receives a BuildJob containing the immutable source and
+plan identity, obtains a repository-scoped read credential, and returns an
+immutable BuildRecord. User repositories do not provide a caller workflow and
+cannot alter the approved executor inputs.
 
 The canonical trusted build executor resolves `dockerfile` to the pinned
 BuildKit adapter and `buildpack` to `pack` with the digest-pinned Paketo Ubuntu
@@ -342,8 +339,8 @@ but must expose no execute or approve tool.
   routing, deployment result metadata, and provenance references.
 - CLI owns only local session state, OS-keychain credentials, configuration, and
   future device/MCP state necessary for the local trust boundary.
-- The OCI registry owns artifact blobs and manifests. GitHub Actions owns the
-  build execution; Agent owns digest pull, runtime rollout, readiness,
+- The OCI registry owns artifact blobs and manifests. The Opsi-owned GitHub
+  Actions executor owns build execution; Agent owns digest pull, runtime rollout, readiness,
   reconciliation, and rollback.
 - Cloud must not own source repository contents, Docker build context, raw build
   logs, raw runtime logs, application secrets, registry password plaintext, or

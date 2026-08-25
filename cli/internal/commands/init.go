@@ -25,92 +25,47 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	defaultConfigPath   = ".opsi/opsi-cd.yaml"
-	defaultWorkflowPath = ".github/workflows/opsi-cd.yaml"
-	claimCallbackPath   = "/_opsi/github/installation-claim"
-)
+const defaultConfigPath = ".opsi/opsi-cd.yaml"
+const claimCallbackPath = "/_opsi/github/installation-claim"
 
 type initOptions struct {
 	ProjectID      string
-	ServiceID      string
-	ServiceKey     string
 	RepositoryID   int64
 	InstallationID int64
 	CloudURL       string
 	RepoDir        string
-	ConfigPath     string
-	WorkflowPath   string
-	BuildContext   string
-	Dockerfile     string
-	Platform       string
-	Branch         string
-	WatchPaths     []string
-	SharedPaths    []string
-	Dependencies   []string
-	PreviewPRs     bool
+	SelectedRef    string
 	DryRun         bool
-	Force          bool
-	Yes            bool
 	NoBrowser      bool
 	JSON           bool
 	Timeout        time.Duration
 }
-
 type initPlan struct {
-	Repository        string                  `json:"repository"`
-	RepositoryID      int64                   `json:"repository_id,omitempty"`
-	ProjectID         string                  `json:"project_id"`
-	ServiceID         string                  `json:"service_id"`
-	ServiceKey        string                  `json:"service_key"`
-	InstallationID    int64                   `json:"installation_id,omitempty"`
-	InstallationClaim string                  `json:"installation_claim"`
-	RepositoryClaim   string                  `json:"repository_claim"`
-	Binding           string                  `json:"binding"`
-	Files             []repository.FileChange `json:"files,omitempty"`
+	Repository        string                            `json:"repository"`
+	RepositoryID      int64                             `json:"repository_id,omitempty"`
+	ProjectID         string                            `json:"project_id"`
+	InstallationID    int64                             `json:"installation_id,omitempty"`
+	InstallationClaim string                            `json:"installation_claim"`
+	RepositoryClaim   string                            `json:"repository_claim"`
+	SelectedRef       string                            `json:"selected_ref,omitempty"`
+	DeploymentRun     *cloudclient.DeploymentRunPreview `json:"deployment_run,omitempty"`
 }
 
 func newInitCommand(configPath *string, rootOptions Options) *cobra.Command {
-	options := initOptions{
-		RepoDir:      ".",
-		ConfigPath:   defaultConfigPath,
-		WorkflowPath: defaultWorkflowPath,
-		BuildContext: ".",
-		Dockerfile:   "Dockerfile",
-		Platform:     "linux/amd64",
-		Timeout:      5 * time.Minute,
-	}
-	cmd := &cobra.Command{
-		Use:   "init",
-		Short: "Bootstrap the current GitHub repository for Opsi CD",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runInit(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), *configPath, rootOptions, options)
-		},
-	}
+	options := initOptions{RepoDir: ".", Timeout: 5 * time.Minute}
+	cmd := &cobra.Command{Use: "init", Short: "Claim and analyze the current repository without writing source files", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return runInit(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), *configPath, rootOptions, options)
+	}}
 	flags := cmd.Flags()
 	flags.StringVar(&options.ProjectID, "project-id", "", "Cloud project ID")
-	flags.StringVar(&options.ServiceID, "service-id", "", "Cloud service ID")
-	flags.StringVar(&options.ServiceKey, "service-key", "", "repository service key")
 	flags.Int64Var(&options.RepositoryID, "repository-id", 0, "numeric GitHub repository ID from Cloud")
 	flags.Int64Var(&options.InstallationID, "installation-id", 0, "GitHub App installation ID to claim when needed")
 	flags.StringVar(&options.CloudURL, "cloud-url", "", "override cloud_url from CLI config")
 	flags.StringVar(&options.RepoDir, "repo-dir", ".", "local Git repository directory")
-	flags.StringVar(&options.ConfigPath, "config-path", defaultConfigPath, "generated Opsi CD config path")
-	flags.StringVar(&options.WorkflowPath, "workflow-path", defaultWorkflowPath, "generated GitHub workflow path")
-	flags.StringVar(&options.BuildContext, "build-context", ".", "repository-relative build context")
-	flags.StringVar(&options.Dockerfile, "dockerfile", "Dockerfile", "repository-relative Dockerfile path")
-	flags.StringVar(&options.Platform, "platform", "linux/amd64", "build platform")
-	flags.StringVar(&options.Branch, "branch", "", "production branch; defaults to Cloud repository metadata")
-	flags.StringSliceVar(&options.WatchPaths, "watch-path", nil, "additional repository-relative path watched by this service")
-	flags.StringSliceVar(&options.SharedPaths, "shared-path", nil, "repository-relative shared path affecting this service")
-	flags.StringSliceVar(&options.Dependencies, "depends-on", nil, "service key this service depends on")
-	flags.BoolVar(&options.PreviewPRs, "preview-prs", false, "enable preview intent for pull requests")
-	flags.BoolVar(&options.DryRun, "dry-run", false, "print a JSON plan without mutations or file writes")
-	flags.BoolVar(&options.Force, "force", false, "allow overwriting generated files when used with --yes")
-	flags.BoolVar(&options.Yes, "yes", false, "confirm explicit overwrite")
+	flags.StringVar(&options.SelectedRef, "ref", "", "branch, tag, or commit to analyze; defaults to the repository default branch")
+	flags.BoolVar(&options.DryRun, "dry-run", false, "show required claims without mutating Cloud or repository source")
 	flags.BoolVar(&options.NoBrowser, "no-browser", false, "print authorization URL without opening a browser")
-	flags.BoolVar(&options.JSON, "json", false, "print success output as JSON")
+	flags.BoolVar(&options.JSON, "json", false, "print output as JSON")
 	flags.DurationVar(&options.Timeout, "timeout", 5*time.Minute, "overall init and browser callback timeout")
 	return cmd
 }
@@ -118,9 +73,6 @@ func newInitCommand(configPath *string, rootOptions Options) *cobra.Command {
 func runInit(parent context.Context, output, statusOutput io.Writer, configPath string, dependencies Options, options initOptions) error {
 	if err := validateInitOptions(options); err != nil {
 		return err
-	}
-	if options.ProjectID == "" && options.ServiceID == "" {
-		return runLocalInit(parent, output, dependencies, options)
 	}
 	store, err := dependencies.KeychainFactory()
 	if err != nil {
@@ -137,7 +89,6 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 		}
 		cliConfig = config.Default()
 	} else {
-		var err error
 		cliConfig, err = config.LoadSelected(configPath)
 		if err != nil {
 			return err
@@ -151,9 +102,9 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	httpClientCopy := *httpClient
-	httpClientCopy.Timeout = options.Timeout
-	client, err := cloudclient.New(cloudURL, pat, dependencies.Version, &httpClientCopy)
+	clientCopy := *httpClient
+	clientCopy.Timeout = options.Timeout
+	client, err := cloudclient.New(cloudURL, pat, dependencies.Version, &clientCopy)
 	if err != nil {
 		return err
 	}
@@ -163,18 +114,7 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 	if err != nil {
 		return err
 	}
-	services, err := client.ListServices(ctx, options.ProjectID)
-	if err != nil {
-		return err
-	}
-	if err := validateService(services, options.ProjectID, options.ServiceID); err != nil {
-		return err
-	}
 	repositories, err := client.ListGitHubRepositories(ctx, options.ProjectID)
-	if err != nil {
-		return err
-	}
-	bindings, err := client.ListGitHubBindings(ctx, options.ProjectID)
 	if err != nil {
 		return err
 	}
@@ -185,8 +125,7 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 			return fmt.Errorf("repository %s is not in Cloud inventory; rerun with --installation-id after installing the GitHub App", local.Origin.FullName)
 		}
 		if options.DryRun {
-			plan := initPlan{Repository: local.Origin.FullName, ProjectID: options.ProjectID, ServiceID: options.ServiceID, ServiceKey: options.ServiceKey, InstallationID: options.InstallationID, InstallationClaim: "required", RepositoryClaim: "pending-inventory", Binding: "pending-inventory"}
-			return writeJSON(output, plan)
+			return writeJSON(output, initPlan{Repository: local.Origin.FullName, ProjectID: options.ProjectID, InstallationID: options.InstallationID, InstallationClaim: "required", RepositoryClaim: "pending-inventory"})
 		}
 		if err := runInstallationClaim(ctx, statusOutput, client, dependencies, options); err != nil {
 			return err
@@ -204,9 +143,6 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 			return err
 		}
 		target, matchErr = repository.MatchInventory(toInventory(repositories), local.Origin, options.RepositoryID)
-		if errors.Is(matchErr, repository.ErrRepositoryNotFound) && options.RepositoryID > 0 {
-			return matchErr
-		}
 		if errors.Is(matchErr, repository.ErrRepositoryNotFound) || (matchErr == nil && target.InstallationID != options.InstallationID) {
 			return fmt.Errorf("GitHub App installation does not have access to %s", local.Origin.FullName)
 		}
@@ -214,93 +150,62 @@ func runInit(parent context.Context, output, statusOutput io.Writer, configPath 
 	if matchErr != nil {
 		return matchErr
 	}
-	branch := options.Branch
-	if branch == "" {
-		branch = target.DefaultBranch
+	selectedRef := options.SelectedRef
+	if selectedRef == "" {
+		selectedRef = target.DefaultBranch
 	}
-	if err := repository.ValidateBuildInputs(local.Root, options.BuildContext, options.Dockerfile, options.Platform, branch); err != nil {
-		return err
+	if selectedRef == "" {
+		return errors.New("repository has no default ref; provide --ref")
 	}
-	mutation := repository.MutationRequest{Repository: local.Root, ConfigPath: options.ConfigPath, WorkflowPath: options.WorkflowPath, Force: options.Force, Confirmed: options.Yes, Service: repository.ServiceV2{Key: options.ServiceKey, Build: repository.BuildV2{Context: options.BuildContext, Dockerfile: options.Dockerfile, Platform: options.Platform}, WatchPaths: options.WatchPaths, SharedPaths: options.SharedPaths, Dependencies: options.Dependencies, Deploy: repository.DeployV2{Production: repository.ProductionV2{Enabled: true, Branches: []string{branch}}, Preview: repository.PreviewV2{Enabled: options.PreviewPRs, PullRequests: options.PreviewPRs}}}}
-	mutationPreview, err := (repository.CDService{Runner: dependencies.GitRunner}).PreviewMutation(mutation)
-	if err != nil {
-		return err
+	claimState := "already-claimed"
+	switch target.ClaimStatus {
+	case "conflict":
+		return fmt.Errorf("repository %s is claimed by another project", target.FullName)
+	case "available":
+		claimState = "required"
 	}
-	existingBinding, bindingState, err := inspectBindings(bindings, options, target.RepositoryID)
-	if err != nil {
-		return err
-	}
-	plan := initPlan{Repository: local.Origin.FullName, RepositoryID: target.RepositoryID, ProjectID: options.ProjectID, ServiceID: options.ServiceID, ServiceKey: options.ServiceKey, InstallationID: options.InstallationID, InstallationClaim: installationClaim, RepositoryClaim: "required", Binding: bindingState, Files: mutationPreview.Files}
-	if existingBinding != nil {
-		plan.RepositoryClaim = "already-claimed"
-	}
+	plan := initPlan{Repository: local.Origin.FullName, RepositoryID: target.RepositoryID, ProjectID: options.ProjectID, InstallationID: target.InstallationID, InstallationClaim: installationClaim, RepositoryClaim: claimState, SelectedRef: selectedRef}
 	if options.DryRun {
 		return writeJSON(output, plan)
 	}
-	for _, change := range mutationPreview.Files {
-		if change.Action == "updated" && (!options.Force || !options.Yes) {
-			return fmt.Errorf("%s already exists with different managed content; use --force --yes to overwrite", change.Path)
-		}
-	}
-	binding := cloudclient.GitHubBinding{}
-	if existingBinding != nil {
-		binding = *existingBinding
-	} else {
+	if claimState == "required" {
 		if _, err := client.ClaimRepository(ctx, options.ProjectID, target.RepositoryID); err != nil {
 			return err
 		}
-		binding, err = client.CreateServiceBinding(ctx, options.ProjectID, options.ServiceID, target.RepositoryID, options.ServiceKey, options.ConfigPath)
-		if err != nil {
+		plan.RepositoryClaim = "claimed"
+	}
+	idempotency, err := randomState(dependencies.Random)
+	if err != nil {
+		return err
+	}
+	run, err := client.CreateDeploymentRun(ctx, options.ProjectID, target.RepositoryID, selectedRef, "init:"+idempotency)
+	if err != nil {
+		return err
+	}
+	plan.DeploymentRun = &run
+	if options.JSON {
+		return writeJSON(output, plan)
+	}
+	if _, err = fmt.Fprintf(output, "Repository %s at %s analyzed as exact commit %s.\nDraft run: %s (%s)\n", plan.Repository, selectedRef, run.Plan.Source.CommitSHA, run.ID, run.State); err != nil {
+		return err
+	}
+	for _, application := range run.Plan.Applications {
+		if _, err = fmt.Fprintf(output, "- %s: %s (port %d)\n", application.Key, application.Root, application.Port); err != nil {
 			return err
 		}
 	}
-	applied, err := (repository.CDService{Runner: dependencies.GitRunner}).ApplyMutation(mutation)
-	if err != nil {
-		return err
-	}
-	return writeInitSuccess(output, options, local.Origin.FullName, target.RepositoryID, binding, repository.FilePlan{Changes: applied.Files})
-}
-
-func runLocalInit(ctx context.Context, output io.Writer, dependencies Options, options initOptions) error {
-	root, err := repository.Root(ctx, dependencies.GitRunner, options.RepoDir)
-	if err != nil {
-		return err
-	}
-	branch := options.Branch
-	if branch == "" {
-		branch = "main"
-	}
-	mutation := repository.MutationRequest{Repository: root, ConfigPath: options.ConfigPath, WorkflowPath: options.WorkflowPath, Force: options.Force, Confirmed: options.Yes, Service: repository.ServiceV2{Key: options.ServiceKey, Build: repository.BuildV2{Context: options.BuildContext, Dockerfile: options.Dockerfile, Platform: options.Platform}, WatchPaths: options.WatchPaths, SharedPaths: options.SharedPaths, Dependencies: options.Dependencies, Deploy: repository.DeployV2{Production: repository.ProductionV2{Enabled: true, Branches: []string{branch}}, Preview: repository.PreviewV2{Enabled: options.PreviewPRs, PullRequests: options.PreviewPRs}}}}
-	service := repository.CDService{Runner: dependencies.GitRunner}
-	preview, err := service.PreviewMutation(mutation)
-	if err != nil {
-		return err
-	}
-	if options.DryRun {
-		return writeJSON(output, preview)
-	}
-	for _, change := range preview.Files {
-		if change.Action == "updated" && (!options.Force || !options.Yes) {
-			return fmt.Errorf("%s already exists with different managed content; use --force --yes to overwrite", change.Path)
+	for _, issue := range run.Plan.Issues {
+		if _, err = fmt.Fprintf(output, "- %s: %s\n", issue.Code, issue.Message); err != nil {
+			return err
 		}
 	}
-	applied, err := service.ApplyMutation(mutation)
-	if err != nil {
-		return err
-	}
-	if options.JSON {
-		return writeJSON(output, applied)
-	}
-	_, err = fmt.Fprintf(output, "Opsi repository initialized: service=%s config_hash=%s\n", options.ServiceKey, applied.ConfigHash)
+	_, err = fmt.Fprintln(output, "No repository files were written. Review and approve this draft in Opsi.")
 	return err
 }
 
 func validateInitOptions(options initOptions) error {
-	if options.ServiceKey == "" {
-		return errors.New("--service-key is required")
-	}
-	if (options.ProjectID == "") != (options.ServiceID == "") {
-		return errors.New("--project-id and --service-id must be provided together")
+	if strings.TrimSpace(options.ProjectID) == "" {
+		return errors.New("--project-id is required")
 	}
 	if options.RepositoryID < 0 || options.InstallationID < 0 {
 		return errors.New("repository and installation IDs must be positive integers")
@@ -308,65 +213,18 @@ func validateInitOptions(options initOptions) error {
 	if options.Timeout <= 0 || options.Timeout > 5*time.Minute {
 		return errors.New("--timeout must be greater than zero and at most 5m")
 	}
-	if options.Force && !options.Yes {
-		return errors.New("--force requires --yes")
-	}
-	if err := repository.ValidateServiceKey(options.ServiceKey); err != nil {
-		return err
-	}
-	if err := repository.ValidateConfigPath(options.ConfigPath); err != nil {
-		return fmt.Errorf("invalid --config-path: %w", err)
-	}
-	if err := repository.ValidateWorkflowPath(options.WorkflowPath); err != nil {
-		return fmt.Errorf("invalid --workflow-path: %w", err)
+	if strings.TrimSpace(options.SelectedRef) != options.SelectedRef || strings.IndexFunc(options.SelectedRef, unicode.IsControl) >= 0 {
+		return errors.New("--ref is invalid")
 	}
 	return nil
 }
-
-func validateService(services []cloudclient.Service, projectID, serviceID string) error {
-	for _, service := range services {
-		if service.ID != serviceID {
-			continue
-		}
-		if service.ProjectID != "" && service.ProjectID != projectID {
-			return fmt.Errorf("service %s does not belong to project %s", serviceID, projectID)
-		}
-		if strings.EqualFold(service.Status, "deleted") {
-			return fmt.Errorf("service %s is deleted", serviceID)
-		}
-		return nil
-	}
-	return fmt.Errorf("service %s does not exist in project %s", serviceID, projectID)
-}
-
 func toInventory(values []cloudclient.GitHubRepository) []repository.InventoryRepository {
 	result := make([]repository.InventoryRepository, 0, len(values))
 	for _, value := range values {
-		result = append(result, repository.InventoryRepository{RepositoryID: value.RepositoryID, InstallationID: value.InstallationID, FullName: value.FullName, DefaultBranch: value.DefaultBranch, Status: value.Status, Archived: value.Archived, Disabled: value.Disabled})
+		result = append(result, repository.InventoryRepository{RepositoryID: value.RepositoryID, InstallationID: value.InstallationID, FullName: value.FullName, DefaultBranch: value.DefaultBranch, Status: value.Status, Archived: value.Archived, Disabled: value.Disabled, ClaimStatus: value.ClaimStatus})
 	}
 	return result
 }
-
-func inspectBindings(bindings []cloudclient.GitHubBinding, options initOptions, repositoryID int64) (*cloudclient.GitHubBinding, string, error) {
-	for index := range bindings {
-		binding := &bindings[index]
-		if strings.EqualFold(binding.Status, "removed") {
-			continue
-		}
-		exact := binding.ServiceID == options.ServiceID && binding.RepositoryID == repositoryID && binding.ServiceKey == options.ServiceKey && binding.ConfigPath == options.ConfigPath
-		if exact {
-			return binding, "existing", nil
-		}
-		if binding.ServiceID == options.ServiceID {
-			return nil, "", fmt.Errorf("service %s already has a different repository binding", options.ServiceID)
-		}
-		if binding.RepositoryID == repositoryID && binding.ServiceKey == options.ServiceKey {
-			return nil, "", fmt.Errorf("repository %d service key %s is bound to service %s", repositoryID, options.ServiceKey, binding.ServiceID)
-		}
-	}
-	return nil, "create", nil
-}
-
 func validateClaimedInstallation(installations []cloudclient.GitHubInstallation, installationID int64) error {
 	for _, installation := range installations {
 		if installation.InstallationID == installationID {
@@ -435,7 +293,6 @@ func runInstallationClaim(ctx context.Context, output io.Writer, client *cloudcl
 		return errors.New("timed out waiting for GitHub installation authorization")
 	}
 }
-
 func validateGitHubAuthorizationURL(raw string) error {
 	authorizationURL, err := url.Parse(raw)
 	if err != nil || authorizationURL.Scheme != "https" || authorizationURL.Host == "" || authorizationURL.User != nil || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
@@ -444,29 +301,23 @@ func validateGitHubAuthorizationURL(raw string) error {
 	return nil
 }
 
-type claimResult struct {
-	grant string
-}
-
+type claimResult struct{ grant string }
 type claimCallback struct {
-	host     string
-	state    string
-	result   chan claimResult
-	mu       sync.Mutex
-	accepted bool
+	host, state string
+	result      chan claimResult
+	mu          sync.Mutex
+	accepted    bool
 }
 
 func newClaimCallback(host, state string) *claimCallback {
 	return &claimCallback{host: host, state: state, result: make(chan claimResult, 1)}
 }
-
 func (c *claimCallback) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet || request.Host != c.host || request.URL.Path != claimCallbackPath || len(request.URL.RawQuery) > 8192 {
 		http.Error(response, "invalid installation callback", http.StatusBadRequest)
 		return
 	}
-	state := request.URL.Query().Get("state")
-	grant := request.URL.Query().Get("grant")
+	state, grant := request.URL.Query().Get("state"), request.URL.Query().Get("grant")
 	if state == "" || grant == "" || strings.IndexFunc(state+grant, unicode.IsControl) >= 0 || subtle.ConstantTimeCompare([]byte(state), []byte(c.state)) != 1 {
 		http.Error(response, "invalid installation callback", http.StatusBadRequest)
 		return
@@ -484,7 +335,6 @@ func (c *claimCallback) ServeHTTP(response http.ResponseWriter, request *http.Re
 	_, _ = io.WriteString(response, "Opsi GitHub installation connected. You may close this window.")
 	c.result <- claimResult{grant: grant}
 }
-
 func randomState(source io.Reader) (string, error) {
 	if source == nil {
 		source = rand.Reader
@@ -495,7 +345,6 @@ func randomState(source io.Reader) (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
-
 func openBrowser(target string) error {
 	var command *exec.Cmd
 	switch runtime.GOOS {
@@ -508,41 +357,6 @@ func openBrowser(target string) error {
 	}
 	return command.Start()
 }
-
-func writeInitSuccess(output io.Writer, options initOptions, fullName string, repositoryID int64, binding cloudclient.GitHubBinding, plan repository.FilePlan) error {
-	if options.JSON {
-		payload := struct {
-			Repository   string                  `json:"repository"`
-			RepositoryID int64                   `json:"repository_id"`
-			ProjectID    string                  `json:"project_id"`
-			ServiceID    string                  `json:"service_id"`
-			ServiceKey   string                  `json:"service_key"`
-			BindingID    string                  `json:"binding_id"`
-			Files        []repository.FileChange `json:"files"`
-		}{fullName, repositoryID, options.ProjectID, options.ServiceID, options.ServiceKey, binding.ID, plan.Changes}
-		return writeJSON(output, payload)
-	}
-	if _, err := fmt.Fprintf(output, "Repository: %s (%d)\nProject: %s\nService: %s\nService key: %s\nBinding: %s\n", fullName, repositoryID, options.ProjectID, options.ServiceID, options.ServiceKey, binding.ID); err != nil {
-		return err
-	}
-	for _, change := range plan.Changes {
-		label := strings.ToUpper(change.Action[:1]) + change.Action[1:]
-		if _, err := fmt.Fprintf(output, "%s: %s", label, change.Path); err != nil {
-			return err
-		}
-		if change.Action == "updated" {
-			if _, err := fmt.Fprintf(output, " (sha256 %s -> %s)", change.OldSHA256, change.NewSHA256); err != nil {
-				return err
-			}
-		}
-		if _, err := fmt.Fprintln(output); err != nil {
-			return err
-		}
-	}
-	_, err := fmt.Fprintln(output, "Next: review and commit the generated files")
-	return err
-}
-
 func writeJSON(output io.Writer, value any) error {
 	encoder := json.NewEncoder(output)
 	encoder.SetIndent("", "  ")

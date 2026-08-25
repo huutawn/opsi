@@ -518,3 +518,72 @@ func TestRepositoryReadTokenIsExactAndNotCached(t *testing.T) {
 		t.Fatalf("repository-scoped source tokens must not be cached: requests=%d", requests)
 	}
 }
+
+func TestRepositoryWriteTokenRequestsOnlyAuditedExportPermissions(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var body struct {
+			RepositoryIDs []int64           `json:"repository_ids"`
+			Permissions   map[string]string `json:"permissions"`
+		}
+		if json.NewDecoder(request.Body).Decode(&body) != nil || len(body.RepositoryIDs) != 1 || body.RepositoryIDs[0] != 77 || len(body.Permissions) != 2 || body.Permissions["contents"] != "write" || body.Permissions["pull_requests"] != "write" {
+			t.Fatalf("body=%+v", body)
+		}
+		return githubAppResponse(http.StatusCreated, `{"token":"write-token","expires_at":"`+now.Add(time.Hour).Format(time.RFC3339)+`"}`), nil
+	}), now)
+	token, _, err := client.RepositoryWriteToken(t.Context(), 42, 77)
+	if err != nil || token != "write-token" {
+		t.Fatalf("token=%q err=%v", token, err)
+	}
+}
+
+func TestRepositoryExportCreatesPRWithoutMergeAndReusesOpenPR(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	sourceSHA, commitSHA := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	requests := 0
+	writes, merges := 0, 0
+	client, _ := newGitHubAppTestClient(t, githubAppRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		if strings.Contains(request.URL.Path, "/merge") {
+			merges++
+		}
+		if request.URL.Path == "/app/installations/42/access_tokens" {
+			return githubAppResponse(http.StatusCreated, `{"token":"write-token","expires_at":"`+now.Add(time.Hour).Format(time.RFC3339)+`"}`), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer write-token" {
+			t.Fatalf("authorization missing for %s", request.URL.Path)
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/owner/repo/pulls":
+			if requests < 8 {
+				return githubAppResponse(http.StatusOK, `[]`), nil
+			}
+			return githubAppResponse(http.StatusOK, `[{"number":9,"html_url":"https://github.test/pr/9","head":{"sha":"`+commitSHA+`","ref":"opsi/export-test"}}]`), nil
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/git/ref/heads/"):
+			return githubAppResponse(http.StatusNotFound, `{}`), nil
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/owner/repo/git/refs":
+			writes++
+			return githubAppResponse(http.StatusCreated, `{}`), nil
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/owner/repo/contents/.opsi/opsi-cd.yaml":
+			return githubAppResponse(http.StatusNotFound, `{}`), nil
+		case request.Method == http.MethodPut && request.URL.Path == "/repos/owner/repo/contents/.opsi/opsi-cd.yaml":
+			writes++
+			return githubAppResponse(http.StatusCreated, `{"commit":{"sha":"`+commitSHA+`"}}`), nil
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/owner/repo/pulls":
+			writes++
+			return githubAppResponse(http.StatusCreated, `{"number":9,"html_url":"https://github.test/pr/9"}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	}), now)
+
+	first, err := client.ExportRepositoryConfig(t.Context(), 42, 77, "owner/repo", sourceSHA, "main", "opsi/export-test", []byte("version: 2\n"))
+	if err != nil || first.Reused || first.PullRequestNumber != 9 {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := client.ExportRepositoryConfig(t.Context(), 42, 77, "owner/repo", sourceSHA, "main", "opsi/export-test", []byte("version: 2\n"))
+	if err != nil || !second.Reused || second.PullRequestNumber != 9 || writes != 3 || merges != 0 {
+		t.Fatalf("second=%+v writes=%d merges=%d err=%v", second, writes, merges, err)
+	}
+}

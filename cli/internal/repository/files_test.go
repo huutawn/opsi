@@ -9,7 +9,7 @@ import (
 
 func TestFilePlanSafeOverwriteAndNoOp(t *testing.T) {
 	root := t.TempDir()
-	specs := []FileSpec{{Path: ".opsi/opsi-cd.yaml", Content: []byte("config\n")}, {Path: ".github/workflows/opsi-cd.yaml", Content: []byte("workflow\n")}}
+	specs := []FileSpec{{Path: ".opsi/opsi-cd.yaml", Content: []byte("config\n")}, {Path: "docs/export-note.txt", Content: []byte("documentation\n")}}
 	plan, err := PrepareFiles(root, specs, false, false)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestSecondFileFailureRollsBackFirst(t *testing.T) {
 	if err := os.WriteFile(firstPath, []byte("original\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	specs := []FileSpec{{Path: ".opsi/opsi-cd.yaml", Content: []byte("updated\n")}, {Path: ".github/workflows/opsi-cd.yaml", Content: []byte("workflow\n")}}
+	specs := []FileSpec{{Path: ".opsi/opsi-cd.yaml", Content: []byte("updated\n")}, {Path: "docs/export-note.txt", Content: []byte("documentation\n")}}
 	plan, err := PrepareFiles(root, specs, true, true)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestSecondFileFailureRollsBackFirst(t *testing.T) {
 	if err != nil || string(content) != "original\n" {
 		t.Fatalf("first file not rolled back: %q err=%v", content, err)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".github", "workflows", "opsi-cd.yaml")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(root, "docs", "export-note.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("second file unexpectedly exists: %v", err)
 	}
 }

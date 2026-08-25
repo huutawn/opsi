@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
 	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
@@ -141,7 +142,7 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	agentResolver := newAgentConfigResolver(cfg, configPath)
 	localSession := newLocalSessionToken()
 	authFlow := &localAuthFlow{
-		states:                  map[string]time.Time{},
+		states:                  map[string]localAuthPending{},
 		installationClaims:      map[string]localInstallationClaimPending{},
 		installationDiscoveries: map[string]localInstallationDiscoveryPending{},
 		discoveredInstallations: map[string]localInstallationDiscoveryResult{},
@@ -543,6 +544,11 @@ type localSelectionState struct {
 	ExpiresAt           time.Time
 }
 
+type localAuthPending struct {
+	ExpiresAt   time.Time
+	ReturnQuery string
+}
+
 type localInstallationDiscoveryPending struct {
 	ProjectID string
 	ExpiresAt time.Time
@@ -560,7 +566,7 @@ type localInstallationDiscoveryResult struct {
 
 type localAuthFlow struct {
 	mu                      sync.Mutex
-	states                  map[string]time.Time
+	states                  map[string]localAuthPending
 	installationClaims      map[string]localInstallationClaimPending
 	installationDiscoveries map[string]localInstallationDiscoveryPending
 	discoveredInstallations map[string]localInstallationDiscoveryResult
@@ -632,10 +638,12 @@ func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.C
 		return
 	}
 	var body struct {
-		ProjectID string `json:"project_id"`
+		ProjectID   string `json:"project_id"`
+		ReturnQuery string `json:"return_query"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
 	body.ProjectID = strings.TrimSpace(body.ProjectID)
+	body.ReturnQuery = canonicalLocalReturnQuery(body.ReturnQuery)
 	state := newLocalSessionToken()
 	callback := "http://" + r.Host + "/api/local/session/callback"
 	if body.ProjectID != "" {
@@ -653,7 +661,7 @@ func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.C
 		return
 	}
 	flow.mu.Lock()
-	flow.states[state] = time.Now().UTC().Add(5 * time.Minute)
+	flow.states[state] = localAuthPending{ExpiresAt: time.Now().UTC().Add(5 * time.Minute), ReturnQuery: body.ReturnQuery}
 	flow.mu.Unlock()
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -679,17 +687,17 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 	code, state := r.URL.Query().Get("code"), r.URL.Query().Get("state")
 	projectID := strings.TrimSpace(r.URL.Query().Get("project"))
 	flow.mu.Lock()
-	expiresAt, ok := flow.states[state]
+	pending, ok := flow.states[state]
 	if ok {
 		delete(flow.states, state)
 	}
 	flow.mu.Unlock()
-	if !ok || time.Now().UTC().After(expiresAt) {
+	if !ok || time.Now().UTC().After(pending.ExpiresAt) {
 		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_CALLBACK_INVALID", "auth callback expired or invalid")
 		return
 	}
 	if authError := browserAuthErrorCode(r.URL.Query().Get("error")); authError != "" {
-		http.Redirect(w, r, localBrowserAuthRedirect(projectID, "auth_error", authError), http.StatusFound)
+		http.Redirect(w, r, localBrowserAuthRedirect(projectID, "auth_error", authError, pending.ReturnQuery), http.StatusFound)
 		return
 	}
 	if code == "" {
@@ -738,15 +746,34 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	flow.setSession(out.Session)
-	http.Redirect(w, r, localBrowserAuthRedirect(out.Session.ProjectID, "auth", "ok"), http.StatusFound)
+	http.Redirect(w, r, localBrowserAuthRedirect(out.Session.ProjectID, "auth", "ok", pending.ReturnQuery), http.StatusFound)
 }
 
-func localBrowserAuthRedirect(projectID, key, value string) string {
-	query := url.Values{key: []string{value}}
+func localBrowserAuthRedirect(projectID, key, value, returnQuery string) string {
+	query, _ := url.ParseQuery(returnQuery)
+	query.Set(key, value)
 	if projectID != "" {
 		query.Set("project", projectID)
 	}
 	return "/?" + query.Encode()
+}
+
+func canonicalLocalReturnQuery(raw string) string {
+	if len(raw) > 4096 {
+		return ""
+	}
+	values, err := url.ParseQuery(strings.TrimPrefix(raw, "?"))
+	if err != nil {
+		return ""
+	}
+	allowed := map[string]bool{"project": true, "view": true, "source_project": true, "source_installation": true, "source_repository": true, "source_ref": true, "source_hostname": true}
+	canonical := url.Values{}
+	for name, entries := range values {
+		if allowed[name] && len(entries) == 1 && len(entries[0]) <= 512 && strings.IndexFunc(entries[0], unicode.IsControl) < 0 {
+			canonical.Set(name, entries[0])
+		}
+	}
+	return canonical.Encode()
 }
 
 func browserAuthErrorCode(code string) string {
