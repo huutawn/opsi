@@ -144,6 +144,28 @@ test("available repository is claimed and analyzed without a page reload", async
 	expect(await page.evaluate(() => window.sessionStorage.getItem("opsi:deploy-source:proj-1"))).toBeNull();
 });
 
+test("main ref with absent optional detections opens review without crashing", async ({ page }) => {
+	let run: ReturnType<typeof deploymentRun> | null = null;
+	await mockDeployAPI(page, () => run, () => run ?? deploymentRun("awaiting_approval"), "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		onCreate: () => {
+			run = deploymentRun("awaiting_approval");
+			run.plan.source.selected_ref = "main";
+			const nullablePlan = run.plan as unknown as { bindings: null; secrets: null };
+			nullablePlan.bindings = null;
+			nullablePlan.secrets = null;
+			return run;
+		},
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByLabel("Repository", { exact: true }).selectOption("7");
+	await expect(page.getByLabel("Branch or ref")).toHaveValue("main");
+	await page.getByRole("button", { name: "Analyze repository" }).click();
+	await expect(page.getByRole("heading", { name: "Review plan" })).toBeVisible();
+	await expect(page).toHaveURL("/?project=proj-1&view=deploy");
+});
+
 test("repository conflict cannot enter analysis", async ({ page }) => {
 	await mockDeployAPI(page, () => null, () => deploymentRun("awaiting_approval"), "owner", undefined, {
 		repository: () => sourceRepository("conflict"),

@@ -2,7 +2,9 @@ package repositoryanalysis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -46,6 +48,19 @@ func TestExplicitConfigIsAuthoritativeAndNeverExecutesSource(t *testing.T) {
 	result := analyze(t, files)
 	if result.Authority != "explicit_config" || len(result.Applications) != 1 || result.Applications[0].Port != 8080 || result.Applications[0].Build.DockerfilePath != "apps/api/Dockerfile" {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestAnalysisCollectionsSerializeAsArraysWhenNothingIsDetected(t *testing.T) {
+	result := analyze(t, memoryRepository{"Dockerfile": "FROM scratch\nEXPOSE 8080\n"})
+	payload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"resources", "dependencies", "bindings", "secrets"} {
+		if strings.Contains(string(payload), `"`+field+`":null`) {
+			t.Fatalf("%s must serialize as an array: %s", field, payload)
+		}
 	}
 }
 

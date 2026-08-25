@@ -68,7 +68,13 @@ func (d Detector) Analyze(ctx context.Context, request Request) (Result, error) 
 		return Result{}, fmt.Errorf("list exact repository snapshot: %w", err)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	result := Result{SchemaVersion: SchemaVersion, RepositoryID: request.RepositoryID, Repository: request.Repository, SelectedRef: request.SelectedRef, CommitSHA: strings.ToLower(request.CommitSHA), Authority: "heuristics", AnalyzedAt: d.clock(), Truncated: treeTruncated}
+	result := Result{
+		SchemaVersion: SchemaVersion, RepositoryID: request.RepositoryID, Repository: request.Repository,
+		SelectedRef: request.SelectedRef, CommitSHA: strings.ToLower(request.CommitSHA), Authority: "heuristics",
+		Applications: []Application{}, Resources: []Resource{}, Dependencies: []Dependency{},
+		Bindings: []Binding{}, Secrets: []Secret{}, Issues: []Issue{},
+		AnalyzedAt: d.clock(), Truncated: treeTruncated,
+	}
 	if len(files) > limits.MaxFiles {
 		files = files[:limits.MaxFiles]
 		result.Truncated = true

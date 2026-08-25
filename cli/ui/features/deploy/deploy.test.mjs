@@ -41,6 +41,10 @@ test("generated secrets remain redacted and workflow calls only Local API", asyn
   for (const action of ["analyze", "approve", "acknowledge", "retry", "cancel"]) assert.match(api, new RegExp(action));
   assert.match(api, /\/api\/local\/projects\/\$\{projectID\}\/deployment-runs/);
   assert.doesNotMatch(api, /\/api\/projects\//);
+	assert.match(api, /normalizeDeploymentRun/);
+	for (const collection of ["applications", "resources", "dependencies", "bindings", "secrets", "issues"]) {
+		assert.match(api, new RegExp(`run\\.plan\\.${collection} \\?\\?= \\[\\]`));
+	}
 });
 
 test("Source owns GitHub discovery, installation connection, and repository claim", async () => {

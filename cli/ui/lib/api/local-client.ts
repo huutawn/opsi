@@ -408,32 +408,34 @@ export class LocalClient {
     return this.call<{ repositories: GitHubRepository[] }>(`/api/local/projects/${projectID}/github/repositories`);
   }
 
-  deploymentRuns(projectID: string) {
-    return this.call<{ deployment_runs: DeploymentRun[] }>(`/api/local/projects/${projectID}/deployment-runs?limit=50`);
+  async deploymentRuns(projectID: string) {
+    const response = await this.call<{ deployment_runs: DeploymentRun[] | null }>(`/api/local/projects/${projectID}/deployment-runs?limit=50`);
+    return { deployment_runs: (response.deployment_runs ?? []).map(normalizeDeploymentRun) };
   }
 
-  deploymentRun(projectID: string, runID: string) {
-    return this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}`);
+  async deploymentRun(projectID: string, runID: string) {
+    return normalizeDeploymentRun(await this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}`));
   }
 
   deploymentRunEvents(projectID: string, runID: string) {
     return this.call<{ events: DeploymentRunEvent[] }>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/events`);
   }
 
-  deploymentRunResult(projectID: string, runID: string) {
-    return this.call<DeploymentRunResult>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/result`);
+  async deploymentRunResult(projectID: string, runID: string) {
+    return normalizeDeploymentRunResult(await this.call<DeploymentRunResult>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/result`));
   }
 
-  createDeploymentRun(projectID: string, body: { repository_id: number; selected_ref: string; target: { hostname?: string } }, idempotencyKey: string) {
-    return this.call<{ deployment_run: DeploymentRun; reused: boolean }>(`/api/local/projects/${projectID}/deployment-runs`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
+  async createDeploymentRun(projectID: string, body: { repository_id: number; selected_ref: string; target: { hostname?: string } }, idempotencyKey: string) {
+    const response = await this.call<{ deployment_run: DeploymentRun; reused: boolean }>(`/api/local/projects/${projectID}/deployment-runs`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
+    return { ...response, deployment_run: normalizeDeploymentRun(response.deployment_run) };
   }
 
-  updateDeploymentPlan(projectID: string, runID: string, revision: number, expectedPlanHash: string, plan: DeploymentPlan, idempotencyKey: string) {
-	return this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/plan`, { method: "PUT", write: true, idempotencyKey, headers: { "If-Match": `"${revision}"` }, body: JSON.stringify({ expected_plan_hash: expectedPlanHash, plan }) });
+  async updateDeploymentPlan(projectID: string, runID: string, revision: number, expectedPlanHash: string, plan: DeploymentPlan, idempotencyKey: string) {
+	return normalizeDeploymentRun(await this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/plan`, { method: "PUT", write: true, idempotencyKey, headers: { "If-Match": `"${revision}"` }, body: JSON.stringify({ expected_plan_hash: expectedPlanHash, plan }) }));
   }
 
-  deploymentRunAction(projectID: string, runID: string, action: "analyze" | "approve" | "acknowledge" | "retry" | "cancel", body: Record<string, unknown>, idempotencyKey: string) {
-    return this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/${action}`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
+  async deploymentRunAction(projectID: string, runID: string, action: "analyze" | "approve" | "acknowledge" | "retry" | "cancel", body: Record<string, unknown>, idempotencyKey: string) {
+    return normalizeDeploymentRun(await this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/${action}`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) }));
   }
 
 	workloadSecrets(projectID: string, applicationID: string) {
@@ -944,4 +946,22 @@ async function readBoundedText(response: Response) {
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(body);
+}
+
+function normalizeDeploymentRun(run: DeploymentRun): DeploymentRun {
+  run.plan.applications ??= [];
+  run.plan.resources ??= [];
+  run.plan.dependencies ??= [];
+  run.plan.bindings ??= [];
+  run.plan.secrets ??= [];
+  run.plan.issues ??= [];
+  run.authority_refs ??= {};
+  return run;
+}
+
+function normalizeDeploymentRunResult(result: DeploymentRunResult): DeploymentRunResult {
+  result.applications ??= [];
+  result.verifications ??= [];
+  result.capacity ??= [];
+  return result;
 }
