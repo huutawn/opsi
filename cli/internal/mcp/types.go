@@ -578,6 +578,7 @@ type ApplicationDependencyDoc struct {
 type DependencyInjectionMapping struct {
 	EnvName        string `json:"env_name"`
 	SymbolicSource string `json:"symbolic_source"`
+	Template       string `json:"template,omitempty"`
 }
 
 type DependencyVerificationDoc struct {

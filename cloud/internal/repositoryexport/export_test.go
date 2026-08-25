@@ -76,3 +76,26 @@ func TestRenderRejectsNonDockerfilePlanInsteadOfCreatingParallelBuildIntent(t *t
 		t.Fatal("expected non-Dockerfile export to be rejected")
 	}
 }
+
+func TestRenderCanonicalizesLegacyURIWithoutExportingCredentialMaterial(t *testing.T) {
+	run := exportRun(t)
+	run.Plan.Dependencies = []repositoryanalysis.Dependency{{From: "repo-api", To: "database", Protocol: "postgres", Required: true, Injections: []repositoryanalysis.Injection{{EnvironmentName: "DATABASE_URL", SymbolicSource: "resource.database.connection_string"}}}}
+	run.Plan.Hash, _ = deploymentworkflow.HashPlan(run.Plan)
+	data, err := Render(run.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "symbolicSource: connection.postgres.uri") || strings.Contains(text, "connection_string") {
+		t.Fatalf("legacy alias was not canonicalized:\n%s", text)
+	}
+}
+
+func TestRenderRejectsUnsafeConnectionTemplate(t *testing.T) {
+	run := exportRun(t)
+	run.Plan.Dependencies = []repositoryanalysis.Dependency{{From: "repo-api", To: "database", Protocol: "postgres", Required: true, Injections: []repositoryanalysis.Injection{{EnvironmentName: "DATABASE_DSN", SymbolicSource: "connection.template", Template: "password=must-not-export"}}}}
+	run.Plan.Hash, _ = deploymentworkflow.HashPlan(run.Plan)
+	if data, err := Render(run.Plan); err == nil || strings.Contains(string(data), "must-not-export") {
+		t.Fatalf("unsafe template data=%q err=%v", data, err)
+	}
+}

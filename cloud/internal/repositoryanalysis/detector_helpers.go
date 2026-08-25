@@ -19,6 +19,8 @@ func imageResourceType(image string) string {
 		return "postgres"
 	case strings.Contains(value, "valkey") || strings.Contains(value, "redis"):
 		return "redis"
+	case strings.Contains(value, "nats"):
+		return "nats"
 	case strings.Contains(value, "kafka"):
 		return "kafka"
 	default:

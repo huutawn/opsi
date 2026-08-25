@@ -3,11 +3,11 @@ package resource
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 
+	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
@@ -101,33 +101,24 @@ func (s Service) ApplicationRuntimeConfiguration(ctx context.Context, projectID,
 				credID = target.Runtime.Spec.CredentialID
 			}
 
+			facts := resourcecompiler.ConnectionFacts{Host: host, Port: port, Database: db}
 			for _, mapping := range dep.InjectionMappings {
-				switch mapping.SymbolicSource {
-				case "resource.host":
-					if host != "" {
-						environment = append(environment, deploymentv1.EnvironmentVariable{Name: mapping.EnvName, Value: host})
-					}
-				case "resource.port":
-					if port != "" {
-						environment = append(environment, deploymentv1.EnvironmentVariable{Name: mapping.EnvName, Value: port})
-					}
-				case "credential.database":
-					if db != "" {
-						environment = append(environment, deploymentv1.EnvironmentVariable{Name: mapping.EnvName, Value: db})
-					}
-				case "credential.username":
-					if credID != "" {
-						secrets = append(secrets, deploymentv1.SecretReference{EnvName: mapping.EnvName, SecretID: credID})
-					}
-				case "credential.password":
-					if credID != "" {
-						secrets = append(secrets, deploymentv1.SecretReference{EnvName: mapping.EnvName, SecretID: credID})
-					}
-				case "connection.url":
-					if credID != "" {
-						secrets = append(secrets, deploymentv1.SecretReference{EnvName: mapping.EnvName, SecretID: credID})
-					}
+				descriptor, lookupErr := resourcecompiler.LookupSource(dep.Protocol, mapping.SymbolicSource, mapping.Template)
+				if lookupErr != nil {
+					return nil, nil, invalid(resourcev1.FailureBindingSecretMaterialization, lookupErr.Error())
 				}
+				if descriptor.Sensitivity == resourcev1.ValueSecret {
+					if credID == "" {
+						return nil, nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding credential is unavailable")
+					}
+					secrets = append(secrets, deploymentv1.SecretReference{EnvName: mapping.EnvName, SecretID: credID})
+					continue
+				}
+				compiled, compileErr := resourcecompiler.CompileConnection(dep.Protocol, mapping.SymbolicSource, mapping.Template, facts)
+				if compileErr != nil {
+					return nil, nil, invalid(resourcev1.FailureBindingSecretMaterialization, compileErr.Error())
+				}
+				environment = append(environment, deploymentv1.EnvironmentVariable{Name: mapping.EnvName, Value: compiled.Value})
 			}
 		}
 	} else {
@@ -199,8 +190,15 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 		}
 	}
 	grouped := map[string]map[string]string{}
+	resolvedServiceID := serviceID
 	for _, reference := range references {
 		authority, ok := byCredential[reference.SecretID]
+		if ok && authority.binding != nil {
+			if resolvedServiceID != "" && resolvedServiceID != authority.binding.Source.ID {
+				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "resource binding does not belong to the workload")
+			}
+			resolvedServiceID = authority.binding.Source.ID
+		}
 		redisManagement := ok && authority.binding == nil && authority.target.Type == resourcev1.TypeRedis && authority.target.Runtime != nil && authority.target.Runtime.Spec.CredentialID == reference.SecretID
 		postgresBinding := ok && authority.binding != nil && authority.target.Type == resourcev1.TypePostgres
 		credential, err := s.Credentials.Get(ctx, reference.SecretID)
@@ -218,11 +216,11 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 			return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "PostgreSQL binding credential authority is invalid")
 		}
 
-		var mappedSource string
+		var mappedSource, mappedTemplate, mappedProtocol string
 		if reader, ok := s.Scopes.(interface {
 			GetServiceConfiguration(projectID, serviceID string) (serviceconfigurationv1.Configuration, error)
 		}); ok {
-			configurationServiceID := serviceID
+			configurationServiceID := resolvedServiceID
 			if authority.binding != nil {
 				configurationServiceID = authority.binding.Source.ID
 			}
@@ -233,7 +231,7 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 					if matchesAuthority {
 						for _, m := range dep.InjectionMappings {
 							if m.EnvName == reference.EnvName {
-								mappedSource = m.SymbolicSource
+								mappedSource, mappedTemplate, mappedProtocol = m.SymbolicSource, m.Template, dep.Protocol
 								break
 							}
 						}
@@ -241,66 +239,28 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 				}
 			}
 		}
+		if mappedSource == "" && authority.binding != nil {
+			mappedSource = legacyBindingSource(*authority.binding, reference.EnvName)
+			mappedProtocol = string(authority.binding.Protocol)
+		}
 
-		upper := strings.ToUpper(reference.EnvName)
 		value := ""
-		switch {
-		case workloadSecret:
+		if workloadSecret {
 			value = credential.Password
-		case mappedSource == "credential.username" || strings.HasSuffix(upper, "_USER") || upper == "USER" || upper == "PGUSER":
-			value = credential.Username
-		case mappedSource == "credential.password" || strings.HasSuffix(upper, "_PASSWORD") || strings.HasSuffix(upper, "_PASS") || upper == "PASSWORD" || upper == "PGPASSWORD" || upper == "PASS":
-			value = credential.Password
-		case mappedSource == "connection.url" || strings.HasSuffix(upper, "_URL") || upper == "URL" || strings.Contains(upper, "DATABASE_URL") || strings.Contains(upper, "REDIS_URL"):
-			scheme := "redis"
-			host, port, database := authority.target.Runtime.Spec.Connection.Host, strconv.Itoa(int(authority.target.Runtime.Spec.Connection.Port)), ""
-			if authority.binding != nil {
-				scheme, host, port, database = "postgres", bindingValue(authority.binding.RuntimeRefs, "HOST"), bindingValue(authority.binding.RuntimeRefs, "PORT"), bindingValue(authority.binding.RuntimeRefs, "NAME")
-				if host == "" && authority.target.Runtime != nil {
-					host = authority.target.Runtime.Spec.Connection.Host
-					port = strconv.Itoa(int(authority.target.Runtime.Spec.Connection.Port))
-				}
-				if database == "" {
-					database = authority.binding.Database
-				}
-				if database == "" && authority.target.Runtime != nil {
-					database = authority.target.Runtime.Spec.Connection.Database
-				}
+		} else {
+			if mappedSource == "" {
+				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, fmt.Sprintf("resource binding secret mapping is unsupported for %s", reference.EnvName))
 			}
-			var connection url.URL
-			if scheme == "redis" {
-				connection = url.URL{Scheme: scheme, User: url.UserPassword(credential.Username, credential.Password), Host: host + ":" + port}
-			} else {
-				connection = url.URL{Scheme: scheme, User: url.UserPassword(credential.Username, credential.Password), Host: host + ":" + port}
-				if database != "" {
-					connection.Path = database
-					connection.RawQuery = "sslmode=disable"
-				}
+			facts := connectionFacts(authority.target, authority.binding)
+			facts.Username, facts.Password, facts.CredentialAvailable = credential.Username, credential.Password, true
+			compiled, compileErr := resourcecompiler.CompileConnection(mappedProtocol, mappedSource, mappedTemplate, facts)
+			if compileErr != nil {
+				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, fmt.Sprintf("compile %s: %v", mappedSource, compileErr))
 			}
-			value = connection.String()
-		default:
-			if strings.Contains(upper, "USER") {
-				value = credential.Username
-			} else if strings.Contains(upper, "PASS") || strings.Contains(upper, "PWD") {
-				value = credential.Password
-			} else if strings.Contains(upper, "URL") {
-				scheme := "redis"
-				host, port, database := authority.target.Runtime.Spec.Connection.Host, strconv.Itoa(int(authority.target.Runtime.Spec.Connection.Port)), ""
-				if authority.binding != nil {
-					scheme, host, port, database = "postgres", bindingValue(authority.binding.RuntimeRefs, "HOST"), bindingValue(authority.binding.RuntimeRefs, "PORT"), bindingValue(authority.binding.RuntimeRefs, "NAME")
-					if database == "" {
-						database = authority.binding.Database
-					}
-				}
-				connection := url.URL{Scheme: scheme, User: url.UserPassword(credential.Username, credential.Password), Host: host + ":" + port}
-				if database != "" {
-					connection.Path = database
-					connection.RawQuery = "sslmode=disable"
-				}
-				value = connection.String()
-			} else {
-				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, fmt.Sprintf("resource binding secret mapping is unsupported for %s (%s)", reference.EnvName, mappedSource))
+			if compiled.Sensitivity != resourcev1.ValueSecret {
+				return nil, invalid(resourcev1.FailureBindingSecretMaterialization, "non-secret resource mapping cannot be materialized as a Secret")
 			}
+			value = compiled.Value
 		}
 		if grouped[reference.SecretID] == nil {
 			grouped[reference.SecretID] = map[string]string{}
@@ -313,6 +273,47 @@ func (s Service) ResolveSecretMaterials(ctx context.Context, projectID, serviceI
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].SecretID < result[j].SecretID })
 	return result, nil
+}
+
+func legacyBindingSource(binding resourcev1.Binding, environmentName string) string {
+	prefix := environmentPrefix(binding.LogicalName) + "_"
+	if !strings.HasPrefix(environmentName, prefix) {
+		return ""
+	}
+	switch strings.TrimPrefix(environmentName, prefix) {
+	case "USER":
+		return serviceconfigurationv1.SourceCredentialUsername
+	case "PASSWORD":
+		return serviceconfigurationv1.SourceCredentialPassword
+	case "URL":
+		return serviceconfigurationv1.SourceConnectionURL
+	default:
+		return ""
+	}
+}
+
+func connectionFacts(target resourcev1.Resource, binding *resourcev1.Binding) resourcecompiler.ConnectionFacts {
+	facts := resourcecompiler.ConnectionFacts{}
+	if target.Runtime != nil {
+		facts.Host = target.Runtime.Spec.Connection.Host
+		facts.Port = strconv.Itoa(int(target.Runtime.Spec.Connection.Port))
+		facts.Database = target.Runtime.Spec.Connection.Database
+	}
+	if binding != nil {
+		if value := bindingValue(binding.RuntimeRefs, "HOST"); value != "" {
+			facts.Host = value
+		}
+		if value := bindingValue(binding.RuntimeRefs, "PORT"); value != "" {
+			facts.Port = value
+		}
+		if value := bindingValue(binding.RuntimeRefs, "NAME"); value != "" {
+			facts.Database = value
+		}
+		if binding.Database != "" {
+			facts.Database = binding.Database
+		}
+	}
+	return facts
 }
 
 func bindingValue(references []resourcev1.RuntimeConnectionReference, name string) string {

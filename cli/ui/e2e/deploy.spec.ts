@@ -132,6 +132,27 @@ test("review plan has no WCAG 2.1 A or AA axe violations", async ({ page }) => {
 	expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);
 });
 
+test("connection mappings select protocol dialects and reject unsafe templates accessibly", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	await mockDeployAPI(page, () => run, () => run);
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+	const dialect = page.getByLabel("Dialect / value").first();
+	await expect(dialect.locator("option", { hasText: "Npgsql connection string" })).toHaveCount(1);
+	await expect(dialect.locator("option", { hasText: "StackExchange.Redis" })).toHaveCount(0);
+	await dialect.selectOption("connection.template");
+	const template = page.getByLabel("Safe connection template");
+	await expect(template).toBeFocused();
+	await template.fill("{{password}}");
+	await expect(page.getByRole("alert").filter({ hasText: "password requires" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Save draft" })).toBeDisabled();
+	await template.fill("Host={{host}};Password={{password|kv_quote}}");
+	const mapping = page.getByRole("article").filter({ has: template }).last();
+	await expect(mapping).toContainText("Sensitivity: secret");
+	await expect(mapping).toContainText("connection.template · redacted");
+	await expect(page.getByRole("button", { name: "Save draft" })).toBeEnabled();
+});
+
 test("warning acknowledgement submits the exact preflight hash", async ({ page }) => {
 	let run = deploymentRun("awaiting_warning_ack");
 	let acknowledgement: Record<string, unknown> | undefined;
@@ -375,7 +396,7 @@ function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting
 				{ source_key: "web", key: "identity-web", name: "identity-web", root: "tcip-fake", port: 3000, build: { context: "tcip-fake", dockerfile_path: "tcip-fake/Dockerfile", strategy: "dockerfile", platform: "linux/amd64" }, confidence: "high", reason: "Dockerfile", evidence: [] },
 			],
 			resources: [{ logical_name: "postgres", type: "postgres", managed: true, required: true, recommendation: "Managed PostgreSQL", confidence: "high", evidence: [] }, { logical_name: "valkey", type: "redis", managed: true, required: true, recommendation: "Managed Valkey", confidence: "high", evidence: [] }],
-			dependencies: [{ from: "identity-api", to: "postgres", protocol: "postgres", required: true, confidence: "high", reason: "Compose", evidence: [], injections: [{ environment_name: "ConnectionStrings__Database", symbolic_source: "resource.postgres.connection_string" }] }, { from: "identity-web", to: "identity-api", protocol: "http", strategy: "same_origin", path: "/api", required: true, verification: { type: "consumer_http", path: "/health", expected_status: 200 }, confidence: "high", reason: "Route", evidence: [] }],
+			dependencies: [{ from: "identity-api", to: "postgres", protocol: "postgres", required: true, confidence: "high", reason: "Compose", evidence: [], injections: [{ environment_name: "ConnectionStrings__Database", symbolic_source: "connection.postgres.npgsql" }] }, { from: "identity-web", to: "identity-api", protocol: "http", strategy: "same_origin", path: "/api", required: true, verification: { type: "consumer_http", path: "/health", expected_status: 200 }, confidence: "high", reason: "Route", evidence: [] }],
 			bindings: [{ from: "identity-web", to: "identity-api", kind: "browser_http", path: "/api", confidence: "high", reason: "Route", evidence: [] }],
 			secrets: [{ name: "jwt-signing-key", application_key: "identity-api", environment_name: "Jwt__SigningKey", generated: true, secret_ref: "generated://jwt-signing-key", revision: 0, display: "Generated and securely stored", confidence: "high", reason: "Configuration", evidence: [] }],
 			issues: [], analysis_scope: { application_roots: [], exclude_paths: [] }, analysis_scope_hash: hash("s"), evidence_coverage: { candidates_found: 6, candidates_selected: 6, files_inspected: 6, bytes_inspected: 2048 }, target: { environment_id: "env-1", runtime_id: "runtime-1", hostname: "identity.apps.example.test", exposure: "public", cpu_milli: 250, memory_bytes: 268435456 }, authority_revisions: { source_commit_sha: hash("d").slice(0, 40) }, failure_policy: { fail_fast: true, rollback_known_good: true, retain_persistent_data: true, max_attempts: 3 },

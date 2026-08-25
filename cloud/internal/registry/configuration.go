@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
+	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
@@ -137,55 +138,6 @@ func isPlatformReservedEnv(name string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(name))
 	if upper == "PORT" || upper == "HOSTNAME" || upper == "HOST_IP" || upper == "POD_NAME" || upper == "POD_NAMESPACE" || upper == "POD_IP" || strings.HasPrefix(upper, "OPSI_") || strings.HasPrefix(upper, "KUBERNETES_") {
 		return true
-	}
-	return false
-}
-
-func validSymbolicSourceForProtocol(protocol, source string) bool {
-	switch protocol {
-	case "postgres":
-		switch source {
-		case "resource.host", "resource.port", "credential.database", "credential.username", "credential.password", "connection.url":
-			return true
-		}
-	case "redis":
-		switch source {
-		case "resource.host", "resource.port", "credential.password", "connection.url":
-			return true
-		}
-	case "nats":
-		switch source {
-		case "resource.host", "resource.port", "connection.url":
-			return true
-		}
-	case "http":
-		switch source {
-		case "application.internal_url", "application.internal_host", "application.internal_port",
-			"application.public_url", "application.public_host", "application.public_port", "application.public_scheme",
-			"application.path", "application.url":
-			return true
-		}
-	}
-	return false
-}
-
-func validSymbolicSourceForStrategy(strategy, source string) bool {
-	switch strategy {
-	case serviceconfigurationv1.StrategyInternalHTTP:
-		switch source {
-		case "application.internal_url", "application.internal_host", "application.internal_port", "application.path":
-			return true
-		}
-	case serviceconfigurationv1.StrategyPublicHTTP:
-		switch source {
-		case "application.public_url", "application.public_host", "application.public_port", "application.public_scheme", "application.path", "application.url":
-			return true
-		}
-	case serviceconfigurationv1.StrategySameOrigin:
-		switch source {
-		case "application.path", "application.url":
-			return true
-		}
 	}
 	return false
 }
@@ -562,11 +514,13 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			if mapping.SymbolicSource == "" {
 				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), "symbolic source is required")
 			}
-			if dep.TargetKind == "managed_resource" && !validSymbolicSourceForProtocol(dep.Protocol, mapping.SymbolicSource) {
-				return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), fmt.Sprintf("symbolic source %s is invalid for protocol %s", mapping.SymbolicSource, dep.Protocol))
+			if dep.TargetKind == "managed_resource" {
+				if _, err := resourcecompiler.LookupSource(dep.Protocol, mapping.SymbolicSource, mapping.Template); err != nil {
+					return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), err.Error())
+				}
 			}
 			if dep.TargetKind == "application" {
-				if !validSymbolicSourceForProtocol(dep.Protocol, mapping.SymbolicSource) || !validSymbolicSourceForStrategy(dep.Strategy, mapping.SymbolicSource) {
+				if dep.Protocol != serviceconfigurationv1.ProtocolHTTP || !resourcecompiler.ValidApplicationSource(dep.Strategy, mapping.SymbolicSource, mapping.Template) {
 					return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), fmt.Sprintf("symbolic source %s is invalid for application strategy %s", mapping.SymbolicSource, dep.Strategy))
 				}
 			}

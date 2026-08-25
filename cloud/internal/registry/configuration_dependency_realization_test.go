@@ -170,8 +170,8 @@ func TestDependencyRealization_ValidationAndPresets(t *testing.T) {
 		}
 	})
 
-	// 5. Invalid Symbolic Source for Valkey (e.g. credential.database)
-	t.Run("Valkey_Invalid_Symbolic_Source", func(t *testing.T) {
+	// 5. Redis database index remains an atomic non-secret source.
+	t.Run("Valkey_Database_Index_Source", func(t *testing.T) {
 		draft := ServiceConfigurationDraft{
 			Dependencies: []serviceconfigurationv1.ApplicationDependency{
 				{
@@ -188,8 +188,8 @@ func TestDependencyRealization_ValidationAndPresets(t *testing.T) {
 			},
 		}
 		_, _, err := validateServiceConfiguration(context.Background(), resolver, source, draft, []ServiceRecord{source})
-		if err == nil || !strings.Contains(err.Error(), "DEPENDENCY_SYMBOLIC_SOURCE_INVALID") {
-			t.Fatalf("expected DEPENDENCY_SYMBOLIC_SOURCE_INVALID, got %v", err)
+		if err != nil {
+			t.Fatalf("expected Redis database source to validate, got %v", err)
 		}
 	})
 

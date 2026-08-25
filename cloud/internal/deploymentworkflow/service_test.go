@@ -73,6 +73,9 @@ func TestPlanHashBindsAnalysisScopeCoverageAndTruncationReason(t *testing.T) {
 		func(plan *Plan) { plan.AnalysisScopeHash = "scope-hash" },
 		func(plan *Plan) { plan.EvidenceCoverage.FilesInspected++ },
 		func(plan *Plan) { plan.TruncationReason = "deadline" },
+		func(plan *Plan) {
+			plan.Dependencies = []repositoryanalysis.Dependency{{From: "api", To: "database", Protocol: "postgres", Injections: []repositoryanalysis.Injection{{EnvironmentName: "DB_DSN", SymbolicSource: "connection.template", Template: "host={{host}}"}}}}
+		},
 	}
 	for index, mutate := range mutations {
 		plan := run.Plan

@@ -622,6 +622,7 @@ func (s *Server) buildDependencyDocs(ctx context.Context, client *cloudclient.Cl
 			mappings = append(mappings, DependencyInjectionMapping{
 				EnvName:        m.EnvName,
 				SymbolicSource: m.SymbolicSource,
+				Template:       m.Template,
 			})
 		}
 		var verContract *DependencyVerificationDoc

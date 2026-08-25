@@ -8,11 +8,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
@@ -385,8 +387,22 @@ func ValidatePlan(plan Plan) error {
 		if !applications[dependency.From] || dependency.To == dependency.From || (!applications[dependency.To] && !resources[dependency.To]) || dependency.Protocol == "" {
 			return errors.New("deployment plan dependency intent is invalid")
 		}
-		if dependency.Required && dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Verification == nil {
+		if dependency.Required && dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Verification == nil {
 			return errors.New("required dependency verification contract is missing")
+		}
+		seenMappings := map[string]bool{}
+		for _, mapping := range dependency.Injections {
+			if mapping.EnvironmentName == "" || mapping.SymbolicSource == "" || seenMappings[mapping.EnvironmentName] {
+				return errors.New("deployment plan dependency mapping is invalid")
+			}
+			seenMappings[mapping.EnvironmentName] = true
+			if dependency.Protocol == "http" {
+				if !resourcecompiler.ValidApplicationSource(dependency.Strategy, mapping.SymbolicSource, mapping.Template) {
+					return errors.New("deployment plan application mapping is invalid")
+				}
+			} else if _, err := resourcecompiler.LookupSource(dependency.Protocol, mapping.SymbolicSource, mapping.Template); err != nil {
+				return fmt.Errorf("deployment plan connection mapping is invalid: %w", err)
+			}
 		}
 	}
 	for _, binding := range plan.Bindings {

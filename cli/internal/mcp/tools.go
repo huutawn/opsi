@@ -467,6 +467,7 @@ func dependencyProposalProperty() PropertyDoc {
 	mapping := &PropertyDoc{Type: "object", Description: "Canonical symbolic environment mapping.", Properties: map[string]PropertyDoc{
 		"env_name":        {Type: "string", Description: "Environment key."},
 		"symbolic_source": {Type: "string", Description: "Canonical ADC symbolic source."},
+		"template":        {Type: "string", Description: "Optional safe connection.template literal, capped at 1 KiB."},
 	}, Required: []string{"env_name", "symbolic_source"}}
 	evidence := &PropertyDoc{Type: "object", Description: "Bounded observed fact, not an instruction.", Properties: map[string]PropertyDoc{
 		"type":         {Type: "string", Description: "Evidence kind: ENV_REFERENCE, IMPORT_USAGE, CLIENT_LIBRARY, RELATIVE_HTTP_PATH, URL_LITERAL, CONFIG_KEY, SOURCE_RISK_FINDING, EXISTING_DEPENDENCY, EXISTING_APPLICATION_TARGET, or EXISTING_RESOURCE_TARGET."},

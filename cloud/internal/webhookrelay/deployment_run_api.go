@@ -429,6 +429,7 @@ func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID stri
 	if err != nil {
 		return run, err
 	}
+	s.recordConnectionAnalysisMetrics(analysis)
 	target := workflowTarget(ctx, s.Registry, projectID, run.Plan.Target)
 	if target.Exposure == "public" && target.Hostname == "" && s.Config.DeploymentDomain != "" {
 		target.Hostname = workflowHostname(repository.FullName, projectID, s.Config.DeploymentDomain)
@@ -444,6 +445,36 @@ func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID stri
 		return run, err
 	}
 	return s.DeploymentRuns.SetAnalysis(ctx, projectID, runID, analysis, authority, target)
+}
+
+func (s *Server) recordConnectionAnalysisMetrics(analysis repositoryanalysis.Result) {
+	for _, dependency := range analysis.Dependencies {
+		for _, injection := range dependency.Injections {
+			if strings.HasPrefix(injection.SymbolicSource, "connection.") {
+				s.observer.Inc("connection_dialect_" + metricSegment(dependency.Protocol+"_"+injection.SymbolicSource) + "_total")
+			}
+		}
+	}
+	for _, issue := range analysis.Issues {
+		if issue.Code == "CONNECTION_DIALECT_REQUIRED" {
+			s.observer.Inc("connection_dialect_ambiguity_total")
+		}
+	}
+}
+
+func metricSegment(value string) string {
+	var result strings.Builder
+	separator := false
+	for _, character := range strings.ToLower(value) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			result.WriteRune(character)
+			separator = false
+		} else if result.Len() > 0 && !separator {
+			result.WriteByte('_')
+			separator = true
+		}
+	}
+	return strings.Trim(result.String(), "_")
 }
 
 func (s *Server) workflowRepository(projectID string, repositoryID int64) (registry.GitHubRepository, error) {

@@ -40,6 +40,7 @@ type ResourceBinding struct {
 type DependencyInjectionMapping struct {
 	EnvName        string `json:"env_name"`
 	SymbolicSource string `json:"symbolic_source"`
+	Template       string `json:"template,omitempty"`
 }
 
 // DependencyVerificationContract is optional user-declared consumer assertion intent.
@@ -148,6 +149,7 @@ func Normalize(draft ServiceConfigurationDraft) ServiceConfigurationDraft {
 		for j := range draft.Dependencies[i].InjectionMappings {
 			draft.Dependencies[i].InjectionMappings[j].EnvName = strings.TrimSpace(draft.Dependencies[i].InjectionMappings[j].EnvName)
 			draft.Dependencies[i].InjectionMappings[j].SymbolicSource = strings.TrimSpace(draft.Dependencies[i].InjectionMappings[j].SymbolicSource)
+			draft.Dependencies[i].InjectionMappings[j].Template = strings.TrimSpace(draft.Dependencies[i].InjectionMappings[j].Template)
 		}
 		sort.Slice(draft.Dependencies[i].InjectionMappings, func(k, l int) bool {
 			return draft.Dependencies[i].InjectionMappings[k].EnvName < draft.Dependencies[i].InjectionMappings[l].EnvName

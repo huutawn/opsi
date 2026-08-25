@@ -502,7 +502,7 @@ func (e deploymentWorkflowExecutor) verify(ctx context.Context, run deploymentwo
 		if deploymentID == "" {
 			return failedStep("VERIFICATION_DEPLOYMENT_MISSING", "A required dependency consumer has no successful deployment.", "Retry the deployment step.", true), nil
 		}
-		if dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Verification == nil {
+		if dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Verification == nil {
 			return failedStep("VERIFICATION_CONTRACT_MISSING", "A required dependency has no verification contract.", "Add a verification contract in Review plan.", false), nil
 		}
 		verification, verifyErr := e.server.ExecuteDependencyVerification(ctx, run.ProjectID, run.Plan.Target.EnvironmentID, consumer.ID, verificationv1.VerifyDependencyRequest{DependencyLogicalName: dependencyLogicalName(dependency), DeploymentJobID: deploymentID}, run.CreatedBy)

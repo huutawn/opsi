@@ -93,27 +93,21 @@ func inferDependencies(result *Result, files []File, read func(string) ([]byte, 
 				continue
 			}
 			inferJWTConfiguration(result, app.Key, file.Path, data)
-			if strings.Contains(text, "ConnectionStrings__Database") || strings.Contains(text, "ConnectionStrings:Database") || strings.Contains(text, "ConnectionStrings\":") {
-				logicalName := resource("database", "postgres", file.Path, ConfidenceHigh)
+			detected, ambiguous := detectConnectionEvidence(file.Path, text)
+			for _, connection := range detected {
+				defaultName := map[string]string{"postgres": "database", "redis": "valkey", "nats": "nats"}[connection.Protocol]
+				logicalName := resource(defaultName, connection.Protocol, file.Path, ConfidenceHigh)
 				key := app.Key + "\x00" + logicalName
+				mapping := Injection{EnvironmentName: connection.EnvironmentName, SymbolicSource: connection.SymbolicSource}
 				if !existing[key] {
-					reason := "The application reads ConnectionStrings:Database."
-					result.Dependencies = append(result.Dependencies, Dependency{From: app.Key, To: logicalName, Protocol: "postgres", Required: true, Injections: []Injection{{EnvironmentName: "ConnectionStrings__Database", SymbolicSource: "resource." + logicalName + ".connection_string"}}, Verification: inferredVerification(app, files), Confidence: ConfidenceHigh, Reason: reason, Evidence: []Evidence{{Path: file.Path, Kind: "configuration_key", Reason: reason, Confidence: ConfidenceHigh}}})
+					result.Dependencies = append(result.Dependencies, Dependency{From: app.Key, To: logicalName, Protocol: connection.Protocol, Required: true, Injections: []Injection{mapping}, Verification: inferredVerification(app, files), Confidence: ConfidenceHigh, Reason: connection.Reason, Evidence: []Evidence{{Path: file.Path, Kind: "connection_dialect", Reason: connection.Reason, Confidence: ConfidenceHigh}}})
 					existing[key] = true
 				} else {
-					addInjection(result, app.Key, logicalName, Injection{EnvironmentName: "ConnectionStrings__Database", SymbolicSource: "resource." + logicalName + ".connection_string"}, file.Path)
+					addInjection(result, app.Key, logicalName, mapping, file.Path)
 				}
 			}
-			if strings.Contains(text, "SignalR__Redis__ConnectionString") || strings.Contains(text, "SignalR:Redis:ConnectionString") || strings.Contains(text, "SignalR") && strings.Contains(text, "Redis") && strings.Contains(text, "ConnectionString") {
-				logicalName := resource("valkey", "redis", file.Path, ConfidenceHigh)
-				key := app.Key + "\x00" + logicalName
-				if !existing[key] {
-					reason := "The application reads the SignalR Redis connection string."
-					result.Dependencies = append(result.Dependencies, Dependency{From: app.Key, To: logicalName, Protocol: "redis", Required: true, Injections: []Injection{{EnvironmentName: "SignalR__Redis__ConnectionString", SymbolicSource: "resource." + logicalName + ".connection_string"}}, Verification: inferredVerification(app, files), Confidence: ConfidenceHigh, Reason: reason, Evidence: []Evidence{{Path: file.Path, Kind: "configuration_key", Reason: reason, Confidence: ConfidenceHigh}}})
-					existing[key] = true
-				} else {
-					addInjection(result, app.Key, logicalName, Injection{EnvironmentName: "SignalR__Redis__ConnectionString", SymbolicSource: "resource." + logicalName + ".connection_string"}, file.Path)
-				}
+			if ambiguous && !hasDialectIssue(result.Issues, app.Key, file.Path) {
+				result.Issues = append(result.Issues, Issue{Code: "CONNECTION_DIALECT_REQUIRED", Message: "A connection string is required by " + app.Key + ", but its dialect cannot be determined safely.", Path: file.Path, Resolution: "Select a protocol-specific dialect or a safe connection.template mapping in Review plan.", Blocking: true})
 			}
 			if isBrowserRouteConsumer(text) && (strings.Contains(text, "/hubs/notifications") || strings.Contains(text, "/api")) {
 				if _, proxied := proxyConfiguration[app.Key]; proxied {
@@ -145,6 +139,15 @@ func inferDependencies(result *Result, files []File, read func(string) ([]byte, 
 			}
 		}
 	}
+}
+
+func hasDialectIssue(issues []Issue, applicationKey, filePath string) bool {
+	for _, issue := range issues {
+		if issue.Code == "CONNECTION_DIALECT_REQUIRED" && (issue.Path == filePath || strings.Contains(issue.Message, applicationKey)) {
+			return true
+		}
+	}
+	return false
 }
 
 func inferJWTConfiguration(result *Result, applicationKey, path string, data []byte) {

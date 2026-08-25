@@ -60,7 +60,7 @@ export type RepositoryEvidence = { path: string; kind: string; reason: string; c
 export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number }; exposure?: { mode?: string; hostname?: string }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DependencyVerification = { type: string; path?: string; expected_status?: number };
-export type DetectedDependency = { from: string; to: string; protocol: string; strategy?: string; path?: string; required: boolean; injections?: Array<{ environment_name: string; symbolic_source: string }>; verification?: DependencyVerification; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DetectedDependency = { from: string; to: string; protocol: string; strategy?: string; path?: string; required: boolean; injections?: Array<{ environment_name: string; symbolic_source: string; template?: string }>; verification?: DependencyVerification; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DetectedBinding = { from: string; to: string; kind: string; path?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type AnalysisIssue = { code: string; message: string; path?: string; resolution?: string; blocking: boolean };
 export type AnalysisScope = { application_roots: string[]; exclude_paths: string[] };
@@ -119,6 +119,7 @@ export type ServiceResourceBinding = {
 export type DependencyInjectionMapping = {
   env_name: string;
   symbolic_source: string;
+  template?: string;
 };
 
 export type DependencyVerificationContract = {
@@ -183,6 +184,7 @@ export type ServiceConfigurationApplyResult = { configuration: ServiceConfigurat
 export type DependencyRealizationProjection = {
   env_name: string;
   symbolic_source: string;
+  template?: string;
   injection_phase: string;
   conflict: boolean;
   conflict_reason?: string;

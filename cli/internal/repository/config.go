@@ -106,6 +106,7 @@ type RuntimeBindingV2 struct {
 type RuntimeInjectionV2 struct {
 	EnvironmentName string `json:"environment_name" yaml:"environmentName"`
 	SymbolicSource  string `json:"symbolic_source" yaml:"symbolicSource"`
+	Template        string `json:"template,omitempty" yaml:"template,omitempty"`
 }
 
 type RuntimeVerificationV2 struct {
@@ -497,7 +498,7 @@ func validateRuntimeV2(service ServiceV2, services, resources map[string]bool) e
 		dependencies[key] = true
 		mappings := map[string]bool{}
 		for _, injection := range dependency.Injections {
-			if !environmentNamePattern.MatchString(injection.EnvironmentName) || injection.SymbolicSource == "" || containsControl(injection.SymbolicSource) || mappings[injection.EnvironmentName] {
+			if !environmentNamePattern.MatchString(injection.EnvironmentName) || injection.SymbolicSource == "" || containsControl(injection.SymbolicSource) || len(injection.Template) > 1024 || containsControl(injection.Template) || mappings[injection.EnvironmentName] {
 				return fmt.Errorf("service %s dependency %s contains an invalid injection", service.Key, dependency.Target)
 			}
 			mappings[injection.EnvironmentName] = true

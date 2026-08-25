@@ -13,20 +13,21 @@ The canonical model supports:
 - Consumer: ServiceRecord (Project/Environment scoped)
 - Target Kind: `application` or `managed_resource`
 - Injection Phase: `runtime` or `build`
-- Injection Mappings: strict symbolic mappings.
+- Injection Mappings: strict symbolic mappings with an optional safe connection template.
 
 ## ADC-02: Managed Resource Dependency Realization (PostgreSQL + Valkey)
 
 ADC-02 bridges declared application dependency intent with runtime environment and secret realization.
 
 ### Realization Pipeline
-1. **Dependency Intent**: An Application declares a `managed_resource` dependency (`postgres` or `redis`) with symbolic injection mappings (`resource.host`, `resource.port`, `credential.username`, `credential.password`, `credential.database`, `connection.url`).
+1. **Dependency Intent**: An Application declares a `managed_resource` dependency (`postgres`, `redis`, or `nats`) with symbolic injection mappings. Atomic sources include `resource.host`, `resource.port`, `credential.username`, `credential.password`, and `credential.database`. Compound sources are dialect-specific: `connection.postgres.uri`, `connection.postgres.npgsql`, `connection.postgres.jdbc`, `connection.postgres.pdo_dsn`, `connection.redis.uri`, `connection.redis.stackexchange`, and `connection.nats.uri`.
 2. **Review / Apply**:
    - `POST /api/projects/{project_id}/services/{service_id}/dependencies/review`: Zero-mutation plan inspecting target readiness, identifying existing bindings for reuse or planned creation, and projecting environment descriptors without credential leakage.
    - `POST /api/projects/{project_id}/services/{service_id}/dependencies/apply`: Idempotently creates or reuses canonical `ResourceBinding` via `resource.Service`, linking `ResourceBindings` into the `ServiceConfiguration`.
 3. **Symbolic Source Resolution**:
    - `resource.host`, `resource.port`, `credential.database` project into non-secret `deploymentv1.EnvironmentVariable`.
-   - `credential.username`, `credential.password`, `connection.url` project into `deploymentv1.SecretReference` referencing the binding credential.
+   - `credential.username`, `credential.password`, and compound sources containing credentials project into `deploymentv1.SecretReference` referencing the binding credential.
+   - `connection.template` accepts at most 1 KiB of literals and whitelisted placeholders. Credential placeholders require `url_userinfo`, `url_query`, or `kv_quote`; expressions, environment expansion, command substitution, and literal credentials are rejected.
 4. **Workload Secret Delivery & Injection**:
    - The deployment compiler resolves secret materials via `ResolveSecretMaterials` without leaking credentials into `WorkloadSpec` or diffs.
    - The Agent materializes Kubernetes Secrets (`opsi-<serviceKey>-<runtimeID>-binding-<secretID>`) with keys matching the mapped environment variable names.
@@ -36,6 +37,10 @@ ADC-02 bridges declared application dependency intent with runtime environment a
    - Managed resource build-phase injection is explicitly rejected (`DEPENDENCY_BUILD_PHASE_UNSUPPORTED`).
    - Platform reserved environment variables (`PORT`, `HOSTNAME`, `OPSI_*`, `KUBERNETES_*`) and manual/generated conflicts fail closed with `DEPENDENCY_ENV_CONFLICT`.
    - Modifying dependencies creates a new `ServiceConfiguration` revision and compiles a new `DeploymentJob` using the immutable `BuildRecord` (zero image rebuilds).
+
+### Compatibility
+
+`connection.url` and `resource.<name>.connection_string` remain accepted for immutable and existing configurations with their historical URI semantics. New analysis and export use the protocol-specific source names above, and review reports the legacy aliases as deprecated. The source and optional template are part of the canonical configuration hash, so editing either invalidates prior approval.
 
 ## ADC-03: App→App HTTP Networking & Direct Resolution
 

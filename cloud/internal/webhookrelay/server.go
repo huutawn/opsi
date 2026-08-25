@@ -474,6 +474,7 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 		if lease.Command != nil && len(lease.Command.Workload.SecretReferences) > 0 {
 			materials, err := s.Resources.ResolveSecretMaterials(r.Context(), projectID, lease.Deployment.ServiceID, lease.Command.Workload.SecretReferences)
 			if err != nil {
+				s.observer.Inc("connection_compile_error_secret_materialization_total")
 				writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureBindingSecretMaterialization})
 				return
 			}

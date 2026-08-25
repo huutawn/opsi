@@ -192,6 +192,7 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 					InjectionPhase: "runtime",
 					InjectionMappings: []serviceconfigurationv1.DependencyInjectionMapping{
 						{EnvName: "APP_DATABASE_URL", SymbolicSource: "connection.url"},
+						{EnvName: "ConnectionStrings__Database", SymbolicSource: serviceconfigurationv1.SourcePostgresNpgsql},
 						{EnvName: "DB_HOST", SymbolicSource: "resource.host"},
 						{EnvName: "DB_PORT", SymbolicSource: "resource.port"},
 						{EnvName: "DB_NAME", SymbolicSource: "credential.database"},
@@ -247,6 +248,11 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	if envMap["CACHE_HOST"] != "valkey.local" || envMap["CACHE_PORT"] != "6379" {
 		t.Fatalf("unexpected Cache env vars: %+v", envMap)
 	}
+	for name, value := range envMap {
+		if strings.Contains(value, pgCred.Password) || strings.Contains(value, valkeyCred.Password) {
+			t.Fatalf("non-secret environment %s contains credential material", name)
+		}
+	}
 
 	// Check secret references
 	secMap := map[string]string{}
@@ -284,6 +290,10 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	if materialValues["APP_DATABASE_URL"] != expectedPGURL {
 		t.Fatalf("expected APP_DATABASE_URL=%s, got %s", expectedPGURL, materialValues["APP_DATABASE_URL"])
 	}
+	npgsql := materialValues["ConnectionStrings__Database"]
+	if !strings.Contains(npgsql, "Host=postgres.local;Port=5432;Database=opsi") || !strings.Contains(npgsql, "Username="+pgBinding.RoleName) || !strings.Contains(npgsql, "Password="+pgCred.Password) || strings.Contains(npgsql, "://") {
+		t.Fatalf("expected typed Npgsql connection string, got %q", npgsql)
+	}
 
 	// Assert custom Valkey values
 	if materialValues["CACHE_PASSWORD"] != valkeyCred.Password {
@@ -294,13 +304,13 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	}
 
 	config := configs["app-1"]
-	config.Dependencies[1].InjectionMappings = append(config.Dependencies[1].InjectionMappings, serviceconfigurationv1.DependencyInjectionMapping{EnvName: "SignalR__Redis__ConnectionString", SymbolicSource: "connection.url"})
+	config.Dependencies[1].InjectionMappings = append(config.Dependencies[1].InjectionMappings, serviceconfigurationv1.DependencyInjectionMapping{EnvName: "SignalR__Redis__ConnectionString", SymbolicSource: serviceconfigurationv1.SourceRedisStackExchange})
 	configs["app-1"] = config
 	managementMaterials, err := service.ResolveSecretMaterials(context.Background(), "proj-1", "app-1", []deploymentv1.SecretReference{{EnvName: "SignalR__Redis__ConnectionString", SecretID: valkeySpec.CredentialID}})
 	if err != nil || len(managementMaterials) != 1 {
 		t.Fatalf("resolve Redis management connection string: materials=%+v err=%v", managementMaterials, err)
 	}
-	if value := managementMaterials[0].Values["SignalR__Redis__ConnectionString"]; !strings.HasPrefix(value, "redis://") || !strings.Contains(value, valkeyCred.Password+"@valkey.local:6379") {
-		t.Fatalf("expected mapped Redis management URL, got %q", value)
+	if value := managementMaterials[0].Values["SignalR__Redis__ConnectionString"]; !strings.HasPrefix(value, "valkey.local:6379,") || !strings.Contains(value, "user="+valkeyCred.Username) || !strings.Contains(value, "password="+valkeyCred.Password) || strings.Contains(value, "://") {
+		t.Fatalf("expected typed StackExchange.Redis connection string, got %q", value)
 	}
 }

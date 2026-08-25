@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
@@ -12,6 +13,7 @@ import (
 type DependencyRealizationProjection struct {
 	EnvName        string `json:"env_name"`
 	SymbolicSource string `json:"symbolic_source"`
+	Template       string `json:"template,omitempty"`
 	Sensitivity    string `json:"sensitivity"`
 	ValuePreview   string `json:"value_preview"`
 }
@@ -107,31 +109,31 @@ func PlanDependencyRealization(ctx context.Context, config serviceconfigurationv
 				port = strconv.Itoa(int(target.Runtime.Spec.Connection.Port))
 				db = target.Runtime.Spec.Connection.Database
 			}
+			if matchingBinding != nil && matchingBinding.Database != "" {
+				db = matchingBinding.Database
+			}
 
 			for _, m := range dep.InjectionMappings {
 				proj := DependencyRealizationProjection{
 					EnvName:        m.EnvName,
 					SymbolicSource: m.SymbolicSource,
+					Template:       m.Template,
 				}
-				switch m.SymbolicSource {
-				case "resource.host":
-					proj.Sensitivity = "non_secret"
-					proj.ValuePreview = host
-				case "resource.port":
-					proj.Sensitivity = "non_secret"
-					proj.ValuePreview = port
-				case "credential.database":
-					proj.Sensitivity = "non_secret"
-					proj.ValuePreview = db
-				case "credential.username":
-					proj.Sensitivity = "secret"
-					proj.ValuePreview = fmt.Sprintf("[managed %s role]", target.Type)
-				case "credential.password":
-					proj.Sensitivity = "secret"
-					proj.ValuePreview = fmt.Sprintf("[managed %s password]", target.Type)
-				case "connection.url":
-					proj.Sensitivity = "secret"
-					proj.ValuePreview = fmt.Sprintf("[managed %s connection url]", target.Type)
+				descriptor, lookupErr := resourcecompiler.LookupSource(dep.Protocol, m.SymbolicSource, m.Template)
+				if lookupErr != nil {
+					return result, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", m.EnvName, lookupErr.Error())
+				}
+				proj.Sensitivity = string(descriptor.Sensitivity)
+				if descriptor.Sensitivity == resourcev1.ValueSecret {
+					proj.ValuePreview = fmt.Sprintf("[managed %s %s · redacted]", target.Type, resourcecompiler.CanonicalSource(dep.Protocol, m.SymbolicSource))
+				} else {
+					compiled, compileErr := resourcecompiler.CompileConnection(dep.Protocol, m.SymbolicSource, m.Template, resourcecompiler.ConnectionFacts{Host: host, Port: port, Database: db})
+					if compileErr != nil && item.BindingAction != "create" {
+						return result, configurationError("DEPENDENCY_CONNECTION_COMPILE_FAILED", m.EnvName, compileErr.Error())
+					}
+					if compileErr == nil {
+						proj.ValuePreview = compiled.Value
+					}
 				}
 				item.Projections = append(item.Projections, proj)
 			}
@@ -177,6 +179,7 @@ func PlanDependencyRealization(ctx context.Context, config serviceconfigurationv
 				proj := DependencyRealizationProjection{
 					EnvName:        m.EnvName,
 					SymbolicSource: m.SymbolicSource,
+					Template:       m.Template,
 					Sensitivity:    "non_secret",
 				}
 				switch m.SymbolicSource {

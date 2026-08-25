@@ -148,7 +148,7 @@ func reconcileDraftIssues(draft Plan) []repositoryanalysis.Issue {
 	}
 	validDependencies := true
 	for _, dependency := range draft.Dependencies {
-		validDependencies = validDependencies && (!dependency.Required || dependency.Protocol == "postgres" || dependency.Protocol == "redis" || dependency.Verification != nil)
+		validDependencies = validDependencies && (!dependency.Required || dependency.Protocol == "postgres" || dependency.Protocol == "redis" || dependency.Protocol == "nats" || dependency.Verification != nil)
 	}
 	validSecrets := true
 	for _, secret := range draft.Secrets {

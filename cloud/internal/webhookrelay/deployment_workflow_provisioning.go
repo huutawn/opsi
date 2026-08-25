@@ -396,11 +396,7 @@ func (e deploymentWorkflowExecutor) ensureConfigurations(ctx context.Context, ru
 				dep.AccessContext = serviceconfigurationv1.AccessContextBrowser
 			}
 			for _, injection := range dependency.Injections {
-				source := injection.SymbolicSource
-				if strings.Contains(source, "connection_string") {
-					source = "connection.url"
-				}
-				dep.InjectionMappings = append(dep.InjectionMappings, serviceconfigurationv1.DependencyInjectionMapping{EnvName: injection.EnvironmentName, SymbolicSource: source})
+				dep.InjectionMappings = append(dep.InjectionMappings, serviceconfigurationv1.DependencyInjectionMapping{EnvName: injection.EnvironmentName, SymbolicSource: injection.SymbolicSource, Template: injection.Template})
 			}
 			draft.Dependencies = append(draft.Dependencies, dep)
 			if binding, ok := bindings[key+"\x00"+dependency.To]; ok {

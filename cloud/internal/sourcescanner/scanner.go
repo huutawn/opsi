@@ -66,7 +66,7 @@ const (
 // Dependency is the scanner's view of an ApplicationDependency.
 type Dependency struct {
 	LogicalName     string
-	Protocol        string   // "postgres", "redis", "http"
+	Protocol        string   // "postgres", "redis", "nats", "http"
 	Strategy        string   // "same_origin", "internal_http", ""
 	AccessContext   string   // "browser", "server"
 	Path            string   // for same_origin

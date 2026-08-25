@@ -14,6 +14,7 @@ import (
 
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	"gopkg.in/yaml.v3"
 )
@@ -83,6 +84,7 @@ type binding struct {
 type injection struct {
 	EnvironmentName string `yaml:"environmentName"`
 	SymbolicSource  string `yaml:"symbolicSource"`
+	Template        string `yaml:"template,omitempty"`
 }
 type dependency struct {
 	Target       string                                   `yaml:"target"`
@@ -171,7 +173,14 @@ func Render(plan deploymentworkflow.Plan) ([]byte, error) {
 				}
 				mapped := dependency{Target: target, Protocol: value.Protocol, Strategy: value.Strategy, Path: value.Path, Required: value.Required, Verification: value.Verification}
 				for _, inject := range value.Injections {
-					mapped.Injections = append(mapped.Injections, injection{EnvironmentName: inject.EnvironmentName, SymbolicSource: inject.SymbolicSource})
+					if value.Protocol == "http" {
+						if !resourcecompiler.ValidApplicationSource(value.Strategy, inject.SymbolicSource, inject.Template) {
+							return nil, errors.New("repository export contains an invalid application mapping")
+						}
+					} else if _, lookupErr := resourcecompiler.LookupSource(value.Protocol, inject.SymbolicSource, inject.Template); lookupErr != nil {
+						return nil, errors.New("repository export contains an invalid connection mapping")
+					}
+					mapped.Injections = append(mapped.Injections, injection{EnvironmentName: inject.EnvironmentName, SymbolicSource: canonicalExportSource(value.Protocol, inject.SymbolicSource), Template: inject.Template})
 				}
 				rt.Dependencies = append(rt.Dependencies, mapped)
 			}
@@ -199,6 +208,20 @@ func Render(plan deploymentworkflow.Plan) ([]byte, error) {
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+func canonicalExportSource(protocol, source string) string {
+	if source == "connection.url" || strings.HasPrefix(source, "resource.") && strings.HasSuffix(source, ".connection_string") {
+		switch protocol {
+		case "postgres":
+			return "connection.postgres.uri"
+		case "redis":
+			return "connection.redis.uri"
+		case "nats":
+			return "connection.nats.uri"
+		}
+	}
+	return source
 }
 
 func NewPreview(run deploymentworkflow.Run, targetBranch string, current []byte) (Preview, error) {

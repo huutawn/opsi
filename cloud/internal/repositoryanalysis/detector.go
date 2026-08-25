@@ -14,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -299,6 +301,7 @@ type explicitConfig struct {
 				Injections []struct {
 					EnvironmentName string `yaml:"environmentName"`
 					SymbolicSource  string `yaml:"symbolicSource"`
+					Template        string `yaml:"template"`
 				} `yaml:"injections"`
 				Verification *VerificationContract `yaml:"verification"`
 			} `yaml:"dependencies"`
@@ -388,7 +391,7 @@ func parseExplicit(data []byte, files map[string]File) (explicitResult, error) {
 			for _, dependency := range service.Runtime.Dependencies {
 				injections := make([]Injection, 0, len(dependency.Injections))
 				for _, injection := range dependency.Injections {
-					injections = append(injections, Injection{EnvironmentName: injection.EnvironmentName, SymbolicSource: injection.SymbolicSource})
+					injections = append(injections, Injection{EnvironmentName: injection.EnvironmentName, SymbolicSource: injection.SymbolicSource, Template: injection.Template})
 				}
 				result.Dependencies = append(result.Dependencies, Dependency{From: service.Key, To: dependency.Target, Protocol: dependency.Protocol, Strategy: dependency.Strategy, Path: dependency.Path, Required: dependency.Required, Injections: injections, Verification: dependency.Verification, Confidence: ConfidenceHigh, Reason: "Runtime dependency is declared by the repository owner.", Evidence: []Evidence{evidence}})
 			}
@@ -517,7 +520,7 @@ func parseCompose(data []byte, composePath string, files map[string]File) ([]App
 				logicalTarget = resourceLogicalNames[target]
 			}
 			dependency := Dependency{From: slug(name), To: logicalTarget, Protocol: protocol, Required: protocol != "http" && protocol != "kafka", Confidence: ConfidenceHigh, Reason: evidence.Reason, Evidence: []Evidence{evidence}}
-			dependency.Injections = composeInjections(node, protocol, target)
+			dependency.Injections = composeInjections(node, protocol)
 			if contract := composeHealthVerification(node); contract != nil {
 				dependency.Verification = contract
 			}
@@ -633,7 +636,7 @@ func composeEnvironment(node yaml.Node) (map[string]string, []string) {
 	return values, unsafe
 }
 
-func composeInjections(node yaml.Node, protocol, target string) []Injection {
+func composeInjections(node yaml.Node, protocol string) []Injection {
 	var service struct {
 		Environment yaml.Node `yaml:"environment"`
 	}
@@ -655,12 +658,8 @@ func composeInjections(node yaml.Node, protocol, target string) []Injection {
 	}
 	out := []Injection{}
 	for _, name := range names {
-		lower := strings.ToLower(name)
-		switch {
-		case protocol == "postgres" && (strings.Contains(lower, "connectionstrings") || strings.Contains(lower, "database_url")):
-			out = append(out, Injection{EnvironmentName: name, SymbolicSource: "resource." + target + ".connection_string"})
-		case protocol == "redis" && (strings.Contains(lower, "redis") || strings.Contains(lower, "valkey")):
-			out = append(out, Injection{EnvironmentName: name, SymbolicSource: "resource." + target + ".connection_string"})
+		if source, ok := sourceForEnvironment(protocol, name); ok {
+			out = append(out, Injection{EnvironmentName: name, SymbolicSource: source})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].EnvironmentName < out[j].EnvironmentName })
@@ -954,11 +953,31 @@ func validateDetected(result *Result) {
 			result.Issues = append(result.Issues, Issue{Code: "APPLICATION_IMAGE_REQUIRED", Message: "Image-based application " + application.Key + " has no immutable image reference.", Resolution: "Set an immutable image digest or select a build strategy.", Blocking: true})
 		}
 	}
-	for _, dependency := range result.Dependencies {
+	for dependencyIndex := range result.Dependencies {
+		dependency := &result.Dependencies[dependencyIndex]
+		for injectionIndex := range dependency.Injections {
+			injection := &dependency.Injections[injectionIndex]
+			if dependency.Protocol == serviceconfigurationv1.ProtocolHTTP {
+				if !resourcecompiler.ValidApplicationSource(dependency.Strategy, injection.SymbolicSource, injection.Template) {
+					result.Issues = append(result.Issues, Issue{Code: "CONNECTION_MAPPING_INVALID", Message: "Injection " + injection.EnvironmentName + " uses an invalid application source.", Resolution: "Select a source valid for the HTTP dependency strategy.", Blocking: true})
+				}
+				continue
+			}
+			descriptor, err := resourcecompiler.LookupSource(dependency.Protocol, injection.SymbolicSource, injection.Template)
+			if err != nil {
+				result.Issues = append(result.Issues, Issue{Code: "CONNECTION_MAPPING_INVALID", Message: "Injection " + injection.EnvironmentName + " is invalid: " + err.Error(), Resolution: "Select a protocol-specific dialect or correct the safe template.", Blocking: true})
+				if injection.SymbolicSource == serviceconfigurationv1.SourceConnectionTemplate {
+					injection.Template = ""
+				}
+			} else if descriptor.Deprecated {
+				result.Issues = append(result.Issues, Issue{Code: "CONNECTION_SOURCE_DEPRECATED", Message: "Injection " + injection.EnvironmentName + " uses deprecated URI alias " + injection.SymbolicSource + ".", Resolution: "Select " + resourcecompiler.CanonicalSource(dependency.Protocol, injection.SymbolicSource) + "; existing runs retain URI semantics.", Blocking: false})
+				injection.SymbolicSource = resourcecompiler.CanonicalSource(dependency.Protocol, injection.SymbolicSource)
+			}
+		}
 		if !dependency.Required {
 			continue
 		}
-		if dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Verification == nil {
+		if dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Verification == nil {
 			result.Issues = append(result.Issues, Issue{Code: "DEPENDENCY_VERIFICATION_REQUIRED", Message: "Required dependency " + dependency.From + " → " + dependency.To + " has no verification contract.", Resolution: "Add a consumer HTTP verification contract or mark the dependency optional.", Blocking: true})
 		}
 	}

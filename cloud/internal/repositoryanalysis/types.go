@@ -77,6 +77,7 @@ type Resource struct {
 type Injection struct {
 	EnvironmentName string `json:"environment_name"`
 	SymbolicSource  string `json:"symbolic_source"`
+	Template        string `json:"template,omitempty"`
 }
 
 type Dependency struct {

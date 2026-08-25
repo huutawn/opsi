@@ -88,6 +88,7 @@ func normalizeCandidate(candidate DependencyCandidate) DependencyCandidate {
 	for i := range candidate.Mappings {
 		candidate.Mappings[i].EnvName = strings.TrimSpace(candidate.Mappings[i].EnvName)
 		candidate.Mappings[i].SymbolicSource = strings.TrimSpace(candidate.Mappings[i].SymbolicSource)
+		candidate.Mappings[i].Template = strings.TrimSpace(candidate.Mappings[i].Template)
 	}
 	sort.Slice(candidate.Mappings, func(i, j int) bool { return candidate.Mappings[i].EnvName < candidate.Mappings[j].EnvName })
 	return candidate
@@ -324,7 +325,7 @@ func candidateTargetResolution(candidate DependencyCandidate, targets Dependency
 func candidateDependency(candidate DependencyCandidate) serviceconfigurationv1.ApplicationDependency {
 	mappings := make([]serviceconfigurationv1.DependencyInjectionMapping, 0, len(candidate.Mappings))
 	for _, mapping := range candidate.Mappings {
-		mappings = append(mappings, serviceconfigurationv1.DependencyInjectionMapping{EnvName: mapping.EnvName, SymbolicSource: mapping.SymbolicSource})
+		mappings = append(mappings, serviceconfigurationv1.DependencyInjectionMapping{EnvName: mapping.EnvName, SymbolicSource: mapping.SymbolicSource, Template: mapping.Template})
 	}
 	return serviceconfigurationv1.ApplicationDependency{LogicalName: candidate.LogicalName, TargetKind: candidate.DependencyKind, TargetIdentity: candidate.TargetID, Protocol: candidate.Protocol, Strategy: candidate.Strategy, AccessContext: candidate.AccessContext, Path: candidate.Path, Required: candidate.Required, InjectionPhase: candidate.Phase, InjectionMappings: mappings, VerificationContract: func() *serviceconfigurationv1.DependencyVerificationContract {
 		if candidate.VerificationContract == nil {
