@@ -292,6 +292,9 @@ func renderProductionResources(command deploymentv1.AgentCommand) ([]byte, rende
 		}
 		container["env"] = env
 	}
+	if spec.StartupProbe != nil {
+		container["startupProbe"] = probeObject(*spec.StartupProbe)
+	}
 	if spec.ReadinessProbe != nil {
 		container["readinessProbe"] = probeObject(*spec.ReadinessProbe)
 	}

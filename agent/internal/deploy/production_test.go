@@ -182,6 +182,26 @@ func TestRenderProductionResourcesUsesTypedSecretRefs(t *testing.T) {
 	}
 }
 
+func TestRenderProductionResourcesUsesStartupProbe(t *testing.T) {
+	command := testAgentCommand(t)
+	command.Workload.StartupProbe = &deploymentv1.Probe{Path: "/health", Port: 8080, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 60}
+	hash, err := command.Workload.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.SpecHash = hash
+	_, resources, _, err := renderProductionResources(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := resources.Deployment["spec"].(map[string]any)["template"].(map[string]any)
+	containers := template["spec"].(map[string]any)["containers"].([]any)
+	probe := containers[0].(map[string]any)["startupProbe"].(map[string]any)
+	if probe["failureThreshold"] != int32(60) || probe["periodSeconds"] != int32(5) {
+		t.Fatalf("startup probe=%v", probe)
+	}
+}
+
 func TestNoExternalRolloutRendersNoIngress(t *testing.T) {
 	snapshot := testRuntimeSnapshot(t, "job-internal", "a")
 	snapshot.Exposure = exposurev1.ExposureSpec{}

@@ -403,6 +403,9 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 		}
 		// Probes are platform-owned runtime defaults. A client may omit them,
 		// but any supplied probe must still equal the Cloud-compiled value.
+		if clientWorkload.StartupProbe == nil {
+			clientWorkload.StartupProbe = workload.StartupProbe
+		}
 		if clientWorkload.ReadinessProbe == nil {
 			clientWorkload.ReadinessProbe = workload.ReadinessProbe
 		}

@@ -44,7 +44,7 @@ func TestCompileServiceRuntimeSpecsProducesNextDeploymentAuthoritiesOnly(t *test
 	if workload.Replicas != 2 || workload.Resources.Requests.CPU != "100m" || workload.Resources.Limits.Memory != "128Mi" {
 		t.Fatalf("topology did not override legacy service resources: %+v", workload)
 	}
-	if workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.ReadinessProbe.Path != source.HealthPath || workload.LivenessProbe.Port != int32(source.ContainerPort) {
+	if workload.StartupProbe == nil || workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.StartupProbe.Path != source.HealthPath || workload.StartupProbe.FailureThreshold != 60 || workload.ReadinessProbe.Path != source.HealthPath || workload.LivenessProbe.Port != int32(source.ContainerPort) {
 		t.Fatalf("health probes were not compiled from the service boundary: %+v", workload)
 	}
 }

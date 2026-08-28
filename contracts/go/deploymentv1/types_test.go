@@ -71,6 +71,38 @@ func TestWorkloadSpecRejectsUnsafeAndInlineSecretShapes(t *testing.T) {
 	}
 }
 
+func TestWorkloadSpecAcceptsBoundedStartupProbeAndHashesItsAuthority(t *testing.T) {
+	first := validWorkload()
+	first.StartupProbe = &Probe{Path: "/health", Port: 8080, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 60}
+	if err := first.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	firstHash, err := first.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	probe := *first.StartupProbe
+	probe.FailureThreshold = 61
+	second.StartupProbe = &probe
+	secondHash, err := second.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstHash == secondHash {
+		t.Fatal("startup probe edit did not invalidate the workload hash")
+	}
+	second.StartupProbe.FailureThreshold = 121
+	if second.Validate() == nil {
+		t.Fatal("unbounded startup probe was accepted")
+	}
+	second.StartupProbe = nil
+	second.LivenessProbe = &Probe{Path: "/health", Port: 8080, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 11}
+	if second.Validate() == nil {
+		t.Fatal("runtime probe threshold was widened with the startup boundary")
+	}
+}
+
 func TestValidateEnvironmentPreservesCaseSensitiveFrameworkMappings(t *testing.T) {
 	if err := ValidateEnvironment(
 		[]EnvironmentVariable{

@@ -97,7 +97,7 @@ func TestResolvedDeploymentCompilesCanonicalSnapshotAndRejectsStaleOrClientSpec(
 		t.Fatalf("configuration authority missing from snapshot: %+v", preview.Snapshot.Authority)
 	}
 	workload := preview.Snapshot.Workload
-	if workload.Replicas != plan.Assignments[0].Replicas || workload.Resources.Requests.CPU != "250m" || workload.Resources.Limits.Memory != "256Mi" || workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.ReadinessProbe.Path != service.HealthPath {
+	if workload.Replicas != plan.Assignments[0].Replicas || workload.Resources.Requests.CPU != "250m" || workload.Resources.Limits.Memory != "256Mi" || workload.StartupProbe == nil || workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.StartupProbe.FailureThreshold != 60 || workload.ReadinessProbe.Path != service.HealthPath {
 		t.Fatalf("canonical workload=%+v", workload)
 	}
 	client := request
@@ -108,8 +108,18 @@ func TestResolvedDeploymentCompilesCanonicalSnapshotAndRejectsStaleOrClientSpec(
 		t.Fatalf("client mismatch err=%v", err)
 	}
 	client = request
+	mismatchedProbeWorkload := preview.Snapshot.Workload
+	startupProbe := *mismatchedProbeWorkload.StartupProbe
+	startupProbe.FailureThreshold--
+	mismatchedProbeWorkload.StartupProbe = &startupProbe
+	client.Workload = &mismatchedProbeWorkload
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", client); deploymentAPIErrorCode(err) != "WORKLOAD_CANONICAL_MISMATCH" {
+		t.Fatalf("client startup probe mismatch err=%v", err)
+	}
+	client = request
 	omittedProbeWorkload := preview.Snapshot.Workload
 	client.Workload = &omittedProbeWorkload
+	client.Workload.StartupProbe = nil
 	client.Workload.ReadinessProbe = nil
 	client.Workload.LivenessProbe = nil
 	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", client); err != nil {

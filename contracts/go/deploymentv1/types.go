@@ -168,6 +168,7 @@ type WorkloadSpec struct {
 	Replicas                     int32                            `json:"replicas"`
 	ApplicationContainerName     string                           `json:"application_container_name"`
 	ContainerPort                int32                            `json:"container_port"`
+	StartupProbe                 *Probe                           `json:"startup_probe,omitempty"`
 	ReadinessProbe               *Probe                           `json:"readiness_probe,omitempty"`
 	LivenessProbe                *Probe                           `json:"liveness_probe,omitempty"`
 	Resources                    Resources                        `json:"resources"`
@@ -241,10 +242,13 @@ func (s WorkloadSpec) Validate() error {
 	if s.ContainerPort < 1 || s.ContainerPort > 65535 {
 		return errors.New("container_port must be between 1 and 65535")
 	}
-	if err := validateProbe(s.ReadinessProbe, s.ContainerPort); err != nil {
+	if err := validateProbe(s.StartupProbe, s.ContainerPort, 120); err != nil {
+		return fmt.Errorf("startup_probe: %w", err)
+	}
+	if err := validateProbe(s.ReadinessProbe, s.ContainerPort, 10); err != nil {
 		return fmt.Errorf("readiness_probe: %w", err)
 	}
-	if err := validateProbe(s.LivenessProbe, s.ContainerPort); err != nil {
+	if err := validateProbe(s.LivenessProbe, s.ContainerPort, 10); err != nil {
 		return fmt.Errorf("liveness_probe: %w", err)
 	}
 	if err := validateResources(s.Resources); err != nil {
@@ -323,14 +327,14 @@ func IsSecretLikeEnvironmentName(value string) bool {
 	return false
 }
 
-func validateProbe(probe *Probe, containerPort int32) error {
+func validateProbe(probe *Probe, containerPort, maxFailureThreshold int32) error {
 	if probe == nil {
 		return nil
 	}
 	if len(probe.Path) == 0 || len(probe.Path) > 256 || !strings.HasPrefix(probe.Path, "/") || strings.ContainsAny(probe.Path, "\r\n\x00") || probe.Port != containerPort {
 		return errors.New("path or port is invalid")
 	}
-	if probe.InitialDelaySeconds < 0 || probe.InitialDelaySeconds > 300 || probe.PeriodSeconds < 1 || probe.PeriodSeconds > 60 || probe.TimeoutSeconds < 1 || probe.TimeoutSeconds > 30 || probe.FailureThreshold < 1 || probe.FailureThreshold > 10 {
+	if probe.InitialDelaySeconds < 0 || probe.InitialDelaySeconds > 300 || probe.PeriodSeconds < 1 || probe.PeriodSeconds > 60 || probe.TimeoutSeconds < 1 || probe.TimeoutSeconds > 30 || probe.FailureThreshold < 1 || probe.FailureThreshold > maxFailureThreshold {
 		return errors.New("probe timing exceeds allowed bounds")
 	}
 	return nil

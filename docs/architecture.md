@@ -123,6 +123,12 @@ factual readiness and known-good rollback. Agent source clone/build, caller-supp
 manifests, direct deployment RPC, service-scoped deployment creation, and the
 generic push relay are retired. Opsi does not yet provision DNS or certificates.
 
+Cloud compiles one canonical HTTP startup probe from the service health boundary
+and includes it in the workload hash. Agent renders that authority as a Kubernetes
+`startupProbe`, which suppresses liveness and delays readiness evaluation for up
+to five minutes while bounded application initialization such as schema migration
+runs.
+
 New BuildRecord deployments never create active `immutable_image` jobs. A
 missing RolloutIntent is a retired historical command and fails closed before
 Kubernetes mutation. No-external workloads use an empty exposure snapshot and
