@@ -331,8 +331,17 @@ func setupCutoverAPITestServer(t *testing.T) (*Server, string, string, string, s
 		KnownGoodID:           baseJob.RolloutIntent.RolloutID,
 		KnownGoodHash:         strings.Repeat("a", 64),
 		ReadinessEvidenceHash: strings.Repeat("e", 64),
+		ApplicationImage:      intent.Desired.Image.Reference,
+		ApplicationImageID:    "containerd://" + intent.Desired.Image.Digest,
+		Namespace:             "opsi",
+		DeploymentName:        "api",
+		ServiceName:           "api",
+		AvailableReplicas:     intent.Desired.Workload.Replicas,
 		Attempt:               intent.Attempt,
-		Resources:             []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}},
+		Resources: []deploymentv1.ResourceIdentity{
+			{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)},
+			{Kind: "Service", Namespace: "opsi", Name: "api", UID: "uid-service", ResourceVersion: "1", FunctionalHash: strings.Repeat("d", 64)},
+		},
 	}
 	result := registry.DeploymentResult{
 		SchemaVersion: deploymentv1.ResultSchemaVersion,
@@ -791,8 +800,17 @@ func TestCutoverRollbackAPIEndToEndAndAudit(t *testing.T) {
 		KnownGoodID:           cutoverIntent.RolloutID,
 		KnownGoodHash:         strings.Repeat("a", 64),
 		ReadinessEvidenceHash: strings.Repeat("e", 64),
+		ApplicationImage:      cutoverIntent.Desired.Image.Reference,
+		ApplicationImageID:    "containerd://" + cutoverIntent.Desired.Image.Digest,
+		Namespace:             "opsi",
+		DeploymentName:        "api",
+		ServiceName:           "api",
+		AvailableReplicas:     cutoverIntent.Desired.Workload.Replicas,
 		Attempt:               cutoverIntent.Attempt,
-		Resources:             []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}},
+		Resources: []deploymentv1.ResourceIdentity{
+			{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)},
+			{Kind: "Service", Namespace: "opsi", Name: "api", UID: "uid-service", ResourceVersion: "1", FunctionalHash: strings.Repeat("d", 64)},
+		},
 	}
 	cutoverDepResult := registry.DeploymentResult{
 		SchemaVersion: deploymentv1.ResultSchemaVersion,

@@ -36,10 +36,13 @@ func resultFromRollout(intent deploymentv1.RolloutIntent, record deploymentv1.Ro
 	if !preMutation && !deploymentv1.IsFactualTerminalRollout(record) {
 		return cloudrelay.DeploymentResult{}, false
 	}
-	result := cloudrelay.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, LeaseToken: lease.LeaseToken, Status: record.State, IntentHash: record.Intent.IntentHash}
-	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: record.State, RolloutID: record.Intent.RolloutID, RolloutState: record.State, IntentHash: record.Intent.IntentHash, StateHash: record.StateHash, SpecHash: record.Intent.Desired.WorkloadSpecHash, WorkloadSpecHash: record.Intent.Desired.WorkloadSpecHash, ExposureSpecHash: record.Intent.Desired.ExposureSpecHash, DesiredDigest: record.Intent.Desired.Image.Digest, PreviousDigest: record.Intent.PreviousDigest, Resources: append([]deploymentv1.ResourceIdentity(nil), record.Resources...), Attempt: record.Intent.Attempt}
+	namespace, deploymentName, serviceName := applicationResourceNames(record.Resources)
+	result := cloudrelay.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, LeaseToken: lease.LeaseToken, Status: record.State, IntentHash: record.Intent.IntentHash, ApplicationImage: record.Intent.Desired.Image.Reference, Namespace: namespace, DeploymentName: deploymentName, ServiceName: serviceName}
+	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: record.State, ApplicationImage: record.Intent.Desired.Image.Reference, Namespace: namespace, DeploymentName: deploymentName, ServiceName: serviceName, RolloutID: record.Intent.RolloutID, RolloutState: record.State, IntentHash: record.Intent.IntentHash, StateHash: record.StateHash, SpecHash: record.Intent.Desired.WorkloadSpecHash, WorkloadSpecHash: record.Intent.Desired.WorkloadSpecHash, ExposureSpecHash: record.Intent.Desired.ExposureSpecHash, DesiredDigest: record.Intent.Desired.Image.Digest, PreviousDigest: record.Intent.PreviousDigest, Resources: append([]deploymentv1.ResourceIdentity(nil), record.Resources...), Attempt: record.Intent.Attempt}
 	if record.Evidence != nil {
 		agentResult.ReadinessEvidenceHash, _ = record.Evidence.Hash()
+		agentResult.ApplicationImageID = record.Evidence.ApplicationImageID
+		agentResult.AvailableReplicas = record.Evidence.AvailableReplicas
 	}
 	if record.Error != nil {
 		failure := deploymentv1.NewRolloutError(record.Error.Code, deploy.RedactSensitive(record.Error.Message), record.Error.Retryable)
@@ -89,8 +92,25 @@ func resultFromRollout(intent deploymentv1.RolloutIntent, record deploymentv1.Ro
 	}
 	result.FailureCode = agentResult.FailureCode
 	result.FailureMessageRedacted = agentResult.FailureMessageRedacted
+	result.ApplicationImageID = agentResult.ApplicationImageID
+	result.AvailableReplicas = agentResult.AvailableReplicas
 	result.RolloutResult = agentResult
 	return result, true
+}
+
+func applicationResourceNames(resources []deploymentv1.ResourceIdentity) (namespace, deploymentName, serviceName string) {
+	for _, resource := range resources {
+		switch resource.Kind {
+		case "Deployment":
+			namespace, deploymentName = resource.Namespace, resource.Name
+		case "Service":
+			if namespace == "" {
+				namespace = resource.Namespace
+			}
+			serviceName = resource.Name
+		}
+	}
+	return namespace, deploymentName, serviceName
 }
 
 func preMutationFailureRecord(intent deploymentv1.RolloutIntent, err error) deploymentv1.RolloutRecord {

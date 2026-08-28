@@ -211,6 +211,33 @@ func TestRolloutProgressResourceValidationByPhase(t *testing.T) {
 		}
 	}
 }
+func TestSuccessfulRolloutResultRequiresObservedRuntimeFacts(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "runtime-facts")
+	job, _, err := service.StartImmutableDeployment(*base.Snapshot, "user-1", "runtime-facts", "runtime-facts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, job)
+	terminalJob := lease.Deployment
+	terminalJob.RolloutState = deploymentv1.RolloutStateWaiting
+	result := rolloutResult(lease, deploymentv1.RolloutStateSucceeded, "6", terminalJob.RolloutIntent.Desired.Image.Digest, "known-good-runtime-facts", strings.Repeat("a", 64), "").RolloutResult
+	for name, mutate := range map[string]func(*deploymentv1.AgentResult){
+		"missing image ID":           func(value *deploymentv1.AgentResult) { value.ApplicationImageID = "" },
+		"missing available replicas": func(value *deploymentv1.AgentResult) { value.AvailableReplicas = 0 },
+		"wrong application image": func(value *deploymentv1.AgentResult) {
+			value.ApplicationImage = "ghcr.io/example/other@sha256:" + strings.Repeat("b", 64)
+		},
+		"missing workload name": func(value *deploymentv1.AgentResult) { value.DeploymentName = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := cloneRolloutResult(result)
+			mutate(candidate)
+			if err := validateRolloutResult(terminalJob, candidate); err == nil {
+				t.Fatal("successful result accepted incomplete observed runtime facts")
+			}
+		})
+	}
+}
 
 func TestExposureAutomaticRollbackKeepsDesiredAndFactualKnownGood(t *testing.T) {
 	service, projectID, base := rolloutRegistryFixture(t, "rollback")
@@ -682,9 +709,9 @@ func rolloutResult(lease DeploymentLease, state, hashCharacter, currentDigest, k
 	if failureCode != "" {
 		failurePhase = deploymentv1.FailurePhasePostMutation
 	}
-	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, RolloutID: intent.RolloutID, RolloutState: state, IntentHash: intent.IntentHash, StateHash: strings.Repeat(hashCharacter, 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: currentDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: knownGoodID, KnownGoodHash: knownGoodHash, ReadinessEvidenceHash: readinessHash, FailureCode: failureCode, FailurePhase: failurePhase, FailureMessageRedacted: "sanitized rollout failure", Attempt: intent.Attempt}
+	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, ApplicationImage: intent.Desired.Image.Reference, ApplicationImageID: "containerd://" + intent.Desired.Image.Digest, Namespace: "opsi", DeploymentName: "api", ServiceName: "api", AvailableReplicas: intent.Desired.Workload.Replicas, RolloutID: intent.RolloutID, RolloutState: state, IntentHash: intent.IntentHash, StateHash: strings.Repeat(hashCharacter, 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: currentDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: knownGoodID, KnownGoodHash: knownGoodHash, ReadinessEvidenceHash: readinessHash, FailureCode: failureCode, FailurePhase: failurePhase, FailureMessageRedacted: "sanitized rollout failure", Attempt: intent.Attempt}
 	if state == deploymentv1.RolloutStateSucceeded || state == deploymentv1.RolloutStateRolledBack {
-		agentResult.Resources = []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}
+		agentResult.Resources = []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}, {Kind: "Service", Namespace: "opsi", Name: "api", UID: "uid-service", ResourceVersion: "1", FunctionalHash: strings.Repeat("e", 64)}}
 	}
 	return DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, LeaseToken: lease.LeaseToken, IntentHash: intent.IntentHash, FailureCode: failureCode, FailureMessageRedacted: agentResult.FailureMessageRedacted, RolloutResult: agentResult}
 }

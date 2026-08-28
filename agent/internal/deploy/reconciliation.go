@@ -442,6 +442,8 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 	evidence.WorkloadEvidenceHash = hashValue(map[string]any{"generation": generation, "observed": observedGeneration, "available": available, "desired": desiredReplicas})
 	evidence.ServiceEvidenceHash = hashValue(map[string]any{"selector": serviceJSON(service, "selector"), "port": command.Workload.ContainerPort, "endpoint_slices": endpointReady, "ready_endpoints": readyEndpoints, "desired": desiredReplicas})
 	evidence.ExposureEvidenceHash = hashValue(map[string]any{"external": plan.Snapshot.HasExternalExposure(), "generation": number(metadataValue(ingress, "generation")), "spec": ingress["spec"], "ownership": ingressReady})
+	evidence.ApplicationImageID = imageID
+	evidence.AvailableReplicas = int32(available)
 	evidence.ApplicationImageIDHash = hashString(imageID)
 	resources := []deploymentv1.ResourceIdentity{resourceIdentityFromObject("Deployment", deployment), resourceIdentityFromObject("Service", service)}
 	if plan.Snapshot.HasExternalExposure() {

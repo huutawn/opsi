@@ -1420,8 +1420,17 @@ func TestADC04AppTargetAlreadyRunningOutsideBatchPasses(t *testing.T) {
 		KnownGoodID:           job.RolloutIntent.RolloutID,
 		KnownGoodHash:         strings.Repeat("d", 64),
 		ReadinessEvidenceHash: strings.Repeat("e", 64),
+		ApplicationImage:      image.Reference,
+		ApplicationImageID:    "containerd://" + image.Digest,
+		Namespace:             "opsi",
+		DeploymentName:        "api",
+		ServiceName:           "api",
+		AvailableReplicas:     snapshot.Workload.Replicas,
 		Attempt:               job.RolloutIntent.Attempt,
-		Resources:             []deploymentv1.ResourceIdentity{{Kind: "Deployment", Name: "api", UID: "uid", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}},
+		Resources: []deploymentv1.ResourceIdentity{
+			{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)},
+			{Kind: "Service", Namespace: "opsi", Name: "api", UID: "uid-service", ResourceVersion: "1", FunctionalHash: strings.Repeat("d", 64)},
+		},
 	}
 	_, err = f.store.CompleteDeployment(f.projectID, f.node.ID, job.ID, "api-result-key", registry.DeploymentResult{
 		SchemaVersion: deploymentv1.ResultSchemaVersion,

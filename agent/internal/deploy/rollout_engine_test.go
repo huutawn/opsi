@@ -601,6 +601,9 @@ func TestRolloutReadinessUsesAppDigestServiceEndpointsAndIngress(t *testing.T) {
 	if evidence.WorkloadEvidenceHash == "" || evidence.ServiceEvidenceHash == "" || evidence.ApplicationImageIDHash == "" {
 		t.Fatalf("readiness omitted factual evidence hashes: %+v", evidence)
 	}
+	if evidence.AvailableReplicas != 1 || !containsExactDigest(evidence.ApplicationImageID, snapshot.Image.Digest) {
+		t.Fatalf("readiness omitted factual application state: %+v", evidence)
+	}
 }
 
 func TestEndpointSliceReadinessFailsClosedAndDeduplicatesAddresses(t *testing.T) {

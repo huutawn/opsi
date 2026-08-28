@@ -361,6 +361,8 @@ type ReadinessEvidence struct {
 	RuntimeReady           bool      `json:"runtime_ready"`
 	LocalRoutingReady      bool      `json:"local_routing_ready"`
 	ExternalReady          bool      `json:"external_ready"`
+	ApplicationImageID     string    `json:"application_image_id,omitempty"`
+	AvailableReplicas      int32     `json:"available_replicas,omitempty"`
 	WorkloadEvidenceHash   string    `json:"workload_evidence_hash"`
 	ServiceEvidenceHash    string    `json:"service_evidence_hash"`
 	ExposureEvidenceHash   string    `json:"exposure_evidence_hash"`
@@ -384,6 +386,12 @@ func (e ReadinessEvidence) Validate(requireLocal, requireExternal bool) error {
 	}
 	if requireExternal && (!e.ExternalReady || !rolloutHashPattern.MatchString(e.ExternalEvidenceHash)) {
 		return errors.New("external readiness evidence is incomplete")
+	}
+	if e.ApplicationImageID == "" && e.AvailableReplicas == 0 {
+		return nil // Compatibility with evidence recorded before these factual fields existed.
+	}
+	if e.AvailableReplicas < 1 || len(e.ApplicationImageID) > 2048 || strings.ContainsAny(e.ApplicationImageID, "\r\n\x00") {
+		return errors.New("application readiness facts are invalid")
 	}
 	return nil
 }

@@ -201,8 +201,8 @@ func (f *fakeRolloutEngine) ReconcileRollout(_ context.Context, intent deploymen
 		return f.record, f.reconcileErr
 	}
 	now := time.Now().UTC()
-	resources := []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}
-	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: true, LocalRoutingReady: true, WorkloadEvidenceHash: strings.Repeat("1", 64), ServiceEvidenceHash: strings.Repeat("2", 64), ExposureEvidenceHash: strings.Repeat("3", 64), ApplicationImageIDHash: strings.Repeat("4", 64), LocalProbeEvidenceHash: strings.Repeat("5", 64), ObservedAt: now}
+	resources := []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}, {Kind: "Service", Namespace: "opsi", Name: "api", UID: "uid-service", ResourceVersion: "1", FunctionalHash: strings.Repeat("e", 64)}}
+	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: true, LocalRoutingReady: true, ApplicationImageID: "containerd://" + intent.Desired.Image.Digest, AvailableReplicas: 1, WorkloadEvidenceHash: strings.Repeat("1", 64), ServiceEvidenceHash: strings.Repeat("2", 64), ExposureEvidenceHash: strings.Repeat("3", 64), ApplicationImageIDHash: strings.Repeat("4", 64), LocalProbeEvidenceHash: strings.Repeat("5", 64), ObservedAt: now}
 	states := []string{deploymentv1.RolloutStatePrepared, deploymentv1.RolloutStateApplying, deploymentv1.RolloutStateWaiting, deploymentv1.RolloutStateSucceeded}
 	var record deploymentv1.RolloutRecord
 	for index, state := range states {
@@ -558,6 +558,10 @@ func TestRunnerExecutesRolloutLeaseAndReportsSanitizedLifecycle(t *testing.T) {
 	}
 	if len(client.results) != 1 || client.results[0].Status != deploymentv1.StateSucceeded || client.results[0].RolloutResult == nil || client.results[0].RolloutResult.CurrentDigest != intent.Desired.Image.Digest || client.results[0].RolloutResult.KnownGoodID != intent.RolloutID || client.results[0].RolloutResult.LeaseToken != "" {
 		t.Fatalf("result=%+v", client.results)
+	}
+	result := client.results[0]
+	if result.ApplicationImage != intent.Desired.Image.Reference || result.ApplicationImageID != "containerd://"+intent.Desired.Image.Digest || result.AvailableReplicas != 1 || result.Namespace != "opsi" || result.DeploymentName != "api" || result.ServiceName != "api" || result.RolloutResult.ApplicationImageID != result.ApplicationImageID || result.RolloutResult.AvailableReplicas != result.AvailableReplicas {
+		t.Fatalf("terminal workload facts were not preserved: %+v", result)
 	}
 }
 

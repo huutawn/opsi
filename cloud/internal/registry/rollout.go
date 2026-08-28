@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -331,7 +332,7 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 	}
 	switch result.RolloutState {
 	case deploymentv1.RolloutStateSucceeded:
-		if result.FailureCode != "" || result.CurrentDigest != result.DesiredDigest || result.KnownGoodID == "" || !validRolloutHash(result.KnownGoodHash) || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 {
+		if result.FailureCode != "" || result.CurrentDigest != result.DesiredDigest || result.KnownGoodID == "" || !validRolloutHash(result.KnownGoodHash) || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 || result.ApplicationImage != job.RolloutIntent.Desired.Image.Reference || !strings.HasSuffix(result.ApplicationImageID, job.RolloutIntent.Desired.Image.Digest) || result.AvailableReplicas < job.RolloutIntent.Desired.Workload.Replicas || result.Namespace == "" || result.DeploymentName == "" || result.ServiceName == "" {
 			return fmt.Errorf("successful rollout result lacks factual known-good metadata")
 		}
 	case deploymentv1.RolloutStateCleaned:
