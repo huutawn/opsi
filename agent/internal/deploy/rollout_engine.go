@@ -349,6 +349,15 @@ func (e *Engine) validatePreviousKnownGood(ctx context.Context, intent deploymen
 	if current == nil && expectedID == "" {
 		return nil
 	}
+	if current != nil && expectedID == "" {
+		legacy, legacyErr := e.Store.GetRollout(ctx, current.ID)
+		if legacyErr != nil {
+			return legacyErr
+		}
+		if legacy != nil && legacy.Evidence != nil && legacy.Evidence.ApplicationImageID == "" && legacy.Evidence.AvailableReplicas == 0 {
+			return e.Store.ClearCurrentKnownGood(ctx, intent.Target)
+		}
+	}
 	if current == nil || current.ID != expectedID || current.SnapshotHash != expectedHash {
 		return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeConflict, "previous known-good reference is stale", false)
 	}

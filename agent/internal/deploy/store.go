@@ -24,6 +24,7 @@ type Store interface {
 	CommitRolloutSuccess(ctx context.Context, rolloutID string, snapshot deploymentv1.KnownGoodSnapshot, resources []deploymentv1.ResourceIdentity, evidence deploymentv1.ReadinessEvidence) (*deploymentv1.RolloutRecord, error)
 	GetKnownGood(ctx context.Context, snapshotID string) (*deploymentv1.KnownGoodSnapshot, error)
 	CurrentKnownGood(ctx context.Context, target deploymentv1.RuntimeTarget) (*deploymentv1.KnownGoodSnapshot, error)
+	ClearCurrentKnownGood(ctx context.Context, target deploymentv1.RuntimeTarget) error
 	Close() error
 }
 
@@ -597,6 +598,11 @@ func (s *SQLiteStore) CurrentKnownGood(ctx context.Context, target deploymentv1.
 		return nil, err
 	}
 	return s.GetKnownGood(ctx, snapshotID)
+}
+
+func (s *SQLiteStore) ClearCurrentKnownGood(ctx context.Context, target deploymentv1.RuntimeTarget) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM known_good_current WHERE target_key = ?`, target.Key())
+	return err
 }
 
 func persistRolloutTransition(ctx context.Context, tx *sql.Tx, record deploymentv1.RolloutRecord) error {

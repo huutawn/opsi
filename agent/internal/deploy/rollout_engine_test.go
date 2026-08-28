@@ -157,6 +157,29 @@ func TestRolloutPreWALFailuresReturnNoRecordAndDoNotMutate(t *testing.T) {
 		}
 	})
 
+	t.Run("legacy previous known-good is discarded when Cloud has no factual authority", func(t *testing.T) {
+		store := openTestStore(t)
+		runtime := newFakeRolloutRuntime()
+		engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+		a := testRuntimeSnapshot(t, "job-legacy-a", "a")
+		if _, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-legacy-a", a, nil), nil); err != nil {
+			t.Fatal(err)
+		}
+		knownA, err := store.CurrentKnownGood(context.Background(), a.Target)
+		if err != nil || knownA == nil {
+			t.Fatalf("knownA=%+v err=%v", knownA, err)
+		}
+		b := testRuntimeSnapshot(t, "job-legacy-b", "b")
+		record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-legacy-b", b, nil), nil)
+		if err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+			t.Fatalf("record=%+v err=%v", record, err)
+		}
+		current, err := store.CurrentKnownGood(context.Background(), b.Target)
+		if err != nil || current == nil || current.ID != record.Intent.RolloutID {
+			t.Fatalf("current=%+v err=%v", current, err)
+		}
+	})
+
 	t.Run("ownership conflict during prepare", func(t *testing.T) {
 		store := openTestStore(t)
 		runtime := newFakeRolloutRuntime()
