@@ -240,3 +240,11 @@ func executorTestJob(id string) Job {
 func executorTestSource(job Job) ApplicationSource {
 	return ApplicationSource{ProjectID: job.ProjectID, EnvironmentID: job.EnvironmentID, ApplicationID: job.ApplicationID, BindingID: job.Source.BindingID, BindingUpdatedAt: job.Source.BindingUpdatedAt, InstallationID: job.Source.InstallationID, RepositoryID: job.Source.RepositoryID, RepositoryOwnerID: job.Source.RepositoryOwnerID, RepositoryFullName: job.Source.RepositoryFullName, SelectedRef: job.Source.SelectedRef, ApplicationRoot: job.Source.ApplicationRoot, BuildContext: job.Source.BuildContext, BuildStrategy: job.RequestedBuildStrategy, DockerfilePath: job.DockerfilePath}
 }
+
+func TestValidRunnerFailureAcceptsSourceAccessFailures(t *testing.T) {
+	for _, code := range []string{"SOURCE_ACCESS_DENIED", "SOURCE_TOKEN_UNAVAILABLE"} {
+		if !validRunnerFailure(code) {
+			t.Fatalf("source access failure %q was rejected", code)
+		}
+	}
+}
