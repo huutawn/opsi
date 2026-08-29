@@ -468,6 +468,60 @@ func TestExplicitRollbackRestartFromPreparedRestoresKnownGoodWithoutApplyingDesi
 	}
 }
 
+func TestStoreRepairsHistoricalExplicitRollbackKnownGoodOnOpen(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "agent.sqlite")
+	store, err := OpenSQLiteStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newFakeRolloutRuntime()
+	engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+	a := testRuntimeSnapshot(t, "job-history-a", "a")
+	if record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-history-a", a, nil), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+		t.Fatalf("seed A record=%+v err=%v", record, err)
+	}
+	knownA, err := store.CurrentKnownGood(context.Background(), a.Target)
+	if err != nil || knownA == nil {
+		t.Fatalf("known A=%+v err=%v", knownA, err)
+	}
+	b := testRuntimeSnapshot(t, "job-history-b", "b")
+	if record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-history-b", b, knownA), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+		t.Fatalf("seed B record=%+v err=%v", record, err)
+	}
+	knownB, err := store.CurrentKnownGood(context.Background(), b.Target)
+	if err != nil || knownB == nil {
+		t.Fatalf("known B=%+v err=%v", knownB, err)
+	}
+	rollback := testRolloutIntent(t, "rollout-history-back-to-a", b, knownA)
+	rollback.Operation = deploymentv1.RolloutOperationRollback
+	rollback.PreviousDigest = a.Image.Digest
+	rollback.ExpectedKnownGoodID = knownB.ID
+	rollback.ExpectedKnownGoodHash = knownB.SnapshotHash
+	rollback.IntentHash = ""
+	rollback, err = rollback.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record, err := engine.ReconcileRollout(context.Background(), rollback, nil); err != nil || record.State != deploymentv1.RolloutStateRolledBack {
+		t.Fatalf("rollback record=%+v err=%v", record, err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO known_good_current(target_key, snapshot_id) VALUES (?, ?) ON CONFLICT(target_key) DO UPDATE SET snapshot_id = excluded.snapshot_id`, b.Target.Key(), knownB.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLiteStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	current, err := reopened.CurrentKnownGood(context.Background(), a.Target)
+	if err != nil || current == nil || current.ID != knownA.ID || current.SnapshotHash != knownA.SnapshotHash {
+		t.Fatalf("historical rollback repair current=%+v err=%v", current, err)
+	}
+}
+
 func TestRolloutWALReplayConflictLockAndTerminalImmutability(t *testing.T) {
 	store := openTestStore(t)
 	snapshot := testRuntimeSnapshot(t, "job-a", "f")

@@ -166,6 +166,64 @@ CREATE TABLE IF NOT EXISTS known_good_current (
 	if err := s.ensureDeploymentColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.reconcileHistoricalRollbacks(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reconcileHistoricalRollbacks repairs the current pointer left by Agents that
+// recorded an explicit rollback before rolled_back updated known_good_current.
+// A pointer moves only when it still identifies the exact snapshot that the
+// rollback intent expected to replace.
+func (s *SQLiteStore) reconcileHistoricalRollbacks(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin historical rollback reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT intent_json FROM rollouts WHERE state = ? AND terminal_at_unix_nano > 0 ORDER BY terminal_at_unix_nano DESC`, deploymentv1.RolloutStateRolledBack)
+	if err != nil {
+		return fmt.Errorf("list historical rollbacks: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var intentJSON string
+		if err := rows.Scan(&intentJSON); err != nil {
+			return fmt.Errorf("scan historical rollback: %w", err)
+		}
+		var intent deploymentv1.RolloutIntent
+		if err := json.Unmarshal([]byte(intentJSON), &intent); err != nil {
+			return &rolloutStoreError{Code: deploymentv1.RolloutCodeKnownGoodCorrupt, Msg: "historical rollback intent JSON is invalid"}
+		}
+		canonical, err := intent.Canonicalize()
+		if err != nil {
+			return &rolloutStoreError{Code: deploymentv1.RolloutCodeKnownGoodCorrupt, Msg: "historical rollback intent is invalid"}
+		}
+		if canonical.Operation != deploymentv1.RolloutOperationRollback || canonical.PreviousKnownGoodID == "" || canonical.ExpectedKnownGoodID == "" {
+			continue
+		}
+		var currentID, currentHash string
+		err = tx.QueryRowContext(ctx, `SELECT c.snapshot_id, s.snapshot_hash FROM known_good_current c JOIN known_good_snapshots s ON s.snapshot_id = c.snapshot_id WHERE c.target_key = ?`, canonical.Target.Key()).Scan(&currentID, &currentHash)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read current known-good during historical rollback reconciliation: %w", err)
+		}
+		if currentID != canonical.ExpectedKnownGoodID || currentHash != canonical.ExpectedKnownGoodHash {
+			continue
+		}
+		if err := restoreCurrentKnownGood(ctx, tx, canonical); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate historical rollbacks: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit historical rollback reconciliation: %w", err)
+	}
 	return nil
 }
 
