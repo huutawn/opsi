@@ -28,7 +28,7 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
   const hostnameError = hostname.trim() ? validatePublicHostname(hostname) : "";
 
   useEffect(() => {
-    if (!rollout || !["queued", "running"].includes(rollout.status)) return;
+    if (!rollout || rolloutReachedTerminalState(rollout)) return;
     const timer = window.setInterval(() => {
       void client.deployment(projectID, rollout.id).then(setRollout).catch(() => undefined);
     }, 2500);
@@ -94,6 +94,10 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
       {canMutate ? <Button className="mt-4" disabled={busy || !selected || !resolvedHostname || Boolean(hostnameError)} onClick={() => void publish()}>{busy ? "Creating route…" : "Publish service"}</Button> : <p className="mt-4 text-sm text-on-surface-variant">Your role can inspect this deployment but cannot publish a route.</p>}
     </section>
   );
+}
+
+function rolloutReachedTerminalState(rollout: DeploymentJob) {
+  return ["succeeded", "failed", "cancelled"].includes(rollout.status) || ["succeeded", "failed", "rolled_back", "rollback_failed", "cleaned"].includes(rollout.rollout_state || "");
 }
 
 function RouteRollout({ hostname, rollout }: { hostname: string; rollout: DeploymentJob }) {
