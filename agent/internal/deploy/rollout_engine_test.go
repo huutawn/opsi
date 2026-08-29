@@ -458,6 +458,14 @@ func TestExplicitRollbackRestartFromPreparedRestoresKnownGoodWithoutApplyingDesi
 	if runtime.current.DeploymentJobID != a.DeploymentJobID || runtime.current.Image.Digest != a.Image.Digest {
 		t.Fatalf("prepared rollback restart applied desired B instead of known-good A: %+v", runtime.current)
 	}
+	current, err := reopened.CurrentKnownGood(context.Background(), a.Target)
+	if err != nil || current == nil || current.ID != knownA.ID || current.SnapshotHash != knownA.SnapshotHash {
+		t.Fatalf("prepared rollback restart did not restore known-good authority: current=%+v err=%v", current, err)
+	}
+	c := testRuntimeSnapshot(t, "job-c", "a")
+	if record, err := restarted.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-c", c, current), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+		t.Fatalf("rollout after restored authority record=%+v err=%v", record, err)
+	}
 }
 
 func TestRolloutWALReplayConflictLockAndTerminalImmutability(t *testing.T) {

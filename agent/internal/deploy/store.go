@@ -471,6 +471,9 @@ func (s *SQLiteStore) TransitionRollout(ctx context.Context, rolloutID, state st
 		if evidence == nil || evidence.Validate(true, false) != nil {
 			return nil, &rolloutStoreError{Code: deploymentv1.RolloutCodeReadinessFailed, Msg: "rolled_back requires verified readiness evidence"}
 		}
+		if err := restoreCurrentKnownGood(ctx, tx, record.Intent); err != nil {
+			return nil, err
+		}
 	}
 	record.State = state
 	record.Version++
@@ -500,6 +503,26 @@ func (s *SQLiteStore) TransitionRollout(ctx context.Context, rolloutID, state st
 		return nil, err
 	}
 	return record, nil
+}
+
+// restoreCurrentKnownGood advances the durable authority only after the
+// reconciler has factually restored and verified the exact prior snapshot.
+func restoreCurrentKnownGood(ctx context.Context, tx *sql.Tx, intent deploymentv1.RolloutIntent) error {
+	if intent.PreviousKnownGoodID == "" || intent.PreviousKnownGoodHash == "" {
+		return &rolloutStoreError{Code: deploymentv1.RolloutCodeKnownGoodCorrupt, Msg: "rolled_back rollout has no previous known-good reference"}
+	}
+	var snapshotID string
+	err := tx.QueryRowContext(ctx, `SELECT snapshot_id FROM known_good_snapshots WHERE snapshot_id = ? AND target_key = ? AND snapshot_hash = ?`, intent.PreviousKnownGoodID, intent.Target.Key(), intent.PreviousKnownGoodHash).Scan(&snapshotID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &rolloutStoreError{Code: deploymentv1.RolloutCodeKnownGoodCorrupt, Msg: "rolled_back rollout previous known-good snapshot is missing or stale"}
+	}
+	if err != nil {
+		return fmt.Errorf("read rollback known-good snapshot: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO known_good_current(target_key, snapshot_id) VALUES (?, ?) ON CONFLICT(target_key) DO UPDATE SET snapshot_id = excluded.snapshot_id`, intent.Target.Key(), snapshotID); err != nil {
+		return fmt.Errorf("restore current known-good: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) CommitRolloutSuccess(ctx context.Context, rolloutID string, snapshot deploymentv1.KnownGoodSnapshot, resources []deploymentv1.ResourceIdentity, evidence deploymentv1.ReadinessEvidence) (*deploymentv1.RolloutRecord, error) {
