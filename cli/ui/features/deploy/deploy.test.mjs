@@ -19,7 +19,10 @@ test("Deploy exposes one role-gated action for each actionable run state", async
 
 test("Deploy result and technical details use factual authority records", async () => {
   const source = await readFile(view, "utf8");
+  const route = await readFile(new URL("./public-route.tsx", view), "utf8");
   for (const value of ["Repository is running", "digest_matches_image_id", "Raw build log", "Image digests", "Build records", "Requested", "Assigned", "Reserved", "Available"]) assert.match(source, new RegExp(value));
+  for (const value of ["Publish one running service", "Override hostname \\(optional\\)", "resolvedHostname", "exposurePreview", "expected_state_hash", "exposureApply", "tcip.103.252.137.163.nip.io"]) assert.match(route, new RegExp(value));
+  assert.doesNotMatch(route, /\/api\/projects\//);
   assert.doesNotMatch(source, /localStorage|dangerouslySetInnerHTML/);
   assert.doesNotMatch(source, /sessionStorage/);
   assert.match(source, /source_project/);

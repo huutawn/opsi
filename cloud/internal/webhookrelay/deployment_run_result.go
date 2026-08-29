@@ -33,10 +33,12 @@ type deploymentRunApplicationResult struct {
 	BuildLogURL           string `json:"build_log_url,omitempty"`
 	DeploymentJobID       string `json:"deployment_job_id,omitempty"`
 	DeploymentStatus      string `json:"deployment_status,omitempty"`
+	ContainerPort         int32  `json:"container_port,omitempty"`
 	ApplicationImageID    string `json:"application_image_id,omitempty"`
 	AvailableReplicas     int32  `json:"available_replicas,omitempty"`
 	ReadinessEvidenceHash string `json:"readiness_evidence_hash,omitempty"`
 	DigestMatchesImageID  bool   `json:"digest_matches_image_id"`
+	PublicURL             string `json:"public_url,omitempty"`
 }
 
 func (s *Server) deploymentRunResult(ctx context.Context, projectID, runID string) (deploymentRunResult, error) {
@@ -45,9 +47,6 @@ func (s *Server) deploymentRunResult(ctx context.Context, projectID, runID strin
 		return deploymentRunResult{}, err
 	}
 	result := deploymentRunResult{RunID: run.ID, State: run.State, SourceSHA: run.Plan.Source.CommitSHA, Applications: []deploymentRunApplicationResult{}, Verifications: []verificationv1.VerificationRun{}, Capacity: []topologyv1.Capacity{}}
-	if run.Plan.Target.Hostname != "" {
-		result.PublicURL = "https://" + run.Plan.Target.Hostname
-	}
 	reader, _ := s.Registry.(immutableDeploymentReader)
 	deployments := map[string]registry.DeploymentJob{}
 	if reader != nil {
@@ -59,12 +58,22 @@ func (s *Server) deploymentRunResult(ctx context.Context, projectID, runID strin
 			deployments[job.ServiceID] = job
 		}
 	}
+	published, listErr := s.Registry.ListDeployments(projectID)
+	if listErr != nil {
+		return deploymentRunResult{}, listErr
+	}
+	publicURLs := publishedServiceURLs(published)
 	for _, id := range run.Refs.IDs(deploymentworkflow.AuthorityBuildRecord) {
 		record, getErr := s.BuildRecords.Get(ctx, projectID, id)
 		if getErr != nil {
 			return deploymentRunResult{}, getErr
 		}
-		result.Applications = append(result.Applications, buildRecordResult(run, record, deployments[record.ServiceID]))
+		application := buildRecordResult(run, record, deployments[record.ServiceID])
+		application.PublicURL = publicURLs[record.ServiceID]
+		result.Applications = append(result.Applications, application)
+	}
+	if len(result.Applications) == 1 {
+		result.PublicURL = result.Applications[0].PublicURL
 	}
 	for _, id := range run.Refs.IDs(deploymentworkflow.AuthorityVerification) {
 		verification, getErr := s.Verifications.Get(ctx, projectID, id)
@@ -93,6 +102,9 @@ func buildRecordResult(run deploymentworkflow.Run, record buildrecordv1.Record, 
 		return result
 	}
 	result.DeploymentJobID, result.DeploymentStatus = job.ID, job.Status
+	if job.Snapshot != nil {
+		result.ContainerPort = job.Snapshot.Workload.ContainerPort
+	}
 	result.ReadinessEvidenceHash = job.ReadinessEvidenceHash
 	if job.TerminalResult != nil {
 		result.ApplicationImageID = job.TerminalResult.ApplicationImageID
@@ -103,4 +115,27 @@ func buildRecordResult(run deploymentworkflow.Run, record buildrecordv1.Record, 
 		result.DigestMatchesImageID = record.Build.OCIDigest != "" && job.TerminalResult.CurrentDigest == record.Build.OCIDigest && strings.HasSuffix(job.TerminalResult.ApplicationImageID, record.Build.OCIDigest) && job.TerminalResult.Status == deploymentv1.StateSucceeded
 	}
 	return result
+}
+
+func publishedServiceURLs(jobs []registry.DeploymentJob) map[string]string {
+	selected := map[string]registry.DeploymentJob{}
+	for _, job := range jobs {
+		if job.Mode != "rollout" || job.Status != deploymentv1.StateSucceeded || job.RolloutState != deploymentv1.RolloutStateSucceeded || job.ExposureSpec == nil {
+			continue
+		}
+		current, exists := selected[job.ServiceID]
+		if !exists || job.UpdatedAt.After(current.UpdatedAt) || job.UpdatedAt.Equal(current.UpdatedAt) && job.ID > current.ID {
+			selected[job.ServiceID] = job
+		}
+	}
+	urls := make(map[string]string, len(selected))
+	for serviceID, job := range selected {
+		exposure := job.ExposureSpec
+		scheme := "http"
+		if exposure.TLS.Mode == "secret_ref" {
+			scheme = "https"
+		}
+		urls[serviceID] = scheme + "://" + exposure.Hostname + exposure.Path
+	}
+	return urls
 }

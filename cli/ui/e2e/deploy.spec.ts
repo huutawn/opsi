@@ -122,6 +122,34 @@ test("export is previewed before an operator creates a pull request", async ({ p
 	await expect(page.getByRole("link", { name: "Open pull request #9" })).toBeVisible();
 });
 
+test("a verified deployment publishes exactly one selected service through the canonical exposure rollout", async ({ page }) => {
+	const run = deploymentRun("succeeded");
+	run.plan.target.hostname = "tcip";
+	let exposure: Record<string, unknown> | undefined;
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		onExposure: (body) => { exposure = body; },
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("heading", { name: "Repository is running" })).toBeVisible();
+	await expect(page.getByRole("link", { name: "https://tcip" })).toHaveCount(0);
+	await page.getByLabel("Running service").selectOption("svc-web");
+	const hostname = page.getByLabel("Override hostname (optional)");
+	await hostname.fill("tcip.103.252.137.163.nip.io");
+	await page.getByRole("button", { name: "Publish service" }).click();
+	await expect.poll(() => exposure).toMatchObject({
+		schema_version: "opsi.exposure_mutation/v1",
+		base_deployment_job_id: "dep-web",
+		expected_state_hash: hash("e"),
+		exposure: { service_key: "identity-web", service_port: 3000, hostname: "tcip.103.252.137.163.nip.io", tls: { mode: "disabled" } },
+	});
+	await expect(page.getByRole("link", { name: "http://tcip.103.252.137.163.nip.io" })).toBeVisible();
+	await hostname.fill("tcip");
+	await expect(page.getByRole("alert").filter({ hasText: "public DNS hostname" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Publish service" })).toBeDisabled();
+});
+
 test("review plan has no WCAG 2.1 A or AA axe violations", async ({ page }) => {
 	const run = deploymentRun("awaiting_approval");
 	await mockDeployAPI(page, () => run, () => run);
@@ -365,6 +393,7 @@ type SourceBehavior = {
 	bootstrapSession?: () => Record<string, unknown>;
 	bootstrapEvents?: () => Array<Record<string, unknown>>;
 	placement?: () => ReturnType<typeof placementFacts>;
+	onExposure?: (body: Record<string, unknown>) => void;
 };
 
 type AuthSelectionBehavior = { authenticated: boolean; selections: number };
@@ -392,7 +421,9 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		else if (path.endsWith("/github/repositories")) body = { repositories: [source?.repository() ?? sourceRepository("active")] };
 		else if (path.endsWith("/deployment-runs")) body = { deployment_runs: current() ? [current()] : [] };
 		else if (/\/deployment-runs\/run-1\/events$/.test(path)) { const run = current(); body = { events: run ? [{ id: "event-1", project_id: "proj-1", run_id: "run-1", state: run.state, level: "info", message: run.state === "provisioning" ? "Plan approved; provisioning started." : "Repository analysis is ready for review.", created_at: "2026-08-24T00:00:00Z" }] : [] }; }
-		else if (/\/deployment-runs\/run-1\/result$/.test(path)) { const run = current(); body = { run_id: "run-1", state: run?.state ?? "awaiting_input", source_sha: hash("d").slice(0, 40), applications: [], verifications: [], capacity: [] }; }
+		else if (path.endsWith("/exposures/preview") && request.method() === "POST") { const mutation = request.postDataJSON(); body = { schema_version: "opsi.exposure_preview/v1", base_deployment_job_id: mutation.base_deployment_job_id, desired: mutation.exposure, changes: ["create exposure"], state_hash: hash("e"), eligible: true, decision_code: "EXPOSURE_READY", message: "ready", resolved_at: "2026-08-24T00:00:00Z" }; }
+		else if (path.endsWith("/exposures") && request.method() === "POST") { source?.onExposure?.(request.postDataJSON()); body = { schema_version: "opsi.deployment_job/v1", id: "dep-exposure", project_id: "proj-1", environment_id: "env-1", runtime_id: "runtime-1", service_id: "svc-web", mode: "rollout", status: "succeeded", rollout_state: "succeeded" }; }
+		else if (/\/deployment-runs\/run-1\/result$/.test(path)) { const run = current(); body = { run_id: "run-1", state: run?.state ?? "awaiting_input", source_sha: hash("d").slice(0, 40), applications: run?.state === "succeeded" ? [{ service_key: "identity-api", service_id: "svc-api", build_record_id: "br-api", build_digest: `sha256:${hash("a")}`, deployment_job_id: "dep-api", deployment_status: "succeeded", container_port: 8080, available_replicas: 1, digest_matches_image_id: true }, { service_key: "identity-web", service_id: "svc-web", build_record_id: "br-web", build_digest: `sha256:${hash("b")}`, deployment_job_id: "dep-web", deployment_status: "succeeded", container_port: 3000, available_replicas: 1, digest_matches_image_id: true }] : [], verifications: [], capacity: [] }; }
 		else if (/\/deployment-runs\/run-1\/(approve|acknowledge|analyze|retry|cancel)$/.test(path)) body = action(request.postDataJSON(), path.split("/").at(-1));
 		else if (/\/deployment-runs\/run-1$/.test(path)) body = current();
 		else if (path.endsWith("/topology/facts")) body = source?.placement?.() ?? placementFacts();
@@ -422,7 +453,7 @@ function placementFacts() {
 	return { project_id: "proj-1", environments: [{ id: "env-1", project_id: "proj-1", name: "Production", type: "prod", status: "active" }], runtimes: [{ id: "runtime-1", project_id: "proj-1", environment_id: "env-1", name: "Primary", type: "k3s", status: "ready" }], nodes: [], agents: [], services: [] };
 }
 
-function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting_warning_ack" | "provisioning" | "building" | "deploying" | "failed" | "stale" | "cancelled") {
+function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting_warning_ack" | "provisioning" | "building" | "deploying" | "succeeded" | "failed" | "stale" | "cancelled") {
 	return {
 		schema_version: "opsi.deployment_run/v2", id: "run-1", project_id: "proj-1", created_by: "user-1", state,
 		plan: {
