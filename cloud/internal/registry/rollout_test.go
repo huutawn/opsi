@@ -85,6 +85,28 @@ func TestExposureUnchangedDoesNotCreateDuplicateRollout(t *testing.T) {
 	}
 }
 
+func TestFailedExposureDoesNotBlockRetry(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "failed-retry")
+	failed, _, err := service.StartExposureRollout(projectID, "user-1", "route-failed", "route-failed", rolloutExposureRequest(t, base, "dep-route-failed", "apps.example.com", "/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, failed)
+	if _, err := service.CompleteDeployment(projectID, failed.NodeID, failed.ID, "route-failed-result", preMutationRolloutResult(lease, deploymentv1.RolloutCodeOwnershipConflict)); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := rolloutExposureRequest(t, base, "dep-route-retry", "apps.example.com", "/")
+	preview, err := service.PreviewExposure(projectID, "user-1", retry)
+	if err != nil || len(preview.Changes) != 1 || preview.Changes[0] != "create exposure apps.example.com/" {
+		t.Fatalf("retry preview=%+v err=%v", preview, err)
+	}
+	job, _, err := service.StartExposureRollout(projectID, "user-1", "route-retry", "route-retry", retry)
+	if err != nil || job.ID != retry.Exposure.DeploymentJobID {
+		t.Fatalf("retry job=%+v err=%v", job, err)
+	}
+}
+
 func TestExposureRolloutAllowsSameOriginLongestPrefixRoutes(t *testing.T) {
 	service, projectID, base := rolloutRegistryFixture(t, "same-origin")
 	web := rolloutExposureRequest(t, base, "dep-web-root", "apps.example.com", "/").Exposure

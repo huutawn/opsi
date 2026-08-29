@@ -180,7 +180,7 @@ func (s *Service) latestExposureLocked(projectID, environmentID, runtimeID, serv
 	var selected *DeploymentJob
 	for id := range s.deployments {
 		job := s.deployments[id]
-		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && job.ExposureSpec != nil && (selected == nil || job.CreatedAt.After(selected.CreatedAt)) {
+		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && appliedExposure(job) && (selected == nil || job.CreatedAt.After(selected.CreatedAt)) {
 			copy := job
 			selected = &copy
 		}
@@ -195,7 +195,7 @@ func (s *Service) latestExposureLocked(projectID, environmentID, runtimeID, serv
 func (s *Service) latestProjectExposuresLocked(projectID string) []exposurev1.ExposureSpec {
 	latest := map[string]DeploymentJob{}
 	for _, job := range s.deployments {
-		if job.ProjectID != projectID || job.ExposureSpec == nil || job.Status == deploymentv1.StateCancelled {
+		if job.ProjectID != projectID || !reservedExposure(job) {
 			continue
 		}
 		key := job.EnvironmentID + "\x00" + job.RuntimeID + "\x00" + job.ServiceID
@@ -209,6 +209,27 @@ func (s *Service) latestProjectExposuresLocked(projectID string) []exposurev1.Ex
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Hostname+result[i].Path < result[j].Hostname+result[j].Path })
 	return result
+}
+
+// appliedExposure is the only exposure state that may be preserved as the
+// current public route. A failed pre-mutation rollout never reached Kubernetes
+// and must not make an equivalent retry appear unchanged.
+func appliedExposure(job DeploymentJob) bool {
+	return job.ExposureSpec != nil && job.Status == deploymentv1.StateSucceeded && job.RolloutState == deploymentv1.RolloutStateSucceeded
+}
+
+// reservedExposure keeps in-flight routes visible to overlap protection, while
+// releasing failed, rolled-back, and cancelled attempts for a safe retry.
+func reservedExposure(job DeploymentJob) bool {
+	if job.ExposureSpec == nil || job.Status == deploymentv1.StateFailed || job.Status == deploymentv1.StateCancelled {
+		return false
+	}
+	switch job.RolloutState {
+	case deploymentv1.RolloutStateFailed, deploymentv1.RolloutStateRolledBack, deploymentv1.RolloutStateRollbackFailed, deploymentv1.RolloutStateCleaned:
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *Service) latestKnownGoodLocked(projectID, environmentID, runtimeID, serviceID, nodeID, agentID string) (string, string, string) {
