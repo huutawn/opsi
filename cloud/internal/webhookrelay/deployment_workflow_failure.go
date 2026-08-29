@@ -46,9 +46,13 @@ func (e deploymentWorkflowExecutor) rollback(_ context.Context, run deploymentwo
 		if job.Status == deploymentv1.StateFailed || job.Status == deploymentv1.StateCancelled {
 			return failedStep(firstNonEmpty(job.FailureCode, "ROLLBACK_FAILED"), "Known-good rollback failed.", "Restore the exact known-good deployment manually.", false), nil
 		}
-		pending = pending || job.Status != deploymentv1.StateSucceeded
+		pending = pending || !rollbackRestored(job.Status)
 	}
 	return deploymentworkflow.StepResult{Pending: pending, Refs: refs}, nil
+}
+
+func rollbackRestored(status string) bool {
+	return status == deploymentv1.RolloutStateRolledBack
 }
 
 func (e deploymentWorkflowExecutor) cleanupFirstDeploy(_ context.Context, run deploymentworkflow.Run) (deploymentworkflow.StepResult, error) {

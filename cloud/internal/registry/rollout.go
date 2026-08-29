@@ -235,7 +235,7 @@ func validKnownGoodCandidate(job DeploymentJob) bool {
 	if snapshot.SchemaVersion != deploymentv1.JobSchemaVersion || snapshot.ProjectID != job.ProjectID || snapshot.Authority.BuildRecord.ProjectID != job.ProjectID || snapshot.Authority.BuildRecord.ServiceID != job.ServiceID || snapshot.Authority.EnvironmentID != job.EnvironmentID || snapshot.Authority.RuntimeID != job.RuntimeID || snapshot.Authority.NodeID != job.NodeID || snapshot.Authority.AgentID != job.AgentID || snapshot.SpecHash != job.SpecHash || snapshot.CreatedAt.IsZero() || snapshot.ActorUserID == "" || !validDeploymentIdempotencyKey(snapshot.IdempotencyKey) || snapshot.PayloadHash == "" {
 		return false
 	}
-	if snapshot.Image.Validate() != nil || snapshot.Workload.Validate() != nil || !reflect.DeepEqual(snapshot.Workload, snapshot.Workload.Normalize()) || snapshot.Image.Repository != snapshot.Authority.BuildRecord.Build.OCIRepository || snapshot.Image.Digest != snapshot.Authority.BuildRecord.Build.OCIDigest {
+	if snapshot.Image.Validate() != nil || snapshot.Workload.Validate() != nil || snapshot.Image.Repository != snapshot.Authority.BuildRecord.Build.OCIRepository || snapshot.Image.Digest != snapshot.Authority.BuildRecord.Build.OCIDigest {
 		return false
 	}
 	workloadHash, err := snapshot.Workload.Hash()

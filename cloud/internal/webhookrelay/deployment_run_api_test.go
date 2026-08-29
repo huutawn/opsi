@@ -19,6 +19,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
@@ -339,6 +340,15 @@ func TestRequiredManagedDependencyAcceptsCompleteNonHTTPEvidence(t *testing.T) {
 	complete.TargetBindingID = ""
 	if verificationSatisfiesRequiredDependency(managed, complete) {
 		t.Fatal("managed dependency without its selected binding was accepted")
+	}
+}
+
+func TestRollbackRestoredRequiresRolledBackEvidence(t *testing.T) {
+	if !rollbackRestored(deploymentv1.RolloutStateRolledBack) {
+		t.Fatal("rolled_back must complete the workflow rollback step")
+	}
+	if rollbackRestored(deploymentv1.StateSucceeded) || rollbackRestored(deploymentv1.StateFailed) {
+		t.Fatal("only factual rolled_back evidence may complete rollback")
 	}
 }
 

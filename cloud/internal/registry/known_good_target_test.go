@@ -133,6 +133,64 @@ func TestMemoryKnownGoodRejectsLegacyExactTargetHistory(t *testing.T) {
 	}
 }
 
+func TestMemoryKnownGoodAcceptsHistoricallyUnorderedWorkload(t *testing.T) {
+	_, _, base := rolloutRegistryFixture(t, "historical-workload-order")
+	candidate := base
+	candidate.ID = "dep-historical-workload-order"
+	candidate.CreatedAt = base.UpdatedAt.Add(time.Second)
+	candidate.UpdatedAt = candidate.CreatedAt
+	candidate.IdempotencyKey = "historical-workload-order"
+	candidate.PayloadHash = "payload-historical-workload-order"
+
+	snapshot := *base.Snapshot
+	workload := snapshot.Workload
+	workload.SecretReferences = []deploymentv1.SecretReference{
+		{EnvName: "Z_TOKEN", SecretID: "secret-z"},
+		{EnvName: "A_TOKEN", SecretID: "secret-a"},
+	}
+	hash, err := workload.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Workload = workload
+	snapshot.SpecHash = hash
+	candidate.Snapshot = &snapshot
+	candidate.SpecHash = hash
+
+	intent, err := buildRolloutIntent(candidate, candidate.ExposureSpec, "", "", "", "", "", deploymentv1.RolloutOperationApply, candidate.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.Action = intent.Operation
+	candidate.IntentHash = intent.IntentHash
+	candidate.RolloutIntent = &intent
+	candidate.DesiredDigest = intent.Desired.Image.Digest
+	candidate.PreviousDigest = intent.PreviousDigest
+	candidate.KnownGoodID = intent.RolloutID
+	candidate.KnownGoodHash = strings.Repeat("b", 64)
+
+	result := *base.TerminalResult
+	result.RolloutID = intent.RolloutID
+	result.IntentHash = intent.IntentHash
+	result.SpecHash = intent.Desired.WorkloadSpecHash
+	result.WorkloadSpecHash = intent.Desired.WorkloadSpecHash
+	result.ExposureSpecHash = intent.Desired.ExposureSpecHash
+	result.DesiredDigest = intent.Desired.Image.Digest
+	result.CurrentDigest = intent.Desired.Image.Digest
+	result.PreviousDigest = ""
+	result.KnownGoodID = candidate.KnownGoodID
+	result.KnownGoodHash = candidate.KnownGoodHash
+	candidate.RolloutStateHash = result.StateHash
+	candidate.CurrentDigest = result.CurrentDigest
+	candidate.ReadinessEvidenceHash = result.ReadinessEvidenceHash
+	candidate.TerminalResult = &result
+	candidate.RolloutVersion = 1
+
+	if !validKnownGoodCandidate(candidate) {
+		t.Fatal("historical workload ordering must not discard factual known-good evidence")
+	}
+}
+
 func TestMemoryExposureKnownGoodDoesNotCrossAgentTarget(t *testing.T) {
 	service, projectID, base := rolloutRegistryFixture(t, "exposure-target")
 	now := base.UpdatedAt.Add(time.Second)
