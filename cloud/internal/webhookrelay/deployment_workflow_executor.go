@@ -428,12 +428,16 @@ func (e deploymentWorkflowExecutor) deploy(ctx context.Context, run deploymentwo
 			if cancelErr := e.server.cancelWorkflowDeployments(run.ProjectID, failedRun, run.ID); cancelErr != nil {
 				return failedStep("FAIL_FAST_CANCEL_FAILED", "A service failed and another rollout could not be stopped safely.", "Inspect active deployment jobs and stop the remaining rollout before retrying.", false), cancelErr
 			}
-			return deploymentworkflow.StepResult{Refs: refs, RollbackRequired: rollbackEligible && run.Plan.FailurePolicy.RollbackKnownGood, CleanupRequired: !rollbackEligible, FailureCode: firstNonEmpty(job.FailureCode, "DEPLOYMENT_FAILED"), FailureMessage: firstNonEmpty(job.FailureMessageRedacted, "An immutable deployment failed."), NextAction: "Inspect the factual deployment evidence before creating a new run."}, nil
+			return deploymentworkflow.StepResult{Refs: refs, RollbackRequired: rollbackEligible && run.Plan.FailurePolicy.RollbackKnownGood, CleanupRequired: !rollbackEligible && failedRolloutNeedsFirstDeployCleanup(job), FailureCode: firstNonEmpty(job.FailureCode, "DEPLOYMENT_FAILED"), FailureMessage: firstNonEmpty(job.FailureMessageRedacted, "An immutable deployment failed."), NextAction: "Inspect the factual deployment evidence before creating a new run."}, nil
 		default:
 			pending = true
 		}
 	}
 	return deploymentworkflow.StepResult{Pending: pending, Refs: refs}, nil
+}
+
+func failedRolloutNeedsFirstDeployCleanup(job registry.DeploymentJob) bool {
+	return job.RolloutIntent == nil || job.RolloutIntent.PreviousKnownGoodID == ""
 }
 
 func (e deploymentWorkflowExecutor) verify(ctx context.Context, run deploymentworkflow.Run) (deploymentworkflow.StepResult, error) {

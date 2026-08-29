@@ -107,6 +107,15 @@ func TestWorkflowHostnameIsDeterministicAndProjectScoped(t *testing.T) {
 	}
 }
 
+func TestFailedRolloutCleanupRequiresNoKnownGoodAuthority(t *testing.T) {
+	if !failedRolloutNeedsFirstDeployCleanup(registry.DeploymentJob{}) {
+		t.Fatal("rollout without durable authority did not require first-deploy cleanup")
+	}
+	if failedRolloutNeedsFirstDeployCleanup(registry.DeploymentJob{RolloutIntent: &deploymentv1.RolloutIntent{PreviousKnownGoodID: "rol-known-good"}}) {
+		t.Fatal("rollout with durable known-good authority requested first-deploy cleanup")
+	}
+}
+
 func TestWorkflowTargetUsesConservativeZeroConfigCapacity(t *testing.T) {
 	server := NewServer(Config{})
 	target := workflowTarget(context.Background(), server.Registry, "project-missing", deploymentworkflow.Target{})
