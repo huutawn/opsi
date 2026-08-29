@@ -137,7 +137,7 @@ test("a verified deployment publishes exactly one selected service through the c
 	await page.getByLabel("Running service").selectOption("svc-web");
 	const hostname = page.getByLabel("Override hostname (optional)");
 	await hostname.fill("tcip.103.252.137.163.nip.io");
-	await page.getByRole("button", { name: "Publish service" }).click();
+	await page.getByRole("button", { name: "Publish or update service" }).click();
 	await expect.poll(() => exposure).toMatchObject({
 		schema_version: "opsi.exposure_mutation/v1",
 		base_deployment_job_id: "dep-web",
@@ -147,7 +147,7 @@ test("a verified deployment publishes exactly one selected service through the c
 	await expect(page.getByRole("link", { name: "http://tcip.103.252.137.163.nip.io" })).toBeVisible();
 	await hostname.fill("tcip");
 	await expect(page.getByRole("alert").filter({ hasText: "public DNS hostname" })).toBeVisible();
-	await expect(page.getByRole("button", { name: "Publish service" })).toBeDisabled();
+	await expect(page.getByRole("button", { name: "Publish or update service" })).toBeDisabled();
 });
 
 test("review plan has no WCAG 2.1 A or AA axe violations", async ({ page }) => {

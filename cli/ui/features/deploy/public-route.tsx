@@ -74,8 +74,8 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
   return (
     <section aria-labelledby="public-route-title" className="mt-4 border border-outline-variant/30 bg-surface-container p-4">
       <p className="text-xs font-medium uppercase tracking-wider text-secondary">Public route</p>
-      <h3 className="mt-1 text-base font-semibold" id="public-route-title">Publish one running service</h3>
-      <p className="mt-1 text-sm text-on-surface-variant">Choose the application users should reach. Opsi previews and applies one canonical exposure rollout; it does not redeploy the source.</p>
+      <h3 className="mt-1 text-base font-semibold" id="public-route-title">Publish or update one running service</h3>
+      <p className="mt-1 text-sm text-on-surface-variant">Choose the application users should reach. You can replace its hostname after an earlier publish. Opsi previews and applies one canonical exposure rollout; it does not redeploy the source.</p>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <label className="text-sm font-medium" htmlFor="public-route-service">Running service
           <Select disabled={!canMutate || busy} id="public-route-service" onChange={(event) => setServiceID(event.target.value)} value={serviceID}>
@@ -91,7 +91,7 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
       {hostnameError && <p className="mt-2 text-sm text-error" role="alert">{hostnameError}</p>}
       {failure && <p className="mt-3 border border-status-failed/40 bg-error-container/10 p-3 text-sm text-error" role="alert">{failure}</p>}
       {rollout && <RouteRollout hostname={resolvedHostname} rollout={rollout} />}
-      {canMutate ? <Button className="mt-4" disabled={busy || !selected || !resolvedHostname || Boolean(hostnameError)} onClick={() => void publish()}>{busy ? "Creating route…" : "Publish service"}</Button> : <p className="mt-4 text-sm text-on-surface-variant">Your role can inspect this deployment but cannot publish a route.</p>}
+      {canMutate ? <Button className="mt-4" disabled={busy || !selected || !resolvedHostname || Boolean(hostnameError)} onClick={() => void publish()}>{busy ? "Applying route…" : "Publish or update service"}</Button> : <p className="mt-4 text-sm text-on-surface-variant">Your role can inspect this deployment but cannot publish a route.</p>}
     </section>
   );
 }
