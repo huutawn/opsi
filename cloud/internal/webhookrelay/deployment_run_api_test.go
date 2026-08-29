@@ -20,6 +20,7 @@ import (
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
 
 type existingBuildRepository struct{}
@@ -298,6 +299,46 @@ func TestProvisioningWaitsForStableResourceBindings(t *testing.T) {
 	checkpoints, pending, err = readyBindingCheckpoints(bindings)
 	if err == nil || pending || len(checkpoints) != 0 || !strings.Contains(err.Error(), "ROLE_CREATE_FAILED") {
 		t.Fatalf("checkpoints=%+v pending=%v err=%v", checkpoints, pending, err)
+	}
+}
+
+func TestRequiredManagedDependencyAcceptsCompleteNonHTTPEvidence(t *testing.T) {
+	managed := repositoryanalysis.Dependency{Protocol: "postgres"}
+	complete := verificationv1.VerificationRun{
+		OverallStatus:   verificationv1.RunStatusPartiallyVerified,
+		TargetBindingID: "binding-postgres",
+		ProviderHealth: verificationv1.ProviderHealthLayer{
+			Status: verificationv1.LayerStatusHealthy,
+		},
+		ContractResolution: verificationv1.ContractResolutionLayer{
+			Status: verificationv1.LayerStatusResolved,
+		},
+		Connection: verificationv1.ConnectionLayer{
+			Status: verificationv1.LayerStatusVerified,
+		},
+		ConsumerHealth: verificationv1.ConsumerHealthLayer{
+			Status: verificationv1.LayerStatusHealthy,
+		},
+		ConsumerAssertion: verificationv1.ConsumerAssertionLayer{
+			Status: verificationv1.LayerStatusNotConfigured,
+		},
+	}
+	if !verificationSatisfiesRequiredDependency(managed, complete) {
+		t.Fatal("complete managed-resource evidence must satisfy the required dependency gate")
+	}
+
+	for name, dependency := range map[string]repositoryanalysis.Dependency{
+		"http":                  {Protocol: "http"},
+		"managed-with-contract": {Protocol: "redis", Verification: &repositoryanalysis.VerificationContract{Path: "/health", ExpectedStatus: 200}},
+	} {
+		if verificationSatisfiesRequiredDependency(dependency, complete) {
+			t.Fatalf("%s dependency bypassed the HTTP assertion requirement", name)
+		}
+	}
+
+	complete.TargetBindingID = ""
+	if verificationSatisfiesRequiredDependency(managed, complete) {
+		t.Fatal("managed dependency without its selected binding was accepted")
 	}
 }
 

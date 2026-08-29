@@ -501,9 +501,10 @@ func (s *Server) ExecuteDependencyVerification(ctx context.Context, projectID, e
 	// Save to store if available
 	if s.Verifications != nil {
 		saved, err := s.Verifications.Create(ctx, run)
-		if err == nil {
-			run = saved
+		if err != nil {
+			return verificationv1.VerificationRun{}, fmt.Errorf("persist verification evidence")
 		}
+		run = saved
 	}
 
 	return run, nil

@@ -510,13 +510,37 @@ func (e deploymentWorkflowExecutor) verify(ctx context.Context, run deploymentwo
 			return workflowFailure(verifyErr, "VERIFICATION_FAILED", "Inspect dependency and workload health evidence, then retry."), verifyErr
 		}
 		refs.Checkpoints = append(refs.Checkpoints, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityVerification, verification.ID, 0, authorityStateHash(verification), deploymentworkflow.StateVerifying))
-		if verification.OverallStatus != verificationv1.RunStatusVerified {
+		if !verificationSatisfiesRequiredDependency(dependency, verification) {
 			code := firstNonEmpty(verification.FailureCode, "VERIFICATION_INCOMPLETE")
 			message := "Post-deployment verification did not produce VERIFIED evidence."
 			return failedStep(code, message, "Configure the missing consumer assertion or inspect failed dependency evidence, then retry.", true), nil
 		}
 	}
 	return deploymentworkflow.StepResult{Refs: refs}, nil
+}
+
+// verificationSatisfiesRequiredDependency is the workflow's single success
+// gate for a required dependency. HTTP dependencies require a passing consumer
+// assertion. Managed connection protocols have no HTTP assertion surface, so
+// their complete provider, binding, connection, and consumer evidence is the
+// applicable success condition while the API record remains PARTIALLY_VERIFIED.
+func verificationSatisfiesRequiredDependency(dependency repositoryanalysis.Dependency, verification verificationv1.VerificationRun) bool {
+	if verification.OverallStatus == verificationv1.RunStatusVerified {
+		return true
+	}
+	if dependency.Verification != nil || verification.OverallStatus != verificationv1.RunStatusPartiallyVerified || verification.TargetBindingID == "" {
+		return false
+	}
+	switch dependency.Protocol {
+	case "postgres", "redis", "nats":
+		return verification.ProviderHealth.Status == verificationv1.LayerStatusHealthy &&
+			verification.ContractResolution.Status == verificationv1.LayerStatusResolved &&
+			verification.Connection.Status == verificationv1.LayerStatusVerified &&
+			verification.ConsumerHealth.Status == verificationv1.LayerStatusHealthy &&
+			verification.ConsumerAssertion.Status == verificationv1.LayerStatusNotConfigured
+	default:
+		return false
+	}
 }
 
 func workflowPreflightHash(values []deploymentv1.PreflightResult) string {
