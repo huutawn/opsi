@@ -134,9 +134,10 @@ test("a verified deployment publishes exactly one selected service through the c
 	await page.goto("/?project=proj-1&view=deploy");
 	await expect(page.getByRole("heading", { name: "Repository is running" })).toBeVisible();
 	await expect(page.getByRole("link", { name: "https://tcip" })).toHaveCount(0);
-	await page.getByLabel("Running service").selectOption("svc-web");
+	await page.getByRole("combobox", { name: "Running service" }).selectOption("svc-web");
 	const hostname = page.getByLabel("Override hostname (optional)");
-	await hostname.fill("tcip.103.252.137.163.nip.io");
+	await expect(hostname).toHaveAttribute("placeholder", "tcip.103.252.137.163.nip.io");
+	await expect(page.getByText("A public hostname was selected automatically from the server:")).toBeVisible();
 	await page.getByRole("button", { name: "Publish or update service" }).click();
 	await expect.poll(() => exposure).toMatchObject({
 		schema_version: "opsi.exposure_mutation/v1",
@@ -428,7 +429,7 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		else if (/\/deployment-runs\/run-1$/.test(path)) body = current();
 		else if (path.endsWith("/topology/facts")) body = source?.placement?.() ?? placementFacts();
 		else if (path.endsWith("/topology")) body = { schema_version: "opsi.topology_plan/v1", id: "topology-1", project_id: "proj-1", revision: 1, state_hash: hash("b"), plan_hash: hash("c"), assignments: [] };
-		else if (path.endsWith("/nodes")) body = { nodes: [] };
+		else if (path.endsWith("/nodes")) body = { nodes: [{ id: "node-1", name: "server-1", role: "primary", status: "healthy", public_host: "103.252.137.163" }] };
 		else if (path.endsWith("/services")) body = { services: [] };
 		else if (path.endsWith("/deployments")) body = { deployments: [] };
 		else if (/\/bootstrap-sessions\/boot-1\/events$/.test(path) && source?.bootstrapEvents) body = source.bootstrapEvents();
@@ -467,7 +468,7 @@ function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting
 			dependencies: [{ from: "identity-api", to: "postgres", protocol: "postgres", required: true, confidence: "high", reason: "Compose", evidence: [], injections: [{ environment_name: "ConnectionStrings__Database", symbolic_source: "connection.postgres.npgsql" }] }, { from: "identity-web", to: "identity-api", protocol: "http", strategy: "same_origin", path: "/api", required: true, verification: { type: "consumer_http", path: "/health", expected_status: 200 }, confidence: "high", reason: "Route", evidence: [] }],
 			bindings: [{ from: "identity-web", to: "identity-api", kind: "browser_http", path: "/api", confidence: "high", reason: "Route", evidence: [] }],
 			secrets: [{ name: "jwt-signing-key", application_key: "identity-api", environment_name: "Jwt__SigningKey", generated: true, secret_ref: "generated://jwt-signing-key", revision: 0, display: "Generated and securely stored", confidence: "high", reason: "Configuration", evidence: [] }],
-			issues: [], analysis_scope: { application_roots: [], exclude_paths: [] }, analysis_scope_hash: hash("s"), evidence_coverage: { candidates_found: 6, candidates_selected: 6, files_inspected: 6, bytes_inspected: 2048 }, target: { environment_id: "env-1", runtime_id: "runtime-1", hostname: "identity.apps.example.test", exposure: "public", cpu_milli: 250, memory_bytes: 268435456 }, authority_revisions: { source_commit_sha: hash("d").slice(0, 40) }, failure_policy: { fail_fast: true, rollback_known_good: true, retain_persistent_data: true, max_attempts: 3 },
+			issues: [], analysis_scope: { application_roots: [], exclude_paths: [] }, analysis_scope_hash: hash("s"), evidence_coverage: { candidates_found: 6, candidates_selected: 6, files_inspected: 6, bytes_inspected: 2048 }, target: { environment_id: "env-1", runtime_id: "runtime-1", node_id: "node-1", hostname: "identity.apps.example.test", exposure: "public", cpu_milli: 250, memory_bytes: 268435456 }, authority_revisions: { source_commit_sha: hash("d").slice(0, 40) }, failure_policy: { fail_fast: true, rollback_known_good: true, retain_persistent_data: true, max_attempts: 3 },
 		},
 		analysis: { authority: "compose", issues: [], files_inspected: 6, bytes_inspected: 2048, truncated: false }, authority_refs: { checkpoints: [] }, preflight_hash: state === "awaiting_warning_ack" ? hash("p") : undefined, failure: state === "failed" ? { step: "building", code: "BUILD_AUTHORITY_UNAVAILABLE", message: "Build authority unavailable.", next_action: "Retry the failed step.", retryable: true } : state === "stale" ? { step: "preflighting", code: "DEPLOYMENT_PLAN_STALE", message: "An authority changed.", next_action: "Analyze and review again.", retryable: false } : undefined, attempt: state === "awaiting_approval" ? 0 : 1, revision: state === "awaiting_approval" ? 3 : 4, created_at: "2026-08-24T00:00:00Z", updated_at: "2026-08-24T00:00:00Z",
 	};

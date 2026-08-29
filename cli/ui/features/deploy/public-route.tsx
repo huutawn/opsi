@@ -21,11 +21,29 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
   const [rollout, setRollout] = useState<DeploymentJob | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
+  const [nodePublicHost, setNodePublicHost] = useState("");
   const candidates = useMemo<PublishableApplication[]>(() => result.applications.filter((application): application is PublishableApplication => Boolean(application.deployment_job_id && application.container_port)), [result.applications]);
   const selected = candidates.find((application) => application.service_id === serviceID);
-  const defaultHostname = plan.target.hostname?.trim().toLowerCase() || "";
+  const targetHostname = plan.target.hostname?.trim().toLowerCase() || "";
+  const defaultHostname = automaticPublicHostname(targetHostname, nodePublicHost);
   const resolvedHostname = hostname.trim().toLowerCase() || defaultHostname;
-  const hostnameError = hostname.trim() ? validatePublicHostname(hostname) : "";
+  const hostnameError = hostname.trim() ? validatePublicHostname(hostname) : defaultHostname ? validatePublicHostname(defaultHostname) : "";
+
+  useEffect(() => {
+    let active = true;
+    if (!plan.target.node_id) {
+      setNodePublicHost("");
+      return () => { active = false; };
+    }
+    void client.nodes(projectID).then((nodes) => {
+      if (!active) return;
+      const node = nodes.find((candidate) => candidate.id === plan.target.node_id);
+      setNodePublicHost(node?.public_host?.trim().toLowerCase() || "");
+    }).catch(() => {
+      if (active) setNodePublicHost("");
+    });
+    return () => { active = false; };
+  }, [client, plan.target.node_id, projectID]);
 
   useEffect(() => {
     if (!rollout || rolloutReachedTerminalState(rollout)) return;
@@ -87,7 +105,7 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
           <Input aria-describedby="public-route-hostname-help" aria-invalid={Boolean(hostnameError)} disabled={!canMutate || busy} id="public-route-hostname" onChange={(event) => setHostname(event.target.value)} placeholder={defaultHostname || "app.example.com"} value={hostname} />
         </label>
       </div>
-      <p className="mt-2 text-xs text-on-surface-variant" id="public-route-hostname-help">{defaultHostname ? <>The deployment default is <span className="font-mono">{defaultHostname}</span>. Override it later with a public DNS name such as <span className="font-mono">tcip.103.252.137.163.nip.io</span>.</> : <>No default hostname is configured. Enter a public DNS name such as <span className="font-mono">tcip.103.252.137.163.nip.io</span>.</>} TLS is not configured for this route, so the published URL uses HTTP.</p>
+      <p className="mt-2 text-xs text-on-surface-variant" id="public-route-hostname-help">{defaultHostname ? <>{defaultHostname !== targetHostname ? <>A public hostname was selected automatically from the server: <span className="font-mono">{defaultHostname}</span>.</> : <>The deployment default is <span className="font-mono">{defaultHostname}</span>.</>} Override it only after configuring a custom DNS name.</> : <>A public hostname could not be derived from the selected server. Enter a public DNS name.</>} TLS is not configured for this route, so the published URL uses HTTP.</p>
       {hostnameError && <p className="mt-2 text-sm text-error" role="alert">{hostnameError}</p>}
       {failure && <p className="mt-3 border border-status-failed/40 bg-error-container/10 p-3 text-sm text-error" role="alert">{failure}</p>}
       {rollout && <RouteRollout hostname={resolvedHostname} rollout={rollout} />}
@@ -113,6 +131,15 @@ function validatePublicHostname(value: string) {
   const labels = hostname.split(".");
   if (labels.length < 2 || labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return "Enter a public DNS hostname such as app.example.com.";
   return "";
+}
+
+function automaticPublicHostname(targetHostname: string, publicHost: string) {
+  if (!targetHostname || targetHostname.includes(".") || !isIPv4(publicHost)) return targetHostname;
+  return `${targetHostname}.${publicHost}.nip.io`;
+}
+
+function isIPv4(value: string) {
+  return /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$/.test(value);
 }
 
 function routeFailure(cause: unknown) {
