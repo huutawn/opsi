@@ -51,6 +51,12 @@ func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	if startLocalInstallationClaim(w, r, cfg, factory, authFlow) {
 		return
 	}
+	if startLocalInstallationDiscovery(w, r, cfg, factory, authFlow) {
+		return
+	}
+	if serveLocalInstallationDiscoveryResult(w, r, authFlow) {
+		return
+	}
 	if localTelemetry(w, r, cfg, factory) || localSecretOperation(w, r, cfg, factory) || localIncidentOperation(w, r, cfg, factory) {
 		return
 	}
@@ -162,12 +168,69 @@ func startLocalInstallationClaim(w http.ResponseWriter, r *http.Request, cfg con
 	}
 	expiresAt := time.Now().UTC().Add(5 * time.Minute)
 	flow.mu.Lock()
-	for pendingState, expiry := range flow.installationClaims {
-		if time.Now().UTC().After(expiry) {
+	for pendingState, pending := range flow.installationClaims {
+		if time.Now().UTC().After(pending.ExpiresAt) {
 			delete(flow.installationClaims, pendingState)
 		}
 	}
-	flow.installationClaims[state] = expiresAt
+	flow.installationClaims[state] = localInstallationClaimPending{ProjectID: projectID, ExpiresAt: expiresAt}
+	flow.mu.Unlock()
+	writeLocalJSON(w, http.StatusOK, map[string]any{"authorization_url": started.AuthorizationURL, "status": "started", "expires_at": expiresAt})
+	return true
+}
+
+func startLocalInstallationDiscovery(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), flow *localAuthFlow) bool {
+	projectID, ok := localInstallationDiscoveryProjectID(r.URL.Path)
+	if !ok {
+		return false
+	}
+	if r.Method != http.MethodPost {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return true
+	}
+	if err := validateGitHubProjectID(projectID); err != nil {
+		writeLocalError(w, r, http.StatusBadRequest, "GITHUB_PROJECT_ID_INVALID", err.Error())
+		return true
+	}
+	pat := optionalPAT(factory)
+	if pat == "" {
+		writeLocalError(w, r, http.StatusUnauthorized, "CLOUD_PAT_REQUIRED", "Cloud PAT is missing from the OS keychain")
+		return true
+	}
+	callbackURL, err := localInstallationDiscoveryCallbackURL(r.Host)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadRequest, "LOCAL_CALLBACK_INVALID", err.Error())
+		return true
+	}
+	client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "INVALID_CLOUD_URL", "local cloud_url is invalid")
+		return true
+	}
+	state, err := randomState(nil)
+	if err != nil {
+		writeLocalError(w, r, http.StatusServiceUnavailable, "GITHUB_DISCOVERY_STATE_UNAVAILABLE", "installation discovery state generation failed")
+		return true
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), githubCommandTimeout)
+	defer cancel()
+	started, err := client.StartInstallationDiscovery(ctx, projectID, callbackURL, state)
+	if err != nil {
+		writeLocalError(w, r, localCloudStatus(err), "GITHUB_INSTALLATION_DISCOVERY_START_FAILED", "GitHub installation discovery could not be started; retry after checking project access and Cloud connectivity")
+		return true
+	}
+	if err := validateGitHubAuthorizationURL(started.AuthorizationURL); err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "GITHUB_AUTHORIZATION_URL_INVALID", err.Error())
+		return true
+	}
+	expiresAt := time.Now().UTC().Add(5 * time.Minute)
+	flow.mu.Lock()
+	for pendingState, pending := range flow.installationDiscoveries {
+		if time.Now().UTC().After(pending.ExpiresAt) {
+			delete(flow.installationDiscoveries, pendingState)
+		}
+	}
+	flow.installationDiscoveries[state] = localInstallationDiscoveryPending{ProjectID: projectID, ExpiresAt: expiresAt}
 	flow.mu.Unlock()
 	writeLocalJSON(w, http.StatusOK, map[string]any{"authorization_url": started.AuthorizationURL, "status": "started", "expires_at": expiresAt})
 	return true
@@ -180,12 +243,12 @@ func completeLocalInstallationClaim(w http.ResponseWriter, r *http.Request, cfg 
 	}
 	grant, state := r.URL.Query().Get("grant"), r.URL.Query().Get("state")
 	flow.mu.Lock()
-	expiresAt, ok := flow.installationClaims[state]
+	pending, ok := flow.installationClaims[state]
 	if ok {
 		delete(flow.installationClaims, state)
 	}
 	flow.mu.Unlock()
-	if !ok || grant == "" || time.Now().UTC().After(expiresAt) {
+	if !ok || grant == "" || time.Now().UTC().After(pending.ExpiresAt) {
 		writeLocalError(w, r, http.StatusUnauthorized, "GITHUB_INSTALLATION_CALLBACK_INVALID", "installation authorization callback expired, was reused, or is invalid")
 		return
 	}
@@ -206,8 +269,56 @@ func completeLocalInstallationClaim(w http.ResponseWriter, r *http.Request, cfg 
 		writeLocalError(w, r, localCloudStatus(err), "GITHUB_INSTALLATION_CLAIM_REDEEM_FAILED", "Cloud rejected the one-time installation grant; restart the connection flow")
 		return
 	}
-	location := "/?github=claimed&installation_id=" + strconv.FormatInt(result.Installation.InstallationID, 10)
+	location := localDeployCallbackRedirect(pending.ProjectID, url.Values{
+		"github":          {"claimed"},
+		"installation_id": {strconv.FormatInt(result.Installation.InstallationID, 10)},
+	})
 	http.Redirect(w, r, location, http.StatusFound)
+}
+
+func completeLocalInstallationDiscovery(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), flow *localAuthFlow) {
+	if r.Method != http.MethodGet {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return
+	}
+	grant, state := r.URL.Query().Get("grant"), r.URL.Query().Get("state")
+	flow.mu.Lock()
+	pending, ok := flow.installationDiscoveries[state]
+	if ok {
+		delete(flow.installationDiscoveries, state)
+	}
+	flow.mu.Unlock()
+	if !ok || grant == "" || time.Now().UTC().After(pending.ExpiresAt) {
+		writeLocalError(w, r, http.StatusUnauthorized, "GITHUB_INSTALLATION_DISCOVERY_CALLBACK_INVALID", "installation discovery callback expired, was reused, or is invalid")
+		return
+	}
+	pat := optionalPAT(factory)
+	if pat == "" {
+		writeLocalError(w, r, http.StatusUnauthorized, "CLOUD_PAT_REQUIRED", "Cloud PAT is missing from the OS keychain")
+		return
+	}
+	client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "INVALID_CLOUD_URL", "local cloud_url is invalid")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), githubCommandTimeout)
+	defer cancel()
+	installations, err := client.RedeemInstallationDiscovery(ctx, grant, state)
+	if err != nil {
+		writeLocalError(w, r, localCloudStatus(err), "GITHUB_INSTALLATION_DISCOVERY_REDEEM_FAILED", "Cloud rejected the one-time installation discovery grant; restart the connection flow")
+		return
+	}
+	flow.mu.Lock()
+	flow.discoveredInstallations[pending.ProjectID] = localInstallationDiscoveryResult{Installations: installations, ExpiresAt: time.Now().UTC().Add(90 * time.Second)}
+	flow.mu.Unlock()
+	http.Redirect(w, r, localDeployCallbackRedirect(pending.ProjectID, url.Values{"github": {"discovered"}}), http.StatusFound)
+}
+
+func localDeployCallbackRedirect(projectID string, query url.Values) string {
+	query.Set("project", projectID)
+	query.Set("view", "deploy")
+	return "/?" + query.Encode()
 }
 
 func localInstallationClaimIDs(path string) (string, int64, bool) {
@@ -226,7 +337,57 @@ func localInstallationClaimIDs(path string) (string, int64, bool) {
 	return projectID, installationID, true
 }
 
+func localInstallationDiscoveryProjectID(path string) (string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 8 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "github" || parts[5] != "installations" || parts[6] != "discover" || parts[7] != "start" {
+		return "", false
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	return projectID, err == nil
+}
+
+func serveLocalInstallationDiscoveryResult(w http.ResponseWriter, r *http.Request, flow *localAuthFlow) bool {
+	projectID, ok := localInstallationDiscoveryResultProjectID(r.URL.Path)
+	if !ok {
+		return false
+	}
+	if r.Method != http.MethodGet {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return true
+	}
+	flow.mu.Lock()
+	result, found := flow.discoveredInstallations[projectID]
+	if found && time.Now().UTC().After(result.ExpiresAt) {
+		delete(flow.discoveredInstallations, projectID)
+		found = false
+	}
+	flow.mu.Unlock()
+	if !found {
+		writeLocalJSON(w, http.StatusOK, map[string]any{"installations": []cloudclient.GitHubInstallation{}})
+		return true
+	}
+	writeLocalJSON(w, http.StatusOK, map[string]any{"installations": result.Installations})
+	return true
+}
+
+func localInstallationDiscoveryResultProjectID(path string) (string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 7 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "github" || parts[5] != "installations" || parts[6] != "discover" {
+		return "", false
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	return projectID, err == nil
+}
+
 func localInstallationCallbackURL(hostport string) (string, error) {
+	return localGitHubCallbackURL(hostport, "/api/local/github/installations/claim/callback")
+}
+
+func localInstallationDiscoveryCallbackURL(hostport string) (string, error) {
+	return localGitHubCallbackURL(hostport, "/api/local/github/installations/discover/callback")
+}
+
+func localGitHubCallbackURL(hostport, callbackPath string) (string, error) {
 	host, port, err := net.SplitHostPort(hostport)
 	if err != nil || port == "" {
 		return "", fmt.Errorf("local callback host must include the loopback listener port")
@@ -237,7 +398,7 @@ func localInstallationCallbackURL(hostport string) (string, error) {
 			return "", fmt.Errorf("local callback host must be 127.0.0.1 or localhost")
 		}
 	}
-	return "http://" + net.JoinHostPort(host, port) + "/api/local/github/installations/claim/callback", nil
+	return "http://" + net.JoinHostPort(host, port) + callbackPath, nil
 }
 
 func localCloudStatus(err error) int {
@@ -291,7 +452,7 @@ func isPlacementPreview(path string) bool {
 }
 
 func copyProxyHeaders(dst, src http.Header) {
-	for _, key := range []string{"Content-Type", "X-Request-ID", "Idempotency-Key"} {
+	for _, key := range []string{"Content-Type", "X-Request-ID", "Idempotency-Key", "If-Match"} {
 		if value := src.Get(key); value != "" {
 			dst.Set(key, value)
 		}

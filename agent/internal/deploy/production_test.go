@@ -144,7 +144,7 @@ func TestRenderProductionResourcesIsDeterministicAndOwned(t *testing.T) {
 		t.Fatal("renderer output is not deterministic")
 	}
 	sum := sha256.Sum256(first)
-	if got := hex.EncodeToString(sum[:]); got != "3096d45f0e5717b0260cf09fb1fbcb1b3639ea7487ae32459e8f2faa2875f2c6" {
+	if got := hex.EncodeToString(sum[:]); got != "cccb51f7dcb2a69d30a1d22633743d53f1c69cac4b89c485df70dc73c7ed26c8" {
 		t.Fatalf("renderer golden hash = %s", got)
 	}
 	var list map[string]any
@@ -157,6 +157,11 @@ func TestRenderProductionResourcesIsDeterministicAndOwned(t *testing.T) {
 	}
 	if resources.DeploymentName != resources.ServiceName || namespace == "" {
 		t.Fatalf("resource identity = %+v namespace=%q", resources, namespace)
+	}
+	template := resources.Deployment["spec"].(map[string]any)["template"].(map[string]any)
+	templateLabels := template["metadata"].(map[string]any)["labels"].(map[string]string)
+	if templateLabels["app.kubernetes.io/name"] != resources.DeploymentName {
+		t.Fatalf("pod template must carry workload identity label: %v", templateLabels)
 	}
 	if !strings.Contains(string(first), `"type":"ClusterIP"`) || !strings.Contains(string(first), `"name":"app"`) {
 		t.Fatalf("renderer omitted required ownership/service/application fields: %s", first)
@@ -174,6 +179,26 @@ func TestRenderProductionResourcesUsesTypedSecretRefs(t *testing.T) {
 	}
 	if strings.Contains(string(data), "must-not-be-inline") || !strings.Contains(string(data), "secretKeyRef") || !strings.Contains(string(data), "CACHE_PASSWORD") {
 		t.Fatalf("secret was rendered unsafely: %s", data)
+	}
+}
+
+func TestRenderProductionResourcesUsesStartupProbe(t *testing.T) {
+	command := testAgentCommand(t)
+	command.Workload.StartupProbe = &deploymentv1.Probe{Path: "/health", Port: 8080, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 60}
+	hash, err := command.Workload.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.SpecHash = hash
+	_, resources, _, err := renderProductionResources(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := resources.Deployment["spec"].(map[string]any)["template"].(map[string]any)
+	containers := template["spec"].(map[string]any)["containers"].([]any)
+	probe := containers[0].(map[string]any)["startupProbe"].(map[string]any)
+	if probe["failureThreshold"] != int32(60) || probe["periodSeconds"] != int32(5) {
+		t.Fatalf("startup probe=%v", probe)
 	}
 }
 

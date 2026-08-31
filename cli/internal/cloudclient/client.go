@@ -107,6 +107,44 @@ func (c *Client) ApplyServiceConfiguration(ctx context.Context, projectID, servi
 	return response, err
 }
 
+func (c *Client) CreateProposalReview(ctx context.Context, projectID, applicationID, key string, request ProposalReviewCreateRequest) (ProposalReview, error) {
+	var response ProposalReview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "services", applicationID, "proposal-reviews"}, request, key, &response)
+	return response, err
+}
+
+func (c *Client) GetProposalReview(ctx context.Context, projectID, reviewID string) (ProposalReview, error) {
+	var response ProposalReview
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "proposal-reviews", reviewID}, nil, "", &response)
+	return response, err
+}
+
+func (c *Client) ListProposalReviews(ctx context.Context, projectID, applicationID string) ([]ProposalReview, error) {
+	var response struct {
+		Reviews []ProposalReview `json:"reviews"`
+	}
+	err := c.do(ctx, http.MethodGet, []string{"api", "projects", projectID, "services", applicationID, "proposal-reviews"}, nil, "", &response)
+	return response.Reviews, err
+}
+
+func (c *Client) ApproveProposalReview(ctx context.Context, projectID, reviewID, key string) (ProposalReview, error) {
+	var response ProposalReview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "proposal-reviews", reviewID, "approve"}, map[string]any{}, key, &response)
+	return response, err
+}
+
+func (c *Client) RejectProposalReview(ctx context.Context, projectID, reviewID, key string) (ProposalReview, error) {
+	var response ProposalReview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "proposal-reviews", reviewID, "reject"}, map[string]any{}, key, &response)
+	return response, err
+}
+
+func (c *Client) ApplyProposalReview(ctx context.Context, projectID, reviewID, key string) (ProposalReview, error) {
+	var response ProposalReview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "proposal-reviews", reviewID, "apply"}, map[string]any{}, key, &response)
+	return response, err
+}
+
 func (c *Client) RegisterActionDevice(ctx context.Context, projectID, displayName, idempotencyKey string, publicKey []byte) (ActionDevice, error) {
 	var response ActionDevice
 	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "action-devices"}, map[string]any{"display_name": displayName, "public_key": publicKey, "idempotency_key": idempotencyKey}, idempotencyKey, &response)
@@ -457,6 +495,16 @@ func (c *Client) StartInstallationClaim(ctx context.Context, projectID string, i
 	return response, err
 }
 
+func (c *Client) StartInstallationDiscovery(ctx context.Context, projectID, localCallback, localState string) (InstallationClaimStart, error) {
+	request := struct {
+		LocalCallback string `json:"local_callback"`
+		LocalState    string `json:"local_state"`
+	}{localCallback, localState}
+	var response InstallationClaimStart
+	err := c.do(ctx, http.MethodPost, []string{"v1", "projects", projectID, "github", "installations", "discover", "start"}, request, "installation-discovery-start", &response)
+	return response, err
+}
+
 func (c *Client) RedeemInstallationClaim(ctx context.Context, grant, localState string) (InstallationClaimResult, error) {
 	request := struct {
 		Grant string `json:"grant"`
@@ -467,10 +515,43 @@ func (c *Client) RedeemInstallationClaim(ctx context.Context, grant, localState 
 	return response, err
 }
 
+func (c *Client) RedeemInstallationDiscovery(ctx context.Context, grant, localState string) ([]GitHubInstallation, error) {
+	request := struct {
+		Grant string `json:"grant"`
+		State string `json:"state"`
+	}{grant, localState}
+	var response struct {
+		Installations []GitHubInstallation `json:"installations"`
+	}
+	err := c.do(ctx, http.MethodPost, []string{"v1", "github", "installations", "discover", "redeem"}, request, "installation-discovery-redeem", &response)
+	return response.Installations, err
+}
+
 func (c *Client) ClaimRepository(ctx context.Context, projectID string, repositoryID int64) (RepositoryClaim, error) {
 	var response RepositoryClaim
 	err := c.do(ctx, http.MethodPost, []string{"v1", "projects", projectID, "github", "repositories", strconv.FormatInt(repositoryID, 10), "claim"}, struct{}{}, fmt.Sprintf("repository-claim:%s:%d", projectID, repositoryID), &response)
 	return response, err
+}
+
+func (c *Client) CreateDeploymentRun(ctx context.Context, projectID string, repositoryID int64, selectedRef, key string) (DeploymentRunPreview, error) {
+	var response struct {
+		DeploymentRun DeploymentRunPreview `json:"deployment_run"`
+	}
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "deployment-runs"}, map[string]any{"repository_id": repositoryID, "selected_ref": selectedRef, "target": map[string]any{}}, key, &response)
+	return response.DeploymentRun, err
+}
+func (c *Client) PreviewRepositoryExport(ctx context.Context, projectID, runID, targetBranch string) (RepositoryExportPreview, error) {
+	var response RepositoryExportPreview
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "repository-export", "preview"}, map[string]string{"run_id": runID, "target_branch": targetBranch}, "", &response)
+	return response, err
+}
+func (c *Client) ExportRepositoryConfiguration(ctx context.Context, projectID, key string, preview RepositoryExportPreview) (RepositoryExportResult, error) {
+	var response struct {
+		RepositoryExport RepositoryExportResult `json:"repository_export"`
+	}
+	body := map[string]any{"run_id": preview.RunID, "run_revision": preview.RunRevision, "plan_hash": preview.PlanHash, "preview_hash": preview.PreviewHash, "target_branch": preview.TargetBranch}
+	err := c.do(ctx, http.MethodPost, []string{"api", "projects", projectID, "repository-export"}, body, key, &response)
+	return response.RepositoryExport, err
 }
 
 func (c *Client) ReleaseRepository(ctx context.Context, projectID string, repositoryID int64) error {

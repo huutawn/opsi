@@ -48,7 +48,7 @@ func (s PostgresService) previewExposure(ctx context.Context, queryer rolloutQue
 	if request.ExpectedStateHash != "" && request.ExpectedStateHash != preview.StateHash {
 		return deploymentv1.ExposurePreview{}, APIError{Status: 409, Code: "EXPOSURE_STATE_CONFLICT", Message: "exposure state changed after preview"}
 	}
-	rows, err := queryer.QueryContext(ctx, `SELECT DISTINCT ON (environment_id,runtime_id,service_id) exposure_spec_json::text, environment_id, runtime_id, service_id FROM deployment_jobs WHERE project_id=$1 AND exposure_spec_json IS NOT NULL AND status <> $2 ORDER BY environment_id,runtime_id,service_id,created_at DESC`, base.ProjectID, deploymentv1.StateCancelled)
+	rows, err := queryer.QueryContext(ctx, `SELECT DISTINCT ON (environment_id,runtime_id,service_id) exposure_spec_json::text, environment_id, runtime_id, service_id FROM deployment_jobs WHERE project_id=$1 AND exposure_spec_json IS NOT NULL AND status NOT IN ($2,$3) AND rollout_state NOT IN ($4,$5,$6,$7) ORDER BY environment_id,runtime_id,service_id,created_at DESC`, base.ProjectID, deploymentv1.StateCancelled, deploymentv1.StateFailed, deploymentv1.RolloutStateFailed, deploymentv1.RolloutStateRolledBack, deploymentv1.RolloutStateRollbackFailed, deploymentv1.RolloutStateCleaned)
 	if err != nil {
 		return deploymentv1.ExposurePreview{}, err
 	}
@@ -154,7 +154,7 @@ func (s PostgresService) StartExposureRollout(projectID, actorUserID, key, reque
 
 func latestPostgresExposure(ctx context.Context, queryer rolloutQueryer, projectID, environmentID, runtimeID, serviceID string) (*exposurev1.ExposureSpec, error) {
 	var raw string
-	err := queryer.QueryRowContext(ctx, `SELECT exposure_spec_json::text FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND exposure_spec_json IS NOT NULL ORDER BY created_at DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID).Scan(&raw)
+	err := queryer.QueryRowContext(ctx, `SELECT exposure_spec_json::text FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND exposure_spec_json IS NOT NULL AND status=$5 AND rollout_state=$6 ORDER BY created_at DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID, deploymentv1.StateSucceeded, deploymentv1.RolloutStateSucceeded).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

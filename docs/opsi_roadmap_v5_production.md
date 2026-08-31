@@ -190,22 +190,28 @@ chứng live này thuộc canonical procedure ở trên nên chặn `DONE`; khô
 mock. R5-006 được thực hiện riêng và không thay đổi trạng thái deferred này của
 R5-005.
 
-### R5-006 — Monorepo config v2, changed-service resolver và workflow generation
+### R5-006 — Monorepo config v2 và changed-service resolver (workflow generation đã bị thay thế)
+
+> Historical checkpoint: user-repository workflow generation described below
+> is no longer an active product path. Zero-config Repository-to-Running uses a
+> Cloud-owned plan and the Opsi-owned executor. `.opsi/opsi-cd.yaml` is optional;
+> `opsi init` no longer writes it. Source mutation occurs only through an
+> explicit canonical Export PR.
 
 **Mục tiêu:** một repository chứa nhiều service và chỉ build service bị ảnh hưởng, nhưng fail safe thành full build khi diff không đáng tin.
 
 **Quy trình thực hiện:**
 
-1. Freeze `.opsi/opsi-cd.yaml` v2: services, context, Dockerfile, platform, watch/shared paths, dependencies, production/preview intent; không chứa project/VPS/Cloud URL/secret.
-2. Migrate v1 -> v2; `opsi init` add/update một service mà không xóa service khác.
+1. Giữ `.opsi/opsi-cd.yaml` v2 strict và tương thích: services, context, Dockerfile, platform, watch/shared paths, build dependencies, production/preview intent; các field optional resource/runtime/binding/runtime dependency/verification/opaque secret reference mở rộng trực tiếp v2, không chứa project/VPS/Cloud URL hoặc plaintext secret.
+2. Migrate v1 -> v2; explicit `opsi cd config upsert` add/update một service mà không xóa service khác.
 3. Implement resolver nhận event/base/head và `git diff --name-status -z`.
 4. Xử lý push, PR, merge, rename, delete, initial build, shallow/missing base, shared path và dependency closure.
 5. Unknown base => full build, không trả empty build.
 6. CLI có `opsi cd plan --base ... --head ... --json` và human-readable reason per service.
-7. Local API/UI có preview affected services trước khi commit workflow/config change.
-8. Generate secure workflow matrix với minimal permissions, timeout/concurrency và full-SHA pinned actions; fork không có push/deploy authority.
+7. Local API có preview affected services cho advanced/manual config use.
+8. User-repository workflow renderer/caller đã bị xóa; Opsi-owned executor build exact approved SHA.
 
-**Read/modify scope:** CLI repository/init/new CD planning packages, workflow renderer/tests, Local API/UI repository setup view, versioned contract docs/status.
+**Read/modify scope:** CLI repository/CD planning packages, Local API, Cloud analyzer/export, Deploy UI, versioned contract docs/status.
 
 **Avoid:** Cloud OIDC endpoint, Agent, arbitrary shell policy, user source upload, committed secrets.
 
@@ -213,7 +219,8 @@ R5-005.
 
 **Trạng thái acceptance 2026-07-18:** `DONE / FUNCTIONAL_ACCEPTANCE_PASS` cho
 manual local scope. Config v2 migration/init, bounded changed-service plans,
-CLI/Local API plan-hash parity, deterministic secure workflow YAML, UI preview/
+CLI/Local API plan-hash parity and historical workflow acceptance. The current
+path removes that generated workflow and replaces init with claim/analyze preview. UI preview/
 apply/error states, and disposable Git acceptance (api, worker, shared path,
 dependency closure, rename, missing base, and empty diff) pass. Later checkpoints
 implemented R5-007 OIDC/BuildRecord and accepted the live R5-008 GitHub
@@ -259,7 +266,7 @@ R5-008; no Agent deployment is part of this scope.
 
 **Quy trình thực hiện:**
 
-1. Chạy generated workflow trên GitHub-hosted runner với monorepo ít nhất hai service.
+1. Historical acceptance used a generated workflow; current acceptance dispatches the Opsi-owned executor for an exact approved SHA.
 2. Thay đổi một service và chứng minh matrix chỉ build service đó.
 3. Push public GHCR bằng `GITHUB_TOKEN`, lấy immutable digest.
 4. Submit OIDC-authenticated BuildRecord và so sánh claim/body/registry digest.
@@ -267,7 +274,7 @@ R5-008; no Agent deployment is part of this scope.
 6. Negative jobs: wrong audience/workflow/ref/SHA/service, replay và tag-only.
 7. Evidence chỉ chứa run IDs, hashes/digests và fields đã redact; không chứa JWT/token.
 
-**Read/modify scope:** generated workflow, OIDC/BuildRecord focused defects, live verifier/runbook/evidence/status, CLI/UI display defects.
+**Read/modify scope:** Opsi-owned executor, OIDC/BuildRecord focused defects, live verifier/runbook/evidence/status, CLI/UI display defects.
 
 **Avoid:** Agent/K3s deploy, private registry, PR preview deploy, AI/MCP.
 

@@ -2,10 +2,70 @@ import React, { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, React
 
 export function Icon({ name, className = "" }: { name: string; className?: string }) {
   return (
-    <span className={`material-symbols-outlined select-none ${className}`} aria-hidden="true" data-icon={name}>
-      {name}
-    </span>
+    <svg
+      aria-hidden="true"
+      className={`icon select-none ${className}`}
+      data-icon={name}
+      fill="none"
+      focusable="false"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.9"
+      viewBox="0 0 24 24"
+    >
+      <IconGlyph name={name} />
+    </svg>
   );
+}
+
+/**
+ * Opsi's canonical, dependency-free icon set.  Icons deliberately render as
+ * SVG paths instead of a ligature font so the Local Edge UI never relies on a
+ * remote font request or falls back to visible identifier text.
+ */
+function IconGlyph({ name }: { name: string }) {
+  switch (name) {
+    case "search": return <><circle cx="10.8" cy="10.8" r="6.2" /><path d="m16 16 4 4" /></>;
+    case "close": return <><path d="m6 6 12 12M18 6 6 18" /></>;
+    case "add": return <path d="M12 5v14M5 12h14" />;
+    case "delete": return <><path d="M4 7h16M10 11v6M14 11v6M9 7l1-2h4l1 2M6 7l1 13h10l1-13" /></>;
+    case "check": return <path d="m5 12 4 4L19 6" />;
+    case "check_circle": return <><circle cx="12" cy="12" r="8.5" /><path d="m8 12 2.6 2.7L16.5 9" /></>;
+    case "error": return <><circle cx="12" cy="12" r="8.5" /><path d="M12 8v5M12 16h.01" /></>;
+    case "warning": return <><path d="m12 3 9 17H3L12 3Z" /><path d="M12 9v4M12 16h.01" /></>;
+    case "block": return <><circle cx="12" cy="12" r="8.5" /><path d="m6 6 12 12" /></>;
+    case "info": return <><circle cx="12" cy="12" r="8.5" /><path d="M12 11v5M12 8h.01" /></>;
+    case "refresh": case "sync": case "rotate_right": return <><path d="M20 11a8 8 0 1 0 1 4" /><path d="M20 5v6h-6" /></>;
+    case "progress_activity": return <path d="M12 4a8 8 0 1 0 7.4 5" />;
+    case "notifications": return <><path d="M18 10a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></>;
+    case "settings": return <><circle cx="12" cy="12" r="3" /><path d="M19 13.5v-3l-2-.6-.8-1.8 1-1.8-2.1-2.1-1.8 1-1.8-.8L11 3H8l-.6 2.1-1.8.8-1.8-1-2.1 2.1 1 1.8-.8 1.8L0 11v3l2.1.6.8 1.8-1 1.8 2.1 2.1 1.8-1 1.8.8L8 22h3l.6-2.1 1.8-.8 1.8 1 2.1-2.1-1-1.8.8-1.8 2.1-.6Z" /></>;
+    case "menu": return <path d="M4 7h16M4 12h16M4 17h16" />;
+    case "arrow_forward": case "chevron_right": return <path d="M5 12h13m-5-5 5 5-5 5" />;
+    case "expand_more": case "arrow_drop_down": return <path d="m6 9 6 6 6-6" />;
+    case "unfold_more": return <path d="m8 9 4-4 4 4M8 15l4 4 4-4" />;
+    case "undo": return <path d="M9 8 5 12l4 4M5 12h8a5 5 0 0 1 5 5" />;
+    case "play_arrow": return <path d="m9 6 10 6-10 6V6Z" fill="currentColor" stroke="none" />;
+    case "pause": return <path d="M8 6v12M16 6v12" />;
+    case "grid_view": case "dashboard": return <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></>;
+    case "table_rows": return <><path d="M5 6h14M5 12h14M5 18h14" /><path d="M8 5v14" /></>;
+    case "layers": return <><path d="m12 4 8 4-8 4-8-4 8-4Z" /><path d="m4 12 8 4 8-4M4 16l8 4 8-4" /></>;
+    case "account_tree": return <><circle cx="6" cy="5" r="1.5" /><circle cx="18" cy="8" r="1.5" /><circle cx="18" cy="18" r="1.5" /><path d="M7.5 5H12v13h4.5M12 8h4.5" /></>;
+    case "rocket_launch": return <><path d="M14 5c2.5-2 5-2 5-2s0 2.5-2 5l-5 5-4-4 6-4Z" /><path d="m8 9-3 1-1 4 4-1M11 14l-1 5 4-1 1-3M8 16l-3 3" /><circle cx="15" cy="7" r="1" /></>;
+    case "dns": case "storage": return <><rect x="4" y="4" width="16" height="6" rx="1" /><rect x="4" y="14" width="16" height="6" rx="1" /><path d="M7 7h.01M7 17h.01M10 7h6M10 17h6" /></>;
+    case "database": return <><ellipse cx="12" cy="5.5" rx="7" ry="2.5" /><path d="M5 5.5v7c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-7M5 12.5v6C5 20 8.1 21 12 21s7-1 7-2.5v-6" /></>;
+    case "memory": return <><rect x="6" y="6" width="12" height="12" rx="1" /><path d="M9 3v3m3-3v3m3-3v3M9 18v3m3-3v3m3-3v3M3 9h3m-3 3h3m-3 3h3m12-6h3m-3 3h3m-3 3h3" /></>;
+    case "monitoring": return <><path d="M4 18V6M4 18h16" /><path d="m7 15 3-4 3 2 5-6" /></>;
+    case "security": case "verified_user": case "shield": return <><path d="M12 3 19 6v5c0 4.5-3 7.5-7 10-4-2.5-7-5.5-7-10V6l7-3Z" /><path d="m9 12 2 2 4-4" /></>;
+    case "network_check": return <><path d="M4 18h16M6 15a8.5 8.5 0 0 1 12 0M9 12a4.3 4.3 0 0 1 6 0" /><circle cx="12" cy="18" r="1" fill="currentColor" stroke="none" /></>;
+    case "public": return <><circle cx="12" cy="12" r="8.5" /><path d="M3.8 12h16.4M12 3.5c2.2 2.4 3.3 5.2 3.3 8.5S14.2 18.1 12 20.5c-2.2-2.4-3.3-5.2-3.3-8.5S9.8 5.9 12 3.5" /></>;
+    case "folder": return <path d="M3 7h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />;
+    case "home": return <><path d="m4 11 8-7 8 7v9H4v-9Z" /><path d="M10 20v-6h4v6" /></>;
+    case "person": return <><circle cx="12" cy="8" r="3" /><path d="M5 20c.7-3 2.8-5 7-5s6.3 2 7 5" /></>;
+    case "logout": return <><path d="M10 5H5v14h5M14 8l4 4-4 4M9 12h9" /></>;
+    case "api": case "hub": return <><circle cx="12" cy="12" r="2" /><circle cx="5" cy="6" r="1.5" /><circle cx="19" cy="6" r="1.5" /><circle cx="12" cy="19" r="1.5" /><path d="m10.5 10.5-4-3m7 3 4-3m-5 6v4" /></>;
+    default: return <><rect x="5" y="5" width="14" height="14" rx="3" /><path d="M9 12h6" /></>;
+  }
 }
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {

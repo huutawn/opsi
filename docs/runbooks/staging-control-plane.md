@@ -311,6 +311,39 @@ Repeat direct-origin certificate checks, proxied health, deny-path tests, and
 GitHub callback/webhook checks. Keep the previous certificate available only in
 a protected rollback location for the approved rollback window.
 
+## Test VPS Public Hostname Provisioning
+
+The Free-plan public workload hostname is one level beneath the zone, for
+example `tcip.opsidev.site`. Keep the zone default and control-plane host on
+Full (strict). Opsi reconciles exact proxied A records through a
+zone-restricted Cloudflare API token.
+
+Create a Custom API Token restricted to the `opsidev.site` zone with Zone Read
+and DNS Edit. Store only the token value in `secrets/cloudflare-api-token` with
+mode `0600`; never put it in `.env`. Configure:
+
+```env
+OPSI_CLOUD_DEPLOYMENT_DOMAIN=opsidev.site
+OPSI_CLOUD_CLOUDFLARE_FLEXIBLE_ORIGIN=false
+OPSI_CLOUD_PUBLIC_HOSTNAME_LIMIT_PER_USER=3
+OPSI_CLOUD_CLOUDFLARE_ZONE_ID=<opsidev.site-zone-id>
+```
+
+Cloud reads the token from
+`OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE=/run/secrets/cloudflare-api-token`.
+Account ID, ruleset IDs, record IDs, and an origin IP are not configuration;
+record IDs and verified node IPv4 targets are persisted with each allocation.
+
+The origin certificate covers `*.opsidev.site`, so Cloudflare reaches these
+one-level workload hostnames over HTTPS using Full (strict). Opsi removes only
+its own legacy Flexible/redirect rules, identified by stable `ref`, and never
+changes the zone-wide SSL mode or operator rules.
+
+After rollout, verify all four boundaries independently: each exact proxied A
+record resolves through Cloudflare; direct origin HTTP answers with the expected
+`Host` header; public HTTPS returns the workload for `/` and every configured
+backend path; and the control-plane hostname still negotiates Full (strict).
+
 ## Stop And Roll Back
 
 If origin TLS is unreachable or Cloudflare returns 525/526:

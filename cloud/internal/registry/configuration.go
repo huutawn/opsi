@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
+	resourcecompiler "github.com/opsi-dev/opsi/cloud/internal/resource/connection"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
@@ -57,7 +58,6 @@ type DependencyTargetResolver interface {
 	ResolveDependencyTarget(ctx context.Context, projectID, targetIdentity string, targetKind string) (DependencyTargetFacts, error)
 }
 
-
 type ServiceConfigurationPreview struct {
 	Configuration        ServiceConfigurationDraft `json:"configuration"`
 	GeneratedEnvironment []GeneratedEnvironment    `json:"generated_environment,omitempty"`
@@ -93,6 +93,16 @@ type ServiceConfigurationApplyRequest struct {
 	Draft             ServiceConfigurationDraft `json:"draft"`
 	ExpectedRevision  uint64                    `json:"expected_revision"`
 	ExpectedStateHash string                    `json:"expected_state_hash"`
+	ProposalReview    *ProposalReviewAudit      `json:"proposal_review,omitempty"`
+}
+
+// ProposalReviewAudit is factual, bounded metadata from a human review UI.
+// It is advisory only: the canonical draft, revision, state hash, validation,
+// and idempotency checks below remain the sole configuration authority.
+type ProposalReviewAudit struct {
+	ProposalHash        string `json:"proposal_hash"`
+	ReviewedPayloadHash string `json:"reviewed_payload_hash"`
+	ProposerOrigin      string `json:"proposer_origin,omitempty"`
 }
 
 type ServiceConfigurationApplyResult struct {
@@ -101,8 +111,9 @@ type ServiceConfigurationApplyResult struct {
 }
 
 type CompiledServiceRuntime struct {
-	Environment []deploymentv1.EnvironmentVariable `json:"environment"`
-	PublicRoute *PublicRouteIntent                 `json:"public_route,omitempty"`
+	Environment      []deploymentv1.EnvironmentVariable `json:"environment"`
+	SecretReferences []deploymentv1.SecretReference     `json:"secret_references,omitempty"`
+	PublicRoute      *PublicRouteIntent                 `json:"public_route,omitempty"`
 }
 
 type configurationReplay struct {
@@ -127,55 +138,6 @@ func isPlatformReservedEnv(name string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(name))
 	if upper == "PORT" || upper == "HOSTNAME" || upper == "HOST_IP" || upper == "POD_NAME" || upper == "POD_NAMESPACE" || upper == "POD_IP" || strings.HasPrefix(upper, "OPSI_") || strings.HasPrefix(upper, "KUBERNETES_") {
 		return true
-	}
-	return false
-}
-
-func validSymbolicSourceForProtocol(protocol, source string) bool {
-	switch protocol {
-	case "postgres":
-		switch source {
-		case "resource.host", "resource.port", "credential.database", "credential.username", "credential.password", "connection.url":
-			return true
-		}
-	case "redis":
-		switch source {
-		case "resource.host", "resource.port", "credential.password", "connection.url":
-			return true
-		}
-	case "nats":
-		switch source {
-		case "resource.host", "resource.port", "connection.url":
-			return true
-		}
-	case "http":
-		switch source {
-		case "application.internal_url", "application.internal_host", "application.internal_port",
-			"application.public_url", "application.public_host", "application.public_port", "application.public_scheme",
-			"application.path", "application.url":
-			return true
-		}
-	}
-	return false
-}
-
-func validSymbolicSourceForStrategy(strategy, source string) bool {
-	switch strategy {
-	case serviceconfigurationv1.StrategyInternalHTTP:
-		switch source {
-		case "application.internal_url", "application.internal_host", "application.internal_port", "application.path":
-			return true
-		}
-	case serviceconfigurationv1.StrategyPublicHTTP:
-		switch source {
-		case "application.public_url", "application.public_host", "application.public_port", "application.public_scheme", "application.path", "application.url":
-			return true
-		}
-	case serviceconfigurationv1.StrategySameOrigin:
-		switch source {
-		case "application.path", "application.url":
-			return true
-		}
 	}
 	return false
 }
@@ -321,7 +283,7 @@ func checkDependencyCycle(sourceID, targetID string, targetDeps []serviceconfigu
 
 func validateServiceConfiguration(ctx context.Context, resolver DependencyTargetResolver, source ServiceRecord, draft ServiceConfigurationDraft, services []ServiceRecord) (ServiceConfigurationDraft, []GeneratedEnvironment, error) {
 	draft = normalizeServiceConfigurationDraft(draft)
-	if err := deploymentv1.ValidateEnvironment(draft.Environment, nil); err != nil {
+	if err := deploymentv1.ValidateEnvironment(draft.Environment, draft.SecretReferences); err != nil {
 		return draft, nil, configurationError("ENVIRONMENT_INVALID", "environment", err.Error())
 	}
 	if len(draft.Bindings) > 64 {
@@ -377,6 +339,9 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 		}
 		if dep.Protocol == "" {
 			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].protocol", index), "protocol is required")
+		}
+		if dep.TargetKind == "managed_resource" && !resourcecompiler.ValidManagedProtocol(dep.Protocol) {
+			return draft, nil, configurationError("DEPENDENCY_PROTOCOL_UNSUPPORTED", fmt.Sprintf("dependencies[%d].protocol", index), "managed resource protocol is unsupported")
 		}
 		if dep.InjectionPhase != "runtime" && dep.InjectionPhase != "build" {
 			return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_phase", index), "invalid injection phase")
@@ -552,11 +517,13 @@ func validateServiceConfiguration(ctx context.Context, resolver DependencyTarget
 			if mapping.SymbolicSource == "" {
 				return draft, nil, configurationError("DEPENDENCY_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), "symbolic source is required")
 			}
-			if dep.TargetKind == "managed_resource" && !validSymbolicSourceForProtocol(dep.Protocol, mapping.SymbolicSource) {
-				return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), fmt.Sprintf("symbolic source %s is invalid for protocol %s", mapping.SymbolicSource, dep.Protocol))
+			if dep.TargetKind == "managed_resource" {
+				if _, err := resourcecompiler.LookupSource(dep.Protocol, mapping.SymbolicSource, mapping.Template); err != nil {
+					return draft, nil, configurationErrorCause("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), "connection mapping is invalid", err)
+				}
 			}
 			if dep.TargetKind == "application" {
-				if !validSymbolicSourceForProtocol(dep.Protocol, mapping.SymbolicSource) || !validSymbolicSourceForStrategy(dep.Strategy, mapping.SymbolicSource) {
+				if dep.Protocol != serviceconfigurationv1.ProtocolHTTP || !resourcecompiler.ValidApplicationSource(dep.Strategy, mapping.SymbolicSource, mapping.Template) {
 					return draft, nil, configurationError("DEPENDENCY_SYMBOLIC_SOURCE_INVALID", fmt.Sprintf("dependencies[%d].injection_mappings[%d].symbolic_source", index, i), fmt.Sprintf("symbolic source %s is invalid for application strategy %s", mapping.SymbolicSource, dep.Strategy))
 				}
 			}
@@ -774,10 +741,10 @@ func CompileServiceRuntime(source ServiceRecord, assignment topologyv1.Assignmen
 	}
 
 	sort.Slice(environment, func(i, j int) bool { return environment[i].Name < environment[j].Name })
-	if err := deploymentv1.ValidateEnvironment(environment, nil); err != nil {
+	if err := deploymentv1.ValidateEnvironment(environment, draft.SecretReferences); err != nil {
 		return CompiledServiceRuntime{}, err
 	}
-	return CompiledServiceRuntime{Environment: environment, PublicRoute: draft.PublicRoute}, nil
+	return CompiledServiceRuntime{Environment: environment, SecretReferences: append([]deploymentv1.SecretReference(nil), draft.SecretReferences...), PublicRoute: draft.PublicRoute}, nil
 }
 
 // CompileServiceRuntimeSpecs is the single source of truth for immutable workloads.
@@ -802,11 +769,22 @@ func CompileServiceRuntimeSpecs(source ServiceRecord, assignment topologyv1.Assi
 	if workloadExposure != "none" && workloadExposure != "internal" {
 		return deploymentv1.WorkloadSpec{}, configurationError("PUBLIC_EXPOSURE_UNSUPPORTED", "exposure.mode", "this deployment flow supports internal workloads only")
 	}
-	cpu := strconv.FormatInt(assignment.CPURequestMillicores, 10) + "m"
-	memory := strconv.FormatInt((assignment.MemoryRequestBytes+1024*1024-1)/(1024*1024), 10) + "Mi"
+	cpuReq := strconv.FormatInt(assignment.CPURequestMillicores, 10) + "m"
+	memoryReq := strconv.FormatInt((assignment.MemoryRequestBytes+1024*1024-1)/(1024*1024), 10) + "Mi"
+	cpuLimitVal := assignment.CPULimitMillicores
+	if cpuLimitVal <= 0 {
+		cpuLimitVal = assignment.CPURequestMillicores
+	}
+	memoryLimitVal := assignment.MemoryLimitBytes
+	if memoryLimitVal <= 0 {
+		memoryLimitVal = assignment.MemoryRequestBytes
+	}
+	cpuLim := strconv.FormatInt(cpuLimitVal, 10) + "m"
+	memoryLim := strconv.FormatInt((memoryLimitVal+1024*1024-1)/(1024*1024), 10) + "Mi"
 	readiness := &deploymentv1.Probe{Path: source.HealthPath, Port: int32(source.ContainerPort), InitialDelaySeconds: 2, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 6}
 	liveness := *readiness
-	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: source.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(source.ContainerPort), ReadinessProbe: readiness, LivenessProbe: &liveness, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}, Limits: deploymentv1.ResourceValues{CPU: cpu, Memory: memory}}, TerminationGracePeriodSecond: 30, Environment: compiled.Environment, Exposure: deploymentv1.ExposureIntent{Mode: workloadExposure}}
+	startup := &deploymentv1.Probe{Path: source.HealthPath, Port: int32(source.ContainerPort), InitialDelaySeconds: 0, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 60}
+	workload := deploymentv1.WorkloadSpec{SchemaVersion: deploymentv1.WorkloadSchemaVersion, ServiceKey: source.Name, Replicas: assignment.Replicas, ApplicationContainerName: deploymentv1.ApplicationContainer, ContainerPort: int32(source.ContainerPort), StartupProbe: startup, ReadinessProbe: readiness, LivenessProbe: &liveness, Resources: deploymentv1.Resources{Requests: deploymentv1.ResourceValues{CPU: cpuReq, Memory: memoryReq}, Limits: deploymentv1.ResourceValues{CPU: cpuLim, Memory: memoryLim}}, TerminationGracePeriodSecond: 30, Environment: compiled.Environment, SecretReferences: compiled.SecretReferences, Exposure: deploymentv1.ExposureIntent{Mode: workloadExposure}}
 	if err := workload.Validate(); err != nil {
 		return deploymentv1.WorkloadSpec{}, err
 	}
@@ -824,6 +802,10 @@ func serviceAssignment(assignments []topologyv1.Assignment, serviceKey, environm
 
 func configurationError(code, field, message string) error {
 	return APIError{Status: 422, Code: code, Message: message, NextAction: field}
+}
+
+func configurationErrorCause(code, field, message string, cause error) error {
+	return APIError{Status: 422, Code: code, Message: message, NextAction: field, Cause: cause}
 }
 
 func configurationDiff(current ServiceConfigurationDraft, next ServiceConfigurationDraft, currentGenerated, nextGenerated []GeneratedEnvironment) ServiceConfigurationDiff {
@@ -931,9 +913,13 @@ func configurationDiff(current ServiceConfigurationDraft, next ServiceConfigurat
 				changes = append(changes, ServiceConfigurationChange{Kind: "dependency_phase", Action: "change", Name: name})
 			}
 			currMappings := map[string]string{}
-			for _, m := range currentDep.InjectionMappings { currMappings[m.EnvName] = m.SymbolicSource }
+			for _, m := range currentDep.InjectionMappings {
+				currMappings[m.EnvName] = m.SymbolicSource
+			}
 			nextMappings := map[string]string{}
-			for _, m := range nextDep.InjectionMappings { nextMappings[m.EnvName] = m.SymbolicSource }
+			for _, m := range nextDep.InjectionMappings {
+				nextMappings[m.EnvName] = m.SymbolicSource
+			}
 			for envName, sym := range currMappings {
 				if nextSym, ok := nextMappings[envName]; !ok {
 					changes = append(changes, ServiceConfigurationChange{Kind: "dependency_mapping", Action: "remove", Name: name + ":" + envName, Before: sym})
@@ -1024,6 +1010,9 @@ func (s *Service) DiffServiceConfiguration(projectID, serviceID string, draft Se
 }
 
 func (s *Service) ApplyServiceConfiguration(projectID, serviceID, actorUserID, key string, request ServiceConfigurationApplyRequest) (ServiceConfigurationApplyResult, error) {
+	if request.ProposalReview != nil && !validProposalReviewAudit(*request.ProposalReview) {
+		return ServiceConfigurationApplyResult{}, APIError{Status: 400, Code: "PROPOSAL_REVIEW_INVALID", Message: "proposal review audit metadata is invalid"}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	payload, _ := json.Marshal(request)
@@ -1050,6 +1039,9 @@ func (s *Service) ApplyServiceConfiguration(projectID, serviceID, actorUserID, k
 	if err != nil {
 		return ServiceConfigurationApplyResult{}, err
 	}
+	if request.ProposalReview != nil && request.ProposalReview.ReviewedPayloadHash != serviceConfigurationHash(normalized) {
+		return ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "PROPOSAL_REVIEW_PAYLOAD_MISMATCH", Message: "reviewed payload hash does not match the canonical configuration"}
+	}
 	now := s.clock()
 	configuration := ServiceConfiguration{ServiceConfigurationDraft: normalized, Revision: current.Revision + 1, StateHash: serviceConfigurationHash(normalized), AppliedBy: actorUserID, AppliedAt: &now}
 	service.Configuration = configuration
@@ -1058,6 +1050,19 @@ func (s *Service) ApplyServiceConfiguration(projectID, serviceID, actorUserID, k
 	result := ServiceConfigurationApplyResult{Configuration: configuration}
 	s.idempotency[replayKey] = configurationReplay{PayloadHash: payloadHash, Result: result}
 	return result, nil
+}
+
+func validProposalReviewAudit(value ProposalReviewAudit) bool {
+	if len(value.ProposalHash) != 64 || len(value.ReviewedPayloadHash) != 64 {
+		return false
+	}
+	if _, err := hex.DecodeString(value.ProposalHash); err != nil {
+		return false
+	}
+	if _, err := hex.DecodeString(value.ReviewedPayloadHash); err != nil {
+		return false
+	}
+	return value.ProposerOrigin == "" || value.ProposerOrigin == "mcp_client"
 }
 
 func (s *Service) configurationScopeLocked(projectID, serviceID string) (ServiceRecord, []ServiceRecord, error) {

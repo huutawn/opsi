@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -49,6 +50,35 @@ func (c *GitHubAppClient) DispatchWorkflow(ctx context.Context, config buildjob.
 		return buildjob.DispatchFacts{}, errors.New("executor dispatch was rejected")
 	}
 	return buildjob.DispatchFacts{}, nil
+}
+
+func (c *GitHubAppClient) CancelWorkflow(ctx context.Context, config buildjob.ExecutorConfig, runID uint64) error {
+	if err := config.Validate(); err != nil || runID == 0 {
+		return errors.New("executor cancellation metadata is invalid")
+	}
+	installationID, err := c.repositoryInstallation(ctx, config.Owner, config.Repository)
+	if err != nil {
+		return err
+	}
+	token, _, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return errors.New("executor installation token is unavailable")
+	}
+	endpoint := githubRepositoryBaseURL + url.PathEscape(config.Owner) + "/" + url.PathEscape(config.Repository) + "/actions/runs/" + strconv.FormatUint(runID, 10) + "/cancel"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return errors.New("executor cancellation request is unavailable")
+	}
+	setGitHubAPIHeaders(request, "Bearer "+token)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return errors.New("executor cancellation request failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted && response.StatusCode != http.StatusConflict {
+		return errors.New("executor cancellation was rejected")
+	}
+	return nil
 }
 
 func (c *GitHubAppClient) repositoryInstallation(ctx context.Context, owner, repository string) (int64, error) {

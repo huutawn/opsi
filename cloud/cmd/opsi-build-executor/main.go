@@ -53,6 +53,9 @@ func run(ctx context.Context, cloudURL, jobID, attemptID string, runID, runAttem
 	}
 	access, err := client.SourceAccess(ctx, jobID, attemptID, runID, uint32(runAttempt))
 	if err != nil {
+		if reportErr := client.Fail(ctx, jobID, attemptID, runnerFailureCode(err)); reportErr != nil {
+			return errors.New("source access failed and Cloud rejected the failure result")
+		}
 		return err
 	}
 	defer access.Destroy()
@@ -98,4 +101,15 @@ func destroy(value []byte) {
 	for index := range value {
 		value[index] = 0
 	}
+}
+
+func runnerFailureCode(err error) string {
+	var executorErr buildexecutor.Error
+	if errors.As(err, &executorErr) {
+		switch executorErr.Code {
+		case "SOURCE_ACCESS_DENIED", "SOURCE_TOKEN_UNAVAILABLE":
+			return executorErr.Code
+		}
+	}
+	return "EXECUTOR_INFRASTRUCTURE_FAILED"
 }

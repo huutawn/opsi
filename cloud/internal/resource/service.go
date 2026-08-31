@@ -20,7 +20,6 @@ const (
 	maxReplicas      = 20
 	maxCPUMillicores = int64(1_000_000)
 	maxMemoryBytes   = int64(1 << 50)
-	maxStorageBytes  = int64(1 << 50)
 )
 
 var ErrNotFound = errors.New("resource not found")
@@ -29,9 +28,11 @@ type Error struct {
 	Code    string
 	Status  int
 	Message string
+	Cause   error
 }
 
 func (e Error) Error() string { return e.Code + ": " + e.Message }
+func (e Error) Unwrap() error { return e.Cause }
 
 type ScopeAuthority interface {
 	EnvironmentExists(context.Context, string, string) (bool, error)
@@ -66,6 +67,11 @@ type Store interface {
 type CredentialAuthority interface {
 	Ensure(context.Context, string) (resourcev1.ManagedResourceCredential, error)
 	EnsureBinding(context.Context, resourcev1.BindingCredentialSpec) (resourcev1.ManagedResourceCredential, error)
+	EnsureWorkloadSecret(context.Context, resourcev1.WorkloadSecretSpec) (resourcev1.ManagedResourceCredential, error)
+	ListWorkloadSecrets(context.Context, string, string) ([]resourcev1.WorkloadSecretMetadata, error)
+	GetWorkloadSecret(context.Context, string, string, string) (resourcev1.WorkloadSecretMetadata, error)
+	UpsertWorkloadSecret(context.Context, resourcev1.WorkloadSecretUpsert) (resourcev1.WorkloadSecretMetadata, bool, error)
+	BindWorkloadSecret(context.Context, string, string, string, string) (resourcev1.WorkloadSecretMetadata, error)
 	Get(context.Context, string) (resourcev1.ManagedResourceCredential, error)
 	Delete(context.Context, string) error
 }
@@ -212,7 +218,12 @@ func (s Service) DeleteIntent(ctx context.Context, projectID, resourceID, actor 
 		}
 	}
 	if current.Runtime == nil {
-		return resourcev1.Resource{}, invalid("MANAGED_RESOURCE_DELETE_FAILED", "managed resource runtime authority is unavailable")
+		if err := s.Store.Delete(ctx, projectID, resourceID); err != nil {
+			return resourcev1.Resource{}, err
+		}
+		current.Lifecycle = resourcev1.LifecycleDeleting
+		current.UpdatedAt = s.clock()
+		return current, nil
 	}
 	current.Lifecycle = resourcev1.LifecycleDeleting
 	current.Runtime.DeleteActor = actor
@@ -400,7 +411,7 @@ func validateManaged(spec resourcev1.ManagedSpec) error {
 	if spec.Replicas < 1 || spec.Replicas > maxReplicas || spec.CPUMillicores < 1 || spec.CPUMillicores > maxCPUMillicores || spec.MemoryBytes < 1 || spec.MemoryBytes > maxMemoryBytes {
 		return invalid("RESOURCE_CAPACITY_INVALID", "replicas, CPU, or memory request is invalid")
 	}
-	if spec.Storage.SizeBytes < 0 || spec.Storage.SizeBytes > maxStorageBytes || (spec.Storage.Persistent && spec.Storage.SizeBytes == 0) || (!spec.Storage.Persistent && (spec.Storage.SizeBytes != 0 || spec.Storage.PolicyRef != "")) {
+	if spec.Storage.SizeBytes < 0 || spec.Storage.SizeBytes > resourcev1.MaxManagedStorageBytes || (spec.Storage.Persistent && spec.Storage.SizeBytes == 0) || (!spec.Storage.Persistent && (spec.Storage.SizeBytes != 0 || spec.Storage.PolicyRef != "")) {
 		return invalid(resourcev1.FailureStorageInvalid, "persistent storage requires a bounded positive size")
 	}
 	if definition.Storage.Required && !spec.Storage.Persistent {
@@ -629,6 +640,9 @@ func newID(prefix string) string {
 }
 
 func invalid(code, message string) Error { return Error{Code: code, Status: 400, Message: message} }
+func invalidCause(code, message string, cause error) Error {
+	return Error{Code: code, Status: 400, Message: message, Cause: cause}
+}
 func unavailable() Error {
 	return Error{Code: "RESOURCE_UNAVAILABLE", Status: 503, Message: "resource authority is unavailable"}
 }

@@ -283,7 +283,7 @@ func (s Service) Route(ctx context.Context, projectID string, request deployment
 }
 
 func automaticPolicyMatches(policy deploymentpolicyv1.Draft, record buildrecordv1.Record) bool {
-	if policy.ProjectID != record.ProjectID || policy.RepositoryID != record.RepositoryID || !contains(policy.ServiceKeys, record.ServiceKey) || !contains(policy.WorkflowRefs, record.Workload.WorkflowRef) || !contains(policy.AllowedPlatforms, record.Build.Platform) || !contains(policy.AllowedConfigHashes, record.Build.ConfigHash) || !contains(policy.AllowedBuildPlanHashes, record.Build.PlanHash) {
+	if policy.ProjectID != record.ProjectID || policy.RepositoryID != record.RepositoryID || !contains(policy.ServiceKeys, record.ServiceKey) || !contains(policy.WorkflowRefs, record.Workload.WorkflowRef) || !contains(policy.AllowedPlatforms, record.Build.Platform) || !contains(policy.AllowedConfigHashes, record.Build.ConfigHash) || !policyAllowsBuildPlan(policy, record) {
 		return false
 	}
 	if record.Workload.JobWorkflowRef == "" {
@@ -323,7 +323,7 @@ func validatePolicyResource(cpu, memory string) error {
 }
 
 func policyMatches(policy deploymentpolicyv1.Draft, record buildrecordv1.Record, environmentID string) bool {
-	if policy.ProjectID != record.ProjectID || policy.RepositoryID != record.RepositoryID || policy.EnvironmentID != environmentID || !contains(policy.ServiceKeys, record.ServiceKey) || !contains(policy.WorkflowRefs, record.Workload.WorkflowRef) || !contains(policy.AllowedEvents, record.Workload.EventName) || !contains(policy.AllowedGitRefs, record.Workload.Ref) || !contains(policy.AllowedPlatforms, record.Build.Platform) || !contains(policy.AllowedConfigHashes, record.Build.ConfigHash) || !contains(policy.AllowedBuildPlanHashes, record.Build.PlanHash) {
+	if policy.ProjectID != record.ProjectID || policy.RepositoryID != record.RepositoryID || policy.EnvironmentID != environmentID || !contains(policy.ServiceKeys, record.ServiceKey) || !contains(policy.WorkflowRefs, record.Workload.WorkflowRef) || !contains(policy.AllowedEvents, record.Workload.EventName) || !contains(policy.AllowedGitRefs, record.Workload.Ref) || !contains(policy.AllowedPlatforms, record.Build.Platform) || !contains(policy.AllowedConfigHashes, record.Build.ConfigHash) || !policyAllowsBuildPlan(policy, record) {
 		return false
 	}
 	if record.Workload.JobWorkflowRef == "" {
@@ -342,6 +342,13 @@ func policyMatches(policy deploymentpolicyv1.Draft, record buildrecordv1.Record,
 		}
 	}
 	return false
+}
+
+func policyAllowsBuildPlan(policy deploymentpolicyv1.Draft, record buildrecordv1.Record) bool {
+	if record.Build.PlanHash == "" {
+		return len(policy.AllowedBuildPlanHashes) == 0
+	}
+	return contains(policy.AllowedBuildPlanHashes, record.Build.PlanHash)
 }
 
 func (s Service) validateAuthority(ctx context.Context, projectID string, draft deploymentpolicyv1.Draft) error {
@@ -399,7 +406,7 @@ func normalizeDraft(projectID string, d deploymentpolicyv1.Draft) (deploymentpol
 		}
 		*list.values = normalized
 	}
-	for _, required := range [][]string{d.ServiceKeys, d.WorkflowRefs, d.AllowedEvents, d.AllowedGitRefs, d.AllowedRuntimeIDs, d.AllowedPlatforms, d.AllowedConfigHashes, d.AllowedBuildPlanHashes} {
+	for _, required := range [][]string{d.ServiceKeys, d.WorkflowRefs, d.AllowedEvents, d.AllowedGitRefs, d.AllowedRuntimeIDs, d.AllowedPlatforms, d.AllowedConfigHashes} {
 		if len(required) == 0 {
 			return d, "", invalid("DEPLOYMENT_POLICY_LIST_INVALID", "required policy allowlists must not be empty")
 		}

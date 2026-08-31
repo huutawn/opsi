@@ -22,11 +22,15 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/cloudflare"
 	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
+	"github.com/opsi-dev/opsi/cloud/internal/publichostname"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
+	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
 	"github.com/opsi-dev/opsi/cloud/internal/sourcereport"
@@ -55,6 +59,10 @@ type Server struct {
 	RegistryPullCredentials RegistryPullCredentialProvider
 	Topology                topology.Service
 	Policies                deploymentpolicy.Service
+	DeploymentRuns          deploymentworkflow.Service
+	PublicHostnames         publichostname.Service
+	Cloudflare              CloudflareProvisioner
+	RepositoryAnalyzer      repositoryanalysis.Detector
 	SourceReports           sourcereport.Store
 	Verifications           verificationstore.Store
 	OIDC                    interface {
@@ -80,13 +88,21 @@ type Server struct {
 	authGrants              map[string]authGrant
 	authSelectionGrants     map[string]authGrant
 	installationClaimGrants map[string]installationClaimGrant
-	now                     func() time.Time
-	random                  io.Reader
-	actionDeviceMu          sync.Mutex
-	actionDevices           actiondevice.Store
-	bootstrapInstall        bootstrapworker.InstallConfig
-	bootstrapRunnerPath     string
-	bootstrapRunnerSHA256   string
+
+	installationDiscoveryGrants map[string]installationDiscoveryGrant
+	now                         func() time.Time
+	random                      io.Reader
+	actionDeviceMu              sync.Mutex
+	actionDevices               actiondevice.Store
+	bootstrapInstall            bootstrapworker.InstallConfig
+	bootstrapRunnerPath         string
+	bootstrapRunnerSHA256       string
+}
+
+type CloudflareProvisioner interface {
+	ReconcileARecord(context.Context, string, string, string) (cloudflare.Record, error)
+	DeleteARecord(context.Context, string, string, string) error
+	ReconcileZoneRules(context.Context) error
 }
 
 func NewServer(cfg Config) *Server {
@@ -130,6 +146,8 @@ func NewServer(cfg Config) *Server {
 		BuildRecords:            buildRecordService,
 		Topology:                topologyService,
 		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
+		DeploymentRuns:          deploymentworkflow.Service{Store: deploymentworkflow.NewMemoryStore()},
+		PublicHostnames:         publichostname.Service{Store: publichostname.NewMemoryStore(), Limit: cfg.PublicHostnameLimit},
 		SourceReports:           sourcereport.NewMemoryStore(),
 		Verifications:           verificationstore.NewMemoryStore(),
 		OIDC:                    verifier,
@@ -146,7 +164,9 @@ func NewServer(cfg Config) *Server {
 		authGrants:              map[string]authGrant{},
 		authSelectionGrants:     map[string]authGrant{},
 		installationClaimGrants: map[string]installationClaimGrant{},
-		random:                  rand.Reader,
+
+		installationDiscoveryGrants: map[string]installationDiscoveryGrant{},
+		random:                      rand.Reader,
 	}
 	server.Cutovers.Deployments = registryService
 	server.Cutovers.BuildRecords = buildRecordService.Store
@@ -206,6 +226,7 @@ func (s *Server) SetGitHubAppClient(client *GitHubAppClient) {
 	s.githubAppClient = client
 	s.BuildJobs.Repository = client
 	s.BuildJobs.Dispatcher = client
+	s.RepositoryAnalyzer = repositoryanalysis.Detector{Repository: client, Limits: repositoryanalysis.DefaultLimits()}
 }
 
 func (s *Server) SetActionDeviceStore(store actiondevice.Store) {
@@ -226,6 +247,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/auth/browser/callback", s.handleBrowserAuthCallback)
 	mux.HandleFunc("/v1/auth/browser/redeem", s.handleBrowserAuthRedeem)
 	mux.HandleFunc("/v1/auth/browser/select-project", s.handleBrowserAuthSelectProject)
+	mux.HandleFunc("/v1/projects/{project_id}/github/installations/discover/start", s.handleInstallationDiscoveryStart)
+	mux.HandleFunc("/v1/github/installations/discover/redeem", s.handleInstallationDiscoveryRedeem)
 	mux.HandleFunc("/v1/projects/{project_id}/github/installations/{installation_id}/claim/start", s.handleInstallationClaimStart)
 	mux.HandleFunc("/v1/github/installations/claim/redeem", s.handleInstallationClaimRedeem)
 	mux.HandleFunc("/v1/projects/{project_id}/github/installations", s.handleGitHubInstallationsAPI)
@@ -460,8 +483,9 @@ func (s *Server) handleAgentWebhookNext(w http.ResponseWriter, r *http.Request) 
 	if ok {
 		s.resolveRegistryPullCredential(r.Context(), lease.Command)
 		if lease.Command != nil && len(lease.Command.Workload.SecretReferences) > 0 {
-			materials, err := s.Resources.ResolveSecretMaterials(r.Context(), projectID, lease.Command.Workload.SecretReferences)
+			materials, err := s.Resources.ResolveSecretMaterials(r.Context(), projectID, lease.Deployment.ServiceID, lease.Command.Workload.SecretReferences)
 			if err != nil {
+				s.observeConnectionCompileError(err)
 				writeJSON(w, http.StatusConflict, map[string]any{"failure_code": resourcev1.FailureBindingSecretMaterialization})
 				return
 			}

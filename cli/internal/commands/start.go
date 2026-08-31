@@ -20,8 +20,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
+	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
@@ -140,9 +142,11 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	agentResolver := newAgentConfigResolver(cfg, configPath)
 	localSession := newLocalSessionToken()
 	authFlow := &localAuthFlow{
-		states:             map[string]time.Time{},
-		installationClaims: map[string]time.Time{},
-		selections:         map[string]localSelectionState{},
+		states:                  map[string]localAuthPending{},
+		installationClaims:      map[string]localInstallationClaimPending{},
+		installationDiscoveries: map[string]localInstallationDiscoveryPending{},
+		discoveredInstallations: map[string]localInstallationDiscoveryResult{},
+		selections:              map[string]localSelectionState{},
 	}
 	routes := http.NewServeMux()
 	routes.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -254,6 +258,9 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 	routes.HandleFunc("/api/local/github/installations/claim/callback", func(w http.ResponseWriter, r *http.Request) {
 		completeLocalInstallationClaim(w, r, cfg, factory, authFlow)
 	})
+	routes.HandleFunc("/api/local/github/installations/discover/callback", func(w http.ResponseWriter, r *http.Request) {
+		completeLocalInstallationDiscovery(w, r, cfg, factory, authFlow)
+	})
 	routes.HandleFunc("/api/local/session/logout", func(w http.ResponseWriter, r *http.Request) {
 		if !requireLocalSession(w, r, localSession) {
 			return
@@ -327,8 +334,10 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			"cloud_connected": cloudState,
 			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
 			"token_status":    tokenState,
+			"user_id":         identity.UserID,
 			"org_id":          identity.OrgID,
 			"project_id":      identity.ProjectID,
+			"role":            identity.Role,
 			"local_session":   localSession,
 			"capabilities":    []string{"projects", "nodes", "services", "deployments", "github_app", "build_records", "topology", "deployment_policy", "routing_preflight", "secrets", "telemetry", "logs", "incidents", "audit", "support"},
 		})
@@ -469,20 +478,34 @@ func writeNormalizedLocalError(w http.ResponseWriter, r *http.Request, status in
 			Message    string `json:"message"`
 			NextAction string `json:"next_action"`
 		} `json:"error"`
+		Code       string `json:"error_code"`
+		Message    string `json:"message"`
+		NextAction string `json:"next_action"`
 	}
 	_ = json.Unmarshal(body, &payload)
 	code := strings.TrimSpace(payload.Error.Code)
 	if code == "" {
+		code = strings.TrimSpace(payload.Code)
+	}
+	if code == "" {
 		code = "DOWNSTREAM_REQUEST_FAILED"
 	}
-	message := strings.TrimSpace(redactLocalTelemetryText(payload.Error.Message))
+	messageValue := payload.Error.Message
+	if messageValue == "" {
+		messageValue = payload.Message
+	}
+	message := strings.TrimSpace(redactLocalTelemetryText(messageValue))
 	if message == "" {
 		message = http.StatusText(status)
 	}
 	if len(message) > 512 {
 		message = message[:512]
 	}
-	nextAction := strings.TrimSpace(payload.Error.NextAction)
+	nextActionValue := payload.Error.NextAction
+	if nextActionValue == "" {
+		nextActionValue = payload.NextAction
+	}
+	nextAction := strings.TrimSpace(nextActionValue)
 	if nextAction == "" {
 		nextAction = localNextAction(status)
 	}
@@ -521,12 +544,34 @@ type localSelectionState struct {
 	ExpiresAt           time.Time
 }
 
+type localAuthPending struct {
+	ExpiresAt   time.Time
+	ReturnQuery string
+}
+
+type localInstallationDiscoveryPending struct {
+	ProjectID string
+	ExpiresAt time.Time
+}
+
+type localInstallationClaimPending struct {
+	ProjectID string
+	ExpiresAt time.Time
+}
+
+type localInstallationDiscoveryResult struct {
+	Installations []cloudclient.GitHubInstallation
+	ExpiresAt     time.Time
+}
+
 type localAuthFlow struct {
-	mu                 sync.Mutex
-	states             map[string]time.Time
-	installationClaims map[string]time.Time
-	selections         map[string]localSelectionState
-	currentSession     localSessionIdentity
+	mu                      sync.Mutex
+	states                  map[string]localAuthPending
+	installationClaims      map[string]localInstallationClaimPending
+	installationDiscoveries map[string]localInstallationDiscoveryPending
+	discoveredInstallations map[string]localInstallationDiscoveryResult
+	selections              map[string]localSelectionState
+	currentSession          localSessionIdentity
 }
 
 type localSessionIdentity struct {
@@ -593,10 +638,12 @@ func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.C
 		return
 	}
 	var body struct {
-		ProjectID string `json:"project_id"`
+		ProjectID   string `json:"project_id"`
+		ReturnQuery string `json:"return_query"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
 	body.ProjectID = strings.TrimSpace(body.ProjectID)
+	body.ReturnQuery = canonicalLocalReturnQuery(body.ReturnQuery)
 	state := newLocalSessionToken()
 	callback := "http://" + r.Host + "/api/local/session/callback"
 	if body.ProjectID != "" {
@@ -614,7 +661,7 @@ func startLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg config.C
 		return
 	}
 	flow.mu.Lock()
-	flow.states[state] = time.Now().UTC().Add(5 * time.Minute)
+	flow.states[state] = localAuthPending{ExpiresAt: time.Now().UTC().Add(5 * time.Minute), ReturnQuery: body.ReturnQuery}
 	flow.mu.Unlock()
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -640,17 +687,17 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 	code, state := r.URL.Query().Get("code"), r.URL.Query().Get("state")
 	projectID := strings.TrimSpace(r.URL.Query().Get("project"))
 	flow.mu.Lock()
-	expiresAt, ok := flow.states[state]
+	pending, ok := flow.states[state]
 	if ok {
 		delete(flow.states, state)
 	}
 	flow.mu.Unlock()
-	if !ok || time.Now().UTC().After(expiresAt) {
+	if !ok || time.Now().UTC().After(pending.ExpiresAt) {
 		writeLocalError(w, r, http.StatusUnauthorized, "AUTH_CALLBACK_INVALID", "auth callback expired or invalid")
 		return
 	}
 	if authError := browserAuthErrorCode(r.URL.Query().Get("error")); authError != "" {
-		http.Redirect(w, r, localBrowserAuthRedirect(projectID, "auth_error", authError), http.StatusFound)
+		http.Redirect(w, r, localBrowserAuthRedirect(projectID, "auth_error", authError, pending.ReturnQuery), http.StatusFound)
 		return
 	}
 	if code == "" {
@@ -699,15 +746,34 @@ func completeLocalBrowserLogin(w http.ResponseWriter, r *http.Request, cfg confi
 		return
 	}
 	flow.setSession(out.Session)
-	http.Redirect(w, r, localBrowserAuthRedirect(out.Session.ProjectID, "auth", "ok"), http.StatusFound)
+	http.Redirect(w, r, localBrowserAuthRedirect(out.Session.ProjectID, "auth", "ok", pending.ReturnQuery), http.StatusFound)
 }
 
-func localBrowserAuthRedirect(projectID, key, value string) string {
-	query := url.Values{key: []string{value}}
+func localBrowserAuthRedirect(projectID, key, value, returnQuery string) string {
+	query, _ := url.ParseQuery(returnQuery)
+	query.Set(key, value)
 	if projectID != "" {
 		query.Set("project", projectID)
 	}
 	return "/?" + query.Encode()
+}
+
+func canonicalLocalReturnQuery(raw string) string {
+	if len(raw) > 4096 {
+		return ""
+	}
+	values, err := url.ParseQuery(strings.TrimPrefix(raw, "?"))
+	if err != nil {
+		return ""
+	}
+	allowed := map[string]bool{"project": true, "view": true, "source_project": true, "source_installation": true, "source_repository": true, "source_ref": true, "source_hostname": true}
+	canonical := url.Values{}
+	for name, entries := range values {
+		if allowed[name] && len(entries) == 1 && len(entries[0]) <= 512 && strings.IndexFunc(entries[0], unicode.IsControl) < 0 {
+			canonical.Set(name, entries[0])
+		}
+	}
+	return canonical.Encode()
 }
 
 func browserAuthErrorCode(code string) string {
@@ -1561,7 +1627,18 @@ func newUIHandler(uiDir, devUI string) http.Handler {
 			http.Error(w, "Opsi UI build not found. Run `npm run build` in cli/ui first.", http.StatusServiceUnavailable)
 		})
 	}
-	return http.FileServer(http.Dir(uiDir))
+	files := http.FileServer(http.Dir(uiDir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/" || strings.HasSuffix(r.URL.Path, ".html"):
+			w.Header().Set("Cache-Control", "no-store")
+		case strings.HasPrefix(r.URL.Path, "/_next/static/"):
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		default:
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		files.ServeHTTP(w, r)
+	})
 }
 
 func resolveUIDir() string {

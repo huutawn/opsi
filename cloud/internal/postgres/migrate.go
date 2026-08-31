@@ -642,5 +642,14 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := MigrateP07B3C2B2CCutoverFinalize(ctx, db); err != nil {
 		return err
 	}
-	return MigrateR5014SourceRisk(ctx, db)
+	if err := MigrateMCP04ProposalReview(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateR5014SourceRisk(ctx, db); err != nil {
+		return err
+	}
+	if err := MigrateRepositoryDeploymentWorkflow(ctx, db); err != nil {
+		return err
+	}
+	return MigratePublicHostnameAllocations(ctx, db)
 }

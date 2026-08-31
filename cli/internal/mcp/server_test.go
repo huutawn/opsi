@@ -17,9 +17,9 @@ type memoryKeychain struct {
 	pat string
 }
 
-func (m *memoryKeychain) GetPAT() (string, error)    { return m.pat, nil }
-func (m *memoryKeychain) SetPAT(val string) error     { m.pat = val; return nil }
-func (m *memoryKeychain) DeletePAT() error           { m.pat = ""; return nil }
+func (m *memoryKeychain) GetPAT() (string, error) { return m.pat, nil }
+func (m *memoryKeychain) SetPAT(val string) error { m.pat = val; return nil }
+func (m *memoryKeychain) DeletePAT() error        { m.pat = ""; return nil }
 
 func TestMCPServer_InitializeAndListTools(t *testing.T) {
 	s := NewServer(ServerOptions{
@@ -85,11 +85,11 @@ func TestMCPServer_InitializeAndListTools(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected []Tool in result, got %T", toolsMap["tools"])
 	}
-	if len(toolsList) != 18 {
-		t.Errorf("expected exactly 18 tools, got %d", len(toolsList))
+	if len(toolsList) != 22 {
+		t.Errorf("expected exactly 22 tools, got %d", len(toolsList))
 	}
 
-	// Invariant: Verify all 18 tools are strictly read-only
+	// Invariant: all MCP-01 facts and MCP-02 advisory tools are non-operational.
 	mutationActionVerbs := []string{"create_", "update_", "delete_", "apply_", "deploy_", "build_start", "build_create", "verify_start", "execute_", "patch_", "mutate_"}
 	for _, tool := range toolsList {
 		for _, kw := range mutationActionVerbs {

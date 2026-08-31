@@ -37,7 +37,7 @@ func (m *mockRunner) Run(ctx context.Context, input []byte, name string, args ..
 func TestVerifyPostgresSuccess(t *testing.T) {
 	runner := &mockRunner{
 		responses: map[string]string{
-			"SELECT 1": "1\n",
+			"CREATE TEMP TABLE opsi_dependency_probe": "opsi-write-read\n",
 			"get pods": "true\n",
 			"curl":     "200",
 		},
@@ -74,9 +74,9 @@ func TestVerifyPostgresSuccess(t *testing.T) {
 func TestVerifyValkeySuccess(t *testing.T) {
 	runner := &mockRunner{
 		responses: map[string]string{
-			"PING":     "PONG\n",
-			"get pods": "true\n",
-			"curl":     "200",
+			"opsi:dependency-probe:": "PONG\nOK\nopsi-write-read\n",
+			"get pods":               "true\n",
+			"curl":                   "200",
 		},
 	}
 	verifier := Verifier{Runner: runner}
@@ -110,7 +110,7 @@ func TestVerifyValkeySuccess(t *testing.T) {
 func TestVerifyPostgresFailure(t *testing.T) {
 	runner := &mockRunner{
 		errors: map[string]error{
-			"SELECT 1": errors.New("psql: error: connection refused"),
+			"CREATE TEMP TABLE opsi_dependency_probe": errors.New("psql: error: connection refused"),
 		},
 		responses: map[string]string{
 			"get pods": "true\n",
@@ -140,7 +140,7 @@ func TestVerifyPostgresFailure(t *testing.T) {
 func TestVerifyValkeyFailure(t *testing.T) {
 	runner := &mockRunner{
 		errors: map[string]error{
-			"PING": errors.New("valkey-cli: connection refused"),
+			"opsi:dependency-probe:": errors.New("valkey-cli: connection refused"),
 		},
 		responses: map[string]string{
 			"get pods": "true\n",
@@ -167,7 +167,7 @@ func TestVerifyValkeyFailure(t *testing.T) {
 func TestVerifyAssertionMismatch(t *testing.T) {
 	runner := &mockRunner{
 		responses: map[string]string{
-			"SELECT 1": "1\n",
+			"CREATE TEMP TABLE opsi_dependency_probe": "opsi-write-read\n",
 			"get pods": "true\n",
 			"curl":     "500",
 		},

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 )
 
 func TestPollJobNoContent(t *testing.T) {
@@ -69,6 +71,25 @@ func TestPollJobAndCompleteDeployment(t *testing.T) {
 	}
 	if !completed {
 		t.Fatal("result was not submitted")
+	}
+}
+
+func TestDeploymentReportsSanitizedCloudError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/agents/node-1/deployments/dep-1/progress" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error_code":"DEPLOYMENT_STATE_INVALID","message":"token=must-not-appear"}`))
+	}))
+	defer server.Close()
+
+	err := (Client{BaseURL: server.URL, ProjectID: "proj-dev"}).ProgressDeployment(context.Background(), "node-1", "dep-1", deploymentv1.Progress{})
+	if err == nil || !strings.Contains(err.Error(), "DEPLOYMENT_STATE_INVALID") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), "must-not-appear") {
+		t.Fatalf("cloud response secret leaked: %v", err)
 	}
 }
 

@@ -16,29 +16,30 @@ import (
 )
 
 const (
-	RolloutSchemaVersion       = "opsi.rollout_intent/v1"
-	RolloutRecordVersion       = "opsi.rollout_record/v1"
-	RolloutEventVersion        = "opsi.rollout_event/v1"
-	RuntimeSnapshotVersion     = "opsi.runtime_snapshot/v1"
-	KnownGoodSchemaVersion     = "opsi.known_good/v1"
-	ReadinessEvidenceVersion   = "opsi.readiness_evidence/v1"
-	ExposureMutationVersion    = "opsi.exposure_mutation/v1"
-	ExposurePreviewVersion     = "opsi.exposure_preview/v1"
-	RolloutStatePrepared       = "prepared"
-	RolloutStateApplying       = "applying"
-	RolloutStateWaiting        = "waiting"
-	RolloutStateSucceeded      = "succeeded"
-	RolloutStateFailed         = "failed"
-	RolloutStateRollingBack    = "rolling_back"
-	RolloutStateRolledBack     = "rolled_back"
-	RolloutStateRollbackFailed = "rollback_failed"
-	RolloutStateCleaned        = "cleaned"
-	RolloutOperationApply      = "apply"
-	RolloutOperationRollback   = "rollback"
-	RolloutOperationCleanup    = "preview_cleanup"
-	MaxRolloutAttempts         = 3
-	MaxRolloutErrorBytes       = 1024
-	MaxRolloutResources        = 8
+	RolloutSchemaVersion               = "opsi.rollout_intent/v1"
+	RolloutRecordVersion               = "opsi.rollout_record/v1"
+	RolloutEventVersion                = "opsi.rollout_event/v1"
+	RuntimeSnapshotVersion             = "opsi.runtime_snapshot/v1"
+	KnownGoodSchemaVersion             = "opsi.known_good/v1"
+	ReadinessEvidenceVersion           = "opsi.readiness_evidence/v1"
+	ExposureMutationVersion            = "opsi.exposure_mutation/v1"
+	ExposurePreviewVersion             = "opsi.exposure_preview/v1"
+	RolloutStatePrepared               = "prepared"
+	RolloutStateApplying               = "applying"
+	RolloutStateWaiting                = "waiting"
+	RolloutStateSucceeded              = "succeeded"
+	RolloutStateFailed                 = "failed"
+	RolloutStateRollingBack            = "rolling_back"
+	RolloutStateRolledBack             = "rolled_back"
+	RolloutStateRollbackFailed         = "rollback_failed"
+	RolloutStateCleaned                = "cleaned"
+	RolloutOperationApply              = "apply"
+	RolloutOperationRollback           = "rollback"
+	RolloutOperationCleanup            = "preview_cleanup"
+	RolloutOperationFirstDeployCleanup = "first_deploy_cleanup"
+	MaxRolloutAttempts                 = 3
+	MaxRolloutErrorBytes               = 1024
+	MaxRolloutResources                = 8
 )
 
 const (
@@ -282,7 +283,7 @@ func (i RolloutIntent) Canonicalize() (RolloutIntent, error) {
 	if out.Operation == "" {
 		out.Operation = RolloutOperationApply
 	}
-	if out.Operation != RolloutOperationApply && out.Operation != RolloutOperationRollback && out.Operation != RolloutOperationCleanup {
+	if out.Operation != RolloutOperationApply && out.Operation != RolloutOperationRollback && out.Operation != RolloutOperationCleanup && out.Operation != RolloutOperationFirstDeployCleanup {
 		return RolloutIntent{}, errors.New("rollout operation is invalid")
 	}
 	if err := out.Target.Validate(); err != nil {
@@ -321,6 +322,9 @@ func (i RolloutIntent) Canonicalize() (RolloutIntent, error) {
 	if out.Operation == RolloutOperationCleanup && (out.Desired.Preview == nil || out.PreviousKnownGoodID != "" || out.ExpectedKnownGoodID != "") {
 		return RolloutIntent{}, errors.New("preview cleanup requires preview authority and no known-good references")
 	}
+	if out.Operation == RolloutOperationFirstDeployCleanup && (out.Desired.Preview != nil || out.PreviousKnownGoodID != "" || out.ExpectedKnownGoodID != "") {
+		return RolloutIntent{}, errors.New("first deploy cleanup requires production authority and no known-good references")
+	}
 	payload := out
 	payload.IntentHash = ""
 	payload.Desired.Exposure.Metadata = nil
@@ -357,6 +361,8 @@ type ReadinessEvidence struct {
 	RuntimeReady           bool      `json:"runtime_ready"`
 	LocalRoutingReady      bool      `json:"local_routing_ready"`
 	ExternalReady          bool      `json:"external_ready"`
+	ApplicationImageID     string    `json:"application_image_id,omitempty"`
+	AvailableReplicas      int32     `json:"available_replicas,omitempty"`
 	WorkloadEvidenceHash   string    `json:"workload_evidence_hash"`
 	ServiceEvidenceHash    string    `json:"service_evidence_hash"`
 	ExposureEvidenceHash   string    `json:"exposure_evidence_hash"`
@@ -380,6 +386,12 @@ func (e ReadinessEvidence) Validate(requireLocal, requireExternal bool) error {
 	}
 	if requireExternal && (!e.ExternalReady || !rolloutHashPattern.MatchString(e.ExternalEvidenceHash)) {
 		return errors.New("external readiness evidence is incomplete")
+	}
+	if e.ApplicationImageID == "" && e.AvailableReplicas == 0 {
+		return nil // Compatibility with evidence recorded before these factual fields existed.
+	}
+	if e.AvailableReplicas < 1 || len(e.ApplicationImageID) > 2048 || strings.ContainsAny(e.ApplicationImageID, "\r\n\x00") {
+		return errors.New("application readiness facts are invalid")
 	}
 	return nil
 }
@@ -482,6 +494,32 @@ func CanTransitionRollout(from, to string) bool {
 		RolloutStateRollingBack: {RolloutStateRolledBack: true, RolloutStateRollbackFailed: true},
 	}
 	return allowed[from][to]
+}
+
+// CanCompleteRollout accepts a factual terminal result when best-effort
+// progress reports were lost, while still requiring a canonical state path.
+func CanCompleteRollout(from, to string) bool {
+	if from == to {
+		return true
+	}
+	states := []string{RolloutStatePrepared, RolloutStateApplying, RolloutStateWaiting, RolloutStateFailed, RolloutStateRollingBack, RolloutStateSucceeded, RolloutStateRolledBack, RolloutStateRollbackFailed, RolloutStateCleaned}
+	seen := map[string]bool{from: true}
+	queue := []string{from}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, next := range states {
+			if seen[next] || !CanTransitionRollout(current, next) {
+				continue
+			}
+			if next == to {
+				return true
+			}
+			seen[next] = true
+			queue = append(queue, next)
+		}
+	}
+	return false
 }
 
 type ExposureMutationRequest struct {

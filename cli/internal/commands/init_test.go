@@ -39,16 +39,17 @@ func (r initGitRunner) Run(_ context.Context, name string, args ...string) ([]by
 }
 
 type fakeCloudState struct {
-	mu              sync.Mutex
-	repositoryReady bool
-	binding         *cloudclient.GitHubBinding
-	posts           []string
-	callback        string
-	localState      string
-	grant           string
-	installation    bool
-	serviceMissing  bool
-	denyAccess      bool
+	mu                sync.Mutex
+	repositoryReady   bool
+	repositoryClaimed bool
+	binding           *cloudclient.GitHubBinding
+	posts             []string
+	callback          string
+	localState        string
+	grant             string
+	installation      bool
+	serviceMissing    bool
+	denyAccess        bool
 }
 
 func (s *fakeCloudState) handler(response http.ResponseWriter, request *http.Request) {
@@ -69,7 +70,11 @@ func (s *fakeCloudState) handler(response http.ResponseWriter, request *http.Req
 		}
 	case request.Method == http.MethodGet && strings.HasSuffix(path, "/github/repositories"):
 		if s.repositoryReady {
-			_, _ = io.WriteString(response, `{"repositories":[{"repository_id":123456,"installation_id":77,"full_name":"Owner/Repo","default_branch":"main","status":"active"}]}`)
+			claimStatus := "available"
+			if s.repositoryClaimed {
+				claimStatus = "active"
+			}
+			_, _ = fmt.Fprintf(response, `{"repositories":[{"repository_id":123456,"installation_id":77,"full_name":"Owner/Repo","default_branch":"main","status":"active","claim_status":%q}]}`, claimStatus)
 		} else {
 			_, _ = io.WriteString(response, `{"repositories":[]}`)
 		}
@@ -120,7 +125,11 @@ func (s *fakeCloudState) handler(response http.ResponseWriter, request *http.Req
 		_, _ = io.WriteString(response, `{"installation":{"installation_id":77,"status":"active"},"repositories_synced":1}`)
 	case request.Method == http.MethodPost && strings.HasSuffix(path, "/repositories/123456/claim"):
 		s.posts = append(s.posts, "repository-claim")
+		s.repositoryClaimed = true
 		_, _ = io.WriteString(response, `{"repository_id":123456,"project_id":"proj-1","status":"active"}`)
+	case request.Method == http.MethodPost && strings.HasSuffix(path, "/deployment-runs"):
+		s.posts = append(s.posts, "deployment-run")
+		_, _ = io.WriteString(response, `{"deployment_run":{"id":"run-1","state":"awaiting_input","revision":2,"plan":{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source":{"repository":"owner/repo","selected_ref":"main","commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"applications":[{"key":"repo-app","root":".","port":8080}],"issues":[{"code":"TARGET_SERVER_REQUIRED","message":"Connect a server","blocking":true}]}}}`)
 	case request.Method == http.MethodPost && strings.HasSuffix(path, "/github/bindings"):
 		s.posts = append(s.posts, "binding-create")
 		var draft cloudclient.GitHubBinding
@@ -151,7 +160,7 @@ func newInitRoot(t *testing.T, root, cloudURL string, state *fakeCloudState) (*c
 	buffer := bytes.NewBuffer(nil)
 	command.SetOut(buffer)
 	command.SetErr(buffer)
-	args := []string{"init", "--project-id", "proj-1", "--service-id", "svc-1", "--service-key", "api", "--cloud-url", cloudURL, "--repo-dir", root, "--timeout", "5s"}
+	args := []string{"init", "--project-id", "proj-1", "--cloud-url", cloudURL, "--repo-dir", root, "--timeout", "5s"}
 	command.SetArgs(args)
 	return &cobraHarness{execute: command.Execute, setArgs: command.SetArgs, baseArgs: args, state: state}, buffer
 }
@@ -181,19 +190,18 @@ func TestInitIntegrationAndIdempotentRerun(t *testing.T) {
 	if err := harness.execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, relative := range []string{defaultConfigPath, defaultWorkflowPath} {
-		content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
-		if err != nil || len(content) == 0 {
-			t.Fatalf("generated %s: %q err=%v", relative, content, err)
+	for _, relative := range []string{defaultConfigPath, ".github/workflows/opsi-cd.yaml"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(relative))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("init wrote %s: %v", relative, err)
 		}
 	}
 	state.mu.Lock()
 	posts := append([]string(nil), state.posts...)
 	state.mu.Unlock()
-	if strings.Join(posts, ",") != "repository-claim,binding-create" {
+	if strings.Join(posts, ",") != "repository-claim,deployment-run" {
 		t.Fatalf("mutation order=%v", posts)
 	}
-	if strings.Contains(output.String(), "test-pat") || !strings.Contains(output.String(), "Repository: owner/repo (123456)") {
+	if strings.Contains(output.String(), "test-pat") || !strings.Contains(output.String(), "No repository files were written") {
 		t.Fatalf("unsafe or incomplete output: %s", output.String())
 	}
 	harness, _ = newInitRoot(t, root, server.URL, state)
@@ -202,32 +210,32 @@ func TestInitIntegrationAndIdempotentRerun(t *testing.T) {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.posts) != 2 {
+	if len(state.posts) != 3 || state.posts[2] != "deployment-run" {
 		t.Fatalf("rerun created duplicate mutations: %v", state.posts)
 	}
 }
 
-func TestInitLocalV2AddUpdateAndIdempotentApply(t *testing.T) {
+func TestExplicitCDConfigUpsertIsSeparateFromInit(t *testing.T) {
 	root := createRepository(t)
 	keychainCalls := 0
 	command := func(args ...string) (*bytes.Buffer, error) {
 		output := &bytes.Buffer{}
 		rootCommand := NewRootCommand(Options{Version: "test", GitRunner: initGitRunner{root: root}, KeychainFactory: func() (keychain.Store, error) { keychainCalls++; return nil, errors.New("keychain must not be used") }})
 		rootCommand.SetOut(output)
-		rootCommand.SetArgs(append([]string{"init", "--repo-dir", root}, args...))
+		rootCommand.SetArgs(append([]string{"cd", "config", "upsert", "--repo-dir", root}, args...))
 		return output, rootCommand.Execute()
 	}
 	if _, err := command("--service-key", "api"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := command("--service-key", "worker", "--depends-on", "api", "--force", "--yes"); err != nil {
+	if _, err := command("--service-key", "worker", "--force", "--yes"); err != nil {
 		t.Fatal(err)
 	}
-	output, err := command("--service-key", "worker", "--depends-on", "api", "--force", "--yes", "--json")
+	output, err := command("--service-key", "worker", "--force", "--yes", "--json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if keychainCalls != 0 || !strings.Contains(output.String(), `"action": "unchanged"`) {
+	if keychainCalls != 0 || !strings.Contains(output.String(), `"action":"unchanged"`) {
 		t.Fatalf("keychain=%d output=%s", keychainCalls, output.String())
 	}
 	configData, err := os.ReadFile(filepath.Join(root, defaultConfigPath))
@@ -259,54 +267,6 @@ func TestInitDryRunAndValidationBeforeMutation(t *testing.T) {
 			t.Fatalf("dry-run posts=%v output=%s", state.posts, output.String())
 		}
 	})
-	t.Run("missing-dockerfile", func(t *testing.T) {
-		root := t.TempDir()
-		state := &fakeCloudState{repositoryReady: true}
-		server := httptest.NewServer(http.HandlerFunc(state.handler))
-		defer server.Close()
-		harness, _ := newInitRoot(t, root, server.URL, state)
-		if err := harness.execute(); err == nil {
-			t.Fatal("missing Dockerfile accepted")
-		}
-		state.mu.Lock()
-		defer state.mu.Unlock()
-		if len(state.posts) != 0 {
-			t.Fatalf("mutation happened before file validation: %v", state.posts)
-		}
-	})
-}
-
-func TestInitBindingConflictAndOverwriteSafety(t *testing.T) {
-	root := createRepository(t)
-	if err := os.MkdirAll(filepath.Join(root, ".opsi"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	existingConfig := []byte("apiVersion: cd.opsi.dev/v1alpha1\nkind: ServiceBuild\nmetadata:\n  serviceKey: web\nbuild:\n  context: .\n  dockerfile: Dockerfile\n  platforms: [linux/amd64]\ndeploy:\n  production:\n    branches: [main]\n  preview:\n    pullRequests: false\n")
-	if err := os.WriteFile(filepath.Join(root, defaultConfigPath), existingConfig, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	state := &fakeCloudState{repositoryReady: true}
-	server := httptest.NewServer(http.HandlerFunc(state.handler))
-	defer server.Close()
-	harness, _ := newInitRoot(t, root, server.URL, state)
-	if err := harness.execute(); err == nil || !strings.Contains(err.Error(), "--force --yes") {
-		t.Fatalf("default overwrite error=%v", err)
-	}
-	state.mu.Lock()
-	if len(state.posts) != 0 {
-		t.Fatalf("overwrite failure mutated Cloud: %v", state.posts)
-	}
-	state.binding = &cloudclient.GitHubBinding{ID: "other", ProjectID: "proj-1", ServiceID: "svc-1", RepositoryID: 999, ServiceKey: "api", ConfigPath: defaultConfigPath, Status: "active"}
-	state.mu.Unlock()
-	harness, _ = newInitRoot(t, root, server.URL, state)
-	harness.setArgs(append(harness.baseArgs, "--force", "--yes"))
-	if err := harness.execute(); err == nil || !strings.Contains(err.Error(), "different repository binding") {
-		t.Fatalf("binding conflict error=%v", err)
-	}
-	content, _ := os.ReadFile(filepath.Join(root, defaultConfigPath))
-	if string(content) != string(existingConfig) {
-		t.Fatalf("conflict wrote file: %q", content)
-	}
 }
 
 func TestInitMissingPATFailsBeforeNetwork(t *testing.T) {
@@ -322,57 +282,10 @@ func TestInitMissingPATFailsBeforeNetwork(t *testing.T) {
 		},
 		HTTPClient: &http.Client{Transport: transport},
 	})
-	command.SetArgs([]string{"init", "--project-id", "proj-1", "--service-id", "svc-1", "--service-key", "api"})
+	command.SetArgs([]string{"init", "--project-id", "proj-1"})
 	err := command.Execute()
 	if err == nil || !strings.Contains(err.Error(), "opsi login --pat-file") || calls.Load() != 0 {
 		t.Fatalf("error=%v calls=%d", err, calls.Load())
-	}
-}
-
-func TestInitMissingServiceFailsBeforeMutation(t *testing.T) {
-	root := createRepository(t)
-	state := &fakeCloudState{repositoryReady: true, serviceMissing: true}
-	server := httptest.NewServer(http.HandlerFunc(state.handler))
-	defer server.Close()
-	harness, _ := newInitRoot(t, root, server.URL, state)
-	err := harness.execute()
-	if err == nil || !strings.Contains(err.Error(), "does not exist") {
-		t.Fatalf("error=%v", err)
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if len(state.posts) != 0 {
-		t.Fatalf("missing service caused mutation: %v", state.posts)
-	}
-}
-
-func TestInitForceYesOverwritesAtomically(t *testing.T) {
-	root := createRepository(t)
-	if err := os.MkdirAll(filepath.Join(root, ".opsi"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	legacyConfig := []byte("apiVersion: cd.opsi.dev/v1alpha1\nkind: ServiceBuild\nmetadata:\n  serviceKey: api\nbuild:\n  context: .\n  dockerfile: Dockerfile\n  platforms: [linux/amd64]\ndeploy:\n  production:\n    branches: [main]\n  preview:\n    pullRequests: true\n")
-	if err := os.WriteFile(filepath.Join(root, defaultConfigPath), legacyConfig, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	state := &fakeCloudState{repositoryReady: true}
-	server := httptest.NewServer(http.HandlerFunc(state.handler))
-	defer server.Close()
-	harness, output := newInitRoot(t, root, server.URL, state)
-	harness.setArgs(append(harness.baseArgs, "--force", "--yes"))
-	if err := harness.execute(); err != nil {
-		t.Fatal(err)
-	}
-	content, err := os.ReadFile(filepath.Join(root, defaultConfigPath))
-	if err != nil || !strings.HasPrefix(string(content), "# Generated by opsi init") {
-		t.Fatalf("content=%q err=%v", content, err)
-	}
-	info, err := os.Stat(filepath.Join(root, defaultConfigPath))
-	if err != nil || info.Mode().Perm() != 0o644 {
-		t.Fatalf("mode=%v err=%v", info.Mode(), err)
-	}
-	if !strings.Contains(output.String(), "sha256") {
-		t.Fatalf("overwrite hashes not reported: %s", output.String())
 	}
 }
 
@@ -390,7 +303,7 @@ func TestInstallationClaimRefreshesInventory(t *testing.T) {
 	posts := append([]string(nil), state.posts...)
 	grant := state.grant
 	state.mu.Unlock()
-	if strings.Join(posts, ",") != "installation-start,installation-redeem,repository-claim,binding-create" {
+	if strings.Join(posts, ",") != "installation-start,installation-redeem,repository-claim,deployment-run" {
 		t.Fatalf("claim flow order=%v", posts)
 	}
 	if strings.Contains(output.String(), grant) || strings.Contains(output.String(), "test-pat") {

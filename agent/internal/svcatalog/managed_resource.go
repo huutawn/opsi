@@ -313,7 +313,10 @@ func managedResourceObjects(spec resourcev1.ManagedResourceSpec, credential *res
 		objects = append(objects, secret)
 		podSpec["volumes"] = []any{map[string]any{"name": "acl", "secret": map[string]any{"secretName": managedResourceSecretName(spec)}}}
 	}
-	deployment := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": spec.Connection.ServiceName, "namespace": namespace, "labels": labels, "annotations": annotations}, "spec": map[string]any{"replicas": spec.Replicas, "selector": map[string]any{"matchLabels": selector}, "template": map[string]any{"metadata": map[string]any{"labels": labels, "annotations": annotations}, "spec": podSpec}}}
+	// Managed credentials are mounted as a generated Secret. Recreate prevents
+	// a resource resize or credential rotation from running old and new pods
+	// concurrently with incompatible credential material on constrained nodes.
+	deployment := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": spec.Connection.ServiceName, "namespace": namespace, "labels": labels, "annotations": annotations}, "spec": map[string]any{"replicas": spec.Replicas, "strategy": map[string]any{"type": "Recreate"}, "selector": map[string]any{"matchLabels": selector}, "template": map[string]any{"metadata": map[string]any{"labels": labels, "annotations": annotations}, "spec": podSpec}}}
 	service := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": spec.Connection.ServiceName, "namespace": namespace, "labels": labels, "annotations": annotations}, "spec": map[string]any{"type": "ClusterIP", "selector": selector, "ports": []any{map[string]any{"name": spec.Ports[0].Name, "port": spec.Ports[0].Port, "targetPort": spec.Ports[0].Name, "protocol": "TCP"}}}}
 	return append(objects, deployment, service)
 }

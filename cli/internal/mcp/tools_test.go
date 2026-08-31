@@ -11,13 +11,43 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
+	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
+
+func TestDeploymentReadinessFactsFailClosed(t *testing.T) {
+	if build := deploymentReadinessBuild(nil); build.Status != "REQUIRED" {
+		t.Fatalf("expected missing build to require a build, got %+v", build)
+	}
+	for status, expected := range map[string]string{"failed": "FAILED", "pending": "NOT_ACCEPTED", "succeeded": "CURRENT"} {
+		build := deploymentReadinessBuild([]cloudclient.BuildRecord{{Build: buildrecordv1.BuildMetadata{Status: status}}})
+		if build.Status != expected {
+			t.Errorf("build status %q: expected %q, got %+v", status, expected, build)
+		}
+	}
+
+	deps := []ApplicationDependencyDoc{{LogicalName: "database", TargetKind: "managed_resource", TargetIdentity: "postgres", Required: true, Realized: true, ResourceBindingStatus: "ready"}}
+	if got := deploymentReadinessDependencies(deps); got.Status != "CONFIGURED" {
+		t.Errorf("expected ready managed dependency facts, got %+v", got)
+	}
+	deps[0].ResourceBindingStatus = "failed"
+	if got := deploymentReadinessDependencies(deps); got.Status != "UNRESOLVED" || got.Unrealized != 1 {
+		t.Errorf("expected unrealized dependency to fail closed, got %+v", got)
+	}
+
+	for status, expected := range map[string]string{"": "NOT_RUN", "VERIFIED": "VERIFIED", "PARTIALLY_VERIFIED": "PARTIALLY_VERIFIED", "FAILED": "FAILED", "STALE": "STALE"} {
+		got := deploymentReadinessVerification([]ApplicationDependencyDoc{{LatestVerificationStatus: status}})
+		if got.Status != expected {
+			t.Errorf("verification status %q: expected %q, got %+v", status, expected, got)
+		}
+	}
+}
 
 func setupMockCloudServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
@@ -242,7 +272,7 @@ func setupMockCloudServer(t *testing.T) (*httptest.Server, string) {
 					"build": map[string]any{
 						"build_strategy": "buildpacks",
 						"oci_digest":     "sha256:1111222233334444555566667777888899990000111122223333444455556666",
-						"status":         "accepted",
+						"status":         "succeeded",
 					},
 				},
 			},
@@ -262,7 +292,7 @@ func setupMockCloudServer(t *testing.T) (*httptest.Server, string) {
 			"build": map[string]any{
 				"build_strategy": "buildpacks",
 				"oci_digest":     "sha256:1111222233334444555566667777888899990000111122223333444455556666",
-				"status":         "accepted",
+				"status":         "succeeded",
 			},
 		})
 	})
@@ -555,6 +585,13 @@ func TestMCPTools_AllReadToolsAcceptance(t *testing.T) {
 	res = callTool("source_search", map[string]any{"application_id": "svc-web-1", "query": "Hello world", "commit_sha": commitSHA, "project_id": projectID})
 	if res.IsError || !strings.Contains(res.Content[0].Text, "main.go") {
 		t.Fatalf("source_search failed: %s", res.Content[0].Text)
+	}
+
+	// 19. deployment_readiness_context aggregates facts only. It must never
+	// advertise an operational action, even when canonical preflight passes.
+	res = callTool("deployment_readiness_context", map[string]any{"application_id": "svc-web-1", "environment_id": "production", "project_id": projectID})
+	if res.IsError || !strings.Contains(res.Content[0].Text, `"action": "NONE"`) || !strings.Contains(res.Content[0].Text, `"status": "PASS"`) {
+		t.Fatalf("deployment_readiness_context failed: %s", res.Content[0].Text)
 	}
 }
 

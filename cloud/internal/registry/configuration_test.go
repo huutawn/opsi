@@ -1,8 +1,8 @@
 package registry
 
 import (
-	"strings"
 	"context"
+	"strings"
 	"testing"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -44,8 +44,67 @@ func TestCompileServiceRuntimeSpecsProducesNextDeploymentAuthoritiesOnly(t *test
 	if workload.Replicas != 2 || workload.Resources.Requests.CPU != "100m" || workload.Resources.Limits.Memory != "128Mi" {
 		t.Fatalf("topology did not override legacy service resources: %+v", workload)
 	}
-	if workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.ReadinessProbe.Path != source.HealthPath || workload.LivenessProbe.Port != int32(source.ContainerPort) {
+	if workload.StartupProbe == nil || workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.StartupProbe.Path != source.HealthPath || workload.StartupProbe.FailureThreshold != 60 || workload.ReadinessProbe.Path != source.HealthPath || workload.LivenessProbe.Port != int32(source.ContainerPort) {
 		t.Fatalf("health probes were not compiled from the service boundary: %+v", workload)
+	}
+}
+func TestCompileServiceRuntimeSpecsSeparateRequestAndLimit(t *testing.T) {
+	source, target := configurationServices()
+	// 1. Explicit request and limit
+	assignment := topologyv1.Assignment{
+		ServiceKey:           source.Name,
+		EnvironmentID:        "env-1",
+		RuntimeID:            "rt-1",
+		Replicas:             1,
+		CPURequestMillicores: 100,
+		MemoryRequestBytes:   128 * 1024 * 1024,
+		CPULimitMillicores:   500,
+		MemoryLimitBytes:     512 * 1024 * 1024,
+		Exposure:             topologyv1.ExposureIntent{Mode: "none"},
+	}
+	workload, err := CompileServiceRuntimeSpecs(source, assignment, []topologyv1.Assignment{assignment}, emptyServiceConfiguration(), []ServiceRecord{source, target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workload.Resources.Requests.CPU != "100m" || workload.Resources.Limits.CPU != "500m" {
+		t.Fatalf("expected requests.cpu=100m limits.cpu=500m, got requests=%s limits=%s", workload.Resources.Requests.CPU, workload.Resources.Limits.CPU)
+	}
+	if workload.Resources.Requests.Memory != "128Mi" || workload.Resources.Limits.Memory != "512Mi" {
+		t.Fatalf("expected requests.memory=128Mi limits.memory=512Mi, got requests=%s limits=%s", workload.Resources.Requests.Memory, workload.Resources.Limits.Memory)
+	}
+
+	// 2. Omitted limits default to requests
+	omittedLimits := topologyv1.Assignment{
+		ServiceKey:           source.Name,
+		EnvironmentID:        "env-1",
+		RuntimeID:            "rt-1",
+		Replicas:             1,
+		CPURequestMillicores: 200,
+		MemoryRequestBytes:   256 * 1024 * 1024,
+		Exposure:             topologyv1.ExposureIntent{Mode: "none"},
+	}
+	workloadOmitted, err := CompileServiceRuntimeSpecs(source, omittedLimits, []topologyv1.Assignment{omittedLimits}, emptyServiceConfiguration(), []ServiceRecord{source, target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workloadOmitted.Resources.Requests.CPU != "200m" || workloadOmitted.Resources.Limits.CPU != "200m" {
+		t.Fatalf("expected omitted limit to default to request (200m), got requests=%s limits=%s", workloadOmitted.Resources.Requests.CPU, workloadOmitted.Resources.Limits.CPU)
+	}
+	if workloadOmitted.Resources.Requests.Memory != "256Mi" || workloadOmitted.Resources.Limits.Memory != "256Mi" {
+		t.Fatalf("expected omitted limit to default to request (256Mi), got requests=%s limits=%s", workloadOmitted.Resources.Requests.Memory, workloadOmitted.Resources.Limits.Memory)
+	}
+}
+
+func TestCompileServiceRuntimeSpecsCarriesSecretReferencesWithoutValues(t *testing.T) {
+	source, target := configurationServices()
+	assignment := topologyv1.Assignment{ServiceKey: source.Name, EnvironmentID: "env-1", RuntimeID: "rt-1", Replicas: 1, CPURequestMillicores: 100, MemoryRequestBytes: 128 << 20, Exposure: topologyv1.ExposureIntent{Mode: "none"}}
+	draft := ServiceConfigurationDraft{SecretReferences: []deploymentv1.SecretReference{{EnvName: "JWT_KEY", SecretID: "wsecret-1"}}}
+	workload, err := CompileServiceRuntimeSpecs(source, assignment, []topologyv1.Assignment{assignment}, appliedConfiguration(draft), []ServiceRecord{source, target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workload.SecretReferences) != 1 || workload.SecretReferences[0].SecretID != "wsecret-1" || len(workload.Environment) != 0 {
+		t.Fatalf("workload=%+v", workload)
 	}
 }
 

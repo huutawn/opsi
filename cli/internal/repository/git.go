@@ -169,6 +169,7 @@ type InventoryRepository struct {
 	Status         string
 	Archived       bool
 	Disabled       bool
+	ClaimStatus    string
 }
 
 var ErrRepositoryNotFound = errors.New("repository is not present in Cloud inventory")

@@ -107,6 +107,26 @@ func TestRoutingFailsClosedOnAmbiguousPolicy(t *testing.T) {
 	}
 }
 
+func TestRoutingAcceptsDockerfileRecordWithoutBuildPlanHash(t *testing.T) {
+	service, record, draft := routingFixture(t)
+	record.Build.PlanHash = ""
+	draft.AllowedBuildPlanHashes = nil
+	if _, err := service.Apply(context.Background(), "p1", "owner", "dockerfile-policy", deploymentpolicyv1.ApplyRequest{Draft: draft}); err != nil {
+		t.Fatal(err)
+	}
+	service.BuildRecords = &recordsFixture{record: record}
+	decision, err := service.Route(context.Background(), "p1", deploymentpolicyv1.RoutingRequest{BuildRecordID: record.ID, EnvironmentID: "e1"})
+	if err != nil || !decision.Eligible {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+
+	record.Build.PlanHash = strings.Repeat("c", 64)
+	service.BuildRecords = &recordsFixture{record: record}
+	if _, err := service.Route(context.Background(), "p1", deploymentpolicyv1.RoutingRequest{BuildRecordID: record.ID, EnvironmentID: "e1"}); deploymentErrorCode(err) != "ROUTING_POLICY_MISMATCH" {
+		t.Fatalf("record with an unapproved build plan matched hashless policy: %v", err)
+	}
+}
+
 func TestPolicyReplayDoesNotReevaluateChangedBinding(t *testing.T) {
 	service, _, draft := routingFixture(t)
 	request := deploymentpolicyv1.ApplyRequest{Draft: draft}

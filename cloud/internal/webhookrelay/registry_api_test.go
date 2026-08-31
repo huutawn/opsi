@@ -20,9 +20,29 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/topology"
 )
+
+func TestWriteRegistryFailurePreservesDeploymentPolicyBlocker(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/project/deployments/preview", nil)
+	request.Header.Set("X-Request-ID", "request-routing")
+	response := httptest.NewRecorder()
+
+	writeRegistryFailure(response, request, deploymentpolicy.Error{
+		Status:  http.StatusConflict,
+		Code:    "ROUTING_POLICY_MISMATCH",
+		Message: "no active DeploymentPolicy exact-matches the BuildRecord, environment, and topology runtime",
+	})
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"error_code":"ROUTING_POLICY_MISMATCH"`) || strings.Contains(response.Body.String(), "Internal server error") {
+		t.Fatalf("unexpected body=%s", response.Body.String())
+	}
+}
 
 func TestRegistryAPIProjectReadinessAndDeploymentGuard(t *testing.T) {
 	server := NewServer(Config{BootstrapWorkerToken: "worker-secret"})

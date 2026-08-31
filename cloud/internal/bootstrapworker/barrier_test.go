@@ -159,7 +159,7 @@ func TestStagingCrashBarrierInsertionPointAndCancellation(t *testing.T) {
 	h.mu.Lock()
 	events := append([]string(nil), h.events...)
 	h.mu.Unlock()
-	wantPrefix := []string{"checkpoint:", "run:preflight", "checkpoint:preflight", "run:install_k3s"}
+	wantPrefix := []string{"checkpoint:", "run:preflight", "checkpoint:preflight", "run:configure_swap", "checkpoint:configure_swap", "run:install_k3s"}
 	if len(events) < len(wantPrefix) || !equalStrings(events[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("events=%v want prefix=%v", events, wantPrefix)
 	}
@@ -174,7 +174,7 @@ func TestStagingCrashBarrierInsertionPointAndCancellation(t *testing.T) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.checkpointRequests) != 2 || h.checkpointRequests[1].LastCompletedStep != "preflight" {
+	if len(h.checkpointRequests) != 3 || h.checkpointRequests[2].LastCompletedStep != "configure_swap" {
 		t.Fatalf("checkpoint advanced while barrier waited: %+v", h.checkpointRequests)
 	}
 	if len(h.finishes) != 1 || h.finishes[0].failureCode != "BOOTSTRAP_WORKER_SHUTDOWN" {
@@ -185,7 +185,7 @@ func TestStagingCrashBarrierInsertionPointAndCancellation(t *testing.T) {
 func TestStagingCrashBarrierReplayAfterRestartAndCompletion(t *testing.T) {
 	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
 	h.barrier = testBarrierConfig(t, t.TempDir(), "boot-1", "run-1")
-	h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], 1)
+	h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], 2)
 	armTestBarrier(t, h.barrier)
 	barrier := newStagingCrashBarrier(h.barrier)
 	if err := writeCrashBarrierState(barrier.statePath(), crashBarrierStateForConfig(h.barrier, crashBarrierReached, "old-worker-process")); err != nil {
@@ -201,7 +201,7 @@ func TestStagingCrashBarrierReplayAfterRestartAndCompletion(t *testing.T) {
 	if !equalStrings(ran, []string{"install_k3s", "install_agent", "register_agent"}) {
 		t.Fatalf("replay skipped remote step or later steps: %v", ran)
 	}
-	if len(h.checkpointRequests) != 3 || h.checkpointRequests[0].NextStepIndex != 2 || h.checkpointRequests[2].NextStepIndex != 4 {
+	if len(h.checkpointRequests) != 3 || h.checkpointRequests[0].NextStepIndex != 3 || h.checkpointRequests[2].NextStepIndex != 5 {
 		t.Fatalf("replay checkpoint sequence=%+v", h.checkpointRequests)
 	}
 	state, exists, err := readCrashBarrierState((newStagingCrashBarrier(h.barrier)).statePath())
@@ -215,15 +215,15 @@ func TestStagingCrashBarrierCompletionFailureDoesNotContradictPersistedCheckpoin
 	second := testLease("boot-1", "host-1")
 	h := newDaemonHarness(t, []Lease{first, second})
 	h.barrier = testBarrierConfig(t, t.TempDir(), "boot-1", "run-1")
-	h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], 1)
-	h.leases[1].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[1], 2)
+	h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], 2)
+	h.leases[1].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[1], 3)
 	barrier := armTestBarrier(t, h.barrier)
 	if err := writeCrashBarrierState(barrier.statePath(), crashBarrierStateForConfig(h.barrier, crashBarrierReached, "old-worker-process")); err != nil {
 		t.Fatal(err)
 	}
 	var evidenceFailure bool
 	h.checkpointPersisted = func(checkpoint registry.BootstrapCheckpoint) {
-		if checkpoint.NextStepIndex == 2 && !evidenceFailure {
+		if checkpoint.NextStepIndex == 3 && !evidenceFailure {
 			evidenceFailure = true
 			if err := os.Chmod(barrier.statePath(), 0o644); err != nil {
 				t.Error(err)
@@ -236,7 +236,7 @@ func TestStagingCrashBarrierCompletionFailureDoesNotContradictPersistedCheckpoin
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !evidenceFailure || len(h.checkpointRequests) != 3 || h.checkpointRequests[0].NextStepIndex != 2 {
+	if !evidenceFailure || len(h.checkpointRequests) != 3 || h.checkpointRequests[0].NextStepIndex != 3 {
 		t.Fatalf("checkpoint evidence failure=%v requests=%+v", evidenceFailure, h.checkpointRequests)
 	}
 	if len(h.finishes) != 1 || h.finishes[0].status != "completed" || h.finishes[0].failureCode != "" {
@@ -265,7 +265,7 @@ func TestStagingCrashBarrierCompletionFailureDoesNotContradictPersistedCheckpoin
 func TestStagingCrashBarrierReplayFailureKeepsCheckpoint(t *testing.T) {
 	h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
 	h.barrier = testBarrierConfig(t, t.TempDir(), "boot-1", "run-1")
-	h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], 1)
+	h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], 2)
 	barrier := armTestBarrier(t, h.barrier)
 	if err := writeCrashBarrierState(barrier.statePath(), crashBarrierStateForConfig(h.barrier, crashBarrierReached, "old-worker-process")); err != nil {
 		t.Fatal(err)

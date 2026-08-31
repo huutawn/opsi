@@ -17,7 +17,7 @@ func TestMutationCreateAddUpdateAndIdempotentApply(t *testing.T) {
 	service := CDService{}
 	api := testService("api", "api/Dockerfile")
 	api.Build.Context = "api"
-	request := MutationRequest{Repository: root, ConfigPath: ".opsi/opsi-cd.yaml", WorkflowPath: ".github/workflows/opsi-cd.yaml", Service: api}
+	request := MutationRequest{Repository: root, ConfigPath: ".opsi/opsi-cd.yaml", Service: api}
 	first, err := service.ApplyMutation(request)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestMutationMigratesV1AndRepeatIsUnchanged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".opsi/opsi-cd.yaml"), legacy, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	request := MutationRequest{Repository: root, ConfigPath: ".opsi/opsi-cd.yaml", WorkflowPath: ".github/workflows/opsi-cd.yaml", Service: testService("api", "Dockerfile"), Force: true, Confirmed: true}
+	request := MutationRequest{Repository: root, ConfigPath: ".opsi/opsi-cd.yaml", Service: testService("api", "Dockerfile"), Force: true, Confirmed: true}
 	service := CDService{}
 	first, err := service.ApplyMutation(request)
 	if err != nil {

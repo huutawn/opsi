@@ -206,30 +206,6 @@ func TestLocalRepositoryApplyRejectsStalePreviewWithoutWriting(t *testing.T) {
 	if string(current) != external {
 		t.Fatalf("stale apply changed config: %q", current)
 	}
-	if _, err := os.Stat(filepath.Join(root, defaultWorkflowPath)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stale apply wrote workflow: %v", err)
-	}
-}
-
-func TestRepositoryCDUISendsDisplayedPreviewHashAndStableApplyKey(t *testing.T) {
-	clientSource, err := os.ReadFile(filepath.Join("..", "..", "ui", "lib", "api", "local-client.ts"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	featureSource, err := os.ReadFile(filepath.Join("..", "..", "ui", "features", "github", "repository-cd.tsx"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, expected := range []string{"preview_hash: previewHash", "idempotencyKey", "init.idempotencyKey ?? crypto.randomUUID()"} {
-		if !strings.Contains(string(clientSource), expected) {
-			t.Fatalf("local client missing %q", expected)
-		}
-	}
-	for _, expected := range []string{"preview.preview_hash, applyKey", "setApplyKey(crypto.randomUUID())"} {
-		if !strings.Contains(string(featureSource), expected) {
-			t.Fatalf("repository UI missing %q", expected)
-		}
-	}
 }
 
 type localApplyResult struct {

@@ -40,13 +40,12 @@ const (
 var (
 	serviceKeyPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	shaPattern            = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	envNamePattern        = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+	envNamePattern        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 	digestPattern         = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	repositoryPattern     = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$`)
 	cpuQuantityPattern    = regexp.MustCompile(`^(?:[1-9][0-9]{0,6}m|[1-9][0-9]{0,3})$`)
 	memoryQuantityPattern = regexp.MustCompile(`^[1-9][0-9]{0,9}(?:Ki|Mi|Gi|Ti)?$`)
 	opaqueIDPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	sensitiveEnvPattern   = regexp.MustCompile(`(^|_)(TOKEN|PASSWORD|SECRET|PRIVATE_KEY|ACCESS_KEY|API_KEY|CREDENTIAL)(_|$)`)
 )
 
 type ImmutableImage struct {
@@ -169,6 +168,7 @@ type WorkloadSpec struct {
 	Replicas                     int32                            `json:"replicas"`
 	ApplicationContainerName     string                           `json:"application_container_name"`
 	ContainerPort                int32                            `json:"container_port"`
+	StartupProbe                 *Probe                           `json:"startup_probe,omitempty"`
 	ReadinessProbe               *Probe                           `json:"readiness_probe,omitempty"`
 	LivenessProbe                *Probe                           `json:"liveness_probe,omitempty"`
 	Resources                    Resources                        `json:"resources"`
@@ -242,10 +242,13 @@ func (s WorkloadSpec) Validate() error {
 	if s.ContainerPort < 1 || s.ContainerPort > 65535 {
 		return errors.New("container_port must be between 1 and 65535")
 	}
-	if err := validateProbe(s.ReadinessProbe, s.ContainerPort); err != nil {
+	if err := validateProbe(s.StartupProbe, s.ContainerPort, 120); err != nil {
+		return fmt.Errorf("startup_probe: %w", err)
+	}
+	if err := validateProbe(s.ReadinessProbe, s.ContainerPort, 10); err != nil {
 		return fmt.Errorf("readiness_probe: %w", err)
 	}
-	if err := validateProbe(s.LivenessProbe, s.ContainerPort); err != nil {
+	if err := validateProbe(s.LivenessProbe, s.ContainerPort, 10); err != nil {
 		return fmt.Errorf("liveness_probe: %w", err)
 	}
 	if err := validateResources(s.Resources); err != nil {
@@ -279,7 +282,7 @@ func ValidateEnvironment(environment []EnvironmentVariable, secretReferences []S
 		if !envNamePattern.MatchString(item.Name) || len(item.Value) > 4096 || strings.ContainsRune(item.Value, '\x00') {
 			return errors.New("environment entry is invalid")
 		}
-		if sensitiveEnvPattern.MatchString(item.Name) {
+		if IsSecretLikeEnvironmentName(item.Name) {
 			return errors.New("secret-like environment names require a secret reference")
 		}
 		if _, exists := seen[item.Name]; exists {
@@ -299,14 +302,39 @@ func ValidateEnvironment(environment []EnvironmentVariable, secretReferences []S
 	return nil
 }
 
-func validateProbe(probe *Probe, containerPort int32) error {
+// IsSecretLikeEnvironmentName reports whether a plain environment value could
+// contain secret material. Configuration names that merely describe token
+// lifetimes (for example Jwt__AccessTokenMinutes) remain valid, while terminal
+// secret names and connection strings must use SecretReference.
+func IsSecretLikeEnvironmentName(value string) bool {
+	normalized := strings.ToLower(value)
+	parts := strings.FieldsFunc(normalized, func(r rune) bool { return r == '_' })
+	for _, part := range parts {
+		switch part {
+		case "password", "passwd", "secret", "token", "credential":
+			return true
+		}
+	}
+	compact := strings.ReplaceAll(normalized, "_", "")
+	if strings.Contains(compact, "connectionstring") {
+		return true
+	}
+	for _, suffix := range []string{"password", "passwd", "secret", "token", "credential", "privatekey", "signingkey", "accesskey", "apikey", "key"} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateProbe(probe *Probe, containerPort, maxFailureThreshold int32) error {
 	if probe == nil {
 		return nil
 	}
 	if len(probe.Path) == 0 || len(probe.Path) > 256 || !strings.HasPrefix(probe.Path, "/") || strings.ContainsAny(probe.Path, "\r\n\x00") || probe.Port != containerPort {
 		return errors.New("path or port is invalid")
 	}
-	if probe.InitialDelaySeconds < 0 || probe.InitialDelaySeconds > 300 || probe.PeriodSeconds < 1 || probe.PeriodSeconds > 60 || probe.TimeoutSeconds < 1 || probe.TimeoutSeconds > 30 || probe.FailureThreshold < 1 || probe.FailureThreshold > 10 {
+	if probe.InitialDelaySeconds < 0 || probe.InitialDelaySeconds > 300 || probe.PeriodSeconds < 1 || probe.PeriodSeconds > 60 || probe.TimeoutSeconds < 1 || probe.TimeoutSeconds > 30 || probe.FailureThreshold < 1 || probe.FailureThreshold > maxFailureThreshold {
 		return errors.New("probe timing exceeds allowed bounds")
 	}
 	return nil

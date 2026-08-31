@@ -187,12 +187,12 @@ type PublicRouteIntent struct {
 type ServiceConfigurationResourceBinding = serviceconfigurationv1.ResourceBinding
 
 type ServiceConfigurationDraft struct {
-	SchemaVersion    string                                 `json:"schema_version"`
-	Environment      []deploymentv1.EnvironmentVariable     `json:"environment,omitempty"`
-	PublicRoute      *PublicRouteIntent                     `json:"public_route,omitempty"`
-	Bindings         []ServiceBinding                       `json:"bindings,omitempty"`
-	ResourceBindings []ServiceConfigurationResourceBinding  `json:"resource_bindings,omitempty"`
-	Dependencies     []ApplicationDependency                `json:"dependencies,omitempty"`
+	SchemaVersion    string                                `json:"schema_version"`
+	Environment      []deploymentv1.EnvironmentVariable    `json:"environment,omitempty"`
+	PublicRoute      *PublicRouteIntent                    `json:"public_route,omitempty"`
+	Bindings         []ServiceBinding                      `json:"bindings,omitempty"`
+	ResourceBindings []ServiceConfigurationResourceBinding `json:"resource_bindings,omitempty"`
+	Dependencies     []ApplicationDependency               `json:"dependencies,omitempty"`
 }
 
 type SourceRiskFinding struct {
@@ -279,6 +279,52 @@ type ServiceConfigurationApplyRequest struct {
 	Draft             ServiceConfigurationDraft `json:"draft"`
 	ExpectedRevision  uint64                    `json:"expected_revision"`
 	ExpectedStateHash string                    `json:"expected_state_hash"`
+	ProposalReview    *ProposalReviewAudit      `json:"proposal_review,omitempty"`
+}
+
+type ProposalReviewAudit struct {
+	ProposalHash        string `json:"proposal_hash"`
+	ReviewedPayloadHash string `json:"reviewed_payload_hash"`
+	ProposerOrigin      string `json:"proposer_origin,omitempty"`
+}
+
+type ProposalReviewKind string
+type ProposalReviewStatus string
+
+type ProposalReview struct {
+	ID                             string               `json:"id"`
+	ProjectID                      string               `json:"project_id"`
+	EnvironmentID                  string               `json:"environment_id"`
+	ApplicationID                  string               `json:"application_id"`
+	Kind                           ProposalReviewKind   `json:"kind"`
+	Status                         ProposalReviewStatus `json:"status"`
+	ProposalHash                   string               `json:"proposal_hash"`
+	AnalysisInputsHash             string               `json:"analysis_inputs_hash"`
+	SourceCommit                   string               `json:"source_commit,omitempty"`
+	ApplicationRoot                string               `json:"application_root,omitempty"`
+	NormalizedPayload              json.RawMessage      `json:"normalized_payload"`
+	ReviewedPayloadHash            string               `json:"reviewed_payload_hash"`
+	ExpectedConfigurationRevision  uint64               `json:"expected_configuration_revision,omitempty"`
+	ExpectedConfigurationStateHash string               `json:"expected_configuration_state_hash,omitempty"`
+	CreatedBy                      string               `json:"created_by,omitempty"`
+	CreatedAt                      time.Time            `json:"created_at"`
+	ExpiresAt                      time.Time            `json:"expires_at"`
+	ApprovedBy                     string               `json:"approved_by,omitempty"`
+	ApprovedAt                     *time.Time           `json:"approved_at,omitempty"`
+	RejectedBy                     string               `json:"rejected_by,omitempty"`
+	RejectedAt                     *time.Time           `json:"rejected_at,omitempty"`
+	AppliedAt                      *time.Time           `json:"applied_at,omitempty"`
+	ResultingConfigurationRevision uint64               `json:"resulting_configuration_revision,omitempty"`
+}
+
+type ProposalReviewCreateRequest struct {
+	EnvironmentID      string                     `json:"environment_id"`
+	Kind               ProposalReviewKind         `json:"kind"`
+	AnalysisInputsHash string                     `json:"analysis_inputs_hash"`
+	SourceCommit       string                     `json:"source_commit,omitempty"`
+	ApplicationRoot    string                     `json:"application_root,omitempty"`
+	DependencyDraft    *ServiceConfigurationDraft `json:"dependency_draft,omitempty"`
+	SourcePatch        json.RawMessage            `json:"source_patch,omitempty"`
 }
 
 type ServiceConfigurationApplyResult struct {
@@ -422,6 +468,52 @@ type RepositoryClaim struct {
 	RepositoryID int64  `json:"repository_id"`
 	ProjectID    string `json:"project_id"`
 	Status       string `json:"status"`
+}
+
+type DeploymentRunPreview struct {
+	ID       string `json:"id"`
+	State    string `json:"state"`
+	Revision uint64 `json:"revision"`
+	Plan     struct {
+		Hash   string `json:"hash"`
+		Source struct {
+			Repository  string `json:"repository"`
+			SelectedRef string `json:"selected_ref"`
+			CommitSHA   string `json:"commit_sha"`
+		} `json:"source"`
+		Applications []struct {
+			Key  string `json:"key"`
+			Root string `json:"root"`
+			Port int    `json:"port"`
+		} `json:"applications"`
+		Issues []struct {
+			Code     string `json:"code"`
+			Message  string `json:"message"`
+			Blocking bool   `json:"blocking"`
+		} `json:"issues"`
+	} `json:"plan"`
+}
+
+type RepositoryExportPreview struct {
+	RunID          string `json:"run_id"`
+	RunRevision    uint64 `json:"run_revision"`
+	PlanHash       string `json:"plan_hash"`
+	SourceSHA      string `json:"source_sha"`
+	RepositoryID   int64  `json:"repository_id"`
+	TargetBranch   string `json:"target_branch"`
+	Path           string `json:"path"`
+	YAML           string `json:"yaml"`
+	Diff           string `json:"diff"`
+	PreviewHash    string `json:"preview_hash"`
+	ExportEnabled  bool   `json:"export_enabled"`
+	DisabledReason string `json:"disabled_reason,omitempty"`
+}
+type RepositoryExportResult struct {
+	Branch            string `json:"branch"`
+	CommitSHA         string `json:"commit_sha"`
+	PullRequestNumber int    `json:"pull_request_number"`
+	PullRequestURL    string `json:"pull_request_url"`
+	Reused            bool   `json:"reused"`
 }
 
 type InstallationClaimStart struct {

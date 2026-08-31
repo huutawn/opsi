@@ -95,6 +95,13 @@ func TestCDCloudCommandsUseGlobalConfigAndPAT(t *testing.T) {
 		pathsMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/repository-export/preview"):
+			_, _ = io.WriteString(w, `{"run_id":"run-1","run_revision":4,"plan_hash":"plan-hash","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repository_id":7,"target_branch":"main","path":".opsi/opsi-cd.yaml","yaml":"version: 2\n","diff":"+version: 2\n","preview_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","export_enabled":true}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/repository-export"):
+			if !strings.HasPrefix(r.Header.Get("Idempotency-Key"), "export:run-1:") {
+				t.Errorf("export idempotency=%q", r.Header.Get("Idempotency-Key"))
+			}
+			_, _ = io.WriteString(w, `{"repository_export":{"branch":"opsi/export-run","commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pull_request_number":9,"pull_request_url":"https://github.test/pr/9","reused":false}}`)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/deployments"):
 			_, _ = io.WriteString(w, `{"deployments":[{"id":"main-1","project_id":"proj-1","status":"succeeded","desired_digest":"sha256:main","snapshot":{}},{"id":"preview-1","project_id":"proj-1","status":"queued","desired_digest":"sha256:preview","snapshot":{"preview":{"head_sha":"abc123","expires_at":"2026-07-27T12:00:00Z"}}}]}`)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/deployments/preview-1"):
@@ -131,6 +138,8 @@ func TestCDCloudCommandsUseGlobalConfigAndPAT(t *testing.T) {
 		{name: "preview list", args: []string{"--config", configPath, "cd", "preview", "list", "--project-id", "proj-1"}, want: "preview-1\tqueued"},
 		{name: "preview detail", args: []string{"cd", "preview", "detail", "--config", configPath, "--project-id", "proj-1", "--deployment-id", "preview-1", "--json"}, want: `"head_sha":"abc123"`},
 		{name: "preview cleanup", args: []string{"--config", configPath, "cd", "preview", "cleanup", "--project-id", "proj-1", "--deployment-id", "preview-1", "--idempotency-key", "cleanup-1", "--json"}, want: `"status":"cleanup_requested"`},
+		{name: "export preview", args: []string{"--config", configPath, "cd", "export", "--project-id", "proj-1", "--run-id", "run-1", "--preview"}, want: "+version: 2"},
+		{name: "export pull request", args: []string{"--config", configPath, "cd", "export", "--project-id", "proj-1", "--run-id", "run-1"}, want: "https://github.test/pr/9"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -149,7 +158,7 @@ func TestCDCloudCommandsUseGlobalConfigAndPAT(t *testing.T) {
 	pathsMu.Lock()
 	gotPaths := append([]string(nil), paths...)
 	pathsMu.Unlock()
-	if loopbackCalls.Load() != 0 || len(gotPaths) != 6 {
+	if loopbackCalls.Load() != 0 || len(gotPaths) != 9 {
 		t.Fatalf("paths=%v loopback calls=%d", gotPaths, loopbackCalls.Load())
 	}
 }

@@ -24,7 +24,7 @@ func (s PostgresService) RenewBootstrapLease(projectID, sessionID, workerID, raw
 		WHERE project_id=$3 AND id=$4 AND lease_owner=$5 AND lease_token_hash=$6
 		  AND lease_expires_at > $1
 		  AND expires_at > $1
-		  AND status IN ('preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')
+		  AND status IN ('preflight','configure_swap','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')
 		RETURNING *
 	) SELECT id, org_id, project_id, environment_id, runtime_id, COALESCE(node_id,''), COALESCE(created_by,''), role, status, idempotency_key, COALESCE(public_host,''), COALESCE(ssh_port,0), COALESCE(ssh_username,''), COALESCE(auth_method,''), expires_at, started_at, finished_at, COALESCE(lease_owner,''), COALESCE(lease_token_hash,''), lease_expires_at, leased_at, COALESCE(attempt_count,0), COALESCE(max_attempts,3), next_attempt_at, lease_heartbeat_at, COALESCE(last_failure_code,''), COALESCE(last_failure_message_redacted,''), dead_lettered_at, checkpoint_schema_version, checkpoint_plan_version, checkpoint_plan_fingerprint, checkpoint_next_step_index, checkpoint_last_completed_step, checkpoint_updated_at, created_at, updated_at FROM renewed`, now, expiresAt, projectID, sessionID, workerID, tokenHash))
 	if err == nil {
@@ -95,7 +95,7 @@ func (s PostgresService) UpdateBootstrapCheckpointForLease(projectID, sessionID,
 			checkpoint_next_step_index=$4, checkpoint_last_completed_step=$5, checkpoint_updated_at=$6, updated_at=$6
 		WHERE id=$7 AND project_id=$8 AND lease_owner=$9 AND lease_token_hash=$10
 			AND lease_expires_at > $6 AND expires_at > $6
-			AND status IN ('preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')
+			AND status IN ('preflight','configure_swap','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')
 			AND checkpoint_schema_version=$11 AND checkpoint_plan_version=$12 AND checkpoint_plan_fingerprint=$13
 			AND checkpoint_next_step_index=$14 AND checkpoint_last_completed_step=$15`,
 		checkpoint.SchemaVersion, checkpoint.PlanVersion, checkpoint.PlanFingerprint, checkpoint.NextStepIndex, checkpoint.LastCompletedStep, now,
@@ -128,7 +128,7 @@ func (s PostgresService) UpdateBootstrapCheckpointForLease(projectID, sessionID,
 }
 
 func recoverExpiredBootstrapLeasesPostgres(ctx context.Context, tx *sql.Tx, now time.Time) (BootstrapRecoverySummary, error) {
-	rows, err := tx.QueryContext(ctx, bootstrapSelectSQL+` WHERE lease_expires_at <= $1 AND status IN ('preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying') FOR UPDATE SKIP LOCKED`, now)
+	rows, err := tx.QueryContext(ctx, bootstrapSelectSQL+` WHERE lease_expires_at <= $1 AND status IN ('preflight','configure_swap','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying') FOR UPDATE SKIP LOCKED`, now)
 	if err != nil {
 		return BootstrapRecoverySummary{}, err
 	}

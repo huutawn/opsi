@@ -24,6 +24,7 @@ type Store interface {
 	CommitRolloutSuccess(ctx context.Context, rolloutID string, snapshot deploymentv1.KnownGoodSnapshot, resources []deploymentv1.ResourceIdentity, evidence deploymentv1.ReadinessEvidence) (*deploymentv1.RolloutRecord, error)
 	GetKnownGood(ctx context.Context, snapshotID string) (*deploymentv1.KnownGoodSnapshot, error)
 	CurrentKnownGood(ctx context.Context, target deploymentv1.RuntimeTarget) (*deploymentv1.KnownGoodSnapshot, error)
+	ClearCurrentKnownGood(ctx context.Context, target deploymentv1.RuntimeTarget) error
 	Close() error
 }
 
@@ -164,6 +165,64 @@ CREATE TABLE IF NOT EXISTS known_good_current (
 	}
 	if err := s.ensureDeploymentColumns(ctx); err != nil {
 		return err
+	}
+	if err := s.reconcileHistoricalRollbacks(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reconcileHistoricalRollbacks repairs the current pointer left by Agents that
+// recorded an explicit rollback before rolled_back updated known_good_current.
+// A pointer moves only when it still identifies the exact snapshot that the
+// rollback intent expected to replace.
+func (s *SQLiteStore) reconcileHistoricalRollbacks(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin historical rollback reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT intent_json FROM rollouts WHERE state = ? AND terminal_at_unix_nano > 0 ORDER BY terminal_at_unix_nano DESC`, deploymentv1.RolloutStateRolledBack)
+	if err != nil {
+		return fmt.Errorf("list historical rollbacks: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var intentJSON string
+		if err := rows.Scan(&intentJSON); err != nil {
+			return fmt.Errorf("scan historical rollback: %w", err)
+		}
+		var intent deploymentv1.RolloutIntent
+		if err := json.Unmarshal([]byte(intentJSON), &intent); err != nil {
+			return &rolloutStoreError{Code: deploymentv1.RolloutCodeKnownGoodCorrupt, Msg: "historical rollback intent JSON is invalid"}
+		}
+		canonical, err := intent.Canonicalize()
+		if err != nil {
+			return &rolloutStoreError{Code: deploymentv1.RolloutCodeKnownGoodCorrupt, Msg: "historical rollback intent is invalid"}
+		}
+		if canonical.Operation != deploymentv1.RolloutOperationRollback || canonical.PreviousKnownGoodID == "" || canonical.ExpectedKnownGoodID == "" {
+			continue
+		}
+		var currentID, currentHash string
+		err = tx.QueryRowContext(ctx, `SELECT c.snapshot_id, s.snapshot_hash FROM known_good_current c JOIN known_good_snapshots s ON s.snapshot_id = c.snapshot_id WHERE c.target_key = ?`, canonical.Target.Key()).Scan(&currentID, &currentHash)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read current known-good during historical rollback reconciliation: %w", err)
+		}
+		if currentID != canonical.ExpectedKnownGoodID || currentHash != canonical.ExpectedKnownGoodHash {
+			continue
+		}
+		if err := restoreCurrentKnownGood(ctx, tx, canonical); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate historical rollbacks: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit historical rollback reconciliation: %w", err)
 	}
 	return nil
 }
@@ -470,6 +529,9 @@ func (s *SQLiteStore) TransitionRollout(ctx context.Context, rolloutID, state st
 		if evidence == nil || evidence.Validate(true, false) != nil {
 			return nil, &rolloutStoreError{Code: deploymentv1.RolloutCodeReadinessFailed, Msg: "rolled_back requires verified readiness evidence"}
 		}
+		if err := restoreCurrentKnownGood(ctx, tx, record.Intent); err != nil {
+			return nil, err
+		}
 	}
 	record.State = state
 	record.Version++
@@ -499,6 +561,26 @@ func (s *SQLiteStore) TransitionRollout(ctx context.Context, rolloutID, state st
 		return nil, err
 	}
 	return record, nil
+}
+
+// restoreCurrentKnownGood advances the durable authority only after the
+// reconciler has factually restored and verified the exact prior snapshot.
+func restoreCurrentKnownGood(ctx context.Context, tx *sql.Tx, intent deploymentv1.RolloutIntent) error {
+	if intent.PreviousKnownGoodID == "" || intent.PreviousKnownGoodHash == "" {
+		return &rolloutStoreError{Code: deploymentv1.RolloutCodeKnownGoodCorrupt, Msg: "rolled_back rollout has no previous known-good reference"}
+	}
+	var snapshotID string
+	err := tx.QueryRowContext(ctx, `SELECT snapshot_id FROM known_good_snapshots WHERE snapshot_id = ? AND target_key = ? AND snapshot_hash = ?`, intent.PreviousKnownGoodID, intent.Target.Key(), intent.PreviousKnownGoodHash).Scan(&snapshotID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &rolloutStoreError{Code: deploymentv1.RolloutCodeKnownGoodCorrupt, Msg: "rolled_back rollout previous known-good snapshot is missing or stale"}
+	}
+	if err != nil {
+		return fmt.Errorf("read rollback known-good snapshot: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO known_good_current(target_key, snapshot_id) VALUES (?, ?) ON CONFLICT(target_key) DO UPDATE SET snapshot_id = excluded.snapshot_id`, intent.Target.Key(), snapshotID); err != nil {
+		return fmt.Errorf("restore current known-good: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) CommitRolloutSuccess(ctx context.Context, rolloutID string, snapshot deploymentv1.KnownGoodSnapshot, resources []deploymentv1.ResourceIdentity, evidence deploymentv1.ReadinessEvidence) (*deploymentv1.RolloutRecord, error) {
@@ -597,6 +679,11 @@ func (s *SQLiteStore) CurrentKnownGood(ctx context.Context, target deploymentv1.
 		return nil, err
 	}
 	return s.GetKnownGood(ctx, snapshotID)
+}
+
+func (s *SQLiteStore) ClearCurrentKnownGood(ctx context.Context, target deploymentv1.RuntimeTarget) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM known_good_current WHERE target_key = ?`, target.Key())
+	return err
 }
 
 func persistRolloutTransition(ctx context.Context, tx *sql.Tx, record deploymentv1.RolloutRecord) error {

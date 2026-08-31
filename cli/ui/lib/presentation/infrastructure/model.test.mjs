@@ -49,6 +49,12 @@ test("canvas edits resources and exposure, excludes unplaced assignments, and co
   assert.deepEqual(compiled.assignments[0], { service_key: "api", environment_id: "env-1", runtime_id: "rt-1", replicas: 3, cpu_request_millicores: 350, memory_request_bytes: 536870912, exposure: { mode: "public" } });
   assert.equal(JSON.stringify(compiled).includes("position"), false);
   assert.deepEqual(compileCanvasDraft("p1", null, { z: draft.reports, a: { ...draft.reports } }).assignments.map((assignment) => assignment.service_key), ["a", "z"]);
+
+  const resized = compileCanvasDraft("p1", appliedPlan, {}, [{
+    id: "worker", project_id: "p1", environment_id: "env-1", name: "worker-db", kind: "managed_service", type: "postgres", lifecycle: "ready", runtime_id: "rt-1", replicas: 1, cpu_millicores: 400, memory_bytes: 256 * 1024 * 1024,
+  }]);
+  assert.equal(resized.assignments.find((assignment) => assignment.service_key === "worker").cpu_request_millicores, 400);
+  assert.equal(resized.assignments.find((assignment) => assignment.service_key === "worker").memory_request_bytes, 256 * 1024 * 1024);
 });
 
 test("topology resource presentation supports factual kinds and fails future kinds closed", () => {

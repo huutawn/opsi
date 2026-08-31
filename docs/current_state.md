@@ -1,26 +1,60 @@
 # Opsi Current State
 
-## Topology project workspace
+## Repository to Running deployment workflow
 
-Project creation and selection now land on the existing
-`Infrastructure / Topology` route. Topology is the first project navigation
-destination, the header shows `Projects / project / environment / Topology`,
-and the workspace separates Design facts (TopologyPlan and unassigned services)
-from Live runtime, node, Agent, and deployment facts. Design now opens on one
-focal `@xyflow/react` canvas with explicit project, environment, revision/hash,
-unpublished-change, validation, Review, and Apply context. Reported servers show
-capacity and Agent state without presenting fabricated live workload state;
-application nodes show placement, replicas, CPU, memory, and exposure intent,
-while unassigned applications remain in Unplaced. The selected resource and
-connection inspector owns edits for placement and service configuration.
-Server and application facts are normalized through one
-`TopologyResourcePresentation` and rendered by one resource-node primitive;
-future or unknown kinds remain visibly unsupported until backed by factual
-domain data.
-Dragging creates an in-memory `CanvasDraft`; Cloud preview/validate/diff is
-required before Apply, stale or conflicting reviews are invalidated, and no
-topology backend write occurs before Apply. Project and applied-topology
-identity changes retain the existing draft isolation rules.
+The default project destination is now `Deploy`. A durable `DeploymentRun`
+owns the user workflow from an exact GitHub commit through repository analysis,
+review, one approval, resource reconciliation, immutable builds, preflight,
+rollout, and verification. It stores immutable plan intent and factual IDs only;
+BuildRecord, Resource, TopologyPlan, DeploymentPolicy, DeploymentJob, and
+Verification remain the operational authorities. PostgreSQL leases and
+idempotency keys allow a different Cloud process to resume a run after restart.
+
+Repository analysis is read-only through the GitHub App and never executes or
+writes source. No repository file or GitHub Actions workflow is required.
+Authority order is optional `.opsi/opsi-cd.yaml`, Compose, then deterministic,
+bounded Dockerfile/framework/source inspection. Operators can refine a
+truncated analysis with persisted application roots and exclude paths on the
+same exact SHA. Findings include evidence coverage, confidence, ambiguity, and
+specific truncation reasons. Generated workload secrets are stored
+by the existing encrypted credential vault; plans, APIs, events, and workload
+specs contain typed references only, and plaintext is delivered transiently to
+the assigned Agent.
+
+Project navigation exposes Deploy, Observability, and Security. Former
+Services, Infrastructure, Topology, and Delivery URLs normalize to Deploy and
+may carry factual IDs into Technical details; they are no longer independent
+mutation paths. The Deploy view has role-gated single actions, exact plan and
+warning hashes, a reconnectable timeline, responsive review panels, and
+redacted generated-secret presentation. This source state is covered by Go and
+UI tests; the real `identity-service` K3s acceptance described in the roadmap
+has not been run in this workspace.
+
+Configuration export is the only source-write path. Viewer roles can inspect a
+canonical redacted YAML/diff preview; owner/admin/developer roles can explicitly
+create a branch, commit, and pull request. Export never merges and affects only
+future runs. The GitHub App installation needs `Contents: read and write` and
+`Pull requests: read and write` only for this endpoint; deployments remain
+available without those upgraded permissions.
+
+Public deployments use one user-entered DNS label and Cloud persists the
+managed FQDN under `OPSI_CLOUD_DEPLOYMENT_DOMAIN`. For the test VPS, configure
+`OPSI_CLOUD_DEPLOYMENT_DOMAIN=test.opsidev.site`; entering `tcip` publishes
+one origin, `tcip.test.opsidev.site`. The browser frontend uses `/`, same-origin
+backends use dependency paths such as `/api`, and other HTTP applications use
+stable application-key paths. Duplicate paths and ambiguous root frontends are
+blocking validation errors. Automatic routing can be switched to manual-only in
+Plan review; manually managed and historical routes are preserved. A blank or
+invalid label blocks the deployment; Cloud does not derive repository names or
+fall back to `nip.io`.
+
+`public_hostname_allocations` is the hostname authority. It enforces a default
+three-hostname quota per user across projects, retains quota through failed and
+release-pending publication, and frees quota only after an owned Cloudflare
+record is deleted. Cloudflare credentials are file-backed; exact proxied A
+records use the verified target node IPv4 address. Opsi-owned suffix rules set
+Flexible origin mode and HTTP-to-HTTPS 308 without changing zone-wide Full
+(strict) or replacing operator-owned rules.
 
 ## R5-014 Local API/UI parity checkpoint
 
@@ -208,7 +242,7 @@ R5-012 source handling is fixed, but its live delivery retest remains pending.
 | Metadata | Value |
 |---|---|
 | Status | Implemented-state snapshot; not a production-readiness claim |
-| Last updated | 2026-08-05 |
+| Last updated | 2026-08-24 |
 | Evidence matrix | `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 
@@ -344,8 +378,8 @@ artifacts. At this snapshot:
 - GitHub App user authorization, installation authentication/webhook intake,
   durable installation/repository inventory, secure installation claim, and
   project/service mapping are implemented. `opsi init` now performs safe local
-  GitHub origin matching, numeric repository claim, service binding, and atomic
-  repository bootstrap file generation. GitHub Actions OIDC, `BuildRecord`,
+  GitHub origin matching, numeric repository claim, and exact-SHA analysis
+  preview without writing source. The Opsi-owned executor and `BuildRecord`,
   manual `TopologyPlan`, exact-match `DeploymentPolicy`, and deterministic
   routing preflight are implemented. R5-010 adds the immutable-digest
   `DeploymentJob` path and has passed live Agent/K3s workload, CLI/Local UI
@@ -457,13 +491,11 @@ still unproven because no production fault-injection hook exists.
   detects only supported GitHub.com origins without reading credential helpers,
   and treats local `owner/repo` only as metadata for selecting a numeric Cloud
   repository ID. A missing repository can use the P09 OAuth installation-claim
-  flow through a one-time loopback callback.
-- Repository bootstrap validates service/binding conflicts and both output
-  files before repository-claim or binding mutation. It supports idempotent
-  reruns, secret-free JSON dry-run, explicit `--force --yes`, atomic writes, and
-  two-file rollback. The generated CD config contains build/deployment intent
-  only; the generated workflow is manual bootstrap status and does not request
-  OIDC, build, push, call Cloud, or deploy.
+  flow through a one-time loopback callback. It then creates an analyzed Draft
+  DeploymentPlan and does not write local or remote repository files.
+- Optional explicit config add/update remains under `opsi cd config upsert`.
+  Canonical export is a separate Cloud-backed preview/PR command and never
+  auto-merges. No user-repository workflow is generated.
 - OS-keychain PAT storage and Agent gRPC TLS/client-certificate/certificate-pin
   support.
 - `opsi start` localhost server with short local sessions, `/api/local/...`
@@ -632,6 +664,14 @@ Cloud has no AI runtime and does not own Kubernetes execution or raw runtime
 evidence.
 
 ## Deployment and gateway truth
+
+The implemented application gateway remains the one Opsi-owned standard
+Traefik Ingress path. Automatic public deployment now maps one managed hostname
+to multiple ClusterIP Services with longest-prefix paths (`/`, `/api`, and
+stable application-key fallbacks). Opsi does not install or maintain a parallel
+Kubernetes Gateway API controller. This same-origin model lets browser frontend
+code call multiple backends without CORS or per-service DNS; rewriting,
+authentication, and rate-limit policies are not implemented gateway features.
 
 Opsi has separate development and production-like staging control-plane
 profiles. `deploy/dev-control-plane` remains the supported local HTTP
@@ -877,15 +917,19 @@ source of truth is `docs/opsi_roadmap_v5_production.md`.
 
 ## R5-006 repository CD checkpoint
 
-R5-006 implements one repository-owned application path for monorepo CD intent.
-`.opsi/opsi-cd.yaml` v2 is strict and deterministic: it contains only version,
-service keys, build context/Dockerfile/platform, watch/shared paths, dependency
-keys, and production/preview intent. v1 `ServiceBuild` files migrate without
-dropping a service or adding infrastructure identity; unknown fields, invalid
+R5-006's repository-owned workflow bootstrap has been replaced by the
+zero-configuration Repository-to-Running path. `.opsi/opsi-cd.yaml` v2 remains
+strict, deterministic, and optional. In addition to service
+build context/Dockerfile/platform, watch/shared paths, build-dependency keys,
+and production/preview intent, it accepts optional repository-owned resource
+intent and service runtime declarations: port, non-secret environment,
+capacity, exposure, symbolic secret references, bindings, runtime dependencies,
+injection mappings, and verification contracts. Existing build-only v2 files
+retain their canonical render and hash. v1 `ServiceBuild` files migrate without
+dropping a service or adding Cloud authority identity; unknown fields, invalid
 paths, traversal, escaping symlinks, duplicate keys, missing dependencies, and
-dependency cycles fail closed. `opsi init` now has a local repository mode for
-create, v1 migration, add, update, dry-run, atomic apply, and idempotent repeat;
-the existing GitHub binding path uses the same repository mutation service.
+dependency cycles fail closed. Explicit add/update/migration remains available
+through `opsi cd config upsert`; it is not part of `opsi init` or deployment.
 
 The changed-service resolver runs the fixed argv form
 `git -C ROOT diff --name-status -z BASE HEAD`, parses add/modify/delete/type,
@@ -897,26 +941,21 @@ typed reasons; a truly
 empty trusted diff is the only empty plan. CLI `opsi cd plan` and Local API
 `/api/local/repository/plan/preview` use the same DTO and service.
 
-The generated workflow has read-only contents permission, immutable action and
-Opsi planner source revisions, bounded plan/build jobs, deterministic
-concurrency and fork-safe behavior;
-it performs no OIDC, GHCR push, Cloud call, or deployment. Local UI repository CD
-setup displays all services, previews config/migration/workflow changes, applies
-with local session/idempotency confirmation, and previews affected services with
-the same plan hash as CLI. The R5-007 focused entry review strengthened that
-apply boundary: preview returns a hash over the canonical mutation, current and
-rendered managed-file hashes, and ordered file actions; apply recomputes it from
-the current filesystem, rejects stale previews before write, and uses a bounded
-in-memory ledger so exact retries reuse the result while conflicting key reuse
-returns a typed conflict. Live GitHub runner execution was accepted in the
-R5-008 checkpoint.
+The generated user-repository workflow, renderer, caller, tests, and Local API
+workflow preview were removed. The Opsi-owned executor is the sole build path:
+after approval it receives a BuildJob, checks out the exact approved SHA using
+a repository-scoped installation credential, and returns an immutable
+BuildRecord. The former Local UI repository editor was removed when Deploy
+became the single operational path; changed-service planning remains an
+advanced local inspection command and does not execute builds.
 
-Capability matrix (R5-006): config v1/v2 parser-validator-writer and atomic
-mutation path: implemented; `opsi init` create/add/update/migrate/dry-run/apply:
-implemented; workflow renderer: deterministic secure changed-service matrix;
-Git adapter: fixed-argv bounded diff parser; Local API: config/mutation/workflow/
-plan preview plus confirmed apply; Local UI: service editor and plan/workflow
-preview with loading/error/retry state and stable preview-bound apply retries.
+Capability matrix: config v1/v2 parser-validator-writer and explicit atomic
+mutation path: implemented; `opsi init` claim plus exact-SHA analysis preview:
+implemented; repository workflow renderer/caller: removed; Git adapter:
+fixed-argv bounded diff parser; Local API: explicit config mutation and plan
+preview; Dashboard: read-only scoped repository analysis, optional audited
+Export PR, and editable deployment-plan review through the single Deploy
+workflow.
 
 ## R5-007 trusted BuildRecord checkpoint
 
@@ -1093,9 +1132,41 @@ are not claimed.
 
 Application Dependency Contract foundation implemented.
 
-## MCP-01 Read-Only Context Surface
+## MCP-01 through MCP-05 Read-Only Context and Proposal Surface
 
 The MCP capability (`opsi mcp` / `opsi mcp serve`) is implemented at the local Opsi Edge boundary:
-- Read-only protocol supporting 18 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), and exact commit-bound source file listing, reading, and literal searching.
+- Read-only protocol supporting 24 tools covering project and project-review context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), exact commit-bound source file listing, reading, and literal searching, bounded deployment readiness context, full ServiceConfiguration proposal validation/diff, advisory dependency-proposal validation, and exact-source patch-proposal validation.
 - Strict security constraints: zero domain mutations exposed, zero secret credentials exposed (regex redaction for URI credentials, bearer tokens, private keys, and passwords), path traversal protection against `..` or escaping `ApplicationRoot`, binary file classification, size-bounded reading (max 256 KiB), bounded search (max 50 matches), and exact commit provenance (returns `SOURCE_SNAPSHOT_UNAVAILABLE` rather than falling back to uncommitted working trees).
 - Transports: stdio JSON-RPC 2.0 (default) with stderr diagnostic logging, and local loopback HTTP (`127.0.0.1` / `localhost`).
+
+MCP-02 remains advisory: an external MCP client performs reasoning and sends a
+typed, client-side proposal. Opsi neither embeds an LLM nor persists proposals.
+It hashes exact BuildRecord source, `ApplicationRoot`, current configuration and
+dependency contract, compatible targets, and topology facts; stale proposals
+fail closed with `action=NONE`. Validation invokes the canonical non-mutating
+ADC configuration validation/diff authority, so manual dependency management
+remains independent and authoritative. No MCP tool can apply a dependency,
+realize a binding, create a resource, build, deploy, acknowledge warnings,
+trigger verification, patch source, access secrets, execute a shell, or fetch an
+arbitrary URL.
+
+MCP-03 keeps source-patch reasoning external. `validate_source_patch_proposal`
+accepts only typed, exact BuildRecord/commit/ApplicationRoot/blob-bound edits to
+existing text files and validates constrained unified diffs through an
+in-memory virtual apply. It returns `action=NONE` and structural status only;
+it never writes source, invokes `git apply`, stages/commits, executes source or
+tests, builds, deploys, or persists a proposal. Path, generated/binary, exact
+preimage, bounded-size, secret-literal, dependency-proposal staleness, and
+prompt-injection boundaries fail closed. A valid patch explicitly states that a
+new BuildRecord is required if a human later applies it.
+
+The local Dashboard has an AI Assistant destination. It detects Codex CLI and
+its login state, runs Codex in an isolated empty workspace with native data and
+execution tools disabled and the selected project's `opsi mcp` server, polls
+bounded background turns, and renders
+structured ServiceConfiguration proposals. MCP remains read-only. Configuration
+changes use the existing Cloud ProposalReview authority, now named
+`service_configuration`, with separate Create review, Approve, and Apply actions
+and revision/state-hash staleness checks. Other provider connectors and
+historical transcript listing are not implemented; the provider interface and
+Codex-owned thread ID are the current extension boundary.

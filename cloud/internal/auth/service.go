@@ -66,6 +66,12 @@ type OAuthStore interface {
 	OAuthUser(ctx context.Context, provider, subject string) (string, error)
 }
 
+// OAuthOnboardingStore creates the minimal personal workspace for a first-time
+// OAuth user. It never accepts an organization or project chosen by the client.
+type OAuthOnboardingStore interface {
+	ProvisionOAuthUser(ctx context.Context, provider, subject string) (string, error)
+}
+
 type OAuthProjectCandidate struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -199,6 +205,28 @@ func (s Service) ResolveOAuthUser(ctx context.Context, provider, subject string)
 		return "", ErrOAuthIdentity
 	}
 	return userID, nil
+}
+
+// EnsureOAuthUser resolves an existing identity or creates an isolated
+// personal workspace for a first-time OAuth user. Project membership remains
+// enforced when a token is issued.
+func (s Service) EnsureOAuthUser(ctx context.Context, provider, subject string) (string, bool, error) {
+	userID, err := s.ResolveOAuthUser(ctx, provider, subject)
+	if err == nil {
+		return userID, false, nil
+	}
+	if !errors.Is(err, ErrOAuthIdentity) {
+		return "", false, err
+	}
+	store, ok := s.Store.(OAuthOnboardingStore)
+	if !ok {
+		return "", false, ErrOAuthIdentity
+	}
+	userID, err = store.ProvisionOAuthUser(ctx, provider, subject)
+	if err != nil {
+		return "", false, err
+	}
+	return userID, true, nil
 }
 
 func (s Service) UserProjects(ctx context.Context, userID string) ([]OAuthProjectCandidate, error) {
@@ -350,6 +378,30 @@ func (s MemoryStore) OAuthUser(_ context.Context, provider, subject string) (str
 		return userID, nil
 	}
 	return "", ErrOAuthIdentity
+}
+
+func (s *MemoryStore) ProvisionOAuthUser(_ context.Context, provider, subject string) (string, error) {
+	if provider == "" || subject == "" {
+		return "", ErrOAuthIdentity
+	}
+	if s.OAuthIdentities == nil {
+		s.OAuthIdentities = map[string]string{}
+	}
+	key := provider + "\x00" + subject
+	if userID := s.OAuthIdentities[key]; userID != "" {
+		return userID, nil
+	}
+	ordinal := len(s.OAuthIdentities) + 1
+	userID := fmt.Sprintf("user-oauth-%d", ordinal)
+	s.OAuthIdentities[key] = userID
+	s.Candidates = append(s.Candidates, Candidate{
+		UserID:    userID,
+		Email:     fmt.Sprintf("oauth-%d@users.noreply.opsi.invalid", ordinal),
+		OrgID:     fmt.Sprintf("org-oauth-%d", ordinal),
+		ProjectID: fmt.Sprintf("proj-oauth-%d", ordinal),
+		Role:      "owner",
+	})
+	return userID, nil
 }
 
 func (s MemoryStore) UserProjectCandidates(_ context.Context, userID string) ([]OAuthProjectCandidate, error) {

@@ -16,9 +16,9 @@ import (
 )
 
 type PostgresService struct {
-	DB  *sql.DB
+	DB                 *sql.DB
 	DependencyResolver DependencyTargetResolver
-	Now func() time.Time
+	Now                func() time.Time
 }
 
 const nodeSelectSQL = `SELECT id, org_id, project_id, environment_id, runtime_id, name, role, status, COALESCE(public_host,''), COALESCE(private_ip,''), COALESCE(provider,''), COALESCE(region,''), COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(arch,''), COALESCE(cpu_cores,0), COALESCE(memory_mb,0), COALESCE(disk_total_gb,0), COALESCE(k3s_role,''), COALESCE(k3s_status,''), COALESCE(k3s_version,''), COALESCE(agent_id,''), COALESCE(agent_version,''), COALESCE(agent_endpoint,''), COALESCE(agent_port,0), COALESCE(agent_tls_server_name,''), COALESCE(agent_cert_sha256,''), last_seen_at, last_inventory_at, COALESCE(failure_code,''), COALESCE(failure_message_redacted,''), created_at, updated_at FROM nodes`
@@ -439,7 +439,7 @@ func (s PostgresService) RecordAgentHeartbeat(projectID, nodeID string, heartbea
 		}
 	}
 	if status == NodeHealthy {
-		if _, err := tx.ExecContext(ctx, `WITH updated AS (UPDATE bootstrap_sessions SET status = 'verifying', updated_at = $1 WHERE project_id = $2 AND node_id = $3 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying') RETURNING org_id, project_id, id, node_id) INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) SELECT $4, org_id, project_id, id, node_id, 'info', 'verifying', 'agent heartbeat marked node healthy; waiting for worker verification', 90, $1 FROM updated`, now, projectID, nodeID, newID("evt")); err != nil {
+		if _, err := tx.ExecContext(ctx, `WITH updated AS (UPDATE bootstrap_sessions SET status = 'verifying', updated_at = $1 WHERE project_id = $2 AND node_id = $3 AND status IN ('created','pending','preflight','configure_swap','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying') RETURNING org_id, project_id, id, node_id) INSERT INTO bootstrap_events(id, org_id, project_id, session_id, node_id, level, step, message_redacted, progress_percent, created_at) SELECT $4, org_id, project_id, id, node_id, 'info', 'verifying', 'agent heartbeat marked node healthy; waiting for worker verification', 90, $1 FROM updated`, now, projectID, nodeID, newID("evt")); err != nil {
 			return Node{}, err
 		}
 	}
@@ -602,7 +602,7 @@ func (s PostgresService) MarkNodeOffline(projectID, nodeID, actorUserID, key, re
 		if healthyServers > 0 {
 			desiredStatus = ProjectReady
 		} else {
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id=$1 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID).Scan(&activeBootstraps); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id=$1 AND status IN ('created','pending','preflight','configure_swap','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID).Scan(&activeBootstraps); err != nil {
 				return Node{}, false, err
 			}
 			if activeBootstraps > 0 {
@@ -1331,6 +1331,69 @@ func (s PostgresService) StartPreviewCleanup(projectID, actorUserID, key, reques
 		return DeploymentJob{}, false, err
 	}
 	if err := insertDeploymentEvent(ctx, tx, rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable preview cleanup prepared", 0, requestID, now, "")); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	return job, false, tx.Commit()
+}
+
+func (s PostgresService) StartFirstDeployCleanup(projectID, actorUserID, key, requestID, deploymentID string) (DeploymentJob, bool, error) {
+	if !validDeploymentIdempotencyKey(key) || !validDeploymentIdempotencyKey(deploymentID) {
+		return DeploymentJob{}, false, APIError{Status: 400, Code: "FIRST_DEPLOY_CLEANUP_INVALID", Message: "first deploy cleanup identity is invalid", RequestID: requestID}
+	}
+	ctx := context.Background()
+	payloadHash := hashJSON(struct {
+		DeploymentID string `json:"deployment_id"`
+	}{deploymentID})
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	defer tx.Rollback()
+	scope := "first-deploy-cleanup:v1:" + projectID
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, scope+":"+key); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	var existingID string
+	err = tx.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE scope=$1 AND key=$2`, scope, key).Scan(&existingID)
+	if err == nil {
+		job, scanErr := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 AND project_id=$2`, existingID, projectID))
+		if scanErr != nil {
+			return DeploymentJob{}, false, scanErr
+		}
+		if job.PayloadHash != payloadHash {
+			return DeploymentJob{}, false, APIError{Status: 409, Code: "IDEMPOTENCY_CONFLICT", Message: "idempotency key was used with a different cleanup payload", RequestID: requestID}
+		}
+		job.Reused = true
+		return job, true, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return DeploymentJob{}, false, err
+	}
+	base, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelectSQL+` WHERE id=$1 AND project_id=$2 FOR UPDATE`, deploymentID, projectID))
+	if err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if base.Snapshot == nil || base.Snapshot.Preview != nil || base.RolloutIntent == nil || base.RollbackEligible || base.PreviousDigest != "" || base.KnownGoodID != "" {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "FIRST_DEPLOY_CLEANUP_NOT_ALLOWED", Message: "deployment has known-good authority or is not a failed first production rollout", RequestID: requestID}
+	}
+	now := s.clock()
+	id := newID("dep")
+	desired := base.RolloutIntent.Desired
+	desired.DeploymentJobID = id
+	intent := deploymentv1.RolloutIntent{SchemaVersion: deploymentv1.RolloutSchemaVersion, RolloutID: "rol-" + hashJSON(id)[:32], Operation: deploymentv1.RolloutOperationFirstDeployCleanup, Target: desired.Target, Desired: desired, Attempt: 1, CreatedAt: now}
+	canonical, err := intent.Canonicalize()
+	if err != nil {
+		return DeploymentJob{}, false, APIError{Status: 409, Code: "FIRST_DEPLOY_CLEANUP_INVALID", Message: "first deploy cleanup authority is invalid", RequestID: requestID}
+	}
+	snapshot := *base.Snapshot
+	job := DeploymentJob{SchemaVersion: deploymentv1.JobSchemaVersion, Mode: "rollout", ID: id, OrgID: base.OrgID, ProjectID: projectID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceID: base.ServiceID, Status: deploymentv1.StateQueued, Action: deploymentv1.RolloutOperationFirstDeployCleanup, IdempotencyKey: key, RequestedBy: actorUserID, AgentID: base.AgentID, NodeID: base.NodeID, MaxAttempts: defaultDeploymentMaxAttempts, Snapshot: &snapshot, SpecHash: base.SpecHash, PayloadHash: payloadHash, IntentHash: canonical.IntentHash, BaseDeploymentID: base.ID, RolloutIntent: &canonical, RolloutState: deploymentv1.RolloutStatePrepared, DesiredDigest: base.DesiredDigest, CreatedAt: now, UpdatedAt: now}
+	if err := insertDeployment(ctx, tx, job); err != nil {
+		return DeploymentJob{}, false, err
+	}
+	if err := insertDeploymentEvent(ctx, tx, rolloutEvent(job, deploymentv1.RolloutStatePrepared, "durable first deploy cleanup prepared", 0, requestID, now, "")); err != nil {
 		return DeploymentJob{}, false, err
 	}
 	if err := insertIdempotency(ctx, tx, scope, key, "deployment_job", job.ID); err != nil {
@@ -2213,7 +2276,7 @@ func (s PostgresService) refreshProject(ctx context.Context, projectID string) (
 		status = ProjectReady
 	} else {
 		var active int
-		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND status IN ('created','pending','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID).Scan(&active); err != nil {
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND status IN ('created','pending','preflight','configure_swap','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID).Scan(&active); err != nil {
 			return "", err
 		}
 		if active > 0 {
@@ -2247,7 +2310,7 @@ func (s PostgresService) validateBootstrap(ctx context.Context, projectID, role,
 		return APIError{Status: 409, Code: "SERVER_NODE_REQUIRED", Message: "add a healthy first server before adding workers", NextAction: "add_first_server"}
 	}
 	var active int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND public_host = $2 AND status IN ('created','pending','waiting','preflight','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID, publicHost).Scan(&active); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM bootstrap_sessions WHERE project_id = $1 AND public_host = $2 AND status IN ('created','pending','waiting','preflight','configure_swap','validating','connecting','installing','installing_k3s','installing_agent','registering_agent','waiting_agent','verifying_agent','verifying')`, projectID, publicHost).Scan(&active); err != nil {
 		return err
 	}
 	if active > 0 {

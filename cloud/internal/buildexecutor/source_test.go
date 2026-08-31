@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
@@ -47,6 +48,41 @@ func TestMaterializeExactCommitAfterBranchMovesAndCleansCredential(t *testing.T)
 	}
 	if !bytes.Equal(token, make([]byte, len(token))) {
 		t.Fatal("source token was not destroyed")
+	}
+}
+
+func TestMaterializeRestoresGitModesUnderRestrictiveExecutorUmask(t *testing.T) {
+	repository := newGitRepository(t)
+	writeRepositoryFile(t, repository, "Dockerfile", "FROM scratch\nCOPY config/appsettings.json /app/appsettings.json\n")
+	writeRepositoryFile(t, repository, "config/appsettings.json", "{}\n")
+	writeRepositoryFile(t, repository, "scripts/start.sh", "#!/bin/sh\nexec true\n")
+	if err := os.Chmod(filepath.Join(repository, "scripts/start.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commit := commitRepository(t, repository, "source modes")
+	workspace := t.TempDir()
+
+	sourceDir, err := func() (string, error) {
+		previousUmask := syscall.Umask(0o077)
+		defer syscall.Umask(previousUmask)
+		return Materialize(context.Background(), Request{Spec: testSpec(commit, ".", "Dockerfile"), RemoteURL: repository, Credential: []byte("token"), Workspace: workspace}, nil)
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]os.FileMode{
+		"config":                  0o755,
+		"config/appsettings.json": 0o644,
+		"scripts":                 0o755,
+		"scripts/start.sh":        0o755,
+	} {
+		info, err := os.Stat(filepath.Join(sourceDir, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode=%#o want=%#o", path, got, want)
+		}
 	}
 }
 

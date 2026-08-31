@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -29,6 +30,10 @@ type immutableDeploymentReader interface {
 
 type previewCleanupStore interface {
 	StartPreviewCleanup(string, string, string, string, deploymentv1.PreviewCleanupRequest) (registry.DeploymentJob, bool, error)
+}
+
+type firstDeployCleanupStore interface {
+	StartFirstDeployCleanup(string, string, string, string, string) (registry.DeploymentJob, bool, error)
 }
 
 type exposureLifecycleStore interface {
@@ -53,6 +58,14 @@ func (s *Server) handleExposureAPI(w http.ResponseWriter, r *http.Request, proje
 		if !decodeStrictDeploymentJSON(w, r, &request) {
 			return true
 		}
+		if err := s.canonicalizeExposureMutation(&request); err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		if err := s.ensurePublicHostnameAvailable(r.Context(), request.Exposure.Hostname, projectID, request.Exposure.EnvironmentID); err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
 		preview, err := store.PreviewExposure(projectID, principal.UserID, request)
 		writeRegistryResult(w, r, preview, err, http.StatusOK)
 		return true
@@ -63,6 +76,23 @@ func (s *Server) handleExposureAPI(w http.ResponseWriter, r *http.Request, proje
 		}
 		var request deploymentv1.ExposureMutationRequest
 		if !decodeStrictDeploymentJSON(w, r, &request) {
+			return true
+		}
+		if err := s.canonicalizeExposureMutation(&request); err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		allocation, err := s.reservePublicHostname(r.Context(), principal.UserID, projectID, request.Exposure.EnvironmentID, request.Exposure.RuntimeID, request.Exposure.Hostname)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		targetIP, err := s.verifiedDeploymentIPv4(projectID, request.BaseDeploymentJobID)
+		if err == nil {
+			_, err = s.publishPublicHostname(r.Context(), allocation, targetIP)
+		}
+		if err != nil {
+			writeRegistryFailure(w, r, err)
 			return true
 		}
 		job, reused, err := store.StartExposureRollout(projectID, principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), request)
@@ -114,6 +144,23 @@ func (s *Server) handleExposureAPI(w http.ResponseWriter, r *http.Request, proje
 		return true
 	}
 	return false
+}
+
+func (s *Server) canonicalizeExposureMutation(request *deploymentv1.ExposureMutationRequest) error {
+	hostname, err := s.canonicalPublicHostname(request.Exposure.Hostname)
+	if err != nil {
+		return err
+	}
+	request.Exposure.Hostname = hostname
+	// The client hashes the label it entered. Cloud owns the FQDN and must
+	// therefore recalculate the authoritative runtime hash after expansion.
+	request.Exposure.SpecHash = ""
+	canonical, err := request.Exposure.Canonicalize()
+	if err != nil {
+		return deploymentworkflow.Error{Code: "PUBLIC_HOSTNAME_INVALID", Status: http.StatusBadRequest, Message: "Public exposure is invalid.", NextAction: "Review the selected public subdomain."}
+	}
+	request.Exposure = canonical
+	return nil
 }
 
 func (s *Server) handleDeploymentAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
@@ -378,6 +425,7 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 	}
 	managedEnvironment, managedSecrets, err := s.Resources.ApplicationRuntimeConfiguration(r.Context(), projectID, request.EnvironmentID, service.ID)
 	if err != nil {
+		s.observeConnectionCompileError(err)
 		return result, err
 	}
 	workload.Environment = append(workload.Environment, managedEnvironment...)
@@ -395,6 +443,17 @@ func (s *Server) resolveDeploymentPreview(r *http.Request, projectID, actor stri
 		clientWorkload := request.Workload.Normalize()
 		if err := clientWorkload.Validate(); err != nil {
 			return result, registry.APIError{Status: 400, Code: "WORKLOAD_SPEC_INVALID", Message: err.Error(), RequestID: r.Header.Get("X-Request-ID")}
+		}
+		// Probes are platform-owned runtime defaults. A client may omit them,
+		// but any supplied probe must still equal the Cloud-compiled value.
+		if clientWorkload.StartupProbe == nil {
+			clientWorkload.StartupProbe = workload.StartupProbe
+		}
+		if clientWorkload.ReadinessProbe == nil {
+			clientWorkload.ReadinessProbe = workload.ReadinessProbe
+		}
+		if clientWorkload.LivenessProbe == nil {
+			clientWorkload.LivenessProbe = workload.LivenessProbe
 		}
 		if !reflect.DeepEqual(clientWorkload, workload) {
 			return result, registry.APIError{Status: 409, Code: "WORKLOAD_CANONICAL_MISMATCH", Message: "client WorkloadSpec does not exactly match the Cloud-compiled canonical spec", NextAction: "refresh_cli_spec", RequestID: r.Header.Get("X-Request-ID")}

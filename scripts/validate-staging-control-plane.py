@@ -329,7 +329,6 @@ def validate_source_texts(
         fail("Caddy HTTP listener must provide health and controlled HTTPS redirect")
     if not http_health_route_is_ordered(caddy):
         fail("Caddy HTTP listener must preserve loopback health before HTTPS redirect with route")
-
     if worker.get("production") is not True:
         fail("staging bootstrap-worker production must be true")
     if worker.get("cloud_url") != "http://cloud:9800":

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -49,7 +50,7 @@ func (s *Service) previewExposureLocked(projectID string, request deploymentv1.E
 		if other.ServiceKey == desired.ServiceKey && other.EnvironmentID == desired.EnvironmentID && other.RuntimeID == desired.RuntimeID {
 			continue
 		}
-		if other.Hostname == desired.Hostname && exposurev1.ManagedPathsConflict(other.Path, desired.Path) {
+		if other.Hostname == desired.Hostname && exposureRoutesConflict(other, desired) {
 			preview.Eligible = false
 			preview.DecisionCode = "EXPOSURE_ROUTE_CONFLICT"
 			preview.Message = "hostname and path overlap another Opsi desired exposure"
@@ -57,6 +58,19 @@ func (s *Service) previewExposureLocked(projectID string, request deploymentv1.E
 		}
 	}
 	return preview, nil
+}
+
+func exposureRoutesConflict(first, second exposurev1.ExposureSpec) bool {
+	firstPaths := append([]string{first.Path}, first.AdditionalPaths...)
+	secondPaths := append([]string{second.Path}, second.AdditionalPaths...)
+	for _, firstPath := range firstPaths {
+		for _, secondPath := range secondPaths {
+			if exposurev1.ManagedPathsConflict(firstPath, secondPath) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Service) StartExposureRollout(projectID, actorUserID, key, requestID string, request deploymentv1.ExposureMutationRequest) (DeploymentJob, bool, error) {
@@ -179,7 +193,7 @@ func (s *Service) latestExposureLocked(projectID, environmentID, runtimeID, serv
 	var selected *DeploymentJob
 	for id := range s.deployments {
 		job := s.deployments[id]
-		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && job.ExposureSpec != nil && (selected == nil || job.CreatedAt.After(selected.CreatedAt)) {
+		if job.ProjectID == projectID && job.EnvironmentID == environmentID && job.RuntimeID == runtimeID && job.ServiceID == serviceID && appliedExposure(job) && (selected == nil || job.CreatedAt.After(selected.CreatedAt)) {
 			copy := job
 			selected = &copy
 		}
@@ -194,7 +208,7 @@ func (s *Service) latestExposureLocked(projectID, environmentID, runtimeID, serv
 func (s *Service) latestProjectExposuresLocked(projectID string) []exposurev1.ExposureSpec {
 	latest := map[string]DeploymentJob{}
 	for _, job := range s.deployments {
-		if job.ProjectID != projectID || job.ExposureSpec == nil || job.Status == deploymentv1.StateCancelled {
+		if job.ProjectID != projectID || !reservedExposure(job) {
 			continue
 		}
 		key := job.EnvironmentID + "\x00" + job.RuntimeID + "\x00" + job.ServiceID
@@ -208,6 +222,27 @@ func (s *Service) latestProjectExposuresLocked(projectID string) []exposurev1.Ex
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Hostname+result[i].Path < result[j].Hostname+result[j].Path })
 	return result
+}
+
+// appliedExposure is the only exposure state that may be preserved as the
+// current public route. A failed pre-mutation rollout never reached Kubernetes
+// and must not make an equivalent retry appear unchanged.
+func appliedExposure(job DeploymentJob) bool {
+	return job.ExposureSpec != nil && job.Status == deploymentv1.StateSucceeded && job.RolloutState == deploymentv1.RolloutStateSucceeded
+}
+
+// reservedExposure keeps in-flight routes visible to overlap protection, while
+// releasing failed, rolled-back, and cancelled attempts for a safe retry.
+func reservedExposure(job DeploymentJob) bool {
+	if job.ExposureSpec == nil || job.Status == deploymentv1.StateFailed || job.Status == deploymentv1.StateCancelled {
+		return false
+	}
+	switch job.RolloutState {
+	case deploymentv1.RolloutStateFailed, deploymentv1.RolloutStateRolledBack, deploymentv1.RolloutStateRollbackFailed, deploymentv1.RolloutStateCleaned:
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *Service) latestKnownGoodLocked(projectID, environmentID, runtimeID, serviceID, nodeID, agentID string) (string, string, string) {
@@ -234,7 +269,7 @@ func validKnownGoodCandidate(job DeploymentJob) bool {
 	if snapshot.SchemaVersion != deploymentv1.JobSchemaVersion || snapshot.ProjectID != job.ProjectID || snapshot.Authority.BuildRecord.ProjectID != job.ProjectID || snapshot.Authority.BuildRecord.ServiceID != job.ServiceID || snapshot.Authority.EnvironmentID != job.EnvironmentID || snapshot.Authority.RuntimeID != job.RuntimeID || snapshot.Authority.NodeID != job.NodeID || snapshot.Authority.AgentID != job.AgentID || snapshot.SpecHash != job.SpecHash || snapshot.CreatedAt.IsZero() || snapshot.ActorUserID == "" || !validDeploymentIdempotencyKey(snapshot.IdempotencyKey) || snapshot.PayloadHash == "" {
 		return false
 	}
-	if snapshot.Image.Validate() != nil || snapshot.Workload.Validate() != nil || !reflect.DeepEqual(snapshot.Workload, snapshot.Workload.Normalize()) || snapshot.Image.Repository != snapshot.Authority.BuildRecord.Build.OCIRepository || snapshot.Image.Digest != snapshot.Authority.BuildRecord.Build.OCIDigest {
+	if snapshot.Image.Validate() != nil || snapshot.Workload.Validate() != nil || snapshot.Image.Repository != snapshot.Authority.BuildRecord.Build.OCIRepository || snapshot.Image.Digest != snapshot.Authority.BuildRecord.Build.OCIDigest {
 		return false
 	}
 	workloadHash, err := snapshot.Workload.Hash()
@@ -263,6 +298,9 @@ func exposureChanges(current *exposurev1.ExposureSpec, desired exposurev1.Exposu
 	}
 	if current.Path != desired.Path {
 		changes = append(changes, "path")
+	}
+	if !reflect.DeepEqual(current.AdditionalPaths, desired.AdditionalPaths) {
+		changes = append(changes, "additional_paths")
 	}
 	if current.ServicePort != desired.ServicePort {
 		changes = append(changes, "service_port")
@@ -320,7 +358,7 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 	if result.WorkloadSpecHash != job.RolloutIntent.Desired.WorkloadSpecHash || result.ExposureSpecHash != job.RolloutIntent.Desired.ExposureSpecHash || result.DesiredDigest != job.RolloutIntent.Desired.Image.Digest || result.PreviousDigest != job.RolloutIntent.PreviousDigest || !validRolloutHash(result.StateHash) || !validOptionalRolloutHash(result.ReadinessEvidenceHash) || result.Attempt != job.RolloutIntent.Attempt || !validSanitizedResources(result.Resources) || len(result.FailureCode) > 128 || len(result.FailureMessageRedacted) > deploymentv1.MaxRolloutErrorBytes {
 		return fmt.Errorf("rollout result hashes or digests do not match the leased intent")
 	}
-	if result.RolloutState != job.RolloutState && !deploymentv1.CanTransitionRollout(job.RolloutState, result.RolloutState) {
+	if !deploymentv1.CanCompleteRollout(job.RolloutState, result.RolloutState) {
 		return fmt.Errorf("rollout terminal result is out of order")
 	}
 	if result.FailureCode == "" && result.FailurePhase != "" || result.FailureCode != "" && !deploymentv1.IsRolloutFailurePhase(result.FailurePhase) {
@@ -331,11 +369,11 @@ func validateRolloutResult(job DeploymentJob, result *deploymentv1.AgentResult) 
 	}
 	switch result.RolloutState {
 	case deploymentv1.RolloutStateSucceeded:
-		if result.FailureCode != "" || result.CurrentDigest != result.DesiredDigest || result.KnownGoodID == "" || !validRolloutHash(result.KnownGoodHash) || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 {
+		if result.FailureCode != "" || result.CurrentDigest != result.DesiredDigest || result.KnownGoodID == "" || !validRolloutHash(result.KnownGoodHash) || !validRolloutHash(result.ReadinessEvidenceHash) || len(result.Resources) == 0 || result.ApplicationImage != job.RolloutIntent.Desired.Image.Reference || !strings.HasSuffix(result.ApplicationImageID, job.RolloutIntent.Desired.Image.Digest) || result.AvailableReplicas < job.RolloutIntent.Desired.Workload.Replicas || result.Namespace == "" || result.DeploymentName == "" || result.ServiceName == "" {
 			return fmt.Errorf("successful rollout result lacks factual known-good metadata")
 		}
 	case deploymentv1.RolloutStateCleaned:
-		if job.RolloutIntent.Operation != deploymentv1.RolloutOperationCleanup || result.FailureCode != "" || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
+		if (job.RolloutIntent.Operation != deploymentv1.RolloutOperationCleanup && job.RolloutIntent.Operation != deploymentv1.RolloutOperationFirstDeployCleanup) || result.FailureCode != "" || result.CurrentDigest != "" || result.KnownGoodID != "" || result.KnownGoodHash != "" || result.ReadinessEvidenceHash != "" {
 			return fmt.Errorf("cleaned preview result is invalid")
 		}
 	case deploymentv1.RolloutStateRolledBack:

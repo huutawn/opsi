@@ -74,6 +74,62 @@ func TestNATSCompilerLeaseReadinessDeleteAndBinding(t *testing.T) {
 	}
 }
 
+func TestUnplacedManagedResourceDeletesWithoutRuntimeAuthority(t *testing.T) {
+	service := testService()
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "unplaced-delete", managedRequest(resourcev1.TypeRedis))
+	if err != nil || created.Runtime != nil || created.Lifecycle != resourcev1.LifecycleUnplaced {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+
+	deleted, err := service.DeleteIntent(context.Background(), "project-1", created.ID, "user-1")
+	if err != nil || deleted.Lifecycle != resourcev1.LifecycleDeleting {
+		t.Fatalf("deleted=%+v err=%v", deleted, err)
+	}
+	if _, err := service.Get(context.Background(), "project-1", created.ID); err != ErrNotFound {
+		t.Fatalf("resource still exists: %v", err)
+	}
+}
+
+func TestReconcileTopologyPreservesUnchangedInFlightAndReadyResource(t *testing.T) {
+	service := testService()
+	request := managedRequest(resourcev1.TypeNATS)
+	request.Managed.CredentialRefs = nil
+	created, _, err := service.Create(context.Background(), "project-1", "user-1", "nats-idempotent-reconcile", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := topologyv1.Plan{ProjectID: "project-1", Revision: 1, PlanHash: strings.Repeat("9", 64), Assignments: []topologyv1.Assignment{{ServiceKey: created.ID, EnvironmentID: "env-1", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20}}}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	lease, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1")
+	if err != nil || !ok {
+		t.Fatalf("lease=%+v ok=%t err=%v", lease, ok, err)
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	inFlight, err := service.Get(context.Background(), "project-1", created.ID)
+	if err != nil || inFlight.Lifecycle != resourcev1.LifecycleProvisioning || inFlight.Runtime == nil || inFlight.Runtime.LeaseToken != lease.LeaseToken {
+		t.Fatalf("in-flight resource was reset: resource=%+v err=%v", inFlight, err)
+	}
+	evidence := &resourcev1.ManagedResourceEvidence{ObservedSpecHash: lease.Spec.SpecHash, WorkloadReady: true, PodReady: true, ServiceReady: true, Image: lease.Spec.Image, ImageID: lease.Spec.Image, AvailableReplicas: 1, ObservedAt: time.Now().UTC()}
+	ready, err := service.CompleteManaged(context.Background(), "project-1", created.ID, ManagedResult{Status: "ready", LeaseToken: lease.LeaseToken, Evidence: evidence})
+	if err != nil || ready.Lifecycle != resourcev1.LifecycleReady {
+		t.Fatalf("ready=%+v err=%v", ready, err)
+	}
+	if err := service.ReconcileTopology(context.Background(), "project-1", plan, staticTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := service.Get(context.Background(), "project-1", created.ID)
+	if err != nil || unchanged.Lifecycle != resourcev1.LifecycleReady || unchanged.Runtime == nil || unchanged.Runtime.Evidence == nil || unchanged.Runtime.Evidence.ObservedSpecHash != lease.Spec.SpecHash {
+		t.Fatalf("ready resource was reset: resource=%+v err=%v", unchanged, err)
+	}
+	if next, ok, err := service.LeaseManaged(context.Background(), "project-1", "node-1"); err != nil || ok {
+		t.Fatalf("unchanged ready resource was leased again: lease=%+v ok=%t err=%v", next, ok, err)
+	}
+}
+
 func TestPostgresCompilerGeneratesStableCredentialAndStorageAuthority(t *testing.T) {
 	service := testService()
 	postgres, _, err := service.Create(context.Background(), "project-1", "user-1", "postgres-runtime", managedRequest(resourcev1.TypePostgres))
@@ -162,11 +218,11 @@ func TestPostgresBindingCredentialRoleIsolationAndRevocationLifecycle(t *testing
 	if err != nil || len(environment) != 3 || len(secrets) != 3 || environment[0].Name != "DATABASE_HOST" || environment[1].Name != "DATABASE_NAME" || environment[2].Name != "DATABASE_PORT" || secrets[0].EnvName != "DATABASE_PASSWORD" || secrets[1].EnvName != "DATABASE_URL" || secrets[2].EnvName != "DATABASE_USER" {
 		t.Fatalf("environment=%+v secrets=%+v err=%v", environment, secrets, err)
 	}
-	materials, err := service.ResolveSecretMaterials(context.Background(), "project-1", secrets)
+	materials, err := service.ResolveSecretMaterials(context.Background(), "project-1", "", secrets)
 	if err != nil || len(materials) != 1 || materials[0].SecretID != first.CredentialID || !strings.HasPrefix(materials[0].Values["DATABASE_URL"], "postgres://") || !strings.Contains(materials[0].Values["DATABASE_URL"], "/opsi?sslmode=disable") {
 		t.Fatalf("materials=%+v err=%v", materials, err)
 	}
-	if _, err := service.ResolveSecretMaterials(context.Background(), "project-1", []deploymentv1.SecretReference{{EnvName: "DATABASE_PASSWORD", SecretID: postgres.Runtime.Spec.CredentialID}}); err == nil || !strings.Contains(err.Error(), resourcev1.FailureBindingSecretMaterialization) {
+	if _, err := service.ResolveSecretMaterials(context.Background(), "project-1", "", []deploymentv1.SecretReference{{EnvName: "DATABASE_PASSWORD", SecretID: postgres.Runtime.Spec.CredentialID}}); err == nil || !strings.Contains(err.Error(), resourcev1.FailureBindingSecretMaterialization) {
 		t.Fatalf("PostgreSQL management credential was accepted as application material: %v", err)
 	}
 	second := create("postgres-binding-b", "ANALYTICS")

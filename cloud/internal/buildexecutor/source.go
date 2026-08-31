@@ -72,6 +72,9 @@ func Materialize(ctx context.Context, request Request, log io.Writer) (string, e
 	if hasLFSAttributes(sourceDir) {
 		return "", Error{Code: "SOURCE_GIT_LFS_UNSUPPORTED", Phase: "source", Message: "Git LFS is not supported"}
 	}
+	if err := normalizeTrackedModes(ctx, sourceDir, baseEnv); err != nil {
+		return "", Error{Code: "SOURCE_MATERIALIZATION_FAILED", Phase: "source", Message: "tracked source permissions cannot be normalized"}
+	}
 	if err := os.RemoveAll(filepath.Join(sourceDir, ".git")); err != nil {
 		return "", Error{Code: "SOURCE_MATERIALIZATION_FAILED", Phase: "source", Message: "Git metadata cleanup failed"}
 	}
@@ -82,6 +85,74 @@ func Materialize(ctx context.Context, request Request, log io.Writer) (string, e
 		return "", Error{Code: "SOURCE_CREDENTIAL_LEAK", Phase: "source", Message: "source credential cleanup verification failed"}
 	}
 	return sourceDir, nil
+}
+
+// normalizeTrackedModes restores the only file permission distinction Git
+// persists: regular (100644) versus executable (100755). The executor runs
+// under umask 077 to protect temporary credentials, but those checkout modes
+// must not leak into the Docker build context or make runtime files root-only.
+func normalizeTrackedModes(ctx context.Context, sourceDir string, env []string) error {
+	output, err := run(ctx, sourceDir, env, "git", "ls-files", "--stage", "-z")
+	if err != nil {
+		return err
+	}
+	directories := map[string]struct{}{}
+	for _, record := range bytes.Split(output, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		tab := bytes.IndexByte(record, '\t')
+		if tab < 0 {
+			return fmt.Errorf("tracked entry is malformed")
+		}
+		fields := strings.Fields(string(record[:tab]))
+		if len(fields) != 3 || fields[2] != "0" {
+			return fmt.Errorf("tracked entry stage is invalid")
+		}
+		relative := string(record[tab+1:])
+		clean := filepath.Clean(relative)
+		if relative == "" || clean != relative || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("tracked path is invalid")
+		}
+		path := filepath.Join(sourceDir, clean)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		switch fields[0] {
+		case "100644", "100755":
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("tracked regular file has unexpected type")
+			}
+			mode := os.FileMode(0o644)
+			if fields[0] == "100755" {
+				mode = 0o755
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				return err
+			}
+		case "120000":
+			if info.Mode()&os.ModeSymlink == 0 {
+				return fmt.Errorf("tracked symlink has unexpected type")
+			}
+		default:
+			return fmt.Errorf("tracked mode is unsupported")
+		}
+		for parent := filepath.Dir(clean); parent != "."; parent = filepath.Dir(parent) {
+			directories[parent] = struct{}{}
+		}
+	}
+	for relative := range directories {
+		path := filepath.Join(sourceDir, relative)
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("tracked parent directory is invalid")
+		}
+		if err := os.Chmod(path, 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeAskPass(directory string) (string, error) {

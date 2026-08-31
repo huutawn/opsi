@@ -71,6 +71,57 @@ func TestWorkloadSpecRejectsUnsafeAndInlineSecretShapes(t *testing.T) {
 	}
 }
 
+func TestWorkloadSpecAcceptsBoundedStartupProbeAndHashesItsAuthority(t *testing.T) {
+	first := validWorkload()
+	first.StartupProbe = &Probe{Path: "/health", Port: 8080, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 60}
+	if err := first.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	firstHash, err := first.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	probe := *first.StartupProbe
+	probe.FailureThreshold = 61
+	second.StartupProbe = &probe
+	secondHash, err := second.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstHash == secondHash {
+		t.Fatal("startup probe edit did not invalidate the workload hash")
+	}
+	second.StartupProbe.FailureThreshold = 121
+	if second.Validate() == nil {
+		t.Fatal("unbounded startup probe was accepted")
+	}
+	second.StartupProbe = nil
+	second.LivenessProbe = &Probe{Path: "/health", Port: 8080, PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 11}
+	if second.Validate() == nil {
+		t.Fatal("runtime probe threshold was widened with the startup boundary")
+	}
+}
+
+func TestValidateEnvironmentPreservesCaseSensitiveFrameworkMappings(t *testing.T) {
+	if err := ValidateEnvironment(
+		[]EnvironmentVariable{
+			{Name: "Jwt__Issuer", Value: "identity-service"},
+			{Name: "Jwt__Audience", Value: "identity-api"},
+			{Name: "Jwt__AccessTokenMinutes", Value: "15"},
+			{Name: "Jwt__RefreshTokenDays", Value: "30"},
+		},
+		[]SecretReference{{EnvName: "Jwt__SigningKey", SecretID: "wsecret-123"}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Database_Password", "Jwt__Key", "Jwt__SigningKey", "ConnectionStrings__Database"} {
+		if err := ValidateEnvironment([]EnvironmentVariable{{Name: name, Value: "inline-secret"}}, nil); err == nil {
+			t.Fatalf("secret-like environment name %q accepted an inline value", name)
+		}
+	}
+}
+
 func TestRegistryPullCredentialRequiresTypedNonSecretReference(t *testing.T) {
 	ref := RegistryPullCredentialReference{Provider: "ghcr", CredentialID: "hosted-opsi", Registry: "ghcr.io"}
 	spec := validWorkload()

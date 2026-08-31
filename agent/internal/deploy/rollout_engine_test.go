@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -108,6 +109,24 @@ func TestRolloutFailureWithoutKnownGoodIsTerminalFailed(t *testing.T) {
 	}
 }
 
+func TestFirstDeployCleanupIsDurableAndDoesNotCreateKnownGood(t *testing.T) {
+	store := openTestStore(t)
+	runtime := newFakeRolloutRuntime()
+	snapshot := testRuntimeSnapshot(t, "job-cleanup", "c")
+	intent := deploymentv1.RolloutIntent{SchemaVersion: deploymentv1.RolloutSchemaVersion, RolloutID: "rollout-cleanup", Operation: deploymentv1.RolloutOperationFirstDeployCleanup, Target: snapshot.Target, Desired: snapshot, Attempt: 1, CreatedAt: time.Now().UTC()}
+	intent, err := intent.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second}).ReconcileRollout(context.Background(), intent, nil)
+	if err != nil || record.State != deploymentv1.RolloutStateCleaned || record.TerminalAt == nil || runtime.cleanupCalls != 1 {
+		t.Fatalf("record=%+v cleanup_calls=%d err=%v", record, runtime.cleanupCalls, err)
+	}
+	if known, getErr := store.CurrentKnownGood(context.Background(), snapshot.Target); getErr != nil || known != nil {
+		t.Fatalf("cleanup created known-good=%+v err=%v", known, getErr)
+	}
+}
+
 func TestRolloutPreWALFailuresReturnNoRecordAndDoNotMutate(t *testing.T) {
 	t.Run("stale previous known-good", func(t *testing.T) {
 		store := openTestStore(t)
@@ -136,6 +155,29 @@ func TestRolloutPreWALFailuresReturnNoRecordAndDoNotMutate(t *testing.T) {
 		current, _ := store.CurrentKnownGood(context.Background(), a.Target)
 		if current == nil || current.ID != knownA.ID || current.SnapshotHash != knownA.SnapshotHash || runtime.current.Image.Digest != a.Image.Digest {
 			t.Fatalf("preflight changed known-good/runtime: current=%+v runtime=%+v", current, runtime.current)
+		}
+	})
+
+	t.Run("legacy previous known-good is discarded when Cloud has no factual authority", func(t *testing.T) {
+		store := openTestStore(t)
+		runtime := newFakeRolloutRuntime()
+		engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+		a := testRuntimeSnapshot(t, "job-legacy-a", "a")
+		if _, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-legacy-a", a, nil), nil); err != nil {
+			t.Fatal(err)
+		}
+		knownA, err := store.CurrentKnownGood(context.Background(), a.Target)
+		if err != nil || knownA == nil {
+			t.Fatalf("knownA=%+v err=%v", knownA, err)
+		}
+		b := testRuntimeSnapshot(t, "job-legacy-b", "b")
+		record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-legacy-b", b, nil), nil)
+		if err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+			t.Fatalf("record=%+v err=%v", record, err)
+		}
+		current, err := store.CurrentKnownGood(context.Background(), b.Target)
+		if err != nil || current == nil || current.ID != record.Intent.RolloutID {
+			t.Fatalf("current=%+v err=%v", current, err)
 		}
 	})
 
@@ -417,6 +459,68 @@ func TestExplicitRollbackRestartFromPreparedRestoresKnownGoodWithoutApplyingDesi
 	if runtime.current.DeploymentJobID != a.DeploymentJobID || runtime.current.Image.Digest != a.Image.Digest {
 		t.Fatalf("prepared rollback restart applied desired B instead of known-good A: %+v", runtime.current)
 	}
+	current, err := reopened.CurrentKnownGood(context.Background(), a.Target)
+	if err != nil || current == nil || current.ID != knownA.ID || current.SnapshotHash != knownA.SnapshotHash {
+		t.Fatalf("prepared rollback restart did not restore known-good authority: current=%+v err=%v", current, err)
+	}
+	c := testRuntimeSnapshot(t, "job-c", "a")
+	if record, err := restarted.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-c", c, current), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+		t.Fatalf("rollout after restored authority record=%+v err=%v", record, err)
+	}
+}
+
+func TestStoreRepairsHistoricalExplicitRollbackKnownGoodOnOpen(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "agent.sqlite")
+	store, err := OpenSQLiteStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newFakeRolloutRuntime()
+	engine := NewEngine(store, EngineConfig{Reconciler: runtime, RolloutTimeout: time.Second})
+	a := testRuntimeSnapshot(t, "job-history-a", "a")
+	if record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-history-a", a, nil), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+		t.Fatalf("seed A record=%+v err=%v", record, err)
+	}
+	knownA, err := store.CurrentKnownGood(context.Background(), a.Target)
+	if err != nil || knownA == nil {
+		t.Fatalf("known A=%+v err=%v", knownA, err)
+	}
+	b := testRuntimeSnapshot(t, "job-history-b", "b")
+	if record, err := engine.ReconcileRollout(context.Background(), testRolloutIntent(t, "rollout-history-b", b, knownA), nil); err != nil || record.State != deploymentv1.RolloutStateSucceeded {
+		t.Fatalf("seed B record=%+v err=%v", record, err)
+	}
+	knownB, err := store.CurrentKnownGood(context.Background(), b.Target)
+	if err != nil || knownB == nil {
+		t.Fatalf("known B=%+v err=%v", knownB, err)
+	}
+	rollback := testRolloutIntent(t, "rollout-history-back-to-a", b, knownA)
+	rollback.Operation = deploymentv1.RolloutOperationRollback
+	rollback.PreviousDigest = a.Image.Digest
+	rollback.ExpectedKnownGoodID = knownB.ID
+	rollback.ExpectedKnownGoodHash = knownB.SnapshotHash
+	rollback.IntentHash = ""
+	rollback, err = rollback.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record, err := engine.ReconcileRollout(context.Background(), rollback, nil); err != nil || record.State != deploymentv1.RolloutStateRolledBack {
+		t.Fatalf("rollback record=%+v err=%v", record, err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO known_good_current(target_key, snapshot_id) VALUES (?, ?) ON CONFLICT(target_key) DO UPDATE SET snapshot_id = excluded.snapshot_id`, b.Target.Key(), knownB.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLiteStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	current, err := reopened.CurrentKnownGood(context.Background(), a.Target)
+	if err != nil || current == nil || current.ID != knownA.ID || current.SnapshotHash != knownA.SnapshotHash {
+		t.Fatalf("historical rollback repair current=%+v err=%v", current, err)
+	}
 }
 
 func TestRolloutWALReplayConflictLockAndTerminalImmutability(t *testing.T) {
@@ -582,6 +686,24 @@ func TestRolloutReadinessUsesAppDigestServiceEndpointsAndIngress(t *testing.T) {
 	}
 	if evidence.WorkloadEvidenceHash == "" || evidence.ServiceEvidenceHash == "" || evidence.ApplicationImageIDHash == "" {
 		t.Fatalf("readiness omitted factual evidence hashes: %+v", evidence)
+	}
+	if evidence.AvailableReplicas != 1 || !containsExactDigest(evidence.ApplicationImageID, snapshot.Image.Digest) {
+		t.Fatalf("readiness omitted factual application state: %+v", evidence)
+	}
+}
+
+func TestAcceptedRoutingStatusPermitsProtectedApplicationResponses(t *testing.T) {
+	for status, accepted := range map[int]bool{
+		http.StatusOK:                true,
+		http.StatusTemporaryRedirect: true,
+		http.StatusUnauthorized:      true,
+		http.StatusForbidden:         true,
+		http.StatusNotFound:          false,
+		http.StatusBadGateway:        false,
+	} {
+		if got := acceptedRoutingStatus(status); got != accepted {
+			t.Errorf("acceptedRoutingStatus(%d)=%v, want %v", status, got, accepted)
+		}
 	}
 }
 
@@ -835,6 +957,7 @@ type fakeRolloutRuntime struct {
 	prepareCalls     int
 	applyCalls       int
 	rollbackCalls    int
+	cleanupCalls     int
 	rollbackTargetID string
 }
 
@@ -1015,6 +1138,12 @@ func (f *fakeRolloutRuntime) ObserveReadiness(_ context.Context, plan RolloutPla
 	}
 	evidence := deploymentv1.ReadinessEvidence{SchemaVersion: deploymentv1.ReadinessEvidenceVersion, RuntimeReady: true, LocalRoutingReady: true, WorkloadEvidenceHash: strings.Repeat("1", 64), ServiceEvidenceHash: strings.Repeat("2", 64), ExposureEvidenceHash: strings.Repeat("3", 64), ApplicationImageIDHash: strings.Repeat("4", 64), LocalProbeEvidenceHash: strings.Repeat("5", 64), ObservedAt: time.Now().UTC()}
 	return evidence, fakeResourceIdentities(f.resourceVersion), nil
+}
+
+func (f *fakeRolloutRuntime) CleanupFirstDeploy(_ context.Context, _ deploymentv1.RuntimeSnapshot) error {
+	f.cleanupCalls++
+	f.current = deploymentv1.RuntimeSnapshot{}
+	return nil
 }
 
 func fakeResourceIdentities(version int) []deploymentv1.ResourceIdentity {

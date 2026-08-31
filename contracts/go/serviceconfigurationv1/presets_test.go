@@ -40,4 +40,3 @@ func TestPresets(t *testing.T) {
 		t.Fatalf("unexpected public HTTP preset: %+v", publicHTTP)
 	}
 }
-

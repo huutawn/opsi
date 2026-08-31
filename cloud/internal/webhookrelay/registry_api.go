@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
@@ -213,6 +215,18 @@ func (s *Server) handleOrgProjects(w http.ResponseWriter, r *http.Request, orgID
 
 func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts []string, principal auth.VerifyResult) {
 	projectID := parts[1]
+	if s.handleDeploymentRunAPI(w, r, projectID, parts, principal) {
+		return
+	}
+	if s.handlePublicHostnameAPI(w, r, projectID, parts, principal) {
+		return
+	}
+	if s.handleWorkloadSecretAPI(w, r, projectID, parts, principal) {
+		return
+	}
+	if s.handleProposalReviewAPI(w, r, projectID, parts, principal) {
+		return
+	}
 	if s.handleResourceAPI(w, r, projectID, parts, principal) {
 		return
 	}
@@ -649,6 +663,79 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 	http.NotFound(w, r)
 }
 
+func (s *Server) handleProposalReviewAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
+	if len(parts) == 5 && parts[2] == "services" && parts[4] == "proposal-reviews" {
+		applicationID := parts[3]
+		if r.Method == http.MethodGet {
+			if !s.requireRole(w, r, principal, projectID, "service", applicationID, "owner", "admin", "developer", "viewer", "support") {
+				return true
+			}
+			value, err := s.Registry.ListProposalReviews(projectID, applicationID, 50)
+			writeRegistryResult(w, r, map[string]any{"reviews": value}, err, http.StatusOK)
+			return true
+		}
+		if r.Method == http.MethodPost {
+			if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "service", applicationID, "owner", "admin", "developer") || principal.UserID == "" {
+				return true
+			}
+			var request registry.ProposalReviewCreateRequest
+			if !decodeJSON(w, r, &request) {
+				return true
+			}
+			value, err := s.Registry.CreateProposalReview(projectID, applicationID, principal.UserID, request)
+			if err == nil {
+				s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "PROPOSAL_REVIEW_CREATED", "proposal_review", value.ID, "success", map[string]any{"proposal_hash": value.ProposalHash, "reviewed_payload_hash": value.ReviewedPayloadHash, "application_id": applicationID, "kind": value.Kind})
+			}
+			writeRegistryResult(w, r, value, err, http.StatusCreated)
+			return true
+		}
+		return false
+	}
+	if len(parts) == 4 && parts[2] == "proposal-reviews" && r.Method == http.MethodGet {
+		reviewID := parts[3]
+		if !s.requireRole(w, r, principal, projectID, "proposal_review", reviewID, "owner", "admin", "developer", "viewer", "support") {
+			return true
+		}
+		value, err := s.Registry.GetProposalReview(projectID, reviewID)
+		writeRegistryResult(w, r, value, err, http.StatusOK)
+		return true
+	}
+	if len(parts) != 5 || parts[2] != "proposal-reviews" || r.Method != http.MethodPost {
+		return false
+	}
+	reviewID, action := parts[3], parts[4]
+	if action != "approve" && action != "reject" && action != "apply" {
+		return false
+	}
+	if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "service", projectID, "owner", "admin", "developer") || principal.UserID == "" {
+		return true
+	}
+	var value registry.ProposalReview
+	var err error
+	switch action {
+	case "approve":
+		value, err = s.Registry.ApproveProposalReview(projectID, reviewID, principal.UserID)
+		if err == nil {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "PROPOSAL_APPROVED", "proposal_review", reviewID, "success", map[string]any{"proposal_hash": value.ProposalHash, "reviewed_payload_hash": value.ReviewedPayloadHash})
+		}
+	case "reject":
+		value, err = s.Registry.RejectProposalReview(projectID, reviewID, principal.UserID)
+		if err == nil {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "PROPOSAL_REJECTED", "proposal_review", reviewID, "success", map[string]any{"proposal_hash": value.ProposalHash})
+		}
+	case "apply":
+		var result registry.ServiceConfigurationApplyResult
+		value, result, err = s.Registry.ApplyProposalReview(projectID, reviewID, principal.UserID)
+		if err == nil && !result.Reused {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CANONICAL_APPLY_SUCCEEDED", "proposal_review", reviewID, "success", map[string]any{"proposal_hash": value.ProposalHash, "reviewed_payload_hash": value.ReviewedPayloadHash, "resulting_revision": result.Configuration.Revision})
+		} else if err != nil {
+			s.Registry.Audit(principal.OrgID, projectID, principal.UserID, "CANONICAL_APPLY_FAILED", "proposal_review", reviewID, "failure", nil)
+		}
+	}
+	writeRegistryResult(w, r, value, err, http.StatusOK)
+	return true
+}
+
 func (s *Server) handleServiceConfigurationAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
 	if len(parts) < 5 || parts[2] != "services" || parts[4] != "configuration" {
 		return false
@@ -689,6 +776,10 @@ func (s *Server) handleServiceConfigurationAPI(w http.ResponseWriter, r *http.Re
 		}
 		var request registry.ServiceConfigurationApplyRequest
 		if !decodeJSON(w, r, &request) {
+			return true
+		}
+		if request.ProposalReview != nil {
+			writeRegistryError(w, registry.APIError{Status: http.StatusBadRequest, Code: "PROPOSAL_REVIEW_APPLY_REQUIRED", Message: "approved reviews must be applied through their durable review endpoint", RequestID: r.Header.Get("X-Request-ID")})
 			return true
 		}
 		value, err := s.Registry.ApplyServiceConfiguration(projectID, serviceID, principal.UserID, r.Header.Get("Idempotency-Key"), request)
@@ -770,12 +861,13 @@ func (s *Server) reviewDependencies(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	resolver := DependencyResolverAdapter{Registry: s.Registry, Resources: s.Resources}
-	plan, err := registry.PlanDependencyRealization(r.Context(), config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
+	plan, err := registry.PlanDependencyRealization(r.Context(), serviceID, config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
 		return s.Resources.Get(ctx, projectID, targetID)
 	}, func(ctx context.Context, targetID string) (registry.DependencyTargetFacts, error) {
 		return resolver.ResolveDependencyTarget(ctx, projectID, targetID, "application")
 	})
 	if err != nil {
+		s.observeConnectionCompileError(err)
 		writeRegistryFailure(w, r, err)
 		return
 	}
@@ -820,12 +912,13 @@ func (s *Server) applyDependencies(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	resolver := DependencyResolverAdapter{Registry: s.Registry, Resources: s.Resources}
-	plan, err := registry.PlanDependencyRealization(r.Context(), config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
+	plan, err := registry.PlanDependencyRealization(r.Context(), serviceID, config, bindings, func(ctx context.Context, targetID string) (resourcev1.Resource, error) {
 		return s.Resources.Get(ctx, projectID, targetID)
 	}, func(ctx context.Context, targetID string) (registry.DependencyTargetFacts, error) {
 		return resolver.ResolveDependencyTarget(ctx, projectID, targetID, "application")
 	})
 	if err != nil {
+		s.observeConnectionCompileError(err)
 		writeRegistryFailure(w, r, err)
 		return
 	}
@@ -1061,6 +1154,16 @@ func writeRegistryResult[T any](w http.ResponseWriter, r *http.Request, value T,
 }
 
 func writeRegistryFailure(w http.ResponseWriter, r *http.Request, err error) {
+	var policyErr deploymentpolicy.Error
+	if errors.As(err, &policyErr) {
+		writeRegistryError(w, registry.APIError{Status: policyErr.Status, Code: policyErr.Code, Message: policyErr.Message, RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
+	var workflowErr deploymentworkflow.Error
+	if errors.As(err, &workflowErr) {
+		writeRegistryError(w, registry.APIError{Status: workflowErr.Status, Code: workflowErr.Code, Message: workflowErr.Message, NextAction: workflowErr.NextAction, RequestID: r.Header.Get("X-Request-ID")})
+		return
+	}
 	var apiErr registry.APIError
 	if errors.As(err, &apiErr) {
 		writeRegistryError(w, apiErr)

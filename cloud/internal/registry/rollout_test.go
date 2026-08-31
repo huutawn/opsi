@@ -85,6 +85,28 @@ func TestExposureUnchangedDoesNotCreateDuplicateRollout(t *testing.T) {
 	}
 }
 
+func TestFailedExposureDoesNotBlockRetry(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "failed-retry")
+	failed, _, err := service.StartExposureRollout(projectID, "user-1", "route-failed", "route-failed", rolloutExposureRequest(t, base, "dep-route-failed", "apps.example.com", "/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, failed)
+	if _, err := service.CompleteDeployment(projectID, failed.NodeID, failed.ID, "route-failed-result", preMutationRolloutResult(lease, deploymentv1.RolloutCodeOwnershipConflict)); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := rolloutExposureRequest(t, base, "dep-route-retry", "apps.example.com", "/")
+	preview, err := service.PreviewExposure(projectID, "user-1", retry)
+	if err != nil || len(preview.Changes) != 1 || preview.Changes[0] != "create exposure apps.example.com/" {
+		t.Fatalf("retry preview=%+v err=%v", preview, err)
+	}
+	job, _, err := service.StartExposureRollout(projectID, "user-1", "route-retry", "route-retry", retry)
+	if err != nil || job.ID != retry.Exposure.DeploymentJobID {
+		t.Fatalf("retry job=%+v err=%v", job, err)
+	}
+}
+
 func TestExposureRolloutAllowsSameOriginLongestPrefixRoutes(t *testing.T) {
 	service, projectID, base := rolloutRegistryFixture(t, "same-origin")
 	web := rolloutExposureRequest(t, base, "dep-web-root", "apps.example.com", "/").Exposure
@@ -101,6 +123,32 @@ func TestExposureRolloutAllowsSameOriginLongestPrefixRoutes(t *testing.T) {
 	preview, err := service.PreviewExposure(projectID, "user-1", rolloutExposureRequest(t, base, "dep-api-prefix", "apps.example.com", "/api"))
 	if err != nil || !preview.Eligible {
 		t.Fatalf("same-origin longest-prefix preview=%+v err=%v", preview, err)
+	}
+}
+
+func TestExposureRolloutRejectsDuplicateAdditionalRoute(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "additional-route-conflict")
+	web := rolloutExposureRequest(t, base, "dep-web-hubs", "apps.example.com", "/hubs").Exposure
+	web.ServiceKey, web.SpecHash = "web", ""
+	web, err := web.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	webJob := base
+	webJob.ID, webJob.ServiceID, webJob.ExposureSpec = web.DeploymentJobID, "svc-web", &web
+	webJob.CreatedAt = base.CreatedAt.Add(1)
+	service.deployments[webJob.ID] = webJob
+
+	request := rolloutExposureRequest(t, base, "dep-api-multiple", "apps.example.com", "/api")
+	request.Exposure.AdditionalPaths = []string{"/hubs", "/ws"}
+	request.Exposure.SpecHash = ""
+	request.Exposure, err = request.Exposure.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.PreviewExposure(projectID, "user-1", request)
+	if err != nil || preview.Eligible || preview.DecisionCode != "EXPOSURE_ROUTE_CONFLICT" {
+		t.Fatalf("preview=%+v err=%v", preview, err)
 	}
 }
 
@@ -209,6 +257,33 @@ func TestRolloutProgressResourceValidationByPhase(t *testing.T) {
 		if err := validateRolloutResult(terminalJob, result); err != nil {
 			t.Fatalf("%s terminal result rejected materialized resource: %v", test.state, err)
 		}
+	}
+}
+func TestSuccessfulRolloutResultRequiresObservedRuntimeFacts(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "runtime-facts")
+	job, _, err := service.StartImmutableDeployment(*base.Snapshot, "user-1", "runtime-facts", "runtime-facts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseRollout(t, service, projectID, job)
+	terminalJob := lease.Deployment
+	terminalJob.RolloutState = deploymentv1.RolloutStateWaiting
+	result := rolloutResult(lease, deploymentv1.RolloutStateSucceeded, "6", terminalJob.RolloutIntent.Desired.Image.Digest, "known-good-runtime-facts", strings.Repeat("a", 64), "").RolloutResult
+	for name, mutate := range map[string]func(*deploymentv1.AgentResult){
+		"missing image ID":           func(value *deploymentv1.AgentResult) { value.ApplicationImageID = "" },
+		"missing available replicas": func(value *deploymentv1.AgentResult) { value.AvailableReplicas = 0 },
+		"wrong application image": func(value *deploymentv1.AgentResult) {
+			value.ApplicationImage = "ghcr.io/example/other@sha256:" + strings.Repeat("b", 64)
+		},
+		"missing workload name": func(value *deploymentv1.AgentResult) { value.DeploymentName = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := cloneRolloutResult(result)
+			mutate(candidate)
+			if err := validateRolloutResult(terminalJob, candidate); err == nil {
+				t.Fatal("successful result accepted incomplete observed runtime facts")
+			}
+		})
 	}
 }
 
@@ -682,9 +757,9 @@ func rolloutResult(lease DeploymentLease, state, hashCharacter, currentDigest, k
 	if failureCode != "" {
 		failurePhase = deploymentv1.FailurePhasePostMutation
 	}
-	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, RolloutID: intent.RolloutID, RolloutState: state, IntentHash: intent.IntentHash, StateHash: strings.Repeat(hashCharacter, 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: currentDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: knownGoodID, KnownGoodHash: knownGoodHash, ReadinessEvidenceHash: readinessHash, FailureCode: failureCode, FailurePhase: failurePhase, FailureMessageRedacted: "sanitized rollout failure", Attempt: intent.Attempt}
+	agentResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, ApplicationImage: intent.Desired.Image.Reference, ApplicationImageID: "containerd://" + intent.Desired.Image.Digest, Namespace: "opsi", DeploymentName: "api", ServiceName: "api", AvailableReplicas: intent.Desired.Workload.Replicas, RolloutID: intent.RolloutID, RolloutState: state, IntentHash: intent.IntentHash, StateHash: strings.Repeat(hashCharacter, 64), SpecHash: intent.Desired.WorkloadSpecHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, CurrentDigest: currentDigest, PreviousDigest: intent.PreviousDigest, KnownGoodID: knownGoodID, KnownGoodHash: knownGoodHash, ReadinessEvidenceHash: readinessHash, FailureCode: failureCode, FailurePhase: failurePhase, FailureMessageRedacted: "sanitized rollout failure", Attempt: intent.Attempt}
 	if state == deploymentv1.RolloutStateSucceeded || state == deploymentv1.RolloutStateRolledBack {
-		agentResult.Resources = []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}
+		agentResult.Resources = []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid-api", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}, {Kind: "Service", Namespace: "opsi", Name: "api", UID: "uid-service", ResourceVersion: "1", FunctionalHash: strings.Repeat("e", 64)}}
 	}
 	return DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: state, LeaseToken: lease.LeaseToken, IntentHash: intent.IntentHash, FailureCode: failureCode, FailureMessageRedacted: agentResult.FailureMessageRedacted, RolloutResult: agentResult}
 }

@@ -161,6 +161,47 @@ func (a ProductionAdapter) CleanupPreview(ctx context.Context, snapshot deployme
 	return nil
 }
 
+// CleanupFirstDeploy removes only the exact Opsi-owned workload and exposure
+// objects rendered by the failed first rollout. It deliberately preserves the
+// namespace, PVCs, managed resources, and encrypted workload-secret authority.
+func (a ProductionAdapter) CleanupFirstDeploy(ctx context.Context, snapshot deploymentv1.RuntimeSnapshot) error {
+	if snapshot.Preview != nil || snapshot.Validate() != nil {
+		return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeInvalid, "first deploy cleanup authority is invalid", false)
+	}
+	plan, err := a.PrepareRollout(ctx, snapshot)
+	if err != nil {
+		return err
+	}
+	a = a.withDefaults()
+	for index := len(plan.Observed) - 1; index >= 0; index-- {
+		observed := plan.Observed[index]
+		if !observed.Exists || observed.Kind == "Namespace" {
+			continue
+		}
+		current, readErr := a.observeRolloutObject(ctx, observed.rolloutObject)
+		if readErr != nil {
+			return readErr
+		}
+		if !current.Exists {
+			continue
+		}
+		if current.UID != observed.UID || current.ResourceVersion != observed.ResourceVersion || current.Functional != observed.Functional {
+			return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeResourceChanged, observed.Kind+"/"+observed.Name+" changed after cleanup preflight", false)
+		}
+		if err := a.verifyRolloutOwnership(current.Object, observed.rolloutObject, snapshot); err != nil {
+			return err
+		}
+		args := []string{"delete", strings.ToLower(observed.Kind), observed.Name, "--ignore-not-found=true", "--wait=true", "--timeout=2m"}
+		if observed.Namespace != "" {
+			args = append(args, "--namespace", observed.Namespace)
+		}
+		if _, runErr := a.Runner.Run(ctx, nil, a.KubectlPath, args...); runErr != nil {
+			return deploymentv1.NewRolloutError(deploymentv1.RolloutCodeRuntimeFailed, "failed rollout object deletion failed", true)
+		}
+	}
+	return nil
+}
+
 type RolloutPlan struct {
 	Snapshot       deploymentv1.RuntimeSnapshot
 	Command        deploymentv1.AgentCommand
@@ -401,6 +442,8 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 	evidence.WorkloadEvidenceHash = hashValue(map[string]any{"generation": generation, "observed": observedGeneration, "available": available, "desired": desiredReplicas})
 	evidence.ServiceEvidenceHash = hashValue(map[string]any{"selector": serviceJSON(service, "selector"), "port": command.Workload.ContainerPort, "endpoint_slices": endpointReady, "ready_endpoints": readyEndpoints, "desired": desiredReplicas})
 	evidence.ExposureEvidenceHash = hashValue(map[string]any{"external": plan.Snapshot.HasExternalExposure(), "generation": number(metadataValue(ingress, "generation")), "spec": ingress["spec"], "ownership": ingressReady})
+	evidence.ApplicationImageID = imageID
+	evidence.AvailableReplicas = int32(available)
 	evidence.ApplicationImageIDHash = hashString(imageID)
 	resources := []deploymentv1.ResourceIdentity{resourceIdentityFromObject("Deployment", deployment), resourceIdentityFromObject("Service", service)}
 	if plan.Snapshot.HasExternalExposure() {
@@ -414,10 +457,18 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 		if err != nil {
 			return evidence, resources, false, nil
 		}
-		evidence.LocalRoutingReady = probe.StatusCode >= 200 && probe.StatusCode < 400 && rolloutHash(probe.EvidenceHash)
+		evidence.LocalRoutingReady = acceptedRoutingStatus(probe.StatusCode) && rolloutHash(probe.EvidenceHash)
 		evidence.LocalProbeEvidenceHash = probe.EvidenceHash
 	}
 	return evidence, resources, runtimeReady && evidence.LocalRoutingReady, nil
+}
+
+// acceptedRoutingStatus permits successful/redirect responses and the two
+// authentication challenges that prove the request reached the protected
+// application. A 404 remains unready because Traefik emits it when no ingress
+// rule matches the requested host and path.
+func acceptedRoutingStatus(status int) bool {
+	return status >= http.StatusOK && status < http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func (a ProductionAdapter) observeRolloutObject(ctx context.Context, object rolloutObject) (rolloutObservation, error) {

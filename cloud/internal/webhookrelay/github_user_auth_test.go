@@ -449,7 +449,7 @@ func TestGitHubUserIDValidationAndCanonicalization(t *testing.T) {
 	}
 }
 
-func TestBrowserAuthUsesGitHubProviderAndRequiresPrelinkedIdentity(t *testing.T) {
+func TestBrowserAuthUsesGitHubProviderAndOnboardsFirstLogin(t *testing.T) {
 	t.Run("fixed provider", func(t *testing.T) {
 		server, projectID, _ := linkedGitHubServer(t, successfulGitHubTransport(t))
 		_, authorizeURL, _ := startBrowserAuth(t, server, projectID)
@@ -459,15 +459,30 @@ func TestBrowserAuthUsesGitHubProviderAndRequiresPrelinkedIdentity(t *testing.T)
 		}
 	})
 
-	t.Run("unlinked", func(t *testing.T) {
-		server, projectID, store := linkedGitHubServer(t, successfulGitHubTransport(t))
+	t.Run("first login creates personal workspace", func(t *testing.T) {
+		server, _, store := linkedGitHubServer(t, successfulGitHubTransport(t))
 		store.OAuthIdentities = map[string]string{"generic\x00" + testGitHubUserID: "user-1"}
 		candidateCount := len(store.Candidates)
+		_, authorizeURL, _ := startBrowserAuth(t, server, "")
+		response := callbackRequest(server, authorizeURL.Query().Get("state"), "code")
+		if response.Code != http.StatusFound || urlQuery(response.Header().Get("Location"), "code") == "" {
+			t.Fatalf("status=%d location=%s", response.Code, response.Header().Get("Location"))
+		}
+		if len(store.Candidates) != candidateCount+2 || store.OAuthIdentities[githubProvider+"\x00"+testGitHubUserID] == "" {
+			t.Fatalf("first login did not create OAuth workspace: candidates=%+v identities=%+v", store.Candidates, store.OAuthIdentities)
+		}
+	})
+
+	t.Run("first login ignores stale requested project", func(t *testing.T) {
+		server, projectID, store := linkedGitHubServer(t, successfulGitHubTransport(t))
+		store.OAuthIdentities = map[string]string{"generic\x00" + testGitHubUserID: "user-1"}
 		_, authorizeURL, _ := startBrowserAuth(t, server, projectID)
 		response := callbackRequest(server, authorizeURL.Query().Get("state"), "code")
-		requireBrowserAuthErrorRedirect(t, response, "GITHUB_ACCOUNT_UNLINKED")
-		if len(store.Candidates) != candidateCount || len(store.OAuthIdentities) != 1 {
-			t.Fatal("unlinked login mutated users or OAuth identities")
+		if response.Code != http.StatusFound || urlQuery(response.Header().Get("Location"), "code") == "" {
+			t.Fatalf("status=%d location=%s", response.Code, response.Header().Get("Location"))
+		}
+		if store.OAuthIdentities[githubProvider+"\x00"+testGitHubUserID] == "" || len(store.Candidates) != 3 || store.Candidates[2].ProjectID != "proj-oauth-2" {
+			t.Fatalf("unexpected requested-project onboarding state: candidates=%+v identities=%+v", store.Candidates, store.OAuthIdentities)
 		}
 	})
 }
@@ -564,6 +579,65 @@ func TestBrowserAuthGrantExpires(t *testing.T) {
 type installationClaimStartResponse struct {
 	AuthorizationURL string    `json:"authorization_url"`
 	ExpiresAt        time.Time `json:"expires_at"`
+}
+
+func TestInstallationDiscoveryUsesOAuthAndReturnsVisibleInstallationsWithoutAnID(t *testing.T) {
+	server, projectID, token, _ := installationClaimServer(t, "owner", successfulInstallationClaimTransport(t, "Organization", 222, []int64{333}))
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/"+projectID+"/github/installations/discover/start", strings.NewReader(`{"local_callback":"http://127.0.0.1:49152/callback","local_state":"opaque-cli-state"}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", response.Code, response.Body.String())
+	}
+	var started installationClaimStartResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	authorizationURL, err := url.Parse(started.AuthorizationURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := authorizationURL.Query().Get("state")
+	server.authMu.Lock()
+	pending := server.oauthStates[state]
+	server.authMu.Unlock()
+	if pending.Purpose != oauthPurposeInstallationDiscovery || pending.ActorUserID != "user-1" || pending.ProjectID != projectID || pending.InstallationID != 0 {
+		t.Fatalf("pending=%+v", pending)
+	}
+	callback := callbackRequest(server, state, "discovery-code")
+	if callback.Code != http.StatusFound {
+		t.Fatalf("callback status=%d body=%s", callback.Code, callback.Body.String())
+	}
+	location, err := url.Parse(callback.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := location.Query().Get("grant")
+	if grant == "" || location.Query().Get("state") != "opaque-cli-state" || strings.Contains(location.RawQuery, testGitHubAccessToken) {
+		t.Fatalf("redirect=%s", location.String())
+	}
+	redeem := httptest.NewRequest(http.MethodPost, "/v1/github/installations/discover/redeem", strings.NewReader(`{"grant":"`+grant+`","state":"opaque-cli-state"}`))
+	redeemResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(redeemResponse, redeem)
+	if redeemResponse.Code != http.StatusOK || strings.Contains(redeemResponse.Body.String(), testGitHubAccessToken) {
+		t.Fatalf("redeem status=%d body=%s", redeemResponse.Code, redeemResponse.Body.String())
+	}
+	var result struct {
+		Installations []registry.GitHubInstallation `json:"installations"`
+	}
+	if err := json.Unmarshal(redeemResponse.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Installations) != 1 || result.Installations[0].InstallationID != 101 || result.Installations[0].AccountLogin != "example" {
+		t.Fatalf("installations=%+v", result.Installations)
+	}
+	redeem = httptest.NewRequest(http.MethodPost, "/v1/github/installations/discover/redeem", strings.NewReader(`{"grant":"`+grant+`","state":"opaque-cli-state"}`))
+	redeemResponse = httptest.NewRecorder()
+	server.Handler().ServeHTTP(redeemResponse, redeem)
+	if redeemResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("reused grant status=%d", redeemResponse.Code)
+	}
 }
 
 func TestInstallationClaimStartRequiresPATRoleAndBindsPurpose(t *testing.T) {
@@ -920,8 +994,8 @@ func TestBrowserAuthMultiProjectSelectionFlow(t *testing.T) {
 	server.HTTPClient = newGitHubHTTPClient()
 	server.HTTPClient.Transport = transport
 
-	// Start auth without project specified
-	_, authURL, _ := startBrowserAuth(t, server, "")
+	// A stale URL project must not bypass membership or block project selection.
+	_, authURL, _ := startBrowserAuth(t, server, "stale-project")
 	state := authURL.Query().Get("state")
 
 	// Callback from GitHub
@@ -943,10 +1017,10 @@ func TestBrowserAuthMultiProjectSelectionFlow(t *testing.T) {
 		t.Fatalf("redeem status=%d body=%s", redeemResp.Code, redeemResp.Body.String())
 	}
 	var redeemOut struct {
-		Status         string                      `json:"status"`
-		SelectionToken string                      `json:"selection_token"`
+		Status         string                       `json:"status"`
+		SelectionToken string                       `json:"selection_token"`
 		Projects       []auth.OAuthProjectCandidate `json:"projects"`
-		Token          string                      `json:"token"`
+		Token          string                       `json:"token"`
 	}
 	if err := json.Unmarshal(redeemResp.Body.Bytes(), &redeemOut); err != nil {
 		t.Fatal(err)

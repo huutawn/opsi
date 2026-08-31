@@ -603,6 +603,13 @@ func TestStartMuxServesHealthAndBuiltUI(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<!doctype html><title>Opsi Console</title>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	assetDir := filepath.Join(dir, "_next", "static", "chunks")
+	if err := os.MkdirAll(assetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetDir, "app-hash.js"), []byte("export{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(newStartMux(dir, "", config.Default(), nil))
 	defer server.Close()
 
@@ -615,13 +622,28 @@ func TestStartMuxServesHealthAndBuiltUI(t *testing.T) {
 	}
 	_ = res.Body.Close()
 
-	res, err = http.Get(server.URL + "/")
+	res, err = http.Get(server.URL + "/?project=proj-1&view=deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("ui status = %d", res.StatusCode)
+	}
+	if cache := res.Header.Get("Cache-Control"); cache != "no-store" {
+		t.Fatalf("ui cache policy = %q", cache)
+	}
+
+	res, err = http.Get(server.URL + "/_next/static/chunks/app-hash.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("ui status = %d", res.StatusCode)
+		t.Fatalf("asset status = %d", res.StatusCode)
+	}
+	if cache := res.Header.Get("Cache-Control"); cache != "public, max-age=31536000, immutable" {
+		t.Fatalf("asset cache policy = %q", cache)
 	}
 }
 
@@ -930,7 +952,8 @@ func TestLocalGitHubInstallationClaimRedeemsOnceWithoutBrowserCredential(t *test
 		t.Fatal(err)
 	}
 	_ = res.Body.Close()
-	if res.StatusCode != http.StatusFound || strings.Contains(res.Header.Get("Location"), "grant") {
+	location, parseErr := url.Parse(res.Header.Get("Location"))
+	if res.StatusCode != http.StatusFound || parseErr != nil || strings.Contains(res.Header.Get("Location"), "grant") || location.Query().Get("project") != "proj-1" || location.Query().Get("view") != "deploy" || location.Query().Get("github") != "claimed" || location.Query().Get("installation_id") != "77" {
 		t.Fatalf("callback status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
 	}
 	res, err = client.Get(callback)
@@ -940,6 +963,97 @@ func TestLocalGitHubInstallationClaimRedeemsOnceWithoutBrowserCredential(t *test
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("reused callback status=%d", res.StatusCode)
+	}
+}
+
+func TestLocalGitHubInstallationDiscoveryReturnsToDeploy(t *testing.T) {
+	var callbackURL, localState string
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer keychain-pat" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch r.URL.Path {
+		case "/v1/projects/proj-1/github/installations/discover/start":
+			var body struct {
+				LocalCallback string `json:"local_callback"`
+				LocalState    string `json:"local_state"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			callbackURL, localState = body.LocalCallback, body.LocalState
+			_, _ = w.Write([]byte(`{"authorization_url":"https://github.com/login/oauth/authorize?client_id=test"}`))
+		case "/v1/github/installations/discover/redeem":
+			var body struct {
+				Grant string `json:"grant"`
+				State string `json:"state"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Grant != "one-time-grant" || body.State != localState {
+				t.Fatalf("redeem = %+v", body)
+			}
+			_, _ = w.Write([]byte(`{"installations":[{"installation_id":77,"status":"active"}]}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer cloud.Close()
+	store := keychain.NewFakeStore()
+	if err := store.SetPAT("keychain-pat"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:1", CloudURL: cloud.URL}, func() (keychain.Store, error) { return store, nil }))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/github/installations/discover/start", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Idempotency-Key", "discover-start")
+	req.Header.Set("X-Local-Session", localTestSession(t, server.URL))
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || callbackURL == "" || localState == "" {
+		t.Fatalf("status=%d callback=%q state=%q", res.StatusCode, callbackURL, localState)
+	}
+
+	callback := callbackURL + "?grant=one-time-grant&state=" + url.QueryEscape(localState)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err = client.Get(callback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	location, parseErr := url.Parse(res.Header.Get("Location"))
+	if res.StatusCode != http.StatusFound || parseErr != nil || location.Query().Get("project") != "proj-1" || location.Query().Get("view") != "deploy" || location.Query().Get("github") != "discovered" {
+		t.Fatalf("callback status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
+	}
+}
+
+func TestCanonicalLocalReturnQueryPreservesOnlyBoundedDeploySourceState(t *testing.T) {
+	raw := "?project=proj-1&view=deploy&source_project=proj-1&source_installation=9&source_repository=7&source_ref=feature%2Fzero-config&source_hostname=app.example.test&auth=stale&redirect=https%3A%2F%2Fevil.test"
+	canonical := canonicalLocalReturnQuery(raw)
+	for _, expected := range []string{"project=proj-1", "view=deploy", "source_project=proj-1", "source_installation=9", "source_repository=7", "source_ref=feature%2Fzero-config", "source_hostname=app.example.test"} {
+		if !strings.Contains(canonical, expected) {
+			t.Fatalf("canonical return query omitted %q: %s", expected, canonical)
+		}
+	}
+	for _, forbidden := range []string{"auth=", "redirect=", "evil.test"} {
+		if strings.Contains(canonical, forbidden) {
+			t.Fatalf("canonical return query retained %q: %s", forbidden, canonical)
+		}
+	}
+	redirect := localBrowserAuthRedirect("proj-1", "auth", "ok", canonical)
+	if !strings.HasPrefix(redirect, "/?") || !strings.Contains(redirect, "auth=ok") || !strings.Contains(redirect, "source_repository=7") {
+		t.Fatalf("redirect=%s", redirect)
+	}
+	if canonicalLocalReturnQuery("?source_ref="+strings.Repeat("a", 513)) != "" {
+		t.Fatal("oversized return value was retained")
 	}
 }
 
@@ -1649,7 +1763,7 @@ func TestLocalSessionVerifiesPATBeforeReportingAuthenticated(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = res.Body.Close()
-	if valid["authenticated"] != true || valid["token_status"] != "valid" || valid["cloud_connected"] != "ok" {
+	if valid["authenticated"] != true || valid["token_status"] != "valid" || valid["cloud_connected"] != "ok" || valid["user_id"] != "user-1" || valid["role"] != "owner" {
 		t.Fatalf("valid session=%v", valid)
 	}
 
@@ -1705,7 +1819,7 @@ func TestLocalSessionResolvesProjectFromPATWithoutBrowserStorage(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&session); err != nil {
 		t.Fatal(err)
 	}
-	if session["authenticated"] != true || session["org_id"] != "org-1" || session["project_id"] != "proj-1" {
+	if session["authenticated"] != true || session["user_id"] != "user-1" || session["org_id"] != "org-1" || session["project_id"] != "proj-1" || session["role"] != "owner" {
 		t.Fatalf("projectless session=%v", session)
 	}
 }
@@ -2300,6 +2414,23 @@ func TestBoundedLocalAPIRejectsOversizedBodiesAndResponses(t *testing.T) {
 	_ = res.Body.Close()
 	if res.StatusCode != http.StatusBadGateway || !bytes.Contains(body, []byte("RESPONSE_BODY_TOO_LARGE")) {
 		t.Fatalf("large response status=%d body=%s", res.StatusCode, body)
+	}
+}
+
+func TestBoundedLocalAPIPreservesFlatCloudErrorCode(t *testing.T) {
+	server := httptest.NewServer(boundedLocalAPI(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error_code":"DEPLOYMENT_LOCKED","message":"existing deployment is active","next_action":"watch_existing_deployment"}`)
+	})))
+	defer server.Close()
+	res, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte(`"DEPLOYMENT_LOCKED"`)) || !bytes.Contains(body, []byte(`"watch_existing_deployment"`)) {
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
 	}
 }
 

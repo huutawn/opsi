@@ -111,6 +111,9 @@ func TestValkeyManifestUsesSecretFilesAndNoPasswordArgs(t *testing.T) {
 		t.Fatalf("objects=%d", len(objects))
 	}
 	deployment := objects[1]
+	if strategy := nested(deployment, "spec", "strategy", "type"); strategy != "Recreate" {
+		t.Fatalf("deployment strategy=%v, want Recreate", strategy)
+	}
 	container := nested(deployment, "spec", "template", "spec", "containers").([]any)[0].(map[string]any)
 	if _, ok := container["args"]; ok || container["command"].([]any)[1] != "/run/opsi-valkey/valkey.conf" {
 		t.Fatalf("container=%v", container)

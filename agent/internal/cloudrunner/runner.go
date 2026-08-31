@@ -498,23 +498,26 @@ func (r Runner) execute(ctx context.Context, lease cloudrelay.DeploymentLease) (
 func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentLease) (cloudrelay.DeploymentResult, bool) {
 	intent, err := RolloutIntentFromLease(lease, r.NodeID)
 	if err != nil {
+		if canonical, canonicalErr := lease.Command.Rollout.Canonicalize(); canonicalErr == nil {
+			return preMutationResult(canonical, lease, "ROLLOUT_COMMAND_INVALID", err.Error(), false), true
+		}
 		return deploymentFailure(lease, "ROLLOUT_COMMAND_INVALID", err.Error()), true
 	}
 	if lease.Command.Workload.RegistryPullCredential != nil {
 		if r.RegistryPullSecrets == nil {
-			return deploymentFailure(lease, deploymentv1.RolloutCodeRegistryCredentialUnavailable, "registry pull secret delivery is unavailable"), true
+			return preMutationResult(intent, lease, deploymentv1.RolloutCodeRegistryCredentialUnavailable, "registry pull secret delivery is unavailable", false), true
 		}
 		if err := r.RegistryPullSecrets.Ensure(ctx, *lease.Command); err != nil {
 			failure := rolloutFailure(err, deploymentv1.RolloutCodeRegistryCredentialUnavailable)
-			return deploymentFailure(lease, failure.Code, failure.Message), true
+			return preMutationResult(intent, lease, failure.Code, failure.Message, failure.Retryable), true
 		}
 	}
 	if len(lease.Command.Workload.SecretReferences) > 0 {
 		if r.WorkloadSecrets == nil {
-			return deploymentFailure(lease, resourcev1.FailureBindingSecretMaterialization, "workload secret delivery is unavailable"), true
+			return preMutationResult(intent, lease, resourcev1.FailureBindingSecretMaterialization, "workload secret delivery is unavailable", false), true
 		}
 		if err := r.WorkloadSecrets.Ensure(ctx, *lease.Command); err != nil {
-			return deploymentFailure(lease, resourcev1.FailureBindingSecretMaterialization, err.Error()), true
+			return preMutationResult(intent, lease, resourcev1.FailureBindingSecretMaterialization, err.Error(), false), true
 		}
 	}
 	var progressMu sync.Mutex
@@ -558,9 +561,13 @@ func (r Runner) executeRollout(ctx context.Context, lease cloudrelay.DeploymentL
 			}
 			return nil
 		})
-		if intent.Operation == deploymentv1.RolloutOperationCleanup && record.State == deploymentv1.RolloutStateCleaned && record.TerminalAt != nil {
-			rolloutResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateCleaned, Namespace: intent.Desired.Preview.Namespace, RolloutID: intent.RolloutID, RolloutState: record.State, IntentHash: intent.IntentHash, StateHash: record.StateHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, PreviousDigest: intent.PreviousDigest, Attempt: intent.Attempt}
-			return cloudrelay.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateCleaned, LeaseToken: lease.LeaseToken, SpecHash: intent.Desired.WorkloadSpecHash, ApplicationImage: intent.Desired.Image.Reference, Namespace: intent.Desired.Preview.Namespace, RolloutResult: rolloutResult}, true
+		if (intent.Operation == deploymentv1.RolloutOperationCleanup || intent.Operation == deploymentv1.RolloutOperationFirstDeployCleanup) && record.State == deploymentv1.RolloutStateCleaned && record.TerminalAt != nil {
+			namespace := ""
+			if intent.Desired.Preview != nil {
+				namespace = intent.Desired.Preview.Namespace
+			}
+			rolloutResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateCleaned, Namespace: namespace, RolloutID: intent.RolloutID, RolloutState: record.State, IntentHash: intent.IntentHash, StateHash: record.StateHash, WorkloadSpecHash: intent.Desired.WorkloadSpecHash, ExposureSpecHash: intent.Desired.ExposureSpecHash, DesiredDigest: intent.Desired.Image.Digest, PreviousDigest: intent.PreviousDigest, Attempt: intent.Attempt}
+			return cloudrelay.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateCleaned, LeaseToken: lease.LeaseToken, SpecHash: intent.Desired.WorkloadSpecHash, ApplicationImage: intent.Desired.Image.Reference, Namespace: namespace, RolloutResult: rolloutResult}, true
 		}
 		if result, terminal := resultFromRollout(intent, record, reconcileErr, lease); terminal {
 			return result, true

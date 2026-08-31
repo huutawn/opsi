@@ -439,10 +439,19 @@ func normalizeDraft(projectID string, draft topologyv1.Draft) (topologyv1.Draft,
 			return topologyv1.Draft{}, "", invalid("TOPOLOGY_ASSIGNMENT_INVALID", "service, environment, and runtime must be non-empty and service keys unique")
 		}
 		seen[a.ServiceKey] = true
+		if a.CPULimitMillicores == 0 {
+			a.CPULimitMillicores = a.CPURequestMillicores
+		}
+		if a.MemoryLimitBytes == 0 {
+			a.MemoryLimitBytes = a.MemoryRequestBytes
+		}
 		if a.Replicas < 1 || a.Replicas > maxReplicas || a.CPURequestMillicores < 1 || a.CPURequestMillicores > maxCPUMillicores || a.MemoryRequestBytes < 1 || a.MemoryRequestBytes > maxMemoryBytes {
 			return topologyv1.Draft{}, "", invalid("TOPOLOGY_RESOURCES_INVALID", "replica, CPU, and memory requests are outside bounded values")
 		}
-		if a.CPURequestMillicores > math.MaxInt64/int64(a.Replicas) || a.MemoryRequestBytes > math.MaxInt64/int64(a.Replicas) {
+		if a.CPULimitMillicores < a.CPURequestMillicores || a.CPULimitMillicores > maxCPUMillicores || a.MemoryLimitBytes < a.MemoryRequestBytes || a.MemoryLimitBytes > maxMemoryBytes {
+			return topologyv1.Draft{}, "", invalid("TOPOLOGY_RESOURCES_INVALID", "resource limits must be greater than or equal to resource requests and bounded")
+		}
+		if a.CPURequestMillicores > math.MaxInt64/int64(a.Replicas) || a.MemoryRequestBytes > math.MaxInt64/int64(a.Replicas) || a.CPULimitMillicores > math.MaxInt64/int64(a.Replicas) || a.MemoryLimitBytes > math.MaxInt64/int64(a.Replicas) {
 			return topologyv1.Draft{}, "", invalid("TOPOLOGY_RESOURCES_INVALID", "resource request overflow")
 		}
 		if a.Exposure.Mode != "none" && a.Exposure.Mode != "internal" && a.Exposure.Mode != "public" {

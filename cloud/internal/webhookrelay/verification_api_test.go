@@ -2,6 +2,7 @@ package webhookrelay
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -17,14 +18,20 @@ import (
 	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
 
+type failingVerificationStore struct{ *verificationstore.MemoryStore }
+
+func (failingVerificationStore) Create(context.Context, verificationv1.VerificationRun) (verificationv1.VerificationRun, error) {
+	return verificationv1.VerificationRun{}, errors.New("persistence unavailable")
+}
+
 type verificationTestFixture struct {
-	server      *Server
-	projectID   string
-	envID       string
-	appID       string
-	resourceID  string
-	depName     string
-	pgResource  resourcev1.Resource
+	server     *Server
+	projectID  string
+	envID      string
+	appID      string
+	resourceID string
+	depName    string
+	pgResource resourcev1.Resource
 }
 
 func setupVerificationFixture(t *testing.T) verificationTestFixture {
@@ -248,6 +255,15 @@ func TestVerifyDependencyPartiallyVerifiedWhenNoAssertion(t *testing.T) {
 	}
 	if run.ConsumerAssertion.Status != verificationv1.LayerStatusNotConfigured {
 		t.Fatalf("expected assertion NOT_CONFIGURED, got %s", run.ConsumerAssertion.Status)
+	}
+}
+
+func TestVerifyDependencyFailsWhenEvidenceCannotBePersisted(t *testing.T) {
+	f := setupVerificationFixture(t)
+	f.server.Verifications = failingVerificationStore{verificationstore.NewMemoryStore()}
+	_, err := f.server.ExecuteDependencyVerification(context.Background(), f.projectID, f.envID, f.appID, verificationv1.VerifyDependencyRequest{DependencyLogicalName: f.depName}, "test-user")
+	if err == nil || err.Error() != "persist verification evidence" {
+		t.Fatalf("err=%v", err)
 	}
 }
 

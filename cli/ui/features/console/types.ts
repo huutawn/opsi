@@ -29,7 +29,7 @@ export type ConsoleController = {
   session: LocalSessionStatus | null;
   review: MutationReview | null;
   navigate: (route: Partial<ConsoleRoute>) => void;
-  setProjectID: (id: string) => void;
+  setProjectID: (id: string) => Promise<boolean>;
   setServiceDetail: (service: ServiceRecord | null) => void;
   projectSummaries: Record<string, ProjectSummaryEntry>;
   reviewMutation: (request: MutationRequest, submit: (idempotencyKey: string, credential?: string) => Promise<string>) => void;

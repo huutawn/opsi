@@ -170,8 +170,8 @@ func TestDependencyRealization_ValidationAndPresets(t *testing.T) {
 		}
 	})
 
-	// 5. Invalid Symbolic Source for Valkey (e.g. credential.database)
-	t.Run("Valkey_Invalid_Symbolic_Source", func(t *testing.T) {
+	// 5. Redis database index remains an atomic non-secret source.
+	t.Run("Valkey_Database_Index_Source", func(t *testing.T) {
 		draft := ServiceConfigurationDraft{
 			Dependencies: []serviceconfigurationv1.ApplicationDependency{
 				{
@@ -188,8 +188,8 @@ func TestDependencyRealization_ValidationAndPresets(t *testing.T) {
 			},
 		}
 		_, _, err := validateServiceConfiguration(context.Background(), resolver, source, draft, []ServiceRecord{source})
-		if err == nil || !strings.Contains(err.Error(), "DEPENDENCY_SYMBOLIC_SOURCE_INVALID") {
-			t.Fatalf("expected DEPENDENCY_SYMBOLIC_SOURCE_INVALID, got %v", err)
+		if err != nil {
+			t.Fatalf("expected Redis database source to validate, got %v", err)
 		}
 	})
 
@@ -491,7 +491,7 @@ func TestPlanDependencyRealization_ZeroMutationAndSafety(t *testing.T) {
 	}
 
 	// 1. Without existing binding: action = create
-	plan, err := PlanDependencyRealization(context.Background(), config, nil, getTarget)
+	plan, err := PlanDependencyRealization(context.Background(), "app-1", config, nil, getTarget)
 	if err != nil {
 		t.Fatalf("plan failed: %v", err)
 	}
@@ -527,13 +527,14 @@ func TestPlanDependencyRealization_ZeroMutationAndSafety(t *testing.T) {
 	// 2. With existing compatible binding: action = reused
 	existingBinding := resourcev1.Binding{
 		ID:          "rbind-pg-existing",
+		Source:      resourcev1.EndpointReference{Kind: resourcev1.KindApplication, ID: "app-1"},
 		Target:      resourcev1.EndpointReference{Kind: resourcev1.KindManagedService, ID: "res-pg-1"},
 		LogicalName: "database",
 		Protocol:    resourcev1.ProtocolPostgres,
 		Lifecycle:   resourcev1.LifecycleReady,
 	}
 
-	planReused, err := PlanDependencyRealization(context.Background(), config, []resourcev1.Binding{existingBinding}, getTarget)
+	planReused, err := PlanDependencyRealization(context.Background(), "app-1", config, []resourcev1.Binding{existingBinding}, getTarget)
 	if err != nil {
 		t.Fatalf("plan with existing binding failed: %v", err)
 	}

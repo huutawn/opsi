@@ -101,9 +101,13 @@ func TestPostgresRendererUsesStatefulSetPVCAndSecretFiles(t *testing.T) {
 	if strings.Contains(string(serialized), credential.Password) || strings.Contains(string(serialized), "hostPath") || strings.Contains(string(serialized), "emptyDir") || nested(container, "env").([]any)[1].(map[string]any)["name"] != "POSTGRES_PASSWORD_FILE" || nested(container, "volumeMounts").([]any)[0].(map[string]any)["mountPath"] != postgresDataMount {
 		t.Fatalf("unsafe PostgreSQL manifest: %s", serialized)
 	}
-	probe := strings.Join(anyStrings(nested(container, "readinessProbe", "exec", "command").([]any)), " ")
-	if !strings.Contains(probe, "pg_isready") || !strings.Contains(probe, "SELECT 1") || strings.Contains(probe, credential.Password) {
-		t.Fatalf("probe=%q", probe)
+	readinessProbe := nested(container, "readinessProbe").(map[string]any)
+	if _, exists := readinessProbe["exec"]; exists {
+		t.Fatalf("PostgreSQL readiness must not execute child processes: %v", readinessProbe)
+	}
+	tcpSocket := nested(readinessProbe, "tcpSocket").(map[string]any)
+	if tcpSocket["port"] != "postgres" {
+		t.Fatalf("readiness tcp socket=%v", tcpSocket)
 	}
 }
 

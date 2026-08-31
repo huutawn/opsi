@@ -19,25 +19,213 @@ type ToolHandler func(ctx context.Context, s *Server, args map[string]any) (any,
 
 func (s *Server) registerHandlers() map[string]ToolHandler {
 	return map[string]ToolHandler{
-		"project_context":                  s.handleProjectContext,
-		"topology":                         s.handleTopology,
-		"applications_list":                s.handleApplicationsList,
-		"application_get":                  s.handleApplicationGet,
-		"application_dependencies":         s.handleApplicationDependencies,
-		"managed_resources_list":           s.handleManagedResourcesList,
-		"managed_resource_get":             s.handleManagedResourceGet,
-		"build_records_list":               s.handleBuildRecordsList,
-		"build_record_get":                 s.handleBuildRecordGet,
-		"deployments_list":                 s.handleDeploymentsList,
-		"deployment_get":                   s.handleDeploymentGet,
-		"deployment_preflight":             s.handleDeploymentPreflight,
-		"source_risk_report":               s.handleSourceRiskReport,
-		"dependency_verification_latest":   s.handleDependencyVerificationLatest,
-		"dependency_verification_history":  s.handleDependencyVerificationHistory,
-		"source_files_list":                s.handleSourceFilesList,
-		"source_file_read":                 s.handleSourceFileRead,
-		"source_search":                    s.handleSourceSearch,
+		"deployment_readiness_context":    s.handleDeploymentReadinessContext,
+		"project_context":                 s.handleProjectContext,
+		"topology":                        s.handleTopology,
+		"applications_list":               s.handleApplicationsList,
+		"application_get":                 s.handleApplicationGet,
+		"application_dependencies":        s.handleApplicationDependencies,
+		"managed_resources_list":          s.handleManagedResourcesList,
+		"managed_resource_get":            s.handleManagedResourceGet,
+		"build_records_list":              s.handleBuildRecordsList,
+		"build_record_get":                s.handleBuildRecordGet,
+		"deployments_list":                s.handleDeploymentsList,
+		"deployment_get":                  s.handleDeploymentGet,
+		"deployment_preflight":            s.handleDeploymentPreflight,
+		"source_risk_report":              s.handleSourceRiskReport,
+		"dependency_verification_latest":  s.handleDependencyVerificationLatest,
+		"dependency_verification_history": s.handleDependencyVerificationHistory,
+		"source_files_list":               s.handleSourceFilesList,
+		"source_file_read":                s.handleSourceFileRead,
+		"source_search":                   s.handleSourceSearch,
+		"dependency_analysis_context":     s.handleDependencyAnalysisContext,
+		"validate_dependency_proposal":    s.handleValidateDependencyProposal,
+		"validate_source_patch_proposal":  s.handleValidateSourcePatchProposal,
 	}
+}
+
+// handleDeploymentReadinessContext only aggregates existing authorities. In
+// particular, it does not store a workflow status: a new call always derives
+// its facts from the current Cloud response and canonical preflight.
+func (s *Server) handleDeploymentReadinessContext(ctx context.Context, _ *Server, args map[string]any) (any, error) {
+	client, err := s.getCloudClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	projectID, err := s.resolveProjectID(ctx, client, args)
+	if err != nil {
+		return nil, err
+	}
+	applicationID, _ := args["application_id"].(string)
+	applicationID = strings.TrimSpace(applicationID)
+	environmentID, _ := args["environment_id"].(string)
+	environmentID = strings.TrimSpace(environmentID)
+	if applicationID == "" || environmentID == "" {
+		return nil, &DomainError{Code: ErrCodeInvalidArgument, Message: "application_id and environment_id are required"}
+	}
+
+	detailValue, err := s.handleApplicationGet(ctx, s, map[string]any{"project_id": projectID, "application_id": applicationID})
+	if err != nil {
+		return nil, err
+	}
+	detail, ok := detailValue.(ApplicationDetailResult)
+	if !ok {
+		return nil, &DomainError{Code: ErrCodeAuthorityUnavailable, Message: "application facts authority returned an unexpected result"}
+	}
+
+	records, err := client.ListBuildRecords(ctx, projectID, url.Values{"service_key": {detail.Name}, "limit": {"20"}})
+	if err != nil {
+		return nil, mapAPIError(err)
+	}
+	build := deploymentReadinessBuild(records.Records)
+	dependencies := deploymentReadinessDependencies(detail.DependenciesSummary)
+
+	placementStatus := "READY"
+	if detail.PlacementRuntimeID == "" {
+		placementStatus = "REQUIRED"
+	}
+	placement := DeploymentReadinessPlacement{Status: placementStatus, RuntimeID: detail.PlacementRuntimeID}
+
+	preflight := DeploymentReadinessPreflight{Status: "NOT_EVALUABLE"}
+	if build.RecordID != "" && build.Status == "CURRENT" {
+		result, preflightErr := client.PreflightDeployment(ctx, projectID, deploymentv1.CreateRequest{BuildRecordID: build.RecordID, EnvironmentID: environmentID})
+		if preflightErr != nil {
+			return nil, mapAPIError(preflightErr)
+		}
+		preflight = DeploymentReadinessPreflight{Status: result.Status, Result: &result}
+	}
+
+	deployments, err := client.ListDeployments(ctx, projectID)
+	if err != nil {
+		return nil, mapAPIError(err)
+	}
+	deployment := deploymentReadinessDeployment(latestApplicationDeployment(deployments, detail.ID, environmentID))
+	verification := deploymentReadinessVerification(detail.DependenciesSummary)
+
+	return DeploymentReadinessContext{
+		Action:        "NONE",
+		ProjectID:     projectID,
+		EnvironmentID: environmentID,
+		Application:   DeploymentReadinessApplication{ID: detail.ID, Name: detail.Name},
+		Source: DeploymentReadinessSource{
+			Status:        deploymentReadinessSourceStatus(build),
+			CommitSHA:     build.CommitSHA,
+			BuildRecordID: build.RecordID,
+			ApplicationRoot: func() string {
+				if detail.SourceBinding == nil {
+					return ""
+				}
+				return detail.SourceBinding.ApplicationRoot
+			}(),
+		},
+		Dependencies: dependencies,
+		Build:        build,
+		Placement:    placement,
+		Preflight:    preflight,
+		Deployment:   deployment,
+		Verification: verification,
+	}, nil
+}
+
+func deploymentReadinessSourceStatus(build DeploymentReadinessBuild) string {
+	if build.CommitSHA == "" {
+		return "UNAVAILABLE"
+	}
+	return "BOUND_TO_BUILD_RECORD"
+}
+
+func deploymentReadinessBuild(records []cloudclient.BuildRecord) DeploymentReadinessBuild {
+	if len(records) == 0 {
+		return DeploymentReadinessBuild{Status: "REQUIRED"}
+	}
+	record := records[0]
+	status := "NOT_ACCEPTED"
+	switch record.Build.Status {
+	case "succeeded":
+		status = "CURRENT"
+	case "failed":
+		status = "FAILED"
+	}
+	return DeploymentReadinessBuild{Status: status, RecordID: record.ID, CommitSHA: record.Workload.SHA, ImageDigest: record.Build.OCIDigest, BuildStatus: record.Build.Status}
+}
+
+func deploymentReadinessDependencies(dependencies []ApplicationDependencyDoc) DeploymentReadinessDependencies {
+	result := DeploymentReadinessDependencies{Status: "NOT_CONFIGURED"}
+	if len(dependencies) == 0 {
+		return result
+	}
+	result.Status = "CONFIGURED"
+	result.Total = len(dependencies)
+	for _, dependency := range dependencies {
+		if dependency.Required {
+			result.Required++
+		}
+		if dependency.TargetIdentity == "" {
+			result.Unresolved++
+		}
+		if dependency.TargetKind == "managed_resource" && dependency.Required && (!dependency.Realized || !strings.EqualFold(dependency.ResourceBindingStatus, "ready")) {
+			result.Unrealized++
+		}
+	}
+	if result.Unresolved > 0 || result.Unrealized > 0 {
+		result.Status = "UNRESOLVED"
+	}
+	return result
+}
+
+func latestApplicationDeployment(deployments []cloudclient.DeploymentJob, applicationID, environmentID string) *cloudclient.DeploymentJob {
+	var latest *cloudclient.DeploymentJob
+	for i := range deployments {
+		deployment := &deployments[i]
+		if deployment.ServiceID != applicationID || (environmentID != "" && deployment.EnvironmentID != "" && deployment.EnvironmentID != environmentID) {
+			continue
+		}
+		if latest == nil || deployment.UpdatedAt.After(latest.UpdatedAt) || (deployment.UpdatedAt.Equal(latest.UpdatedAt) && deployment.CreatedAt.After(latest.CreatedAt)) {
+			latest = deployment
+		}
+	}
+	return latest
+}
+
+func deploymentReadinessDeployment(deployment *cloudclient.DeploymentJob) DeploymentReadinessDeployment {
+	if deployment == nil {
+		return DeploymentReadinessDeployment{Status: "NOT_STARTED"}
+	}
+	status := "COMPLETED"
+	switch deployment.Status {
+	case "pending", "queued", "running", "deploying":
+		status = "IN_PROGRESS"
+	case "failed", "cancelled":
+		status = "FAILED"
+	}
+	return DeploymentReadinessDeployment{Status: status, DeploymentID: deployment.ID, DeploymentStatus: deployment.Status, RolloutState: deployment.RolloutState, DesiredDigest: deployment.DesiredDigest, CurrentDigest: deployment.CurrentDigest}
+}
+
+func deploymentReadinessVerification(dependencies []ApplicationDependencyDoc) DeploymentReadinessVerification {
+	if len(dependencies) == 0 {
+		return DeploymentReadinessVerification{Status: "NOT_REQUIRED"}
+	}
+	result := DeploymentReadinessVerification{Status: "NOT_RUN", DependencyCount: len(dependencies)}
+	allVerified := true
+	for _, dependency := range dependencies {
+		status := dependency.LatestVerificationStatus
+		switch status {
+		case "STALE":
+			return DeploymentReadinessVerification{Status: "STALE", DependencyCount: len(dependencies)}
+		case "FAILED":
+			return DeploymentReadinessVerification{Status: "FAILED", DependencyCount: len(dependencies)}
+		case "PARTIALLY_VERIFIED":
+			result.Status = "PARTIALLY_VERIFIED"
+			allVerified = false
+		case "VERIFIED":
+		default:
+			allVerified = false
+		}
+	}
+	if allVerified {
+		result.Status = "VERIFIED"
+	}
+	return result
 }
 
 func getIntArg(args map[string]any, key string, defaultVal, maxVal int) int {
@@ -258,13 +446,13 @@ func (s *Server) handleApplicationsList(ctx context.Context, _ *Server, args map
 		}
 
 		summary := ApplicationSummary{
-			ID:                  svc.ID,
-			Name:                svc.Name,
-			Status:              svc.Status,
-			SourceBinding:       bindingDoc,
-			PlacementRuntimeID:  runtimeID,
-			LatestDeploymentID:  latestDepID,
-			LatestDeployStatus:  latestDepStatus,
+			ID:                 svc.ID,
+			Name:               svc.Name,
+			Status:             svc.Status,
+			SourceBinding:      bindingDoc,
+			PlacementRuntimeID: runtimeID,
+			LatestDeploymentID: latestDepID,
+			LatestDeployStatus: latestDepStatus,
 		}
 
 		// Count dependencies if configuration exists
@@ -434,6 +622,7 @@ func (s *Server) buildDependencyDocs(ctx context.Context, client *cloudclient.Cl
 			mappings = append(mappings, DependencyInjectionMapping{
 				EnvName:        m.EnvName,
 				SymbolicSource: m.SymbolicSource,
+				Template:       m.Template,
 			})
 		}
 		var verContract *DependencyVerificationDoc

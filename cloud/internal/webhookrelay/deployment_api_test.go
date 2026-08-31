@@ -97,7 +97,7 @@ func TestResolvedDeploymentCompilesCanonicalSnapshotAndRejectsStaleOrClientSpec(
 		t.Fatalf("configuration authority missing from snapshot: %+v", preview.Snapshot.Authority)
 	}
 	workload := preview.Snapshot.Workload
-	if workload.Replicas != plan.Assignments[0].Replicas || workload.Resources.Requests.CPU != "250m" || workload.Resources.Limits.Memory != "256Mi" || workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.ReadinessProbe.Path != service.HealthPath {
+	if workload.Replicas != plan.Assignments[0].Replicas || workload.Resources.Requests.CPU != "250m" || workload.Resources.Limits.Memory != "256Mi" || workload.StartupProbe == nil || workload.ReadinessProbe == nil || workload.LivenessProbe == nil || workload.StartupProbe.FailureThreshold != 60 || workload.ReadinessProbe.Path != service.HealthPath {
 		t.Fatalf("canonical workload=%+v", workload)
 	}
 	client := request
@@ -106,6 +106,24 @@ func TestResolvedDeploymentCompilesCanonicalSnapshotAndRejectsStaleOrClientSpec(
 	client.Workload.Replicas++
 	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", client); deploymentAPIErrorCode(err) != "WORKLOAD_CANONICAL_MISMATCH" {
 		t.Fatalf("client mismatch err=%v", err)
+	}
+	client = request
+	mismatchedProbeWorkload := preview.Snapshot.Workload
+	startupProbe := *mismatchedProbeWorkload.StartupProbe
+	startupProbe.FailureThreshold--
+	mismatchedProbeWorkload.StartupProbe = &startupProbe
+	client.Workload = &mismatchedProbeWorkload
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", client); deploymentAPIErrorCode(err) != "WORKLOAD_CANONICAL_MISMATCH" {
+		t.Fatalf("client startup probe mismatch err=%v", err)
+	}
+	client = request
+	omittedProbeWorkload := preview.Snapshot.Workload
+	client.Workload = &omittedProbeWorkload
+	client.Workload.StartupProbe = nil
+	client.Workload.ReadinessProbe = nil
+	client.Workload.LivenessProbe = nil
+	if _, err := server.resolveDeploymentPreview(httptest.NewRequest(http.MethodPost, "/deployments/preview", nil), projectID, "owner", client); err != nil {
+		t.Fatalf("client with omitted platform probes err=%v", err)
 	}
 	_, err = server.Registry.ApplyServiceConfiguration(projectID, service.ID, "owner", "config-change", registry.ServiceConfigurationApplyRequest{Draft: registry.ServiceConfigurationDraft{Environment: []deploymentv1.EnvironmentVariable{{Name: "LOG_LEVEL", Value: "debug"}}}, ExpectedRevision: configuration.Revision, ExpectedStateHash: configuration.StateHash})
 	if err != nil {
@@ -258,7 +276,8 @@ func deploymentAPIErrorCode(err error) string {
 }
 
 func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
-	server := NewServer(Config{})
+	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
+	server.Cloudflare = successfulCloudflare{}
 	store := server.Registry.(*registry.Service)
 	project, err := store.CreateProject("org-1", "Exposure", "exposure", "owner", "project-key")
 	if err != nil {
@@ -301,12 +320,12 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	baseResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateSucceeded, RolloutState: deploymentv1.RolloutStateSucceeded, RolloutID: baseJob.RolloutIntent.RolloutID, IntentHash: baseJob.IntentHash, StateHash: strings.Repeat("c", 64), SpecHash: snapshot.SpecHash, WorkloadSpecHash: baseJob.RolloutIntent.Desired.WorkloadSpecHash, ExposureSpecHash: baseJob.RolloutIntent.Desired.ExposureSpecHash, DesiredDigest: image.Digest, CurrentDigest: image.Digest, KnownGoodID: baseJob.RolloutIntent.RolloutID, KnownGoodHash: strings.Repeat("d", 64), ReadinessEvidenceHash: strings.Repeat("e", 64), Attempt: baseJob.RolloutIntent.Attempt, Resources: []deploymentv1.ResourceIdentity{{Kind: "Deployment", Name: "api", UID: "uid", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}}}
+	baseResult := &deploymentv1.AgentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateSucceeded, RolloutState: deploymentv1.RolloutStateSucceeded, RolloutID: baseJob.RolloutIntent.RolloutID, IntentHash: baseJob.IntentHash, StateHash: strings.Repeat("c", 64), SpecHash: snapshot.SpecHash, WorkloadSpecHash: baseJob.RolloutIntent.Desired.WorkloadSpecHash, ExposureSpecHash: baseJob.RolloutIntent.Desired.ExposureSpecHash, DesiredDigest: image.Digest, CurrentDigest: image.Digest, KnownGoodID: baseJob.RolloutIntent.RolloutID, KnownGoodHash: strings.Repeat("d", 64), ReadinessEvidenceHash: strings.Repeat("e", 64), ApplicationImage: image.Reference, ApplicationImageID: "containerd://" + image.Digest, Namespace: "opsi", DeploymentName: "api", ServiceName: "api", AvailableReplicas: snapshot.Workload.Replicas, Attempt: baseJob.RolloutIntent.Attempt, Resources: []deploymentv1.ResourceIdentity{{Kind: "Deployment", Namespace: "opsi", Name: "api", UID: "uid", ResourceVersion: "1", FunctionalHash: strings.Repeat("f", 64)}, {Kind: "Service", Namespace: "opsi", Name: "api", UID: "uid-service", ResourceVersion: "1", FunctionalHash: strings.Repeat("d", 64)}}}
 	base, err := store.CompleteDeployment(project.ID, node.ID, baseJob.ID, "base-result", registry.DeploymentResult{SchemaVersion: deploymentv1.ResultSchemaVersion, Status: deploymentv1.RolloutStateSucceeded, LeaseToken: baseLease.LeaseToken, IntentHash: baseJob.IntentHash, RolloutResult: baseResult})
 	if err != nil {
 		t.Fatal(err)
 	}
-	exposure, err := (exposurev1.ExposureSpec{SchemaVersion: exposurev1.SchemaVersion, ProjectID: project.ID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceKey: workload.ServiceKey, DeploymentJobID: "dep-exposure", Hostname: "api.example.com", Path: "/", ServicePort: workload.ContainerPort, TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled}, Metadata: &exposurev1.Metadata{DisplayName: "Public API", Rationale: "request-body-secret-marker"}}).Canonicalize()
+	exposure, err := (exposurev1.ExposureSpec{SchemaVersion: exposurev1.SchemaVersion, ProjectID: project.ID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceKey: workload.ServiceKey, DeploymentJobID: "dep-exposure", Hostname: "api", Path: "/", ServicePort: workload.ContainerPort, TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled}, Metadata: &exposurev1.Metadata{DisplayName: "Public API", Rationale: "request-body-secret-marker"}}).Canonicalize()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,6 +368,22 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	created := call(http.MethodPost, "/api/projects/"+project.ID+"/exposures", "owner-pat", "exposure-key", body)
 	if created.Code != http.StatusAccepted || bytes.Contains(created.Body.Bytes(), []byte("owner-pat")) || bytes.Contains(created.Body.Bytes(), []byte("lease_token")) || bytes.Contains(created.Body.Bytes(), []byte("raw_manifest")) {
 		t.Fatalf("created status=%d body=%s", created.Code, created.Body.String())
+	}
+	duplicate := mutation
+	duplicate.Exposure.DeploymentJobID = "dep-exposure-duplicate"
+	duplicate.Exposure.SpecHash = ""
+	duplicate.Exposure, err = duplicate.Exposure.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateBody, _ := json.Marshal(duplicate)
+	duplicateResponse := call(http.MethodPost, "/api/projects/"+project.ID+"/exposures", "owner-pat", "duplicate-hostname-key", duplicateBody)
+	if duplicateResponse.Code != http.StatusConflict || bytes.Contains(duplicateResponse.Body.Bytes(), []byte("PUBLIC_HOSTNAME_UNAVAILABLE")) {
+		t.Fatalf("duplicate hostname status=%d body=%s", duplicateResponse.Code, duplicateResponse.Body.String())
+	}
+	quota, err := server.PublicHostnames.Quota(t.Context(), "owner")
+	if err != nil || quota.Used != 1 {
+		t.Fatalf("redeploy quota=%+v err=%v", quota, err)
 	}
 	countCreatedAudits := func() int {
 		audits, err := store.ListAudit(project.ID)
@@ -422,7 +457,7 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	}
 
 	conflicting := mutation
-	conflicting.Exposure.Hostname = "other.example.com"
+	conflicting.Exposure.Hostname = "other"
 	conflicting.Exposure.SpecHash = ""
 	conflicting.Exposure, err = conflicting.Exposure.Canonicalize()
 	if err != nil {
@@ -501,22 +536,22 @@ func TestResolvedDeploymentRejectsStaleBuildPhaseDependency(t *testing.T) {
 	configHash := registry.ComputeBuildConfigHash(strings.Repeat("a", 40), "", service.Dockerfile, service.BuildContext, "ghcr.io/o/r/api", buildDepState)
 
 	record := buildrecordv1.Record{
-		SchemaVersion: buildrecordv1.SchemaVersion,
-		ID:            "br-build-dep-fresh",
-		ProjectID:     projectID,
-		RepositoryID:  7,
+		SchemaVersion:     buildrecordv1.SchemaVersion,
+		ID:                "br-build-dep-fresh",
+		ProjectID:         projectID,
+		RepositoryID:      7,
 		RepositoryOwnerID: 8,
-		ActiveBindingID: "binding-1",
-		ServiceID:     service.ID,
-		ServiceKey:    service.Name,
-		CreatedAt:     time.Now().UTC(),
+		ActiveBindingID:   "binding-1",
+		ServiceID:         service.ID,
+		ServiceKey:        service.Name,
+		CreatedAt:         time.Now().UTC(),
 		Workload: buildrecordv1.WorkloadIdentity{
-			RepositoryID: 7,
+			RepositoryID:      7,
 			RepositoryOwnerID: 8,
-			Ref: "refs/heads/main",
-			SHA: strings.Repeat("a", 40),
-			EventName: "push",
-			WorkflowRef: "o/r/.github/workflows/cd.yml@refs/heads/main",
+			Ref:               "refs/heads/main",
+			SHA:               strings.Repeat("a", 40),
+			EventName:         "push",
+			WorkflowRef:       "o/r/.github/workflows/cd.yml@refs/heads/main",
 		},
 		Build: buildrecordv1.BuildMetadata{
 			ConfigHash:    configHash,

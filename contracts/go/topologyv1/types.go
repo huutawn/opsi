@@ -89,6 +89,8 @@ type Assignment struct {
 	Replicas             int32          `json:"replicas"`
 	CPURequestMillicores int64          `json:"cpu_request_millicores"`
 	MemoryRequestBytes   int64          `json:"memory_request_bytes"`
+	CPULimitMillicores   int64          `json:"cpu_limit_millicores,omitempty"`
+	MemoryLimitBytes     int64          `json:"memory_limit_bytes,omitempty"`
 	Exposure             ExposureIntent `json:"exposure"`
 	Rationale            Rationale      `json:"rationale,omitempty"`
 }

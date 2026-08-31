@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 )
@@ -38,22 +39,22 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	now := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
 	// 1. Create PostgreSQL Managed Resource
 	pgSpec := resourcev1.ManagedResourceSpec{
-		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion,
-		ResourceID:    "res-pg",
-		ProjectID:     "proj-1",
-		EnvironmentID: "env-1",
-		ResourceType:  resourcev1.TypePostgres,
-		Profile:       "single-node-experimental",
-		Version:       resourcev1.PostgresVersion,
-		Image:         resourcev1.PostgresImage,
-		Assignment:    resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
-		Replicas:      1,
-		CPUMillicores: 250,
-		MemoryBytes:   256 * 1024 * 1024,
-		Storage:       resourcev1.StorageRequest{Persistent: true, SizeBytes: 10 * 1024 * 1024 * 1024, PolicyRef: resourcev1.StoragePolicyDefault},
-		Ports:         []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}},
-		Connection:    resourcev1.ManagedResourceConnection{ServiceName: "postgres-svc", Host: "postgres.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
-		CredentialID:  "mrcred-res-pg",
+		SchemaVersion:    resourcev1.ManagedResourceSpecSchemaVersion,
+		ResourceID:       "res-pg",
+		ProjectID:        "proj-1",
+		EnvironmentID:    "env-1",
+		ResourceType:     resourcev1.TypePostgres,
+		Profile:          "single-node-experimental",
+		Version:          resourcev1.PostgresVersion,
+		Image:            resourcev1.PostgresImage,
+		Assignment:       resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
+		Replicas:         1,
+		CPUMillicores:    250,
+		MemoryBytes:      256 * 1024 * 1024,
+		Storage:          resourcev1.StorageRequest{Persistent: true, SizeBytes: 10 * 1024 * 1024 * 1024, PolicyRef: resourcev1.StoragePolicyDefault},
+		Ports:            []resourcev1.ManagedResourcePort{{Name: "postgres", Port: 5432, Protocol: resourcev1.ProtocolPostgres}},
+		Connection:       resourcev1.ManagedResourceConnection{ServiceName: "postgres-svc", Host: "postgres.local", Port: 5432, Protocol: resourcev1.ProtocolPostgres, Database: "opsi"},
+		CredentialID:     "mrcred-res-pg",
 		TopologyRevision: 1,
 	}
 	pgSpec.ConfigurationHash = strings.Repeat("a", 64)
@@ -96,21 +97,21 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 
 	// 2. Create Valkey Managed Resource
 	valkeySpec := resourcev1.ManagedResourceSpec{
-		SchemaVersion: resourcev1.ManagedResourceSpecSchemaVersion,
-		ResourceID:    "res-valkey",
-		ProjectID:     "proj-1",
-		EnvironmentID: "env-1",
-		ResourceType:  resourcev1.TypeRedis,
-		Profile:       "single-node-experimental",
-		Version:       resourcev1.ValkeyVersion,
-		Image:         resourcev1.ValkeyImage,
-		Assignment:    resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
-		Replicas:      1,
-		CPUMillicores: 250,
-		MemoryBytes:   256 * 1024 * 1024,
-		Ports:         []resourcev1.ManagedResourcePort{{Name: "redis", Port: 6379, Protocol: resourcev1.ProtocolRedis}},
-		Connection:    resourcev1.ManagedResourceConnection{ServiceName: "valkey-svc", Host: "valkey.local", Port: 6379, Protocol: resourcev1.ProtocolRedis},
-		CredentialID:  "mrcred-res-valkey",
+		SchemaVersion:    resourcev1.ManagedResourceSpecSchemaVersion,
+		ResourceID:       "res-valkey",
+		ProjectID:        "proj-1",
+		EnvironmentID:    "env-1",
+		ResourceType:     resourcev1.TypeRedis,
+		Profile:          "single-node-experimental",
+		Version:          resourcev1.ValkeyVersion,
+		Image:            resourcev1.ValkeyImage,
+		Assignment:       resourcev1.ManagedResourceAssignment{RuntimeID: "runtime-1", NodeID: "node-1", AgentID: "agent-1"},
+		Replicas:         1,
+		CPUMillicores:    250,
+		MemoryBytes:      256 * 1024 * 1024,
+		Ports:            []resourcev1.ManagedResourcePort{{Name: "redis", Port: 6379, Protocol: resourcev1.ProtocolRedis}},
+		Connection:       resourcev1.ManagedResourceConnection{ServiceName: "valkey-svc", Host: "valkey.local", Port: 6379, Protocol: resourcev1.ProtocolRedis},
+		CredentialID:     "mrcred-res-valkey",
 		TopologyRevision: 1,
 	}
 	valkeySpec.ConfigurationHash = strings.Repeat("c", 64)
@@ -191,6 +192,7 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 					InjectionPhase: "runtime",
 					InjectionMappings: []serviceconfigurationv1.DependencyInjectionMapping{
 						{EnvName: "APP_DATABASE_URL", SymbolicSource: "connection.url"},
+						{EnvName: "ConnectionStrings__Database", SymbolicSource: serviceconfigurationv1.SourcePostgresNpgsql},
 						{EnvName: "DB_HOST", SymbolicSource: "resource.host"},
 						{EnvName: "DB_PORT", SymbolicSource: "resource.port"},
 						{EnvName: "DB_NAME", SymbolicSource: "credential.database"},
@@ -246,6 +248,11 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	if envMap["CACHE_HOST"] != "valkey.local" || envMap["CACHE_PORT"] != "6379" {
 		t.Fatalf("unexpected Cache env vars: %+v", envMap)
 	}
+	for name, value := range envMap {
+		if strings.Contains(value, pgCred.Password) || strings.Contains(value, valkeyCred.Password) {
+			t.Fatalf("non-secret environment %s contains credential material", name)
+		}
+	}
 
 	// Check secret references
 	secMap := map[string]string{}
@@ -260,7 +267,7 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	}
 
 	// 5. Test ResolveSecretMaterials
-	materials, err := service.ResolveSecretMaterials(context.Background(), "proj-1", secRefs)
+	materials, err := service.ResolveSecretMaterials(context.Background(), "proj-1", "", secRefs)
 	if err != nil {
 		t.Fatalf("ResolveSecretMaterials failed: %v", err)
 	}
@@ -283,6 +290,10 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	if materialValues["APP_DATABASE_URL"] != expectedPGURL {
 		t.Fatalf("expected APP_DATABASE_URL=%s, got %s", expectedPGURL, materialValues["APP_DATABASE_URL"])
 	}
+	npgsql := materialValues["ConnectionStrings__Database"]
+	if !strings.Contains(npgsql, "Host=postgres.local;Port=5432;Database=opsi") || !strings.Contains(npgsql, "Username="+pgBinding.RoleName) || !strings.Contains(npgsql, "Password="+pgCred.Password) || strings.Contains(npgsql, "://") {
+		t.Fatalf("expected typed Npgsql connection string, got %q", npgsql)
+	}
 
 	// Assert custom Valkey values
 	if materialValues["CACHE_PASSWORD"] != valkeyCred.Password {
@@ -290,5 +301,44 @@ func TestApplicationRuntimeConfiguration_DependencyRealization(t *testing.T) {
 	}
 	if !strings.HasPrefix(materialValues["APP_REDIS_URL"], "redis://") || !strings.Contains(materialValues["APP_REDIS_URL"], valkeyCred.Password+"@valkey.local:6379") {
 		t.Fatalf("expected valid Redis URL, got %s", materialValues["APP_REDIS_URL"])
+	}
+
+	config := configs["app-1"]
+	config.Dependencies[1].InjectionMappings = append(config.Dependencies[1].InjectionMappings, serviceconfigurationv1.DependencyInjectionMapping{EnvName: "SignalR__Redis__ConnectionString", SymbolicSource: serviceconfigurationv1.SourceRedisStackExchange})
+	configs["app-1"] = config
+	managementMaterials, err := service.ResolveSecretMaterials(context.Background(), "proj-1", "app-1", []deploymentv1.SecretReference{{EnvName: "SignalR__Redis__ConnectionString", SecretID: valkeySpec.CredentialID}})
+	if err != nil || len(managementMaterials) != 1 {
+		t.Fatalf("resolve Redis management connection string: materials=%+v err=%v", managementMaterials, err)
+	}
+	if value := managementMaterials[0].Values["SignalR__Redis__ConnectionString"]; !strings.HasPrefix(value, "valkey.local:6379,") || !strings.Contains(value, "user="+valkeyCred.Username) || !strings.Contains(value, "password="+valkeyCred.Password) || strings.Contains(value, "://") {
+		t.Fatalf("expected typed StackExchange.Redis connection string, got %q", value)
+	}
+
+	if _, err := service.ResolveSecretMaterials(context.Background(), "proj-1", "app-1", []deploymentv1.SecretReference{{EnvName: "DB_PASSWORD", SecretID: valkeySpec.CredentialID}}); err == nil {
+		t.Fatal("cross-resource credential was injected through a PostgreSQL mapping")
+	}
+
+	identityConfig := configs["app-1"]
+	identityConfig.ResourceBindings[1].BindingID = "stale-optional-binding"
+	configs["app-1"] = identityConfig
+	optionalEnvironment, optionalSecrets, err := service.ApplicationRuntimeConfiguration(context.Background(), "proj-1", "env-1", "app-1")
+	if err != nil {
+		t.Fatalf("optional missing binding did not get omitted: %v", err)
+	}
+	for _, value := range optionalEnvironment {
+		if strings.HasPrefix(value.Name, "CACHE_") {
+			t.Fatalf("optional missing binding emitted environment: %+v", optionalEnvironment)
+		}
+	}
+	for _, value := range optionalSecrets {
+		if strings.HasPrefix(value.EnvName, "CACHE_") || value.EnvName == "APP_REDIS_URL" {
+			t.Fatalf("optional missing binding emitted secret reference: %+v", optionalSecrets)
+		}
+	}
+
+	identityConfig.ResourceBindings[0].BindingID = valkeyBinding.ID
+	configs["app-1"] = identityConfig
+	if _, _, err := service.ApplicationRuntimeConfiguration(context.Background(), "proj-1", "env-1", "app-1"); err == nil {
+		t.Fatal("required dependency accepted a selected binding with mismatched target and protocol")
 	}
 }

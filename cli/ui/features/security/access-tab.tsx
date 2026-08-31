@@ -120,7 +120,7 @@ export function AccessTab({ console }: { console: ConsoleController }) {
                 <div className="flex items-center gap-2">
                   <StatusBadge value={node.status} />
                   <Button
-                    onClick={() => console.navigate({ view: "infrastructure", tab: "servers", server: node.id })}
+                    onClick={() => console.navigate({ view: "observability", tab: "servers", server: node.id })}
                     size="sm"
                     variant="outline"
                   >
@@ -161,7 +161,7 @@ export function AccessTab({ console }: { console: ConsoleController }) {
                 <div className="flex items-center gap-2">
                   <StatusBadge value={sess.status} />
                   <Button
-                    onClick={() => console.navigate({ view: "infrastructure", tab: "servers", session: sess.id })}
+                    onClick={() => console.navigate({ view: "observability", tab: "servers", session: sess.id })}
                     size="sm"
                     variant="outline"
                   >
@@ -199,7 +199,7 @@ export function AccessTab({ console }: { console: ConsoleController }) {
                 <div className="flex items-center gap-2">
                   <StatusBadge value={svc.status} />
                   <Button
-                    onClick={() => console.navigate({ view: "services", service: svc.id })}
+                    onClick={() => console.navigate({ view: "observability", tab: "applications", service: svc.id })}
                     size="sm"
                     variant="outline"
                   >

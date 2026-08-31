@@ -8,7 +8,6 @@ import type { ObservabilityModel } from "@/features/observability/observability-
 import { safeLogMessage } from "@/features/observability/data";
 import { formatObserved } from "@/features/observability/shared";
 import { LocalClient } from "@/lib/api/local-client";
-import { DependencyVerificationPanel } from "@/features/dependencies/verification-panel";
 import { formatShortDigest, type ApplicationRuntimeSummary, type RuntimeEvent } from "@/lib/presentation/observability/model";
 import type { TelemetryLogEntry, TelemetryQueryResponse } from "@/lib/contracts/registry";
 
@@ -217,22 +216,22 @@ function ApplicationDetailDrawer({
           <div className="flex items-center gap-2">
             <a
               className="inline-flex items-center justify-center px-3 py-1.5 text-xs font-medium rounded-lg border border-outline-variant text-on-surface hover:bg-surface-container-high transition-colors"
-              href={routeHref({ projectID, view: "delivery", tab: "deployments", service: app.id })}
+              href={routeHref({ projectID, view: "deploy", service: app.id })}
               onClick={(e) => {
                 if (e.metaKey || e.ctrlKey) return;
                 e.preventDefault();
-                console.navigate({ projectID, view: "delivery", tab: "deployments", service: app.id });
+                console.navigate({ projectID, view: "deploy", service: app.id });
               }}
             >
-              Open in Delivery
+              Open in Deploy
             </a>
             <a
               className="inline-flex items-center justify-center px-3 py-1.5 text-xs font-medium rounded-lg border border-outline-variant text-on-surface hover:bg-surface-container-high transition-colors"
-              href={routeHref({ projectID, view: "topology", service: app.id })}
+              href={routeHref({ projectID, view: "deploy", service: app.id })}
               onClick={(e) => {
                 if (e.metaKey || e.ctrlKey) return;
                 e.preventDefault();
-                console.navigate({ projectID, view: "topology", service: app.id });
+                console.navigate({ projectID, view: "deploy", service: app.id });
               }}
             >
               Open in Topology
@@ -276,7 +275,7 @@ function ApplicationDetailDrawer({
           ) : detailTab === "workload" ? (
             <AppWorkloadSection app={app} />
           ) : detailTab === "dependencies" ? (
-            <AppDependenciesSection app={app} console={console} projectID={projectID} />
+            <AppDependenciesSection app={app} console={console} />
           ) : detailTab === "logs" ? (
             <AppLogsSection app={app} projectID={projectID} />
           ) : detailTab === "events" ? (
@@ -293,11 +292,9 @@ function ApplicationDetailDrawer({
 function AppDependenciesSection({
   app,
   console,
-  projectID,
 }: {
   app: ApplicationRuntimeSummary;
   console: ConsoleController;
-  projectID: string;
 }) {
   const service = console.state.services.find((s) => s.id === app.id || s.name === app.key);
   const dependencies = service?.configuration?.dependencies ?? [];
@@ -318,23 +315,31 @@ function AppDependenciesSection({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h4 className="font-headline-md text-sm font-semibold text-on-surface">
-          Runtime Dependency Verification ({dependencies.length})
+          Declared runtime dependencies ({dependencies.length})
         </h4>
         <span className="text-xs font-code-md text-on-surface-variant">
-          5-Layer Verification
+          Read-only authority facts
         </span>
       </div>
 
       <div className="space-y-4">
         {dependencies.map((dep) => (
-          <DependencyVerificationPanel
-            applicationID={app.id}
-            dependency={dep}
-            deploymentJobID={app.lastDeploymentID}
-            environmentID={app.environment}
-            key={dep.logical_name}
-            projectID={projectID}
-          />
+          <article className="rounded-xl border border-outline-variant/20 bg-surface-container p-4" key={dep.logical_name}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h5 className="font-semibold text-on-surface">{dep.logical_name}</h5>
+                <p className="mt-1 text-xs text-on-surface-variant">
+                  {dep.protocol} · {dep.target_kind} · {dep.target_identity}
+                </p>
+              </div>
+              <StatusBadge label={dep.required ? "Required" : "Optional"} value={dep.required ? "healthy" : "unknown"} />
+            </div>
+            <p className="mt-3 text-xs text-on-surface-variant">
+              {dep.verification_contract?.path
+                ? `Verification contract: ${dep.verification_contract.type || "http"} ${dep.verification_contract.path} → ${dep.verification_contract.expected_status || 200}`
+                : "No verification contract is recorded in the current service configuration."}
+            </p>
+          </article>
         ))}
       </div>
     </div>

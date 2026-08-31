@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LocalAPIError, LocalClient, type LocalSessionStatus } from "@/lib/api/local-client";
 import type { ConsoleController, MutationRequest, MutationReview } from "@/features/console/types";
 import { normalizeRoute, parseRoute, routeHref, routeLabel, type ConsoleRoute } from "@/features/console/navigation";
-import { deploymentPollInterval, terminalDeployment } from "@/features/delivery/polling-model";
+import { deploymentPollInterval, terminalDeployment } from "@/features/deploy/deployment-polling";
 import { buildFailure } from "@/lib/presentation/build";
 import { deriveProjectSummary, emptyFoundation, normalizeStatus, PROJECT_SUMMARY_TTL_MS, type FoundationState, type ProjectSummaryEntry } from "@/lib/presentation/project";
 import type { BootstrapSession, ConsoleState, ServiceRecord } from "@/lib/contracts/registry";
@@ -137,7 +137,7 @@ export function useConsoleState() {
     }));
   }
 
-  async function load(selectedProjectID = selectedProject.current, operation = generation.current, forceSummaries = false) {
+  async function load(selectedProjectID = selectedProject.current, operation = ++generation.current, forceSummaries = false) {
     if (!isCurrent(operation, selectedProjectID)) return;
     patch(state.status === "ready" ? { message: "" } : { status: "loading", message: "" });
     try {
@@ -237,23 +237,27 @@ export function useConsoleState() {
 
   useEffect(() => {
     const initial = parseRoute(window.location.search);
-    queueMicrotask(() => {
-      // URL state is the external source of truth for refresh/deep-link restoration.
-      setRoute(initial);
-      currentRoute.current = initial;
-      if (!initial.projectID) { void enterWorkspace(initial, true); return; }
-      const operation = ++generation.current;
-      selectedProject.current = initial.projectID;
-      setSelectedProjectID(initial.projectID);
-      patch(clearProjectPatch("Loading project…"));
-      void load(initial.projectID, operation);
-    });
+		const canonicalURL = routeHref(initial);
+		if (window.location.pathname + window.location.search !== canonicalURL) window.history.replaceState({}, "", canonicalURL);
+    setRoute(initial);
+    currentRoute.current = initial;
+    if (!initial.projectID) {
+      void enterWorkspace(initial, true);
+      return;
+    }
+    const operation = ++generation.current;
+    selectedProject.current = initial.projectID;
+    setSelectedProjectID(initial.projectID);
+    patch(clearProjectPatch("Loading project…"));
+    void load(initial.projectID, operation);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     function restoreRoute() {
       const next = parseRoute(window.location.search);
+		const canonicalURL = routeHref(next);
+		if (window.location.pathname + window.location.search !== canonicalURL) window.history.replaceState({}, "", canonicalURL);
       clearSensitive();
       setReview(null);
       if (next.projectID === selectedProject.current) {
@@ -316,25 +320,28 @@ export function useConsoleState() {
   }
 
   async function selectProject(id: string, destination = normalizeRoute({ projectID: id }), replace = false) {
-    if (!id) return;
+    if (!id) return false;
     clearSensitive();
     const operation = ++generation.current;
     selectedProject.current = id;
     setSelectedProjectID(id);
     updateRoute(destination, replace);
     patch(clearProjectPatch("Switching project…"));
+    let loaded = false;
     const queued = switchQueue.current.catch(() => undefined).then(async () => {
       if (!isCurrent(operation, id)) return;
       try {
         await client.switchProject(id, crypto.randomUUID());
         if (!isCurrent(operation, id)) return;
         await load(id, operation);
+        loaded = currentSession.current?.authenticated === true && currentSession.current.project_id === id;
       } catch (error) {
         loadError(error as Error & { status?: number }, operation, id);
       }
     });
     switchQueue.current = queued;
     await queued;
+    return loaded;
   }
 
   function loadError(error: Error & { status?: number }, operation = generation.current, id = selectedProject.current) {
@@ -413,7 +420,7 @@ export function useConsoleState() {
   async function diagnostics(nodeID: string) {
     if (!currentProject) return;
     patch({ nodeDetail: await client.node(currentProject.id, nodeID) });
-    navigate({ view: "infrastructure", tab: "nodes", node: nodeID });
+    navigate({ view: "observability", tab: "servers", node: nodeID });
   }
 
   function nodeAction(nodeID: string, action: "offline" | "drain" | "remove") {
@@ -599,9 +606,9 @@ export function useConsoleState() {
         })()
       : null,
     navigate,
-    setProjectID: (id: string) => {
+    setProjectID: async (id: string) => {
       setReview(null);
-      void selectProject(id);
+      return selectProject(id);
     },
     setServiceDetail: (serviceDetail: ServiceRecord | null) => {
       patch({ serviceDetail });

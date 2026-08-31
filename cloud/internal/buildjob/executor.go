@@ -29,6 +29,7 @@ const (
 	DispatchStateClaimed     = "claimed"
 	DispatchStateSucceeded   = "succeeded"
 	DispatchStateFailed      = "failed"
+	DispatchStateCancelled   = "cancelled"
 )
 
 var ociDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -137,6 +138,10 @@ type Dispatcher interface {
 	DispatchWorkflow(context.Context, ExecutorConfig, string, string) (DispatchFacts, error)
 }
 
+type WorkflowCanceller interface {
+	CancelWorkflow(context.Context, ExecutorConfig, uint64) error
+}
+
 type RunnerIdentity struct {
 	Repository  string
 	WorkflowRef string
@@ -225,8 +230,8 @@ type ExecutorResult struct {
 }
 
 type RunnerResult struct {
-	BuildJobID        string         `json:"build_job_id"`
-	AttemptID         string         `json:"attempt_id"`
+	BuildJobID        string                `json:"build_job_id"`
+	AttemptID         string                `json:"attempt_id"`
 	RegistryReference string                `json:"registry_reference"`
 	Digest            string                `json:"digest"`
 	Executor          ExecutorResult        `json:"executor"`
@@ -449,7 +454,7 @@ func validBuildpackMetadata(metadata buildrecordv1.BuilderMetadata) bool {
 func validRunnerFailure(code string) bool {
 	switch code {
 	case "USER_BUILD_FAILED", "REGISTRY_AUTH_FAILED", "REGISTRY_PUSH_FAILED", "REGISTRY_DIGEST_MISMATCH", "REGISTRY_ARTIFACT_NOT_FOUND", "EXECUTOR_INFRASTRUCTURE_FAILED",
-		"BUILDPACK_DETECTION_FAILED", "BUILDPACK_BUILD_FAILED", "BUILDPACK_RUN_IMAGE_UNAVAILABLE", "BUILDPACK_BUILDER_UNAVAILABLE", "BUILDPACK_MONOREPO_UNSUPPORTED", "BUILDPACK_RESULT_INVALID":
+		"SOURCE_ACCESS_DENIED", "SOURCE_TOKEN_UNAVAILABLE", "BUILDPACK_DETECTION_FAILED", "BUILDPACK_BUILD_FAILED", "BUILDPACK_RUN_IMAGE_UNAVAILABLE", "BUILDPACK_BUILDER_UNAVAILABLE", "BUILDPACK_MONOREPO_UNSUPPORTED", "BUILDPACK_RESULT_INVALID":
 		return true
 	default:
 		return false

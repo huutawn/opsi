@@ -44,12 +44,23 @@ inputs are not present.
 
 ## Repository bootstrap
 
-`opsi init --project-id <project> --service-id <service> --service-key <key>`
-detects the local GitHub.com `origin`, matches it case-insensitively to Cloud
-inventory, but always claims and binds by the numeric Cloud `repository_id`.
+`opsi init --project-id <project> [--ref <branch-or-sha>]` detects the local
+GitHub.com `origin`, matches it case-insensitively to Cloud inventory, claims
+the numeric Cloud `repository_id` when necessary, resolves the exact source
+SHA, and creates an analyzed Draft DeploymentPlan for review. It never writes
+repository files. Use `--dry-run` to preview required claims without mutating
+Cloud.
+
 If the repository is not visible, `--installation-id` starts the P09
 installation-claim browser flow; Cloud still verifies the GitHub user and
 installation through OAuth. The CLI reads its PAT only from the OS keychain.
+
+`.opsi/opsi-cd.yaml` is optional and, when present and valid, has precedence
+over inference. Advanced users can explicitly maintain it with `opsi cd config
+upsert`. `opsi cd export --project-id <project> --run-id <run>` previews the
+canonical redacted YAML and creates a reviewable pull request; `--preview`
+performs no source mutation. Export requires GitHub App `Contents: read and
+write` and `Pull requests: read and write`; analysis and deployment do not.
 
 ## Human-approved actions
 
@@ -62,10 +73,7 @@ the exact displayed phrase. Pending grants remain in the OS secure store and
 are removed after a terminal Agent result. No browser approve/execute API,
 MCP, AI approval, `--yes`, or automatic approval path is implemented.
 
-The command writes `.opsi/opsi-cd.yaml` with build/deployment intent only and
-`.github/workflows/opsi-cd.yaml` as a manual bootstrap status workflow. Neither
-file contains Cloud infrastructure identity or secrets. Existing different
-content is never overwritten unless both `--force` and `--yes` are present;
-`--dry-run` prints a secret-free JSON plan without mutation or file writes.
-P10 does not implement Actions OIDC, BuildRecord, image build/push, Agent
-deployment, or real CD.
+Repository-to-running execution is owned by the Cloud deployment controller
+and the Opsi-owned build executor. A user repository does not need a GitHub
+Actions workflow, and analyze/deploy never commits configuration or creates a
+pull request implicitly.

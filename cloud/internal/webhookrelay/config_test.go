@@ -27,6 +27,12 @@ var cloudEnvNames = append([]string{
 	"OPSI_CLOUD_TTL",
 	"OPSI_CLOUD_DATABASE_URL",
 	"OPSI_CLOUD_PUBLIC_BASE_URL",
+	"OPSI_CLOUD_DEPLOYMENT_DOMAIN",
+	"OPSI_CLOUD_CLOUDFLARE_FLEXIBLE_ORIGIN",
+	"OPSI_CLOUD_PUBLIC_HOSTNAME_LIMIT_PER_USER",
+	"OPSI_CLOUD_CLOUDFLARE_ZONE_ID",
+	"OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE",
+	"OPSI_CLOUD_CLOUDFLARE_API_TOKEN",
 	"OPSI_CLOUD_PRODUCTION",
 	"OPSI_CLOUD_ENABLE_DEBUG_UI",
 	"OPSI_CLOUD_REQUIRE_AGENT_SIGNATURES",
@@ -136,6 +142,81 @@ func TestLoadConfigProductionNormalizesPublicBaseURLForAudience(t *testing.T) {
 	}
 	if cfg.PublicBaseURL != "https://cloud.example.test" || cfg.GitHubOIDC.Audience != cfg.PublicBaseURL+buildRecordPath {
 		t.Fatalf("public_base_url=%q audience=%q", cfg.PublicBaseURL, cfg.GitHubOIDC.Audience)
+	}
+}
+
+func TestLoadConfigNormalizesDeploymentDomain(t *testing.T) {
+	clearCloudEnv(t)
+	t.Setenv("OPSI_CLOUD_DEPLOYMENT_DOMAIN", "Apps.Example.Test")
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DeploymentDomain != "apps.example.test" {
+		t.Fatalf("deployment_domain=%q", cfg.DeploymentDomain)
+	}
+	if err := os.Unsetenv("OPSI_CLOUD_DEPLOYMENT_DOMAIN"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(writeCloudConfig(t, `{"deployment_domain":"https://apps.example.test"}`)); err == nil {
+		t.Fatal("expected invalid deployment domain to fail")
+	}
+	if _, err := LoadConfig(writeCloudConfig(t, `{"deployment_domain":"*.apps.example.test"}`)); err == nil {
+		t.Fatal("expected wildcard deployment domain to fail")
+	}
+}
+
+func TestCloudflareConfigRequiresSecretFileAndLoadsToken(t *testing.T) {
+	clearCloudEnv(t)
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "cloudflare-token")
+	if err := os.WriteFile(tokenPath, []byte("secret-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPSI_CLOUD_DEPLOYMENT_DOMAIN", "test.example.com")
+	t.Setenv("OPSI_CLOUD_CLOUDFLARE_ZONE_ID", "zone-id")
+	t.Setenv("OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE", tokenPath)
+	t.Setenv("OPSI_CLOUD_PUBLIC_HOSTNAME_LIMIT_PER_USER", "3")
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cloudflare.APIToken != "secret-token" || cfg.Cloudflare.APITokenFile != tokenPath || cfg.PublicHostnameLimit != 3 {
+		t.Fatalf("cloudflare config=%+v limit=%d", cfg.Cloudflare, cfg.PublicHostnameLimit)
+	}
+}
+
+func TestCloudflareFlexibleOriginDefaultsToEnabledAndCanBeDisabled(t *testing.T) {
+	clearCloudEnv(t)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CloudflareFlexibleOrigin {
+		t.Fatal("Cloudflare Flexible origin must remain enabled unless explicitly disabled")
+	}
+	t.Setenv("OPSI_CLOUD_CLOUDFLARE_FLEXIBLE_ORIGIN", "false")
+	cfg, err = LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareFlexibleOrigin {
+		t.Fatal("Cloudflare Flexible origin was not disabled")
+	}
+}
+
+func TestCloudflareDirectTokenEnvIsRejected(t *testing.T) {
+	clearCloudEnv(t)
+	t.Setenv("OPSI_CLOUD_CLOUDFLARE_API_TOKEN", "must-not-be-used")
+	if _, err := LoadConfig(""); err == nil || !strings.Contains(err.Error(), "TOKEN_FILE") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCloudflareDirectTokenJSONIsRejected(t *testing.T) {
+	clearCloudEnv(t)
+	if _, err := LoadConfig(writeCloudConfig(t, `{"cloudflare":{"api_token":"must-not-be-used"}}`)); err == nil || !strings.Contains(err.Error(), "api_token_file") {
+		t.Fatalf("err=%v", err)
 	}
 }
 

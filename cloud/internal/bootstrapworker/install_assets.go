@@ -82,12 +82,22 @@ func BuildBootstrapPlan(cfg Config, bundle Bundle) (BootstrapPlan, error) {
 		"OPSI_REMOTE_USERNAME":              bundle.SSH.Username,
 	}
 	secretEnv := map[string]string{"OPSI_AGENT_REGISTRATION_TOKEN": bundle.AgentRegistrationToken}
-	stepIDs := registry.FirstServerBootstrapPlanV2StepIDs()
-	return BootstrapPlan{Version: registry.FirstServerBootstrapPlanVersionV2, Steps: []BootstrapStep{
+	if bundle.Checkpoint.PlanVersion == registry.FirstServerBootstrapPlanVersionV2 {
+		stepIDs := registry.FirstServerBootstrapPlanV2StepIDs()
+		return BootstrapPlan{Version: registry.FirstServerBootstrapPlanVersionV2, Steps: []BootstrapStep{
+			{ID: stepIDs[0], Status: "preflight", Message: "checking Ubuntu target prerequisites", Command: CommandSpec{Script: preflightScript, Env: env}},
+			{ID: stepIDs[1], Status: "installing_k3s", Message: "installing verified K3s server", Command: CommandSpec{Script: installK3sScript, Env: env}},
+			{ID: stepIDs[2], Status: "installing_agent", Message: "staging verified Opsi Agent release", Command: CommandSpec{Script: installAgentScript, Env: env}},
+			{ID: stepIDs[3], Status: "registering_agent", Message: "registering and activating Opsi Agent", Command: CommandSpec{Script: registerAgentScript, Env: env, SensitiveEnv: secretEnv}},
+		}}, nil
+	}
+	stepIDs := registry.FirstServerBootstrapPlanV3StepIDs()
+	return BootstrapPlan{Version: registry.FirstServerBootstrapPlanVersionV3, Steps: []BootstrapStep{
 		{ID: stepIDs[0], Status: "preflight", Message: "checking Ubuntu target prerequisites", Command: CommandSpec{Script: preflightScript, Env: env}},
-		{ID: stepIDs[1], Status: "installing_k3s", Message: "installing verified K3s server", Command: CommandSpec{Script: installK3sScript, Env: env}},
-		{ID: stepIDs[2], Status: "installing_agent", Message: "staging verified Opsi Agent release", Command: CommandSpec{Script: installAgentScript, Env: env}},
-		{ID: stepIDs[3], Status: "registering_agent", Message: "registering and activating Opsi Agent", Command: CommandSpec{Script: registerAgentScript, Env: env, SensitiveEnv: secretEnv}},
+		{ID: stepIDs[1], Status: "configure_swap", Message: "configuring idempotent system swap", Command: CommandSpec{Script: configureSwapScript, Env: env}},
+		{ID: stepIDs[2], Status: "installing_k3s", Message: "installing verified K3s server", Command: CommandSpec{Script: installK3sScript, Env: env}},
+		{ID: stepIDs[3], Status: "installing_agent", Message: "staging verified Opsi Agent release", Command: CommandSpec{Script: installAgentScript, Env: env}},
+		{ID: stepIDs[4], Status: "registering_agent", Message: "registering and activating Opsi Agent", Command: CommandSpec{Script: registerAgentScript, Env: env, SensitiveEnv: secretEnv}},
 	}}, nil
 }
 
@@ -253,6 +263,12 @@ func classifyConnectFailure(err error) JobFailure {
 
 func classifyStepFailure(status, message string) JobFailure {
 	for _, classified := range []JobFailure{
+		{Code: "SWAP_FILE_CONFLICT", Retryable: false},
+		{Code: "SWAP_INSUFFICIENT_DISK_SPACE", Retryable: false},
+		{Code: "SWAP_CREATION_FAILED", Retryable: false},
+		{Code: "SWAP_ACTIVATION_FAILED", Retryable: false},
+		{Code: "SWAP_FSTAB_CONFLICT", Retryable: false},
+		{Code: "SWAP_FSTAB_UPDATE_FAILED", Retryable: false},
 		{Code: "K3S_INSTALLER_CHECKSUM_MISMATCH", Retryable: false},
 		{Code: "K3S_VERSION_VERIFICATION_FAILED", Retryable: true},
 		{Code: "AGENT_INSTALL_CHECKSUM_MISMATCH", Retryable: false},
@@ -270,6 +286,9 @@ func classifyStepFailure(status, message string) JobFailure {
 	}
 	if status == "preflight" {
 		return JobFailure{Code: "TARGET_OS_UNSUPPORTED", Message: boundedFailureMessage(message), Retryable: false}
+	}
+	if status == "configure_swap" {
+		return JobFailure{Code: "SWAP_CONFIGURATION_FAILED", Message: boundedFailureMessage(message), Retryable: false}
 	}
 	return JobFailure{Code: "BOOTSTRAP_CLOUD_TEMPORARY", Message: boundedFailureMessage(message), Retryable: true}
 }
@@ -351,8 +370,125 @@ const preflightScript = `
 set -eu
 . /etc/os-release
 test "${ID:-}" = ubuntu
-for command in curl systemctl sha256sum mktemp install readlink cmp stat openssl; do command -v "$command" >/dev/null; done
+for command in curl systemctl sha256sum mktemp install readlink cmp stat openssl swapon mkswap df fallocate dd blkid grep tee sed awk cat chown mv rm; do command -v "$command" >/dev/null; done
 if [ "${OPSI_REMOTE_USERNAME}" != root ]; then command -v sudo >/dev/null && sudo -n true; fi
+`
+
+const configureSwapScript = `
+set -eu
+fail_code() { printf '%s\n' "$1" >&2; exit 1; }
+SUDO=""
+if [ "${OPSI_REMOTE_USERNAME}" != root ]; then SUDO="sudo -n"; fi
+
+swap_dir="/var/lib/opsi"
+swap_file="/var/lib/opsi/swapfile"
+marker_file="/var/lib/opsi/swap.marker"
+marker_value="opsi.swapfile/v1"
+
+active_swap="$($SUDO swapon --show=NAME --noheadings 2>/dev/null || true)"
+if [ -n "$active_swap" ] && ! printf '%s\n' "$active_swap" | grep -q "^${swap_file}$"; then
+	exit 0
+fi
+
+validate_marker() {
+	if ! $SUDO test -f "$marker_file" || $SUDO test -L "$marker_file"; then
+		fail_code SWAP_FILE_CONFLICT
+	fi
+	marker_owner="$($SUDO stat -c '%u:%g' "$marker_file" 2>/dev/null || true)"
+	[ "$marker_owner" = "0:0" ] || fail_code SWAP_FILE_CONFLICT
+	marker_perm="$($SUDO stat -c '%a' "$marker_file" 2>/dev/null || true)"
+	[ "$marker_perm" = "600" ] || fail_code SWAP_FILE_CONFLICT
+	stored_marker="$($SUDO cat "$marker_file" 2>/dev/null || true)"
+	[ "$stored_marker" = "$marker_value" ] || fail_code SWAP_FILE_CONFLICT
+}
+
+validate_swap_file() {
+	if $SUDO test -L "$swap_file" || ! $SUDO test -f "$swap_file"; then
+		fail_code SWAP_FILE_CONFLICT
+	fi
+	owner="$($SUDO stat -c '%u:%g' "$swap_file" 2>/dev/null || true)"
+	[ "$owner" = "0:0" ] || fail_code SWAP_FILE_CONFLICT
+	perm="$($SUDO stat -c '%a' "$swap_file" 2>/dev/null || true)"
+	[ "$perm" = "600" ] || fail_code SWAP_FILE_CONFLICT
+	size="$($SUDO stat -c '%s' "$swap_file" 2>/dev/null || true)"
+	[ "$size" = "4294967296" ] || fail_code SWAP_FILE_CONFLICT
+}
+
+$SUDO install -d -m 0755 "$swap_dir"
+
+if $SUDO test -e "$marker_file" || $SUDO test -L "$marker_file"; then
+	validate_marker
+elif $SUDO test -e "$swap_file" || $SUDO test -L "$swap_file"; then
+	fail_code SWAP_FILE_CONFLICT
+else
+	tmp_marker="$swap_dir/.swap.marker.$$"
+	$SUDO install -m 0600 /dev/null "$tmp_marker" || fail_code SWAP_CREATION_FAILED
+	printf '%s\n' "$marker_value" | $SUDO tee "$tmp_marker" >/dev/null || fail_code SWAP_CREATION_FAILED
+	$SUDO chown 0:0 "$tmp_marker" || fail_code SWAP_CREATION_FAILED
+	$SUDO mv -T "$tmp_marker" "$marker_file" || fail_code SWAP_CREATION_FAILED
+	validate_marker
+fi
+
+if $SUDO test -e "$swap_file" || $SUDO test -L "$swap_file"; then
+	validate_swap_file
+else
+	avail_kb="$($SUDO df -k --output=avail "$swap_dir" 2>/dev/null | awk 'NR == 2 { print $1 }')"
+	if [ -z "$avail_kb" ] || [ "$avail_kb" -lt 5242880 ]; then
+		fail_code SWAP_INSUFFICIENT_DISK_SPACE
+	fi
+
+	tmp_swap="$swap_dir/.swapfile.$$"
+	cleanup_swap_tmp() { $SUDO rm -f "$tmp_swap"; }
+	trap cleanup_swap_tmp EXIT HUP INT TERM
+	if ! $SUDO fallocate -l 4G "$tmp_swap" 2>/dev/null; then
+		$SUDO rm -f "$tmp_swap"
+		$SUDO dd if=/dev/zero of="$tmp_swap" bs=1M count=4096 status=none || fail_code SWAP_CREATION_FAILED
+	fi
+
+	$SUDO chmod 0600 "$tmp_swap" || fail_code SWAP_CREATION_FAILED
+	$SUDO chown 0:0 "$tmp_swap" || fail_code SWAP_CREATION_FAILED
+	tmp_size="$($SUDO stat -c '%s' "$tmp_swap" 2>/dev/null || true)"
+	[ "$tmp_size" = "4294967296" ] || fail_code SWAP_CREATION_FAILED
+	$SUDO mv -T "$tmp_swap" "$swap_file" || fail_code SWAP_CREATION_FAILED
+	trap - EXIT HUP INT TERM
+	validate_swap_file
+fi
+
+if ! $SUDO blkid "$swap_file" 2>/dev/null | grep -q 'TYPE="swap"'; then
+	$SUDO mkswap "$swap_file" >/dev/null || fail_code SWAP_CREATION_FAILED
+fi
+
+fstab_line="${swap_file} none swap sw 0 0"
+added_fstab=0
+fstab_state="$($SUDO awk -v path="$swap_file" '
+	$1 == path {
+		count++
+		if (NF != 6 || $2 != "none" || $3 != "swap" || $4 != "sw" || $5 != "0" || $6 != "0") bad=1
+	}
+	END { printf "%d:%d", count, bad }
+' /etc/fstab 2>/dev/null)" || fail_code SWAP_FSTAB_UPDATE_FAILED
+if [ "$fstab_state" = "0:0" ]; then
+	printf '%s\n' "$fstab_line" | $SUDO tee -a /etc/fstab >/dev/null || fail_code SWAP_FSTAB_UPDATE_FAILED
+	added_fstab=1
+elif [ "$fstab_state" != "1:0" ]; then
+	fail_code SWAP_FSTAB_CONFLICT
+fi
+
+if ! $SUDO swapon --show=NAME --noheadings 2>/dev/null | grep -q "^${swap_file}$"; then
+	if ! $SUDO swapon "$swap_file"; then
+		if [ "$added_fstab" -eq 1 ]; then
+			$SUDO sed -i "/^[[:space:]]*\/var\/lib\/opsi\/swapfile[[:space:]]/d" /etc/fstab 2>/dev/null || true
+		fi
+		fail_code SWAP_ACTIVATION_FAILED
+	fi
+fi
+
+if ! $SUDO swapon --show=NAME --noheadings 2>/dev/null | grep -q "^${swap_file}$"; then
+	if [ "$added_fstab" -eq 1 ]; then
+		$SUDO sed -i "/^[[:space:]]*\/var\/lib\/opsi\/swapfile[[:space:]]/d" /etc/fstab 2>/dev/null || true
+	fi
+	fail_code SWAP_ACTIVATION_FAILED
+fi
 `
 
 const installK3sScript = `
@@ -369,23 +505,30 @@ if command -v k3s >/dev/null 2>&1; then
 	current_output="$($SUDO k3s --version 2>/dev/null)" || fail_code K3S_VERSION_VERIFICATION_FAILED
 	current_version="$(printf '%s\n' "$current_output" | awk 'NR == 1 { print $3 }')"
 fi
-if [ "$current_version" != "$OPSI_K3S_VERSION" ]; then
+needs_reconcile=0
+if ! $SUDO grep -q 'fail-swap-on=false' /etc/systemd/system/k3s.service 2>/dev/null && ! $SUDO grep -q 'fail-swap-on=false' /etc/rancher/k3s/config.yaml 2>/dev/null; then
+	needs_reconcile=1
+fi
+if [ "$current_version" != "$OPSI_K3S_VERSION" ] || ! $SUDO test -s /var/lib/rancher/k3s/server/cred/encryption-config.json || [ "$needs_reconcile" -eq 1 ]; then
 	download_file "$OPSI_K3S_INSTALLER_URL" "$installer"
 	if ! printf '%s  %s\n' "$OPSI_K3S_INSTALLER_SHA256" "$installer" | sha256sum --check -; then
 		fail_code K3S_INSTALLER_CHECKSUM_MISMATCH
 	fi
 	chmod 0700 "$installer"
 	if [ "${OPSI_REMOTE_USERNAME}" = root ]; then
-		INSTALL_K3S_VERSION="$OPSI_K3S_VERSION" INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640' sh "$installer"
+		INSTALL_K3S_VERSION="$OPSI_K3S_VERSION" INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640 --secrets-encryption --kubelet-arg=fail-swap-on=false' sh "$installer"
 	else
-		sudo -n env INSTALL_K3S_VERSION="$OPSI_K3S_VERSION" INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640' sh "$installer"
+		sudo -n env INSTALL_K3S_VERSION="$OPSI_K3S_VERSION" INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640 --secrets-encryption --kubelet-arg=fail-swap-on=false' sh "$installer"
 	fi
 fi
 $SUDO systemctl enable --now k3s
 $SUDO systemctl is-active --quiet k3s
+$SUDO test -s /var/lib/rancher/k3s/server/cred/encryption-config.json || fail_code K3S_SECRETS_ENCRYPTION_NOT_ENABLED
+$SUDO k3s secrets-encrypt status | grep -q 'Encryption Status: Enabled' || fail_code K3S_SECRETS_ENCRYPTION_NOT_ENABLED
 installed_output="$($SUDO k3s --version 2>/dev/null)" || fail_code K3S_VERSION_VERIFICATION_FAILED
 installed_version="$(printf '%s\n' "$installed_output" | awk 'NR == 1 { print $3 }')"
 [ "$installed_version" = "$OPSI_K3S_VERSION" ] || fail_code K3S_VERSION_VERIFICATION_FAILED
+$SUDO grep -q 'fail-swap-on=false' /etc/systemd/system/k3s.service 2>/dev/null || $SUDO grep -q 'fail-swap-on=false' /etc/rancher/k3s/config.yaml 2>/dev/null || fail_code K3S_VERSION_VERIFICATION_FAILED
 $SUDO k3s kubectl get nodes
 `
 
@@ -542,7 +685,7 @@ secret:
   namespace: default
   kubectl_path: kubectl
   totp_namespace: default
-  encryption_at_rest_confirmed: false
+  encryption_at_rest_confirmed: true
 EOF
 	"$target_binary" --config "$config_tmp" --check >/dev/null 2>&1 || fail_code AGENT_REGISTRATION_STATE_INVALID
 	$SUDO install -d -m 0750 /etc/opsi /var/lib/opsi

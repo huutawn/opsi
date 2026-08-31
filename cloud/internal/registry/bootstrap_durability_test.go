@@ -219,13 +219,27 @@ func TestBootstrapCheckpointTransitionsAndLeaseValidation(t *testing.T) {
 	}
 }
 
-func TestBootstrapCheckpointMetadataPreservesV1AndAcceptsV2(t *testing.T) {
+func TestBootstrapCheckpointMetadataPreservesV1AndAcceptsV2AndV3(t *testing.T) {
 	if FirstServerBootstrapPlanVersion != "first-server-v1" {
 		t.Fatalf("v1 metadata changed: %q", FirstServerBootstrapPlanVersion)
 	}
-	want := []string{"preflight", "install_k3s", "install_agent", "register_agent"}
-	if got := FirstServerBootstrapPlanV2StepIDs(); !slices.Equal(got, want) {
+	wantV2 := []string{"preflight", "install_k3s", "install_agent", "register_agent"}
+	if got := FirstServerBootstrapPlanV2StepIDs(); !slices.Equal(got, wantV2) {
 		t.Fatalf("v2 step IDs=%v", got)
+	}
+	wantV3 := []string{"preflight", "configure_swap", "install_k3s", "install_agent", "register_agent"}
+	if got := FirstServerBootstrapPlanV3StepIDs(); !slices.Equal(got, wantV3) {
+		t.Fatalf("v3 step IDs=%v", got)
+	}
+	v3 := BootstrapCheckpoint{
+		SchemaVersion:     BootstrapCheckpointSchemaVersion,
+		PlanVersion:       FirstServerBootstrapPlanVersionV3,
+		PlanFingerprint:   strings.Repeat("c", 64),
+		NextStepIndex:     2,
+		LastCompletedStep: "configure_swap",
+	}
+	if err := validateBootstrapCheckpointFormat(v3); err != nil {
+		t.Fatalf("v3 checkpoint rejected: %v", err)
 	}
 	v2 := BootstrapCheckpoint{
 		SchemaVersion:     BootstrapCheckpointSchemaVersion,
@@ -243,6 +257,12 @@ func TestBootstrapCheckpointMetadataPreservesV1AndAcceptsV2(t *testing.T) {
 	requested.LastCompletedStep = "preflight"
 	if _, err := validateBootstrapCheckpointTransition(v1, requested); apiErrorCode(err) != "BOOTSTRAP_PLAN_MISMATCH" {
 		t.Fatalf("v1 to v2 transition err=%v", err)
+	}
+	requestedV3 := v3
+	requestedV3.NextStepIndex = 1
+	requestedV3.LastCompletedStep = "preflight"
+	if _, err := validateBootstrapCheckpointTransition(v2, requestedV3); apiErrorCode(err) != "BOOTSTRAP_PLAN_MISMATCH" {
+		t.Fatalf("v2 to v3 transition err=%v", err)
 	}
 }
 

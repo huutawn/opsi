@@ -25,19 +25,27 @@ const (
 	SourceCredentialUsername = "credential.username"
 	SourceCredentialPassword = "credential.password"
 	SourceConnectionURL      = "connection.url"
+	SourcePostgresURI        = "connection.postgres.uri"
+	SourcePostgresNpgsql     = "connection.postgres.npgsql"
+	SourcePostgresJDBC       = "connection.postgres.jdbc"
+	SourcePostgresPDODSN     = "connection.postgres.pdo_dsn"
+	SourceRedisURI           = "connection.redis.uri"
+	SourceRedisStackExchange = "connection.redis.stackexchange"
+	SourceNATSURI            = "connection.nats.uri"
+	SourceConnectionTemplate = "connection.template"
 
-	SourceApplicationInternalURL    = "application.internal_url"
-	SourceApplicationInternalHost   = "application.internal_host"
-	SourceApplicationInternalPort   = "application.internal_port"
-	SourceApplicationPublicURL      = "application.public_url"
-	SourceApplicationPublicHost     = "application.public_host"
-	SourceApplicationPublicPort     = "application.public_port"
-	SourceApplicationPublicScheme   = "application.public_scheme"
-	SourceApplicationPath           = "application.path"
-	SourceApplicationURL            = "application.url"
+	SourceApplicationInternalURL  = "application.internal_url"
+	SourceApplicationInternalHost = "application.internal_host"
+	SourceApplicationInternalPort = "application.internal_port"
+	SourceApplicationPublicURL    = "application.public_url"
+	SourceApplicationPublicHost   = "application.public_host"
+	SourceApplicationPublicPort   = "application.public_port"
+	SourceApplicationPublicScheme = "application.public_scheme"
+	SourceApplicationPath         = "application.path"
+	SourceApplicationURL          = "application.url"
 )
 
-// PostgresURLPreset creates an ApplicationDependency configured with DATABASE_URL <- connection.url.
+// PostgresURLPreset creates an ApplicationDependency configured with a typed PostgreSQL URI.
 func PostgresURLPreset(logicalName, targetIdentity string, required bool) ApplicationDependency {
 	return ApplicationDependency{
 		LogicalName:    logicalName,
@@ -47,7 +55,7 @@ func PostgresURLPreset(logicalName, targetIdentity string, required bool) Applic
 		Required:       required,
 		InjectionPhase: InjectionPhaseRuntime,
 		InjectionMappings: []DependencyInjectionMapping{
-			{EnvName: "DATABASE_URL", SymbolicSource: SourceConnectionURL},
+			{EnvName: "DATABASE_URL", SymbolicSource: SourcePostgresURI},
 		},
 	}
 }
@@ -71,7 +79,7 @@ func PostgresStandardPreset(logicalName, targetIdentity string, required bool) A
 	}
 }
 
-// ValkeyURLPreset creates an ApplicationDependency configured with REDIS_URL <- connection.url.
+// ValkeyURLPreset creates an ApplicationDependency configured with a typed Redis URI.
 func ValkeyURLPreset(logicalName, targetIdentity string, required bool) ApplicationDependency {
 	return ApplicationDependency{
 		LogicalName:    logicalName,
@@ -81,7 +89,7 @@ func ValkeyURLPreset(logicalName, targetIdentity string, required bool) Applicat
 		Required:       required,
 		InjectionPhase: InjectionPhaseRuntime,
 		InjectionMappings: []DependencyInjectionMapping{
-			{EnvName: "REDIS_URL", SymbolicSource: SourceConnectionURL},
+			{EnvName: "REDIS_URL", SymbolicSource: SourceRedisURI},
 		},
 	}
 }
@@ -171,4 +179,3 @@ func PublicHTTPPreset(logicalName, targetIdentity, accessContext, envName string
 		},
 	}
 }
-

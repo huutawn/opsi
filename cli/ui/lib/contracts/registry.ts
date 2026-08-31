@@ -56,6 +56,59 @@ export type ServiceRecord = {
   configuration?: ServiceConfiguration;
 };
 
+export type RepositoryEvidence = { path: string; kind: string; reason: string; confidence: "high" | "medium" | "low" };
+export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number; cpu_limit_milli?: number; memory_limit_bytes?: number }; exposure?: { mode?: string; hostname?: string; path?: string; automatic?: boolean }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DependencyVerification = { type: string; path?: string; expected_status?: number };
+export type DetectedDependency = { from: string; to: string; protocol: string; strategy?: string; path?: string; required: boolean; injections?: Array<{ environment_name: string; symbolic_source: string; template?: string }>; verification?: DependencyVerification; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DetectedBinding = { from: string; to: string; kind: string; path?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type AnalysisIssue = { code: string; message: string; path?: string; resolution?: string; blocking: boolean };
+export type AnalysisScope = { application_roots: string[]; exclude_paths: string[] };
+export type EvidenceCoverage = { candidates_found: number; candidates_selected: number; files_inspected: number; bytes_inspected: number };
+export type DeploymentPlan = {
+  schema_version: "opsi.deployment_plan/v2"; hash: string;
+  source: { repository_id: number; installation_id: number; repository: string; selected_ref: string; commit_sha: string };
+  applications: DetectedApplication[]; resources: DetectedResource[]; dependencies: DetectedDependency[]; bindings: DetectedBinding[];
+  secrets: Array<{ name: string; application_key: string; environment_name: string; generated: boolean; secret_ref?: string; revision?: number; display: string; confidence: string; reason: string; evidence: RepositoryEvidence[] }>;
+  issues: AnalysisIssue[];
+  analysis_scope: AnalysisScope; analysis_scope_hash: string; evidence_coverage: EvidenceCoverage; truncation_reason?: string;
+  target: { environment_id: string; runtime_id?: string; node_id?: string; hostname?: string; exposure: string; public_routes?: "automatic" | "manual"; cpu_milli?: number; memory_bytes?: number; cpu_limit_milli?: number; memory_limit_bytes?: number };
+  authority_revisions: { source_commit_sha: string; repository_updated_at?: string; topology_revision?: number; topology_hash?: string; policy_revision?: number; policy_hash?: string; resource_revision?: number; resource_hash?: string };
+  failure_policy: { fail_fast: boolean; rollback_known_good: boolean; retain_persistent_data: boolean; max_attempts: number };
+};
+export type DeploymentRunState = "analyzing" | "awaiting_input" | "awaiting_approval" | "provisioning" | "building" | "preflighting" | "awaiting_warning_ack" | "deploying" | "verifying" | "succeeded" | "stale" | "failed" | "rolling_back" | "cleaning_up" | "rolled_back" | "cancelled";
+export type DeploymentRun = {
+  schema_version: "opsi.deployment_run/v2"; id: string; project_id: string; created_by: string; state: DeploymentRunState;
+  plan: DeploymentPlan; analysis: { authority?: string; issues?: AnalysisIssue[]; scope?: AnalysisScope; scope_hash?: string; evidence_coverage?: EvidenceCoverage; files_inspected?: number; bytes_inspected?: number; truncated?: boolean; truncation_reason?: string };
+  approval?: { actor: string; plan_hash: string; approved_at: string };
+  warning_acknowledgement?: { actor: string; preflight_hash: string; acknowledged_at: string };
+  preflight_hash?: string; preflight_warnings?: string[];
+  authority_refs: { checkpoints?: Array<{ kind: string; id: string; revision?: number; state_hash?: string; step: DeploymentRunState }> };
+  failure?: { step: DeploymentRunState; code: string; message: string; next_action?: string; retryable: boolean };
+  public_route_failures?: Array<{ service_key: string; message: string }>;
+  attempt: number; revision: number; created_at: string; updated_at: string; finished_at?: string;
+};
+export type RepositoryExportPreview = { run_id: string; run_revision: number; plan_hash: string; source_sha: string; repository_id: number; target_branch: string; path: string; yaml: string; diff: string; preview_hash: string; export_enabled: boolean; disabled_reason?: string };
+export type RepositoryExportResult = { branch: string; commit_sha: string; pull_request_number: number; pull_request_url: string; reused: boolean };
+export type WorkloadSecretMetadata = { id: string; reference: string; project_id: string; service_id: string; logical_name: string; revision: number; status: string; updated_at: string };
+export type DeploymentRunEvent = { id: string; project_id: string; run_id: string; state: DeploymentRunState; level: string; message: string; metadata?: Record<string, unknown>; created_at: string };
+export type DeploymentRunResult = {
+  run_id: string; state: DeploymentRunState; source_sha: string; public_url?: string;
+  applications: Array<{ service_key: string; service_id: string; build_record_id: string; build_digest: string; build_log_url?: string; deployment_job_id?: string; deployment_status?: string; container_port?: number; application_image_id?: string; available_replicas?: number; readiness_evidence_hash?: string; digest_matches_image_id: boolean; public_url?: string }>;
+  public_endpoints?: Array<{ service_key: string; service_id: string; port: number; hostname: string; url: string; status: "publishing" | "ready" | "failed" | "manual_preserved"; message?: string }>;
+  public_hostname?: PublicHostnameAllocation;
+  verifications: Array<{ id: string; dependency_logical_name: string; overall_status: string; provider_health: { status: string; provider_kind: string; safe_evidence?: Record<string,string> }; connection: { status: string; protocol?: string; latency_ms?: number }; consumer_assertion: { status: string; assertion_path?: string; status_code?: number; expected_code?: number } }>;
+  capacity: Array<{ runtime_id: string; source: string; reserved_cpu_millicores: number; reserved_memory_bytes: number; assigned_cpu_millicores: number; assigned_memory_bytes: number; requested_cpu_millicores: number; requested_memory_bytes: number; available_cpu_millicores?: number; available_memory_bytes?: number; unknown_capacity: boolean; oversubscribed: boolean }>;
+};
+
+export type PublicHostnameStatus = "reserved" | "provisioning" | "active" | "release_pending" | "failed" | "released";
+export type PublicHostnameAllocation = {
+  id: string; hostname: string; owner_user_id: string; project_id: string; environment_id: string; runtime_id?: string;
+  target_ip?: string; cloudflare_record_id?: string; status: PublicHostnameStatus; publication_error_code?: string; publication_error?: string;
+  created_at: string; updated_at: string; released_at?: string;
+};
+export type PublicHostnameQuota = { used: number; limit: number; remaining: number; allocations: PublicHostnameAllocation[]; project_allocations?: PublicHostnameAllocation[] };
+
 export type EnvironmentVariable = { name: string; value: string };
 
 export type ServiceBinding = {
@@ -77,6 +130,7 @@ export type ServiceResourceBinding = {
 export type DependencyInjectionMapping = {
   env_name: string;
   symbolic_source: string;
+  template?: string;
 };
 
 export type DependencyVerificationContract = {
@@ -87,7 +141,7 @@ export type DependencyVerificationContract = {
 
 export type ApplicationDependency = {
   logical_name: string;
-  target_kind: "managed_service" | "application" | string;
+  target_kind: "managed_resource" | "application" | string;
   target_identity: string;
   protocol: "postgres" | "redis" | "http" | string;
   strategy?: "same_origin" | "internal_http" | "public_http" | string;
@@ -121,11 +175,27 @@ export type ServiceConfigurationPreview = { configuration: ServiceConfigurationD
 export type ServiceConfigurationValidation = { valid: boolean; issues?: { code: string; field?: string; message: string }[] };
 export type ServiceConfigurationChange = { kind: "connection" | "dependency" | "resource_binding" | "generated_environment" | "public_route" | "user_environment"; action: string; name?: string; before?: string; after?: string };
 export type ServiceConfigurationDiff = { changes: ServiceConfigurationChange[] };
+export type ProposalReviewAudit = { proposal_hash: string; reviewed_payload_hash: string; proposer_origin?: "mcp_client" };
+export type ProposalReviewStatus = "review_required" | "approved" | "rejected" | "stale" | "expired" | "applied" | "apply_failed";
+export type ProposalReview = {
+  id: string; project_id: string; environment_id: string; application_id: string;
+  kind: "service_configuration" | "source_patch"; status: ProposalReviewStatus;
+  proposal_hash: string; analysis_inputs_hash: string; source_commit?: string; application_root?: string;
+  normalized_payload: unknown; reviewed_payload_hash: string;
+  expected_configuration_revision?: number; expected_configuration_state_hash?: string;
+  created_by?: string; created_at: string; expires_at: string; approved_by?: string; approved_at?: string;
+  rejected_by?: string; rejected_at?: string; applied_at?: string; resulting_configuration_revision?: number;
+};
+export type ProposalReviewCreateRequest = {
+  environment_id: string; kind: "service_configuration" | "source_patch"; analysis_inputs_hash: string;
+  source_commit?: string; application_root?: string; configuration_draft?: ServiceConfigurationDraft; source_patch?: unknown;
+};
 export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
 
 export type DependencyRealizationProjection = {
   env_name: string;
   symbolic_source: string;
+  template?: string;
   injection_phase: string;
   conflict: boolean;
   conflict_reason?: string;
@@ -280,8 +350,43 @@ export type TopologyAssignment = {
   replicas: number;
   cpu_request_millicores: number;
   memory_request_bytes: number;
+  cpu_limit_millicores?: number;
+  memory_limit_bytes?: number;
   exposure: { mode: "none" | "internal" | "public" };
   rationale?: { summary?: string };
+};
+
+export type ResourceBudget = { cpu_millicores: number; memory_bytes: number };
+export type BudgetProjection = {
+  real_capacity: ResourceBudget;
+  system_reserve: ResourceBudget;
+  existing_workloads: ResourceBudget;
+  planned_managed: ResourceBudget;
+  available_for_run: ResourceBudget;
+  remaining_after_proposal: ResourceBudget;
+};
+export type ApplicationResourceValues = { cpu_request_milli: number; cpu_limit_milli: number; memory_request_bytes: number; memory_limit_bytes: number };
+export type ApplicationRecommendation = { key: string; name: string; replicas: number; current: ApplicationResourceValues; proposed: ApplicationResourceValues };
+export type TargetCapacityInfo = { cpu_millicores: number; memory_bytes: number; source: string; heartbeat_age_seconds: number; heartbeat_fresh: boolean };
+export type RecommendationBasis = {
+  run_revision: number;
+  plan_hash: string;
+  topology_revision: number;
+  topology_hash: string;
+  capacity_state_hash: string;
+  basis_hash: string;
+  observed_at: string;
+};
+export type ResourceRecommendation = {
+  eligible: boolean;
+  runtime_id?: string;
+  node_id?: string;
+  target_capacity: TargetCapacityInfo;
+  budget_projection: BudgetProjection;
+  basis: RecommendationBasis;
+  applications: ApplicationRecommendation[];
+  warnings?: string[];
+  reason?: string;
 };
 
 export type TopologyDraft = { schema_version: "opsi.topology_plan/v1"; project_id: string; assignments: TopologyAssignment[] };

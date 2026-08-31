@@ -282,6 +282,35 @@ func TestBuildRecordSubmissionReportsPendingAutomaticDeliveryAndReplaysExactly(t
 	}
 }
 
+func TestBuildRecordSubmissionAcceptsWhenAutomaticRoutingNeedsTopology(t *testing.T) {
+	server, store, projectID, identity := automaticDeliveryServer(t, 0)
+	facts := server.Topology.Facts
+	withoutTopology := topology.Service{Store: topology.NewMemoryStore(), Facts: facts, Now: server.Topology.Now}
+	server.Topology = withoutTopology
+	server.Policies.Topology = withoutTopology
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	response := postBuildRecord(t, httpServer.URL, mustBuildRecordBody(t, identity), "oidc-topology-missing")
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.StatusCode, readResponse(response))
+	}
+	var accepted struct {
+		Record   buildrecordv1.Record    `json:"record"`
+		Delivery *registry.DeploymentJob `json:"delivery"`
+	}
+	decodeResponse(t, response, &accepted)
+	if accepted.Record.ID != "br-auto" || accepted.Delivery != nil {
+		t.Fatalf("accepted=%+v", accepted)
+	}
+	if _, err := server.BuildRecords.Get(context.Background(), projectID, "br-auto"); err != nil {
+		t.Fatalf("accepted BuildRecord missing: %v", err)
+	}
+	if jobs, err := store.ListDeployments(projectID); err != nil || len(jobs) != 0 {
+		t.Fatalf("jobs=%+v err=%v", jobs, err)
+	}
+}
+
 func TestBuildRecordSubmissionConcurrentAutomaticReplayCreatesOneJobAndAudit(t *testing.T) {
 	server, store, projectID, identity := automaticDeliveryServer(t, 0)
 	httpServer := httptest.NewServer(server.Handler())
