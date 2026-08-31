@@ -153,6 +153,46 @@ func TestRateLimitRetryIsBounded(t *testing.T) {
 	}
 }
 
+func TestRecordWriteFallsBackToCommentWhenTagsAreUnavailable(t *testing.T) {
+	writes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dns_records") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []Record{}})
+			return
+		}
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/dns_records") {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		writes++
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if writes == 1 {
+			if _, ok := body["tags"]; !ok {
+				t.Fatal("first write omitted ownership tag")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "errors": []map[string]any{{"code": 9300, "message": "DNS record has 1 tags, exceeding the quota of 0."}}})
+			return
+		}
+		if _, ok := body["tags"]; ok {
+			t.Fatal("fallback write retained unsupported tags")
+		}
+		if body["comment"] != Marker("allocation") {
+			t.Fatalf("fallback comment=%v", body["comment"])
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": Record{ID: "record", Type: "A", Name: "app.test.example.com", Content: "203.0.113.9", Proxied: true, TTL: 1, Comment: Marker("allocation")}})
+	}))
+	defer server.Close()
+	client, err := New(Options{ZoneID: "zone", APIToken: "token", Domain: "test.example.com", APIURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := client.ReconcileARecord(t.Context(), "app.test.example.com", "203.0.113.9", "allocation")
+	if err != nil || record.ID != "record" || writes != 2 {
+		t.Fatalf("record=%+v writes=%d err=%v", record, writes, err)
+	}
+}
+
 func TestRulesPreserveForeignRulesAndPatchOnlyOpsiRefs(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

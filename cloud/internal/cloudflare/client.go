@@ -118,7 +118,7 @@ func (c *Client) ReconcileARecord(ctx context.Context, hostname, ipv4, allocatio
 	payload := map[string]any{"type": "A", "name": hostname, "content": parsed.To4().String(), "proxied": true, "ttl": 1, "comment": marker, "tags": []string{marker}}
 	if len(records) == 0 {
 		var created Record
-		if err := c.do(ctx, http.MethodPost, "/zones/"+url.PathEscape(c.zoneID)+"/dns_records", payload, &created); err != nil {
+		if err := c.writeRecord(ctx, http.MethodPost, "/zones/"+url.PathEscape(c.zoneID)+"/dns_records", payload, &created); err != nil {
 			return Record{}, err
 		}
 		return created, nil
@@ -131,10 +131,26 @@ func (c *Client) ReconcileARecord(ctx context.Context, hostname, ipv4, allocatio
 		return record, nil
 	}
 	var updated Record
-	if err := c.do(ctx, http.MethodPatch, "/zones/"+url.PathEscape(c.zoneID)+"/dns_records/"+url.PathEscape(record.ID), payload, &updated); err != nil {
+	if err := c.writeRecord(ctx, http.MethodPatch, "/zones/"+url.PathEscape(c.zoneID)+"/dns_records/"+url.PathEscape(record.ID), payload, &updated); err != nil {
 		return Record{}, err
 	}
 	return updated, nil
+}
+
+// writeRecord falls back to the comment marker only when the zone plan has no
+// DNS-tag quota. A comment remains sufficient for ownership verification.
+func (c *Client) writeRecord(ctx context.Context, method, path string, payload map[string]any, result *Record) error {
+	err := c.do(ctx, method, path, payload, result)
+	if !tagQuotaExceeded(err) {
+		return err
+	}
+	delete(payload, "tags")
+	return c.do(ctx, method, path, payload, result)
+}
+
+func tagQuotaExceeded(err error) bool {
+	var apiErr APIError
+	return errors.As(err, &apiErr) && apiErr.Code == 9300
 }
 
 func (c *Client) DeleteARecord(ctx context.Context, recordID, hostname, allocationID string) error {
