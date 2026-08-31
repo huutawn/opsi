@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { expectHTTPFailure, expectNoConsoleErrors, watchConsoleErrors } from "./console-errors";
+import type { DeploymentRun } from "@/lib/contracts/registry";
 
 const hash = (value: string) => value.repeat(64).slice(0, 64);
 
@@ -124,7 +125,8 @@ test("export is previewed before an operator creates a pull request", async ({ p
 
 test("a verified deployment publishes exactly one selected service through the canonical exposure rollout", async ({ page }) => {
 	const run = deploymentRun("succeeded");
-	run.plan.target.hostname = "tcip";
+	run.plan.target.hostname = "tcip.test.opsidev.site";
+	run.plan.target.public_routes = "manual";
 	let exposure: Record<string, unknown> | undefined;
 	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
 		repository: () => sourceRepository("active"),
@@ -135,20 +137,55 @@ test("a verified deployment publishes exactly one selected service through the c
 	await expect(page.getByRole("heading", { name: "Repository is running" })).toBeVisible();
 	await expect(page.getByRole("link", { name: "https://tcip" })).toHaveCount(0);
 	await page.getByRole("combobox", { name: "Running service" }).selectOption("svc-web");
-	const hostname = page.getByLabel("Override hostname (optional)");
-	await expect(hostname).toHaveAttribute("placeholder", "tcip.103.252.137.163.nip.io");
-	await expect(page.getByText("A public hostname was selected automatically from the server:")).toBeVisible();
+	const hostname = page.getByLabel("Public subdomain");
+	await expect(hostname).toHaveAttribute("placeholder", "tcip");
+	await expect(page.getByText(".test.opsidev.site", { exact: true })).toBeVisible();
 	await page.getByRole("button", { name: "Publish or update service" }).click();
 	await expect.poll(() => exposure).toMatchObject({
 		schema_version: "opsi.exposure_mutation/v1",
 		base_deployment_job_id: "dep-web",
 		expected_state_hash: hash("e"),
-		exposure: { service_key: "identity-web", service_port: 3000, hostname: "tcip.103.252.137.163.nip.io", tls: { mode: "disabled" } },
+		exposure: { service_key: "identity-web", service_port: 3000, hostname: "tcip", tls: { mode: "disabled" } },
 	});
-	await expect(page.getByRole("link", { name: "http://tcip.103.252.137.163.nip.io" })).toBeVisible();
-	await hostname.fill("tcip");
-	await expect(page.getByRole("alert").filter({ hasText: "public DNS hostname" })).toBeVisible();
+	await expect(page.getByRole("link", { name: "https://tcip.test.opsidev.site" })).toBeVisible();
+	await hostname.fill("api.foo");
+	await expect(page.getByRole("alert").filter({ hasText: "one available DNS label" })).toBeVisible();
 	await expect(page.getByRole("button", { name: "Publish or update service" })).toBeDisabled();
+});
+
+test("a verified automatic deployment lists every HTTPS endpoint while routes are applying", async ({ page }) => {
+	const run = deploymentRun("succeeded");
+	run.plan.target.hostname = "tcip.test.opsidev.site";
+	run.plan.target.public_routes = "automatic";
+	run.plan.applications[0].exposure = { mode: "public", hostname: "tcip.test.opsidev.site", path: "/api", automatic: true };
+	run.plan.applications[1].exposure = { mode: "public", hostname: "tcip.test.opsidev.site", path: "/", automatic: true };
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		result: () => ({ run_id: "run-1", state: "succeeded", source_sha: hash("d").slice(0, 40), applications: [{ service_key: "identity-api", service_id: "svc-api", build_record_id: "br-api", build_digest: `sha256:${hash("a")}`, deployment_job_id: "dep-api", deployment_status: "succeeded", container_port: 8080, available_replicas: 1, digest_matches_image_id: true }, { service_key: "identity-web", service_id: "svc-web", build_record_id: "br-web", build_digest: `sha256:${hash("b")}`, deployment_job_id: "dep-web", deployment_status: "succeeded", container_port: 3000, available_replicas: 1, digest_matches_image_id: true }], public_endpoints: [{ service_key: "identity-api", service_id: "svc-api", port: 8080, hostname: "tcip.test.opsidev.site", url: "https://tcip.test.opsidev.site/api", status: "publishing" }, { service_key: "identity-web", service_id: "svc-web", port: 3000, hostname: "tcip.test.opsidev.site", url: "https://tcip.test.opsidev.site/", status: "ready" }], verifications: [], capacity: [] }),
+	});
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("heading", { name: "HTTPS routes" })).toBeVisible();
+	await expect(page.getByText("https://tcip.test.opsidev.site/api")).toBeVisible();
+	await expect(page.getByText("Publishing", { exact: true })).toBeVisible();
+	await expect(page.getByRole("link", { name: "Open HTTPS URL" })).toHaveCount(1);
+});
+
+test("public hostname quota blocks a fourth label until release", async ({ page }) => {
+	let used = 3;
+	const allocation = { id: "phn-1", hostname: "old.test.opsidev.site", owner_user_id: "user-1", project_id: "proj-1", environment_id: "env-1", runtime_id: "runtime-1", status: "failed", publication_error: "Cloudflare could not publish the exact DNS record.", created_at: "2026-08-24T00:00:00Z", updated_at: "2026-08-24T00:00:00Z" };
+	await mockDeployAPI(page, () => null, () => deploymentRun("awaiting_approval"), "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		quota: () => ({ used, limit: 3, remaining: 3 - used, allocations: used ? [allocation, { ...allocation, id: "phn-2", hostname: "two.test.opsidev.site", project_id: "proj-2" }, { ...allocation, id: "phn-3", hostname: "three.test.opsidev.site", project_id: "proj-3" }] : [], project_allocations: used ? [allocation] : [] }),
+		onHostnameAction: () => { used = 2; },
+	});
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("heading", { name: "3/3 public hostnames used" })).toBeVisible();
+	await page.getByLabel("Repository", { exact: true }).selectOption("7");
+	await page.getByLabel("Public subdomain").fill("four");
+	await expect(page.getByRole("button", { name: "Analyze repository" })).toBeDisabled();
+	await page.getByRole("button", { name: "Release" }).click();
+	await expect(page.getByRole("heading", { name: "2/3 public hostnames used" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Analyze repository" })).toBeEnabled();
 });
 
 test("review plan has no WCAG 2.1 A or AA axe violations", async ({ page }) => {
@@ -157,6 +194,12 @@ test("review plan has no WCAG 2.1 A or AA axe violations", async ({ page }) => {
 
 	await page.goto("/?project=proj-1&view=deploy");
 	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
+	await page.getByText("View or edit full detected configuration").click();
+	const publicSubdomain = page.getByLabel("Public subdomain (.test.opsidev.site)");
+	await expect(publicSubdomain).toHaveValue("identity");
+	await publicSubdomain.fill("api.foo");
+	await expect(publicSubdomain).toHaveValue("api.foo");
+	await expect(page.getByRole("button", { name: "Save draft" })).toBeDisabled();
 	const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
 	expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);
 });
@@ -302,12 +345,12 @@ test("available repository is claimed and analyzed without a page reload", async
 	await page.goto("/?project=proj-1&view=deploy");
 	await page.getByLabel("Repository", { exact: true }).selectOption("7");
 	await page.getByLabel("Branch or ref").fill("developer");
-	await page.getByLabel("Hostname (optional)").fill("identity.example.test");
+	await page.getByLabel("Public subdomain").fill("identity");
 	await expect(page).toHaveURL(/source_repository=7/);
 	await page.reload();
 	await expect(page.getByLabel("Repository", { exact: true })).toHaveValue("7");
 	await expect(page.getByLabel("Branch or ref")).toHaveValue("developer");
-	await expect(page.getByLabel("Hostname (optional)")).toHaveValue("identity.example.test");
+	await expect(page.getByLabel("Public subdomain")).toHaveValue("identity");
 	await page.getByRole("button", { name: "Claim & analyze repository" }).click();
 	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
 	expect(claimed).toBe(true);
@@ -332,6 +375,7 @@ test("main ref with absent optional detections opens review without crashing", a
 	await page.goto("/?project=proj-1&view=deploy");
 	await page.getByLabel("Repository", { exact: true }).selectOption("7");
 	await expect(page.getByLabel("Branch or ref")).toHaveValue("main");
+	await page.getByLabel("Public subdomain").fill("identity");
 	await page.getByRole("button", { name: "Analyze repository" }).click();
 	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
 	await expect(page).toHaveURL("/?project=proj-1&view=deploy");
@@ -358,6 +402,7 @@ test("claim auth failure keeps Source visible and offers sign-in", async ({ page
 
 	await page.goto("/?project=proj-1&view=deploy");
 	await page.getByLabel("Repository", { exact: true }).selectOption("7");
+	await page.getByLabel("Public subdomain").fill("identity");
 	expectHTTPFailure(page, { method: "POST", path: "/api/local/projects/proj-1/github/repositories/7/claim", status: 401 });
 	await page.getByRole("button", { name: "Claim & analyze repository" }).click();
 	await expect(page.getByRole("heading", { name: "Choose a repository to deploy" })).toBeVisible();
@@ -395,6 +440,9 @@ type SourceBehavior = {
 	bootstrapEvents?: () => Array<Record<string, unknown>>;
 	placement?: () => ReturnType<typeof placementFacts>;
 	onExposure?: (body: Record<string, unknown>) => void;
+	result?: () => Record<string, unknown>;
+	quota?: () => Record<string, unknown>;
+	onHostnameAction?: () => void;
 };
 
 type AuthSelectionBehavior = { authenticated: boolean; selections: number };
@@ -413,6 +461,7 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		else if (path.endsWith("/repository-export/preview") && request.method() === "POST") body = { run_id: "run-1", run_revision: 3, plan_hash: hash("a"), source_sha: hash("d").slice(0, 40), repository_id: 7, target_branch: "main", path: ".opsi/opsi-cd.yaml", yaml: "version: 2\n", diff: "+version: 2\n", preview_hash: hash("e"), export_enabled: true };
 		else if (path.endsWith("/repository-export") && request.method() === "POST") { source?.onExport?.(); body = { repository_export: { branch: "opsi/export-run", commit_sha: hash("f").slice(0, 40), pull_request_number: 9, pull_request_url: "https://github.test/pr/9", reused: false } }; }
 		else if (path.endsWith("/deployment-runs") && request.method() === "POST" && source?.onCreate) body = { deployment_run: source.onCreate(), reused: false };
+		else if (/\/public-hostnames\/[^/]+\/(release|retry)$/.test(path) && request.method() === "POST") { source?.onHostnameAction?.(); body = { id: "phn-1", status: "released" }; }
 		else if (path === "/api/local/session") body = authSelection && !authSelection.authenticated ? { authenticated: false, cloud_connected: "ok", agent_connected: "ok", token_status: "missing", local_session: "local-session" } : { authenticated: true, cloud_connected: "ok", agent_connected: "ok", token_status: "valid", local_session: "local-session", user_id: "user-1", org_id: "org-1", project_id: "proj-1", role, capabilities: [] };
 		else if (path === "/api/local/session/project") body = { status: "selected", project_id: "proj-1" };
 		else if (path === "/api/local/projects") body = { projects: [{ id: "proj-1", org_id: "org-1", name: "Identity", slug: "identity", status: "ready" }] };
@@ -421,10 +470,11 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		else if (path.endsWith("/github/installations")) body = { installations: [{ installation_id: 9, account_login: "acme", account_type: "Organization", status: "active" }] };
 		else if (path.endsWith("/github/repositories")) body = { repositories: [source?.repository() ?? sourceRepository("active")] };
 		else if (path.endsWith("/deployment-runs")) body = { deployment_runs: current() ? [current()] : [] };
+		else if (path.endsWith("/public-hostnames")) body = source?.quota?.() ?? { used: 0, limit: 3, remaining: 3, allocations: [], project_allocations: [] };
 		else if (/\/deployment-runs\/run-1\/events$/.test(path)) { const run = current(); body = { events: run ? [{ id: "event-1", project_id: "proj-1", run_id: "run-1", state: run.state, level: "info", message: run.state === "provisioning" ? "Plan approved; provisioning started." : "Repository analysis is ready for review.", created_at: "2026-08-24T00:00:00Z" }] : [] }; }
 		else if (path.endsWith("/exposures/preview") && request.method() === "POST") { const mutation = request.postDataJSON(); body = { schema_version: "opsi.exposure_preview/v1", base_deployment_job_id: mutation.base_deployment_job_id, desired: mutation.exposure, changes: ["create exposure"], state_hash: hash("e"), eligible: true, decision_code: "EXPOSURE_READY", message: "ready", resolved_at: "2026-08-24T00:00:00Z" }; }
 		else if (path.endsWith("/exposures") && request.method() === "POST") { source?.onExposure?.(request.postDataJSON()); body = { schema_version: "opsi.deployment_job/v1", id: "dep-exposure", project_id: "proj-1", environment_id: "env-1", runtime_id: "runtime-1", service_id: "svc-web", mode: "rollout", status: "succeeded", rollout_state: "succeeded" }; }
-		else if (/\/deployment-runs\/run-1\/result$/.test(path)) { const run = current(); body = { run_id: "run-1", state: run?.state ?? "awaiting_input", source_sha: hash("d").slice(0, 40), applications: run?.state === "succeeded" ? [{ service_key: "identity-api", service_id: "svc-api", build_record_id: "br-api", build_digest: `sha256:${hash("a")}`, deployment_job_id: "dep-api", deployment_status: "succeeded", container_port: 8080, available_replicas: 1, digest_matches_image_id: true }, { service_key: "identity-web", service_id: "svc-web", build_record_id: "br-web", build_digest: `sha256:${hash("b")}`, deployment_job_id: "dep-web", deployment_status: "succeeded", container_port: 3000, available_replicas: 1, digest_matches_image_id: true }] : [], verifications: [], capacity: [] }; }
+		else if (/\/deployment-runs\/run-1\/result$/.test(path)) { const run = current(); body = source?.result?.() ?? { run_id: "run-1", state: run?.state ?? "awaiting_input", source_sha: hash("d").slice(0, 40), applications: run?.state === "succeeded" ? [{ service_key: "identity-api", service_id: "svc-api", build_record_id: "br-api", build_digest: `sha256:${hash("a")}`, deployment_job_id: "dep-api", deployment_status: "succeeded", container_port: 8080, available_replicas: 1, digest_matches_image_id: true }, { service_key: "identity-web", service_id: "svc-web", build_record_id: "br-web", build_digest: `sha256:${hash("b")}`, deployment_job_id: "dep-web", deployment_status: "succeeded", container_port: 3000, available_replicas: 1, digest_matches_image_id: true }] : [], verifications: [], capacity: [] }; }
 		else if (/\/deployment-runs\/run-1\/(approve|acknowledge|analyze|retry|cancel)$/.test(path)) body = action(request.postDataJSON(), path.split("/").at(-1));
 		else if (/\/deployment-runs\/run-1$/.test(path)) body = current();
 		else if (path.endsWith("/topology/facts")) body = source?.placement?.() ?? placementFacts();
@@ -454,7 +504,7 @@ function placementFacts() {
 	return { project_id: "proj-1", environments: [{ id: "env-1", project_id: "proj-1", name: "Production", type: "prod", status: "active" }], runtimes: [{ id: "runtime-1", project_id: "proj-1", environment_id: "env-1", name: "Primary", type: "k3s", status: "ready" }], nodes: [], agents: [], services: [] };
 }
 
-function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting_warning_ack" | "provisioning" | "building" | "deploying" | "succeeded" | "failed" | "stale" | "cancelled") {
+function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting_warning_ack" | "provisioning" | "building" | "deploying" | "succeeded" | "failed" | "stale" | "cancelled"): DeploymentRun {
 	return {
 		schema_version: "opsi.deployment_run/v2", id: "run-1", project_id: "proj-1", created_by: "user-1", state,
 		plan: {
@@ -468,8 +518,8 @@ function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting
 			dependencies: [{ from: "identity-api", to: "postgres", protocol: "postgres", required: true, confidence: "high", reason: "Compose", evidence: [], injections: [{ environment_name: "ConnectionStrings__Database", symbolic_source: "connection.postgres.npgsql" }] }, { from: "identity-web", to: "identity-api", protocol: "http", strategy: "same_origin", path: "/api", required: true, verification: { type: "consumer_http", path: "/health", expected_status: 200 }, confidence: "high", reason: "Route", evidence: [] }],
 			bindings: [{ from: "identity-web", to: "identity-api", kind: "browser_http", path: "/api", confidence: "high", reason: "Route", evidence: [] }],
 			secrets: [{ name: "jwt-signing-key", application_key: "identity-api", environment_name: "Jwt__SigningKey", generated: true, secret_ref: "generated://jwt-signing-key", revision: 0, display: "Generated and securely stored", confidence: "high", reason: "Configuration", evidence: [] }],
-			issues: [], analysis_scope: { application_roots: [], exclude_paths: [] }, analysis_scope_hash: hash("s"), evidence_coverage: { candidates_found: 6, candidates_selected: 6, files_inspected: 6, bytes_inspected: 2048 }, target: { environment_id: "env-1", runtime_id: "runtime-1", node_id: "node-1", hostname: "identity.apps.example.test", exposure: "public", cpu_milli: 250, memory_bytes: 268435456 }, authority_revisions: { source_commit_sha: hash("d").slice(0, 40) }, failure_policy: { fail_fast: true, rollback_known_good: true, retain_persistent_data: true, max_attempts: 3 },
+			issues: [], analysis_scope: { application_roots: [], exclude_paths: [] }, analysis_scope_hash: hash("s"), evidence_coverage: { candidates_found: 6, candidates_selected: 6, files_inspected: 6, bytes_inspected: 2048 }, target: { environment_id: "env-1", runtime_id: "runtime-1", node_id: "node-1", hostname: "identity.test.opsidev.site", exposure: "public", public_routes: "automatic", cpu_milli: 250, memory_bytes: 268435456 }, authority_revisions: { source_commit_sha: hash("d").slice(0, 40) }, failure_policy: { fail_fast: true, rollback_known_good: true, retain_persistent_data: true, max_attempts: 3 },
 		},
 		analysis: { authority: "compose", issues: [], files_inspected: 6, bytes_inspected: 2048, truncated: false }, authority_refs: { checkpoints: [] }, preflight_hash: state === "awaiting_warning_ack" ? hash("p") : undefined, failure: state === "failed" ? { step: "building", code: "BUILD_AUTHORITY_UNAVAILABLE", message: "Build authority unavailable.", next_action: "Retry the failed step.", retryable: true } : state === "stale" ? { step: "preflighting", code: "DEPLOYMENT_PLAN_STALE", message: "An authority changed.", next_action: "Analyze and review again.", retryable: false } : undefined, attempt: state === "awaiting_approval" ? 0 : 1, revision: state === "awaiting_approval" ? 3 : 4, created_at: "2026-08-24T00:00:00Z", updated_at: "2026-08-24T00:00:00Z",
-	};
+	} as unknown as DeploymentRun;
 }

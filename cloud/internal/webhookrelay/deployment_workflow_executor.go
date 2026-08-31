@@ -18,6 +18,7 @@ import (
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
+	exposurev1 "github.com/opsi-dev/opsi/contracts/go/exposurev1"
 	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
@@ -520,7 +521,100 @@ func (e deploymentWorkflowExecutor) verify(ctx context.Context, run deploymentwo
 			return failedStep(code, message, "Configure the missing consumer assertion or inspect failed dependency evidence, then retry.", true), nil
 		}
 	}
-	return deploymentworkflow.StepResult{Refs: refs}, nil
+	if publicationErr := e.server.ensureAutomaticHostnamePublished(ctx, run); publicationErr != nil {
+		return deploymentworkflow.StepResult{Refs: refs, PublicRouteFailures: automaticRouteFailures(run, publicationErr.Error())}, nil
+	}
+	routeFailures := e.ensureAutomaticExposures(ctx, run, byName, deploymentByService)
+	return deploymentworkflow.StepResult{Refs: refs, PublicRouteFailures: routeFailures}, nil
+}
+
+const automaticPublicRouteRationale = "automatic-public-route"
+
+// ensureAutomaticExposures starts the existing canonical exposure rollout for
+// each application selected by the approved automatic route plan. Exposure
+// failures are deliberately not deployment failures: workloads have already
+// been verified and the resulting rollout remains observable and retryable.
+func (e deploymentWorkflowExecutor) ensureAutomaticExposures(ctx context.Context, run deploymentworkflow.Run, services map[string]registry.ServiceRecord, deploymentByService map[string]string) []deploymentworkflow.PublicRouteFailure {
+	failures := []deploymentworkflow.PublicRouteFailure{}
+	if run.Plan.Target.Exposure != "public" || run.Plan.Target.PublicRoutes != deploymentworkflow.PublicRoutesAutomatic {
+		return failures
+	}
+	store, ok := e.server.Registry.(exposureLifecycleStore)
+	if !ok {
+		return automaticRouteFailures(run, "The public route authority is unavailable.")
+	}
+	current, err := e.server.Registry.ListDeployments(run.ProjectID)
+	if err != nil {
+		return automaticRouteFailures(run, "Public route state could not be read.")
+	}
+	latest := latestExposureByService(current)
+	for _, application := range run.Plan.Applications {
+		if !application.Exposure.Automatic || application.Exposure.Hostname == "" {
+			continue
+		}
+		service := services[application.Key]
+		baseID := deploymentByService[service.ID]
+		if service.ID == "" || baseID == "" {
+			continue
+		}
+		if existing := latest[service.ID]; existing != nil && (existing.Metadata == nil || existing.Metadata.Rationale != automaticPublicRouteRationale) {
+			continue // historical and manually-managed routes always win.
+		}
+		spec, canonicalErr := (exposurev1.ExposureSpec{
+			SchemaVersion: exposurev1.SchemaVersion, ProjectID: run.ProjectID, EnvironmentID: run.Plan.Target.EnvironmentID, RuntimeID: run.Plan.Target.RuntimeID,
+			ServiceKey: application.Key, DeploymentJobID: automaticExposureDeploymentID(run.ID, service.ID),
+			Hostname: application.Exposure.Hostname, Path: applicationPath(run, application.Key), ServicePort: int32(application.Port), TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled},
+			Metadata: &exposurev1.Metadata{DisplayName: "Automatic public route", Rationale: automaticPublicRouteRationale},
+		}).Canonicalize()
+		if canonicalErr != nil {
+			failures = append(failures, deploymentworkflow.PublicRouteFailure{ServiceKey: application.Key, Message: "The automatic public route is invalid."})
+			continue
+		}
+		request := deploymentv1.ExposureMutationRequest{SchemaVersion: deploymentv1.ExposureMutationVersion, BaseDeploymentJobID: baseID, Exposure: spec}
+		preview, previewErr := store.PreviewExposure(run.ProjectID, run.CreatedBy, request)
+		if previewErr != nil || !preview.Eligible {
+			failures = append(failures, deploymentworkflow.PublicRouteFailure{ServiceKey: application.Key, Message: "The public route could not be prepared."})
+			continue
+		}
+		request.ExpectedStateHash = preview.StateHash
+		if _, _, startErr := store.StartExposureRollout(run.ProjectID, run.CreatedBy, workflowExecutionKey(run, "auto-exposure", service.ID), run.ID, request); startErr != nil {
+			failures = append(failures, deploymentworkflow.PublicRouteFailure{ServiceKey: application.Key, Message: "The public route could not be started."})
+		}
+	}
+	return failures
+}
+
+func automaticRouteFailures(run deploymentworkflow.Run, message string) []deploymentworkflow.PublicRouteFailure {
+	values := []deploymentworkflow.PublicRouteFailure{}
+	for _, application := range run.Plan.Applications {
+		if application.Exposure.Automatic && application.Exposure.Hostname != "" {
+			values = append(values, deploymentworkflow.PublicRouteFailure{ServiceKey: application.Key, Message: message})
+		}
+	}
+	return values
+}
+
+func automaticExposureDeploymentID(runID, serviceID string) string {
+	sum := sha256.Sum256([]byte(runID + "\x00" + serviceID))
+	return "dep-auto-" + hex.EncodeToString(sum[:12])
+}
+
+func latestExposureByService(jobs []registry.DeploymentJob) map[string]*exposurev1.ExposureSpec {
+	selected := map[string]registry.DeploymentJob{}
+	for _, job := range jobs {
+		if job.Mode != "rollout" || job.ExposureSpec == nil {
+			continue
+		}
+		current, exists := selected[job.ServiceID]
+		if !exists || job.UpdatedAt.After(current.UpdatedAt) || job.UpdatedAt.Equal(current.UpdatedAt) && job.ID > current.ID {
+			selected[job.ServiceID] = job
+		}
+	}
+	result := make(map[string]*exposurev1.ExposureSpec, len(selected))
+	for serviceID, job := range selected {
+		result[serviceID] = job.ExposureSpec
+	}
+	return result
 }
 
 // verificationSatisfiesRequiredDependency is the workflow's single success
@@ -629,6 +723,15 @@ func applicationHostname(run deploymentworkflow.Run, key string) string {
 		}
 	}
 	return run.Plan.Target.Hostname
+}
+
+func applicationPath(run deploymentworkflow.Run, key string) string {
+	for _, application := range run.Plan.Applications {
+		if application.Key == key && application.Exposure.Path != "" {
+			return application.Exposure.Path
+		}
+	}
+	return "/"
 }
 
 func authorityStateHash(value any) string {

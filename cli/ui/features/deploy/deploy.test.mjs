@@ -7,6 +7,7 @@ import { LocalClient } from "../../lib/api/local-client.ts";
 const view = new URL("./deploy-view.tsx", import.meta.url);
 const review = new URL("./plan-review.tsx", import.meta.url);
 const sourceStep = new URL("./source-step.tsx", import.meta.url);
+const hostnameQuota = new URL("./public-hostname-quota.tsx", import.meta.url);
 const client = new URL("../../lib/api/local-client.ts", import.meta.url);
 
 test("Deploy exposes one role-gated action for each actionable run state", async () => {
@@ -21,7 +22,8 @@ test("Deploy result and technical details use factual authority records", async 
   const source = await readFile(view, "utf8");
   const route = await readFile(new URL("./public-route.tsx", view), "utf8");
   for (const value of ["Repository is running", "digest_matches_image_id", "Raw build log", "Image digests", "Build records", "Requested", "Assigned", "Reserved", "Available"]) assert.match(source, new RegExp(value));
-  for (const value of ["Publish or update one running service", "Override hostname \\(optional\\)", "resolvedHostname", "exposurePreview", "expected_state_hash", "exposureApply", "automaticPublicHostname", "client.nodes", "rolloutReachedTerminalState"]) assert.match(route, new RegExp(value));
+  for (const value of ["Publish or update one running service", "Public subdomain", "publicSubdomainSuffix", "resolvedHostname", "exposurePreview", "expected_state_hash", "exposureApply", "https://", "rolloutReachedTerminalState"]) assert.match(route, new RegExp(value));
+  assert.doesNotMatch(route, /nip\.io|automaticPublicHostname|client\.nodes/);
   assert.doesNotMatch(route, /\/api\/projects\//);
   assert.doesNotMatch(source, /localStorage|dangerouslySetInnerHTML/);
   assert.doesNotMatch(source, /sessionStorage/);
@@ -87,4 +89,14 @@ test("deployment run normalization fills empty analysis scope arrays", async () 
     application_roots: [],
     exclude_paths: [],
   });
+});
+
+test("public hostname quota gates new labels and exposes retry and release", async () => {
+  const [viewSource, source, quota, api] = await Promise.all([readFile(view, "utf8"), readFile(sourceStep, "utf8"), readFile(hostnameQuota, "utf8"), readFile(client, "utf8")]);
+  assert.match(quota, /public hostnames used/);
+  for (const status of ["Reserved", "Provisioning", "Active", "Release pending", "Publication failed"]) assert.match(quota, new RegExp(status));
+  for (const action of ["Retry publication", "Release"]) assert.match(quota, new RegExp(action));
+  assert.match(source, /quotaBlocked/);
+  assert.match(viewSource, /hostnameQuota\.remaining > 0/);
+  assert.match(api, /public-hostnames\/\$\{encodeURIComponent\(allocationID\)\}\/\$\{action\}/);
 });

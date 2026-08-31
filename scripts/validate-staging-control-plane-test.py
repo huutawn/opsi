@@ -93,30 +93,12 @@ class StagingValidatorTests(unittest.TestCase):
         self.assert_source_rejected(caddy=self.caddy.replace("/api/internal/*", "/api/not-internal/*"))
 
     def test_http_health_route_ordering_required(self) -> None:
-        ordered = """\
-:8080 {
-\troute {
-\t\t@health {
-\t\t\tpath /health
-\t\t\tremote_ip 127.0.0.1 ::1
-\t\t}
-\t\trespond @health 200
-\t\tredir https://{host}{uri} 308
-\t}
-}
-"""
-        unordered = """\
-:8080 {
-\t@health {
-\t\tpath /health
-\t\tremote_ip 127.0.0.1 ::1
-\t}
-\trespond @health 200
-\tredir https://{host}{uri} 308
-}
-"""
-        self.assertIn(ordered, self.caddy)
-        self.assert_source_rejected(caddy=self.caddy.replace(ordered, unordered, 1))
+        self.assertTrue(validator.http_health_route_is_ordered(self.caddy))
+        self.assert_source_rejected(caddy=self.caddy.replace("\troute {\n", "\thandle {\n", 1))
+
+    def test_flexible_origin_route_must_be_scoped_and_precede_redirect(self) -> None:
+        self.assert_source_rejected(caddy=self.caddy.replace("reverse_proxy @cloudflare_flexible cloud:9800", "reverse_proxy cloud:9800", 1))
+        self.assert_source_rejected(caddy=self.caddy.replace("@cloudflare_flexible host_regexp cloudflare_flexible ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.test\\.opsidev\\.site$", "@cloudflare_flexible host test.opsidev.site", 1))
 
     def test_internal_path_variants_are_denied(self) -> None:
         for target in (

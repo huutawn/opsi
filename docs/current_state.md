@@ -37,10 +37,24 @@ future runs. The GitHub App installation needs `Contents: read and write` and
 `Pull requests: read and write` only for this endpoint; deployments remain
 available without those upgraded permissions.
 
-For automatic public hostnames, configure `deployment_domain` or
-`OPSI_CLOUD_DEPLOYMENT_DOMAIN` with the wildcard DNS suffix. Cloud derives a
-deterministic project-scoped hostname. Without that authority, analysis blocks
-approval until the operator enters an explicit hostname in Review plan.
+Public deployments use one user-entered DNS label and Cloud persists the
+managed FQDN under `OPSI_CLOUD_DEPLOYMENT_DOMAIN`. For the test VPS, configure
+`OPSI_CLOUD_DEPLOYMENT_DOMAIN=test.opsidev.site`; entering `tcip` publishes
+one origin, `tcip.test.opsidev.site`. The browser frontend uses `/`, same-origin
+backends use dependency paths such as `/api`, and other HTTP applications use
+stable application-key paths. Duplicate paths and ambiguous root frontends are
+blocking validation errors. Automatic routing can be switched to manual-only in
+Plan review; manually managed and historical routes are preserved. A blank or
+invalid label blocks the deployment; Cloud does not derive repository names or
+fall back to `nip.io`.
+
+`public_hostname_allocations` is the hostname authority. It enforces a default
+three-hostname quota per user across projects, retains quota through failed and
+release-pending publication, and frees quota only after an owned Cloudflare
+record is deleted. Cloudflare credentials are file-backed; exact proxied A
+records use the verified target node IPv4 address. Opsi-owned suffix rules set
+Flexible origin mode and HTTP-to-HTTPS 308 without changing zone-wide Full
+(strict) or replacing operator-owned rules.
 
 ## R5-014 Local API/UI parity checkpoint
 
@@ -651,6 +665,14 @@ evidence.
 
 ## Deployment and gateway truth
 
+The implemented application gateway remains the one Opsi-owned standard
+Traefik Ingress path. Automatic public deployment now maps one managed hostname
+to multiple ClusterIP Services with longest-prefix paths (`/`, `/api`, and
+stable application-key fallbacks). Opsi does not install or maintain a parallel
+Kubernetes Gateway API controller. This same-origin model lets browser frontend
+code call multiple backends without CORS or per-service DNS; rewriting,
+authentication, and rate-limit policies are not implemented gateway features.
+
 Opsi has separate development and production-like staging control-plane
 profiles. `deploy/dev-control-plane` remains the supported local HTTP
 development package. It starts PostgreSQL, Opsi Cloud, one Bootstrap Worker,
@@ -1113,7 +1135,7 @@ Application Dependency Contract foundation implemented.
 ## MCP-01 through MCP-05 Read-Only Context and Proposal Surface
 
 The MCP capability (`opsi mcp` / `opsi mcp serve`) is implemented at the local Opsi Edge boundary:
-- Read-only protocol supporting 22 tools covering project context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), exact commit-bound source file listing, reading, and literal searching, bounded deployment readiness context, advisory dependency-proposal validation, and exact-source patch-proposal validation.
+- Read-only protocol supporting 24 tools covering project and project-review context, topology, applications, ADC-01 dependencies, managed resources, immutable build records, deployment history, zero-mutation deployment preflight evaluation (ADC-04), ADC-05 source risk reports, 5-layer dependency verification runs (ADC-05), exact commit-bound source file listing, reading, and literal searching, bounded deployment readiness context, full ServiceConfiguration proposal validation/diff, advisory dependency-proposal validation, and exact-source patch-proposal validation.
 - Strict security constraints: zero domain mutations exposed, zero secret credentials exposed (regex redaction for URI credentials, bearer tokens, private keys, and passwords), path traversal protection against `..` or escaping `ApplicationRoot`, binary file classification, size-bounded reading (max 256 KiB), bounded search (max 50 matches), and exact commit provenance (returns `SOURCE_SNAPSHOT_UNAVAILABLE` rather than falling back to uncommitted working trees).
 - Transports: stdio JSON-RPC 2.0 (default) with stderr diagnostic logging, and local loopback HTTP (`127.0.0.1` / `localhost`).
 
@@ -1137,3 +1159,14 @@ tests, builds, deploys, or persists a proposal. Path, generated/binary, exact
 preimage, bounded-size, secret-literal, dependency-proposal staleness, and
 prompt-injection boundaries fail closed. A valid patch explicitly states that a
 new BuildRecord is required if a human later applies it.
+
+The local Dashboard has an AI Assistant destination. It detects Codex CLI and
+its login state, runs Codex in an isolated empty workspace with native data and
+execution tools disabled and the selected project's `opsi mcp` server, polls
+bounded background turns, and renders
+structured ServiceConfiguration proposals. MCP remains read-only. Configuration
+changes use the existing Cloud ProposalReview authority, now named
+`service_configuration`, with separate Create review, Approve, and Apply actions
+and revision/state-hash staleness checks. Other provider connectors and
+historical transcript listing are not implemented; the provider interface and
+Codex-owned thread ID are the current extension boundary.

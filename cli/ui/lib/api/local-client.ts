@@ -70,6 +70,8 @@ import type {
   DeploymentPlan,
   RepositoryExportPreview,
   RepositoryExportResult,
+	PublicHostnameAllocation,
+	PublicHostnameQuota,
 	WorkloadSecretMetadata,
 } from "@/lib/contracts/registry";
 
@@ -138,6 +140,22 @@ export type SelectionResponse = {
   projects: SelectableProject[];
 };
 
+export type AssistantProvider = {
+  id: string; name: string; available: boolean; authenticated: boolean; version?: string;
+  capabilities: string[]; data_boundary: string; message?: string;
+};
+
+export type AssistantConfigurationProposal = {
+  application_id: string; application_name: string; environment_id: string; rationale: string;
+  expected_revision: number; expected_state_hash: string; analysis_inputs_hash: string; draft_json: string;
+};
+
+export type AssistantTurn = {
+  id: string; conversation_id: string; provider_id: string; project_id: string;
+  state: "running" | "succeeded" | "failed"; response?: string; error?: string;
+  proposals?: AssistantConfigurationProposal[]; started_at: string; finished_at?: string;
+};
+
 export class LocalClient {
   private localSession = "";
 
@@ -204,6 +222,20 @@ export class LocalClient {
 
   settings() {
     return this.call<LocalSettings>("/api/local/settings");
+  }
+
+  assistantProviders() {
+    return this.call<{ providers: AssistantProvider[]; mcp_surface: string }>("/api/local/ai/providers");
+  }
+
+  startAssistantTurn(projectID: string, body: { provider_id?: string; conversation_id?: string; prompt: string }, idempotencyKey?: string) {
+    return this.call<AssistantTurn>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns`, {
+      method: "POST", write: true, idempotencyKey, body: JSON.stringify(body),
+    });
+  }
+
+  assistantTurn(projectID: string, turnID: string) {
+    return this.call<AssistantTurn>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns/${encodeURIComponent(turnID)}`);
   }
 
   async projects(orgID: string) {
@@ -413,6 +445,14 @@ export class LocalClient {
   async deploymentRuns(projectID: string) {
     const response = await this.call<{ deployment_runs: DeploymentRun[] | null }>(`/api/local/projects/${projectID}/deployment-runs?limit=50`);
     return { deployment_runs: (response.deployment_runs ?? []).map(normalizeDeploymentRun) };
+  }
+
+  publicHostnameQuota(projectID: string) {
+    return this.call<PublicHostnameQuota>(`/api/local/projects/${projectID}/public-hostnames`);
+  }
+
+  publicHostnameAction(projectID: string, allocationID: string, action: "release" | "retry", idempotencyKey: string) {
+    return this.call<PublicHostnameAllocation>(`/api/local/projects/${projectID}/public-hostnames/${encodeURIComponent(allocationID)}/${action}`, { method: "POST", write: true, idempotencyKey, body: "{}" });
   }
 
   async deploymentRun(projectID: string, runID: string) {

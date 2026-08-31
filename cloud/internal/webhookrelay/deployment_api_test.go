@@ -276,7 +276,8 @@ func deploymentAPIErrorCode(err error) string {
 }
 
 func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
-	server := NewServer(Config{})
+	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
+	server.Cloudflare = successfulCloudflare{}
 	store := server.Registry.(*registry.Service)
 	project, err := store.CreateProject("org-1", "Exposure", "exposure", "owner", "project-key")
 	if err != nil {
@@ -324,7 +325,7 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exposure, err := (exposurev1.ExposureSpec{SchemaVersion: exposurev1.SchemaVersion, ProjectID: project.ID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceKey: workload.ServiceKey, DeploymentJobID: "dep-exposure", Hostname: "api.example.com", Path: "/", ServicePort: workload.ContainerPort, TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled}, Metadata: &exposurev1.Metadata{DisplayName: "Public API", Rationale: "request-body-secret-marker"}}).Canonicalize()
+	exposure, err := (exposurev1.ExposureSpec{SchemaVersion: exposurev1.SchemaVersion, ProjectID: project.ID, EnvironmentID: base.EnvironmentID, RuntimeID: base.RuntimeID, ServiceKey: workload.ServiceKey, DeploymentJobID: "dep-exposure", Hostname: "api", Path: "/", ServicePort: workload.ContainerPort, TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled}, Metadata: &exposurev1.Metadata{DisplayName: "Public API", Rationale: "request-body-secret-marker"}}).Canonicalize()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,6 +368,22 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	created := call(http.MethodPost, "/api/projects/"+project.ID+"/exposures", "owner-pat", "exposure-key", body)
 	if created.Code != http.StatusAccepted || bytes.Contains(created.Body.Bytes(), []byte("owner-pat")) || bytes.Contains(created.Body.Bytes(), []byte("lease_token")) || bytes.Contains(created.Body.Bytes(), []byte("raw_manifest")) {
 		t.Fatalf("created status=%d body=%s", created.Code, created.Body.String())
+	}
+	duplicate := mutation
+	duplicate.Exposure.DeploymentJobID = "dep-exposure-duplicate"
+	duplicate.Exposure.SpecHash = ""
+	duplicate.Exposure, err = duplicate.Exposure.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateBody, _ := json.Marshal(duplicate)
+	duplicateResponse := call(http.MethodPost, "/api/projects/"+project.ID+"/exposures", "owner-pat", "duplicate-hostname-key", duplicateBody)
+	if duplicateResponse.Code != http.StatusConflict || bytes.Contains(duplicateResponse.Body.Bytes(), []byte("PUBLIC_HOSTNAME_UNAVAILABLE")) {
+		t.Fatalf("duplicate hostname status=%d body=%s", duplicateResponse.Code, duplicateResponse.Body.String())
+	}
+	quota, err := server.PublicHostnames.Quota(t.Context(), "owner")
+	if err != nil || quota.Used != 1 {
+		t.Fatalf("redeploy quota=%+v err=%v", quota, err)
 	}
 	countCreatedAudits := func() int {
 		audits, err := store.ListAudit(project.ID)
@@ -440,7 +457,7 @@ func TestExposureAPIIsProjectScopedStrictIdempotentAndSanitized(t *testing.T) {
 	}
 
 	conflicting := mutation
-	conflicting.Exposure.Hostname = "other.example.com"
+	conflicting.Exposure.Hostname = "other"
 	conflicting.Exposure.SpecHash = ""
 	conflicting.Exposure, err = conflicting.Exposure.Canonicalize()
 	if err != nil {

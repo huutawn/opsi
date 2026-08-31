@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, Icon, Input, Select, StatusBadge } from "@/components/ui/primitives";
+import { publicHostname, publicSubdomainFromHostname, publicSubdomainSuffix, validatePublicSubdomain } from "@/features/deploy/public-subdomain";
 import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
 import { hashExposure, type DeploymentJob, type DeploymentPlan, type DeploymentRunResult, type ExposureMutationRequest } from "@/lib/contracts/registry";
 
@@ -21,29 +22,12 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
   const [rollout, setRollout] = useState<DeploymentJob | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
-  const [nodePublicHost, setNodePublicHost] = useState("");
   const candidates = useMemo<PublishableApplication[]>(() => result.applications.filter((application): application is PublishableApplication => Boolean(application.deployment_job_id && application.container_port)), [result.applications]);
   const selected = candidates.find((application) => application.service_id === serviceID);
-  const targetHostname = plan.target.hostname?.trim().toLowerCase() || "";
-  const defaultHostname = automaticPublicHostname(targetHostname, nodePublicHost);
-  const resolvedHostname = hostname.trim().toLowerCase() || defaultHostname;
-  const hostnameError = hostname.trim() ? validatePublicHostname(hostname) : defaultHostname ? validatePublicHostname(defaultHostname) : "";
-
-  useEffect(() => {
-    let active = true;
-    if (!plan.target.node_id) {
-      setNodePublicHost("");
-      return () => { active = false; };
-    }
-    void client.nodes(projectID).then((nodes) => {
-      if (!active) return;
-      const node = nodes.find((candidate) => candidate.id === plan.target.node_id);
-      setNodePublicHost(node?.public_host?.trim().toLowerCase() || "");
-    }).catch(() => {
-      if (active) setNodePublicHost("");
-    });
-    return () => { active = false; };
-  }, [client, plan.target.node_id, projectID]);
+  const defaultHostname = plan.target.hostname?.trim().toLowerCase() || "";
+  const selectedSubdomain = hostname || publicSubdomainFromHostname(defaultHostname);
+  const hostnameError = validatePublicSubdomain(selectedSubdomain);
+  const resolvedHostname = hostnameError ? "" : publicHostname(selectedSubdomain);
 
   useEffect(() => {
     if (!rollout || rolloutReachedTerminalState(rollout)) return;
@@ -69,7 +53,8 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
           runtime_id: plan.target.runtime_id || "",
           service_key: selected.service_key,
           deployment_job_id: deploymentID,
-          hostname: resolvedHostname,
+		  // Cloud owns suffix expansion and rejects client-supplied FQDNs.
+		  hostname: selectedSubdomain,
           path: "/",
           service_port: selected.container_port,
           tls: { mode: "disabled" },
@@ -101,11 +86,11 @@ export function PublicRoute({ canMutate, client, plan, projectID, result }: Publ
             {candidates.map((application) => <option key={application.service_id} value={application.service_id}>{application.service_key} · port {application.container_port}</option>)}
           </Select>
         </label>
-        <label className="text-sm font-medium" htmlFor="public-route-hostname">Override hostname (optional)
-          <Input aria-describedby="public-route-hostname-help" aria-invalid={Boolean(hostnameError)} disabled={!canMutate || busy} id="public-route-hostname" onChange={(event) => setHostname(event.target.value)} placeholder={defaultHostname || "app.example.com"} value={hostname} />
+        <label className="text-sm font-medium" htmlFor="public-route-hostname">Public subdomain
+          <div className="mt-1 flex items-center"><Input aria-describedby="public-route-hostname-help" aria-invalid={Boolean(hostnameError)} className="rounded-r-none" disabled={!canMutate || busy} id="public-route-hostname" onChange={(event) => setHostname(event.target.value)} placeholder={publicSubdomainFromHostname(defaultHostname) || "tcip"} value={hostname} /><span className="min-h-10 border border-l-0 border-outline-variant/40 bg-surface-container-low px-3 py-2 font-mono text-xs text-on-surface-variant">.{publicSubdomainSuffix}</span></div>
         </label>
       </div>
-      <p className="mt-2 text-xs text-on-surface-variant" id="public-route-hostname-help">{defaultHostname ? <>{defaultHostname !== targetHostname ? <>A public hostname was selected automatically from the server: <span className="font-mono">{defaultHostname}</span>.</> : <>The deployment default is <span className="font-mono">{defaultHostname}</span>.</>} Override it only after configuring a custom DNS name.</> : <>A public hostname could not be derived from the selected server. Enter a public DNS name.</>} TLS is not configured for this route, so the published URL uses HTTP.</p>
+      <p className="mt-2 text-xs text-on-surface-variant" id="public-route-hostname-help">{defaultHostname ? <>Current deployment subdomain: <span className="font-mono">{defaultHostname}</span>.</> : <>Choose the public subdomain to publish.</>} Cloudflare serves the public URL over HTTPS; Opsi verifies the VPS origin over HTTP.</p>
       {hostnameError && <p className="mt-2 text-sm text-error" role="alert">{hostnameError}</p>}
       {failure && <p className="mt-3 border border-status-failed/40 bg-error-container/10 p-3 text-sm text-error" role="alert">{failure}</p>}
       {rollout && <RouteRollout hostname={resolvedHostname} rollout={rollout} />}
@@ -121,25 +106,7 @@ function rolloutReachedTerminalState(rollout: DeploymentJob) {
 function RouteRollout({ hostname, rollout }: { hostname: string; rollout: DeploymentJob }) {
   const succeeded = rollout.status === "succeeded" && rollout.rollout_state === "succeeded";
   const failed = ["failed", "rolled_back", "cancelled"].includes(rollout.status);
-  return <div className="mt-4 border border-outline-variant/30 p-3 text-sm" role="status"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-medium">Route rollout</p><StatusBadge status={succeeded ? "ready" : failed ? "failed" : "in_progress"} value={succeeded ? "ready" : failed ? "failed" : "in_progress"} /></div>{succeeded ? <a className="mt-2 inline-flex min-h-10 items-center gap-2 text-primary underline underline-offset-4" href={`http://${hostname}`} rel="noreferrer" target="_blank"><Icon name="open_in_new" />http://{hostname}</a> : <p className="mt-2 text-on-surface-variant">{failed ? "The route was not applied. Review the rollout in Technical details before trying again." : "The Agent is applying and verifying the route."}</p>}</div>;
-}
-
-function validatePublicHostname(value: string) {
-  const hostname = value.toLowerCase();
-  if (!hostname) return "A public hostname is required.";
-  if (hostname !== hostname.trim() || hostname.includes(":") || hostname.includes("/") || hostname.includes("?") || hostname.includes("#") || hostname.includes("*") || hostname === "localhost" || hostname.endsWith(".localhost")) return "Enter a DNS hostname without a scheme, port, path, wildcard, or whitespace.";
-  const labels = hostname.split(".");
-  if (labels.length < 2 || labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return "Enter a public DNS hostname such as app.example.com.";
-  return "";
-}
-
-function automaticPublicHostname(targetHostname: string, publicHost: string) {
-  if (!targetHostname || targetHostname.includes(".") || !isIPv4(publicHost)) return targetHostname;
-  return `${targetHostname}.${publicHost}.nip.io`;
-}
-
-function isIPv4(value: string) {
-  return /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$/.test(value);
+  return <div className="mt-4 border border-outline-variant/30 p-3 text-sm" role="status"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-medium">Route rollout</p><StatusBadge status={succeeded ? "ready" : failed ? "failed" : "in_progress"} value={succeeded ? "ready" : failed ? "failed" : "in_progress"} /></div>{succeeded ? <a className="mt-2 inline-flex min-h-10 items-center gap-2 text-primary underline underline-offset-4" href={`https://${hostname}`} rel="noreferrer" target="_blank"><Icon name="open_in_new" />https://{hostname}</a> : <p className="mt-2 text-on-surface-variant">{failed ? "The route was not applied. Review the rollout in Technical details before trying again." : "The Agent is applying and verifying the route."}</p>}</div>;
 }
 
 function routeFailure(cause: unknown) {

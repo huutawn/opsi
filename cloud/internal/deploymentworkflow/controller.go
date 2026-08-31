@@ -10,19 +10,20 @@ import (
 )
 
 type StepResult struct {
-	Refs              AuthorityRefs
-	ReplaceBuildRefs  bool
-	Pending           bool
-	Stale             bool
-	RollbackRequired  bool
-	CleanupRequired   bool
-	PreflightHash     string
-	PreflightWarnings []string
-	Blocked           bool
-	FailureCode       string
-	FailureMessage    string
-	NextAction        string
-	Retryable         bool
+	Refs                AuthorityRefs
+	ReplaceBuildRefs    bool
+	Pending             bool
+	Stale               bool
+	RollbackRequired    bool
+	CleanupRequired     bool
+	PreflightHash       string
+	PreflightWarnings   []string
+	Blocked             bool
+	FailureCode         string
+	FailureMessage      string
+	NextAction          string
+	Retryable           bool
+	PublicRouteFailures []PublicRouteFailure
 }
 
 // Executor adapts the workflow to existing canonical authorities. It returns
@@ -94,6 +95,9 @@ func (c Controller) process(ctx context.Context, run Run) error {
 		removeCheckpointKinds(&run.Refs, AuthorityBuildJob, AuthorityBuildRecord)
 	}
 	mergeRefs(&run.Refs, result.Refs, step)
+	if result.PublicRouteFailures != nil {
+		run.PublicRouteFailures = append([]PublicRouteFailure(nil), result.PublicRouteFailures...)
+	}
 	if result.Stale {
 		run.State = StateStale
 		run.Approval = nil

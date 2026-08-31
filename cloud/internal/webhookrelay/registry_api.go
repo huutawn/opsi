@@ -218,6 +218,9 @@ func (s *Server) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts 
 	if s.handleDeploymentRunAPI(w, r, projectID, parts, principal) {
 		return
 	}
+	if s.handlePublicHostnameAPI(w, r, projectID, parts, principal) {
+		return
+	}
 	if s.handleWorkloadSecretAPI(w, r, projectID, parts, principal) {
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +52,13 @@ func TestGitHubInventoryMigrationCreatesSchemaAndPreservesP08Data(t *testing.T) 
 	}
 	if err := Migrate(ctx, db); err != nil {
 		t.Fatal(err)
+	}
+	var proposalKindConstraint string
+	if err := db.QueryRowContext(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='proposal_reviews'::regclass AND conname='proposal_reviews_kind_check'`).Scan(&proposalKindConstraint); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(proposalKindConstraint, "service_configuration") {
+		t.Fatalf("proposal review kind constraint was not expanded: %s", proposalKindConstraint)
 	}
 	var legacyProjects int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM projects WHERE id='legacy-project' AND created_by='legacy-user'`).Scan(&legacyProjects); err != nil || legacyProjects != 1 {

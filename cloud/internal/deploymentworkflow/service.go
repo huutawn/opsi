@@ -36,6 +36,9 @@ func (s Service) Create(ctx context.Context, projectID, actor, key string, sourc
 		return Run{}, false, unavailable()
 	}
 	now := s.clock()
+	if target.Exposure == "public" && target.PublicRoutes == "" {
+		target.PublicRoutes = PublicRoutesAutomatic
+	}
 	run := Run{SchemaVersion: RunSchemaVersion, ID: id, ProjectID: projectID, CreatedBy: actor, State: StateAnalyzing, Plan: Plan{SchemaVersion: PlanSchemaVersion, Source: source, Target: target, FailurePolicy: FailurePolicy{FailFast: true, RollbackKnownGood: true, RetainPersistentData: true, MaxAttempts: 3}}, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	event := s.event(run, "info", "Repository analysis queued.", nil)
 	return s.Store.Create(ctx, run, event, key)
@@ -76,6 +79,7 @@ func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analy
 	run.PreflightHash = ""
 	run.PreflightWarnings = nil
 	run.Failure = nil
+	run.PublicRouteFailures = nil
 	run.Attempt = 0
 	run.RetryAfterAt = nil
 	run.FinishedAt = nil
@@ -121,6 +125,7 @@ func (s Service) UpdatePlan(ctx context.Context, projectID, runID, actor, expect
 	run.WarningAcknowledgement = nil
 	run.PreflightHash = ""
 	run.PreflightWarnings = nil
+	run.PublicRouteFailures = nil
 	run.State = StateAwaitingApproval
 	for _, issue := range draft.Issues {
 		if issue.Blocking {

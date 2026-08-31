@@ -29,6 +29,8 @@ type Config struct {
 	DatabaseURL            string                  `json:"database_url"`
 	PublicBaseURL          string                  `json:"public_base_url"`
 	DeploymentDomain       string                  `json:"deployment_domain,omitempty"`
+	PublicHostnameLimit    int                     `json:"public_hostname_limit,omitempty"`
+	Cloudflare             CloudflareConfig        `json:"cloudflare,omitempty"`
 	Production             bool                    `json:"production"`
 	OTP                    OTPConfig               `json:"otp"`
 	SMTP                   SMTPConfig              `json:"smtp"`
@@ -44,6 +46,16 @@ type Config struct {
 	RegistryPull           RegistryPullConfig      `json:"registry_pull"`
 	Placement              PlacementConfig         `json:"placement"`
 	BackupStore            BackupStoreConfig       `json:"backup_store"`
+}
+
+type CloudflareConfig struct {
+	ZoneID       string `json:"zone_id,omitempty"`
+	APITokenFile string `json:"api_token_file,omitempty"`
+	APIToken     string `json:"-"`
+}
+
+func (c CloudflareConfig) Enabled() bool {
+	return c.ZoneID != "" || c.APITokenFile != "" || c.APIToken != ""
 }
 
 type BackupStoreConfig struct {
@@ -123,8 +135,9 @@ type Duration time.Duration
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
-		TTL:        Duration(24 * time.Hour),
-		GitHubOIDC: githuboidc.DefaultConfig(),
+		TTL:                 Duration(24 * time.Hour),
+		PublicHostnameLimit: 3,
+		GitHubOIDC:          githuboidc.DefaultConfig(),
 		Placement: PlacementConfig{
 			HeartbeatTTL: Duration(2 * time.Minute), ReservedCPUMilli: 250, ReservedMemoryBytes: 256 << 20,
 		},
@@ -146,8 +159,14 @@ func LoadConfig(path string) (Config, error) {
 		if err := rejectLegacyAuthJSON(data); err != nil {
 			return Config{}, err
 		}
+		if err := rejectCloudflareTokenJSON(data); err != nil {
+			return Config{}, err
+		}
 	}
 	if err := applyEnvOverrides(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := loadCloudflareToken(&cfg.Cloudflare); err != nil {
 		return Config{}, err
 	}
 	if err := loadBackupStoreFiles(&cfg.BackupStore); err != nil {
@@ -159,6 +178,19 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
+func rejectCloudflareTokenJSON(data []byte) error {
+	var value struct {
+		Cloudflare map[string]json.RawMessage `json:"cloudflare"`
+	}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil
+	}
+	if _, exists := value.Cloudflare["api_token"]; exists {
+		return fmt.Errorf("cloudflare.api_token is not supported; use api_token_file")
+	}
+	return nil
+}
+
 func applyEnvOverrides(cfg *Config) error {
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
@@ -167,6 +199,9 @@ func applyEnvOverrides(cfg *Config) error {
 		}
 		if strings.HasPrefix(name, legacyAuthEnvPrefix) {
 			return fmt.Errorf("%s is no longer supported; use OPSI_CLOUD_GITHUB_APP_*", name)
+		}
+		if name == "OPSI_CLOUD_CLOUDFLARE_API_TOKEN" {
+			return fmt.Errorf("%s is not supported; use OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE", name)
 		}
 	}
 	if err := applyDurationEnv("OPSI_CLOUD_TTL", &cfg.TTL); err != nil {
@@ -177,6 +212,11 @@ func applyEnvOverrides(cfg *Config) error {
 	}
 	applyStringEnv("OPSI_CLOUD_PUBLIC_BASE_URL", &cfg.PublicBaseURL)
 	applyStringEnv("OPSI_CLOUD_DEPLOYMENT_DOMAIN", &cfg.DeploymentDomain)
+	if err := applyIntEnv("OPSI_CLOUD_PUBLIC_HOSTNAME_LIMIT_PER_USER", &cfg.PublicHostnameLimit); err != nil {
+		return err
+	}
+	applyStringEnv("OPSI_CLOUD_CLOUDFLARE_ZONE_ID", &cfg.Cloudflare.ZoneID)
+	applyStringEnv("OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE", &cfg.Cloudflare.APITokenFile)
 	if err := applyBoolEnv("OPSI_CLOUD_PRODUCTION", &cfg.Production); err != nil {
 		return err
 	}
@@ -264,6 +304,24 @@ func applyEnvOverrides(cfg *Config) error {
 	applyStringEnv("OPSI_CLOUD_BACKUP_S3_SESSION_TOKEN_FILE", &cfg.BackupStore.SessionTokenFile)
 	if err := applyBoolEnv("OPSI_CLOUD_BACKUP_S3_ALLOW_INSECURE", &cfg.BackupStore.AllowInsecure); err != nil {
 		return err
+	}
+	return nil
+}
+
+func loadCloudflareToken(cfg *CloudflareConfig) error {
+	if cfg.APITokenFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(cfg.APITokenFile)
+	if err != nil {
+		return fmt.Errorf("read OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE: %w", err)
+	}
+	if len(data) > maxConfigFileBytes {
+		return fmt.Errorf("OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE exceeds %d bytes", maxConfigFileBytes)
+	}
+	cfg.APIToken = trimOneTrailingNewline(string(data))
+	if strings.TrimSpace(cfg.APIToken) == "" {
+		return fmt.Errorf("OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE contains an empty token")
 	}
 	return nil
 }
@@ -402,11 +460,25 @@ func applyDurationEnv(name string, target *Duration) error {
 
 func validateConfig(cfg *Config) error {
 	if cfg.DeploymentDomain != "" {
-		domain, err := exposurev1.NormalizeHostname(strings.TrimPrefix(strings.TrimSpace(cfg.DeploymentDomain), "*."))
+		domain, err := exposurev1.NormalizeHostname(strings.TrimSpace(cfg.DeploymentDomain))
 		if err != nil {
 			return fmt.Errorf("deployment_domain must be a valid DNS suffix: %w", err)
 		}
 		cfg.DeploymentDomain = domain
+	}
+	if cfg.PublicHostnameLimit == 0 {
+		cfg.PublicHostnameLimit = 3
+	}
+	if cfg.PublicHostnameLimit < 0 || cfg.PublicHostnameLimit > 100 {
+		return fmt.Errorf("public_hostname_limit must be between 1 and 100")
+	}
+	if cfg.Cloudflare.Enabled() {
+		if cfg.Cloudflare.ZoneID == "" || cfg.Cloudflare.APITokenFile == "" || cfg.Cloudflare.APIToken == "" {
+			return fmt.Errorf("cloudflare zone_id and a non-empty api_token_file must be configured together")
+		}
+		if cfg.DeploymentDomain == "" {
+			return fmt.Errorf("cloudflare requires deployment_domain")
+		}
 	}
 	if time.Duration(cfg.TTL) <= 0 {
 		cfg.TTL = Duration(24 * time.Hour)
@@ -453,6 +525,9 @@ func validateConfig(cfg *Config) error {
 		}
 		if !cfg.RequireAgentSignatures {
 			return fmt.Errorf("production requires require_agent_signatures=true")
+		}
+		if cfg.DeploymentDomain != "" && !cfg.Cloudflare.Enabled() {
+			return fmt.Errorf("production public deployments require Cloudflare zone_id and api_token_file")
 		}
 		publicBaseURL, err := normalizeProductionPublicBaseURL(cfg.PublicBaseURL)
 		if err != nil {

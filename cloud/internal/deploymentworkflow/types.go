@@ -74,9 +74,15 @@ type Target struct {
 	NodeID        string `json:"node_id,omitempty"`
 	Hostname      string `json:"hostname,omitempty"`
 	Exposure      string `json:"exposure"`
+	PublicRoutes  string `json:"public_routes,omitempty"`
 	CPUMilli      int64  `json:"cpu_milli,omitempty"`
 	MemoryBytes   int64  `json:"memory_bytes,omitempty"`
 }
+
+const (
+	PublicRoutesAutomatic = "automatic"
+	PublicRoutesManual    = "manual"
+)
 
 type FailurePolicy struct {
 	FailFast             bool `json:"fail_fast"`
@@ -223,6 +229,11 @@ type Failure struct {
 	Retryable  bool   `json:"retryable"`
 }
 
+type PublicRouteFailure struct {
+	ServiceKey string `json:"service_key"`
+	Message    string `json:"message"`
+}
+
 type Run struct {
 	SchemaVersion          string                    `json:"schema_version"`
 	ID                     string                    `json:"id"`
@@ -237,6 +248,7 @@ type Run struct {
 	PreflightWarnings      []string                  `json:"preflight_warnings,omitempty"`
 	Refs                   AuthorityRefs             `json:"authority_refs"`
 	Failure                *Failure                  `json:"failure,omitempty"`
+	PublicRouteFailures    []PublicRouteFailure      `json:"public_route_failures,omitempty"`
 	Attempt                int                       `json:"attempt"`
 	RetryAfterAt           *time.Time                `json:"retry_after_at,omitempty"`
 	Revision               uint64                    `json:"revision"`
@@ -327,6 +339,9 @@ func ValidatePlan(plan Plan) error {
 	}
 	if plan.Target.Exposure != "public" && plan.Target.Exposure != "internal" {
 		return errors.New("deployment plan exposure is invalid")
+	}
+	if plan.Target.Exposure == "public" && plan.Target.PublicRoutes != "" && plan.Target.PublicRoutes != PublicRoutesAutomatic && plan.Target.PublicRoutes != PublicRoutesManual {
+		return errors.New("deployment plan public route policy is invalid")
 	}
 	if plan.Target.Exposure == "public" {
 		hostname, err := exposurev1.NormalizeHostname(plan.Target.Hostname)

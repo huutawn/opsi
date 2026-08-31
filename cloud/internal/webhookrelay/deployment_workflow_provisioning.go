@@ -300,6 +300,11 @@ func (e deploymentWorkflowExecutor) ensureConfigurations(ctx context.Context, ru
 	if err != nil {
 		return nil, nil, err
 	}
+	published, err := e.server.Registry.ListDeployments(run.ProjectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	manualRoutes := latestExposureByService(published)
 	bindings := map[string]resourcev1.Binding{}
 	for _, dependency := range run.Plan.Dependencies {
 		consumer, ok := apps[dependency.From]
@@ -341,7 +346,11 @@ func (e deploymentWorkflowExecutor) ensureConfigurations(ctx context.Context, ru
 			}
 		}
 		if applicationExposure(run, key) == "public" && applicationHostname(run, key) != "" {
-			draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: applicationHostname(run, key), Path: "/"}
+			if existing := manualRoutes[service.ID]; existing != nil && (existing.Metadata == nil || existing.Metadata.Rationale != automaticPublicRouteRationale) {
+				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: existing.Hostname, Path: existing.Path}
+			} else {
+				draft.PublicRoute = &serviceconfigurationv1.PublicRouteIntent{Hostname: applicationHostname(run, key), Path: applicationPath(run, key)}
+			}
 		}
 		for _, secret := range run.Plan.Secrets {
 			if secret.ApplicationKey != key {

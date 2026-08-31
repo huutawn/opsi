@@ -57,7 +57,7 @@ export type ServiceRecord = {
 };
 
 export type RepositoryEvidence = { path: string; kind: string; reason: string; confidence: "high" | "medium" | "low" };
-export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number }; exposure?: { mode?: string; hostname?: string }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number }; exposure?: { mode?: string; hostname?: string; path?: string; automatic?: boolean }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DependencyVerification = { type: string; path?: string; expected_status?: number };
 export type DetectedDependency = { from: string; to: string; protocol: string; strategy?: string; path?: string; required: boolean; injections?: Array<{ environment_name: string; symbolic_source: string; template?: string }>; verification?: DependencyVerification; confidence: string; reason: string; evidence: RepositoryEvidence[] };
@@ -72,7 +72,7 @@ export type DeploymentPlan = {
   secrets: Array<{ name: string; application_key: string; environment_name: string; generated: boolean; secret_ref?: string; revision?: number; display: string; confidence: string; reason: string; evidence: RepositoryEvidence[] }>;
   issues: AnalysisIssue[];
   analysis_scope: AnalysisScope; analysis_scope_hash: string; evidence_coverage: EvidenceCoverage; truncation_reason?: string;
-  target: { environment_id: string; runtime_id?: string; node_id?: string; hostname?: string; exposure: string; cpu_milli?: number; memory_bytes?: number };
+  target: { environment_id: string; runtime_id?: string; node_id?: string; hostname?: string; exposure: string; public_routes?: "automatic" | "manual"; cpu_milli?: number; memory_bytes?: number };
   authority_revisions: { source_commit_sha: string; repository_updated_at?: string; topology_revision?: number; topology_hash?: string; policy_revision?: number; policy_hash?: string; resource_revision?: number; resource_hash?: string };
   failure_policy: { fail_fast: boolean; rollback_known_good: boolean; retain_persistent_data: boolean; max_attempts: number };
 };
@@ -85,6 +85,7 @@ export type DeploymentRun = {
   preflight_hash?: string; preflight_warnings?: string[];
   authority_refs: { checkpoints?: Array<{ kind: string; id: string; revision?: number; state_hash?: string; step: DeploymentRunState }> };
   failure?: { step: DeploymentRunState; code: string; message: string; next_action?: string; retryable: boolean };
+  public_route_failures?: Array<{ service_key: string; message: string }>;
   attempt: number; revision: number; created_at: string; updated_at: string; finished_at?: string;
 };
 export type RepositoryExportPreview = { run_id: string; run_revision: number; plan_hash: string; source_sha: string; repository_id: number; target_branch: string; path: string; yaml: string; diff: string; preview_hash: string; export_enabled: boolean; disabled_reason?: string };
@@ -94,9 +95,19 @@ export type DeploymentRunEvent = { id: string; project_id: string; run_id: strin
 export type DeploymentRunResult = {
   run_id: string; state: DeploymentRunState; source_sha: string; public_url?: string;
   applications: Array<{ service_key: string; service_id: string; build_record_id: string; build_digest: string; build_log_url?: string; deployment_job_id?: string; deployment_status?: string; container_port?: number; application_image_id?: string; available_replicas?: number; readiness_evidence_hash?: string; digest_matches_image_id: boolean; public_url?: string }>;
+  public_endpoints?: Array<{ service_key: string; service_id: string; port: number; hostname: string; url: string; status: "publishing" | "ready" | "failed" | "manual_preserved"; message?: string }>;
+  public_hostname?: PublicHostnameAllocation;
   verifications: Array<{ id: string; dependency_logical_name: string; overall_status: string; provider_health: { status: string; provider_kind: string; safe_evidence?: Record<string,string> }; connection: { status: string; protocol?: string; latency_ms?: number }; consumer_assertion: { status: string; assertion_path?: string; status_code?: number; expected_code?: number } }>;
   capacity: Array<{ runtime_id: string; source: string; reserved_cpu_millicores: number; reserved_memory_bytes: number; assigned_cpu_millicores: number; assigned_memory_bytes: number; requested_cpu_millicores: number; requested_memory_bytes: number; available_cpu_millicores?: number; available_memory_bytes?: number; unknown_capacity: boolean; oversubscribed: boolean }>;
 };
+
+export type PublicHostnameStatus = "reserved" | "provisioning" | "active" | "release_pending" | "failed" | "released";
+export type PublicHostnameAllocation = {
+  id: string; hostname: string; owner_user_id: string; project_id: string; environment_id: string; runtime_id?: string;
+  target_ip?: string; cloudflare_record_id?: string; status: PublicHostnameStatus; publication_error_code?: string; publication_error?: string;
+  created_at: string; updated_at: string; released_at?: string;
+};
+export type PublicHostnameQuota = { used: number; limit: number; remaining: number; allocations: PublicHostnameAllocation[]; project_allocations?: PublicHostnameAllocation[] };
 
 export type EnvironmentVariable = { name: string; value: string };
 
@@ -168,7 +179,7 @@ export type ProposalReviewAudit = { proposal_hash: string; reviewed_payload_hash
 export type ProposalReviewStatus = "review_required" | "approved" | "rejected" | "stale" | "expired" | "applied" | "apply_failed";
 export type ProposalReview = {
   id: string; project_id: string; environment_id: string; application_id: string;
-  kind: "dependency" | "source_patch"; status: ProposalReviewStatus;
+  kind: "service_configuration" | "source_patch"; status: ProposalReviewStatus;
   proposal_hash: string; analysis_inputs_hash: string; source_commit?: string; application_root?: string;
   normalized_payload: unknown; reviewed_payload_hash: string;
   expected_configuration_revision?: number; expected_configuration_state_hash?: string;
@@ -176,8 +187,8 @@ export type ProposalReview = {
   rejected_by?: string; rejected_at?: string; applied_at?: string; resulting_configuration_revision?: number;
 };
 export type ProposalReviewCreateRequest = {
-  environment_id: string; kind: "dependency" | "source_patch"; analysis_inputs_hash: string;
-  source_commit?: string; application_root?: string; dependency_draft?: ServiceConfigurationDraft; source_patch?: unknown;
+  environment_id: string; kind: "service_configuration" | "source_patch"; analysis_inputs_hash: string;
+  source_commit?: string; application_root?: string; configuration_draft?: ServiceConfigurationDraft; source_patch?: unknown;
 };
 export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
 

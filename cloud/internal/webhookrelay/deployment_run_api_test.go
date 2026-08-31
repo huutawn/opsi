@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +23,7 @@ import (
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
 	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	serviceconfigurationv1 "github.com/opsi-dev/opsi/contracts/go/serviceconfigurationv1"
 	verificationv1 "github.com/opsi-dev/opsi/contracts/go/verificationv1"
 )
 
@@ -94,16 +97,93 @@ func TestDeploymentRunAPIViewerReadOnlyAndProjectScoped(t *testing.T) {
 	}
 }
 
-func TestWorkflowHostnameIsDeterministicAndProjectScoped(t *testing.T) {
-	first := workflowHostname("owner/identity-service", "project-a", "apps.example.test")
-	if first != workflowHostname("owner/identity-service", "project-a", "apps.example.test") {
-		t.Fatal("workflow hostname changed for identical authority")
+func TestCanonicalPublicHostnameAcceptsOneLabelAndRejectsUnsafeValues(t *testing.T) {
+	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
+	hostname, err := server.canonicalPublicHostname("TCIP")
+	if err != nil || hostname != "tcip.test.opsidev.site" {
+		t.Fatalf("hostname=%q err=%v", hostname, err)
 	}
-	if first == workflowHostname("owner/identity-service", "project-b", "apps.example.test") {
-		t.Fatal("workflow hostname was not project scoped")
+	for _, label := range []string{"", "api.foo", "https://api", "103.252.137.163", "localhost", " tcip", "tcip "} {
+		if _, err := server.canonicalPublicHostname(label); err == nil {
+			t.Fatalf("label %q was accepted", label)
+		}
 	}
-	if want := ".apps.example.test"; len(first) <= len(want) || first[len(first)-len(want):] != want {
-		t.Fatalf("hostname=%q", first)
+	if _, err := NewServer(Config{}).canonicalPublicHostname("tcip"); err == nil {
+		t.Fatal("unconfigured managed suffix was accepted")
+	}
+	target := deploymentworkflow.Target{Exposure: "public", Hostname: "tcip"}
+	if err := server.canonicalizeNewDeploymentTarget(&target); err != nil || target.Hostname != "tcip.test.opsidev.site" {
+		t.Fatalf("target=%+v err=%v", target, err)
+	}
+	legacy := deploymentworkflow.Target{Exposure: "public", Hostname: "tcip.103.252.137.163.nip.io"}
+	if err := server.canonicalizeNewDeploymentTarget(&legacy); err == nil {
+		t.Fatal("legacy nip.io hostname was accepted as a new public subdomain")
+	}
+}
+
+func TestAutomaticPublicRoutesUseOneHostnameAndDependencyPaths(t *testing.T) {
+	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
+	plan := deploymentworkflow.Plan{Target: deploymentworkflow.Target{Exposure: "public", PublicRoutes: deploymentworkflow.PublicRoutesAutomatic, Hostname: "tcip.test.opsidev.site"}, Applications: []repositoryanalysis.Application{
+		{Key: "api", Port: 8080}, {Key: "web", Port: 3000}, {Key: "worker", Port: 8080},
+	}, Dependencies: []repositoryanalysis.Dependency{{From: "web", To: "api", Protocol: "http", Strategy: serviceconfigurationv1.StrategySameOrigin, Path: "/api"}}}
+	if err := server.applyAutomaticPublicRoutesForPlan(&plan); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]repositoryanalysis.Exposure{}
+	for _, application := range plan.Applications {
+		if !application.Exposure.Automatic || application.Exposure.Mode != "public" {
+			t.Fatalf("application was not automatically public: %+v", application)
+		}
+		got[application.Key] = application.Exposure
+	}
+	want := map[string]repositoryanalysis.Exposure{
+		"api":    {Mode: "public", Hostname: "tcip.test.opsidev.site", Path: "/api", Automatic: true},
+		"web":    {Mode: "public", Hostname: "tcip.test.opsidev.site", Path: "/", Automatic: true},
+		"worker": {Mode: "public", Hostname: "tcip.test.opsidev.site", Path: "/worker", Automatic: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("routes=%v want=%v", got, want)
+	}
+	plan.Target.PublicRoutes = deploymentworkflow.PublicRoutesManual
+	if err := server.applyAutomaticPublicRoutesForPlan(&plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, application := range plan.Applications {
+		if application.Exposure.Automatic || application.Exposure.Mode != "internal" {
+			t.Fatalf("automatic route was not cleared: %+v", application.Exposure)
+		}
+	}
+}
+
+func TestAutomaticPublicRoutesUseBrowserBindingPathWithoutDuplicateDependency(t *testing.T) {
+	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
+	plan := deploymentworkflow.Plan{
+		Target:       deploymentworkflow.Target{Exposure: "public", PublicRoutes: deploymentworkflow.PublicRoutesAutomatic, Hostname: "tcip.test.opsidev.site"},
+		Applications: []repositoryanalysis.Application{{Key: "api", Port: 8080}, {Key: "web", Port: 3000}},
+		Bindings:     []repositoryanalysis.Binding{{From: "web", To: "api", Kind: serviceconfigurationv1.BindingBrowserHTTP, Path: "/api"}},
+	}
+	if err := server.applyAutomaticPublicRoutesForPlan(&plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.Applications[0].Exposure.Path != "/api" || plan.Applications[1].Exposure.Path != "/" {
+		t.Fatalf("routes=%+v", plan.Applications)
+	}
+}
+
+func TestAutomaticPublicRoutesRejectAmbiguousBrowserFrontends(t *testing.T) {
+	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
+	plan := deploymentworkflow.Plan{
+		Target:       deploymentworkflow.Target{Exposure: "public", PublicRoutes: deploymentworkflow.PublicRoutesAutomatic, Hostname: "tcip.test.opsidev.site"},
+		Applications: []repositoryanalysis.Application{{Key: "api", Port: 8080}, {Key: "web", Port: 3000}, {Key: "admin", Port: 3001}},
+		Dependencies: []repositoryanalysis.Dependency{
+			{From: "web", To: "api", Protocol: "http", Strategy: serviceconfigurationv1.StrategySameOrigin, Path: "/api"},
+			{From: "admin", To: "api", Protocol: "http", Strategy: serviceconfigurationv1.StrategySameOrigin, Path: "/api"},
+		},
+	}
+	err := server.applyAutomaticPublicRoutesForPlan(&plan)
+	var workflowError deploymentworkflow.Error
+	if !errors.As(err, &workflowError) || workflowError.Code != "AUTO_PUBLIC_ROOT_AMBIGUOUS" {
+		t.Fatalf("err=%v", err)
 	}
 }
 

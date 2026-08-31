@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
+	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -57,6 +58,14 @@ func (s *Server) handleExposureAPI(w http.ResponseWriter, r *http.Request, proje
 		if !decodeStrictDeploymentJSON(w, r, &request) {
 			return true
 		}
+		if err := s.canonicalizeExposureMutation(&request); err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		if err := s.ensurePublicHostnameAvailable(r.Context(), request.Exposure.Hostname, projectID, request.Exposure.EnvironmentID); err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
 		preview, err := store.PreviewExposure(projectID, principal.UserID, request)
 		writeRegistryResult(w, r, preview, err, http.StatusOK)
 		return true
@@ -67,6 +76,23 @@ func (s *Server) handleExposureAPI(w http.ResponseWriter, r *http.Request, proje
 		}
 		var request deploymentv1.ExposureMutationRequest
 		if !decodeStrictDeploymentJSON(w, r, &request) {
+			return true
+		}
+		if err := s.canonicalizeExposureMutation(&request); err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		allocation, err := s.reservePublicHostname(r.Context(), principal.UserID, projectID, request.Exposure.EnvironmentID, request.Exposure.RuntimeID, request.Exposure.Hostname)
+		if err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		targetIP, err := s.verifiedDeploymentIPv4(projectID, request.BaseDeploymentJobID)
+		if err == nil {
+			_, err = s.publishPublicHostname(r.Context(), allocation, targetIP)
+		}
+		if err != nil {
+			writeRegistryFailure(w, r, err)
 			return true
 		}
 		job, reused, err := store.StartExposureRollout(projectID, principal.UserID, r.Header.Get("Idempotency-Key"), r.Header.Get("X-Request-ID"), request)
@@ -118,6 +144,23 @@ func (s *Server) handleExposureAPI(w http.ResponseWriter, r *http.Request, proje
 		return true
 	}
 	return false
+}
+
+func (s *Server) canonicalizeExposureMutation(request *deploymentv1.ExposureMutationRequest) error {
+	hostname, err := s.canonicalPublicHostname(request.Exposure.Hostname)
+	if err != nil {
+		return err
+	}
+	request.Exposure.Hostname = hostname
+	// The client hashes the label it entered. Cloud owns the FQDN and must
+	// therefore recalculate the authoritative runtime hash after expansion.
+	request.Exposure.SpecHash = ""
+	canonical, err := request.Exposure.Canonicalize()
+	if err != nil {
+		return deploymentworkflow.Error{Code: "PUBLIC_HOSTNAME_INVALID", Status: http.StatusBadRequest, Message: "Public exposure is invalid.", NextAction: "Review the selected public subdomain."}
+	}
+	request.Exposure = canonical
+	return nil
 }
 
 func (s *Server) handleDeploymentAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {

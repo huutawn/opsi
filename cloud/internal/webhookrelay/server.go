@@ -22,11 +22,13 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/cloudflare"
 	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/githuboidc"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
+	"github.com/opsi-dev/opsi/cloud/internal/publichostname"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
@@ -58,6 +60,8 @@ type Server struct {
 	Topology                topology.Service
 	Policies                deploymentpolicy.Service
 	DeploymentRuns          deploymentworkflow.Service
+	PublicHostnames         publichostname.Service
+	Cloudflare              CloudflareProvisioner
 	RepositoryAnalyzer      repositoryanalysis.Detector
 	SourceReports           sourcereport.Store
 	Verifications           verificationstore.Store
@@ -93,6 +97,12 @@ type Server struct {
 	bootstrapInstall            bootstrapworker.InstallConfig
 	bootstrapRunnerPath         string
 	bootstrapRunnerSHA256       string
+}
+
+type CloudflareProvisioner interface {
+	ReconcileARecord(context.Context, string, string, string) (cloudflare.Record, error)
+	DeleteARecord(context.Context, string, string, string) error
+	ReconcileZoneRules(context.Context) error
 }
 
 func NewServer(cfg Config) *Server {
@@ -137,6 +147,7 @@ func NewServer(cfg Config) *Server {
 		Topology:                topologyService,
 		Policies:                deploymentpolicy.Service{Store: deploymentpolicy.NewMemoryStore(), BuildRecords: buildRecordService.Store, Bindings: registryService, Topology: topologyService},
 		DeploymentRuns:          deploymentworkflow.Service{Store: deploymentworkflow.NewMemoryStore()},
+		PublicHostnames:         publichostname.Service{Store: publichostname.NewMemoryStore(), Limit: cfg.PublicHostnameLimit},
 		SourceReports:           sourcereport.NewMemoryStore(),
 		Verifications:           verificationstore.NewMemoryStore(),
 		OIDC:                    verifier,

@@ -15,6 +15,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/auth"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
+	"github.com/opsi-dev/opsi/cloud/internal/publichostname"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryexport"
@@ -59,13 +60,29 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 			}
 			source := deploymentworkflow.Source{RepositoryID: repository.RepositoryID, InstallationID: repository.InstallationID, Repository: repository.FullName, SelectedRef: request.SelectedRef}
 			request.Target = workflowTarget(r.Context(), s.Registry, projectID, request.Target)
-			if request.Target.Exposure == "public" && request.Target.Hostname == "" && s.Config.DeploymentDomain != "" {
-				request.Target.Hostname = workflowHostname(repository.FullName, projectID, s.Config.DeploymentDomain)
+			if err := s.canonicalizeNewDeploymentTarget(&request.Target); err != nil {
+				writeRegistryFailure(w, r, err)
+				return true
+			}
+			var reserved publichostname.Allocation
+			allocationReused := true
+			if request.Target.Exposure == "public" && request.Target.Hostname != "" {
+				reserved, allocationReused, err = s.PublicHostnames.Reserve(r.Context(), publichostname.ReserveRequest{Hostname: request.Target.Hostname, OwnerUserID: principal.UserID, ProjectID: projectID, EnvironmentID: request.Target.EnvironmentID, RuntimeID: request.Target.RuntimeID})
+				if err = publicHostnameError(err); err != nil {
+					writeRegistryFailure(w, r, err)
+					return true
+				}
 			}
 			run, reused, err := s.DeploymentRuns.Create(r.Context(), projectID, principal.UserID, r.Header.Get("Idempotency-Key"), source, request.Target)
 			if err != nil {
+				if reserved.ID != "" && !allocationReused {
+					_, _ = s.PublicHostnames.Released(r.Context(), reserved.ID)
+				}
 				writeRegistryFailure(w, r, err)
 				return true
+			}
+			if reused && reserved.ID != "" && !allocationReused && run.Plan.Target.Hostname != request.Target.Hostname {
+				_, _ = s.PublicHostnames.Released(r.Context(), reserved.ID)
 			}
 			if !reused {
 				if analyzed, analysisErr := s.analyzeDeploymentRun(r.Context(), projectID, run.ID, nil); analysisErr == nil {
@@ -140,7 +157,24 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 			writeRegistryFailure(w, r, deploymentworkflow.Error{Code: "DEPLOYMENT_RUN_REVISION_STALE", Status: http.StatusConflict, Message: "The deployment run changed after it was loaded.", NextAction: "Refresh and review the latest run."})
 			return true
 		}
+		if err := s.canonicalizeUpdatedPlan(&request.Plan, current.Plan); err != nil {
+			writeRegistryFailure(w, r, err)
+			return true
+		}
+		var draftAllocation publichostname.Allocation
+		draftAllocationReused := true
+		if request.Plan.Target.Exposure == "public" && request.Plan.Target.Hostname != "" {
+			var reserveErr error
+			draftAllocation, draftAllocationReused, reserveErr = s.PublicHostnames.Reserve(r.Context(), publichostname.ReserveRequest{Hostname: request.Plan.Target.Hostname, OwnerUserID: principal.UserID, ProjectID: projectID, EnvironmentID: request.Plan.Target.EnvironmentID, RuntimeID: request.Plan.Target.RuntimeID})
+			if reserveErr = publicHostnameError(reserveErr); reserveErr != nil {
+				writeRegistryFailure(w, r, reserveErr)
+				return true
+			}
+		}
 		run, err := s.DeploymentRuns.UpdatePlan(r.Context(), projectID, runID, principal.UserID, request.ExpectedPlanHash, request.Plan)
+		if err != nil && draftAllocation.ID != "" && !draftAllocationReused {
+			_, _ = s.PublicHostnames.Released(r.Context(), draftAllocation.ID)
+		}
 		writeRegistryResult(w, r, run, err, http.StatusOK)
 		return true
 	}
@@ -431,14 +465,14 @@ func (s *Server) analyzeDeploymentRun(ctx context.Context, projectID, runID stri
 	}
 	s.recordConnectionAnalysisMetrics(analysis)
 	target := workflowTarget(ctx, s.Registry, projectID, run.Plan.Target)
-	if target.Exposure == "public" && target.Hostname == "" && s.Config.DeploymentDomain != "" {
-		target.Hostname = workflowHostname(repository.FullName, projectID, s.Config.DeploymentDomain)
-	}
 	if target.EnvironmentID == "" || target.RuntimeID == "" {
 		analysis.Issues = append(analysis.Issues, repositoryanalysis.Issue{Code: "TARGET_SERVER_REQUIRED", Message: "No Ready project server is available for this deployment.", Resolution: "Connect a server, then analyze again.", Blocking: true})
 	}
 	if target.Exposure == "public" && target.Hostname == "" {
-		analysis.Issues = append(analysis.Issues, repositoryanalysis.Issue{Code: "PUBLIC_HOSTNAME_REQUIRED", Message: "No public deployment hostname is configured.", Resolution: "Enter a hostname in Review plan or configure OPSI_CLOUD_DEPLOYMENT_DOMAIN.", Blocking: true})
+		analysis.Issues = append(analysis.Issues, repositoryanalysis.Issue{Code: "PUBLIC_HOSTNAME_REQUIRED", Message: "No public subdomain is configured.", Resolution: "Enter one public subdomain label in the deployment form.", Blocking: true})
+	}
+	if err := s.applyAutomaticPublicRoutes(&analysis, target); err != nil {
+		analysis.Issues = append(analysis.Issues, repositoryanalysis.Issue{Code: "AUTO_PUBLIC_ROUTE_INVALID", Message: "Automatic public routes could not be generated.", Resolution: err.Error(), Blocking: true})
 	}
 	authority, err := s.workflowAuthority(ctx, projectID, repository, sha)
 	if err != nil {
@@ -534,6 +568,9 @@ func workflowTarget(ctx context.Context, authority registry.API, projectID strin
 	if target.Exposure == "" {
 		target.Exposure = "public"
 	}
+	if target.Exposure == "public" && target.PublicRoutes == "" {
+		target.PublicRoutes = deploymentworkflow.PublicRoutesAutomatic
+	}
 	if target.CPUMilli == 0 {
 		target.CPUMilli = 100
 	}
@@ -569,15 +606,6 @@ func workflowTarget(ctx context.Context, authority registry.API, projectID strin
 		}
 	}
 	return target
-}
-
-func workflowHostname(repository, projectID, domain string) string {
-	_, name, found := strings.Cut(repository, "/")
-	if !found {
-		name = repository
-	}
-	digest := sha256.Sum256([]byte(projectID + "\x00" + repository))
-	return fmt.Sprintf("%s-%x.%s", safeDNSLabel(name), digest[:3], domain)
 }
 
 func (s *Server) workflowAuthority(ctx context.Context, projectID string, repository registry.GitHubRepository, sha string) (deploymentworkflow.AuthorityRevisions, error) {

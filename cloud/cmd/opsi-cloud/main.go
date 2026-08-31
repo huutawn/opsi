@@ -20,11 +20,13 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/bootstrapworker"
 	"github.com/opsi-dev/opsi/cloud/internal/buildjob"
 	"github.com/opsi-dev/opsi/cloud/internal/buildrecord"
+	"github.com/opsi-dev/opsi/cloud/internal/cloudflare"
 	cutoverdomain "github.com/opsi-dev/opsi/cloud/internal/cutover"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentpolicy"
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/otp"
 	"github.com/opsi-dev/opsi/cloud/internal/postgres"
+	"github.com/opsi-dev/opsi/cloud/internal/publichostname"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/resource"
 	restoredomain "github.com/opsi-dev/opsi/cloud/internal/restore"
@@ -93,6 +95,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookrelay.GitHubAppClient, stderr io.Writer) error {
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	relay := webhookrelay.NewServer(cfg)
+	if cfg.Cloudflare.Enabled() {
+		client, clientErr := cloudflare.New(cloudflare.Options{ZoneID: cfg.Cloudflare.ZoneID, APIToken: cfg.Cloudflare.APIToken, Domain: cfg.DeploymentDomain})
+		if clientErr != nil {
+			return fmt.Errorf("configure Cloudflare: %w", clientErr)
+		}
+		startupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if clientErr = client.ValidateZone(startupCtx); clientErr != nil {
+			return clientErr
+		}
+		if clientErr = client.ReconcileZoneRules(startupCtx); clientErr != nil {
+			return fmt.Errorf("reconcile Cloudflare zone rules: %w", clientErr)
+		}
+		relay.Cloudflare = client
+	}
 	if cfg.BootstrapWorkerConfig != "" {
 		install, err := bootstrapworker.LoadInstallConfig(cfg.BootstrapWorkerConfig)
 		if err != nil {
@@ -148,6 +165,11 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 		relay.Topology = topology.Service{Store: topology.PostgresStore{DB: db}, Facts: postgresRegistry, HeartbeatTTL: time.Duration(cfg.Placement.HeartbeatTTL), ReservedCPU: cfg.Placement.ReservedCPUMilli, ReservedMemory: cfg.Placement.ReservedMemoryBytes}
 		relay.Policies = deploymentpolicy.Service{Store: deploymentpolicy.PostgresStore{DB: db}, BuildRecords: relay.BuildRecords.Store, Bindings: postgresRegistry, Topology: relay.Topology}
 		relay.DeploymentRuns.Store = deploymentworkflow.PostgresStore{DB: db}
+		hostnameStore := publichostname.PostgresStore{DB: db}
+		if err := hostnameStore.Backfill(context.Background(), cfg.DeploymentDomain); err != nil {
+			return fmt.Errorf("backfill public hostname allocations: %w", err)
+		}
+		relay.PublicHostnames = publichostname.Service{Store: hostnameStore, Limit: cfg.PublicHostnameLimit}
 		relay.Cutovers.Deployments = postgresRegistry
 		relay.Cutovers.BuildRecords = relay.BuildRecords.Store
 		relay.Cutovers.Topology = relay.Topology
@@ -198,6 +220,7 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go relay.RunDeploymentWorkflow(ctx, fmt.Sprintf("cloud-%d", os.Getpid()))
+	go relay.RunPublicHostnameReconciler(ctx)
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("cloud relay listening", "addr", addr)
