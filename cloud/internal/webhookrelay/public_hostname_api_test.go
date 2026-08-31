@@ -67,3 +67,34 @@ func TestDeveloperCanReleaseProjectHostnameAndQuotaReturns(t *testing.T) {
 		t.Fatalf("quota=%+v err=%v", quota, err)
 	}
 }
+
+func TestRetryPublicationReResolvesVerifiedNodeIPv4(t *testing.T) {
+	server := NewServer(Config{DeploymentDomain: "test.example.com", PublicHostnameLimit: 3})
+	server.Cloudflare = successfulCloudflare{}
+	project, err := server.Registry.CreateProject("org", "project", "project", "owner", "project-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := server.Registry.PlacementFacts(t.Context(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Registry.UpsertNode(project.ID, "node-1", "server", "healthy", "203.0.113.10", "agent-1", "node-key"); err != nil {
+		t.Fatal(err)
+	}
+	allocation, _, err := server.PublicHostnames.Reserve(t.Context(), publichostname.ReserveRequest{Hostname: "app.test.example.com", OwnerUserID: "owner", ProjectID: project.ID, EnvironmentID: facts.Environments[0].ID, RuntimeID: facts.Runtimes[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocation, err = server.PublicHostnames.PublicationFailed(t.Context(), allocation.ID, "", "CLOUDFLARE_DNS_FAILED", "DNS publication failed.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := server.retryPublicHostname(t.Context(), allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != publichostname.StatusActive || updated.TargetIP != "203.0.113.10" || updated.CloudflareRecordID == "" {
+		t.Fatalf("updated=%+v", updated)
+	}
+}

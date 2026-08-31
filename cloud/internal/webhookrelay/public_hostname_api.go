@@ -110,10 +110,11 @@ func (s *Server) retryPublicHostname(ctx context.Context, allocation publichostn
 	if allocation.Status == publichostname.StatusReleasePending {
 		return s.releasePublicHostname(ctx, allocation)
 	}
-	if allocation.TargetIP == "" {
-		return allocation, deploymentworkflow.Error{Code: "PUBLIC_TARGET_IPV4_PENDING", Status: http.StatusConflict, Message: "Publication is waiting for a verified target IPv4 address.", NextAction: "Wait for workload verification before retrying publication."}
+	targetIP, err := s.verifiedAllocationIPv4(allocation)
+	if err != nil {
+		return allocation, err
 	}
-	return s.publishPublicHostname(ctx, allocation, allocation.TargetIP)
+	return s.publishPublicHostname(ctx, allocation, targetIP)
 }
 
 func (s *Server) ensureAutomaticHostnamePublished(ctx context.Context, run deploymentworkflow.Run) error {
@@ -136,15 +137,26 @@ func (s *Server) ensureAutomaticHostnamePublished(ctx context.Context, run deplo
 }
 
 func (s *Server) verifiedTargetIPv4(run deploymentworkflow.Run) (string, error) {
-	nodes, err := s.Registry.ListNodes(run.ProjectID)
+	return s.verifiedNodeIPv4(run.ProjectID, run.Plan.Target.NodeID, run.Plan.Target.EnvironmentID, run.Plan.Target.RuntimeID)
+}
+
+func (s *Server) verifiedAllocationIPv4(allocation publichostname.Allocation) (string, error) {
+	return s.verifiedNodeIPv4(allocation.ProjectID, "", allocation.EnvironmentID, allocation.RuntimeID)
+}
+
+func (s *Server) verifiedNodeIPv4(projectID, nodeID, environmentID, runtimeID string) (string, error) {
+	nodes, err := s.Registry.ListNodes(projectID)
 	if err != nil {
 		return "", err
 	}
 	for _, node := range nodes {
-		if run.Plan.Target.NodeID != "" && node.ID != run.Plan.Target.NodeID {
+		if nodeID != "" && node.ID != nodeID {
 			continue
 		}
-		if node.EnvironmentID != run.Plan.Target.EnvironmentID || node.RuntimeID != run.Plan.Target.RuntimeID || node.ProjectID != run.ProjectID || node.Status != registry.NodeHealthy {
+		if environmentID != "" && node.EnvironmentID != environmentID {
+			continue
+		}
+		if node.RuntimeID != runtimeID || node.ProjectID != projectID || node.Status != registry.NodeHealthy {
 			continue
 		}
 		if parsed := net.ParseIP(node.PublicHost); parsed != nil && parsed.To4() != nil {
@@ -166,18 +178,7 @@ func (s *Server) verifiedDeploymentIPv4(projectID, deploymentID string) (string,
 	if job.Status != deploymentv1.StateSucceeded || job.TerminalResult == nil || job.TerminalResult.AvailableReplicas < 1 {
 		return "", deploymentworkflow.Error{Code: "PUBLICATION_WORKLOAD_NOT_VERIFIED", Status: http.StatusConflict, Message: "Public hostname publication requires a verified successful workload.", NextAction: "Wait for workload verification before publishing the route."}
 	}
-	nodes, err := s.Registry.ListNodes(projectID)
-	if err != nil {
-		return "", err
-	}
-	for _, node := range nodes {
-		if node.ID == job.NodeID && node.ProjectID == projectID && node.RuntimeID == job.RuntimeID && node.Status == registry.NodeHealthy {
-			if parsed := net.ParseIP(node.PublicHost); parsed != nil && parsed.To4() != nil {
-				return parsed.To4().String(), nil
-			}
-		}
-	}
-	return "", deploymentworkflow.Error{Code: "PUBLIC_TARGET_IPV4_INVALID", Status: http.StatusConflict, Message: "The verified deployment node has no valid public IPv4 address.", NextAction: "Correct node public_host and retry publication."}
+	return s.verifiedNodeIPv4(projectID, job.NodeID, "", job.RuntimeID)
 }
 
 func (s *Server) RunPublicHostnameReconciler(ctx context.Context) {
