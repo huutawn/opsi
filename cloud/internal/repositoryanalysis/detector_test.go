@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -145,7 +146,7 @@ func TestAcceptanceProfileExcludesLowSignalSourceAndReadsRootDocs(t *testing.T) 
 		"docs/opsi-acceptance-profile.md":                                       "Set `Kafka__Enabled=false` for this acceptance profile.",
 		"tcip-fake/Dockerfile":                                                  "FROM scratch\nEXPOSE 3000\n",
 		"tcip-fake/next.config.ts":                                              `const backend = process.env.BACKEND_URL; async rewrites() { return [{source: "/api/:path*", destination: backend + "/api/:path*"}, {source: "/hubs/:path*", destination: backend + "/hubs/:path*"}] }`,
-		"tcip-fake/features/notifications/services/notification-hub.service.ts": `new HubConnectionBuilder().withUrl("/hubs/notifications");`,
+		"tcip-fake/features/notifications/services/notification-hub.service.ts": `new HubConnectionBuilder().withUrl("/hubs/notifications"); new WebSocket("/ws/events");`,
 	}
 	for i := 0; i < 160; i++ {
 		files[fmt.Sprintf("be/src/IdentityService.Api/Services/Impl/Service%03d.cs", i)] = "sealed class Service {}"
@@ -199,14 +200,14 @@ func TestAcceptanceProfileExcludesLowSignalSourceAndReadsRootDocs(t *testing.T) 
 		}
 		if dependency.From == frontendKey && dependency.To == backendKey {
 			proxyDependencies++
-			if dependency.Strategy != "internal_http" || dependency.Path != "/api" || len(dependency.Injections) != 1 || dependency.Injections[0].EnvironmentName != "BACKEND_URL" || dependency.Injections[0].SymbolicSource != "application.internal_url" {
+			if dependency.Strategy != "internal_http" || dependency.Path != "/api" || !reflect.DeepEqual(dependency.ProxyPaths, []string{"/api", "/hubs", "/ws"}) || len(dependency.Injections) != 1 || dependency.Injections[0].EnvironmentName != "BACKEND_URL" || dependency.Injections[0].SymbolicSource != "application.internal_url" {
 				t.Fatalf("proxy dependency=%+v", dependency)
 			}
 			evidence := strings.Builder{}
 			for _, item := range dependency.Evidence {
 				evidence.WriteString(item.Reason)
 			}
-			if !strings.Contains(evidence.String(), "/api") || !strings.Contains(evidence.String(), "/hubs/notifications") {
+			if !strings.Contains(evidence.String(), "/api") || !strings.Contains(evidence.String(), "/hubs") || !strings.Contains(evidence.String(), "/ws") {
 				t.Fatalf("proxy routes missing from evidence: %+v", dependency.Evidence)
 			}
 		}

@@ -144,7 +144,7 @@ func Render(plan deploymentworkflow.Plan) ([]byte, error) {
 			capacity := app.Capacity
 			rt.Capacity = &capacity
 		}
-		if app.Exposure != (repositoryanalysis.Exposure{}) {
+		if app.Exposure.Mode != "" || app.Exposure.Hostname != "" || app.Exposure.Path != "" || len(app.Exposure.AdditionalPaths) > 0 || app.Exposure.Automatic {
 			exposure := app.Exposure
 			rt.Exposure = &exposure
 		}

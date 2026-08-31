@@ -3,8 +3,11 @@ package repositoryanalysis
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+var applicationProxySourcePattern = regexp.MustCompile("(?i)[\"']?source[\"']?\\s*:\\s*[\"'](/(?:api|hubs|ws))(?:/[^\"']*)?[\"']")
 
 func inferDependencies(result *Result, files []File, read func(string) ([]byte, error)) {
 	if result.Authority == "explicit_config" {
@@ -22,14 +25,17 @@ func inferDependencies(result *Result, files []File, read func(string) ([]byte, 
 		}
 	}
 	proxyConfiguration := map[string]File{}
+	proxyPaths := map[string][]string{}
 	for _, file := range files {
 		text := string(contents[file.Path])
-		if !isApplicationProxyConfiguration(text) {
+		paths := applicationProxyPaths(text)
+		if len(paths) == 0 {
 			continue
 		}
 		for _, app := range result.Applications {
 			if underRoot(file.Path, app.Root) {
 				proxyConfiguration[app.Key] = file
+				proxyPaths[app.Key] = paths
 			}
 		}
 	}
@@ -43,15 +49,15 @@ func inferDependencies(result *Result, files []File, read func(string) ([]byte, 
 				continue
 			}
 			reason := "The web container proxies browser routes to an internal backend URL."
+			paths := proxyPaths[app.Key]
 			dependency := Dependency{
-				From: app.Key, To: target.Key, Protocol: "http", Strategy: "internal_http", Path: "/api", Required: true,
+				From: app.Key, To: target.Key, Protocol: "http", Strategy: "internal_http", Path: paths[0], ProxyPaths: paths, Required: true,
 				Injections:   []Injection{{EnvironmentName: "BACKEND_URL", SymbolicSource: "application.internal_url"}},
-				Verification: &VerificationContract{Type: "consumer_http", Path: "/api", ExpectedStatus: 200},
+				Verification: &VerificationContract{Type: "consumer_http", Path: paths[0], ExpectedStatus: 200},
 				Confidence:   ConfidenceHigh, Reason: reason,
-				Evidence: []Evidence{
-					{Path: file.Path, Kind: "application_proxy", Reason: "The server-side proxy maps /api to BACKEND_URL.", Confidence: ConfidenceHigh},
-					{Path: file.Path, Kind: "application_proxy", Reason: "The server-side proxy maps /hubs to BACKEND_URL.", Confidence: ConfidenceHigh},
-				},
+			}
+			for _, path := range paths {
+				dependency.Evidence = append(dependency.Evidence, Evidence{Path: file.Path, Kind: "application_proxy", Reason: "The server-side proxy maps " + path + " to BACKEND_URL.", Confidence: ConfidenceHigh})
 			}
 			replaced := false
 			for index := range result.Dependencies {
@@ -109,7 +115,7 @@ func inferDependencies(result *Result, files []File, read func(string) ([]byte, 
 			if ambiguous && !hasDialectIssue(result.Issues, app.Key, file.Path) {
 				result.Issues = append(result.Issues, Issue{Code: "CONNECTION_DIALECT_REQUIRED", Message: "A connection string is required by " + app.Key + ", but its dialect cannot be determined safely.", Path: file.Path, Resolution: "Select a protocol-specific dialect or a safe connection.template mapping in Review plan.", Blocking: true})
 			}
-			if isBrowserRouteConsumer(text) && (strings.Contains(text, "/hubs/notifications") || strings.Contains(text, "/api")) {
+			if isBrowserRouteConsumer(text) && len(browserProxyPaths(text)) > 0 {
 				if _, proxied := proxyConfiguration[app.Key]; proxied {
 					addApplicationProxyRouteEvidence(result, app.Key, file.Path, text)
 					continue
@@ -240,12 +246,33 @@ func addApplicationProxyRouteEvidence(result *Result, applicationKey, filePath, 
 		if dependency.From != applicationKey || dependency.Strategy != "internal_http" || !hasInjection(dependency.Injections, "BACKEND_URL", "application.internal_url") {
 			continue
 		}
-		for _, route := range []string{"/api", "/hubs/notifications"} {
-			if strings.Contains(text, route) {
-				dependency.Evidence = append(dependency.Evidence, Evidence{Path: filePath, Kind: "browser_route", Reason: "Browser source uses " + route + " through the application proxy.", Confidence: ConfidenceHigh})
+		for _, route := range browserProxyPaths(text) {
+			if !containsPath(dependency.ProxyPaths, route) {
+				dependency.ProxyPaths = append(dependency.ProxyPaths, route)
 			}
+			dependency.Evidence = append(dependency.Evidence, Evidence{Path: filePath, Kind: "browser_route", Reason: "Browser source uses " + route + " through the application proxy.", Confidence: ConfidenceHigh})
 		}
 	}
+}
+
+func browserProxyPaths(text string) []string {
+	lower := strings.ToLower(text)
+	paths := []string{}
+	for _, route := range []string{"/api", "/hubs", "/ws"} {
+		if strings.Contains(lower, route) {
+			paths = append(paths, route)
+		}
+	}
+	return paths
+}
+
+func containsPath(paths []string, target string) bool {
+	for _, path := range paths {
+		if path == target {
+			return true
+		}
+	}
+	return false
 }
 
 func hasInjection(injections []Injection, environmentName, symbolicSource string) bool {
@@ -267,8 +294,27 @@ func hasEvidenceKind(evidence []Evidence, kind string) bool {
 }
 
 func isApplicationProxyConfiguration(text string) bool {
+	return len(applicationProxyPaths(text)) > 0
+}
+
+func applicationProxyPaths(text string) []string {
 	lower := strings.ToLower(text)
-	return strings.Contains(lower, "backend_url") && strings.Contains(lower, "rewrites") && strings.Contains(lower, "destination") && strings.Contains(lower, "/api") && strings.Contains(lower, "/hubs")
+	if !strings.Contains(lower, "backend_url") || !strings.Contains(lower, "rewrites") || !strings.Contains(lower, "destination") {
+		return nil
+	}
+	present := map[string]bool{}
+	for _, match := range applicationProxySourcePattern.FindAllStringSubmatch(text, -1) {
+		if len(match) > 1 {
+			present[strings.ToLower(match[1])] = true
+		}
+	}
+	paths := make([]string, 0, len(present))
+	for _, path := range []string{"/api", "/hubs", "/ws"} {
+		if present[path] {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func isBrowserRouteConsumer(text string) bool {
@@ -280,6 +326,8 @@ func isBrowserRouteConsumer(text string) bool {
 		"xmlhttprequest",
 		"hubconnectionbuilder",
 		".withurl(",
+		"websocket(",
+		"socket.io",
 		"destination:",
 		"rewrites()",
 	} {

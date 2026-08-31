@@ -51,8 +51,11 @@ type Capacity struct {
 }
 
 type Exposure struct {
-	Mode     string `json:"mode,omitempty" yaml:"mode,omitempty"`
-	Hostname string `json:"hostname,omitempty" yaml:"hostname,omitempty"`
+	Mode            string   `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Hostname        string   `json:"hostname,omitempty" yaml:"hostname,omitempty"`
+	Path            string   `json:"path,omitempty" yaml:"path,omitempty"`
+	AdditionalPaths []string `json:"additional_paths,omitempty" yaml:"additionalPaths,omitempty"`
+	Automatic       bool     `json:"automatic,omitempty" yaml:"automatic,omitempty"`
 }
 
 type Persistence struct {
@@ -86,6 +89,7 @@ type Dependency struct {
 	Protocol     string                `json:"protocol"`
 	Strategy     string                `json:"strategy,omitempty"`
 	Path         string                `json:"path,omitempty"`
+	ProxyPaths   []string              `json:"proxy_paths,omitempty"`
 	Required     bool                  `json:"required"`
 	Injections   []Injection           `json:"injections,omitempty"`
 	Verification *VerificationContract `json:"verification,omitempty"`

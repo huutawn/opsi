@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -21,8 +22,9 @@ const (
 	TLSDisabled   = "disabled"
 	TLSSecretRef  = "secret_ref"
 
-	MaxJSONBytes = 32 * 1024
-	MaxPathBytes = 2048
+	MaxJSONBytes       = 32 * 1024
+	MaxPathBytes       = 2048
+	MaxAdditionalPaths = 15
 )
 
 const (
@@ -72,6 +74,7 @@ type ExposureSpec struct {
 	DeploymentJobID string    `json:"deployment_job_id"`
 	Hostname        string    `json:"hostname"`
 	Path            string    `json:"path"`
+	AdditionalPaths []string  `json:"additional_paths,omitempty"`
 	ServicePort     int32     `json:"service_port"`
 	TLS             TLSConfig `json:"tls"`
 	Metadata        *Metadata `json:"metadata,omitempty"`
@@ -112,6 +115,26 @@ func (s ExposureSpec) Canonicalize() (ExposureSpec, error) {
 		return ExposureSpec{}, err
 	}
 	out.Path = canonicalPath
+	if len(out.AdditionalPaths) > MaxAdditionalPaths {
+		return ExposureSpec{}, validationError(CodeInvalidPath, "additional_paths", "too many additional exposure paths")
+	}
+	seenPaths := map[string]bool{canonicalPath: true}
+	for index, additionalPath := range out.AdditionalPaths {
+		canonicalAdditionalPath, normalizeErr := NormalizePath(additionalPath)
+		if normalizeErr != nil {
+			return ExposureSpec{}, validationError(CodeInvalidPath, fmt.Sprintf("additional_paths[%d]", index), "additional exposure path is invalid")
+		}
+		if seenPaths[canonicalAdditionalPath] {
+			return ExposureSpec{}, validationError(CodeInvalidPath, fmt.Sprintf("additional_paths[%d]", index), "exposure paths must be unique")
+		}
+		seenPaths[canonicalAdditionalPath] = true
+		out.AdditionalPaths[index] = canonicalAdditionalPath
+	}
+	if len(out.AdditionalPaths) == 0 {
+		out.AdditionalPaths = nil
+	} else {
+		sort.Strings(out.AdditionalPaths)
+	}
 	if out.Metadata != nil && out.Metadata.DisplayName == "" && out.Metadata.Rationale == "" {
 		out.Metadata = nil
 	}
@@ -149,6 +172,19 @@ func (s ExposureSpec) Hash() (string, error) {
 		return "", err
 	}
 	return canonical.SpecHash, nil
+}
+
+// RoutePaths returns the canonical paths rendered for this exposure. Path is
+// kept as the primary route for backward compatibility and readiness probing.
+func (s ExposureSpec) RoutePaths() ([]string, error) {
+	canonical, err := s.Canonicalize()
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, 1+len(canonical.AdditionalPaths))
+	paths = append(paths, canonical.Path)
+	paths = append(paths, canonical.AdditionalPaths...)
+	return paths, nil
 }
 
 // RuntimeHash identifies only fields that can change the rendered Ingress or

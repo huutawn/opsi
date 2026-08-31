@@ -185,6 +185,22 @@ func TestAutomaticPublicRoutesPutApplicationProxyFrontendAtRoot(t *testing.T) {
 	}
 }
 
+func TestAutomaticPublicRoutesPreserveAllApplicationProxyPaths(t *testing.T) {
+	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
+	plan := deploymentworkflow.Plan{
+		Target:       deploymentworkflow.Target{Exposure: "public", PublicRoutes: deploymentworkflow.PublicRoutesAutomatic, Hostname: "tcip.test.opsidev.site"},
+		Applications: []repositoryanalysis.Application{{Key: "backend-service", Port: 8080}, {Key: "web", Port: 3000}},
+		Dependencies: []repositoryanalysis.Dependency{{From: "web", To: "backend-service", Protocol: "http", Strategy: serviceconfigurationv1.StrategyInternalHTTP, Path: "/api", ProxyPaths: []string{"/api", "/hubs", "/ws"}, Evidence: []repositoryanalysis.Evidence{{Kind: "application_proxy"}}}},
+	}
+	if err := server.applyAutomaticPublicRoutesForPlan(&plan); err != nil {
+		t.Fatal(err)
+	}
+	backend, frontend := plan.Applications[0].Exposure, plan.Applications[1].Exposure
+	if backend.Path != "/api" || !reflect.DeepEqual(backend.AdditionalPaths, []string{"/hubs", "/ws"}) || frontend.Path != "/" || len(frontend.AdditionalPaths) != 0 {
+		t.Fatalf("backend=%+v frontend=%+v", backend, frontend)
+	}
+}
+
 func TestAutomaticPublicRoutesPassesApplicationProxyEvidenceFromAnalysis(t *testing.T) {
 	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
 	analysis := repositoryanalysis.Result{

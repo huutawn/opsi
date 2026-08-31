@@ -72,6 +72,32 @@ func TestExposureSpecMetadataIsDisplayOnlyForRuntimeHash(t *testing.T) {
 	}
 }
 
+func TestExposureSpecCanonicalizesBoundedAdditionalPaths(t *testing.T) {
+	base := validSpec(t)
+	candidate := base
+	candidate.AdditionalPaths = []string{"/ws/", "/hubs"}
+	candidate.SpecHash = ""
+	canonical, err := candidate.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(canonical.SpecHash, base.SpecHash) {
+		t.Fatal("additional routes did not change the runtime hash")
+	}
+	paths, err := canonical.RoutePaths()
+	if err != nil || !reflect.DeepEqual(paths, []string{"/api", "/hubs", "/ws"}) {
+		t.Fatalf("paths=%v err=%v", paths, err)
+	}
+	for _, additional := range [][]string{{"/api"}, {"/hubs", "/hubs/"}, make([]string, MaxAdditionalPaths+1)} {
+		invalid := base
+		invalid.AdditionalPaths = additional
+		invalid.SpecHash = ""
+		if _, err := invalid.Canonicalize(); !hasCode(err, CodeInvalidPath) {
+			t.Fatalf("additional_paths=%v err=%v", additional, err)
+		}
+	}
+}
+
 func TestExposureSpecAcceptsR5011LegacyMetadataHash(t *testing.T) {
 	spec := validSpec(t)
 	legacy := spec

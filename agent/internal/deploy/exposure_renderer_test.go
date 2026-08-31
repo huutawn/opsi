@@ -83,6 +83,35 @@ func TestRenderExposureIsDeterministicAndTargetsExactOwnedService(t *testing.T) 
 	}
 }
 
+func TestRenderExposureTargetsAllCanonicalPathsAtOneService(t *testing.T) {
+	command := testAgentCommand(t)
+	spec := testExposureSpec(t)
+	spec.AdditionalPaths = []string{"/ws", "/hubs"}
+	spec.SpecHash = ""
+	var err error
+	spec, err = spec.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := renderExposure(context.Background(), command, spec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := rendered.Ingress["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["http"].(map[string]any)["paths"].([]any)
+	got := make([]string, 0, len(paths))
+	for _, value := range paths {
+		path := value.(map[string]any)
+		got = append(got, path["path"].(string))
+		service := path["backend"].(map[string]any)["service"].(map[string]any)
+		if service["name"] != rendered.BackendServiceName {
+			t.Fatalf("path %v targets service %v", path["path"], service["name"])
+		}
+	}
+	if !reflect.DeepEqual(got, []string{"/api", "/hubs", "/ws"}) {
+		t.Fatalf("paths=%v", got)
+	}
+}
+
 func TestRenderExposureTLSReferenceBoundary(t *testing.T) {
 	command := testAgentCommand(t)
 	spec := testExposureSpec(t)

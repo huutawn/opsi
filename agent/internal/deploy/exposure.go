@@ -112,18 +112,22 @@ func renderExposure(ctx context.Context, command deploymentv1.AgentCommand, spec
 		"opsi.dev/workload-spec-hash": command.SpecHash,
 		"opsi.dev/identity-hash":      exposureIdentityHash(canonical),
 	}
+	paths := make([]any, 0, 1+len(canonical.AdditionalPaths))
+	for _, path := range append([]string{canonical.Path}, canonical.AdditionalPaths...) {
+		paths = append(paths, map[string]any{
+			"path":     path,
+			"pathType": "Prefix",
+			"backend": map[string]any{"service": map[string]any{
+				"name": workload.ServiceName,
+				"port": map[string]any{"number": canonical.ServicePort},
+			}},
+		})
+	}
 	specObject := map[string]any{
 		"ingressClassName": TraefikIngressClass,
 		"rules": []any{map[string]any{
 			"host": canonical.Hostname,
-			"http": map[string]any{"paths": []any{map[string]any{
-				"path":     canonical.Path,
-				"pathType": "Prefix",
-				"backend": map[string]any{"service": map[string]any{
-					"name": workload.ServiceName,
-					"port": map[string]any{"number": canonical.ServicePort},
-				}},
-			}}},
+			"http": map[string]any{"paths": paths},
 		}},
 	}
 	if canonical.TLS.Mode == exposurev1.TLSSecretRef {

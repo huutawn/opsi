@@ -50,7 +50,7 @@ func (s *Service) previewExposureLocked(projectID string, request deploymentv1.E
 		if other.ServiceKey == desired.ServiceKey && other.EnvironmentID == desired.EnvironmentID && other.RuntimeID == desired.RuntimeID {
 			continue
 		}
-		if other.Hostname == desired.Hostname && exposurev1.ManagedPathsConflict(other.Path, desired.Path) {
+		if other.Hostname == desired.Hostname && exposureRoutesConflict(other, desired) {
 			preview.Eligible = false
 			preview.DecisionCode = "EXPOSURE_ROUTE_CONFLICT"
 			preview.Message = "hostname and path overlap another Opsi desired exposure"
@@ -58,6 +58,19 @@ func (s *Service) previewExposureLocked(projectID string, request deploymentv1.E
 		}
 	}
 	return preview, nil
+}
+
+func exposureRoutesConflict(first, second exposurev1.ExposureSpec) bool {
+	firstPaths := append([]string{first.Path}, first.AdditionalPaths...)
+	secondPaths := append([]string{second.Path}, second.AdditionalPaths...)
+	for _, firstPath := range firstPaths {
+		for _, secondPath := range secondPaths {
+			if exposurev1.ManagedPathsConflict(firstPath, secondPath) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Service) StartExposureRollout(projectID, actorUserID, key, requestID string, request deploymentv1.ExposureMutationRequest) (DeploymentJob, bool, error) {
@@ -285,6 +298,9 @@ func exposureChanges(current *exposurev1.ExposureSpec, desired exposurev1.Exposu
 	}
 	if current.Path != desired.Path {
 		changes = append(changes, "path")
+	}
+	if !reflect.DeepEqual(current.AdditionalPaths, desired.AdditionalPaths) {
+		changes = append(changes, "additional_paths")
 	}
 	if current.ServicePort != desired.ServicePort {
 		changes = append(changes, "service_port")

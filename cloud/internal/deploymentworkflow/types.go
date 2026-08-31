@@ -299,6 +299,7 @@ func HashPlan(plan Plan) (string, error) {
 		sort.Slice(copy.Dependencies[i].Injections, func(j, k int) bool {
 			return copy.Dependencies[i].Injections[j].EnvironmentName < copy.Dependencies[i].Injections[k].EnvironmentName
 		})
+		sort.Strings(copy.Dependencies[i].ProxyPaths)
 		sortEvidence(copy.Dependencies[i].Evidence)
 	}
 	sort.Slice(copy.Bindings, func(i, j int) bool {
@@ -408,6 +409,22 @@ func ValidatePlan(plan Plan) error {
 		}
 		if dependency.Required && dependency.Protocol != "postgres" && dependency.Protocol != "redis" && dependency.Protocol != "nats" && dependency.Verification == nil {
 			return errors.New("required dependency verification contract is missing")
+		}
+		if len(dependency.ProxyPaths) > 0 {
+			if dependency.Protocol != serviceconfigurationv1.ProtocolHTTP || dependency.Strategy != serviceconfigurationv1.StrategyInternalHTTP || len(dependency.ProxyPaths) > exposurev1.MaxAdditionalPaths+1 {
+				return errors.New("deployment plan application proxy paths are invalid")
+			}
+			seenPaths := map[string]bool{}
+			for _, path := range dependency.ProxyPaths {
+				canonicalPath, err := exposurev1.NormalizePath(path)
+				if err != nil || canonicalPath == "/" || seenPaths[canonicalPath] {
+					return errors.New("deployment plan application proxy paths are invalid")
+				}
+				seenPaths[canonicalPath] = true
+			}
+			if !seenPaths[dependency.Path] {
+				return errors.New("deployment plan primary application proxy path is missing")
+			}
 		}
 		seenMappings := map[string]bool{}
 		for _, mapping := range dependency.Injections {

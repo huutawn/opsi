@@ -126,6 +126,32 @@ func TestExposureRolloutAllowsSameOriginLongestPrefixRoutes(t *testing.T) {
 	}
 }
 
+func TestExposureRolloutRejectsDuplicateAdditionalRoute(t *testing.T) {
+	service, projectID, base := rolloutRegistryFixture(t, "additional-route-conflict")
+	web := rolloutExposureRequest(t, base, "dep-web-hubs", "apps.example.com", "/hubs").Exposure
+	web.ServiceKey, web.SpecHash = "web", ""
+	web, err := web.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	webJob := base
+	webJob.ID, webJob.ServiceID, webJob.ExposureSpec = web.DeploymentJobID, "svc-web", &web
+	webJob.CreatedAt = base.CreatedAt.Add(1)
+	service.deployments[webJob.ID] = webJob
+
+	request := rolloutExposureRequest(t, base, "dep-api-multiple", "apps.example.com", "/api")
+	request.Exposure.AdditionalPaths = []string{"/hubs", "/ws"}
+	request.Exposure.SpecHash = ""
+	request.Exposure, err = request.Exposure.Canonicalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.PreviewExposure(projectID, "user-1", request)
+	if err != nil || preview.Eligible || preview.DecisionCode != "EXPOSURE_ROUTE_CONFLICT" {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+}
+
 func TestFirstSuccessfulDeploymentHasNoRollbackTarget(t *testing.T) {
 	_, _, first := rolloutRegistryFixture(t, "first-rollback")
 	if first.RollbackEligible || first.RollbackBlockedReason == "" {

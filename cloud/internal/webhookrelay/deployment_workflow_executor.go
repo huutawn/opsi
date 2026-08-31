@@ -563,7 +563,7 @@ func (e deploymentWorkflowExecutor) ensureAutomaticExposures(ctx context.Context
 		spec, canonicalErr := (exposurev1.ExposureSpec{
 			SchemaVersion: exposurev1.SchemaVersion, ProjectID: run.ProjectID, EnvironmentID: run.Plan.Target.EnvironmentID, RuntimeID: run.Plan.Target.RuntimeID,
 			ServiceKey: application.Key, DeploymentJobID: automaticExposureDeploymentID(run.ID, service.ID),
-			Hostname: application.Exposure.Hostname, Path: applicationPath(run, application.Key), ServicePort: int32(application.Port), TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled},
+			Hostname: application.Exposure.Hostname, Path: applicationPath(run, application.Key), AdditionalPaths: applicationAdditionalPaths(run, application.Key), ServicePort: int32(application.Port), TLS: exposurev1.TLSConfig{Mode: exposurev1.TLSDisabled},
 			Metadata: &exposurev1.Metadata{DisplayName: "Automatic public route", Rationale: automaticPublicRouteRationale},
 		}).Canonicalize()
 		if canonicalErr != nil {
@@ -732,6 +732,15 @@ func applicationPath(run deploymentworkflow.Run, key string) string {
 		}
 	}
 	return "/"
+}
+
+func applicationAdditionalPaths(run deploymentworkflow.Run, key string) []string {
+	for _, application := range run.Plan.Applications {
+		if application.Key == key {
+			return append([]string(nil), application.Exposure.AdditionalPaths...)
+		}
+	}
+	return nil
 }
 
 func authorityStateHash(value any) string {

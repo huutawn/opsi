@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
@@ -137,8 +138,14 @@ func (s *Server) applyAutomaticPublicRoutesForPlan(plan *deploymentworkflow.Plan
 		}
 		if dependency.Strategy == serviceconfigurationv1.StrategyInternalHTTP && hasApplicationProxyEvidence(dependency) {
 			rootCandidates[dependency.From] = true
-			if err := addBackendPath(dependency.To, dependency.Path); err != nil {
-				return err
+			proxyPaths := dependency.ProxyPaths
+			if len(proxyPaths) == 0 {
+				proxyPaths = []string{dependency.Path}
+			}
+			for _, proxyPath := range proxyPaths {
+				if err := addBackendPath(dependency.To, proxyPath); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -161,22 +168,26 @@ func (s *Server) applyAutomaticPublicRoutesForPlan(plan *deploymentworkflow.Plan
 			continue
 		}
 		path := "/" + safeDNSLabel(application.Key)
+		additionalPaths := []string(nil)
 		if rootCandidates[application.Key] {
 			path = "/"
 		}
 		if candidates := pathsByApplication[application.Key]; len(candidates) > 0 {
-			if len(candidates) > 1 {
-				return deploymentworkflow.Error{Code: "AUTO_PUBLIC_PATH_AMBIGUOUS", Status: http.StatusUnprocessableEntity, Message: "One backend requires more than one unrelated public path.", NextAction: "Consolidate the backend under one path prefix or configure routes manually."}
-			}
+			paths := make([]string, 0, len(candidates))
 			for candidate := range candidates {
-				path = candidate
+				paths = append(paths, candidate)
 			}
+			sort.Strings(paths)
+			path = paths[0]
+			additionalPaths = append(additionalPaths, paths[1:]...)
 		}
-		if owner := usedPaths[path]; owner != "" && owner != application.Key {
-			return deploymentworkflow.Error{Code: "AUTO_PUBLIC_PATH_CONFLICT", Status: http.StatusConflict, Message: "Automatic public routes contain a duplicate path.", NextAction: "Assign a unique same-origin path to each backend."}
+		for _, candidate := range append([]string{path}, additionalPaths...) {
+			if owner := usedPaths[candidate]; owner != "" && owner != application.Key {
+				return deploymentworkflow.Error{Code: "AUTO_PUBLIC_PATH_CONFLICT", Status: http.StatusConflict, Message: "Automatic public routes contain a duplicate path.", NextAction: "Assign a unique same-origin path to each backend."}
+			}
+			usedPaths[candidate] = application.Key
 		}
-		usedPaths[path] = application.Key
-		application.Exposure = repositoryanalysis.Exposure{Mode: "public", Hostname: plan.Target.Hostname, Path: path, Automatic: true}
+		application.Exposure = repositoryanalysis.Exposure{Mode: "public", Hostname: plan.Target.Hostname, Path: path, AdditionalPaths: additionalPaths, Automatic: true}
 	}
 	return nil
 }
