@@ -137,6 +137,9 @@ func (s *Server) applyAutomaticPublicRoutesForPlan(plan *deploymentworkflow.Plan
 		}
 		if dependency.Strategy == serviceconfigurationv1.StrategyInternalHTTP && hasApplicationProxyEvidence(dependency) {
 			rootCandidates[dependency.From] = true
+			if err := addBackendPath(dependency.To, dependency.Path); err != nil {
+				return err
+			}
 		}
 	}
 	for _, binding := range plan.Bindings {

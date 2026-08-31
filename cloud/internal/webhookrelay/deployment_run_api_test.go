@@ -174,8 +174,8 @@ func TestAutomaticPublicRoutesPutApplicationProxyFrontendAtRoot(t *testing.T) {
 	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
 	plan := deploymentworkflow.Plan{
 		Target:       deploymentworkflow.Target{Exposure: "public", PublicRoutes: deploymentworkflow.PublicRoutesAutomatic, Hostname: "tcip.test.opsidev.site"},
-		Applications: []repositoryanalysis.Application{{Key: "api", Port: 8080}, {Key: "web", Port: 3000}},
-		Dependencies: []repositoryanalysis.Dependency{{From: "web", To: "api", Protocol: "http", Strategy: serviceconfigurationv1.StrategyInternalHTTP, Evidence: []repositoryanalysis.Evidence{{Kind: "application_proxy"}}}},
+		Applications: []repositoryanalysis.Application{{Key: "backend-service", Port: 8080}, {Key: "web", Port: 3000}},
+		Dependencies: []repositoryanalysis.Dependency{{From: "web", To: "backend-service", Protocol: "http", Strategy: serviceconfigurationv1.StrategyInternalHTTP, Path: "/api", Evidence: []repositoryanalysis.Evidence{{Kind: "application_proxy"}}}},
 	}
 	if err := server.applyAutomaticPublicRoutesForPlan(&plan); err != nil {
 		t.Fatal(err)
@@ -188,8 +188,8 @@ func TestAutomaticPublicRoutesPutApplicationProxyFrontendAtRoot(t *testing.T) {
 func TestAutomaticPublicRoutesPassesApplicationProxyEvidenceFromAnalysis(t *testing.T) {
 	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
 	analysis := repositoryanalysis.Result{
-		Applications: []repositoryanalysis.Application{{Key: "api", Port: 8080}, {Key: "web", Port: 3000}},
-		Dependencies: []repositoryanalysis.Dependency{{From: "web", To: "api", Protocol: "http", Strategy: serviceconfigurationv1.StrategyInternalHTTP, Evidence: []repositoryanalysis.Evidence{{Kind: "application_proxy"}}}},
+		Applications: []repositoryanalysis.Application{{Key: "backend-service", Port: 8080}, {Key: "web", Port: 3000}},
+		Dependencies: []repositoryanalysis.Dependency{{From: "web", To: "backend-service", Protocol: "http", Strategy: serviceconfigurationv1.StrategyInternalHTTP, Path: "/api", Evidence: []repositoryanalysis.Evidence{{Kind: "application_proxy"}}}},
 	}
 	if err := server.applyAutomaticPublicRoutes(&analysis, deploymentworkflow.Target{Exposure: "public", PublicRoutes: deploymentworkflow.PublicRoutesAutomatic, Hostname: "tcip.test.opsidev.site"}); err != nil {
 		t.Fatal(err)
