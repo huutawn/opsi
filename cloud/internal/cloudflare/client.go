@@ -24,21 +24,23 @@ var ErrDNSConflict = errors.New("cloudflare DNS record conflicts with Opsi alloc
 var ErrOwnership = errors.New("cloudflare DNS record ownership could not be verified")
 
 type Client struct {
-	zoneID   string
-	token    string
-	domain   string
-	baseURL  string
-	http     *http.Client
-	rulesMu  sync.Mutex
-	maxTries int
+	zoneID         string
+	token          string
+	domain         string
+	baseURL        string
+	http           *http.Client
+	rulesMu        sync.Mutex
+	maxTries       int
+	flexibleOrigin bool
 }
 
 type Options struct {
-	ZoneID     string
-	APIToken   string
-	Domain     string
-	APIURL     string
-	HTTPClient *http.Client
+	ZoneID                string
+	APIToken              string
+	Domain                string
+	APIURL                string
+	HTTPClient            *http.Client
+	DisableFlexibleOrigin bool
 }
 
 type Record struct {
@@ -76,7 +78,7 @@ func New(options Options) (*Client, error) {
 		clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 	httpClient = &clone
-	return &Client{zoneID: strings.TrimSpace(options.ZoneID), token: strings.TrimSpace(options.APIToken), domain: strings.TrimSuffix(strings.ToLower(strings.TrimSpace(options.Domain)), "."), baseURL: baseURL, http: httpClient, maxTries: 3}, nil
+	return &Client{zoneID: strings.TrimSpace(options.ZoneID), token: strings.TrimSpace(options.APIToken), domain: strings.TrimSuffix(strings.ToLower(strings.TrimSpace(options.Domain)), "."), baseURL: baseURL, http: httpClient, maxTries: 3, flexibleOrigin: !options.DisableFlexibleOrigin}, nil
 }
 
 func Marker(allocationID string) string { return "opsi-public-hostname:" + allocationID }

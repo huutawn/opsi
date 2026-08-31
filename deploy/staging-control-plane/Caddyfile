@@ -11,12 +11,6 @@
 		}
 		respond @health 200
 
-		# Cloudflare terminates TLS for the managed test suffix and reaches this
-		# origin over HTTP through its suffix-scoped Flexible rule. Do not redirect
-		# these requests back to HTTPS or the edge would enter a redirect loop.
-		@cloudflare_flexible host *.test.opsidev.site
-		reverse_proxy @cloudflare_flexible cloud:9800
-
 		redir https://{host}{uri} 308
 	}
 }

@@ -25,27 +25,28 @@ const (
 )
 
 type Config struct {
-	TTL                    Duration                `json:"ttl"`
-	DatabaseURL            string                  `json:"database_url"`
-	PublicBaseURL          string                  `json:"public_base_url"`
-	DeploymentDomain       string                  `json:"deployment_domain,omitempty"`
-	PublicHostnameLimit    int                     `json:"public_hostname_limit,omitempty"`
-	Cloudflare             CloudflareConfig        `json:"cloudflare,omitempty"`
-	Production             bool                    `json:"production"`
-	OTP                    OTPConfig               `json:"otp"`
-	SMTP                   SMTPConfig              `json:"smtp"`
-	Alerts                 AlertConfig             `json:"alerts"`
-	BootstrapWorkerToken   string                  `json:"bootstrap_worker_token"`
-	BootstrapWorkerConfig  string                  `json:"bootstrap_worker_config"`
-	BootstrapSecretKey     string                  `json:"bootstrap_secret_key"`
-	RequireAgentSignatures bool                    `json:"require_agent_signatures"`
-	GitHubApp              GitHubAppConfig         `json:"github_app"`
-	GitHubOIDC             githuboidc.Config       `json:"github_oidc"`
-	BuildExecutor          buildjob.ExecutorConfig `json:"build_executor"`
-	BuildRegistry          buildjob.RegistryConfig `json:"build_registry"`
-	RegistryPull           RegistryPullConfig      `json:"registry_pull"`
-	Placement              PlacementConfig         `json:"placement"`
-	BackupStore            BackupStoreConfig       `json:"backup_store"`
+	TTL                      Duration                `json:"ttl"`
+	DatabaseURL              string                  `json:"database_url"`
+	PublicBaseURL            string                  `json:"public_base_url"`
+	DeploymentDomain         string                  `json:"deployment_domain,omitempty"`
+	PublicHostnameLimit      int                     `json:"public_hostname_limit,omitempty"`
+	CloudflareFlexibleOrigin bool                    `json:"cloudflare_flexible_origin"`
+	Cloudflare               CloudflareConfig        `json:"cloudflare,omitempty"`
+	Production               bool                    `json:"production"`
+	OTP                      OTPConfig               `json:"otp"`
+	SMTP                     SMTPConfig              `json:"smtp"`
+	Alerts                   AlertConfig             `json:"alerts"`
+	BootstrapWorkerToken     string                  `json:"bootstrap_worker_token"`
+	BootstrapWorkerConfig    string                  `json:"bootstrap_worker_config"`
+	BootstrapSecretKey       string                  `json:"bootstrap_secret_key"`
+	RequireAgentSignatures   bool                    `json:"require_agent_signatures"`
+	GitHubApp                GitHubAppConfig         `json:"github_app"`
+	GitHubOIDC               githuboidc.Config       `json:"github_oidc"`
+	BuildExecutor            buildjob.ExecutorConfig `json:"build_executor"`
+	BuildRegistry            buildjob.RegistryConfig `json:"build_registry"`
+	RegistryPull             RegistryPullConfig      `json:"registry_pull"`
+	Placement                PlacementConfig         `json:"placement"`
+	BackupStore              BackupStoreConfig       `json:"backup_store"`
 }
 
 type CloudflareConfig struct {
@@ -135,9 +136,10 @@ type Duration time.Duration
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
-		TTL:                 Duration(24 * time.Hour),
-		PublicHostnameLimit: 3,
-		GitHubOIDC:          githuboidc.DefaultConfig(),
+		TTL:                      Duration(24 * time.Hour),
+		PublicHostnameLimit:      3,
+		CloudflareFlexibleOrigin: true,
+		GitHubOIDC:               githuboidc.DefaultConfig(),
 		Placement: PlacementConfig{
 			HeartbeatTTL: Duration(2 * time.Minute), ReservedCPUMilli: 250, ReservedMemoryBytes: 256 << 20,
 		},
@@ -212,6 +214,9 @@ func applyEnvOverrides(cfg *Config) error {
 	}
 	applyStringEnv("OPSI_CLOUD_PUBLIC_BASE_URL", &cfg.PublicBaseURL)
 	applyStringEnv("OPSI_CLOUD_DEPLOYMENT_DOMAIN", &cfg.DeploymentDomain)
+	if err := applyBoolEnv("OPSI_CLOUD_CLOUDFLARE_FLEXIBLE_ORIGIN", &cfg.CloudflareFlexibleOrigin); err != nil {
+		return err
+	}
 	if err := applyIntEnv("OPSI_CLOUD_PUBLIC_HOSTNAME_LIMIT_PER_USER", &cfg.PublicHostnameLimit); err != nil {
 		return err
 	}

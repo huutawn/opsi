@@ -267,6 +267,34 @@ func TestRulesCreateMissingPhaseEntryPoints(t *testing.T) {
 	}
 }
 
+func TestRulesDisableRemovesOnlyOpsiRules(t *testing.T) {
+	var deleted []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/rulesets"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []ruleset{{ID: "config", Kind: "zone", Phase: "http_config_settings"}, {ID: "redirect", Kind: "zone", Phase: "http_request_dynamic_redirect"}}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/config"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": ruleset{ID: "config", Rules: []rule{{ID: "ours-config", Ref: flexibleRuleRef}, {ID: "foreign", Ref: "operator"}}}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/redirect"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": ruleset{ID: "redirect", Rules: []rule{{ID: "ours-redirect", Ref: redirectRuleRef}}}})
+		case r.Method == http.MethodDelete:
+			deleted = append(deleted, r.URL.Path)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{}})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, _ := New(Options{ZoneID: "zone", APIToken: "token", Domain: "example.com", APIURL: server.URL, DisableFlexibleOrigin: true})
+	if err := client.ReconcileZoneRules(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(deleted, "/zones/zone/rulesets/config/rules/ours-config") || !slices.Contains(deleted, "/zones/zone/rulesets/redirect/rules/ours-redirect") || len(deleted) != 2 {
+		t.Fatalf("deleted=%v", deleted)
+	}
+}
+
 func TestRulesReconciliationIsSerialized(t *testing.T) {
 	var mu sync.Mutex
 	active, maximum := 0, 0

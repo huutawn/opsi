@@ -163,16 +163,6 @@ def http_health_route_is_ordered(caddy: str) -> bool:
     return health >= 0 and redirect > health
 
 
-def flexible_origin_route_is_scoped(caddy: str) -> bool:
-    listener = re.search(r"(?ms)^:8080\s*\{(.*?)(?=^:8443\s*\{)", caddy)
-    if not listener:
-        return False
-    block = listener.group(1)
-    matcher = "@cloudflare_flexible host *.test.opsidev.site"
-    proxy = "reverse_proxy @cloudflare_flexible cloud:9800"
-    return matcher in block and proxy in block and block.find(proxy) < block.find("redir https://{host}{uri} 308")
-
-
 def require_https(raw: str, name: str, allow_placeholder: bool) -> object:
     parsed = urlparse(raw)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
@@ -339,9 +329,6 @@ def validate_source_texts(
         fail("Caddy HTTP listener must provide health and controlled HTTPS redirect")
     if not http_health_route_is_ordered(caddy):
         fail("Caddy HTTP listener must preserve loopback health before HTTPS redirect with route")
-    if not flexible_origin_route_is_scoped(caddy):
-        fail("Caddy HTTP listener must proxy only the Cloudflare Flexible test suffix before redirecting other HTTP requests")
-
     if worker.get("production") is not True:
         fail("staging bootstrap-worker production must be true")
     if worker.get("cloud_url") != "http://cloud:9800":

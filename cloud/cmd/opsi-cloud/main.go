@@ -96,7 +96,7 @@ func serveCloud(addr string, cfg webhookrelay.Config, githubAppClient *webhookre
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	relay := webhookrelay.NewServer(cfg)
 	if cfg.Cloudflare.Enabled() {
-		client, clientErr := cloudflare.New(cloudflare.Options{ZoneID: cfg.Cloudflare.ZoneID, APIToken: cfg.Cloudflare.APIToken, Domain: cfg.DeploymentDomain})
+		client, clientErr := cloudflare.New(cloudflare.Options{ZoneID: cfg.Cloudflare.ZoneID, APIToken: cfg.Cloudflare.APIToken, Domain: cfg.DeploymentDomain, DisableFlexibleOrigin: !cfg.CloudflareFlexibleOrigin})
 		if clientErr != nil {
 			return fmt.Errorf("configure Cloudflare: %w", clientErr)
 		}

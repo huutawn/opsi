@@ -28,6 +28,7 @@ var cloudEnvNames = append([]string{
 	"OPSI_CLOUD_DATABASE_URL",
 	"OPSI_CLOUD_PUBLIC_BASE_URL",
 	"OPSI_CLOUD_DEPLOYMENT_DOMAIN",
+	"OPSI_CLOUD_CLOUDFLARE_FLEXIBLE_ORIGIN",
 	"OPSI_CLOUD_PUBLIC_HOSTNAME_LIMIT_PER_USER",
 	"OPSI_CLOUD_CLOUDFLARE_ZONE_ID",
 	"OPSI_CLOUD_CLOUDFLARE_API_TOKEN_FILE",
@@ -182,6 +183,25 @@ func TestCloudflareConfigRequiresSecretFileAndLoadsToken(t *testing.T) {
 	}
 	if cfg.Cloudflare.APIToken != "secret-token" || cfg.Cloudflare.APITokenFile != tokenPath || cfg.PublicHostnameLimit != 3 {
 		t.Fatalf("cloudflare config=%+v limit=%d", cfg.Cloudflare, cfg.PublicHostnameLimit)
+	}
+}
+
+func TestCloudflareFlexibleOriginDefaultsToEnabledAndCanBeDisabled(t *testing.T) {
+	clearCloudEnv(t)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CloudflareFlexibleOrigin {
+		t.Fatal("Cloudflare Flexible origin must remain enabled unless explicitly disabled")
+	}
+	t.Setenv("OPSI_CLOUD_CLOUDFLARE_FLEXIBLE_ORIGIN", "false")
+	cfg, err = LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareFlexibleOrigin {
+		t.Fatal("Cloudflare Flexible origin was not disabled")
 	}
 }
 

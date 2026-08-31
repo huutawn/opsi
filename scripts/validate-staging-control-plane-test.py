@@ -96,10 +96,6 @@ class StagingValidatorTests(unittest.TestCase):
         self.assertTrue(validator.http_health_route_is_ordered(self.caddy))
         self.assert_source_rejected(caddy=self.caddy.replace("\troute {\n", "\thandle {\n", 1))
 
-    def test_flexible_origin_route_must_be_scoped_and_precede_redirect(self) -> None:
-        self.assert_source_rejected(caddy=self.caddy.replace("reverse_proxy @cloudflare_flexible cloud:9800", "reverse_proxy cloud:9800", 1))
-        self.assert_source_rejected(caddy=self.caddy.replace("@cloudflare_flexible host *.test.opsidev.site", "@cloudflare_flexible host test.opsidev.site", 1))
-
     def test_internal_path_variants_are_denied(self) -> None:
         for target in (
             "/internal",
