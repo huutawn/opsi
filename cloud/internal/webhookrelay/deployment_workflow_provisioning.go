@@ -227,9 +227,10 @@ func (e deploymentWorkflowExecutor) ensureResources(ctx context.Context, run dep
 			if detected.Persistence != nil {
 				storage = resourcev1.StorageRequest{Persistent: detected.Persistence.Persistent, SizeBytes: detected.Persistence.SizeBytes, PolicyRef: detected.Persistence.PolicyRef}
 			}
+			managedCPU, managedMemory := deploymentworkflow.PlannedManagedResourceCapacity(detected.Type)
 			value, _, err = e.server.Resources.Create(ctx, run.ProjectID, run.CreatedBy, workflowExecutionKey(run, "resource", detected.LogicalName), resourcev1.CreateRequest{
 				EnvironmentID: run.Plan.Target.EnvironmentID, Name: detected.LogicalName, Kind: resourcev1.KindManagedService, Type: resourceType,
-				Managed: &resourcev1.ManagedSpec{Type: resourceType, Version: version.Version, Profile: profile.Name, Replicas: 1, CPUMillicores: run.Plan.Target.CPUMilli, MemoryBytes: run.Plan.Target.MemoryBytes, Storage: storage, ServiceConfig: detected.Settings, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
+				Managed: &resourcev1.ManagedSpec{Type: resourceType, Version: version.Version, Profile: profile.Name, Replicas: 1, CPUMillicores: managedCPU, MemoryBytes: managedMemory, Storage: storage, ServiceConfig: detected.Settings, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"}},
 			})
 			if err != nil {
 				return result, ids, err
@@ -268,10 +269,40 @@ func (e deploymentWorkflowExecutor) ensureTopology(ctx context.Context, run depl
 		return topologyv1.Plan{}, currentErr
 	}
 	for _, application := range run.Plan.Applications {
-		assignments[application.Key] = topologyv1.Assignment{ServiceKey: application.Key, EnvironmentID: run.Plan.Target.EnvironmentID, RuntimeID: run.Plan.Target.RuntimeID, Replicas: firstPositiveInt32(application.Capacity.Replicas, 1), CPURequestMillicores: firstPositiveInt64(application.Capacity.CPUMilli, run.Plan.Target.CPUMilli), MemoryRequestBytes: firstPositiveInt64(application.Capacity.MemoryBytes, run.Plan.Target.MemoryBytes), Exposure: topologyv1.ExposureIntent{Mode: applicationExposure(run, application.Key)}}
+		cpuReq := firstPositiveInt64(application.Capacity.CPUMilli, run.Plan.Target.CPUMilli)
+		memReq := firstPositiveInt64(application.Capacity.MemoryBytes, run.Plan.Target.MemoryBytes)
+		cpuLim := firstPositiveInt64(application.Capacity.CPULimitMilli, run.Plan.Target.CPULimitMilli)
+		if cpuLim < cpuReq {
+			cpuLim = cpuReq
+		}
+		memLim := firstPositiveInt64(application.Capacity.MemoryLimitBytes, run.Plan.Target.MemoryLimitBytes)
+		if memLim < memReq {
+			memLim = memReq
+		}
+		assignments[application.Key] = topologyv1.Assignment{
+			ServiceKey:           application.Key,
+			EnvironmentID:        run.Plan.Target.EnvironmentID,
+			RuntimeID:            run.Plan.Target.RuntimeID,
+			Replicas:             firstPositiveInt32(application.Capacity.Replicas, 1),
+			CPURequestMillicores: cpuReq,
+			MemoryRequestBytes:   memReq,
+			CPULimitMillicores:   cpuLim,
+			MemoryLimitBytes:     memLim,
+			Exposure:             topologyv1.ExposureIntent{Mode: applicationExposure(run, application.Key)},
+		}
 	}
 	for _, value := range resources {
-		assignments[value.ID] = topologyv1.Assignment{ServiceKey: value.ID, EnvironmentID: value.EnvironmentID, RuntimeID: run.Plan.Target.RuntimeID, Replicas: value.Managed.Replicas, CPURequestMillicores: value.Managed.CPUMillicores, MemoryRequestBytes: value.Managed.MemoryBytes, Exposure: topologyv1.ExposureIntent{Mode: "none"}}
+		assignments[value.ID] = topologyv1.Assignment{
+			ServiceKey:           value.ID,
+			EnvironmentID:        value.EnvironmentID,
+			RuntimeID:            run.Plan.Target.RuntimeID,
+			Replicas:             value.Managed.Replicas,
+			CPURequestMillicores: value.Managed.CPUMillicores,
+			MemoryRequestBytes:   value.Managed.MemoryBytes,
+			CPULimitMillicores:   value.Managed.CPUMillicores,
+			MemoryLimitBytes:     value.Managed.MemoryBytes,
+			Exposure:             topologyv1.ExposureIntent{Mode: "none"},
+		}
 	}
 	values := make([]topologyv1.Assignment, 0, len(assignments))
 	for _, value := range assignments {

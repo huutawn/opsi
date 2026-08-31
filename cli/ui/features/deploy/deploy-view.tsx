@@ -11,8 +11,9 @@ import { RefineAnalysis, RepositoryExport } from "@/features/deploy/analysis-too
 import { PublicRoute } from "@/features/deploy/public-route";
 import { PublicHostnameQuotaPanel } from "@/features/deploy/public-hostname-quota";
 import { publicHostname, publicSubdomainFromHostname } from "@/features/deploy/public-subdomain";
+import { ResourceProposalDialog } from "@/features/deploy/resource-proposal-dialog";
 import { LocalAPIError, LocalClient } from "@/lib/api/local-client";
-import type { AnalysisScope, DeploymentPlan, DeploymentRun, DeploymentRunEvent, DeploymentRunResult, GitHubInstallation, GitHubRepository, PublicHostnameAllocation, PublicHostnameQuota, RepositoryExportPreview, RepositoryExportResult, WorkloadSecretMetadata } from "@/lib/contracts/registry";
+import type { AnalysisScope, DeploymentPlan, DeploymentRun, DeploymentRunEvent, DeploymentRunResult, GitHubInstallation, GitHubRepository, PublicHostnameAllocation, PublicHostnameQuota, RepositoryExportPreview, RepositoryExportResult, ResourceRecommendation, WorkloadSecretMetadata } from "@/lib/contracts/registry";
 import { terminalBootstrap } from "@/lib/presentation/infrastructure/model";
 
 export function DeployView({ console }: { console: ConsoleController }) {
@@ -39,6 +40,11 @@ export function DeployView({ console }: { console: ConsoleController }) {
   const [showConnect, setShowConnect] = useState(false);
   const targetResume = useRef(false);
   const connectTrigger = useRef<HTMLButtonElement>(null);
+  const [showProposal, setShowProposal] = useState(false);
+  const [recommendation, setRecommendation] = useState<ResourceRecommendation | null>(null);
+  const [recLoading, setRecLoading] = useState(false);
+  const [recError, setRecError] = useState<string | null>(null);
+  const [applyingProposal, setApplyingProposal] = useState(false);
   const canMutate = ["owner", "admin", "developer"].includes(console.session?.role || "");
   const needsServer = Boolean(run?.plan.issues.some((issue) => issue.code === "TARGET_SERVER_REQUIRED" && issue.blocking));
   const bootstrapSession = useMemo(() => [...console.state.sessions].sort((a, b) => b.created_at.localeCompare(a.created_at))[0], [console.state.sessions]);
@@ -143,6 +149,69 @@ export function DeployView({ console }: { console: ConsoleController }) {
     }
   }
   async function saveDraft() { if (!run || !draftPlan) return; await mutate("plan", () => client.updateDeploymentPlan(projectID, run.id, run.revision, run.plan.hash, draftPlan, crypto.randomUUID())); }
+  const loadRecommendation = useCallback(async (openDialog = true) => {
+    if (!projectID || !run) return null;
+    setRecLoading(true);
+    setRecError(null);
+    if (openDialog) setShowProposal(true);
+    try {
+      const rec = await client.resourceRecommendation(projectID, run.id);
+      setRecommendation(rec);
+      return rec;
+    } catch (cause) {
+      const msg = (cause as Error).message || "Failed to load resource recommendation";
+      setRecError(msg);
+      return null;
+    } finally {
+      setRecLoading(false);
+    }
+  }, [client, projectID, run]);
+
+  // Proposal is prompted after bootstrap completes/resumes analysis or when requested via Resource proposal action
+  async function applyProposal(rec: ResourceRecommendation) {
+    if (!run || !draftPlan) return;
+    setApplyingProposal(true);
+    try {
+      const updatedPlan = structuredClone(draftPlan);
+      for (const appRec of rec.applications) {
+        const index = updatedPlan.applications.findIndex((a) => a.key === appRec.key);
+        if (index >= 0) {
+          updatedPlan.applications[index].capacity = {
+            ...updatedPlan.applications[index].capacity,
+            replicas: appRec.replicas,
+            cpu_milli: appRec.proposed.cpu_request_milli,
+            cpu_limit_milli: appRec.proposed.cpu_limit_milli,
+            memory_bytes: appRec.proposed.memory_request_bytes,
+            memory_limit_bytes: appRec.proposed.memory_limit_bytes,
+          };
+        }
+      }
+      setDraftPlan(updatedPlan);
+      const updatedRun = await client.updateDeploymentPlan(
+        projectID,
+        run.id,
+        run.revision,
+        run.plan.hash,
+        updatedPlan,
+        crypto.randomUUID(),
+        rec.basis?.basis_hash
+      );
+      setRun(updatedRun);
+      setDraftPlan(structuredClone(updatedRun.plan));
+      setRuns((current) => [updatedRun, ...current.filter((item) => item.id !== updatedRun.id)]);
+      setShowProposal(false);
+    } catch (cause) {
+      const failure = deployFailure(cause);
+      if (failure.code === "RESOURCE_RECOMMENDATION_STALE") {
+        setRecError("Resource recommendation is stale because cluster topology or capacity changed. Loading refreshed proposal…");
+        void loadRecommendation(true);
+      } else {
+        setError(failure);
+      }
+    } finally {
+      setApplyingProposal(false);
+    }
+  }
   async function hostnameAction(allocation: PublicHostnameAllocation, actionName: "release" | "retry") { const name = `hostname-${allocation.id}`; setBusy(name); setError(null); try { await client.publicHostnameAction(projectID, allocation.id, actionName, crypto.randomUUID()); const quota = await client.publicHostnameQuota(projectID); setHostnameQuota(quota); if (run) setResult(await client.deploymentRunResult(projectID, run.id)); } catch (cause) { setError(deployFailure(cause)); } finally { setBusy(""); } }
   async function resolveSecret(applicationID: string, logicalName: string, value: string): Promise<WorkloadSecretMetadata> { const response = await client.upsertWorkloadSecret(projectID, applicationID, logicalName, value, crypto.randomUUID()); return response.workload_secret; }
   async function mutate(name: string, operation: () => Promise<DeploymentRun>) { setBusy(name); setError(null); try { const next = await operation(); setRun(next); setDraftPlan(structuredClone(next.plan)); setRuns((current) => [next, ...current.filter((item) => item.id !== next.id)]); const [timeline, projection, quota] = await Promise.all([client.deploymentRunEvents(projectID, next.id), client.deploymentRunResult(projectID, next.id), client.publicHostnameQuota(projectID)]); setEvents(timeline.events || []); setResult(projection); setHostnameQuota(quota); return next; } catch (cause) { setError(deployFailure(cause)); return null; } finally { setBusy(""); } }
@@ -160,6 +229,7 @@ export function DeployView({ console }: { console: ConsoleController }) {
 					targetResume.current = true;
 					const resumed = await mutate("analyze", () => client.deploymentRunAction(projectID, run.id, "analyze", {}, crypto.randomUUID()));
 					if (!resumed) targetResume.current = false;
+					else void loadRecommendation(true);
 				}
 			} catch { targetResume.current = false; /* The visible run issue remains the factual next action. */ }
 			finally { checking = false; }
@@ -175,7 +245,7 @@ export function DeployView({ console }: { console: ConsoleController }) {
     if (!hostnameQuota || hostnameQuota.remaining > 0) return false;
     const label = publicSubdomainFromHostname(value) || value;
     const fqdn = label ? publicHostname(label) : "";
-    return ![...hostnameQuota.allocations, ...(hostnameQuota.project_allocations || [])].some((allocation) => allocation.status !== "released" && allocation.project_id === projectID && allocation.hostname === fqdn);
+    return ![...(hostnameQuota.allocations || []), ...(hostnameQuota.project_allocations || [])].some((allocation) => allocation.status !== "released" && allocation.project_id === projectID && allocation.hostname === fqdn);
   };
   return (
     <main className="mx-auto max-w-7xl space-y-6 p-4 lg:p-margin-desktop">
@@ -184,8 +254,8 @@ export function DeployView({ console }: { console: ConsoleController }) {
       <PublicHostnameQuotaPanel busy={busy} canMutate={canMutate} onAction={(allocation, actionName) => void hostnameAction(allocation, actionName)} projectID={projectID} quota={hostnameQuota} />
       {sourceOnly ? <SourceStep busy={busy} canMutate={canMutate && !isAuthFailure(error)} hostname={hostname} installationID={installationID} installations={installations} linkedInstallationIDs={linkedInstallationIDs} onConnectInstallation={() => void connectInstallation()} onDiscover={() => void discoverGitHub()} onHostname={(value) => { setHostname(value); updateSourceDraft(projectID, { hostname: value }); }} onInstallation={(value) => { setInstallationID(value); updateSourceDraft(projectID, { installationID: value }); }} onRef={(value) => { setRefName(value); updateSourceDraft(projectID, { refName: value }); }} onRepository={(value) => { setRepositoryID(value); updateSourceDraft(projectID, { repositoryID: value }); }} onStart={() => void sourceAction()} quotaBlocked={hostnameQuotaBlocked(hostname)} refName={refName} repositories={repositories} repositoryID={repositoryID} /> : run && <>
         <RunHeader onSelect={(id) => { const selected = runs.find((item) => item.id === id) || null; setRun(selected); setExportResult(null); setDraftPlan(selected ? structuredClone(selected.plan) : null); setHostname(selected?.plan.target.hostname || ""); if (selected) void Promise.all([client.deploymentRunEvents(projectID, selected.id), client.deploymentRunResult(projectID, selected.id)]).then(([timeline, projection]) => { setEvents(timeline.events || []); setResult(projection); }); }} run={run} runs={runs} />
-        {run.state === "awaiting_input" && draftPlan && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><PlanReview canEdit={canMutate} dirty={JSON.stringify(draftPlan) !== JSON.stringify(run.plan)} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} quotaBlocked={hostnameQuotaBlocked(draftPlan.target.hostname || "")} saving={busy === "plan"} services={console.state.services} /></div>}
-        {run.state === "awaiting_approval" && draftPlan && <ApprovalPlanSummary plan={draftPlan}><PlanReview canEdit={canMutate} dirty={JSON.stringify(draftPlan) !== JSON.stringify(run.plan)} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} quotaBlocked={hostnameQuotaBlocked(draftPlan.target.hostname || "")} saving={busy === "plan"} services={console.state.services} /><RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} /></ApprovalPlanSummary>}
+        {run.state === "awaiting_input" && draftPlan && <div className="border border-outline-variant/30 bg-surface-container p-4 sm:p-6"><PlanReview canEdit={canMutate} dirty={JSON.stringify(draftPlan) !== JSON.stringify(run.plan)} onPlan={setDraftPlan} onProposal={() => void loadRecommendation(true)} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} quotaBlocked={hostnameQuotaBlocked(draftPlan.target.hostname || "")} saving={busy === "plan"} services={console.state.services} /></div>}
+        {run.state === "awaiting_approval" && draftPlan && <ApprovalPlanSummary onProposal={() => void loadRecommendation(true)} plan={draftPlan}><PlanReview canEdit={canMutate} dirty={JSON.stringify(draftPlan) !== JSON.stringify(run.plan)} onPlan={setDraftPlan} onResolveSecret={resolveSecret} onSave={() => void saveDraft()} plan={draftPlan} quotaBlocked={hostnameQuotaBlocked(draftPlan.target.hostname || "")} saving={busy === "plan"} services={console.state.services} /><RepositoryExport canCreate={canMutate} onCreate={createExport} onPreview={previewExport} result={exportResult} /></ApprovalPlanSummary>}
         {run.plan.issues.some((issue) => issue.code === "ANALYSIS_TRUNCATED") && <RefineAnalysis
           busy={busy === "analyze"}
           initialScope={run.plan.analysis_scope || { application_roots: [], exclude_paths: [] }}
@@ -199,6 +269,16 @@ export function DeployView({ console }: { console: ConsoleController }) {
         <PrimaryAction bootstrapActive={bootstrapActive} busy={busy} canMutate={canMutate} connectTrigger={connectTrigger} needsServer={needsServer} onAction={action} onConnect={() => setShowConnect(true)} onNew={() => { setShowNew(true); setHostname(""); setError(null); }} run={run} />
         <TechnicalDetails events={events} result={result} run={run} />
 		{showConnect && <BootstrapDialog console={console} onClose={() => { setShowConnect(false); window.requestAnimationFrame(() => connectTrigger.current?.focus()); }} onCreated={async () => { await console.actions.load(); }} />}
+		{showProposal && (
+			<ResourceProposalDialog
+				applying={applyingProposal}
+				error={recError}
+				loading={recLoading}
+				onApply={applyProposal}
+				onClose={() => setShowProposal(false)}
+				recommendation={recommendation}
+			/>
+		)}
       </>}
     </main>
   );

@@ -57,7 +57,7 @@ export type ServiceRecord = {
 };
 
 export type RepositoryEvidence = { path: string; kind: string; reason: string; confidence: "high" | "medium" | "low" };
-export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number }; exposure?: { mode?: string; hostname?: string; path?: string; automatic?: boolean }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
+export type DetectedApplication = { source_key: string; key: string; name: string; root: string; port?: number; environment?: Record<string,string>; capacity?: { replicas?: number; cpu_milli?: number; memory_bytes?: number; cpu_limit_milli?: number; memory_limit_bytes?: number }; exposure?: { mode?: string; hostname?: string; path?: string; automatic?: boolean }; build: { context: string; dockerfile_path?: string; strategy: string; platform: string; image?: string }; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DetectedResource = { logical_name: string; type: string; managed: boolean; required: boolean; persistence?: { persistent: boolean; size_bytes?: number; policy_ref?: string }; settings?: Record<string,string>; recommendation?: string; confidence: string; reason: string; evidence: RepositoryEvidence[] };
 export type DependencyVerification = { type: string; path?: string; expected_status?: number };
 export type DetectedDependency = { from: string; to: string; protocol: string; strategy?: string; path?: string; required: boolean; injections?: Array<{ environment_name: string; symbolic_source: string; template?: string }>; verification?: DependencyVerification; confidence: string; reason: string; evidence: RepositoryEvidence[] };
@@ -72,7 +72,7 @@ export type DeploymentPlan = {
   secrets: Array<{ name: string; application_key: string; environment_name: string; generated: boolean; secret_ref?: string; revision?: number; display: string; confidence: string; reason: string; evidence: RepositoryEvidence[] }>;
   issues: AnalysisIssue[];
   analysis_scope: AnalysisScope; analysis_scope_hash: string; evidence_coverage: EvidenceCoverage; truncation_reason?: string;
-  target: { environment_id: string; runtime_id?: string; node_id?: string; hostname?: string; exposure: string; public_routes?: "automatic" | "manual"; cpu_milli?: number; memory_bytes?: number };
+  target: { environment_id: string; runtime_id?: string; node_id?: string; hostname?: string; exposure: string; public_routes?: "automatic" | "manual"; cpu_milli?: number; memory_bytes?: number; cpu_limit_milli?: number; memory_limit_bytes?: number };
   authority_revisions: { source_commit_sha: string; repository_updated_at?: string; topology_revision?: number; topology_hash?: string; policy_revision?: number; policy_hash?: string; resource_revision?: number; resource_hash?: string };
   failure_policy: { fail_fast: boolean; rollback_known_good: boolean; retain_persistent_data: boolean; max_attempts: number };
 };
@@ -350,8 +350,43 @@ export type TopologyAssignment = {
   replicas: number;
   cpu_request_millicores: number;
   memory_request_bytes: number;
+  cpu_limit_millicores?: number;
+  memory_limit_bytes?: number;
   exposure: { mode: "none" | "internal" | "public" };
   rationale?: { summary?: string };
+};
+
+export type ResourceBudget = { cpu_millicores: number; memory_bytes: number };
+export type BudgetProjection = {
+  real_capacity: ResourceBudget;
+  system_reserve: ResourceBudget;
+  existing_workloads: ResourceBudget;
+  planned_managed: ResourceBudget;
+  available_for_run: ResourceBudget;
+  remaining_after_proposal: ResourceBudget;
+};
+export type ApplicationResourceValues = { cpu_request_milli: number; cpu_limit_milli: number; memory_request_bytes: number; memory_limit_bytes: number };
+export type ApplicationRecommendation = { key: string; name: string; replicas: number; current: ApplicationResourceValues; proposed: ApplicationResourceValues };
+export type TargetCapacityInfo = { cpu_millicores: number; memory_bytes: number; source: string; heartbeat_age_seconds: number; heartbeat_fresh: boolean };
+export type RecommendationBasis = {
+  run_revision: number;
+  plan_hash: string;
+  topology_revision: number;
+  topology_hash: string;
+  capacity_state_hash: string;
+  basis_hash: string;
+  observed_at: string;
+};
+export type ResourceRecommendation = {
+  eligible: boolean;
+  runtime_id?: string;
+  node_id?: string;
+  target_capacity: TargetCapacityInfo;
+  budget_projection: BudgetProjection;
+  basis: RecommendationBasis;
+  applications: ApplicationRecommendation[];
+  warnings?: string[];
+  reason?: string;
 };
 
 export type TopologyDraft = { schema_version: "opsi.topology_plan/v1"; project_id: string; assignments: TopologyAssignment[] };

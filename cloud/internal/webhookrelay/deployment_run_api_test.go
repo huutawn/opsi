@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -886,5 +887,208 @@ func TestDeploymentPlanUpdateRequiresExactRevisionAndReplaysSemantically(t *test
 	}
 	if replay := request(strconv.FormatUint(run.Revision, 10)); replay.Code != http.StatusOK || replay.Body.String() != updated.Body.String() {
 		t.Fatalf("semantic replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+}
+func TestResourceRecommendationEndpoint(t *testing.T) {
+	server := NewServer(Config{})
+	project, err := server.Registry.CreateProject("org-1", "Recommendation Project", "rec-project", "owner", "rec-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerHash, _ := auth.HashPAT("rec-owner-pat")
+	viewerHash, _ := auth.HashPAT("rec-viewer-pat")
+	server.Auth = &auth.Service{Store: auth.MemoryStore{Candidates: []auth.Candidate{
+		{ID: "owner", UserID: "owner", OrgID: "org-1", ProjectID: project.ID, Role: "owner", Hash: ownerHash, ExpiresAt: time.Now().Add(time.Hour)},
+		{ID: "viewer", UserID: "viewer", OrgID: "org-1", ProjectID: project.ID, Role: "viewer", Hash: viewerHash, ExpiresAt: time.Now().Add(time.Hour)},
+	}}}
+
+	now := time.Now().UTC()
+	server.now = func() time.Time { return now }
+	server.Topology.Now = func() time.Time { return now }
+
+	services := server.Registry.(*registry.Service)
+	facts, err := services.PlacementFacts(context.Background(), project.ID)
+	if err != nil || len(facts.Environments) == 0 || len(facts.Runtimes) == 0 {
+		t.Fatalf("facts err: %v facts=%+v", err, facts)
+	}
+	envID := facts.Environments[0].ID
+	runtimeID := facts.Runtimes[0].ID
+
+	// 1. Initially runtime has no healthy node reporting -> eligible=false
+	run, _, err := server.DeploymentRuns.Create(context.Background(), project.ID, "owner", "rec-create", deploymentworkflow.Source{
+		RepositoryID: 1, InstallationID: 2, Repository: "owner/repo", SelectedRef: "main",
+	}, deploymentworkflow.Target{EnvironmentID: envID, RuntimeID: runtimeID, Exposure: "internal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := repositoryanalysis.Result{
+		SchemaVersion: repositoryanalysis.SchemaVersion,
+		RepositoryID:  1,
+		Repository:    "owner/repo",
+		SelectedRef:   "main",
+		CommitSHA:     strings.Repeat("a", 40),
+		Applications: []repositoryanalysis.Application{{
+			SourceKey: "web", Key: "web", Name: "web", Root: ".", Port: 8080,
+			Capacity: repositoryanalysis.Capacity{Replicas: 1, CPUMilli: 100, MemoryBytes: 128 << 20},
+			Build:    repositoryanalysis.Build{Context: ".", Strategy: "dockerfile", DockerfilePath: "Dockerfile", Platform: "linux/amd64"},
+		}},
+		Resources: []repositoryanalysis.Resource{{
+			LogicalName: "redis", Type: "redis", Managed: true, Required: true,
+		}},
+	}
+	run, err = server.DeploymentRuns.SetAnalysis(context.Background(), project.ID, run.ID, analysis, deploymentworkflow.AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA}, run.Plan.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	getRec := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/deployment-runs/"+run.ID+"/resource-recommendation", nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, req)
+		return response
+	}
+
+	// Unauthenticated / unauthorized
+	if resp := getRec(""); resp.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d", resp.Code)
+	}
+
+	// Runtime has no node yet -> eligible=false
+	notReady := getRec("rec-viewer-pat")
+	if notReady.Code != http.StatusOK || !strings.Contains(notReady.Body.String(), `"eligible":false`) {
+		t.Fatalf("not ready status=%d body=%s", notReady.Code, notReady.Body.String())
+	}
+
+	// Create node & agent with 2C / 4GB capacity
+	node, err := services.UpsertNode(project.ID, "node-1", "server", registry.NodeHealthy, "203.0.113.10", "", "node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = services.RegisterAgent(project.ID, node.ID, "fp", "cred-hash", "v1.0.0", "agent-key", map[string]any{"deploy": true, "managed_resources": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = services.RecordAgentHeartbeat(project.ID, node.ID, registry.AgentHeartbeat{
+		Version:      "v1.0.0",
+		NodeReady:    true,
+		K3SStatus:    "ready",
+		Capabilities: map[string]any{"deploy": true, "managed_resources": true},
+		Capacity:     registry.NodeCapacity{CPUCores: 2, MemoryMB: 4096},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create managed Redis
+	_, _, err = server.Resources.Create(context.Background(), project.ID, "owner", "rec-redis", resourcev1.CreateRequest{
+		EnvironmentID: envID, Name: "redis", Kind: resourcev1.KindManagedService, Type: resourcev1.TypeRedis,
+		Managed: &resourcev1.ManagedSpec{
+			Type: resourcev1.TypeRedis, Version: resourcev1.ValkeyVersion, Profile: "single-node-experimental",
+			Replicas: 1, CPUMillicores: 100, MemoryBytes: 256 << 20, ConnectionPolicy: resourcev1.ExposurePolicy{Mode: "internal"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now check recommendation for 2C / 4GB node + 1 web app + 1 managed redis
+	readyResp := getRec("rec-owner-pat")
+	if readyResp.Code != http.StatusOK {
+		t.Fatalf("ready recommendation status=%d body=%s", readyResp.Code, readyResp.Body.String())
+	}
+
+	var recResult struct {
+		Recommendation deploymentworkflow.Recommendation `json:"recommendation"`
+	}
+	if err := json.Unmarshal(readyResp.Body.Bytes(), &recResult); err != nil {
+		t.Fatal(err)
+	}
+	rec := recResult.Recommendation
+	if !rec.Eligible {
+		t.Fatalf("expected eligible=true, got false reason=%s", rec.Reason)
+	}
+	if rec.TargetCapacity.CPUMillicores != 2000 || rec.TargetCapacity.MemoryBytes != 4096<<20 {
+		t.Fatalf("target capacity=%+v", rec.TargetCapacity)
+	}
+	if rec.Projection.SystemReserve.CPUMillicores != 250 || rec.Projection.SystemReserve.MemoryBytes != 256<<20 {
+		t.Fatalf("reserved budget=%+v", rec.Projection.SystemReserve)
+	}
+	if rec.Projection.PlannedManaged.CPUMillicores != 100 || rec.Projection.PlannedManaged.MemoryBytes != 256<<20 {
+		t.Fatalf("planned managed budget=%+v", rec.Projection.PlannedManaged)
+	}
+	// Available: 2000 - 250 - 100 = 1650m CPU, 4096 - 256 - 256 = 3584 MiB
+	if rec.Projection.AvailableForRun.CPUMillicores != 1650 || rec.Projection.AvailableForRun.MemoryBytes != 3584<<20 {
+		t.Fatalf("available budget=%+v", rec.Projection.AvailableForRun)
+	}
+	if rec.Basis.BasisHash == "" || rec.Basis.CapacityStateHash == "" {
+		t.Fatalf("missing basis hashes: %+v", rec.Basis)
+	}
+	if len(rec.Applications) != 1 {
+		t.Fatalf("apps length=%d", len(rec.Applications))
+	}
+	app := rec.Applications[0]
+	if app.Key != "web" || app.Proposed.CPURequestMilli < 100 || app.Proposed.CPULimitMilli < app.Proposed.CPURequestMilli {
+		t.Fatalf("app proposed invalid: %+v", app)
+	}
+	if app.Proposed.CPULimitMilli < 1000 {
+		t.Fatalf("expected CPU burst limit >= 1000m, got %d", app.Proposed.CPULimitMilli)
+	}
+	if app.Proposed.MemoryLimitBytes < app.Proposed.MemoryRequestBytes {
+		t.Fatalf("memory limit %d < request %d", app.Proposed.MemoryLimitBytes, app.Proposed.MemoryRequestBytes)
+	}
+	if app.Proposed.CPURequestMilli > rec.Projection.AvailableForRun.CPUMillicores {
+		t.Fatalf("proposed CPU request %d > available %d", app.Proposed.CPURequestMilli, rec.Projection.AvailableForRun.CPUMillicores)
+	}
+
+	// Verify plan is not mutated by the GET call (pure read-only)
+	unmutatedRun, _ := server.DeploymentRuns.Get(context.Background(), project.ID, run.ID)
+	if unmutatedRun.Plan.Applications[0].Capacity.CPUMilli != 100 {
+		t.Fatalf("deployment run was mutated by recommendation call: %+v", unmutatedRun.Plan.Applications[0].Capacity)
+	}
+
+	// Test PUT /plan with basis check
+	draftPlan := unmutatedRun.Plan
+	draftPlan.Applications[0].Capacity.CPUMilli = app.Proposed.CPURequestMilli
+	draftPlan.Applications[0].Capacity.CPULimitMilli = app.Proposed.CPULimitMilli
+	draftPlan.Applications[0].Capacity.MemoryBytes = app.Proposed.MemoryRequestBytes
+	draftPlan.Applications[0].Capacity.MemoryLimitBytes = app.Proposed.MemoryLimitBytes
+
+	// 1. Stale basis hash -> 409 RESOURCE_RECOMMENDATION_STALE
+	staleReqBody, _ := json.Marshal(map[string]any{
+		"expected_plan_hash":           unmutatedRun.Plan.Hash,
+		"expected_resource_basis_hash": strings.Repeat("f", 64),
+		"plan":                         draftPlan,
+	})
+	putStale := httptest.NewRequest(http.MethodPut, "/api/projects/"+project.ID+"/deployment-runs/"+run.ID+"/plan", bytes.NewReader(staleReqBody))
+	putStale.Header.Set("Authorization", "Bearer rec-owner-pat")
+	putStale.Header.Set("Content-Type", "application/json")
+	putStale.Header.Set("If-Match", fmt.Sprintf(`"%d"`, unmutatedRun.Revision))
+	putStale.Header.Set("Idempotency-Key", "put-stale-basis")
+	putStale.Header.Set("X-Request-ID", "req-stale-basis")
+	staleResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(staleResp, putStale)
+	if staleResp.Code != http.StatusConflict || !strings.Contains(staleResp.Body.String(), "RESOURCE_RECOMMENDATION_STALE") {
+		t.Fatalf("expected 409 RESOURCE_RECOMMENDATION_STALE, got status=%d body=%s", staleResp.Code, staleResp.Body.String())
+	}
+
+	// 2. Valid basis hash -> 200 OK
+	validReqBody, _ := json.Marshal(map[string]any{
+		"expected_plan_hash":           unmutatedRun.Plan.Hash,
+		"expected_resource_basis_hash": rec.Basis.BasisHash,
+		"plan":                         draftPlan,
+	})
+	putValid := httptest.NewRequest(http.MethodPut, "/api/projects/"+project.ID+"/deployment-runs/"+run.ID+"/plan", bytes.NewReader(validReqBody))
+	putValid.Header.Set("Authorization", "Bearer rec-owner-pat")
+	putValid.Header.Set("Content-Type", "application/json")
+	putValid.Header.Set("If-Match", fmt.Sprintf(`"%d"`, unmutatedRun.Revision))
+	putValid.Header.Set("Idempotency-Key", "put-valid-basis")
+	putValid.Header.Set("X-Request-ID", "req-valid-basis")
+	validResp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(validResp, putValid)
+	if validResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for valid basis, got status=%d body=%s", validResp.Code, validResp.Body.String())
 	}
 }

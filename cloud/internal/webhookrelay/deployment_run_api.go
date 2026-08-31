@@ -128,13 +128,23 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 		writeRegistryResult(w, r, result, err, http.StatusOK)
 		return true
 	}
+	if action == "resource-recommendation" && r.Method == http.MethodGet {
+		if !s.requireRole(w, r, principal, projectID, "deployment_run", runID, "owner", "admin", "developer", "viewer", "support") {
+			return true
+		}
+		engine := s.recommendationEngine()
+		recommendation, err := engine.Recommend(r.Context(), projectID, runID)
+		writeRegistryResult(w, r, map[string]any{"recommendation": recommendation}, err, http.StatusOK)
+		return true
+	}
 	if action == "plan" && r.Method == http.MethodPut {
 		if !requireWriteHeaders(w, r) || !s.requireRole(w, r, principal, projectID, "deployment_run", runID, "owner", "admin", "developer") {
 			return true
 		}
 		var request struct {
-			ExpectedPlanHash string                  `json:"expected_plan_hash"`
-			Plan             deploymentworkflow.Plan `json:"plan"`
+			ExpectedPlanHash          string                  `json:"expected_plan_hash"`
+			ExpectedResourceBasisHash string                  `json:"expected_resource_basis_hash"`
+			Plan                      deploymentworkflow.Plan `json:"plan"`
 		}
 		if !decodeJSON(w, r, &request) {
 			return true
@@ -171,7 +181,8 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 				return true
 			}
 		}
-		run, err := s.DeploymentRuns.UpdatePlan(r.Context(), projectID, runID, principal.UserID, request.ExpectedPlanHash, request.Plan)
+		engine := s.recommendationEngine()
+		run, err := s.DeploymentRuns.UpdatePlanWithBasis(r.Context(), projectID, runID, principal.UserID, request.ExpectedPlanHash, request.ExpectedResourceBasisHash, request.Plan, &engine)
 		if err != nil && draftAllocation.ID != "" && !draftAllocationReused {
 			_, _ = s.PublicHostnames.Released(r.Context(), draftAllocation.ID)
 		}
@@ -241,6 +252,19 @@ func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, 
 	}
 	writeRegistryResult(w, r, run, err, http.StatusOK)
 	return true
+}
+
+func (s *Server) recommendationEngine() deploymentworkflow.RecommendationEngine {
+	return deploymentworkflow.RecommendationEngine{
+		Store:          s.DeploymentRuns.Store,
+		Topology:       s.Topology,
+		Facts:          s.Registry,
+		Resources:      s.Resources,
+		Now:            s.now,
+		HeartbeatTTL:   s.Topology.HeartbeatTTL,
+		ReservedCPU:    s.Topology.ReservedCPU,
+		ReservedMemory: s.Topology.ReservedMemory,
+	}
 }
 
 type repositoryExportPreviewResponse struct {

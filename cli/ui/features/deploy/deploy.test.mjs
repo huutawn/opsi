@@ -100,3 +100,37 @@ test("public hostname quota gates new labels and exposes retry and release", asy
   assert.match(viewSource, /hostnameQuota\.remaining > 0/);
   assert.match(api, /public-hostnames\/\$\{encodeURIComponent\(allocationID\)\}\/\$\{action\}/);
 });
+test("Resource allocation proposal dialog and recommendation API integration", async () => {
+  const proposalDialog = new URL("./resource-proposal-dialog.tsx", import.meta.url);
+  const [viewSource, planSource, dialogSource, api] = await Promise.all([
+    readFile(view, "utf8"),
+    readFile(review, "utf8"),
+    readFile(proposalDialog, "utf8"),
+    readFile(client, "utf8"),
+  ]);
+
+  // Dialog structure and contract
+  for (const value of ["Resource allocation proposal", "Real capacity", "System reserve", "Managed services", "Available for apps", "Apply to draft", "Close"]) {
+    assert.match(dialogSource, new RegExp(value));
+  }
+  assert.match(dialogSource, /projection\.real_capacity\.cpu_millicores/);
+  assert.match(dialogSource, /projection\.system_reserve\.cpu_millicores/);
+  assert.match(dialogSource, /projection\.available_for_run\.cpu_millicores/);
+  assert.match(dialogSource, /projection\.remaining_after_proposal\.cpu_millicores/);
+
+  // Plan review separate request & limit inputs
+  for (const label of ["CPU request (m)", "CPU limit (m)", "Memory request (MiB)", "Memory limit (MiB)", "Resource proposal"]) {
+    assert.match(planSource, new RegExp(label.replace("(", "\\(").replace(")", "\\)")));
+  }
+  assert.match(planSource, /app\.capacity\?\.cpu_limit_milli/);
+  assert.match(planSource, /app\.capacity\?\.memory_limit_bytes/);
+
+  // API client method
+  assert.match(api, /resourceRecommendation/);
+  assert.match(api, /\/api\/local\/projects\/\$\{projectID\}\/deployment-runs\/\$\{encodeURIComponent\(runID\)\}\/resource-recommendation/);
+
+  // DeployView integration
+  assert.match(viewSource, /ResourceProposalDialog/);
+  assert.match(viewSource, /applyProposal/);
+  assert.match(viewSource, /client\.updateDeploymentPlan/);
+});

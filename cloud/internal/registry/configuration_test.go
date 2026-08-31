@@ -48,6 +48,52 @@ func TestCompileServiceRuntimeSpecsProducesNextDeploymentAuthoritiesOnly(t *test
 		t.Fatalf("health probes were not compiled from the service boundary: %+v", workload)
 	}
 }
+func TestCompileServiceRuntimeSpecsSeparateRequestAndLimit(t *testing.T) {
+	source, target := configurationServices()
+	// 1. Explicit request and limit
+	assignment := topologyv1.Assignment{
+		ServiceKey:           source.Name,
+		EnvironmentID:        "env-1",
+		RuntimeID:            "rt-1",
+		Replicas:             1,
+		CPURequestMillicores: 100,
+		MemoryRequestBytes:   128 * 1024 * 1024,
+		CPULimitMillicores:   500,
+		MemoryLimitBytes:     512 * 1024 * 1024,
+		Exposure:             topologyv1.ExposureIntent{Mode: "none"},
+	}
+	workload, err := CompileServiceRuntimeSpecs(source, assignment, []topologyv1.Assignment{assignment}, emptyServiceConfiguration(), []ServiceRecord{source, target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workload.Resources.Requests.CPU != "100m" || workload.Resources.Limits.CPU != "500m" {
+		t.Fatalf("expected requests.cpu=100m limits.cpu=500m, got requests=%s limits=%s", workload.Resources.Requests.CPU, workload.Resources.Limits.CPU)
+	}
+	if workload.Resources.Requests.Memory != "128Mi" || workload.Resources.Limits.Memory != "512Mi" {
+		t.Fatalf("expected requests.memory=128Mi limits.memory=512Mi, got requests=%s limits=%s", workload.Resources.Requests.Memory, workload.Resources.Limits.Memory)
+	}
+
+	// 2. Omitted limits default to requests
+	omittedLimits := topologyv1.Assignment{
+		ServiceKey:           source.Name,
+		EnvironmentID:        "env-1",
+		RuntimeID:            "rt-1",
+		Replicas:             1,
+		CPURequestMillicores: 200,
+		MemoryRequestBytes:   256 * 1024 * 1024,
+		Exposure:             topologyv1.ExposureIntent{Mode: "none"},
+	}
+	workloadOmitted, err := CompileServiceRuntimeSpecs(source, omittedLimits, []topologyv1.Assignment{omittedLimits}, emptyServiceConfiguration(), []ServiceRecord{source, target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workloadOmitted.Resources.Requests.CPU != "200m" || workloadOmitted.Resources.Limits.CPU != "200m" {
+		t.Fatalf("expected omitted limit to default to request (200m), got requests=%s limits=%s", workloadOmitted.Resources.Requests.CPU, workloadOmitted.Resources.Limits.CPU)
+	}
+	if workloadOmitted.Resources.Requests.Memory != "256Mi" || workloadOmitted.Resources.Limits.Memory != "256Mi" {
+		t.Fatalf("expected omitted limit to default to request (256Mi), got requests=%s limits=%s", workloadOmitted.Resources.Requests.Memory, workloadOmitted.Resources.Limits.Memory)
+	}
+}
 
 func TestCompileServiceRuntimeSpecsCarriesSecretReferencesWithoutValues(t *testing.T) {
 	source, target := configurationServices()

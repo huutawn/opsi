@@ -45,9 +45,11 @@ type Application struct {
 }
 
 type Capacity struct {
-	Replicas    int32 `json:"replicas,omitempty" yaml:"replicas,omitempty"`
-	CPUMilli    int64 `json:"cpu_milli,omitempty" yaml:"cpuMilli,omitempty"`
-	MemoryBytes int64 `json:"memory_bytes,omitempty" yaml:"memoryBytes,omitempty"`
+	Replicas         int32 `json:"replicas,omitempty" yaml:"replicas,omitempty"`
+	CPUMilli         int64 `json:"cpu_milli,omitempty" yaml:"cpuMilli,omitempty"`
+	MemoryBytes      int64 `json:"memory_bytes,omitempty" yaml:"memoryBytes,omitempty"`
+	CPULimitMilli    int64 `json:"cpu_limit_milli,omitempty" yaml:"cpuLimitMilli,omitempty"`
+	MemoryLimitBytes int64 `json:"memory_limit_bytes,omitempty" yaml:"memoryLimitBytes,omitempty"`
 }
 
 type Exposure struct {

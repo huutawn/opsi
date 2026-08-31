@@ -122,6 +122,128 @@ test("export is previewed before an operator creates a pull request", async ({ p
 	await expect.poll(() => exports).toBe(1);
 	await expect(page.getByRole("link", { name: "Open pull request #9" })).toBeVisible();
 });
+test("Resource allocation proposal popup appears, applies draft plan with burst limits, or closes", async ({ page }) => {
+	let run = deploymentRun("awaiting_approval");
+	let updatedPlanPayload: Record<string, unknown> | undefined;
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		onPlanUpdate: (body) => {
+			updatedPlanPayload = body;
+			run = { ...run, plan: (body.plan as typeof run.plan), revision: run.revision + 1 };
+			return run;
+		},
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
+
+	// 1. Open proposal dialog via "Resource proposal" action in review
+	await page.getByText("View or edit full detected configuration").click();
+	const proposalButton = page.getByRole("button", { name: "Resource proposal" });
+	await expect(proposalButton).toBeVisible();
+	await proposalButton.click();
+
+	const dialog = page.getByRole("dialog", { name: "Resource allocation proposal" });
+	await expect(dialog).toBeVisible();
+	await expect(dialog.getByText("Real capacity")).toBeVisible();
+	await expect(dialog.getByText("Available for apps")).toBeVisible();
+	await expect(dialog.getByText("Burst enabled").first()).toBeVisible();
+
+	// 2. Click Apply to draft
+	await dialog.getByRole("button", { name: "Apply to draft" }).click();
+	await expect(dialog).toBeHidden();
+	await expect.poll(() => updatedPlanPayload).toBeDefined();
+
+	// 3. Re-open via "Resource proposal" button in PlanReview
+	await proposalButton.click();
+	await expect(dialog).toBeVisible();
+
+	// 4. Close dialog without changes
+	await dialog.getByRole("button", { name: "Close", exact: true }).click();
+	await expect(dialog).toBeHidden();
+
+	// 5. Approve & Deploy is available
+	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toBeEnabled();
+});
+test("low capacity or ineligible recommendation disables Apply button and displays warning", async ({ page }) => {
+	const run = deploymentRun("awaiting_approval");
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		recommendation: () => ({
+			eligible: false,
+			reason: "Available capacity cannot satisfy the minimum required 100m CPU and 128 MiB RAM per replica.",
+			warnings: ["Insufficient headroom for safe baseline allocation."],
+			target_capacity: { cpu_millicores: 1000, memory_bytes: 1024 * 1024 * 1024, source: "agent_observed", heartbeat_age_seconds: 5, heartbeat_fresh: true },
+			reserved_budget: { cpu_millicores: 250, memory_bytes: 256 * 1024 * 1024 },
+			managed_budget: { cpu_millicores: 500, memory_bytes: 512 * 1024 * 1024 },
+			available_budget: { cpu_millicores: 250, memory_bytes: 256 * 1024 * 1024 },
+			remaining_budget: { cpu_millicores: 250, memory_bytes: 256 * 1024 * 1024 },
+			budget_projection: {
+				real_capacity: { cpu_millicores: 1000, memory_bytes: 1024 * 1024 * 1024 },
+				system_reserve: { cpu_millicores: 250, memory_bytes: 256 * 1024 * 1024 },
+				existing_workloads: { cpu_millicores: 0, memory_bytes: 0 },
+				planned_managed: { cpu_millicores: 500, memory_bytes: 512 * 1024 * 1024 },
+				available_for_run: { cpu_millicores: 250, memory_bytes: 256 * 1024 * 1024 },
+				remaining_after_proposal: { cpu_millicores: 250, memory_bytes: 256 * 1024 * 1024 },
+			},
+			applications: [],
+		}),
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+	await page.getByRole("button", { name: "Resource proposal" }).click();
+
+	const dialog = page.getByRole("dialog", { name: "Resource allocation proposal" });
+	await expect(dialog).toBeVisible();
+	await expect(dialog.getByText("Recommendation unavailable")).toBeVisible();
+	await expect(dialog.getByText("Available capacity cannot satisfy the minimum required")).toBeVisible();
+	await expect(dialog.getByRole("button", { name: "Apply to draft" })).toBeDisabled();
+	await dialog.getByRole("button", { name: "Close", exact: true }).click();
+	await expect(dialog).toBeHidden();
+});
+
+test("stale resource recommendation refreshes and requires confirmation before applying", async ({ page }) => {
+	let run = deploymentRun("awaiting_approval");
+	let stale = true;
+	let recommendationRequests = 0;
+	let planUpdates = 0;
+	await mockDeployAPI(page, () => run, () => run, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		recommendation: () => {
+			recommendationRequests += 1;
+			return resourceRecommendation(hash(recommendationRequests === 1 ? "d" : "e"));
+		},
+		planUpdateFailure: () => {
+			if (!stale) return undefined;
+			stale = false;
+			return {
+				status: 409,
+				body: { error: { code: "RESOURCE_RECOMMENDATION_STALE", message: "Resource recommendation basis changed." } },
+			};
+		},
+		onPlanUpdate: (body) => {
+			planUpdates += 1;
+			run = { ...run, plan: body.plan as typeof run.plan, revision: run.revision + 1 };
+			return run;
+		},
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+	await page.getByRole("button", { name: "Resource proposal" }).click();
+
+	const dialog = page.getByRole("dialog", { name: "Resource allocation proposal" });
+	expectHTTPFailure(page, { path: "/api/local/projects/proj-1/deployment-runs/run-1/plan", status: 409, method: "PUT" });
+	await dialog.getByRole("button", { name: "Apply to draft" }).click();
+	await expect(dialog).toBeVisible();
+	await expect.poll(() => recommendationRequests).toBe(2);
+	await expect.poll(() => planUpdates).toBe(0);
+
+	await dialog.getByRole("button", { name: "Apply to draft" }).click();
+	await expect(dialog).toBeHidden();
+	await expect.poll(() => planUpdates).toBe(1);
+});
 
 test("a verified deployment publishes exactly one selected service through the canonical exposure rollout", async ({ page }) => {
 	const run = deploymentRun("succeeded");
@@ -433,6 +555,9 @@ type SourceBehavior = {
 	repository: () => ReturnType<typeof sourceRepository>;
 	onClaim?: () => void;
 	onCreate?: () => ReturnType<typeof deploymentRun>;
+	onPlanUpdate?: (body: Record<string, unknown>) => ReturnType<typeof deploymentRun>;
+	planUpdateFailure?: () => { status: number; body: Record<string, unknown> } | undefined;
+	recommendation?: () => Record<string, unknown>;
 	claimFailure?: boolean;
 	onLoginStart?: () => void;
 	onExport?: () => void;
@@ -444,7 +569,6 @@ type SourceBehavior = {
 	quota?: () => Record<string, unknown>;
 	onHostnameAction?: () => void;
 };
-
 type AuthSelectionBehavior = { authenticated: boolean; selections: number };
 
 async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploymentRun> | null, action: (body: Record<string, unknown>, name?: string) => ReturnType<typeof deploymentRun>, role = "owner", secretAction?: (body: Record<string, unknown>) => Record<string, unknown>, source?: SourceBehavior, authSelection?: AuthSelectionBehavior) {
@@ -460,6 +584,21 @@ async function mockDeployAPI(page: Page, current: () => ReturnType<typeof deploy
 		else if (/\/github\/repositories\/7\/claim$/.test(path) && request.method() === "POST" && source) { source.onClaim?.(); body = { repository_id: 7, project_id: "proj-1", status: "active" }; }
 		else if (path.endsWith("/repository-export/preview") && request.method() === "POST") body = { run_id: "run-1", run_revision: 3, plan_hash: hash("a"), source_sha: hash("d").slice(0, 40), repository_id: 7, target_branch: "main", path: ".opsi/opsi-cd.yaml", yaml: "version: 2\n", diff: "+version: 2\n", preview_hash: hash("e"), export_enabled: true };
 		else if (path.endsWith("/repository-export") && request.method() === "POST") { source?.onExport?.(); body = { repository_export: { branch: "opsi/export-run", commit_sha: hash("f").slice(0, 40), pull_request_number: 9, pull_request_url: "https://github.test/pr/9", reused: false } }; }
+		else if (path.endsWith("/resource-recommendation") && request.method() === "GET") {
+			body = {
+				recommendation: source?.recommendation?.() ?? resourceRecommendation(hash("d")),
+			};
+		}
+		else if (/\/deployment-runs\/run-1\/plan$/.test(path) && request.method() === "PUT") {
+			const putData = request.postDataJSON();
+			const failure = source?.planUpdateFailure?.();
+			if (failure) return fulfill(route, failure.body, failure.status);
+			if (source?.onPlanUpdate) {
+				body = source.onPlanUpdate(putData);
+			} else {
+				body = { ...current()!, plan: putData.plan, revision: (current()?.revision ?? 1) + 1 };
+			}
+		}
 		else if (path.endsWith("/deployment-runs") && request.method() === "POST" && source?.onCreate) body = { deployment_run: source.onCreate(), reused: false };
 		else if (/\/public-hostnames\/[^/]+\/(release|retry)$/.test(path) && request.method() === "POST") { source?.onHostnameAction?.(); body = { id: "phn-1", status: "released" }; }
 		else if (path === "/api/local/session") body = authSelection && !authSelection.authenticated ? { authenticated: false, cloud_connected: "ok", agent_connected: "ok", token_status: "missing", local_session: "local-session" } : { authenticated: true, cloud_connected: "ok", agent_connected: "ok", token_status: "valid", local_session: "local-session", user_id: "user-1", org_id: "org-1", project_id: "proj-1", role, capabilities: [] };
@@ -502,6 +641,29 @@ function sourceRepository(claimStatus: "active" | "available" | "conflict") {
 
 function placementFacts() {
 	return { project_id: "proj-1", environments: [{ id: "env-1", project_id: "proj-1", name: "Production", type: "prod", status: "active" }], runtimes: [{ id: "runtime-1", project_id: "proj-1", environment_id: "env-1", name: "Primary", type: "k3s", status: "ready" }], nodes: [], agents: [], services: [] };
+}
+
+function resourceRecommendation(basisHash: string) {
+	return {
+		eligible: true,
+		runtime_id: "runtime-1",
+		node_id: "node-1",
+		target_capacity: { cpu_millicores: 2000, memory_bytes: 4096 * 1024 * 1024, source: "agent_observed", heartbeat_age_seconds: 5, heartbeat_fresh: true },
+		budget_projection: {
+			real_capacity: { cpu_millicores: 2000, memory_bytes: 4096 * 1024 * 1024 },
+			system_reserve: { cpu_millicores: 250, memory_bytes: 256 * 1024 * 1024 },
+			existing_workloads: { cpu_millicores: 0, memory_bytes: 0 },
+			planned_managed: { cpu_millicores: 200, memory_bytes: 512 * 1024 * 1024 },
+			available_for_run: { cpu_millicores: 1550, memory_bytes: 3328 * 1024 * 1024 },
+			remaining_after_proposal: { cpu_millicores: 950, memory_bytes: 2304 * 1024 * 1024 },
+		},
+		basis: { run_revision: 3, plan_hash: hash("a"), topology_revision: 1, topology_hash: hash("b"), capacity_state_hash: hash("c"), basis_hash: basisHash, observed_at: "2026-08-24T00:00:00Z" },
+		applications: [
+			{ key: "identity-api", name: "identity-api", replicas: 1, current: { cpu_request_milli: 250, cpu_limit_milli: 250, memory_request_bytes: 256 * 1024 * 1024, memory_limit_bytes: 256 * 1024 * 1024 }, proposed: { cpu_request_milli: 300, cpu_limit_milli: 1000, memory_request_bytes: 512 * 1024 * 1024, memory_limit_bytes: 1024 * 1024 * 1024 } },
+			{ key: "identity-web", name: "identity-web", replicas: 1, current: { cpu_request_milli: 250, cpu_limit_milli: 250, memory_request_bytes: 256 * 1024 * 1024, memory_limit_bytes: 256 * 1024 * 1024 }, proposed: { cpu_request_milli: 300, cpu_limit_milli: 1000, memory_request_bytes: 512 * 1024 * 1024, memory_limit_bytes: 1024 * 1024 * 1024 } },
+		],
+		warnings: [],
+	};
 }
 
 function deploymentRun(state: "awaiting_input" | "awaiting_approval" | "awaiting_warning_ack" | "provisioning" | "building" | "deploying" | "succeeded" | "failed" | "stale" | "cancelled"): DeploymentRun {

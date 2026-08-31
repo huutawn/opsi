@@ -69,14 +69,16 @@ type AuthorityRevisions struct {
 }
 
 type Target struct {
-	EnvironmentID string `json:"environment_id"`
-	RuntimeID     string `json:"runtime_id,omitempty"`
-	NodeID        string `json:"node_id,omitempty"`
-	Hostname      string `json:"hostname,omitempty"`
-	Exposure      string `json:"exposure"`
-	PublicRoutes  string `json:"public_routes,omitempty"`
-	CPUMilli      int64  `json:"cpu_milli,omitempty"`
-	MemoryBytes   int64  `json:"memory_bytes,omitempty"`
+	EnvironmentID    string `json:"environment_id"`
+	RuntimeID        string `json:"runtime_id,omitempty"`
+	NodeID           string `json:"node_id,omitempty"`
+	Hostname         string `json:"hostname,omitempty"`
+	Exposure         string `json:"exposure"`
+	PublicRoutes     string `json:"public_routes,omitempty"`
+	CPUMilli         int64  `json:"cpu_milli,omitempty"`
+	MemoryBytes      int64  `json:"memory_bytes,omitempty"`
+	CPULimitMilli    int64  `json:"cpu_limit_milli,omitempty"`
+	MemoryLimitBytes int64  `json:"memory_limit_bytes,omitempty"`
 }
 
 const (
@@ -279,6 +281,9 @@ func HashPlan(plan Plan) (string, error) {
 	if err := json.Unmarshal(encoded, &copy); err != nil {
 		return "", err
 	}
+	if err := normalizePlanCapacity(&copy); err != nil {
+		return "", err
+	}
 	copy.Hash = ""
 	sort.Slice(copy.Applications, func(i, j int) bool { return copy.Applications[i].Key < copy.Applications[j].Key })
 	sort.Slice(copy.Resources, func(i, j int) bool { return copy.Resources[i].LogicalName < copy.Resources[j].LogicalName })
@@ -344,6 +349,9 @@ func ValidatePlan(plan Plan) error {
 	if plan.Target.Exposure == "public" && plan.Target.PublicRoutes != "" && plan.Target.PublicRoutes != PublicRoutesAutomatic && plan.Target.PublicRoutes != PublicRoutesManual {
 		return errors.New("deployment plan public route policy is invalid")
 	}
+	if err := validateTargetCapacity(plan.Target); err != nil {
+		return err
+	}
 	if plan.Target.Exposure == "public" {
 		hostname, err := exposurev1.NormalizeHostname(plan.Target.Hostname)
 		if err != nil || hostname != plan.Target.Hostname {
@@ -351,9 +359,13 @@ func ValidatePlan(plan Plan) error {
 		}
 	}
 	applications := map[string]bool{}
-	for _, application := range plan.Applications {
+	for i := range plan.Applications {
+		application := &plan.Applications[i]
 		if application.Key == "" || application.SourceKey == "" || applications[application.Key] || application.Build.Strategy == "" || application.Build.Context == "" || application.Port < 1 || application.Port > 65535 {
 			return errors.New("deployment plan application intent is invalid")
+		}
+		if err := ValidateApplicationCapacity(application.Capacity); err != nil {
+			return fmt.Errorf("application %s capacity invalid: %w", application.Key, err)
 		}
 		applications[application.Key] = true
 		if application.Exposure.Mode == "public" {

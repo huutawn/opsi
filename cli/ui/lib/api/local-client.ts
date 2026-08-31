@@ -40,6 +40,7 @@ import type {
   TopologyPreview,
   TopologyValidation,
   TopologyDiff,
+  ResourceRecommendation,
   PlacementFacts,
   DeploymentPolicyDraft,
   DeploymentPolicy,
@@ -467,13 +468,18 @@ export class LocalClient {
     return normalizeDeploymentRunResult(await this.call<DeploymentRunResult>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/result`));
   }
 
+  async resourceRecommendation(projectID: string, runID: string) {
+    const response = await this.call<{ recommendation: ResourceRecommendation }>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/resource-recommendation`);
+    return response.recommendation;
+  }
+
   async createDeploymentRun(projectID: string, body: { repository_id: number; selected_ref: string; target: { hostname?: string } }, idempotencyKey: string) {
     const response = await this.call<{ deployment_run: DeploymentRun; reused: boolean }>(`/api/local/projects/${projectID}/deployment-runs`, { method: "POST", write: true, idempotencyKey, body: JSON.stringify(body) });
     return { ...response, deployment_run: normalizeDeploymentRun(response.deployment_run) };
   }
 
-  async updateDeploymentPlan(projectID: string, runID: string, revision: number, expectedPlanHash: string, plan: DeploymentPlan, idempotencyKey: string) {
-	return normalizeDeploymentRun(await this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/plan`, { method: "PUT", write: true, idempotencyKey, headers: { "If-Match": `"${revision}"` }, body: JSON.stringify({ expected_plan_hash: expectedPlanHash, plan }) }));
+  async updateDeploymentPlan(projectID: string, runID: string, revision: number, expectedPlanHash: string, plan: DeploymentPlan, idempotencyKey: string, expectedResourceBasisHash?: string) {
+	return normalizeDeploymentRun(await this.call<DeploymentRun>(`/api/local/projects/${projectID}/deployment-runs/${encodeURIComponent(runID)}/plan`, { method: "PUT", write: true, idempotencyKey, headers: { "If-Match": `"${revision}"` }, body: JSON.stringify({ expected_plan_hash: expectedPlanHash, expected_resource_basis_hash: expectedResourceBasisHash, plan }) }));
   }
 
   async deploymentRunAction(projectID: string, runID: string, action: "analyze" | "approve" | "acknowledge" | "retry" | "cancel", body: Record<string, unknown>, idempotencyKey: string) {

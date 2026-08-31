@@ -2,10 +2,13 @@ package deploymentworkflow
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
+	topologyv1 "github.com/opsi-dev/opsi/contracts/go/topologyv1"
 )
 
 func fixture(t *testing.T) (Service, Run, AuthorityRevisions) {
@@ -401,6 +404,214 @@ func TestControllerRenewsLeaseDuringLongAuthorityCall(t *testing.T) {
 	}
 	if store.renewals < 2 {
 		t.Fatalf("renewals=%d", store.renewals)
+	}
+}
+
+type fakeTopologyAuthority struct {
+	plan        topologyv1.Plan
+	operatorCap topologyv1.OperatorCapacity
+	planErr     error
+	opCapErr    error
+}
+
+func (f fakeTopologyAuthority) Get(ctx context.Context, projectID string) (topologyv1.Plan, error) {
+	return f.plan, f.planErr
+}
+
+func (f fakeTopologyAuthority) GetOperatorCapacity(ctx context.Context, projectID, runtimeID string) (topologyv1.OperatorCapacity, error) {
+	return f.operatorCap, f.opCapErr
+}
+
+type fakeFactsAuthority struct {
+	facts topologyv1.PlacementFacts
+	err   error
+}
+
+func (f fakeFactsAuthority) PlacementFacts(ctx context.Context, projectID string) (topologyv1.PlacementFacts, error) {
+	return f.facts, f.err
+}
+
+type fakeResourceAuthority struct {
+	resources []resourcev1.Resource
+	err       error
+}
+
+func (f fakeResourceAuthority) List(ctx context.Context, projectID, environmentID string) ([]resourcev1.Resource, error) {
+	return f.resources, f.err
+}
+
+func TestRecommendationEngineCalculationsAndBasisParity(t *testing.T) {
+	service, run, _ := fixture(t)
+	now := time.Date(2026, 8, 24, 1, 2, 3, 0, time.UTC)
+	fresh := now.Add(-10 * time.Second)
+
+	facts := topologyv1.PlacementFacts{
+		ProjectID: "project-1",
+		Environments: []topologyv1.EnvironmentFact{
+			{ID: "env-1", ProjectID: "project-1", Status: "active"},
+		},
+		Runtimes: []topologyv1.RuntimeFact{
+			{ID: "runtime-1", ProjectID: "project-1", EnvironmentID: "env-1", Type: "k3s", Status: "ready"},
+		},
+		Nodes: []topologyv1.NodeFact{
+			{ID: "node-1", ProjectID: "project-1", RuntimeID: "runtime-1", Status: "healthy", CPUCores: 2, MemoryMB: 4096, LastSeenAt: &fresh},
+		},
+		Agents: []topologyv1.AgentFact{
+			{ID: "agent-1", ProjectID: "project-1", RuntimeID: "runtime-1", NodeID: "node-1", Status: "active", Capabilities: map[string]any{"deploy": true}, LastSeenAt: &fresh},
+		},
+	}
+
+	// Current topology has an existing background service "worker" (100m, 256MiB) and old "api" (200m, 512MiB)
+	topoPlan := topologyv1.Plan{
+		ID:        "topo-1",
+		Revision:  2,
+		PlanHash:  "topohash123",
+		StateHash: "topostate123",
+		Assignments: []topologyv1.Assignment{
+			{ServiceKey: "worker", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 100, CPULimitMillicores: 500, MemoryRequestBytes: 256 << 20, MemoryLimitBytes: 512 << 20},
+			{ServiceKey: "api", RuntimeID: "runtime-1", Replicas: 1, CPURequestMillicores: 200, MemoryRequestBytes: 512 << 20}, // Being redeployed!
+		},
+	}
+
+	// Run has 1 planned managed Postgres
+	run.Plan.Resources = []repositoryanalysis.Resource{
+		{LogicalName: "postgres", Type: "postgres", Managed: true},
+	}
+	_, _ = service.Store.Save(context.Background(), run, run.Revision, Event{})
+
+	engine := RecommendationEngine{
+		Store:          service.Store,
+		Topology:       fakeTopologyAuthority{plan: topoPlan},
+		Facts:          fakeFactsAuthority{facts: facts},
+		Resources:      fakeResourceAuthority{resources: []resourcev1.Resource{}},
+		Now:            func() time.Time { return now },
+		ReservedCPU:    250,
+		ReservedMemory: 256 << 20,
+	}
+
+	rec, err := engine.Recommend(context.Background(), run.ProjectID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Eligible {
+		t.Fatalf("expected eligible=true, got reason=%s", rec.Reason)
+	}
+
+	// Total node: 2000m CPU, 4096 MiB RAM
+	// System reserve: 250m CPU, 256 MiB RAM
+	// Existing workloads: worker (100m, 512 MiB RAM limit). Note: "api" is redeployed so excluded!
+	// Planned managed: postgres (250m, 256 MiB)
+	// Available for run: 2000 - 250 - 100 - 250 = 1400m CPU, 4096 - 256 - 512 - 256 = 3072 MiB RAM
+	if rec.Projection.RealCapacity.CPUMillicores != 2000 || rec.Projection.RealCapacity.MemoryBytes != 4096<<20 {
+		t.Fatalf("real capacity=%+v", rec.Projection.RealCapacity)
+	}
+	if rec.Projection.SystemReserve.CPUMillicores != 250 || rec.Projection.SystemReserve.MemoryBytes != 256<<20 {
+		t.Fatalf("system reserve=%+v", rec.Projection.SystemReserve)
+	}
+	if rec.Projection.ExistingWorkload.CPUMillicores != 100 || rec.Projection.ExistingWorkload.MemoryBytes != 512<<20 {
+		t.Fatalf("existing workloads=%+v", rec.Projection.ExistingWorkload)
+	}
+	if rec.Projection.PlannedManaged.CPUMillicores != 250 || rec.Projection.PlannedManaged.MemoryBytes != 256<<20 {
+		t.Fatalf("planned managed=%+v", rec.Projection.PlannedManaged)
+	}
+	if rec.Projection.AvailableForRun.CPUMillicores != 1400 || rec.Projection.AvailableForRun.MemoryBytes != 3072<<20 {
+		t.Fatalf("available for run=%+v", rec.Projection.AvailableForRun)
+	}
+
+	// Basis hashes deterministic
+	if rec.Basis.BasisHash == "" || rec.Basis.CapacityStateHash == "" {
+		t.Fatalf("empty basis hashes: %+v", rec.Basis)
+	}
+
+	// An already assigned managed resource is identified by Resource ID, counted
+	// once as an existing commitment, and not counted again as planned capacity.
+	assignedPlan := topoPlan
+	assignedPlan.Assignments = append(append([]topologyv1.Assignment(nil), topoPlan.Assignments...), topologyv1.Assignment{
+		ServiceKey: "res-postgres", RuntimeID: "runtime-1", Replicas: 1,
+		CPURequestMillicores: 250, MemoryRequestBytes: 256 << 20, MemoryLimitBytes: 256 << 20,
+	})
+	assignedEngine := engine
+	assignedEngine.Topology = fakeTopologyAuthority{plan: assignedPlan}
+	assignedEngine.Resources = fakeResourceAuthority{resources: []resourcev1.Resource{{
+		ID: "res-postgres", ProjectID: "project-1", EnvironmentID: "env-1", Name: "postgres",
+		Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres, Lifecycle: resourcev1.LifecycleReady,
+		Managed: &resourcev1.ManagedSpec{Type: resourcev1.TypePostgres, Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20},
+	}}}
+	assignedRec, err := assignedEngine.Recommend(context.Background(), run.ProjectID, run.ID)
+	if err != nil || !assignedRec.Eligible {
+		t.Fatalf("assigned managed recommendation eligible=%v err=%v", assignedRec.Eligible, err)
+	}
+	if assignedRec.Projection.PlannedManaged != (ResourceBudget{}) || assignedRec.Projection.ExistingWorkload.CPUMillicores != 350 || assignedRec.Projection.ExistingWorkload.MemoryBytes != 768<<20 {
+		t.Fatalf("assigned managed resource was not single-counted: %+v", assignedRec.Projection)
+	}
+
+	// Authority failures are not silently treated as empty topology/capacity.
+	brokenTopology := engine
+	brokenTopology.Topology = fakeTopologyAuthority{planErr: errors.New("topology unavailable")}
+	if _, err := brokenTopology.Recommend(context.Background(), run.ProjectID, run.ID); err == nil {
+		t.Fatal("topology authority failure did not fail closed")
+	}
+	brokenCapacity := engine
+	brokenCapacity.Topology = fakeTopologyAuthority{plan: topoPlan, opCapErr: errors.New("capacity unavailable")}
+	if _, err := brokenCapacity.Recommend(context.Background(), run.ProjectID, run.ID); err == nil {
+		t.Fatal("operator capacity authority failure did not fail closed")
+	}
+
+	// Stale heartbeat fails closed
+	stale := now.Add(-10 * time.Minute)
+	staleFacts := facts
+	staleFacts.Nodes[0].LastSeenAt = &stale
+	staleEngine := engine
+	staleEngine.Facts = fakeFactsAuthority{facts: staleFacts}
+	staleRec, err := staleEngine.Recommend(context.Background(), run.ProjectID, run.ID)
+	if err != nil || staleRec.Eligible {
+		t.Fatalf("stale heartbeat did not fail closed: eligible=%v err=%v", staleRec.Eligible, err)
+	}
+
+	// Low capacity below minimum (e.g. 50m available) fails closed
+	lowCapFacts := facts
+	lowCapFacts.Nodes[0].CPUCores = 0
+	lowCapFacts.Nodes[0].MemoryMB = 0
+	lowCapEngine := engine
+	lowCapEngine.Facts = fakeFactsAuthority{facts: lowCapFacts}
+	lowCapRec, err := lowCapEngine.Recommend(context.Background(), run.ProjectID, run.ID)
+	if err != nil || lowCapRec.Eligible {
+		t.Fatalf("unknown/zero capacity did not fail closed: eligible=%v err=%v", lowCapRec.Eligible, err)
+	}
+}
+
+func TestApplicationCapacityValidation(t *testing.T) {
+	// 1. Zero limits are normalized on the plan before its hash is computed.
+	plan := Plan{Target: Target{CPUMilli: 100, MemoryBytes: 256 << 20}, Applications: []repositoryanalysis.Application{{Key: "api", Capacity: repositoryanalysis.Capacity{
+		Replicas: 1, CPUMilli: 250, MemoryBytes: 256 << 20,
+	}}}}
+	if err := refreshHash(&plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.Target.CPULimitMilli != 100 || plan.Target.MemoryLimitBytes != 256<<20 || plan.Applications[0].Capacity.CPULimitMilli != 250 || plan.Applications[0].Capacity.MemoryLimitBytes != 256<<20 {
+		t.Fatalf("zero limit not normalized before hash: %+v", plan)
+	}
+	if hash, err := HashPlan(plan); err != nil || hash != plan.Hash {
+		t.Fatalf("normalized plan hash mismatch hash=%q plan_hash=%q err=%v", hash, plan.Hash, err)
+	}
+
+	// 2. Non-zero limit smaller than request is rejected
+	capInvalid := repositoryanalysis.Capacity{
+		Replicas:      1,
+		CPUMilli:      500,
+		CPULimitMilli: 250,
+		MemoryBytes:   256 << 20,
+	}
+	if err := ValidateApplicationCapacity(capInvalid); err == nil {
+		t.Fatal("expected error for limit < request")
+	}
+
+	// 3. Negative values rejected
+	capNegative := repositoryanalysis.Capacity{
+		Replicas: -1,
+	}
+	if err := ValidateApplicationCapacity(capNegative); err == nil {
+		t.Fatal("expected error for negative replicas")
 	}
 }
 func errorCode(err error) string {

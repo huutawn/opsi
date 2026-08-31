@@ -204,6 +204,84 @@ func TestOperatorDeclaredCapacityIsAuditableRevisionedAndAuthoritative(t *testin
 		t.Fatalf("validation=%+v", validation)
 	}
 }
+func TestTopologyDraftResourceLimitsValidation(t *testing.T) {
+	now := time.Now().UTC()
+	service := Service{Store: NewMemoryStore(), Facts: factFixture{Facts{
+		ProjectID:    "p1",
+		Environments: []EnvironmentFact{{ID: "e1", ProjectID: "p1", Status: "active"}},
+		Runtimes:     []RuntimeFact{{ID: "r1", ProjectID: "p1", EnvironmentID: "e1", Type: "k3s", Status: "ready"}},
+		Services:     []ServiceFact{{ID: "s1", ProjectID: "p1", Key: "api"}},
+		Nodes:        []NodeFact{{ID: "n1", ProjectID: "p1", RuntimeID: "r1", Status: "healthy", CPUCores: 4, MemoryMB: 8192, LastSeenAt: &now}},
+		Agents:       []AgentFact{{ID: "a1", ProjectID: "p1", RuntimeID: "r1", NodeID: "n1", Status: "active", Capabilities: map[string]any{"deploy": true}, LastSeenAt: &now}},
+	}}, Now: func() time.Time { return now }}
+
+	// 1. Valid request and limit
+	validDraft := topologyv1.Draft{
+		SchemaVersion: topologyv1.SchemaVersion,
+		ProjectID:     "p1",
+		Assignments: []topologyv1.Assignment{{
+			ServiceKey:           "api",
+			EnvironmentID:        "e1",
+			RuntimeID:            "r1",
+			Replicas:             1,
+			CPURequestMillicores: 100,
+			MemoryRequestBytes:   128 * 1024 * 1024,
+			CPULimitMillicores:   500,
+			MemoryLimitBytes:     512 * 1024 * 1024,
+			Exposure:             topologyv1.ExposureIntent{Mode: "none"},
+		}},
+	}
+	preview, err := service.Preview(context.Background(), "p1", validDraft)
+	if err != nil {
+		t.Fatalf("valid draft failed preview: %v", err)
+	}
+	if preview.Draft.Assignments[0].CPULimitMillicores != 500 || preview.Draft.Assignments[0].MemoryLimitBytes != 512*1024*1024 {
+		t.Fatalf("preview draft limits not preserved: %+v", preview.Draft.Assignments[0])
+	}
+
+	// 2. Omitted limit defaults to request in preview
+	omittedDraft := topologyv1.Draft{
+		SchemaVersion: topologyv1.SchemaVersion,
+		ProjectID:     "p1",
+		Assignments: []topologyv1.Assignment{{
+			ServiceKey:           "api",
+			EnvironmentID:        "e1",
+			RuntimeID:            "r1",
+			Replicas:             1,
+			CPURequestMillicores: 250,
+			MemoryRequestBytes:   256 * 1024 * 1024,
+			Exposure:             topologyv1.ExposureIntent{Mode: "none"},
+		}},
+	}
+	previewOmitted, err := service.Preview(context.Background(), "p1", omittedDraft)
+	if err != nil {
+		t.Fatalf("omitted limit draft failed preview: %v", err)
+	}
+	if previewOmitted.Draft.Assignments[0].CPULimitMillicores != 250 || previewOmitted.Draft.Assignments[0].MemoryLimitBytes != 256*1024*1024 {
+		t.Fatalf("preview draft omitted limits not defaulted: %+v", previewOmitted.Draft.Assignments[0])
+	}
+
+	// 3. Limit less than request is rejected
+	invalidLimitDraft := topologyv1.Draft{
+		SchemaVersion: topologyv1.SchemaVersion,
+		ProjectID:     "p1",
+		Assignments: []topologyv1.Assignment{{
+			ServiceKey:           "api",
+			EnvironmentID:        "e1",
+			RuntimeID:            "r1",
+			Replicas:             1,
+			CPURequestMillicores: 500,
+			MemoryRequestBytes:   512 * 1024 * 1024,
+			CPULimitMillicores:   250, // Less than request
+			MemoryLimitBytes:     512 * 1024 * 1024,
+			Exposure:             topologyv1.ExposureIntent{Mode: "none"},
+		}},
+	}
+	_, err = service.Preview(context.Background(), "p1", invalidLimitDraft)
+	if err == nil || errorCode(err) != "TOPOLOGY_RESOURCES_INVALID" {
+		t.Fatalf("expected TOPOLOGY_RESOURCES_INVALID for limit < request, got %v", err)
+	}
+}
 
 func cloneFacts(value Facts) Facts {
 	raw, _ := json.Marshal(value)

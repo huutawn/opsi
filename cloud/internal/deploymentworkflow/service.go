@@ -135,6 +135,18 @@ func (s Service) UpdatePlan(ctx context.Context, projectID, runID, actor, expect
 	}
 	return s.save(ctx, run, "Draft deployment plan updated.", map[string]any{"actor": actor, "plan_hash": draft.Hash})
 }
+func (s Service) UpdatePlanWithBasis(ctx context.Context, projectID, runID, actor, expectedHash, expectedBasisHash string, draft Plan, engine *RecommendationEngine) (Run, error) {
+	if expectedBasisHash != "" && engine != nil {
+		rec, err := engine.Recommend(ctx, projectID, runID)
+		if err != nil {
+			return Run{}, conflict("RESOURCE_RECOMMENDATION_STALE", "The resource recommendation basis could not be verified: "+err.Error(), "Refresh and review the latest recommendation.")
+		}
+		if !rec.Eligible || rec.Basis.BasisHash != expectedBasisHash {
+			return Run{}, conflict("RESOURCE_RECOMMENDATION_STALE", "The resource recommendation basis is stale because topology, capacity, or plan changed.", "Refresh and review the latest recommendation.")
+		}
+	}
+	return s.UpdatePlan(ctx, projectID, runID, actor, expectedHash, draft)
+}
 
 // reconcileDraftIssues removes only detector issues whose exact condition is
 // now satisfied by the user-reviewed draft. Repository-integrity issues (for
@@ -321,6 +333,9 @@ func (s Service) event(run Run, level, message string, metadata map[string]any) 
 	return Event{ID: id, ProjectID: run.ProjectID, RunID: run.ID, State: run.State, Level: level, Message: message, Metadata: metadata, CreatedAt: s.clock()}
 }
 func refreshHash(plan *Plan) error {
+	if err := normalizePlanCapacity(plan); err != nil {
+		return err
+	}
 	hash, err := HashPlan(*plan)
 	if err == nil {
 		plan.Hash = hash
