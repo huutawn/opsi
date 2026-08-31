@@ -325,10 +325,16 @@ type BootstrapCheckpoint struct {
 }
 
 func BootstrapStepIDs(planVersion string) []string {
-	if planVersion != FirstServerBootstrapPlanVersion {
+	switch planVersion {
+	case FirstServerBootstrapPlanVersionV3:
+		return FirstServerBootstrapPlanV3StepIDs()
+	case FirstServerBootstrapPlanVersionV2:
+		return FirstServerBootstrapPlanV2StepIDs()
+	case FirstServerBootstrapPlanVersion:
+		return []string{"preflight", "install_k3s", "install_agent", "register_agent"}
+	default:
 		return nil
 	}
-	return []string{"preflight", "install_k3s", "install_agent", "register_agent"}
 }
 
 type BootstrapSessionLease struct {
@@ -2534,7 +2540,7 @@ func (s *Service) expireBootstrapsLocked() {
 
 func isActiveBootstrap(status string) bool {
 	switch status {
-	case "created", BootstrapPending, BootstrapWaiting, BootstrapRetryWait, "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
+	case "created", BootstrapPending, BootstrapWaiting, BootstrapRetryWait, "preflight", "configure_swap", "configuring_swap", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
 		return true
 	default:
 		return false
@@ -2547,7 +2553,7 @@ func validBootstrapStatus(status string) bool {
 
 func isLeasedBootstrapStatus(status string) bool {
 	switch status {
-	case "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
+	case "preflight", "configure_swap", "configuring_swap", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
 		return true
 	default:
 		return false
@@ -2616,6 +2622,8 @@ func bootstrapProgress(status string) int {
 		return 10
 	case "connecting":
 		return 20
+	case "configure_swap", "configuring_swap":
+		return 30
 	case "installing", "installing_k3s":
 		return 45
 	case "installing_agent":

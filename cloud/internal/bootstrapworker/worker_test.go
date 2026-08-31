@@ -519,13 +519,53 @@ func TestValidateBundleInvalidAndUnsupportedTargets(t *testing.T) {
 }
 
 func TestBootstrapResumeExecutesFromDurableCheckpoint(t *testing.T) {
-	stepIDs := registry.BootstrapStepIDs(registry.FirstServerBootstrapPlanVersion)
+	stepIDs := registry.FirstServerBootstrapPlanV3StepIDs()
 	for nextIndex := 0; nextIndex <= len(stepIDs); nextIndex++ {
 		t.Run(fmt.Sprintf("index_%d", nextIndex), func(t *testing.T) {
 			h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
 			if nextIndex > 0 {
 				h.leases[0].Bundle.Checkpoint = checkpointForHarness(t, h, h.leases[0], nextIndex)
 			}
+			runUntilFinishes(t, h, 1)
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			var ran []string
+			for _, script := range h.executor.runScripts {
+				ran = append(ran, stepIDForScript(script))
+			}
+			if want := stepIDs[nextIndex:]; !slices.Equal(ran, want) {
+				t.Fatalf("ran=%v want=%v", ran, want)
+			}
+			if nextIndex == len(stepIDs) && h.executor.connects != 0 {
+				t.Fatalf("completed plan opened SSH %d times", h.executor.connects)
+			}
+			if h.statusRequests == 0 || h.finishes[0].status != "completed" {
+				t.Fatalf("heartbeat checks=%d finishes=%+v", h.statusRequests, h.finishes)
+			}
+		})
+	}
+}
+
+func TestBootstrapResumeExecutesFromDurableCheckpointV2(t *testing.T) {
+	stepIDs := registry.FirstServerBootstrapPlanV2StepIDs()
+	for nextIndex := 0; nextIndex <= len(stepIDs); nextIndex++ {
+		t.Run(fmt.Sprintf("index_%d", nextIndex), func(t *testing.T) {
+			h := newDaemonHarness(t, []Lease{testLease("boot-1", "host-1")})
+			bundle := h.leases[0].Bundle
+			bundle.Checkpoint = registry.BootstrapCheckpoint{
+				SchemaVersion: registry.BootstrapCheckpointSchemaVersion,
+				PlanVersion:   registry.FirstServerBootstrapPlanVersionV2,
+				NextStepIndex: nextIndex,
+			}
+			v2Plan, err := BuildBootstrapPlan(h.config(), bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bundle.Checkpoint.PlanFingerprint = BootstrapPlanFingerprint(h.config(), v2Plan)
+			if nextIndex > 0 {
+				bundle.Checkpoint.LastCompletedStep = v2Plan.Steps[nextIndex-1].ID
+			}
+			h.leases[0].Bundle.Checkpoint = bundle.Checkpoint
 			runUntilFinishes(t, h, 1)
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -554,6 +594,7 @@ func TestBootstrapCheckpointsAfterEachSuccessfulStep(t *testing.T) {
 	want := []string{
 		"checkpoint:",
 		"run:preflight", "checkpoint:preflight",
+		"run:configure_swap", "checkpoint:configure_swap",
 		"run:install_k3s", "checkpoint:install_k3s",
 		"run:install_agent", "checkpoint:install_agent",
 		"run:register_agent", "checkpoint:register_agent",
@@ -570,10 +611,10 @@ func TestBootstrapStepAndCheckpointFailuresPreserveResumePoint(t *testing.T) {
 		runUntilFinishes(t, h, 1)
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		if len(h.checkpointRequests) != 2 || h.checkpointRequests[1].NextStepIndex != 1 {
+		if len(h.checkpointRequests) != 3 || h.checkpointRequests[2].NextStepIndex != 2 {
 			t.Fatalf("checkpoint requests=%+v", h.checkpointRequests)
 		}
-		if len(h.executor.runScripts) != 2 {
+		if len(h.executor.runScripts) != 3 {
 			t.Fatalf("run count=%d", len(h.executor.runScripts))
 		}
 	})
@@ -620,7 +661,7 @@ func TestBootstrapInvalidOrMismatchedCheckpointFailsClosed(t *testing.T) {
 		code   string
 	}{
 		"plan mismatch":          {mutate: func(c *registry.BootstrapCheckpoint) { c.PlanFingerprint = strings.Repeat("b", 64) }, code: "BOOTSTRAP_PLAN_MISMATCH"},
-		"invalid index":          {mutate: func(c *registry.BootstrapCheckpoint) { c.NextStepIndex = 5; c.LastCompletedStep = "register_agent" }, code: "BOOTSTRAP_CHECKPOINT_INVALID"},
+		"invalid index":          {mutate: func(c *registry.BootstrapCheckpoint) { c.NextStepIndex = 10; c.LastCompletedStep = "register_agent" }, code: "BOOTSTRAP_CHECKPOINT_INVALID"},
 		"invalid completed step": {mutate: func(c *registry.BootstrapCheckpoint) { c.LastCompletedStep = "preflight" }, code: "BOOTSTRAP_CHECKPOINT_INVALID"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -972,6 +1013,8 @@ func stepIDForScript(script string) string {
 	switch script {
 	case preflightScript:
 		return "preflight"
+	case configureSwapScript:
+		return "configure_swap"
 	case installK3sScript:
 		return "install_k3s"
 	case installAgentScript:

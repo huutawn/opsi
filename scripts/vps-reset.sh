@@ -107,6 +107,7 @@ cat <<'EOF'
 - K3s server/agent install and runtime state
 - K3s containerd/CNI/kubelet state
 - Opsi config/data under /etc/opsi, /var/lib/opsi, /opt/opsi
+- Opsi canonical swap (/var/lib/opsi/swapfile) and /etc/fstab entry
 - Opsi temp build/cache files under /tmp
 EOF
 echo
@@ -138,6 +139,21 @@ elif [ "$DRY_RUN" -eq 1 ]; then
   echo "[dry-run] skip missing /usr/local/bin/k3s-agent-uninstall.sh"
 fi
 
+if command -v swapon >/dev/null 2>&1 && command -v swapoff >/dev/null 2>&1; then
+  if swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/var/lib/opsi/swapfile$'; then
+    run swapoff /var/lib/opsi/swapfile
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] skip swapoff (not active)"
+  fi
+fi
+
+if [ -f /etc/fstab ] && grep -q '^[[:space:]]*/var/lib/opsi/swapfile[[:space:]]' /etc/fstab; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] remove /var/lib/opsi/swapfile entry from /etc/fstab"
+  else
+    sed -i '/^[[:space:]]*\/var\/lib\/opsi\/swapfile[[:space:]]/d' /etc/fstab
+  fi
+fi
 for path in \
   /etc/rancher/k3s \
   /var/lib/rancher/k3s \

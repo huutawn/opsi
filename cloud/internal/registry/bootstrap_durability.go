@@ -7,12 +7,20 @@ import (
 	"time"
 )
 
-const FirstServerBootstrapPlanVersionV2 = "first-server-v2"
+const (
+	FirstServerBootstrapPlanVersionV2 = "first-server-v2"
+	FirstServerBootstrapPlanVersionV3 = "first-server-v3"
+)
 
 var firstServerBootstrapPlanV2StepIDs = [...]string{"preflight", "install_k3s", "install_agent", "register_agent"}
+var firstServerBootstrapPlanV3StepIDs = [...]string{"preflight", "configure_swap", "install_k3s", "install_agent", "register_agent"}
 
 func FirstServerBootstrapPlanV2StepIDs() []string {
 	return append([]string(nil), firstServerBootstrapPlanV2StepIDs[:]...)
+}
+
+func FirstServerBootstrapPlanV3StepIDs() []string {
+	return append([]string(nil), firstServerBootstrapPlanV3StepIDs[:]...)
 }
 
 func bootstrapRetryDelay(attempt int) time.Duration {
@@ -156,10 +164,14 @@ func validateBootstrapCheckpointFormat(checkpoint BootstrapCheckpoint) error {
 }
 
 func bootstrapCheckpointStepIDs(planVersion string) []string {
-	if planVersion == FirstServerBootstrapPlanVersionV2 {
+	switch planVersion {
+	case FirstServerBootstrapPlanVersionV3:
+		return FirstServerBootstrapPlanV3StepIDs()
+	case FirstServerBootstrapPlanVersionV2:
 		return FirstServerBootstrapPlanV2StepIDs()
+	default:
+		return BootstrapStepIDs(planVersion)
 	}
-	return BootstrapStepIDs(planVersion)
 }
 
 func validateStoredBootstrapCheckpoint(checkpoint BootstrapCheckpoint) error {

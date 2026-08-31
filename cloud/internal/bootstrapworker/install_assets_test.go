@@ -13,17 +13,17 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 )
 
-func TestBootstrapPlanV2Contract(t *testing.T) {
+func TestBootstrapPlanV3Contract(t *testing.T) {
 	cfg := testInstallConfig()
 	bundle := testLease("boot-1", "host-1").Bundle
 	plan, err := BuildBootstrapPlan(cfg, bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Version != registry.FirstServerBootstrapPlanVersionV2 {
+	if plan.Version != registry.FirstServerBootstrapPlanVersionV3 {
 		t.Fatalf("plan version=%q", plan.Version)
 	}
-	wantIDs := []string{"preflight", "install_k3s", "install_agent", "register_agent"}
+	wantIDs := []string{"preflight", "configure_swap", "install_k3s", "install_agent", "register_agent"}
 	gotIDs := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
 		gotIDs = append(gotIDs, step.ID)
@@ -44,7 +44,7 @@ func TestBootstrapPlanV2Contract(t *testing.T) {
 	}
 	for _, required := range []string{
 		"INSTALL_K3S_VERSION=\"$OPSI_K3S_VERSION\"",
-		"INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640 --secrets-encryption'",
+		"INSTALL_K3S_EXEC='server --write-kubeconfig-mode 0640 --secrets-encryption --kubelet-arg=fail-swap-on=false'",
 		"systemctl is-active --quiet k3s",
 		"encryption-config.json",
 		"k3s secrets-encrypt status",
@@ -52,6 +52,18 @@ func TestBootstrapPlanV2Contract(t *testing.T) {
 	} {
 		if !strings.Contains(installK3sScript, required) {
 			t.Fatalf("K3s script missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"swapon --show=NAME --noheadings",
+		"/var/lib/opsi/swapfile",
+		"SWAP_INSUFFICIENT_DISK_SPACE",
+		"SWAP_CREATION_FAILED",
+		"SWAP_ACTIVATION_FAILED",
+		"/etc/fstab",
+	} {
+		if !strings.Contains(configureSwapScript, required) {
+			t.Fatalf("configure_swap script missing %q", required)
 		}
 	}
 	if !strings.Contains(installAgentScript, "/opt/opsi/agent/releases") || !strings.Contains(installAgentScript, "$OPSI_AGENT_SHA256") {
@@ -68,6 +80,32 @@ func TestBootstrapPlanV2Contract(t *testing.T) {
 		if !strings.Contains(registerAgentScript, required) {
 			t.Fatalf("register_agent missing %q", required)
 		}
+	}
+}
+
+func TestBootstrapPlanV2ResumeContract(t *testing.T) {
+	cfg := testInstallConfig()
+	bundle := testLease("boot-1", "host-1").Bundle
+	bundle.Checkpoint = registry.BootstrapCheckpoint{
+		SchemaVersion:   registry.BootstrapCheckpointSchemaVersion,
+		PlanVersion:     registry.FirstServerBootstrapPlanVersionV2,
+		PlanFingerprint: strings.Repeat("c", 64),
+		NextStepIndex:   1,
+	}
+	plan, err := BuildBootstrapPlan(cfg, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Version != registry.FirstServerBootstrapPlanVersionV2 {
+		t.Fatalf("plan version=%q", plan.Version)
+	}
+	wantIDs := []string{"preflight", "install_k3s", "install_agent", "register_agent"}
+	gotIDs := make([]string, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		gotIDs = append(gotIDs, step.ID)
+	}
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("v2 resume step IDs=%v want=%v", gotIDs, wantIDs)
 	}
 }
 
@@ -222,7 +260,7 @@ func TestBootstrapPlanFingerprintInputsAndSecrets(t *testing.T) {
 func TestRemoteInstallIdempotencyContracts(t *testing.T) {
 	contracts := map[string][]string{
 		"K3s version and encryption skip reinstall": {
-			"if [ \"$current_version\" != \"$OPSI_K3S_VERSION\" ] || ! $SUDO test -s /var/lib/rancher/k3s/server/cred/encryption-config.json; then",
+			"if [ \"$current_version\" != \"$OPSI_K3S_VERSION\" ] || ! $SUDO test -s /var/lib/rancher/k3s/server/cred/encryption-config.json || [ \"$needs_reconcile\" -eq 1 ]; then",
 			"systemctl enable --now k3s",
 		},
 		"K3s mismatch verified upgrade": {
@@ -288,21 +326,66 @@ func TestFirstServerV1CheckpointFailsClosedAgainstV2Plan(t *testing.T) {
 
 func TestStepFailureClassification(t *testing.T) {
 	for _, testCase := range []struct {
+		status    string
+		message   string
 		code      string
 		retryable bool
 	}{
-		{"K3S_INSTALLER_CHECKSUM_MISMATCH", false},
-		{"K3S_VERSION_VERIFICATION_FAILED", true},
-		{"AGENT_INSTALL_CHECKSUM_MISMATCH", false},
-		{"AGENT_RELEASE_INTEGRITY_FAILED", false},
-		{"AGENT_REGISTRATION_IDENTITY_MISMATCH", false},
-		{"AGENT_REGISTRATION_STATE_INVALID", false},
-		{"AGENT_SERVICE_START_FAILED", true},
-		{"AGENT_ROLLBACK_FAILED", false},
+		{"configure_swap", "SWAP_FILE_CONFLICT", "SWAP_FILE_CONFLICT", false},
+		{"configure_swap", "SWAP_INSUFFICIENT_DISK_SPACE", "SWAP_INSUFFICIENT_DISK_SPACE", false},
+		{"configure_swap", "SWAP_CREATION_FAILED", "SWAP_CREATION_FAILED", false},
+		{"configure_swap", "SWAP_ACTIVATION_FAILED", "SWAP_ACTIVATION_FAILED", false},
+		{"configure_swap", "SWAP_FSTAB_CONFLICT", "SWAP_FSTAB_CONFLICT", false},
+		{"configure_swap", "SWAP_FSTAB_UPDATE_FAILED", "SWAP_FSTAB_UPDATE_FAILED", false},
+		{"configure_swap", "generic command failure", "SWAP_CONFIGURATION_FAILED", false},
+		{"preflight", "unsupported debian release", "TARGET_OS_UNSUPPORTED", false},
+		{"installing_k3s", "K3S_INSTALLER_CHECKSUM_MISMATCH", "K3S_INSTALLER_CHECKSUM_MISMATCH", false},
+		{"installing_k3s", "K3S_VERSION_VERIFICATION_FAILED", "K3S_VERSION_VERIFICATION_FAILED", true},
+		{"installing_agent", "AGENT_INSTALL_CHECKSUM_MISMATCH", "AGENT_INSTALL_CHECKSUM_MISMATCH", false},
+		{"installing_agent", "AGENT_RELEASE_INTEGRITY_FAILED", "AGENT_RELEASE_INTEGRITY_FAILED", false},
+		{"registering_agent", "AGENT_REGISTRATION_IDENTITY_MISMATCH", "AGENT_REGISTRATION_IDENTITY_MISMATCH", false},
+		{"registering_agent", "AGENT_REGISTRATION_STATE_INVALID", "AGENT_REGISTRATION_STATE_INVALID", false},
+		{"registering_agent", "AGENT_TLS_GENERATION_FAILED", "AGENT_TLS_GENERATION_FAILED", false},
+		{"registering_agent", "AGENT_SERVICE_START_FAILED", "AGENT_SERVICE_START_FAILED", true},
+		{"registering_agent", "AGENT_ROLLBACK_FAILED", "AGENT_ROLLBACK_FAILED", false},
 	} {
-		failure := classifyStepFailure("registering_agent", "remote step failed: "+testCase.code)
+		failure := classifyStepFailure(testCase.status, "remote step failed: "+testCase.message)
 		if failure.Code != testCase.code || failure.Retryable != testCase.retryable {
-			t.Fatalf("classification=%+v want code=%s retryable=%v", failure, testCase.code, testCase.retryable)
+			t.Fatalf("status=%s message=%s classification=%+v want code=%s retryable=%v", testCase.status, testCase.message, failure, testCase.code, testCase.retryable)
+		}
+	}
+}
+
+func TestConfigureSwapScriptContract(t *testing.T) {
+	for _, required := range []string{
+		"swapon --show=NAME --noheadings",
+		"swap_dir=\"/var/lib/opsi\"",
+		"swap_file=\"/var/lib/opsi/swapfile\"",
+		"marker_file=\"/var/lib/opsi/swap.marker\"",
+		"marker_value=\"opsi.swapfile/v1\"",
+		"SWAP_FILE_CONFLICT",
+		"install -d -m 0755 \"$swap_dir\"",
+		"df -k --output=avail",
+		"5242880",
+		"SWAP_INSUFFICIENT_DISK_SPACE",
+		"fallocate -l 4G",
+		"dd if=/dev/zero",
+		"chmod 0600",
+		"chown 0:0",
+		"stat -c '%s'",
+		"4294967296",
+		"mkswap",
+		"SWAP_CREATION_FAILED",
+		"swapon \"$swap_file\"",
+		"SWAP_ACTIVATION_FAILED",
+		"/etc/fstab",
+		"SWAP_FSTAB_UPDATE_FAILED",
+		"SWAP_FSTAB_CONFLICT",
+		"tmp_swap=\"$swap_dir/.swapfile.$$\"",
+		"mv -T \"$tmp_swap\" \"$swap_file\"",
+	} {
+		if !strings.Contains(configureSwapScript, required) {
+			t.Fatalf("configureSwapScript missing %q", required)
 		}
 	}
 }
