@@ -193,8 +193,8 @@ func (s *Server) RunPublicHostnameReconciler(ctx context.Context) {
 			for _, allocation := range items {
 				if allocation.Status == publichostname.StatusReleasePending {
 					_, _ = s.releasePublicHostname(ctx, allocation)
-				} else if allocation.TargetIP != "" {
-					_, _ = s.publishPublicHostname(ctx, allocation, allocation.TargetIP)
+				} else {
+					_, _ = s.retryPublicHostname(ctx, allocation)
 				}
 			}
 		}
