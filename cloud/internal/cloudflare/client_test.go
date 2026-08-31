@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -187,6 +188,7 @@ func TestRulesPreserveForeignRulesAndPatchOnlyOpsiRefs(t *testing.T) {
 
 func TestRulesCreateMissingPhaseEntryPoints(t *testing.T) {
 	created := 0
+	var expressions []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
@@ -200,6 +202,13 @@ func TestRulesCreateMissingPhaseEntryPoints(t *testing.T) {
 			if body["kind"] != "zone" || body["phase"] == "" {
 				t.Errorf("body=%v", body)
 			}
+			if rules, ok := body["rules"].([]any); ok && len(rules) == 1 {
+				if rule, ok := rules[0].(map[string]any); ok {
+					if expression, ok := rule["expression"].(string); ok {
+						expressions = append(expressions, expression)
+					}
+				}
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": ruleset{ID: "created"}})
 			return
 		}
@@ -212,6 +221,9 @@ func TestRulesCreateMissingPhaseEntryPoints(t *testing.T) {
 	}
 	if created != 2 {
 		t.Fatalf("created=%d", created)
+	}
+	if !slices.Contains(expressions, `not ssl and ends_with(http.host, ".test.example.com")`) {
+		t.Fatalf("missing HTTP-only redirect expression: %v", expressions)
 	}
 }
 

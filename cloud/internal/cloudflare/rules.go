@@ -31,7 +31,7 @@ func (c *Client) ReconcileZoneRules(ctx context.Context) error {
 		return err
 	}
 	return c.reconcileRule(ctx, "http_request_dynamic_redirect", redirectRuleRef, map[string]any{
-		"action": "redirect", "action_parameters": map[string]any{"from_value": map[string]any{"target_url": map[string]any{"expression": `concat("https://", http.host, http.request.uri.path)`}, "status_code": 308, "preserve_query_string": true}}, "expression": fmt.Sprintf(`(http.request.scheme eq "http" and ends_with(http.host, %q))`, "."+c.domain), "description": "Opsi managed deployment hostnames redirect HTTP to HTTPS",
+		"action": "redirect", "action_parameters": map[string]any{"from_value": map[string]any{"target_url": map[string]any{"expression": `concat("https://", http.host, http.request.uri.path)`}, "status_code": 308, "preserve_query_string": true}}, "expression": fmt.Sprintf(`not ssl and ends_with(http.host, %q)`, "."+c.domain), "description": "Opsi managed deployment hostnames redirect HTTP to HTTPS",
 	})
 }
 
