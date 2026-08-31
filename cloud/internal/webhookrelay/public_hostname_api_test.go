@@ -82,7 +82,7 @@ func TestRetryPublicationReResolvesVerifiedNodeIPv4(t *testing.T) {
 	if _, err := server.Registry.UpsertNode(project.ID, "node-1", "server", "healthy", "203.0.113.10", "agent-1", "node-key"); err != nil {
 		t.Fatal(err)
 	}
-	allocation, _, err := server.PublicHostnames.Reserve(t.Context(), publichostname.ReserveRequest{Hostname: "app.test.example.com", OwnerUserID: "owner", ProjectID: project.ID, EnvironmentID: facts.Environments[0].ID, RuntimeID: facts.Runtimes[0].ID})
+	allocation, _, err := server.PublicHostnames.Reserve(t.Context(), publichostname.ReserveRequest{Hostname: "app.test.example.com", OwnerUserID: "owner", ProjectID: project.ID, EnvironmentID: facts.Environments[0].ID})
 	if err != nil {
 		t.Fatal(err)
 	}

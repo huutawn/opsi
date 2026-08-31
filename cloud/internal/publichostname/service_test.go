@@ -64,3 +64,15 @@ func TestConcurrentReservationNeverExceedsQuota(t *testing.T) {
 		t.Fatalf("succeeded=%d", succeeded)
 	}
 }
+
+func TestRedeployBindsRuntimeWhenInitialReservationPredatesPlacement(t *testing.T) {
+	service := Service{Store: NewMemoryStore(), Limit: 3, Now: func() time.Time { return time.Unix(1, 0) }}
+	initial, reused, err := service.Reserve(context.Background(), ReserveRequest{Hostname: "app.test", OwnerUserID: "u", ProjectID: "p", EnvironmentID: "env"})
+	if err != nil || reused || initial.RuntimeID != "" {
+		t.Fatalf("initial=%+v reused=%v err=%v", initial, reused, err)
+	}
+	updated, reused, err := service.Reserve(context.Background(), ReserveRequest{Hostname: "app.test", OwnerUserID: "u", ProjectID: "p", EnvironmentID: "env", RuntimeID: "rt"})
+	if err != nil || !reused || updated.RuntimeID != "rt" {
+		t.Fatalf("updated=%+v reused=%v err=%v", updated, reused, err)
+	}
+}

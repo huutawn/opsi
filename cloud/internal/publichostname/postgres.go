@@ -25,6 +25,14 @@ func (s PostgresStore) Reserve(ctx context.Context, req ReserveRequest, limit in
 	current, err := scanOne(tx.QueryRowContext(ctx, `SELECT `+columns+` FROM public_hostname_allocations WHERE hostname=$1 FOR UPDATE`, req.Hostname))
 	if err == nil && current.Status != StatusReleased {
 		if current.ProjectID == req.ProjectID && current.EnvironmentID == req.EnvironmentID {
+			if current.RuntimeID == "" && req.RuntimeID != "" {
+				row := tx.QueryRowContext(ctx, `UPDATE public_hostname_allocations SET runtime_id=$2,updated_at=$3 WHERE id=$1 RETURNING `+columns, current.ID, req.RuntimeID, now)
+				value, updateErr := scanOne(row)
+				if updateErr != nil {
+					return Allocation{}, false, updateErr
+				}
+				return value, true, tx.Commit()
+			}
 			return current, true, tx.Commit()
 		}
 		return Allocation{}, false, Error{Code: "PUBLIC_HOSTNAME_UNAVAILABLE", Message: "This public subdomain has already been issued by Opsi.", NextAction: "Choose a different public subdomain."}

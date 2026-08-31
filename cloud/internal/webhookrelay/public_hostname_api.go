@@ -121,10 +121,7 @@ func (s *Server) ensureAutomaticHostnamePublished(ctx context.Context, run deplo
 	if run.Plan.Target.Exposure != "public" || run.Plan.Target.PublicRoutes != deploymentworkflow.PublicRoutesAutomatic || run.Plan.Target.Hostname == "" {
 		return nil
 	}
-	allocation, err := s.PublicHostnames.GetByHostname(ctx, run.Plan.Target.Hostname)
-	if errors.Is(err, publichostname.ErrNotFound) {
-		allocation, err = s.reservePublicHostname(ctx, run.CreatedBy, run.ProjectID, run.Plan.Target.EnvironmentID, run.Plan.Target.RuntimeID, run.Plan.Target.Hostname)
-	}
+	allocation, err := s.reservePublicHostname(ctx, run.CreatedBy, run.ProjectID, run.Plan.Target.EnvironmentID, run.Plan.Target.RuntimeID, run.Plan.Target.Hostname)
 	if err != nil {
 		return err
 	}
@@ -141,7 +138,31 @@ func (s *Server) verifiedTargetIPv4(run deploymentworkflow.Run) (string, error) 
 }
 
 func (s *Server) verifiedAllocationIPv4(allocation publichostname.Allocation) (string, error) {
-	return s.verifiedNodeIPv4(allocation.ProjectID, "", allocation.EnvironmentID, allocation.RuntimeID)
+	nodes, err := s.Registry.ListNodes(allocation.ProjectID)
+	if err != nil {
+		return "", err
+	}
+	selected := ""
+	for _, node := range nodes {
+		if node.ProjectID != allocation.ProjectID || node.EnvironmentID != allocation.EnvironmentID || node.Status != registry.NodeHealthy {
+			continue
+		}
+		if allocation.RuntimeID != "" && node.RuntimeID != allocation.RuntimeID {
+			continue
+		}
+		parsed := net.ParseIP(node.PublicHost)
+		if parsed == nil || parsed.To4() == nil {
+			continue
+		}
+		if allocation.RuntimeID == "" && selected != "" {
+			return "", deploymentworkflow.Error{Code: "PUBLIC_TARGET_IPV4_INVALID", Status: http.StatusConflict, Message: "The hostname allocation does not identify a unique verified target node.", NextAction: "Redeploy the hostname with a selected runtime, then retry publication."}
+		}
+		selected = parsed.To4().String()
+	}
+	if selected == "" {
+		return "", deploymentworkflow.Error{Code: "PUBLIC_TARGET_IPV4_INVALID", Status: http.StatusConflict, Message: "The verified deployment node has no valid public IPv4 address.", NextAction: "Correct node public_host and retry publication."}
+	}
+	return selected, nil
 }
 
 func (s *Server) verifiedNodeIPv4(projectID, nodeID, environmentID, runtimeID string) (string, error) {

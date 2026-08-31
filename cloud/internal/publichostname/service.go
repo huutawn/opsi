@@ -205,6 +205,10 @@ func (s *MemoryStore) Reserve(_ context.Context, req ReserveRequest, limit int, 
 		}
 		if current.Status != StatusReleased {
 			if current.ProjectID == req.ProjectID && current.EnvironmentID == req.EnvironmentID {
+				if current.RuntimeID == "" && req.RuntimeID != "" {
+					current.RuntimeID, current.UpdatedAt = req.RuntimeID, now
+					s.values[id] = current
+				}
 				return current, true, nil
 			}
 			return Allocation{}, false, Error{Code: "PUBLIC_HOSTNAME_UNAVAILABLE", Message: "This public subdomain has already been issued by Opsi.", NextAction: "Choose a different public subdomain."}
