@@ -168,7 +168,7 @@ def flexible_origin_route_is_scoped(caddy: str) -> bool:
     if not listener:
         return False
     block = listener.group(1)
-    matcher = "@cloudflare_flexible host_regexp cloudflare_flexible ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.test\\.opsidev\\.site$"
+    matcher = "@cloudflare_flexible host *.test.opsidev.site"
     proxy = "reverse_proxy @cloudflare_flexible cloud:9800"
     return matcher in block and proxy in block and block.find(proxy) < block.find("redir https://{host}{uri} 308")
 
