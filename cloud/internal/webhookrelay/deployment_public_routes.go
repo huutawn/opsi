@@ -126,12 +126,17 @@ func (s *Server) applyAutomaticPublicRoutesForPlan(plan *deploymentworkflow.Plan
 		return nil
 	}
 	for _, dependency := range plan.Dependencies {
-		if dependency.Protocol != "http" || dependency.Strategy != serviceconfigurationv1.StrategySameOrigin {
+		if dependency.Protocol != "http" {
 			continue
 		}
-		rootCandidates[dependency.From] = true
-		if err := addBackendPath(dependency.To, dependency.Path); err != nil {
-			return err
+		if dependency.Strategy == serviceconfigurationv1.StrategySameOrigin {
+			rootCandidates[dependency.From] = true
+			if err := addBackendPath(dependency.To, dependency.Path); err != nil {
+				return err
+			}
+		}
+		if dependency.Strategy == serviceconfigurationv1.StrategyInternalHTTP && hasApplicationProxyEvidence(dependency) {
+			rootCandidates[dependency.From] = true
 		}
 	}
 	for _, binding := range plan.Bindings {
@@ -171,6 +176,15 @@ func (s *Server) applyAutomaticPublicRoutesForPlan(plan *deploymentworkflow.Plan
 		application.Exposure = repositoryanalysis.Exposure{Mode: "public", Hostname: plan.Target.Hostname, Path: path, Automatic: true}
 	}
 	return nil
+}
+
+func hasApplicationProxyEvidence(dependency repositoryanalysis.Dependency) bool {
+	for _, evidence := range dependency.Evidence {
+		if evidence.Kind == "application_proxy" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) reservePublicHostname(ctx context.Context, userID, projectID, environmentID, runtimeID, hostname string) (publichostname.Allocation, error) {
