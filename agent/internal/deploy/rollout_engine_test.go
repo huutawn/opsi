@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -688,6 +689,21 @@ func TestRolloutReadinessUsesAppDigestServiceEndpointsAndIngress(t *testing.T) {
 	}
 	if evidence.AvailableReplicas != 1 || !containsExactDigest(evidence.ApplicationImageID, snapshot.Image.Digest) {
 		t.Fatalf("readiness omitted factual application state: %+v", evidence)
+	}
+}
+
+func TestAcceptedRoutingStatusPermitsProtectedApplicationResponses(t *testing.T) {
+	for status, accepted := range map[int]bool{
+		http.StatusOK:                true,
+		http.StatusTemporaryRedirect: true,
+		http.StatusUnauthorized:      true,
+		http.StatusForbidden:         true,
+		http.StatusNotFound:          false,
+		http.StatusBadGateway:        false,
+	} {
+		if got := acceptedRoutingStatus(status); got != accepted {
+			t.Errorf("acceptedRoutingStatus(%d)=%v, want %v", status, got, accepted)
+		}
 	}
 }
 

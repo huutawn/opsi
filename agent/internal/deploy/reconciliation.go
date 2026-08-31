@@ -457,10 +457,18 @@ func (a ProductionAdapter) readinessOnce(ctx context.Context, plan RolloutPlan) 
 		if err != nil {
 			return evidence, resources, false, nil
 		}
-		evidence.LocalRoutingReady = probe.StatusCode >= 200 && probe.StatusCode < 400 && rolloutHash(probe.EvidenceHash)
+		evidence.LocalRoutingReady = acceptedRoutingStatus(probe.StatusCode) && rolloutHash(probe.EvidenceHash)
 		evidence.LocalProbeEvidenceHash = probe.EvidenceHash
 	}
 	return evidence, resources, runtimeReady && evidence.LocalRoutingReady, nil
+}
+
+// acceptedRoutingStatus permits successful/redirect responses and the two
+// authentication challenges that prove the request reached the protected
+// application. A 404 remains unready because Traefik emits it when no ingress
+// rule matches the requested host and path.
+func acceptedRoutingStatus(status int) bool {
+	return status >= http.StatusOK && status < http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func (a ProductionAdapter) observeRolloutObject(ctx context.Context, object rolloutObject) (rolloutObservation, error) {
