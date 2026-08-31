@@ -84,7 +84,7 @@ func (s *Server) canonicalizeUpdatedPlan(draft *deploymentworkflow.Plan, current
 // routes. It uses the user supplied label as a stable base and never derives a
 // hostname from the repository name.
 func (s *Server) applyAutomaticPublicRoutes(analysis *repositoryanalysis.Result, target deploymentworkflow.Target) error {
-	plan := deploymentworkflow.Plan{Applications: analysis.Applications, Target: target}
+	plan := deploymentworkflow.Plan{Applications: analysis.Applications, Dependencies: analysis.Dependencies, Bindings: analysis.Bindings, Target: target}
 	if err := s.applyAutomaticPublicRoutesForPlan(&plan); err != nil {
 		return err
 	}

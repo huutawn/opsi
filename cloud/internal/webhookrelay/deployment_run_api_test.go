@@ -185,6 +185,20 @@ func TestAutomaticPublicRoutesPutApplicationProxyFrontendAtRoot(t *testing.T) {
 	}
 }
 
+func TestAutomaticPublicRoutesPassesApplicationProxyEvidenceFromAnalysis(t *testing.T) {
+	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
+	analysis := repositoryanalysis.Result{
+		Applications: []repositoryanalysis.Application{{Key: "api", Port: 8080}, {Key: "web", Port: 3000}},
+		Dependencies: []repositoryanalysis.Dependency{{From: "web", To: "api", Protocol: "http", Strategy: serviceconfigurationv1.StrategyInternalHTTP, Evidence: []repositoryanalysis.Evidence{{Kind: "application_proxy"}}}},
+	}
+	if err := server.applyAutomaticPublicRoutes(&analysis, deploymentworkflow.Target{Exposure: "public", PublicRoutes: deploymentworkflow.PublicRoutesAutomatic, Hostname: "tcip.test.opsidev.site"}); err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Applications[0].Exposure.Path != "/api" || analysis.Applications[1].Exposure.Path != "/" {
+		t.Fatalf("routes=%+v", analysis.Applications)
+	}
+}
+
 func TestAutomaticPublicRoutesRejectAmbiguousBrowserFrontends(t *testing.T) {
 	server := NewServer(Config{DeploymentDomain: "test.opsidev.site"})
 	plan := deploymentworkflow.Plan{
