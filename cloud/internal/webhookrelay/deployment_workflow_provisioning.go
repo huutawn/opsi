@@ -32,7 +32,7 @@ func (e deploymentWorkflowExecutor) provision(ctx context.Context, run deploymen
 	}
 	plan, err := e.ensureTopology(ctx, run, resources)
 	if err != nil {
-		return workflowResultWithRefs(workflowFailure(err, "TOPOLOGY_APPLY_FAILED", "Review target capacity and placement facts."), refs), err
+		return workflowResultWithRefs(topologyProvisionFailure(err), refs), err
 	}
 	refs.Checkpoints = append(refs.Checkpoints, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityTopologyPlan, plan.ID, plan.Revision, plan.StateHash, deploymentworkflow.StateProvisioning))
 	targets, ok := e.server.Registry.(resource.RuntimeTargetResolver)
@@ -42,6 +42,12 @@ func (e deploymentWorkflowExecutor) provision(ctx context.Context, run deploymen
 	if err := e.server.Resources.ReconcileTopology(ctx, run.ProjectID, plan, targets); err != nil {
 		return workflowResultWithRefs(workflowFailure(err, "RESOURCE_RECONCILE_FAILED", "Restore the target Agent and managed-resource authority, then retry."), refs), err
 	}
+	// ReconcileTopology may legitimately change the runtime spec of resources
+	// selected by this run. Refresh their exact checkpoints after that mutation;
+	// the next workflow poll must not treat the run's own reconcile as external
+	// drift.
+	refreshedResources := make(map[string]resourcev1.Resource, len(resources))
+	resourcesReady := true
 	for _, value := range resources {
 		current, getErr := e.server.Resources.Get(ctx, run.ProjectID, value.ID)
 		if getErr != nil {
@@ -50,9 +56,14 @@ func (e deploymentWorkflowExecutor) provision(ctx context.Context, run deploymen
 		if current.Lifecycle == resourcev1.LifecycleFailed || current.Lifecycle == resourcev1.LifecycleDegraded {
 			return workflowResultWithRefs(failedStep("MANAGED_RESOURCE_FAILED", "A managed resource failed to become Ready.", "Inspect its factual Agent evidence and correct the target.", true), refs), nil
 		}
-		if current.Lifecycle != resourcev1.LifecycleReady {
-			return deploymentworkflow.StepResult{Pending: true, Refs: refs}, nil
-		}
+		refreshedResources[value.Name] = current
+		resourcesReady = resourcesReady && current.Lifecycle == resourcev1.LifecycleReady
+	}
+	resources = refreshedResources
+	refs = provisionedResourceRefs(resources, resourceIDs)
+	refs.Checkpoints = append(refs.Checkpoints, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityTopologyPlan, plan.ID, plan.Revision, plan.StateHash, deploymentworkflow.StateProvisioning))
+	if !resourcesReady {
+		return deploymentworkflow.StepResult{Pending: true, Refs: refs}, nil
 	}
 	bindingIDs, secretCheckpoints, err := e.ensureConfigurations(ctx, run, apps, resources)
 	if err != nil {
@@ -86,6 +97,17 @@ func (e deploymentWorkflowExecutor) provision(ctx context.Context, run deploymen
 		refs.Checkpoints = append(refs.Checkpoints, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityApplication, service.ID, configuration.Revision, authorityStateHash(struct{ GitSHA, ConfigurationHash string }{service.GitSHA, configuration.StateHash}), deploymentworkflow.StateProvisioning))
 	}
 	return deploymentworkflow.StepResult{Refs: refs}, nil
+}
+
+func topologyProvisionFailure(err error) deploymentworkflow.StepResult {
+	result := workflowFailure(err, "TOPOLOGY_APPLY_FAILED", "Review target capacity and placement facts.")
+	var topologyErr topology.Error
+	if errors.As(err, &topologyErr) && topologyErr.Code == "TOPOLOGY_VALIDATION_FAILED" {
+		result.Retryable = false
+		result.FailureCode = topologyErr.Code
+		result.NextAction = "Review the reported topology validation issue, then create a new deployment."
+	}
+	return result
 }
 
 func provisionedResourceRefs(resources map[string]resourcev1.Resource, resourceIDs []string) deploymentworkflow.AuthorityRefs {

@@ -40,6 +40,42 @@ test("Deploy replaces legacy action URLs and approves the exact reviewed plan", 
 	}
 });
 
+test("dirty resource edits must be saved before approval can deploy", async ({ page }) => {
+	let run = deploymentRun("awaiting_approval");
+	let approvals = 0;
+	let savedPlan: Record<string, unknown> | undefined;
+	await mockDeployAPI(page, () => run, (_body, name) => {
+		if (name === "approve") approvals += 1;
+		run = deploymentRun("provisioning");
+		return run;
+	}, "owner", undefined, {
+		repository: () => sourceRepository("active"),
+		onPlanUpdate: (body) => {
+			savedPlan = body.plan as Record<string, unknown>;
+			run = { ...run, plan: body.plan as typeof run.plan, revision: run.revision + 1 };
+			return run;
+		},
+	});
+
+	await page.goto("/?project=proj-1&view=deploy");
+	await page.getByText("View or edit full detected configuration").click();
+	const cpuLimits = page.getByLabel("CPU limit (m)");
+	await cpuLimits.nth(0).fill("500");
+	await cpuLimits.nth(1).fill("300");
+	await expect(page.getByRole("button", { name: "Save changes before approval" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Approve & Deploy" })).toHaveCount(0);
+
+	await page.getByRole("button", { name: "Save changes before approval" }).click();
+	await expect.poll(() => savedPlan).toBeDefined();
+	const applications = savedPlan?.applications as Array<{ capacity?: { cpu_limit_milli?: number } }>;
+	expect(applications[0].capacity?.cpu_limit_milli).toBe(500);
+	expect(applications[1].capacity?.cpu_limit_milli).toBe(300);
+	expect(approvals).toBe(0);
+
+	await page.getByRole("button", { name: "Approve & Deploy" }).click();
+	expect(approvals).toBe(1);
+});
+
 test("viewer can inspect the reviewed plan but sees no mutation control", async ({ page }) => {
 	const run = deploymentRun("awaiting_approval");
 	await mockDeployAPI(page, () => run, () => run, "viewer");

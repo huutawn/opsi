@@ -151,7 +151,7 @@ func (s Service) ApplyScoped(ctx context.Context, projectID, actor, idempotencyK
 		return topologyv1.ApplyResult{}, err
 	}
 	if !validation.Valid {
-		return topologyv1.ApplyResult{}, Error{Code: "TOPOLOGY_VALIDATION_FAILED", Status: 409, Message: "topology plan has deterministic validation errors"}
+		return topologyv1.ApplyResult{}, validationError(validation)
 	}
 	now := s.clock()
 	plan := topologyv1.Plan{
@@ -396,11 +396,23 @@ func validateRuntime(ctx context.Context, s Service, facts Facts, runtime Runtim
 
 func nodeParticipatesInRuntime(status string) bool {
 	switch status {
-	case "offline", "removed":
-		return false
-	default:
+	case "agent_connecting", "healthy", "draining":
 		return true
+	default:
+		// A pending bootstrap has not become part of the runtime. It cannot
+		// schedule workloads and must not block the healthy server after an
+		// earlier bootstrap attempt was abandoned.
+		return false
 	}
+}
+
+func validationError(validation topologyv1.ValidationResult) Error {
+	message := "topology plan has deterministic validation errors"
+	if len(validation.Issues) > 0 {
+		issue := validation.Issues[0]
+		message = issue.Code + ": " + issue.Message
+	}
+	return Error{Code: "TOPOLOGY_VALIDATION_FAILED", Status: 409, Message: message}
 }
 
 func heartbeatFresh(lastSeen *time.Time, now time.Time, ttl time.Duration) bool {

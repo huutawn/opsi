@@ -1264,6 +1264,15 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("bootstrap progress status=%d body=%s", w.Code, w.Body.String())
 	}
+	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/progress", bytes.NewReader([]byte(`{"project_id":"`+projectID+`","status":"configure_swap","message":"configuring idempotent system swap"}`)))
+	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
+	req.Header.Set("X-Bootstrap-Worker-ID", "worker-1")
+	req.Header.Set("X-Bootstrap-Lease-Token", bundle.LeaseToken)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("bootstrap configure_swap status=%d body=%s", w.Code, w.Body.String())
+	}
 	req = httptest.NewRequest(http.MethodPost, "/internal/bootstrap/sessions/"+session.ID+"/progress", bytes.NewReader([]byte(`{"project_id":"`+projectID+`","status":"installing_k3s","message":"installing k3s"}`)))
 	req.Header.Set("X-Bootstrap-Worker-Token", "worker-secret")
 	req.Header.Set("X-Bootstrap-Worker-ID", "worker-1")
@@ -1509,7 +1518,7 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("events status=%d body=%s", w.Code, w.Body.String())
 	}
-	if !bytes.Contains(w.Body.Bytes(), []byte(`"step":"connecting"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"step":"installing_k3s"`)) {
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"step":"connecting"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"step":"configure_swap"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"step":"installing_k3s"`)) {
 		t.Fatalf("missing truthful bootstrap transitions: %s", w.Body.String())
 	}
 	if bytes.Contains(w.Body.Bytes(), []byte("password=secret")) || bytes.Contains(w.Body.Bytes(), []byte("token=abc")) || bytes.Contains(w.Body.Bytes(), []byte("private_key=leak")) || bytes.Contains(w.Body.Bytes(), []byte("kubeconfig=leak")) || bytes.Contains(w.Body.Bytes(), []byte("pat=leak")) || bytes.Contains(w.Body.Bytes(), []byte("app_secret=leak")) {
@@ -1519,7 +1528,7 @@ func TestBootstrapCredentialVaultAndRBAC(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer owner_pat")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("BOOTSTRAP_STATE_CONNECTING")) || !bytes.Contains(w.Body.Bytes(), []byte("BOOTSTRAP_STATE_INSTALLING_K3S")) {
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte("BOOTSTRAP_STATE_CONNECTING")) || !bytes.Contains(w.Body.Bytes(), []byte("BOOTSTRAP_STATE_CONFIGURE_SWAP")) || !bytes.Contains(w.Body.Bytes(), []byte("BOOTSTRAP_STATE_INSTALLING_K3S")) {
 		t.Fatalf("missing bootstrap transition audit status=%d body=%s", w.Code, w.Body.String())
 	}
 	if bytes.Contains(w.Body.Bytes(), []byte("password=secret")) || bytes.Contains(w.Body.Bytes(), []byte("token=abc")) || bytes.Contains(w.Body.Bytes(), []byte("private_key=leak")) || bytes.Contains(w.Body.Bytes(), []byte("kubeconfig=leak")) || bytes.Contains(w.Body.Bytes(), []byte("pat=leak")) || bytes.Contains(w.Body.Bytes(), []byte("app_secret=leak")) {
