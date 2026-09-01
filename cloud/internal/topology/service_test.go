@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,8 +37,11 @@ func TestValidatorHealthCapacityAndAmbiguityFailClosed(t *testing.T) {
 		{name: "historical removed node", mutate: func(f *Facts) {
 			f.Nodes = append(f.Nodes, NodeFact{ID: "n-old", ProjectID: "p1", RuntimeID: "r1", Status: "removed"})
 		}, valid: true},
-		{name: "second active node", mutate: func(f *Facts) {
+		{name: "pending bootstrap does not participate", mutate: func(f *Facts) {
 			f.Nodes = append(f.Nodes, NodeFact{ID: "n2", ProjectID: "p1", RuntimeID: "r1", Status: "pending"})
+		}, valid: true},
+		{name: "second connected node", mutate: func(f *Facts) {
+			f.Nodes = append(f.Nodes, NodeFact{ID: "n2", ProjectID: "p1", RuntimeID: "r1", Status: "agent_connecting"})
 		}, code: "TOPOLOGY_RUNTIME_MULTI_NODE_UNSUPPORTED"},
 		{name: "stale", mutate: func(f *Facts) { f.Nodes[0].LastSeenAt = &stale }, code: "TOPOLOGY_HEARTBEAT_STALE"},
 		{name: "future heartbeat", mutate: func(f *Facts) { f.Nodes[0].LastSeenAt = &future }, code: "TOPOLOGY_HEARTBEAT_STALE"},
@@ -160,6 +164,17 @@ func TestApplyReplayDoesNotReevaluateChangedRuntimeFacts(t *testing.T) {
 	replay, err := service.Apply(context.Background(), "p1", "owner", "stable-replay", request, false)
 	if err != nil || !replay.Reused || replay.Plan.StateHash != first.Plan.StateHash {
 		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+}
+
+func TestApplyReturnsTheDeterministicValidationIssue(t *testing.T) {
+	now := time.Now().UTC()
+	facts := Facts{ProjectID: "p1", Environments: []EnvironmentFact{{ID: "e1", ProjectID: "p1", Status: "active"}}, Runtimes: []RuntimeFact{{ID: "r1", ProjectID: "p1", EnvironmentID: "e1", Type: "k3s", Status: "ready"}}, Services: []ServiceFact{{ID: "s1", ProjectID: "p1", Key: "api"}}, Nodes: []NodeFact{{ID: "n1", ProjectID: "p1", RuntimeID: "r1", Status: "healthy", CPUCores: 2, MemoryMB: 2048, LastSeenAt: &now}}}
+	service := Service{Store: NewMemoryStore(), Facts: factFixture{facts}, Now: func() time.Time { return now }}
+	request := topologyv1.ApplyRequest{Draft: topologyv1.Draft{SchemaVersion: topologyv1.SchemaVersion, ProjectID: "p1", Assignments: []topologyv1.Assignment{{ServiceKey: "api", EnvironmentID: "e1", RuntimeID: "r1", Replicas: 1, CPURequestMillicores: 100, MemoryRequestBytes: 1, Exposure: topologyv1.ExposureIntent{Mode: "none"}}}}}
+	_, err := service.Apply(context.Background(), "p1", "owner", "validation-detail", request, false)
+	if errorCode(err) != "TOPOLOGY_VALIDATION_FAILED" || !strings.Contains(err.Error(), "TOPOLOGY_AGENT_MISSING") {
+		t.Fatalf("err=%v", err)
 	}
 }
 

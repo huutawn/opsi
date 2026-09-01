@@ -20,6 +20,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/deploymentworkflow"
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
+	"github.com/opsi-dev/opsi/cloud/internal/topology"
 	buildrecordv1 "github.com/opsi-dev/opsi/contracts/go/buildrecordv1"
 	deploymentpolicyv1 "github.com/opsi-dev/opsi/contracts/go/deploymentpolicyv1"
 	deploymentv1 "github.com/opsi-dev/opsi/contracts/go/deploymentv1"
@@ -590,6 +591,17 @@ func TestWorkflowTopologyReusesExactPlanAcrossRuns(t *testing.T) {
 	reused, err := executor.ensureTopology(t.Context(), run, resources)
 	if err != nil || reused.Revision != first.Revision || reused.StateHash != first.StateHash {
 		t.Fatalf("reused=%+v first=%+v err=%v", reused, first, err)
+	}
+}
+
+func TestTopologyProvisionFailureIsTerminalForDeterministicValidation(t *testing.T) {
+	result := topologyProvisionFailure(topology.Error{Code: "TOPOLOGY_VALIDATION_FAILED", Status: 409, Message: "TOPOLOGY_AGENT_MISSING: runtime has no fresh healthy deploy Agent"})
+	if result.FailureCode != "TOPOLOGY_VALIDATION_FAILED" || result.Retryable || result.NextAction == "" {
+		t.Fatalf("result=%+v", result)
+	}
+	transient := topologyProvisionFailure(errors.New("database unavailable"))
+	if transient.FailureCode != "TOPOLOGY_APPLY_FAILED" || !transient.Retryable {
+		t.Fatalf("transient=%+v", transient)
 	}
 }
 

@@ -176,10 +176,16 @@ func recoverExpiredBootstrapLeasesPostgres(ctx context.Context, tx *sql.Tx, now 
 		if status == BootstrapDeadLetter {
 			t := now
 			session.DeadLetteredAt, session.FinishedAt = &t, &t
+			if err := retireBootstrapNodePostgres(ctx, tx, session, now); err != nil {
+				return BootstrapRecoverySummary{}, err
+			}
 			summary.DeadLettered = append(summary.DeadLettered, session)
 		} else if status == "expired" {
 			t := now
 			session.FinishedAt = &t
+			if err := retireBootstrapNodePostgres(ctx, tx, session, now); err != nil {
+				return BootstrapRecoverySummary{}, err
+			}
 			summary.Expired = append(summary.Expired, session)
 		} else {
 			summary.Recovered = append(summary.Recovered, session)
@@ -215,6 +221,9 @@ func recoverExpiredBootstrapLeasesPostgres(ctx context.Context, tx *sql.Tx, now 
 		session.UpdatedAt = now
 		session.FinishedAt = &now
 		clearBootstrapLease(&session)
+		if err := retireBootstrapNodePostgres(ctx, tx, session, now); err != nil {
+			return BootstrapRecoverySummary{}, err
+		}
 		summary.Expired = append(summary.Expired, session)
 		if err := insertBootstrapEvent(ctx, tx, session, "warn", "expired", "bootstrap session expired", now); err != nil {
 			return BootstrapRecoverySummary{}, err
@@ -292,6 +301,11 @@ func (s PostgresService) FinishBootstrapSessionForLease(projectID, sessionID, wo
 	} else {
 		session.FinishedAt = nil
 	}
+	if status == BootstrapDeadLetter || status == "cancelled" {
+		if err := retireBootstrapNodePostgres(ctx, tx, session, now); err != nil {
+			return BootstrapSession{}, err
+		}
+	}
 	if err := insertBootstrapEvent(ctx, tx, session, level, step, eventMessage, now); err != nil {
 		return BootstrapSession{}, err
 	}
@@ -333,6 +347,9 @@ func (s PostgresService) ManualRetryBootstrapSession(projectID, sessionID, idemp
 	if !now.Before(session.ExpiresAt) {
 		return BootstrapManualRetryResult{}, APIError{Status: 409, Code: "BOOTSTRAP_SESSION_EXPIRED", Message: "expired bootstrap session cannot be retried"}
 	}
+	if err := restoreBootstrapNodePostgres(ctx, tx, session, now); err != nil {
+		return BootstrapManualRetryResult{}, err
+	}
 	retryStatus, eventMessage := BootstrapPending, "bootstrap session manually returned to pending"
 	if session.AuthMethod == "command" {
 		retryStatus, eventMessage = BootstrapWaiting, "bootstrap session waiting for a new bootstrap command connection"
@@ -357,6 +374,45 @@ func (s PostgresService) ManualRetryBootstrapSession(projectID, sessionID, idemp
 		return BootstrapManualRetryResult{}, err
 	}
 	return BootstrapManualRetryResult{Session: session, Applied: true}, nil
+}
+
+func retireBootstrapNodePostgres(ctx context.Context, tx *sql.Tx, session BootstrapSession, now time.Time) error {
+	failureCode, failureMessage := session.LastFailureCode, session.LastFailureRedacted
+	if failureCode == "" {
+		failureCode, failureMessage = "BOOTSTRAP_SESSION_TERMINATED", "bootstrap session terminated before the node became healthy"
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE nodes
+		SET status=$1, failure_code=$2, failure_message_redacted=$3, updated_at=$4
+		WHERE id=$5 AND project_id=$6 AND status IN ('pending','agent_connecting')
+		  AND NOT EXISTS (SELECT 1 FROM agents WHERE project_id=$6 AND node_id=$5 AND status='active')`,
+		NodeRemoved, failureCode, failureMessage, now, session.NodeID, session.ProjectID)
+	return err
+}
+
+func restoreBootstrapNodePostgres(ctx context.Context, tx *sql.Tx, session BootstrapSession, now time.Time) error {
+	var status string
+	err := tx.QueryRowContext(ctx, `SELECT status FROM nodes WHERE id=$1 AND project_id=$2 FOR UPDATE`, session.NodeID, session.ProjectID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status == NodePending {
+		return nil
+	}
+	if status != NodeRemoved {
+		return APIError{Status: 409, Code: "BOOTSTRAP_NODE_UNAVAILABLE", Message: "bootstrap node cannot be retried after it joined another lifecycle"}
+	}
+	var activeAgent bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agents WHERE project_id=$1 AND node_id=$2 AND status='active')`, session.ProjectID, session.NodeID).Scan(&activeAgent); err != nil {
+		return err
+	}
+	if activeAgent {
+		return APIError{Status: 409, Code: "BOOTSTRAP_NODE_UNAVAILABLE", Message: "bootstrap node has an active Agent"}
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE nodes SET status=$1, failure_code=NULL, failure_message_redacted=NULL, updated_at=$2 WHERE id=$3 AND project_id=$4`, NodePending, now, session.NodeID, session.ProjectID)
+	return err
 }
 
 func insertBootstrapEvent(ctx context.Context, tx *sql.Tx, session BootstrapSession, level, step, message string, now time.Time) error {

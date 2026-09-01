@@ -214,12 +214,14 @@ func (s *Service) recoverExpiredBootstrapLeasesLocked(now time.Time) BootstrapRe
 		if !now.Before(session.ExpiresAt) {
 			session.Status = "expired"
 			session.FinishedAt = &now
+			s.removeBootstrapNodeLocked(session, now)
 			summary.Expired = append(summary.Expired, session)
 			s.appendBootstrapDurabilityEventLocked(session, "warn", "BOOTSTRAP_LEASE_EXPIRED", "bootstrap session expired after worker lease loss", now)
 		} else if session.AttemptCount >= effectiveBootstrapMaxAttempts(session.MaxAttempts) {
 			session.Status = BootstrapDeadLetter
 			session.DeadLetteredAt = &now
 			session.FinishedAt = &now
+			s.removeBootstrapNodeLocked(session, now)
 			summary.DeadLettered = append(summary.DeadLettered, session)
 			s.appendBootstrapDurabilityEventLocked(session, "error", "BOOTSTRAP_DEAD_LETTERED", session.LastFailureRedacted, now)
 		} else {
@@ -248,6 +250,7 @@ func (s *Service) recoverExpiredBootstrapLeasesLocked(now time.Time) BootstrapRe
 		session.UpdatedAt = now
 		session.FinishedAt = &now
 		clearBootstrapLease(&session)
+		s.removeBootstrapNodeLocked(session, now)
 		s.bootstraps[id] = session
 		summary.Expired = append(summary.Expired, session)
 		s.appendBootstrapDurabilityEventLocked(session, "warn", "expired", "bootstrap session expired", now)
@@ -286,6 +289,7 @@ func (s *Service) FinishBootstrapSessionForLease(projectID, sessionID, workerID,
 		session.Status = "cancelled"
 		session.FinishedAt = &now
 		clearBootstrapLease(&session)
+		s.removeBootstrapNodeLocked(session, now)
 		session.UpdatedAt = now
 		s.bootstraps[sessionID] = session
 		s.appendBootstrapDurabilityEventLocked(session, "warn", "cancelled", RedactString(result.MessageRedacted), now)
@@ -312,6 +316,7 @@ func (s *Service) FinishBootstrapSessionForLease(projectID, sessionID, workerID,
 		session.Status = BootstrapDeadLetter
 		session.DeadLetteredAt = &now
 		session.FinishedAt = &now
+		s.removeBootstrapNodeLocked(session, now)
 		s.appendBootstrapDurabilityEventLocked(session, "error", "BOOTSTRAP_DEAD_LETTERED", session.LastFailureRedacted, now)
 	}
 	s.bootstraps[sessionID] = session
@@ -340,6 +345,9 @@ func (s *Service) ManualRetryBootstrapSession(projectID, sessionID, idempotencyK
 	if !now.Before(session.ExpiresAt) {
 		return BootstrapManualRetryResult{}, APIError{Status: 409, Code: "BOOTSTRAP_SESSION_EXPIRED", Message: "expired bootstrap session cannot be retried"}
 	}
+	if err := s.restoreBootstrapNodeLocked(session, now); err != nil {
+		return BootstrapManualRetryResult{}, err
+	}
 	session.Status = BootstrapPending
 	message := "bootstrap session manually returned to pending"
 	if session.AuthMethod == "command" {
@@ -357,6 +365,50 @@ func (s *Service) ManualRetryBootstrapSession(projectID, sessionID, idempotencyK
 	s.appendBootstrapDurabilityEventLocked(session, "info", "BOOTSTRAP_MANUAL_RETRY_REQUESTED", message, now)
 	s.refreshProjectLocked(projectID)
 	return BootstrapManualRetryResult{Session: session, Applied: true}, nil
+}
+
+// removeBootstrapNodeLocked retires only a provisional node owned by a
+// terminal bootstrap. A connected or healthy node is preserved because its
+// lifecycle must be managed through its Agent.
+func (s *Service) removeBootstrapNodeLocked(session BootstrapSession, now time.Time) {
+	node, ok := s.nodes[session.NodeID]
+	if !ok || node.ProjectID != session.ProjectID || (node.Status != NodePending && node.Status != NodeAgentConnecting) {
+		return
+	}
+	for _, agent := range s.agents {
+		if agent.ProjectID == session.ProjectID && agent.NodeID == node.ID && agent.Status == "active" {
+			return
+		}
+	}
+	node.Status = NodeRemoved
+	node.FailureCode = session.LastFailureCode
+	node.FailureMessageRedacted = session.LastFailureRedacted
+	node.UpdatedAt = now
+	s.nodes[node.ID] = node
+}
+
+func (s *Service) restoreBootstrapNodeLocked(session BootstrapSession, now time.Time) error {
+	node, ok := s.nodes[session.NodeID]
+	if !ok || node.ProjectID != session.ProjectID {
+		return ErrNotFound
+	}
+	if node.Status == NodePending {
+		return nil
+	}
+	if node.Status != NodeRemoved {
+		return APIError{Status: 409, Code: "BOOTSTRAP_NODE_UNAVAILABLE", Message: "bootstrap node cannot be retried after it joined another lifecycle"}
+	}
+	for _, agent := range s.agents {
+		if agent.ProjectID == session.ProjectID && agent.NodeID == node.ID && agent.Status == "active" {
+			return APIError{Status: 409, Code: "BOOTSTRAP_NODE_UNAVAILABLE", Message: "bootstrap node has an active Agent"}
+		}
+	}
+	node.Status = NodePending
+	node.FailureCode = ""
+	node.FailureMessageRedacted = ""
+	node.UpdatedAt = now
+	s.nodes[node.ID] = node
+	return nil
 }
 
 func effectiveBootstrapMaxAttempts(value int) int {

@@ -32,7 +32,7 @@ func (e deploymentWorkflowExecutor) provision(ctx context.Context, run deploymen
 	}
 	plan, err := e.ensureTopology(ctx, run, resources)
 	if err != nil {
-		return workflowResultWithRefs(workflowFailure(err, "TOPOLOGY_APPLY_FAILED", "Review target capacity and placement facts."), refs), err
+		return workflowResultWithRefs(topologyProvisionFailure(err), refs), err
 	}
 	refs.Checkpoints = append(refs.Checkpoints, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityTopologyPlan, plan.ID, plan.Revision, plan.StateHash, deploymentworkflow.StateProvisioning))
 	targets, ok := e.server.Registry.(resource.RuntimeTargetResolver)
@@ -86,6 +86,17 @@ func (e deploymentWorkflowExecutor) provision(ctx context.Context, run deploymen
 		refs.Checkpoints = append(refs.Checkpoints, deploymentworkflow.Checkpoint(deploymentworkflow.AuthorityApplication, service.ID, configuration.Revision, authorityStateHash(struct{ GitSHA, ConfigurationHash string }{service.GitSHA, configuration.StateHash}), deploymentworkflow.StateProvisioning))
 	}
 	return deploymentworkflow.StepResult{Refs: refs}, nil
+}
+
+func topologyProvisionFailure(err error) deploymentworkflow.StepResult {
+	result := workflowFailure(err, "TOPOLOGY_APPLY_FAILED", "Review target capacity and placement facts.")
+	var topologyErr topology.Error
+	if errors.As(err, &topologyErr) && topologyErr.Code == "TOPOLOGY_VALIDATION_FAILED" {
+		result.Retryable = false
+		result.FailureCode = topologyErr.Code
+		result.NextAction = "Review the reported topology validation issue, then create a new deployment."
+	}
+	return result
 }
 
 func provisionedResourceRefs(resources map[string]resourcev1.Resource, resourceIDs []string) deploymentworkflow.AuthorityRefs {

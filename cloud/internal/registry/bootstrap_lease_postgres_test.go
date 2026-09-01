@@ -155,6 +155,17 @@ func TestPostgresBootstrapLeaseHeartbeatRetryDeadLetterSurvivesRestart(t *testin
 	if err != nil || dead.Status != BootstrapDeadLetter || dead.DeadLetteredAt == nil {
 		t.Fatalf("dead=%+v err=%v", dead, err)
 	}
+	var retiredNodeStatus string
+	if err := db.QueryRow(`SELECT status FROM nodes WHERE id=$1`, dead.NodeID).Scan(&retiredNodeStatus); err != nil || retiredNodeStatus != NodeRemoved {
+		t.Fatalf("retired node status=%q err=%v", retiredNodeStatus, err)
+	}
+	retried, err := repoC.ManualRetryBootstrapSession(project.ID, dead.ID, "dead-retry", retryAt.Add(4*time.Second))
+	if err != nil || !retried.Applied || retried.Session.Status != BootstrapPending {
+		t.Fatalf("retried=%+v err=%v", retried, err)
+	}
+	if err := db.QueryRow(`SELECT status FROM nodes WHERE id=$1`, dead.NodeID).Scan(&retiredNodeStatus); err != nil || retiredNodeStatus != NodePending {
+		t.Fatalf("restored node status=%q err=%v", retiredNodeStatus, err)
+	}
 }
 
 func TestPostgresBootstrapConcurrentRecoveryIsAtomic(t *testing.T) {

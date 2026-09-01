@@ -45,6 +45,12 @@ func TestBootstrapRetryFailureBackoffAndCompletion(t *testing.T) {
 	if failed.Status != BootstrapRetryWait || failed.NextAttemptAt == nil || !failed.NextAttemptAt.Equal(now.Add(time.Second).Add(bootstrapRetryDelay(1))) || failed.LeaseTokenHash != "" {
 		t.Fatalf("retry state=%+v", failed)
 	}
+	service.mu.Lock()
+	pendingNode := service.nodes[failed.NodeID]
+	service.mu.Unlock()
+	if pendingNode.Status != NodePending {
+		t.Fatalf("retryable bootstrap must retain its provisional node: %+v", pendingNode)
+	}
 	if _, ok, err := service.LeaseNextBootstrapSession("worker-2", "", failed.NextAttemptAt.Add(-time.Nanosecond), 90*time.Second); err != nil || ok {
 		t.Fatalf("leased before backoff ok=%v err=%v", ok, err)
 	}
@@ -87,6 +93,12 @@ func TestBootstrapExpiredLeaseRecoveryAndAttemptExhaustion(t *testing.T) {
 	if dead.Status != BootstrapDeadLetter || dead.DeadLetteredAt == nil || dead.AttemptCount != 2 {
 		t.Fatalf("dead-letter=%+v", dead)
 	}
+	service.mu.Lock()
+	node := service.nodes[dead.NodeID]
+	service.mu.Unlock()
+	if node.Status != NodeRemoved || node.FailureCode != "BOOTSTRAP_LEASE_EXPIRED" {
+		t.Fatalf("terminal bootstrap node=%+v", node)
+	}
 	if _, ok, err := service.LeaseNextBootstrapSession("worker-3", "", second.LeaseExpiresAt.Add(time.Hour), 30*time.Second); err != nil || ok {
 		t.Fatalf("dead-letter leased ok=%v err=%v lease=%+v", ok, err, lease)
 	}
@@ -99,6 +111,12 @@ func TestBootstrapPermanentFailureDeadLettersImmediately(t *testing.T) {
 	dead, err := service.FinishBootstrapSessionForLease(projectID, session.ID, "worker-1", lease.LeaseToken, BootstrapFinishResult{Status: "failed", FailureCode: "SSH_AUTH_METHOD_UNSUPPORTED", MessageRedacted: "private key mode is unsupported"}, now.Add(time.Second))
 	if err != nil || dead.Status != BootstrapDeadLetter || dead.DeadLetteredAt == nil || dead.NextAttemptAt != nil {
 		t.Fatalf("dead=%+v err=%v", dead, err)
+	}
+	service.mu.Lock()
+	node := service.nodes[dead.NodeID]
+	service.mu.Unlock()
+	if node.Status != NodeRemoved || node.FailureCode != "SSH_AUTH_METHOD_UNSUPPORTED" {
+		t.Fatalf("retired node=%+v", node)
 	}
 }
 
@@ -114,10 +132,19 @@ func TestBootstrapManualRetryIsIdempotentAndDeadLetterOnly(t *testing.T) {
 	stored.AttemptCount = 3
 	stored.DeadLetteredAt = &now
 	service.bootstraps[session.ID] = stored
+	node := service.nodes[session.NodeID]
+	node.Status = NodeRemoved
+	service.nodes[session.NodeID] = node
 	service.mu.Unlock()
 	first, err := service.ManualRetryBootstrapSession(projectID, session.ID, "retry-1", now.Add(time.Second))
 	if err != nil || !first.Applied || first.Session.Status != BootstrapPending || first.Session.AttemptCount != 0 {
 		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	service.mu.Lock()
+	node = service.nodes[session.NodeID]
+	service.mu.Unlock()
+	if node.Status != NodePending {
+		t.Fatalf("manual retry must restore its provisional node: %+v", node)
 	}
 	second, err := service.ManualRetryBootstrapSession(projectID, session.ID, "retry-1", now.Add(2*time.Second))
 	if err != nil || second.Applied || second.Session.ID != first.Session.ID {
