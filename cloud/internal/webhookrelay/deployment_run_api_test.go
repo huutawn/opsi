@@ -251,6 +251,36 @@ func TestWorkflowTargetUsesConservativeZeroConfigCapacity(t *testing.T) {
 	}
 }
 
+func TestWorkflowResourceAuthorityIgnoresReconcilerFactsButDetectsDesiredSpecChanges(t *testing.T) {
+	resources := []resourcev1.Resource{{
+		ID: "res-1", ProjectID: "project-1", EnvironmentID: "env-1", Name: "postgres", Kind: resourcev1.KindManagedService, Type: resourcev1.TypePostgres,
+		Lifecycle: resourcev1.LifecycleProvisioning, UpdatedAt: time.Unix(100, 0).UTC(),
+		Managed: &resourcev1.ManagedSpec{Type: resourcev1.TypePostgres, Version: "18.6", Profile: "single-node-experimental", Replicas: 1, CPUMillicores: 250, MemoryBytes: 256 << 20},
+	}}
+	initial, err := workflowResourceAuthorityHash(resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources[0].Lifecycle = resourcev1.LifecycleReady
+	resources[0].UpdatedAt = time.Unix(200, 0).UTC()
+	resources[0].Runtime = &resourcev1.ManagedResourceRuntime{FailureCode: "transient-observation"}
+	reconciled, err := workflowResourceAuthorityHash(resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled != initial {
+		t.Fatalf("reconciler facts changed plan authority: initial=%s reconciled=%s", initial, reconciled)
+	}
+	resources[0].Managed.MemoryBytes = 512 << 20
+	changed, err := workflowResourceAuthorityHash(resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == initial {
+		t.Fatal("managed resource specification change did not invalidate authority")
+	}
+}
+
 func TestWorkflowPublishesApplicationProxyAndKeepsBackendInternal(t *testing.T) {
 	run := deploymentworkflow.Run{Plan: deploymentworkflow.Plan{
 		Applications: []repositoryanalysis.Application{{Key: "api"}, {Key: "web"}},

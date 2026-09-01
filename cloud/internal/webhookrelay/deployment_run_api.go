@@ -19,6 +19,7 @@ import (
 	"github.com/opsi-dev/opsi/cloud/internal/registry"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryanalysis"
 	"github.com/opsi-dev/opsi/cloud/internal/repositoryexport"
+	resourcev1 "github.com/opsi-dev/opsi/contracts/go/resourcev1"
 )
 
 func (s *Server) handleDeploymentRunAPI(w http.ResponseWriter, r *http.Request, projectID string, parts []string, principal auth.VerifyResult) bool {
@@ -642,9 +643,8 @@ func (s *Server) workflowAuthority(ctx context.Context, projectID string, reposi
 	if err != nil {
 		return value, err
 	}
-	sort.Slice(resources, func(i, j int) bool { return resources[i].ID < resources[j].ID })
 	value.ResourceRevision = uint64(len(resources))
-	value.ResourceHash, err = workflowAuthorityHash(resources)
+	value.ResourceHash, err = workflowResourceAuthorityHash(resources)
 	if err != nil {
 		return value, err
 	}
@@ -663,6 +663,37 @@ func (s *Server) workflowAuthority(ctx context.Context, projectID string, reposi
 		return value, err
 	}
 	return value, nil
+}
+
+// workflowResourceAuthorityHash deliberately excludes reconciler-owned
+// lifecycle, runtime evidence, and timestamps. Those fields change while an
+// otherwise unchanged resource becomes Ready and must not invalidate a plan
+// before its owner can approve it. Desired resource identity and specification
+// remain part of the authority snapshot, so externally changing either still
+// invalidates the reviewed plan.
+func workflowResourceAuthorityHash(resources []resourcev1.Resource) (string, error) {
+	type desiredResource struct {
+		ID            string                   `json:"id"`
+		ProjectID     string                   `json:"project_id"`
+		EnvironmentID string                   `json:"environment_id"`
+		Name          string                   `json:"name"`
+		Kind          resourcev1.Kind          `json:"kind"`
+		Provider      string                   `json:"provider"`
+		Type          resourcev1.Type          `json:"type"`
+		Managed       *resourcev1.ManagedSpec  `json:"managed,omitempty"`
+		External      *resourcev1.ExternalSpec `json:"external,omitempty"`
+		InternalName  string                   `json:"internal_name,omitempty"`
+	}
+	values := make([]desiredResource, 0, len(resources))
+	for _, resource := range resources {
+		values = append(values, desiredResource{
+			ID: resource.ID, ProjectID: resource.ProjectID, EnvironmentID: resource.EnvironmentID,
+			Name: resource.Name, Kind: resource.Kind, Provider: resource.Provider, Type: resource.Type,
+			Managed: resource.Managed, External: resource.External, InternalName: resource.InternalName,
+		})
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].ID < values[j].ID })
+	return workflowAuthorityHash(values)
 }
 
 func workflowAuthorityHash(value any) (string, error) {
