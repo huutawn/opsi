@@ -372,7 +372,7 @@ func (s *Server) handleBootstrapWorkerFinish(w http.ResponseWriter, r *http.Requ
 
 func bootstrapStatusActive(status string) bool {
 	switch status {
-	case "created", "pending", "preflight", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
+	case "created", "pending", "preflight", "configure_swap", "validating", "connecting", "installing", "installing_k3s", "installing_agent", "registering_agent", "waiting_agent", "verifying_agent", "verifying":
 		return true
 	default:
 		return false
