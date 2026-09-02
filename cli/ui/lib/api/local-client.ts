@@ -146,15 +146,28 @@ export type AssistantProvider = {
   capabilities: string[]; data_boundary: string; message?: string;
 };
 
+export type AssistantGrounding = {
+  status: "verified" | "failed" | "unverified";
+  successful_tool_calls: number;
+  tools: string[];
+};
+
 export type AssistantConfigurationProposal = {
   application_id: string; application_name: string; environment_id: string; rationale: string;
   expected_revision: number; expected_state_hash: string; analysis_inputs_hash: string; draft_json: string;
 };
+export type AssistantSourcePatchProposal = {
+  project_id: string; environment_id: string; application_id: string; source_commit: string;
+  application_root: string; proposal_hash: string; validation_status: "VALID" | "VALID_WITH_WARNINGS";
+  proposal: { rationale?: { observed_source?: string; opsi_facts?: string; inference?: string }; files?: Array<{ path: string; base_blob_sha: string; unified_diff: string }> };
+};
+export type SourcePatchApplyReceipt = { status: string; reused?: boolean; proposal_hash: string; source_commit: string; changed_files: string[]; journal_id?: string; applied_at: string };
 
 export type AssistantTurn = {
   id: string; conversation_id: string; provider_id: string; project_id: string;
   state: "running" | "succeeded" | "failed"; response?: string; error?: string;
-  proposals?: AssistantConfigurationProposal[]; started_at: string; finished_at?: string;
+  error_code?: string; grounding?: AssistantGrounding;
+  configuration_proposals?: AssistantConfigurationProposal[]; source_patch_proposals?: AssistantSourcePatchProposal[]; started_at: string; finished_at?: string;
 };
 
 export class LocalClient {
@@ -237,6 +250,13 @@ export class LocalClient {
 
   assistantTurn(projectID: string, turnID: string) {
     return this.call<AssistantTurn>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns/${encodeURIComponent(turnID)}`);
+  }
+
+  applyAssistantSourcePatch(projectID: string, turnID: string, proposalHash: string, expectedSourceCommit: string, idempotencyKey?: string) {
+    return this.call<SourcePatchApplyReceipt>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns/${encodeURIComponent(turnID)}/source-patches/${encodeURIComponent(proposalHash)}/apply`, {
+      method: "POST", write: true, idempotencyKey,
+      body: JSON.stringify({ confirmed_proposal_hash: proposalHash, expected_source_commit: expectedSourceCommit }),
+    });
   }
 
   async projects(orgID: string) {

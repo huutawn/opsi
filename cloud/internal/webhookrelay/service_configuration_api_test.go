@@ -66,7 +66,7 @@ func TestServiceConfigurationProposalAuditIsBoundToCanonicalApply(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := server.Registry.CreateProposalReview(project.ID, service.ID, "user-1", registry.ProposalReviewCreateRequest{EnvironmentID: service.EnvironmentID, Kind: registry.ProposalReviewDependency, AnalysisInputsHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", DependencyDraft: &registry.ServiceConfigurationDraft{}})
+	created, err := server.Registry.CreateProposalReview(project.ID, service.ID, "user-1", registry.ProposalReviewCreateRequest{EnvironmentID: service.EnvironmentID, Kind: registry.ProposalReviewServiceConfiguration, AnalysisInputsHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ConfigurationDraft: &registry.ServiceConfigurationDraft{}})
 	if err != nil {
 		t.Fatal(err)
 	}

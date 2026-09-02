@@ -58,7 +58,6 @@ class TestContext:
         self.repo_dir = os.path.join(self.tmp_dir, "repo")
         self.commit_sha = None
         self.all_mcp_output_text = []
-
     def log(self, msg):
         print(f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] {msg}")
 
@@ -124,6 +123,12 @@ def wait_for_http(url, timeout=30):
 
 async def run_live_acceptance():
     ctx = TestContext()
+    # This harness owns default-pat only in a disposable Secret Service/D-Bus
+    # session. Refuse to touch a user's active keychain as crash recovery could
+    # otherwise lose the original credential before cleanup runs.
+    check_pat = subprocess.run(["secret-tool", "lookup", "service", "opsi", "key", "default-pat"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if check_pat.returncode == 0 and check_pat.stdout.strip():
+        raise RuntimeError("refusing to overwrite an existing default-pat; run under an isolated Secret Service session")
     try:
         ctx.log("=== SECTION 0: EXACT GIT REVISION ===")
         full_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -804,7 +809,7 @@ fetch("http://localhost:8080/api/health/dependencies/database").then(r => r.json
 
                 tools_res = await session.list_tools()
                 ctx.log(f"Tool Discovery: {len(tools_res.tools)} tools found")
-                assert len(tools_res.tools) == 22, f"Expected 22 tools, got {len(tools_res.tools)}"
+                assert len(tools_res.tools) == 24, f"Expected 24 tools, got {len(tools_res.tools)}"
                 tool_names = [t.name for t in tools_res.tools]
                 mutation_keywords = ["create_", "update_", "delete_", "apply_", "build_start", "execute_", "patch_", "mutate_"]
                 for t in tools_res.tools:
@@ -814,7 +819,7 @@ fetch("http://localhost:8080/api/health/dependencies/database").then(r => r.json
                 assert "validate_dependency_proposal" in tool_names
                 assert "validate_source_patch_proposal" in tool_names
                 assert "deployment_readiness_context" in tool_names
-                ctx.log("✓ All 22 tools verified strictly non-operational")
+                ctx.log("✓ All 24 tools verified strictly non-operational")
 
                 ctx.log("\n=== SECTION 5: PROJECT CONTEXT THROUGH MCP ===")
                 # 1. project_context
@@ -1491,47 +1496,21 @@ fetch("http://localhost:8080/api/health/dependencies/database").then(r => r.json
         wait_for_http(f"{ctx.cloud_url}/health")
         ctx.log("✓ Cloud authority restored")
 
-        ctx.log("\n=== SECTION 24: HTTP TRANSPORT LIVE SMOKE ===")
-        mcp_http_port = get_free_port()
-        mcp_http_proc = subprocess.Popen([
-            os.path.abspath("./bin/opsi"), "--config", cli_cfg_path, "mcp", "serve",
-            "--addr", f"127.0.0.1:{mcp_http_port}",
-            "--project-id", ctx.project_id
-        ], cwd=ctx.repo_dir)
-        time.sleep(1)
-        try:
-            # 1. Valid loopback Host
-            req = urllib.request.Request(f"http://127.0.0.1:{mcp_http_port}/health")
-            with urllib.request.urlopen(req) as resp:
-                assert resp.status == 200
-                health_data = json.loads(resp.read().decode())
-                assert health_data["status"] == "ok"
-
-            # 2. Foreign Host
-            try:
-                req_foreign = urllib.request.Request(f"http://127.0.0.1:{mcp_http_port}/health", headers={"Host": "evil.attacker.com"})
-                with urllib.request.urlopen(req_foreign) as resp:
-                    assert False, "Expected 403 for foreign Host"
-            except urllib.error.HTTPError as e:
-                assert e.code == 403
-
-            # 3. Foreign Origin on /mcp
-            try:
-                req_origin = urllib.request.Request(
-                    f"http://127.0.0.1:{mcp_http_port}/mcp",
-                    data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode(),
-                    headers={"Content-Type": "application/json", "Origin": "https://evil.attacker.com"}
-                )
-                with urllib.request.urlopen(req_origin) as resp:
-                    assert False, "Expected 403 for foreign Origin"
-            except urllib.error.HTTPError as e:
-                assert e.code == 403
-
-            ctx.log("✓ HTTP transport smoke: loopback only, foreign Host/Origin rejected with 403")
-        finally:
-            mcp_http_proc.terminate()
-            mcp_http_proc.wait(timeout=3)
-
+        ctx.log("\n=== SECTION 24: STDIO SERVE ALIAS SMOKE ===")
+        serve_params = StdioServerParameters(
+            command=os.path.abspath("./bin/opsi"),
+            args=["--config", cli_cfg_path, "mcp", "serve", "--project-id", ctx.project_id],
+            env=env,
+            cwd=ctx.repo_dir
+        )
+        async with stdio_client(serve_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                init_res = await session.initialize()
+                assert init_res.serverInfo.name == "opsi-mcp"
+                await session.send_ping()
+                ctx_res = await session.call_tool("project_context", {"project_id": ctx.project_id})
+                assert not ctx_res.isError
+                ctx.log("✓ 'opsi mcp serve' alias stdio transport verified identical to 'opsi mcp'")
         ctx.log("\n=== SECTION 25: MANUAL MODE INDEPENDENT ===")
         # MCP server is stopped. Call Cloud authority directly.
         req_topo = urllib.request.Request(

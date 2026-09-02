@@ -1,5 +1,6 @@
 export const projectDestinations = [
   { id: "deploy", label: "Deploy" },
+  { id: "assistant", label: "AI Assistant" },
   { id: "observability", label: "Observability" },
   { id: "security", label: "Security" },
 ] as const;

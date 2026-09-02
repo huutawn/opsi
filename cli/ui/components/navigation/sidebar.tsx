@@ -51,6 +51,7 @@ export function Sidebar({
 
   const projectDestinations = [
     { id: "deploy", label: "Deploy", icon: "rocket_launch" },
+    { id: "assistant", label: "AI Assistant", icon: "hub" },
     { id: "observability", label: "Observability", icon: "monitoring" },
     { id: "security", label: "Security", icon: "security" },
   ] as const;
@@ -140,6 +141,7 @@ export function Sidebar({
             projectDestinations.map((item) => {
               const iconMap: Record<string, string> = {
                 deploy: "rocket_launch",
+                assistant: "hub",
                 observability: "monitoring",
                 security: "security",
               };

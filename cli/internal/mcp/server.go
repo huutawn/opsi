@@ -7,15 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
@@ -351,16 +347,6 @@ func (s *Server) handleNotification(_ context.Context, req JSONRPCRequest) {
 		s.logf("Ignored notification %q", req.Method)
 	}
 }
-
-func isLoopbackHost(host string) bool {
-	h := strings.Trim(host, "[]")
-	if h == "127.0.0.1" || h == "localhost" || h == "::1" {
-		return true
-	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
-}
-
 // ServeStdio starts the stdio JSON-RPC loop.
 func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.logf("Starting Opsi MCP Server (version %s) on stdio", s.Version)
@@ -431,110 +417,5 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 		s.writeMu.Lock()
 		_, _ = fmt.Fprintf(out, "%s\n", string(respBytes))
 		s.writeMu.Unlock()
-	}
-}
-
-// ServeHTTP starts a local loopback HTTP server.
-func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
-	if strings.TrimSpace(addr) == "" {
-		addr = "127.0.0.1:9781"
-	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	if !isLoopbackHost(host) {
-		return errors.New("MCP HTTP transport must bind to loopback address (127.0.0.1, localhost, or ::1)")
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		// Validate Host header to protect against DNS rebinding attacks
-		reqHost := r.Host
-		if h, _, err := net.SplitHostPort(reqHost); err == nil {
-			reqHost = h
-		}
-		if !isLoopbackHost(reqHost) {
-			http.Error(w, "Forbidden: invalid Host header", http.StatusForbidden)
-			return
-		}
-
-		// Validate Origin header to protect against malicious browser websites
-		if origin := r.Header.Get("Origin"); origin != "" {
-			u, err := url.Parse(origin)
-			if err != nil || !isLoopbackHost(u.Hostname()) {
-				http.Error(w, "Forbidden: cross-origin requests are rejected", http.StatusForbidden)
-				return
-			}
-		}
-
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Validate Content-Type
-		if ct := r.Header.Get("Content-Type"); ct != "" {
-			mediaType, _, _ := mime.ParseMediaType(ct)
-			if mediaType != "application/json" {
-				http.Error(w, "Unsupported Media Type: Content-Type must be application/json", http.StatusUnsupportedMediaType)
-				return
-			}
-		}
-
-		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
-		if err != nil {
-			http.Error(w, "Bad request", http.StatusBadRequest)
-			return
-		}
-		resp, err := s.HandleMessage(r.Context(), body)
-		if err != nil || resp == nil {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		reqHost := r.Host
-		if h, _, err := net.SplitHostPort(reqHost); err == nil {
-			reqHost = h
-		}
-		if !isLoopbackHost(reqHost) {
-			http.Error(w, "Forbidden: invalid Host header", http.StatusForbidden)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","service":"opsi-mcp"}`))
-	})
-
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-
-	server := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- server.Serve(listener)
-	}()
-
-	s.logf("Opsi MCP HTTP server listening on http://%s", listener.Addr().String())
-
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
 	}
 }

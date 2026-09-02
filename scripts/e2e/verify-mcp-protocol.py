@@ -58,7 +58,7 @@ async def run_mcp_client_suite():
                 # 3. List Tools Discovery (Section 4 & 5)
                 tools_res = await session.list_tools()
                 print(f"[2] Tool Discovery: {len(tools_res.tools)} tools found")
-                assert len(tools_res.tools) == 22, f"Expected 22 tools, got {len(tools_res.tools)}"
+                assert len(tools_res.tools) == 24, f"Expected 24 tools, got {len(tools_res.tools)}"
 
                 tool_names = [t.name for t in tools_res.tools]
                 print(f"    Discovered Tools: {', '.join(tool_names)}")
@@ -69,13 +69,21 @@ async def run_mcp_client_suite():
                     for kw in mutation_keywords:
                         assert not t.name.startswith(kw), f"Mutation tool found: {t.name}"
                     assert "read-only" in t.description.lower() or "safe" in t.description.lower() or "immutable" in t.description.lower()
-                    # Schema verification
+                    # Schema & annotations verification
                     assert t.inputSchema is not None
                     assert t.inputSchema.get("type") == "object"
+                    annotations = getattr(t, "annotations", None)
+                    if annotations is not None:
+                        ro = getattr(annotations, "readOnlyHint", None)
+                        if ro is None and isinstance(annotations, dict):
+                            ro = annotations.get("readOnlyHint")
+                        assert ro is True, f"Tool {t.name} missing readOnlyHint: true"
                 assert "dependency_analysis_context" in tool_names
+                assert "project_review_context" in tool_names
                 assert "validate_dependency_proposal" in tool_names
+                assert "validate_service_configuration_proposal" in tool_names
                 assert "validate_source_patch_proposal" in tool_names
-                print("    ✓ All 22 tools verified strictly non-operational with typed schemas")
+                print("    ✓ All 24 tools verified strictly non-operational with typed schemas")
 
                 # 4. Unauthenticated Cloud-Authority Tools (Section 8)
                 print("[3] Testing AUTH_REQUIRED on Cloud tools when unauthenticated...")

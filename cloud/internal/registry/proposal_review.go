@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -12,26 +11,19 @@ import (
 
 const proposalReviewLifetime = 24 * time.Hour
 
-var sourceReviewSecrets = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(?:github_pat_|gh[pousr]_|glpat-|xox[baprs]-)[A-Za-z0-9_\-]{8,}`),
-	regexp.MustCompile(`(?i)(?:postgres(?:ql)?|redis|rediss)://[^\s"\\]+`),
-	regexp.MustCompile(`(?i)("(?:agent[_-]?token|postgres(?:ql)?[_-]?password|valkey[_-]?password|redis[_-]?password|registry[_-]?(?:credential|password|token)|password|token|pat|credential|secret)(?:[_-][^"]*)?"\s*:\s*)"(?:[^"\\]|\\.)*"`),
-	regexp.MustCompile(`(?i)(?:agent[_-]?token|postgres(?:ql)?[_-]?password|valkey[_-]?password|redis[_-]?password|registry[_-]?(?:credential|password|token)|password|token|pat|credential|secret)\s*[:=]\s*["']?[^\s,"'}\\\]]+`),
-}
-
 type ProposalReviewKind string
 type ProposalReviewStatus string
 
 const (
-	ProposalReviewDependency  ProposalReviewKind   = "dependency"
-	ProposalReviewSourcePatch ProposalReviewKind   = "source_patch"
-	ReviewRequired            ProposalReviewStatus = "review_required"
-	ReviewApproved            ProposalReviewStatus = "approved"
-	ReviewRejected            ProposalReviewStatus = "rejected"
-	ReviewStale               ProposalReviewStatus = "stale"
-	ReviewExpired             ProposalReviewStatus = "expired"
-	ReviewApplied             ProposalReviewStatus = "applied"
-	ReviewApplyFailed         ProposalReviewStatus = "apply_failed"
+	ProposalReviewServiceConfiguration ProposalReviewKind   = "service_configuration"
+	ProposalReviewSourcePatch          ProposalReviewKind   = "source_patch"
+	ReviewRequired                     ProposalReviewStatus = "review_required"
+	ReviewApproved                     ProposalReviewStatus = "approved"
+	ReviewRejected                     ProposalReviewStatus = "rejected"
+	ReviewStale                        ProposalReviewStatus = "stale"
+	ReviewExpired                      ProposalReviewStatus = "expired"
+	ReviewApplied                      ProposalReviewStatus = "applied"
+	ReviewApplyFailed                  ProposalReviewStatus = "apply_failed"
 )
 
 // ProposalReview is Cloud workflow authority. Its payload is deliberately a
@@ -70,8 +62,7 @@ type ProposalReviewCreateRequest struct {
 	AnalysisInputsHash string                     `json:"analysis_inputs_hash"`
 	SourceCommit       string                     `json:"source_commit,omitempty"`
 	ApplicationRoot    string                     `json:"application_root,omitempty"`
-	DependencyDraft    *ServiceConfigurationDraft `json:"dependency_draft,omitempty"`
-	SourcePatch        json.RawMessage            `json:"source_patch,omitempty"`
+	ConfigurationDraft *ServiceConfigurationDraft `json:"configuration_draft,omitempty"`
 }
 
 func reviewHash(value any) string {
@@ -88,23 +79,6 @@ func validReviewHash(value string) bool {
 	return err == nil
 }
 
-func normalizeSourcePatch(raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 || len(raw) > 256<<10 || !json.Valid(raw) {
-		return nil, APIError{Status: 422, Code: "SOURCE_PATCH_INVALID", Message: "source patch review payload is invalid"}
-	}
-	// A source review is display-only. Scrub obvious credential-bearing text at
-	// the Cloud boundary before persistence or Copy Patch can expose it.
-	safe := string(raw)
-	for _, pattern := range sourceReviewSecrets {
-		if strings.Contains(pattern.String(), "\\s*:") {
-			safe = pattern.ReplaceAllString(safe, `${1}"[REDACTED]"`)
-		} else {
-			safe = pattern.ReplaceAllString(safe, "[REDACTED]")
-		}
-	}
-	return json.RawMessage(safe), nil
-}
-
 func proposalReviewStale(value ProposalReview, configuration ServiceConfiguration, now time.Time) ProposalReviewStatus {
 	if value.Status != ReviewRequired && value.Status != ReviewApproved {
 		return value.Status
@@ -112,13 +86,13 @@ func proposalReviewStale(value ProposalReview, configuration ServiceConfiguratio
 	if now.After(value.ExpiresAt) {
 		return ReviewExpired
 	}
-	if value.Kind == ProposalReviewDependency && (configuration.Revision != value.ExpectedConfigurationRevision || configuration.StateHash != value.ExpectedConfigurationStateHash) {
+	if isConfigurationReviewKind(value.Kind) && (configuration.Revision != value.ExpectedConfigurationRevision || configuration.StateHash != value.ExpectedConfigurationStateHash) {
 		return ReviewStale
 	}
 	return value.Status
 }
 
-func decodeReviewedDependency(value ProposalReview) (ServiceConfigurationDraft, error) {
+func decodeReviewedConfiguration(value ProposalReview) (ServiceConfigurationDraft, error) {
 	var payload struct {
 		Draft ServiceConfigurationDraft `json:"draft"`
 	}
@@ -126,6 +100,13 @@ func decodeReviewedDependency(value ProposalReview) (ServiceConfigurationDraft, 
 		return ServiceConfigurationDraft{}, APIError{Status: 409, Code: "TAMPERED_REVIEW", Message: "stored proposal review payload is invalid"}
 	}
 	return payload.Draft, nil
+}
+
+func isConfigurationReviewKind(kind ProposalReviewKind) bool {
+	// Registry owns this persisted-value compatibility boundary. Remove the
+	// dependency value after all pre-mcp-04 proposal rows have expired (24h)
+	// or been migrated; new requests cannot create it.
+	return kind == ProposalReviewServiceConfiguration || kind == ProposalReviewKind("dependency")
 }
 
 func sortProposalReviews(values []ProposalReview) {

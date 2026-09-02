@@ -23,7 +23,7 @@ func proposalReviewFixture(t *testing.T) (*Service, Project, ServiceRecord) {
 
 func createDependencyReview(t *testing.T, service *Service, project Project, application ServiceRecord) ProposalReview {
 	t.Helper()
-	value, err := service.CreateProposalReview(project.ID, application.ID, "human-1", ProposalReviewCreateRequest{EnvironmentID: application.EnvironmentID, Kind: ProposalReviewDependency, AnalysisInputsHash: strings.Repeat("a", 64), DependencyDraft: &ServiceConfigurationDraft{}})
+	value, err := service.CreateProposalReview(project.ID, application.ID, "human-1", ProposalReviewCreateRequest{EnvironmentID: application.EnvironmentID, Kind: ProposalReviewServiceConfiguration, AnalysisInputsHash: strings.Repeat("a", 64), ConfigurationDraft: &ServiceConfigurationDraft{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,18 +158,8 @@ func TestProposalReviewExpiryAndSourceReviewCannotWrite(t *testing.T) {
 	if err != nil || expired.Status != ReviewExpired {
 		t.Fatalf("expired=%+v err=%v", expired, err)
 	}
-	source, err := service.CreateProposalReview(project.ID, application.ID, "human-1", ProposalReviewCreateRequest{
-		EnvironmentID: application.EnvironmentID, Kind: ProposalReviewSourcePatch, AnalysisInputsHash: strings.Repeat("b", 64),
-		SourcePatch: []byte(`{"files":[{"path":"main.go","unified_diff":"@@ -1 +1 @@\n-old\n+new"}]}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.RejectProposalReview(project.ID, source.ID, "human-2"); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := service.ApplyProposalReview(project.ID, source.ID, "human-2"); err == nil {
-		t.Fatal("source review acquired write authority")
+	if _, err := service.CreateProposalReview(project.ID, application.ID, "human-1", ProposalReviewCreateRequest{EnvironmentID: application.EnvironmentID, Kind: ProposalReviewSourcePatch, AnalysisInputsHash: strings.Repeat("b", 64)}); err == nil {
+		t.Fatal("source patch review must be local-only")
 	}
 	configuration, err := service.GetServiceConfiguration(project.ID, application.ID)
 	if err != nil || configuration.Revision != 0 {
@@ -177,20 +167,13 @@ func TestProposalReviewExpiryAndSourceReviewCannotWrite(t *testing.T) {
 	}
 }
 
-func TestSourceProposalReviewRedactsCredentialBearingContentBeforePersistence(t *testing.T) {
+func TestSourceProposalReviewIsRejectedBeforePersistence(t *testing.T) {
 	service, project, application := proposalReviewFixture(t)
 	secrets := []string{"github_pat_abcdefghijklmnopqrstuvwxyz123456", "agent_token=agent-secret", "postgresql://opsi:postgres-secret@db.example/opsi", "valkey_password=valkey-secret", "registry_credential=registry-secret"}
-	patch := `{"files":[{"path":"main.go","unified_diff":"` + strings.Join(secrets, `\\n`) + `"}]}`
-	review, err := service.CreateProposalReview(project.ID, application.ID, "human-1", ProposalReviewCreateRequest{
-		EnvironmentID: application.EnvironmentID, Kind: ProposalReviewSourcePatch, AnalysisInputsHash: strings.Repeat("c", 64), SourcePatch: []byte(patch),
-	})
-	if err != nil {
-		t.Fatal(err)
+	if len(secrets) == 0 {
+		t.Fatal("test fixture is empty")
 	}
-	persisted := string(review.NormalizedPayload)
-	for _, secret := range secrets {
-		if strings.Contains(persisted, secret) {
-			t.Fatalf("durable source review leaked %q: %s", secret, persisted)
-		}
+	if _, err := service.CreateProposalReview(project.ID, application.ID, "human-1", ProposalReviewCreateRequest{EnvironmentID: application.EnvironmentID, Kind: ProposalReviewSourcePatch, AnalysisInputsHash: strings.Repeat("c", 64)}); err == nil {
+		t.Fatal("source patch must not be persisted in Cloud")
 	}
 }

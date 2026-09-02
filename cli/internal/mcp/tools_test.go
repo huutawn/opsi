@@ -485,6 +485,21 @@ func TestMCPTools_AllReadToolsAcceptance(t *testing.T) {
 		t.Errorf("expected project_id in result, got: %s", res.Content[0].Text)
 	}
 
+	// Project review composes existing authorities and stays explicitly non-operational.
+	res = callTool("project_review_context", map[string]any{"project_id": projectID})
+	if res.IsError || !strings.Contains(res.Content[0].Text, `"action": "NONE"`) || !strings.Contains(res.Content[0].Text, "web-api") {
+		t.Fatalf("project_review_context failed: %s", res.Content[0].Text)
+	}
+
+	// A stale complete-configuration proposal is rejected before any preview,
+	// diff, persistence, or apply call can occur.
+	res = callTool("validate_service_configuration_proposal", map[string]any{"proposal": map[string]any{
+		"project_id": projectID, "application_id": "svc-web-1", "expected_revision": 4, "expected_state_hash": "old-state",
+		"draft": map[string]any{"schema_version": serviceconfigurationv1.SchemaVersion, "environment": []map[string]any{{"name": "LOG_LEVEL", "value": "debug"}}},
+	}})
+	if res.IsError || !strings.Contains(res.Content[0].Text, `"status": "STALE"`) || !strings.Contains(res.Content[0].Text, `"action": "NONE"`) {
+		t.Fatalf("validate_service_configuration_proposal did not fail closed: %s", res.Content[0].Text)
+	}
 	// 2. topology
 	res = callTool("topology", map[string]any{"project_id": projectID})
 	if res.IsError || !strings.Contains(res.Content[0].Text, "web-api") {

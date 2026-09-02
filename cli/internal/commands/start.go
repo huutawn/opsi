@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/opsi-dev/opsi/cli/internal/agentclient"
+	"github.com/opsi-dev/opsi/cli/internal/assistant"
 	"github.com/opsi-dev/opsi/cli/internal/cloudclient"
 	"github.com/opsi-dev/opsi/cli/internal/config"
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
@@ -72,8 +73,10 @@ func runStart(ctx context.Context, addr, devUI, configPath string, out io.Writer
 	}
 	defer listener.Close()
 
+	mux, assistantMgr := newStartServer(resolveUIDir(), devUI, cfg, factory, configPath)
+	defer assistantMgr.Close()
 	server := &http.Server{
-		Handler:           newStartMux(resolveUIDir(), devUI, cfg, factory, configPath),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -135,11 +138,20 @@ func resolveAgentSnapshot(startup config.Config, resolver ...agentConfigResolver
 }
 
 func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error), configPaths ...string) *http.ServeMux {
+	mux, _ := newStartServer(uiDir, devUI, cfg, factory, configPaths...)
+	return mux
+}
+
+func newStartServer(uiDir, devUI string, cfg config.Config, factory func() (keychain.Store, error), configPaths ...string) (*http.ServeMux, *assistant.Manager) {
 	configPath := ""
 	if len(configPaths) > 0 {
 		configPath = configPaths[0]
 	}
 	agentResolver := newAgentConfigResolver(cfg, configPath)
+	repoRoot, _ := os.Getwd()
+	opsiBinary, _ := os.Executable()
+	assistantManager := assistant.NewManager(assistant.NewCodexProvider(assistant.CodexOptions{OpsiBinary: opsiBinary, ConfigPath: configPath, RepoRoot: repoRoot}))
+	assistantManager.SetRepositoryRoot(repoRoot)
 	localSession := newLocalSessionToken()
 	authFlow := &localAuthFlow{
 		states:                  map[string]localAuthPending{},
@@ -382,17 +394,17 @@ func newStartMux(uiDir, devUI string, cfg config.Config, factory func() (keychai
 			writeLocalError(w, r, http.StatusBadRequest, "ORG_ID_REQUIRED", "org_id must come from the authenticated session")
 			return
 		}
+		if handleLocalAssistantRoutes(w, r, assistantManager, cfg, factory, localSession) {
+			return
+		}
 		if handleLocalAgentRoutes(w, r, cfg, factory, localSession, agentResolver) {
 			return
 		}
 		proxyLocalRegistry(w, r, cfg, factory, localSession, authFlow)
 	})
 
-	mux := http.NewServeMux()
-	mux.Handle("/health", routes)
-	mux.Handle("/api/local/", boundedLocalAPI(routes))
-	mux.Handle("/", newUIHandler(uiDir, devUI))
-	return mux
+	routes.Handle("/", newUIHandler(uiDir, devUI))
+	return routes, assistantManager
 }
 
 func configuredAuthority(raw string) string {

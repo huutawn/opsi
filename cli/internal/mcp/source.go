@@ -97,7 +97,7 @@ func CleanApplicationRoot(appRoot string) string {
 	appRoot = filepath.ToSlash(appRoot)
 	appRoot = strings.TrimPrefix(appRoot, "./")
 	appRoot = strings.Trim(appRoot, "/")
-	if appRoot == "." {
+	if appRoot == "" || appRoot == "." {
 		return ""
 	}
 	return path.Clean(appRoot)

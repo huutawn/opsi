@@ -154,7 +154,7 @@ func (s PostgresService) StartExposureRollout(projectID, actorUserID, key, reque
 
 func latestPostgresExposure(ctx context.Context, queryer rolloutQueryer, projectID, environmentID, runtimeID, serviceID string) (*exposurev1.ExposureSpec, error) {
 	var raw string
-	err := queryer.QueryRowContext(ctx, `SELECT exposure_spec_json::text FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND exposure_spec_json IS NOT NULL AND status=$5 AND rollout_state=$6 ORDER BY created_at DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID, deploymentv1.StateSucceeded, deploymentv1.RolloutStateSucceeded).Scan(&raw)
+	err := queryer.QueryRowContext(ctx, `SELECT exposure_spec_json::text FROM deployment_jobs WHERE project_id=$1 AND environment_id=$2 AND runtime_id=$3 AND service_id=$4 AND exposure_spec_json IS NOT NULL AND status=rollout_state AND rollout_state IN ($5,$6) ORDER BY created_at DESC LIMIT 1`, projectID, environmentID, runtimeID, serviceID, deploymentv1.RolloutStateSucceeded, deploymentv1.RolloutStateRolledBack).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

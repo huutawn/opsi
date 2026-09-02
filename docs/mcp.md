@@ -4,7 +4,7 @@
 
 Opsi Model Context Protocol (MCP) server provides AI agents and external tools with a safe, read-only window into Opsi project topology, source snapshots, deployment preflight evaluations, and 5-layer dependency verifications.
 
-MCP-01 through MCP-05 are strictly **non-operational**. They introduce zero mutations into the Opsi control plane or running environments.
+MCP-01 through MCP-05 are strictly **non-operational**. They introduce zero mutations into the Opsi control plane or running environments. The local Dashboard can connect Codex to this surface, but Review, Approve, and Apply remain separate human actions outside MCP.
 
 MCP-02 adds an advisory dependency-proposal boundary. Opsi provides bounded,
 exact-source-bound facts and deterministically validates a typed candidate with
@@ -29,7 +29,7 @@ The MCP server runs at the **local Opsi Edge boundary** (the CLI on the operator
 +-------------------------------------------------------------------------+
 | Local Operator Machine                                                  |
 |                                                                         |
-|  +--------------------+         Stdio / Loopback HTTP                   |
+|  +--------------------+                     Stdio                             |
 |  |   MCP Client       | -------------------------------------+          |
 |  | (AI Assistant/IDE) |                                      |          |
 |  +--------------------+                                      v          |
@@ -63,10 +63,10 @@ The MCP server runs at the **local Opsi Edge boundary** (the CLI on the operator
 
 ---
 
-## Transport Modes
+## Transport Mode
 
-### 1. Stdio (Default)
-Standard JSON-RPC 2.0 over standard input and standard output (newline-delimited JSON). Diagnostic logs are written exclusively to `stderr` to maintain protocol stream integrity.
+### Stdio
+Standard JSON-RPC 2.0 over standard input and standard output (newline-delimited JSON). Diagnostic logs are written exclusively to `stderr` to maintain protocol stream integrity. Both `opsi mcp` and `opsi mcp serve` share the exact same authority and start the stdio server.
 
 ```bash
 opsi mcp
@@ -74,19 +74,13 @@ opsi mcp
 opsi mcp serve
 ```
 
-### 2. Loopback HTTP (Optional)
-HTTP POST endpoint running exclusively on local loopback (`127.0.0.1` or `localhost`).
-
-```bash
-opsi mcp serve --addr 127.0.0.1:9781
-```
-
 ---
 
-## Available Read-Only Tools (22)
+## Available Read-Only Tools (24)
 
 | Tool Name | Scope / Purpose | Key Safeguards & Bounds |
 | :--- | :--- | :--- |
+| `project_review_context` | One bounded composition of current project, application, topology, deployment, and configuration facts for an external review agent. | Reuses existing authorities; always `action: NONE`; does not store an AI review state. |
 | `deployment_readiness_context` | Single bounded snapshot of current source, configuration/dependency realization, BuildRecord, placement, canonical preflight, deployment, and verification facts for one application/environment. | Always `action: NONE`; derives facts on each read; no persisted AI workflow, reasoning, acknowledgement, or operational action. A PASS still requires the human to use the canonical deployment review surface. |
 | `project_context` | High-level project summary, counts, topology revision, deployment state. | Redacted facts, zero credentials. |
 | `topology` | Applied topology plan (runtimes, nodes, assignments, state hashes). | Canonical applied plan only. |
@@ -108,6 +102,7 @@ opsi mcp serve --addr 127.0.0.1:9781
 | `source_search` | Deterministic literal text search at an exact commit SHA. | Max 50 matches, credential redaction in snippets, bounded scan. |
 | `dependency_analysis_context` | Bounded facts for external dependency analysis for one application/environment. | Current immutable BuildRecord commit, `ApplicationRoot`, configuration/dependency/topology hashes, compatible targets, bounded risk/verification facts; no source dump or secrets. |
 | `validate_dependency_proposal` | Validate an external typed dependency proposal. | Always `action: NONE`; detects stale provenance; reuses canonical ADC validation/diff endpoints; never applies, persists, builds, deploys, or realizes. |
+| `validate_service_configuration_proposal` | Validate and semantically diff a complete ServiceConfiguration proposal, including non-secret variables, bindings, dependencies, resources, and public routes. | Revision/state-hash stale check; canonical Cloud preview/validation/diff; returns generated variable names but not generated values; never persists or applies. |
 | `validate_source_patch_proposal` | Validate an external typed exact-source patch proposal. | Always `action: NONE`; max 8 files, 32 hunks, 128 KiB, and 1000 changed lines; exact blob preimage and virtual apply only; never writes, applies, persists, builds, or tests. |
 
 ### MCP-02 proposal lifecycle
@@ -129,10 +124,10 @@ The only confidence values are `HIGH`, `MEDIUM`, and `LOW`; confidence is an AI
 client assertion, not an Opsi probability score. Source text, names, excerpts,
 and proposal fields are treated as data and cannot add capabilities.
 
-MCP-02 does not provide dependency apply, resource-binding realization,
+MCP does not provide ServiceConfiguration apply, dependency apply, resource-binding realization,
 managed-resource creation, build, deployment, warning acknowledgement,
 verification trigger, source patching, shell execution, arbitrary HTTP, secret
-access, or a model-provider integration.
+access, or an approval action.
 
 ### MCP-03 source patch lifecycle
 
@@ -160,6 +155,36 @@ uses an un-applied MCP-02 mapping returns
 `DEPENDS_ON_UNAPPLIED_DEPENDENCY_PROPOSAL`; a configuration-only alternative is
 reported rather than hidden. Source and proposal prompt-injection text is data
 only and cannot expand MCP capabilities.
+
+After a successful assistant turn, a human developer may explicitly choose
+**Apply to local worktree** in the Dashboard. That Local API action is outside
+MCP and only accepts the exact patch retained by the attested turn. It requires
+the reviewed commit to still be `HEAD`, every target Git blob and worktree file
+to match the original preimage, and every target to be clean, regular and
+inside the repository. Opsi writes atomically with a local `.git/opsi/source-patch`
+recovery journal. It never builds, tests, stages, commits, pushes, or opens a
+pull request. Cloud ProposalReview accepts configuration changes only; source
+patches are not persisted in Cloud.
+
+### Local AI Assistant
+
+`opsi start` exposes an AI Assistant destination backed by a local provider
+bridge. The current provider is Codex CLI; the bridge uses a provider interface
+so another local agent can replace it without adding another Opsi review or
+configuration implementation. Codex runs in an isolated empty workspace and
+receives project facts through an `opsi mcp` child configured for the selected
+project. The bridge prompt prohibits shell, filesystem, web, and non-Opsi tools.
+Codex owns its thread history; Opsi keeps only a bounded in-memory turn
+projection. Native shell, execution, browser, web, plugin, app, computer, and
+image tools are disabled for assistant turns.
+
+Agent configuration output is structured and must first pass
+`validate_service_configuration_proposal`. The browser rechecks the current
+revision/state hash and Cloud validation/diff before it creates the authoritative
+`service_configuration` ProposalReview. A human then performs three distinct
+actions: Create review, Approve, and Apply. Restarting the local CLI loses the UI
+projection but not Cloud ProposalReview records; listing historical agent
+threads in the Dashboard is not implemented.
 
 ---
 

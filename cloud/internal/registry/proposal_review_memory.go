@@ -5,7 +5,10 @@ import (
 )
 
 func (s *Service) CreateProposalReview(projectID, applicationID, actorUserID string, request ProposalReviewCreateRequest) (ProposalReview, error) {
-	if request.Kind != ProposalReviewDependency && request.Kind != ProposalReviewSourcePatch {
+	if request.Kind == ProposalReviewSourcePatch {
+		return ProposalReview{}, APIError{Status: 422, Code: "SOURCE_PATCH_LOCAL_ONLY", Message: "source patches are confirmed and applied only in the local worktree"}
+	}
+	if request.Kind != ProposalReviewServiceConfiguration {
 		return ProposalReview{}, APIError{Status: 422, Code: "PROPOSAL_REVIEW_KIND_INVALID", Message: "proposal review kind is invalid"}
 	}
 	if !validReviewHash(request.AnalysisInputsHash) {
@@ -15,11 +18,11 @@ func (s *Service) CreateProposalReview(projectID, applicationID, actorUserID str
 	var reviewedHash string
 	var expectedRevision uint64
 	var expectedStateHash string
-	if request.Kind == ProposalReviewDependency {
-		if request.DependencyDraft == nil {
-			return ProposalReview{}, APIError{Status: 422, Code: "PROPOSAL_REVIEW_DRAFT_REQUIRED", Message: "dependency proposal requires a draft"}
+	if request.Kind == ProposalReviewServiceConfiguration {
+		if request.ConfigurationDraft == nil {
+			return ProposalReview{}, APIError{Status: 422, Code: "PROPOSAL_REVIEW_DRAFT_REQUIRED", Message: "service configuration proposal requires a draft"}
 		}
-		preview, err := s.PreviewServiceConfiguration(projectID, applicationID, *request.DependencyDraft)
+		preview, err := s.PreviewServiceConfiguration(projectID, applicationID, *request.ConfigurationDraft)
 		if err != nil {
 			return ProposalReview{}, err
 		}
@@ -27,13 +30,6 @@ func (s *Service) CreateProposalReview(projectID, applicationID, actorUserID str
 			Draft ServiceConfigurationDraft `json:"draft"`
 		}{preview.Configuration})
 		reviewedHash, expectedRevision, expectedStateHash = preview.DraftStateHash, preview.CurrentRevision, preview.CurrentStateHash
-	} else {
-		var err error
-		payload, err = normalizeSourcePatch(request.SourcePatch)
-		if err != nil {
-			return ProposalReview{}, err
-		}
-		reviewedHash = reviewHash(payload)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -45,7 +41,7 @@ func (s *Service) CreateProposalReview(projectID, applicationID, actorUserID str
 		return ProposalReview{}, ErrNotFound
 	}
 	current := normalizeStoredConfiguration(service.Configuration)
-	if request.Kind == ProposalReviewDependency && (current.Revision != expectedRevision || current.StateHash != expectedStateHash) {
+	if request.Kind == ProposalReviewServiceConfiguration && (current.Revision != expectedRevision || current.StateHash != expectedStateHash) {
 		return ProposalReview{}, APIError{Status: 409, Code: "SERVICE_CONFIGURATION_STALE", Message: "configuration changed while creating the review"}
 	}
 	now := s.clock()
@@ -65,7 +61,7 @@ func (s *Service) GetProposalReview(projectID, reviewID string) (ProposalReview,
 	if !ok || value.ProjectID != projectID {
 		return ProposalReview{}, ErrNotFound
 	}
-	if value.Kind == ProposalReviewDependency {
+	if isConfigurationReviewKind(value.Kind) {
 		configuration, err := s.GetServiceConfiguration(projectID, value.ApplicationID)
 		if err != nil {
 			return ProposalReview{}, err
@@ -81,10 +77,14 @@ func (s *Service) GetProposalReview(projectID, reviewID string) (ProposalReview,
 			}
 			s.mu.Unlock()
 		}
-	} else if s.clock().After(value.ExpiresAt) && value.Status == ReviewRequired {
+	} else if value.Kind == ProposalReviewSourcePatch && s.clock().After(value.ExpiresAt) {
 		s.mu.Lock()
 		current := s.proposalReviews[reviewID]
-		current.Status = ReviewExpired
+		if current.Status == ReviewRequired || current.Status == ReviewApproved {
+			current.Status = ReviewExpired
+		}
+		current.NormalizedPayload = json.RawMessage(`{"redacted":"source_patch_moved_to_local"}`)
+		current.SourceCommit, current.ApplicationRoot = "", ""
 		s.proposalReviews[reviewID] = current
 		value = current
 		s.mu.Unlock()
@@ -165,7 +165,7 @@ func (s *Service) ApplyProposalReview(projectID, reviewID, actorUserID string) (
 	if err != nil {
 		return ProposalReview{}, ServiceConfigurationApplyResult{}, err
 	}
-	if value.Kind != ProposalReviewDependency {
+	if !isConfigurationReviewKind(value.Kind) {
 		return ProposalReview{}, ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "SOURCE_WRITE_AUTHORITY_ABSENT", Message: "source patch reviews cannot be applied"}
 	}
 	if value.Status == ReviewApplied {
@@ -174,7 +174,7 @@ func (s *Service) ApplyProposalReview(projectID, reviewID, actorUserID string) (
 	if value.Status != ReviewApproved {
 		return ProposalReview{}, ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "PROPOSAL_REVIEW_NOT_APPROVED", Message: "proposal review is not approved"}
 	}
-	draft, err := decodeReviewedDependency(value)
+	draft, err := decodeReviewedConfiguration(value)
 	if err != nil {
 		return ProposalReview{}, ServiceConfigurationApplyResult{}, err
 	}

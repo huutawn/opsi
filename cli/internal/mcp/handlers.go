@@ -19,29 +19,51 @@ type ToolHandler func(ctx context.Context, s *Server, args map[string]any) (any,
 
 func (s *Server) registerHandlers() map[string]ToolHandler {
 	return map[string]ToolHandler{
-		"deployment_readiness_context":    s.handleDeploymentReadinessContext,
-		"project_context":                 s.handleProjectContext,
-		"topology":                        s.handleTopology,
-		"applications_list":               s.handleApplicationsList,
-		"application_get":                 s.handleApplicationGet,
-		"application_dependencies":        s.handleApplicationDependencies,
-		"managed_resources_list":          s.handleManagedResourcesList,
-		"managed_resource_get":            s.handleManagedResourceGet,
-		"build_records_list":              s.handleBuildRecordsList,
-		"build_record_get":                s.handleBuildRecordGet,
-		"deployments_list":                s.handleDeploymentsList,
-		"deployment_get":                  s.handleDeploymentGet,
-		"deployment_preflight":            s.handleDeploymentPreflight,
-		"source_risk_report":              s.handleSourceRiskReport,
-		"dependency_verification_latest":  s.handleDependencyVerificationLatest,
-		"dependency_verification_history": s.handleDependencyVerificationHistory,
-		"source_files_list":               s.handleSourceFilesList,
-		"source_file_read":                s.handleSourceFileRead,
-		"source_search":                   s.handleSourceSearch,
-		"dependency_analysis_context":     s.handleDependencyAnalysisContext,
-		"validate_dependency_proposal":    s.handleValidateDependencyProposal,
-		"validate_source_patch_proposal":  s.handleValidateSourcePatchProposal,
+		"deployment_readiness_context":            s.handleDeploymentReadinessContext,
+		"project_review_context":                  s.handleProjectReviewContext,
+		"project_context":                         s.handleProjectContext,
+		"topology":                                s.handleTopology,
+		"applications_list":                       s.handleApplicationsList,
+		"application_get":                         s.handleApplicationGet,
+		"application_dependencies":                s.handleApplicationDependencies,
+		"managed_resources_list":                  s.handleManagedResourcesList,
+		"managed_resource_get":                    s.handleManagedResourceGet,
+		"build_records_list":                      s.handleBuildRecordsList,
+		"build_record_get":                        s.handleBuildRecordGet,
+		"deployments_list":                        s.handleDeploymentsList,
+		"deployment_get":                          s.handleDeploymentGet,
+		"deployment_preflight":                    s.handleDeploymentPreflight,
+		"source_risk_report":                      s.handleSourceRiskReport,
+		"dependency_verification_latest":          s.handleDependencyVerificationLatest,
+		"dependency_verification_history":         s.handleDependencyVerificationHistory,
+		"source_files_list":                       s.handleSourceFilesList,
+		"source_file_read":                        s.handleSourceFileRead,
+		"source_search":                           s.handleSourceSearch,
+		"dependency_analysis_context":             s.handleDependencyAnalysisContext,
+		"validate_dependency_proposal":            s.handleValidateDependencyProposal,
+		"validate_service_configuration_proposal": s.handleValidateServiceConfigurationProposal,
+		"validate_source_patch_proposal":          s.handleValidateSourcePatchProposal,
 	}
+}
+
+func (s *Server) handleProjectReviewContext(ctx context.Context, _ *Server, args map[string]any) (any, error) {
+	projectValue, err := s.handleProjectContext(ctx, s, args)
+	if err != nil {
+		return nil, err
+	}
+	project, ok := projectValue.(ProjectContextResult)
+	if !ok {
+		return nil, &DomainError{Code: ErrCodeAuthorityUnavailable, Message: "project facts authority returned an unexpected result"}
+	}
+	applications, err := s.handleApplicationsList(ctx, s, args)
+	if err != nil {
+		return nil, err
+	}
+	topology, err := s.handleTopology(ctx, s, args)
+	if err != nil {
+		return nil, err
+	}
+	return ProjectReviewContext{Action: proposalActionNone, Project: project, Applications: applications, Topology: topology}, nil
 }
 
 // handleDeploymentReadinessContext only aggregates existing authorities. In

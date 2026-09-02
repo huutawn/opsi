@@ -187,8 +187,8 @@ export type ProposalReview = {
   rejected_by?: string; rejected_at?: string; applied_at?: string; resulting_configuration_revision?: number;
 };
 export type ProposalReviewCreateRequest = {
-  environment_id: string; kind: "service_configuration" | "source_patch"; analysis_inputs_hash: string;
-  source_commit?: string; application_root?: string; configuration_draft?: ServiceConfigurationDraft; source_patch?: unknown;
+  environment_id: string; kind: "service_configuration"; analysis_inputs_hash: string;
+  configuration_draft?: ServiceConfigurationDraft;
 };
 export type ServiceConfigurationApplyResult = { configuration: ServiceConfiguration; reused: boolean };
 

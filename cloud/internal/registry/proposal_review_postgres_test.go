@@ -44,7 +44,7 @@ func TestPostgresProposalReviewSurvivesRestartAndAppliesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := fresh().CreateProposalReview(project.ID, application.ID, userID, ProposalReviewCreateRequest{
-		EnvironmentID: application.EnvironmentID, Kind: ProposalReviewDependency, AnalysisInputsHash: strings.Repeat("a", 64), DependencyDraft: &ServiceConfigurationDraft{},
+		EnvironmentID: application.EnvironmentID, Kind: ProposalReviewServiceConfiguration, AnalysisInputsHash: strings.Repeat("a", 64), ConfigurationDraft: &ServiceConfigurationDraft{},
 	})
 	if err != nil || created.Status != ReviewRequired {
 		t.Fatalf("created=%+v err=%v", created, err)

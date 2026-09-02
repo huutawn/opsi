@@ -4,7 +4,7 @@
 |---|---|
 | Version | 6.1 |
 | Status | Active architecture map |
-| Last updated | 2026-07-24 |
+| Last updated | 2026-08-30 |
 | Implementation truth | `docs/current_state.md`, `docs/status_matrix.md` |
 | Canonical roadmap | `docs/opsi_roadmap_v5_production.md` |
 
@@ -34,9 +34,11 @@ Agent
 GitHub App identity/repository binding, GitHub Actions OIDC, accepted
 `BuildRecord`, digest deployment, `TopologyPlan`, `DeploymentPolicy`, routing,
 and factual readiness/known-good rollback are implemented. `IncidentEvidence
-v1` and Safe ActionPlane v1 are implemented with fake-runtime verification. No
-current path contains an AI provider, MCP server, browser approval surface, or
-pull-request preview environment.
+v1` and Safe ActionPlane v1 are implemented with fake-runtime verification. The
+CLI contains a 24-tool read-only MCP server and a local Codex-backed Dashboard
+assistant. AI proposals use the existing Cloud ProposalReview and
+ServiceConfiguration authority; MCP itself cannot mutate or approve.
+Pull-request preview environments remain unavailable.
 
 ### 1.1 Repository domains
 
@@ -122,6 +124,13 @@ routing -> durable `DeploymentJob` + canonical `RolloutIntent` -> Agent `PollJob
 factual readiness and known-good rollback. Agent source clone/build, caller-supplied
 manifests, direct deployment RPC, service-scoped deployment creation, and the
 generic push relay are retired. Opsi does not yet provision DNS or certificates.
+
+Public multi-application deployments use the existing standard Traefik Ingress,
+not a parallel Kubernetes Gateway API implementation. One managed hostname uses
+longest-prefix paths: the browser frontend is `/`, same-origin backends use
+declared paths such as `/api`, and other HTTP services receive stable
+application-key paths. Cloud rejects duplicate paths and ambiguous root
+frontends before rollout.
 
 Cloud compiles one canonical HTTP startup probe from the service health boundary
 and includes it in the workload hash. Agent renders that authority as a Kubernetes
@@ -243,7 +252,9 @@ An allowed `BuildRecord` creates or reuses a durable `DeploymentJob`. Agent
 validates the allowlisted image repository and full `sha256` digest, pulls the
 immutable artifact, and deploys it through an Opsi-rendered Deployment and
 ClusterIP Service. Typed `ExposureSpec` produces an Opsi-owned Traefik resource
-with hostname/path conflict detection. Readiness, last-known-good digest,
+with hostname/path conflict detection. Multiple Services share one hostname via
+distinct path prefixes; no second Gateway controller or route authority exists.
+Readiness, last-known-good digest,
 automatic rollback, post-check, and restart reconciliation complete the
 deployment transaction.
 
@@ -291,9 +302,11 @@ receive the evidence body.
 Trusted CD is not an AI action. `DeploymentPolicy` does not use an AI
 `ActionPlan` or `ApprovalGrant`, AI cannot approve CD, and automatic rollback is
 part of the authorized deployment transaction. AI-originated mutations still
-require deterministic Agent preflight and separate human approval. MCP remains
-unimplemented; its future boundary may read, preflight, and request a challenge
-but must expose no execute or approve tool.
+require deterministic Agent preflight and separate human approval. MCP is
+implemented as a read-only local boundary. It exposes factual context,
+preflight, project review context, and deterministic proposal validation, but no
+execute, approve, or apply tool. The Dashboard's Create review, Approve, and
+Apply operations are authenticated browser/Cloud actions outside MCP.
 
 ## 3. Trust boundaries
 

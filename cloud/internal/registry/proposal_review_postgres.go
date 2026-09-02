@@ -10,7 +10,10 @@ import (
 const proposalReviewSelectSQL = `SELECT id,project_id,environment_id,application_id,kind,status,proposal_hash,analysis_inputs_hash,source_commit,application_root,normalized_payload::text,reviewed_payload_hash,expected_configuration_revision,expected_configuration_state_hash,COALESCE(created_by,''),created_at,expires_at,COALESCE(approved_by,''),approved_at,COALESCE(rejected_by,''),rejected_at,applied_at,COALESCE(resulting_configuration_revision,0),COALESCE(apply_idempotency_key,''),COALESCE(failure_code,'') FROM proposal_reviews`
 
 func (s PostgresService) CreateProposalReview(projectID, applicationID, actorUserID string, request ProposalReviewCreateRequest) (ProposalReview, error) {
-	if request.Kind != ProposalReviewDependency && request.Kind != ProposalReviewSourcePatch {
+	if request.Kind == ProposalReviewSourcePatch {
+		return ProposalReview{}, APIError{Status: 422, Code: "SOURCE_PATCH_LOCAL_ONLY", Message: "source patches are confirmed and applied only in the local worktree"}
+	}
+	if request.Kind != ProposalReviewServiceConfiguration {
 		return ProposalReview{}, APIError{Status: 422, Code: "PROPOSAL_REVIEW_KIND_INVALID", Message: "proposal review kind is invalid"}
 	}
 	if !validReviewHash(request.AnalysisInputsHash) {
@@ -19,11 +22,11 @@ func (s PostgresService) CreateProposalReview(projectID, applicationID, actorUse
 	var payload json.RawMessage
 	var reviewedHash, expectedHash string
 	var expectedRevision uint64
-	if request.Kind == ProposalReviewDependency {
-		if request.DependencyDraft == nil {
-			return ProposalReview{}, APIError{Status: 422, Code: "PROPOSAL_REVIEW_DRAFT_REQUIRED", Message: "dependency proposal requires a draft"}
+	if request.Kind == ProposalReviewServiceConfiguration {
+		if request.ConfigurationDraft == nil {
+			return ProposalReview{}, APIError{Status: 422, Code: "PROPOSAL_REVIEW_DRAFT_REQUIRED", Message: "service configuration proposal requires a draft"}
 		}
-		preview, err := s.PreviewServiceConfiguration(projectID, applicationID, *request.DependencyDraft)
+		preview, err := s.PreviewServiceConfiguration(projectID, applicationID, *request.ConfigurationDraft)
 		if err != nil {
 			return ProposalReview{}, err
 		}
@@ -31,13 +34,6 @@ func (s PostgresService) CreateProposalReview(projectID, applicationID, actorUse
 			Draft ServiceConfigurationDraft `json:"draft"`
 		}{preview.Configuration})
 		reviewedHash, expectedHash, expectedRevision = preview.DraftStateHash, preview.CurrentStateHash, preview.CurrentRevision
-	} else {
-		var err error
-		payload, err = normalizeSourcePatch(request.SourcePatch)
-		if err != nil {
-			return ProposalReview{}, err
-		}
-		reviewedHash = reviewHash(payload)
 	}
 	ctx := context.Background()
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -56,7 +52,7 @@ func (s PostgresService) CreateProposalReview(projectID, applicationID, actorUse
 		return ProposalReview{}, ErrNotFound
 	}
 	current := normalizeStoredConfiguration(service.Configuration)
-	if request.Kind == ProposalReviewDependency && (current.Revision != expectedRevision || current.StateHash != expectedHash) {
+	if request.Kind == ProposalReviewServiceConfiguration && (current.Revision != expectedRevision || current.StateHash != expectedHash) {
 		return ProposalReview{}, APIError{Status: 409, Code: "SERVICE_CONFIGURATION_STALE", Message: "configuration changed while creating the review"}
 	}
 	now := s.clock()
@@ -80,7 +76,7 @@ func (s PostgresService) GetProposalReview(projectID, reviewID string) (Proposal
 	if err != nil {
 		return ProposalReview{}, err
 	}
-	if value.Kind == ProposalReviewDependency {
+	if isConfigurationReviewKind(value.Kind) {
 		configuration, err := s.GetServiceConfiguration(projectID, value.ApplicationID)
 		if err != nil {
 			return ProposalReview{}, err
@@ -92,11 +88,15 @@ func (s PostgresService) GetProposalReview(projectID, reviewID string) (Proposal
 			}
 			value.Status = next
 		}
-	} else if s.clock().After(value.ExpiresAt) && value.Status == ReviewRequired {
-		if _, err := s.DB.ExecContext(context.Background(), `UPDATE proposal_reviews SET status=$1 WHERE project_id=$2 AND id=$3 AND status=$4`, ReviewExpired, projectID, reviewID, ReviewRequired); err != nil {
+	} else if value.Kind == ProposalReviewSourcePatch && s.clock().After(value.ExpiresAt) {
+		if _, err := s.DB.ExecContext(context.Background(), `UPDATE proposal_reviews SET status=CASE WHEN status IN ('review_required','approved') THEN $1 ELSE status END, normalized_payload=$2::jsonb, source_commit='', application_root='' WHERE project_id=$3 AND id=$4`, ReviewExpired, `{"redacted":"source_patch_moved_to_local"}`, projectID, reviewID); err != nil {
 			return ProposalReview{}, err
 		}
-		value.Status = ReviewExpired
+		if value.Status == ReviewRequired || value.Status == ReviewApproved {
+			value.Status = ReviewExpired
+		}
+		value.NormalizedPayload = json.RawMessage(`{"redacted":"source_patch_moved_to_local"}`)
+		value.SourceCommit, value.ApplicationRoot = "", ""
 	}
 	return value, nil
 }
@@ -171,7 +171,7 @@ func (s PostgresService) ApplyProposalReview(projectID, reviewID, actorUserID st
 	if err != nil {
 		return ProposalReview{}, ServiceConfigurationApplyResult{}, err
 	}
-	if value.Kind != ProposalReviewDependency {
+	if !isConfigurationReviewKind(value.Kind) {
 		return ProposalReview{}, ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "SOURCE_WRITE_AUTHORITY_ABSENT", Message: "source patch reviews cannot be applied"}
 	}
 	if value.Status == ReviewApplied {
@@ -180,7 +180,7 @@ func (s PostgresService) ApplyProposalReview(projectID, reviewID, actorUserID st
 	if value.Status != ReviewApproved {
 		return ProposalReview{}, ServiceConfigurationApplyResult{}, APIError{Status: 409, Code: "PROPOSAL_REVIEW_NOT_APPROVED", Message: "proposal review is not approved"}
 	}
-	draft, err := decodeReviewedDependency(value)
+	draft, err := decodeReviewedConfiguration(value)
 	if err != nil {
 		return ProposalReview{}, ServiceConfigurationApplyResult{}, err
 	}
