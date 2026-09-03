@@ -39,11 +39,17 @@ The browser entry point is served from the installed `opsi-ui/index.html`.
 `OPSI_UI_DIR` remains an explicit development override only.
 
 The Local UI uses the Hosted Beta Cloud at `https://opsidev.site` unless an
-explicit YAML config selects a self-hosted `cloud_url`. No Agent address is
-invented: before `opsi server connect` or an explicit `agent_addr`, the Local
-UI starts normally and reports the Agent as not connected.
+explicit YAML config selects a self-hosted `cloud_url`.
 
-The `v0.1.0-beta.2` support boundary is a single VPS with single-node K3s,
-Web/API workloads, deployment, exposure, and rollback. DNS/TLS automation,
-multi-VPS, managed databases, production hardening, and production SLA are
-excluded from this beta.
+### Project-scoped Runtime Agent Observability & Network Requirements
+
+Project observability in the Local Dashboard dynamically discovers all nodes and
+agents for the selected project directly from the Cloud registry using an
+`AgentTargetResolver` authority. Observability never falls back to loopback
+`127.0.0.1:9443` or a single hardcoded `agent_addr`:
+
+1. **Valid Cloud PAT**: Workstations running Opsi CLI/UI require a valid Cloud Personal Access Token (PAT) stored in the OS keychain via `opsi auth login` to query the Cloud registry for project agent targets.
+2. **Local Client mTLS**: If the environment uses mutual TLS, `tls.client_cert_path` and `tls.client_key_path` must be configured in the local `cli.yaml` and reference readable certificate and private key files.
+3. **Direct TLS Port Ingress**: Each agent on a VPS must have its registered TLS port (default `9443`) open in the VPS firewall (e.g., `ufw`, security group) and reachable directly from the workstation running Opsi CLI/UI.
+4. **Direct VPS Access & No Cloud Relay**: In this release, the Opsi CLI/UI connects directly to each VPS agent endpoint over TLS with SHA-256 certificate pinning. There is no Cloud telemetry relay; if workstation network or firewall blocks an agent port, the dashboard displays `Unavailable` or `Partial` with actionable diagnostic guidance rather than falsely assuming workloads or servers are healthy.
+5. **Connection Diagnostics**: `opsi server connect --project-id <project> --node-id <node>` resolves Cloud metadata and saves direct configuration for standalone CLI commands without project context. Run `opsi status` afterwards to verify reachability, port access, and TLS pinning.

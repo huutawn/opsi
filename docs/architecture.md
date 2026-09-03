@@ -156,6 +156,16 @@ Agent telemetry/detectors
 
 The clean VPS/K3s command path verifies this factual lifecycle and resolve audit.
 There is no analyze, action approval, or mitigation execution step.
+### 1.7 Project-scoped telemetry and AgentTargetResolver authority
+
+Project-level observability and runtime telemetry use `AgentTargetResolver` as the single authoritative discovery and querying mechanism:
+
+1. **Dynamic Cloud Discovery**: Discovers all nodes and agents belonging to the project from Cloud registry, selecting observable targets with valid endpoints, ports, and certificate fingerprints. Loopback (`127.0.0.1:9443`) and local `agent_addr` are never used as fallback for project observability.
+2. **Bounded Fan-out & Pinning**: Queries active agents in parallel with bounded concurrency and short timeouts using TLS certificate pinning with SHA-256 fingerprints. Secrets and credentials (such as PATs) are strictly redacted from diagnostic outputs and logs.
+3. **Coverage Metadata**: Every telemetry response reports coverage status (`connected`, `partial`, or `unavailable`), agent counts (expected, successful, failed), and actionable diagnostics (e.g. Cloud PAT missing/expired, local client mTLS missing, agent unreachable, TLS pin mismatch, timeout).
+4. **No Health Inferences on Stale or Unknown**: The UI strictly separates runtime failures from observation unavailability. When telemetry is stale, partial, or unavailable, the dashboard marks preserved snapshots as "Stale" or "Unavailable" and refuses to render false claims like "All workloads healthy" or "All execution nodes ready".
+5. **Direct Workstation-to-Agent Network Path**: Workstations running Opsi CLI/UI access each VPS agent directly on its registered TLS port. No Cloud telemetry relay is utilized; firewalled or blocked ports result in actionable `AGENT_UNREACHABLE` or `AGENT_TIMEOUT` errors.
+
 
 ## 2. Trusted artifact architecture
 

@@ -1,3 +1,4 @@
+import { formatObserved as formatObservedI18n, type Locale } from "../../lib/i18n/index.ts";
 import { StatusBadge } from "@/components/ui/primitives";
 import type { SourceState } from "@/features/observability/data";
 
@@ -19,8 +20,6 @@ export function Fact({ label, value }: { label: string; value: string | number }
   );
 }
 
-export function formatObserved(value?: number) {
-  return value
-    ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(value * 1000)
-    : "Not reported";
+export function formatObserved(value?: number, locale: Locale = "en") {
+  return formatObservedI18n(value, locale);
 }

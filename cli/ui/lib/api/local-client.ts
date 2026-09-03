@@ -32,6 +32,7 @@ import type {
   IncidentListResult,
   IncidentEvidence,
   SupportSummary,
+  ProjectAgentConnection,
   TelemetryQueryResponse,
   TelemetrySummary,
   TimelineEvent,
@@ -653,16 +654,12 @@ export class LocalClient {
   support(projectID: string) {
     return this.call<SupportSummary>(`/api/local/projects/${projectID}/support`);
   }
-
+  projectAgentConnection(projectID: string) {
+    return this.call<ProjectAgentConnection>(`/api/local/projects/${encodeURIComponent(projectID)}/agent-connection`);
+  }
   telemetrySummary(projectID: string, sinceUnix = 0) {
     return this.call<TelemetrySummary>(
       `/api/local/projects/${projectID}/telemetry/summary?since_unix=${encodeURIComponent(String(sinceUnix))}`,
-    );
-  }
-
-  telemetryService(projectID: string, serviceID: string, sinceUnix = 0) {
-    return this.call<TelemetryQueryResponse>(
-      `/api/local/projects/${projectID}/telemetry/services/${encodeURIComponent(serviceID)}?since_unix=${encodeURIComponent(String(sinceUnix))}`,
     );
   }
 

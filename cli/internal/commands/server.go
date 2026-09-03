@@ -341,7 +341,7 @@ func newServerConnectCommand(configPath *string, options Options) *cobra.Command
 	flags := &serverFlags{}
 	cmd := &cobra.Command{
 		Use:   "connect",
-		Short: "Resolve and atomically save a pinned direct Agent connection",
+		Short: "Resolve Cloud Agent metadata and save explicit CLI configuration",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if flags.projectID == "" || flags.nodeID == "" {
 				return errors.New("project-id and node-id are required")
@@ -385,6 +385,7 @@ func newServerConnectCommand(configPath *string, options Options) *cobra.Command
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 				"node_id": node.ID, "agent_id": node.AgentID, "agent_endpoint": node.AgentEndpoint,
 				"agent_port": node.AgentPort, "tls_server_name": node.AgentTLSServerName, "certificate_sha256": node.AgentCertSHA256,
+				"diagnostic": "direct connection metadata resolved; run opsi status to verify reachability", "status": "ok",
 			})
 		},
 	}

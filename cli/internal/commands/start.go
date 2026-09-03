@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -966,11 +967,48 @@ func handleLocalAgentRoutes(w http.ResponseWriter, r *http.Request, cfg config.C
 			return true
 		}
 	}
-	return localTelemetry(w, r, cfg, factory, resolver) ||
+	return localProjectAgentConnection(w, r, cfg, factory) ||
+		localTelemetry(w, r, cfg, factory) ||
 		localSecretOperation(w, r, cfg, factory, resolver) ||
 		localIncidentOperation(w, r, cfg, factory, resolver)
 }
 
+func localProjectAgentConnection(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error)) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "agent-connection" {
+		return false
+	}
+	if r.Method != http.MethodGet {
+		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+		return true
+	}
+	projectID, err := url.PathUnescape(parts[3])
+	if err != nil || strings.TrimSpace(projectID) == "" {
+		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
+		return true
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("content-type", "application/json")
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	resp, err := targetResolver.CheckConnection(ctx, projectID)
+	if err != nil {
+		writeLocalError(w, r, http.StatusBadGateway, "AGENT_CONNECTION_CHECK_FAILED", err.Error())
+		return true
+	}
+	writeLocalJSON(w, http.StatusOK, resp)
+	return true
+}
 func localSecretOperation(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 5 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "secrets" {
@@ -1445,7 +1483,7 @@ func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err er
 	writeLocalError(w, r, statusCode, code, "Agent incident operation failed")
 }
 
-func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
+func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), _ ...agentConfigResolver) bool {
 	req, view, ok := localTelemetryRequest(w, r)
 	if !ok {
 		return false
@@ -1457,60 +1495,85 @@ func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, f
 		writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
 		return true
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
-	if err != nil {
-		writeLocalAgentTelemetryError(w, r, err)
-		return true
-	}
-	resp, err := agentclient.New(agentCfg).QueryTelemetry(ctx, req)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("content-type", "application/json")
+
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	resp, coverage, err := targetResolver.QueryTelemetry(ctx, req)
 	if err != nil {
+		var unavail *agentclient.TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			writeLocalErrorWithCoverage(w, r, http.StatusBadGateway, "AGENT_TELEMETRY_UNAVAILABLE", "Agent telemetry operation failed", unavail.Coverage)
+			return true
+		}
 		writeLocalAgentTelemetryError(w, r, err)
 		return true
 	}
 	sanitizeTelemetryResponse(resp)
-	if view == "summary" && resp.Summary != nil {
-		_ = json.NewEncoder(w).Encode(telemetrySummary{
+	if view == "summary" {
+		sum := telemetrySummary{
 			ProjectID:     resp.ProjectID,
-			SinceUnix:     resp.Summary.SinceUnix,
-			RecordCount:   int(resp.Summary.MetricCount + resp.Summary.LogCount),
-			StartUnix:     resp.Summary.SinceUnix,
-			EndUnix:       resp.Summary.EndUnix,
 			Done:          true,
 			Source:        "agent",
 			PayloadPolicy: resp.PayloadPolicy,
-			Health:        resp.Summary.Health,
-			MetricCount:   int(resp.Summary.MetricCount),
-			LogCount:      int(resp.Summary.LogCount),
-			ErrorCount:    int(resp.Summary.ErrorCount),
-			ServiceCount:  int(resp.Summary.ServiceCount),
-		})
+			Coverage:      coverage,
+		}
+		if resp.Summary != nil {
+			sum.SinceUnix = resp.Summary.SinceUnix
+			sum.RecordCount = int(resp.Summary.MetricCount + resp.Summary.LogCount)
+			sum.StartUnix = resp.Summary.SinceUnix
+			sum.EndUnix = resp.Summary.EndUnix
+			sum.Health = resp.Summary.Health
+			sum.MetricCount = int(resp.Summary.MetricCount)
+			sum.LogCount = int(resp.Summary.LogCount)
+			sum.ErrorCount = int(resp.Summary.ErrorCount)
+			sum.ServiceCount = int(resp.Summary.ServiceCount)
+		}
+		sum.Services = resp.Services
+		_ = json.NewEncoder(w).Encode(sum)
 		return true
 	}
-	_ = json.NewEncoder(w).Encode(resp)
+	type telemetryQueryResponseWithCoverage struct {
+		*agentv1.TelemetryQueryResponse
+		Coverage *agentclient.TelemetryCoverage `json:"coverage,omitempty"`
+	}
+	_ = json.NewEncoder(w).Encode(telemetryQueryResponseWithCoverage{
+		TelemetryQueryResponse: resp,
+		Coverage:               coverage,
+	})
 	return true
 }
 
 type telemetrySummary struct {
-	ProjectID     string `json:"project_id"`
-	SinceUnix     int64  `json:"since_unix"`
-	ChunkCount    int    `json:"chunk_count"`
-	RecordCount   int    `json:"record_count"`
-	StartUnix     int64  `json:"start_unix"`
-	EndUnix       int64  `json:"end_unix"`
-	Done          bool   `json:"done"`
-	Source        string `json:"source"`
-	PayloadPolicy string `json:"payload_policy"`
-	Health        string `json:"health,omitempty"`
-	MetricCount   int    `json:"metric_count,omitempty"`
-	LogCount      int    `json:"log_count,omitempty"`
-	ErrorCount    int    `json:"error_count,omitempty"`
-	ServiceCount  int    `json:"service_count,omitempty"`
+	ProjectID     string                           `json:"project_id"`
+	SinceUnix     int64                            `json:"since_unix"`
+	ChunkCount    int                              `json:"chunk_count"`
+	RecordCount   int                              `json:"record_count"`
+	StartUnix     int64                            `json:"start_unix"`
+	EndUnix       int64                            `json:"end_unix"`
+	Done          bool                             `json:"done"`
+	Source        string                           `json:"source"`
+	PayloadPolicy string                           `json:"payload_policy"`
+	Health        string                           `json:"health,omitempty"`
+	MetricCount   int                              `json:"metric_count,omitempty"`
+	LogCount      int                              `json:"log_count,omitempty"`
+	ErrorCount    int                              `json:"error_count,omitempty"`
+	ServiceCount  int                              `json:"service_count,omitempty"`
+	Coverage      *agentclient.TelemetryCoverage   `json:"coverage,omitempty"`
+	Services      []agentv1.TelemetryServiceStatus `json:"services,omitempty"`
 }
 
 func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.TelemetryQueryRequest, string, bool) {
@@ -1532,16 +1595,6 @@ func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.Tel
 		req.IncludeSummary = true
 		req.IncludeServices = true
 		return req, "summary", true
-	case len(parts) == 7 && parts[4] == "telemetry" && parts[5] == "services":
-		serviceID, err := url.PathUnescape(parts[6])
-		if err != nil || serviceID == "" {
-			writeLocalError(w, r, http.StatusBadRequest, "SERVICE_ID_REQUIRED", "service_id is required")
-			return nil, "", true
-		}
-		req.ServiceID = serviceID
-		req.IncludeSummary = true
-		req.IncludeServices = true
-		return req, "service", true
 	case len(parts) == 5 && parts[4] == "logs":
 		req.ServiceID = query.Get("service_id")
 		req.IncludeLogs = true

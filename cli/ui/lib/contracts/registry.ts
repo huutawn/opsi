@@ -724,6 +724,34 @@ export type TimelineEvent = {
   created_at: string;
 };
 
+export type AgentDiagnosticError = {
+  node_id?: string;
+  agent_id?: string;
+  endpoint?: string;
+  code: string;
+  message_redacted: string;
+  actionable_cause?: string;
+};
+
+export type TelemetryCoverage = {
+  status: "connected" | "partial" | "unavailable";
+  expected_agents: number;
+  successful_agents: number;
+  failed_agents: number;
+  errors?: AgentDiagnosticError[];
+  observed_at: string;
+};
+
+export type ProjectAgentConnection = {
+  project_id: string;
+  status: "connected" | "partial" | "unavailable";
+  expected_agents: number;
+  successful_agents: number;
+  failed_agents: number;
+  errors?: AgentDiagnosticError[];
+  observed_at: string;
+};
+
 export type TelemetrySummary = {
   project_id: string;
   since_unix: number;
@@ -739,6 +767,8 @@ export type TelemetrySummary = {
   log_count?: number;
   error_count?: number;
   service_count?: number;
+  coverage?: TelemetryCoverage;
+  services?: TelemetryServiceStatus[];
 };
 
 export type TelemetryLogEntry = {
@@ -779,6 +809,7 @@ export type TelemetryQueryResponse = {
   services?: TelemetryServiceStatus[];
   logs?: TelemetryLogEntry[];
   next_cursor?: string;
+  coverage?: TelemetryCoverage;
 };
 
 export type SecretResult = {

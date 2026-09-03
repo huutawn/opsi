@@ -139,6 +139,230 @@ test("Cross-center navigation links to Deploy", async ({ page }) => {
   await drawer.getByRole("link", { name: "Open in Deploy" }).click();
   await expect(page).toHaveURL(/view=deploy/);
 });
+test("Two agents succeed with connected status and Live Factual Telemetry", async ({ page }) => {
+  await page.goto("/?project=proj-1&view=observability");
+
+  // Header should show Runtime agent telemetry with Connected
+  const headerBadge = page.getByLabel("Runtime agent telemetry");
+  await expect(headerBadge).toBeVisible();
+  await expect(headerBadge).toContainText("Connected");
+
+  // Overview banner should show Live Factual Telemetry
+  await expect(page.getByText("Live Factual Telemetry")).toBeVisible();
+
+  // Source authority badge
+  await expect(page.locator("span.status", { hasText: "Agent Telemetry" }).or(page.getByText("Agent Telemetry"))).toBeVisible();
+});
+
+test("One agent failure displays partial status, actionable cause, and avoids healthy claim", async ({ page }) => {
+  await page.route("**/api/local/projects/proj-1/agent-connection", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        project_id: "proj-1",
+        status: "partial",
+        expected_agents: 2,
+        successful_agents: 1,
+        failed_agents: 1,
+        errors: [
+          {
+            node_id: "node-2",
+            code: "AGENT_TIMEOUT",
+            message_redacted: "connect agent: context deadline exceeded",
+            actionable_cause: "Connection or query timed out. Verify workstation can reach agent TLS port and VPS firewall allows traffic.",
+          },
+        ],
+        observed_at: new Date().toISOString(),
+      }),
+    });
+  });
+
+  await page.route("**/api/local/projects/proj-1/telemetry/summary*", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        project_id: "proj-1",
+        source: "agent",
+        health: "healthy",
+        coverage: {
+          status: "partial",
+          expected_agents: 2,
+          successful_agents: 1,
+          failed_agents: 1,
+          errors: [
+            {
+              node_id: "node-2",
+              code: "AGENT_TIMEOUT",
+              message_redacted: "connect agent: context deadline exceeded",
+              actionable_cause: "Connection or query timed out. Verify workstation can reach agent TLS port and VPS firewall allows traffic.",
+            },
+          ],
+          observed_at: new Date().toISOString(),
+        },
+      }),
+    });
+  });
+
+  await page.goto("/?project=proj-1&view=observability");
+
+  // Header displays Partial (1/2) with actionable error in title
+  const headerBadge = page.getByLabel("Runtime agent telemetry");
+  await expect(headerBadge).toBeVisible();
+  await expect(headerBadge).toContainText("Partial (1/2)");
+  await expect(headerBadge).toHaveAttribute("title", /Connection or query timed out/);
+
+  // Overview banner shows Partial Telemetry
+  await expect(page.getByText(/Partial Telemetry/)).toBeVisible();
+
+  // Does NOT display "All workloads healthy" when telemetry is partial
+  await expect(page.getByText("All workloads healthy")).toHaveCount(0);
+});
+
+test("All agents unavailable shows unverified status and no false healthy claim", async ({ page }) => {
+  await page.route("**/api/local/projects/proj-1/nodes*", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        nodes: [
+          {
+            id: "node-1",
+            name: "server-1",
+            role: "primary",
+            status: "ready",
+            public_host: "192.0.2.10",
+            cpu_cores: 8,
+            memory_mb: 16384,
+            agent_id: "agent-1",
+            agent_version: "v1.2.0",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/local/projects/proj-1/resources*", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ resources: [] }),
+    });
+  });
+
+  await page.route("**/api/local/projects/proj-1/agent-connection", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        project_id: "proj-1",
+        status: "unavailable",
+        expected_agents: 2,
+        successful_agents: 0,
+        failed_agents: 2,
+        errors: [
+          {
+            code: "AGENT_UNREACHABLE",
+            message_redacted: "connection refused",
+            actionable_cause: "Agent endpoint is unreachable.",
+          },
+        ],
+        observed_at: new Date().toISOString(),
+      }),
+    });
+  });
+
+  await page.route("**/api/local/projects/proj-1/telemetry/summary*", (route) => {
+    route.fulfill({
+      status: 502,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "AGENT_TELEMETRY_UNAVAILABLE", message: "Agent telemetry operation failed" },
+        coverage: {
+          status: "unavailable",
+          expected_agents: 2,
+          successful_agents: 0,
+          failed_agents: 2,
+          errors: [{ code: "AGENT_UNREACHABLE", message_redacted: "connection refused" }],
+          observed_at: new Date().toISOString(),
+        },
+      }),
+    });
+  });
+
+  await page.goto("/?project=proj-1&view=observability");
+
+  // Header displays Unavailable
+  const headerBadge = page.getByLabel("Runtime agent telemetry");
+  await expect(headerBadge).toBeVisible();
+  await expect(headerBadge).toContainText("Unavailable");
+
+  // Banner indicates telemetry unavailable
+  await expect(page.getByText("Telemetry Unavailable")).toBeVisible();
+
+  // Incident section must NOT display "No Current Runtime Failures"
+  await expect(page.getByText("No Current Runtime Failures")).toHaveCount(0);
+  await expect(page.getByText("Runtime Observation Unavailable")).toBeVisible();
+});
+
+test("Refresh failure displays error sources and accessible Retry recovers factual state", async ({ page }) => {
+  let shouldFail = true;
+
+  await page.route("**/api/local/projects/proj-1/telemetry/summary*", (route) => {
+    if (shouldFail) {
+      route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "AGENT_TELEMETRY_UNAVAILABLE", message: "fail" },
+        }),
+      });
+    } else {
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          project_id: "proj-1",
+          source: "agent",
+          health: "healthy",
+          coverage: { status: "connected", expected_agents: 2, successful_agents: 2, failed_agents: 0 },
+        }),
+      });
+    }
+  });
+
+  await page.goto("/?project=proj-1&view=observability");
+
+  // Initial load failed -> alert is shown
+  const alert = page.getByRole("alert").filter({ hasText: "Refresh failed" });
+  await expect(alert).toBeVisible();
+  await expect(alert).toContainText("Agent telemetry");
+
+  // Accessible Retry button
+  const retryButton = alert.getByRole("button", { name: "Retry refresh" }).or(alert.getByRole("button", { name: "Retry" }));
+  await expect(retryButton).toBeVisible();
+  // Now fix the backend failure and click Retry
+  shouldFail = false;
+  await retryButton.click();
+
+  // Alert disappears after successful retry
+  await expect(alert).toHaveCount(0);
+});
+
+test("Badge, header, and KPI card states remain unified across transitions", async ({ page }) => {
+  await page.goto("/?project=proj-1&view=observability");
+
+  // Header has Runtime agent telemetry
+  const headerBadge = page.getByLabel("Runtime agent telemetry");
+  await expect(headerBadge).toBeVisible();
+  await expect(headerBadge).toContainText("Connected");
+
+  // Overview status strip
+  const strip = page.locator(".statusStrip");
+  await expect(strip).toBeVisible();
+  await expect(strip.getByText("Applications")).toBeVisible();
+  await expect(strip.getByText("Servers")).toBeVisible();
+});
 
 // Mock Fixture
 async function mockObservabilityAPI(page: Page) {
@@ -192,17 +416,29 @@ async function respond(route: Route) {
         },
       ],
     };
+  } else if (path.endsWith("/agent-connection")) {
+    body = {
+      project_id: "proj-1",
+      status: "connected",
+      expected_agents: 2,
+      successful_agents: 2,
+      failed_agents: 0,
+      errors: [],
+      observed_at: new Date().toISOString(),
+    };
   } else if (path.endsWith("/telemetry/summary")) {
     body = {
       project_id: "proj-1",
       source: "agent",
       health: "healthy",
-    };
-  } else if (path.endsWith("/telemetry/services/svc-web")) {
-    body = {
-      project_id: "proj-1",
-      source: "agent",
-      payload_policy: "redacted",
+      coverage: {
+        status: "connected",
+        expected_agents: 2,
+        successful_agents: 2,
+        failed_agents: 0,
+        errors: [],
+        observed_at: new Date().toISOString(),
+      },
       services: [
         {
           service_id: "svc-web",
@@ -213,14 +449,6 @@ async function respond(route: Route) {
           recent_error_count: 0,
           last_seen_unix: 1723850000,
         },
-      ],
-    };
-  } else if (path.endsWith("/telemetry/services/svc-worker")) {
-    body = {
-      project_id: "proj-1",
-      source: "agent",
-      payload_policy: "redacted",
-      services: [
         {
           service_id: "svc-worker",
           health: "degraded",

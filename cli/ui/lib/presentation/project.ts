@@ -1,3 +1,4 @@
+import { formatRelativeTime, translate, type Locale } from "../i18n/index.ts";
 import type {
   BuildRecord,
   DeploymentJob,
@@ -76,15 +77,15 @@ export function normalizeStatus(value?: string | null): PresentationStatus {
   return statusMap[String(value ?? "").trim().toLowerCase()] ?? "unknown";
 }
 
-export function statusLabel(status: PresentationStatus) {
-  return {
+export function statusLabel(status: PresentationStatus, locale: Locale = "en") {
+  return translate(`status.${status}`, locale, {
     healthy: "Healthy",
     degraded: "Degraded",
     failed: "Failed",
     unknown: "Unknown",
     unavailable: "Unavailable",
     in_progress: "In progress",
-  }[status];
+  }[status] ?? status);
 }
 
 export function shortIdentifier(value?: string, size = 12) {
@@ -93,20 +94,8 @@ export function shortIdentifier(value?: string, size = 12) {
   return digest.length > size ? `${digest.slice(0, size)}…` : digest;
 }
 
-const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
-const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
-
-export function formatTimestamp(value?: string | number | null, now = Date.now()) {
-  if (!value) return "Not reported";
-  const time = typeof value === "number" ? (value < 10_000_000_000 ? value * 1000 : value) : Date.parse(value);
-  if (!Number.isFinite(time)) return "Not reported";
-  const seconds = Math.round((time - now) / 1000);
-  if (Math.abs(seconds) < 60) return relative.format(seconds, "second");
-  const minutes = Math.round(seconds / 60);
-  if (Math.abs(minutes) < 60) return relative.format(minutes, "minute");
-  const hours = Math.round(minutes / 60);
-  if (Math.abs(hours) < 24) return relative.format(hours, "hour");
-  return dateTime.format(time);
+export function formatTimestamp(value?: string | number | null, now = Date.now(), locale: Locale = "en") {
+  return formatRelativeTime(value, locale, now);
 }
 
 function latest<T>(items: T[], timestamp: (item: T) => string | number | undefined) {

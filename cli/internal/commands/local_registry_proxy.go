@@ -33,6 +33,20 @@ func writeLocalError(w http.ResponseWriter, r *http.Request, status int, code, m
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": message, "retryable": status >= 500, "request_id": requestID}})
 }
+func writeLocalErrorWithCoverage(w http.ResponseWriter, r *http.Request, status int, code, message string, coverage any) {
+	requestID := r.Header.Get("X-Request-ID")
+	w.Header().Set("content-type", "application/json")
+	if requestID != "" {
+		w.Header().Set("X-Request-ID", requestID)
+	}
+	w.WriteHeader(status)
+	errObj := map[string]any{"code": code, "message": message, "retryable": status >= 500, "request_id": requestID}
+	resp := map[string]any{"error": errObj}
+	if coverage != nil {
+		resp["coverage"] = coverage
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
 
 func proxyLocalRegistry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), localSession string, authFlow *localAuthFlow) {
 	if retiredLocalServiceDeployment(r.URL.Path, r.Method) {
