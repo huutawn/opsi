@@ -210,6 +210,19 @@ func TestParseCodexEventStream_FailClosedScenarios(t *testing.T) {
 	if !parsed.ToolFailed {
 		t.Fatal("expected ToolFailed to be true")
 	}
+	if !strings.Contains(parsed.ToolFailureMessage, "not found") {
+		t.Fatalf("failure message=%q", parsed.ToolFailureMessage)
+	}
+
+	// 3b. MCP tool errors are commonly carried by result.isError/content, not item.error.
+	resultFailureEvent := []byte(`{"type":"item.completed","item":{"id":"call-2","type":"mcp_tool_call","server":"opsi","tool":"deployments_list","status":"failed","result":{"isError":true,"content":[{"type":"text","text":"{\"code\":\"AUTH_REQUIRED\",\"message\":\"Opsi local session unauthenticated\"}"}]}}}` + "\n")
+	parsed, err = parseCodexEventStream(resultFailureEvent, "")
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if !parsed.ToolFailed || !strings.Contains(parsed.ToolFailureMessage, "AUTH_REQUIRED") || strings.Contains(parsed.ToolFailureMessage, "<nil>") {
+		t.Fatalf("result failure was not surfaced: %+v", parsed)
+	}
 
 	// 4. Zero tools executed
 	emptyEvents := []byte(`{"type":"thread.started","thread_id":"t-1"}` + "\n")

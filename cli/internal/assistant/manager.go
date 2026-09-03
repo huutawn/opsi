@@ -698,8 +698,9 @@ func parseCodexEventStream(events []byte, stderrOutput string) (codexParsedEvent
 			}
 
 			status, _ := item["status"].(string)
-			isError, _ := item["is_error"].(bool)
+			isError := mcpItemIsError(item)
 			errVal := item["error"]
+			resultIsError, _ := mcpResultFailure(item)
 
 			if server == "opsi" || server == "" {
 				if status == "approval_blocked" || isApprovalBlocked(fmt.Sprint(errVal)) {
@@ -710,7 +711,7 @@ func parseCodexEventStream(events []byte, stderrOutput string) (codexParsedEvent
 				if callID == "" {
 					continue // no stable identity means this event cannot ground a turn
 				}
-				if status == "completed" || status == "success" || status == "failed" || isError {
+				if status == "completed" || status == "success" || status == "failed" || status == "error" || isError || resultIsError {
 					item["tool"] = toolName
 					terminalCalls[callID] = item
 				}
@@ -723,11 +724,13 @@ func parseCodexEventStream(events []byte, stderrOutput string) (codexParsedEvent
 	for _, item := range terminalCalls {
 		toolName, _ := item["tool"].(string)
 		status, _ := item["status"].(string)
-		isError, _ := item["is_error"].(bool)
+		isError := mcpItemIsError(item)
 		errVal := item["error"]
-		if status == "failed" || isError || (errVal != nil && fmt.Sprint(errVal) != "" && fmt.Sprint(errVal) != "<nil>") {
+		resultIsError, resultFailure := mcpResultFailure(item)
+		if status == "failed" || status == "error" || isError || resultIsError || (errVal != nil && fmt.Sprint(errVal) != "" && fmt.Sprint(errVal) != "<nil>") {
 			result.ToolFailed = true
-			result.ToolFailureMessage = fmt.Sprintf("Opsi MCP tool %q failed: %v", toolName, errVal)
+			failureMessage := mcpFailureMessage(errVal, resultFailure)
+			result.ToolFailureMessage = fmt.Sprintf("Opsi MCP tool %q failed: %s", toolName, failureMessage)
 			continue
 		}
 		if status != "completed" && status != "success" {
@@ -752,6 +755,72 @@ func parseCodexEventStream(events []byte, stderrOutput string) (codexParsedEvent
 
 	sort.Strings(result.SuccessfulOpsiTools)
 	return result, nil
+}
+
+func mcpItemIsError(item map[string]any) bool {
+	if isError, ok := item["is_error"].(bool); ok && isError {
+		return true
+	}
+	isError, _ := item["isError"].(bool)
+	return isError
+}
+
+func mcpResultFailure(item map[string]any) (bool, string) {
+	result, ok := item["result"].(map[string]any)
+	if !ok {
+		return false, ""
+	}
+	isError := mcpItemIsError(result)
+	if !isError {
+		return false, ""
+	}
+	if detail := mcpContentText(result["content"]); detail != "" {
+		return true, detail
+	}
+	if detail := mcpContentText(result["structured_content"]); detail != "" {
+		return true, detail
+	}
+	return true, ""
+}
+
+func mcpContentText(value any) string {
+	content, ok := value.([]any)
+	if !ok {
+		return ""
+	}
+	for _, entry := range content {
+		item, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		text, _ := item["text"].(string)
+		if strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+func mcpFailureMessage(errorValue any, resultFailure string) string {
+	if errorValue != nil {
+		if message := strings.TrimSpace(fmt.Sprint(errorValue)); message != "" && message != "<nil>" {
+			return message
+		}
+	}
+	if strings.TrimSpace(resultFailure) != "" {
+		var payload struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal([]byte(resultFailure), &payload) == nil && strings.TrimSpace(payload.Code) != "" {
+			if strings.TrimSpace(payload.Message) != "" {
+				return payload.Code + ": " + payload.Message
+			}
+			return payload.Code
+		}
+		return resultFailure
+	}
+	return "MCP server reported a failed tool call without diagnostic details"
 }
 
 func eventCallID(item map[string]any) string {
