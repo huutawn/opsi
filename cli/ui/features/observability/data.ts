@@ -180,6 +180,10 @@ export function useObservabilityData(console: ConsoleController) {
       },
     }));
 
+    const windowParam = console.route.window || "1h";
+    const windowSeconds = windowParam === "24h" ? 86400 : windowParam === "6h" ? 21600 : 3600;
+    const sinceUnix = Math.floor(Date.now() / 1000) - windowSeconds;
+
     const [
       summaryRes,
       servicesRes,
@@ -193,7 +197,7 @@ export function useObservabilityData(console: ConsoleController) {
       auditRes,
       incidentsRes,
     ] = await Promise.allSettled([
-      client.telemetrySummary(projectID),
+      client.telemetrySummary(projectID, sinceUnix, windowParam),
       client.services(projectID),
       client.nodes(projectID),
       client.resources(projectID, environmentID || undefined),
@@ -205,7 +209,6 @@ export function useObservabilityData(console: ConsoleController) {
       client.audit(projectID),
       client.incidents(projectID),
     ]);
-
     if (current !== sequence.current) return;
 
     const failingSources: string[] = [];
@@ -267,6 +270,12 @@ export function useObservabilityData(console: ConsoleController) {
     } else {
       failingSources.push("Agent telemetry");
       telemetryError = summaryRes.reason instanceof Error ? summaryRes.reason.message : "Telemetry unavailable";
+      if (summaryRes.reason && typeof summaryRes.reason === "object" && "coverage" in summaryRes.reason) {
+        const reasonObj = summaryRes.reason;
+        if (reasonObj.coverage && typeof reasonObj.coverage === "object") {
+          telemetryCoverage = reasonObj.coverage as TelemetryCoverage;
+        }
+      }
       if (previous.summary) {
         summary = previous.summary;
         telemetry = previous.telemetry;
@@ -282,12 +291,26 @@ export function useObservabilityData(console: ConsoleController) {
     let incidents = console.state.incidents;
     let incidentsState: SourceState = "empty";
     let incidentsError: string | undefined;
+    let incidentsCoverage: TelemetryCoverage | undefined;
     if (incidentsRes.status === "fulfilled") {
       incidents = incidentsRes.value.incidents ?? [];
-      incidentsState = incidents.length ? "fresh" : "empty";
+      incidentsCoverage = incidentsRes.value.coverage;
+      if (incidentsCoverage?.status === "partial") {
+        incidentsState = "partial";
+      } else if (incidentsCoverage?.status === "unavailable") {
+        incidentsState = previous.incidents.length ? "stale" : "unavailable";
+      } else {
+        incidentsState = incidents.length ? "fresh" : "empty";
+      }
     } else {
       failingSources.push("Incident store");
       incidentsError = incidentsRes.reason instanceof Error ? incidentsRes.reason.message : "Incidents unavailable";
+      if (incidentsRes.reason && typeof incidentsRes.reason === "object" && "coverage" in incidentsRes.reason) {
+        const reasonObj = incidentsRes.reason;
+        if (reasonObj.coverage && typeof reasonObj.coverage === "object") {
+          incidentsCoverage = reasonObj.coverage as TelemetryCoverage;
+        }
+      }
       if (previous.incidents.length) {
         incidents = previous.incidents;
         incidentsState = "stale";
@@ -296,8 +319,6 @@ export function useObservabilityData(console: ConsoleController) {
         incidentsState = "unavailable";
       }
     }
-
-    // Resources & Deployments
     let resources = previous.resources;
     let resourcesState: SourceState = "empty";
     if (resourcesRes.status === "fulfilled") {
@@ -377,7 +398,7 @@ export function useObservabilityData(console: ConsoleController) {
     const sourceDetails: SourceDetails = {
       registry: { state: registryState, errorRedacted: registryError, observedAt: Date.now() },
       telemetry: { state: telemetryState, errorRedacted: telemetryError, observedAt: summary?.end_unix || Date.now(), coverage: telemetryCoverage },
-      incidents: { state: incidentsState, errorRedacted: incidentsError, observedAt: Date.now() },
+      incidents: { state: incidentsState, errorRedacted: incidentsError, observedAt: Date.now(), coverage: incidentsCoverage },
       support: { state: console.state.support ? "ready" : "unavailable", observedAt: Date.now() },
       nodes: { state: nodesState, errorRedacted: nodesError, observedAt: Date.now() },
       resources: { state: resourcesState, observedAt: Date.now() },
@@ -412,17 +433,20 @@ export function useObservabilityData(console: ConsoleController) {
       error: errorMessage,
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, console.session?.agent_connected, console.state.support, environmentID, projectID]);
+  }, [client, console.route.window, console.session?.agent_connected, console.state.support, environmentID, projectID]);
 
   const loadLogs = useCallback(
     async (params: { serviceID?: string; cursor?: string; level?: string; query?: string } = {}) => {
       if (!projectID) return { logs: [] };
+      const windowParam = console.route.window || "1h";
+      const windowSeconds = windowParam === "24h" ? 86400 : windowParam === "6h" ? 21600 : 3600;
+      const sinceUnix = Math.floor(Date.now() / 1000) - windowSeconds;
       setData((previous) => ({
         ...previous,
         logs: { ...previous.logs, source: previous.logs.rows.length ? previous.logs.source : "loading", error: "" },
       }));
       try {
-        const result = await client.logs(projectID, { serviceID: params.serviceID, cursor: params.cursor, limit: 100 });
+        const result = await client.logs(projectID, { serviceID: params.serviceID, cursor: params.cursor, limit: 100, sinceUnix, window: windowParam });
         setData((previous) => ({
           ...previous,
           logs: {
@@ -445,27 +469,27 @@ export function useObservabilityData(console: ConsoleController) {
         throw error;
       }
     },
-    [client, projectID],
+    [client, console.route.window, projectID],
   );
 
   const selectIncident = useCallback(
-    async (incidentID: string) => {
+    async (incidentID: string, nodeID?: string) => {
       if (!projectID || !incidentID) return;
       const current = ++incidentSequence.current;
       setData((previous) => ({
         ...previous,
-        selectedIncident: previous.incidents.find((item) => item.incident_id === incidentID) ?? null,
+        selectedIncident: previous.incidents.find((item) => item.incident_id === incidentID && (!nodeID || item.node_id === nodeID)) ?? null,
         evidence: null,
         evidenceState: "loading",
         evidenceError: "",
         sources: { ...previous.sources, incidents: "loading" },
       }));
       const [incidentRes, evidenceRes] = await Promise.allSettled([
-        client.incident(projectID, incidentID),
-        client.incidentEvidence(projectID, incidentID),
+        client.incident(projectID, incidentID, nodeID),
+        client.incidentEvidence(projectID, incidentID, nodeID),
       ]);
       if (current !== incidentSequence.current) return;
-      const incident = incidentRes.status === "fulfilled" ? incidentRes.value.incident : data.incidents.find((item) => item.incident_id === incidentID) ?? null;
+      const incident = incidentRes.status === "fulfilled" ? incidentRes.value.incident : data.incidents.find((item) => item.incident_id === incidentID && (!nodeID || item.node_id === nodeID)) ?? null;
       const validEvidence = evidenceRes.status === "fulfilled" && isIncidentEvidence(evidenceRes.value);
       setData((previous) => ({
         ...previous,
@@ -476,9 +500,9 @@ export function useObservabilityData(console: ConsoleController) {
         evidenceError:
           evidenceRes.status === "rejected"
             ? (evidenceRes.reason as Error).message
-            : validEvidence
-            ? ""
-            : "Incident evidence failed structural validation.",
+            : !validEvidence && evidenceRes.status === "fulfilled"
+              ? "Incident evidence payload failed schema validation"
+              : "",
       }));
     },
     [client, data.incidents, projectID],
@@ -501,10 +525,13 @@ export function useObservabilityData(console: ConsoleController) {
 
   useEffect(() => {
     const incidentID = console.route.incident;
-    if (incidentID && data.incidents.some((item) => item.incident_id === incidentID) && data.selectedIncident?.incident_id !== incidentID) {
-      void selectIncident(incidentID);
+    const nodeID = console.route.node;
+    if (incidentID && data.incidents.some((item) => item.incident_id === incidentID && (!nodeID || item.node_id === nodeID))) {
+      if (data.selectedIncident?.incident_id !== incidentID || (nodeID && data.selectedIncident?.node_id !== nodeID)) {
+        void selectIncident(incidentID, nodeID);
+      }
     }
-  }, [console.route.incident, data.incidents, data.selectedIncident?.incident_id, selectIncident]);
+  }, [console.route.incident, console.route.node, data.incidents, data.selectedIncident?.incident_id, data.selectedIncident?.node_id, selectIncident]);
 
   return useMemo(
     () => ({ data, load, loadLogs, selectIncident, getApplicationEvents }),

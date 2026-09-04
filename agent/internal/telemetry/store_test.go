@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/secret"
+	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestSQLiteStoreMigrationIsIdempotentAndSyncsRecords(t *testing.T) {
@@ -179,5 +182,241 @@ func TestRetainAggregatesExpiredRawMetrics(t *testing.T) {
 	aggregate := records[0].MetricAggregate
 	if aggregate == nil || aggregate.Count != 2 || aggregate.Avg != 2 || aggregate.Min != 1 || aggregate.Max != 3 {
 		t.Fatalf("unexpected aggregate: %+v", aggregate)
+	}
+}
+
+func TestBoundedTelemetryWindowsDefaultsAndRejection(t *testing.T) {
+	store, err := OpenSQLiteStore(t.TempDir() + "/telemetry.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+
+	// 1. Zero-window defaults to 1 hour
+	reqZero := &agentv1.TelemetryQueryRequest{
+		ProjectID:      "proj-1",
+		SinceUnix:      0,
+		IncludeSummary: true,
+	}
+	resp, err := BuildQueryResponse(context.Background(), store, reqZero, now)
+	if err != nil {
+		t.Fatalf("unexpected error for zero-window: %v", err)
+	}
+	if resp.Summary == nil || resp.Summary.SinceUnix != now.Add(-1*time.Hour).Unix() {
+		t.Fatalf("expected since_unix to default to 1h ago (%d), got %+v", now.Add(-1*time.Hour).Unix(), resp.Summary)
+	}
+
+	// 2. Window > 24 hours rejected with InvalidArgument
+	reqOver24 := &agentv1.TelemetryQueryRequest{
+		ProjectID:      "proj-1",
+		SinceUnix:      now.Add(-25 * time.Hour).Unix(),
+		IncludeSummary: true,
+	}
+	_, err = BuildQueryResponse(context.Background(), store, reqOver24, now)
+	if err == nil {
+		t.Fatal("expected error for >24h window")
+	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got code %v: %v", status.Code(err), err)
+	}
+
+	// 3. Exactly 24h window accepted
+	req24 := &agentv1.TelemetryQueryRequest{
+		ProjectID:      "proj-1",
+		SinceUnix:      now.Add(-24 * time.Hour).Unix(),
+		IncludeSummary: true,
+	}
+	resp24, err := BuildQueryResponse(context.Background(), store, req24, now)
+	if err != nil {
+		t.Fatalf("expected 24h window to be accepted, got: %v", err)
+	}
+	if resp24.Summary.SinceUnix != now.Add(-24*time.Hour).Unix() {
+		t.Fatalf("unexpected since_unix: %d", resp24.Summary.SinceUnix)
+	}
+}
+
+func TestBoundedTelemetryLatestSampleSemanticsNeverSumsHistorical(t *testing.T) {
+	store, err := OpenSQLiteStore(t.TempDir() + "/telemetry.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+
+	// Pod 1 historical samples (should take latest only: CPU=0.8, Memory=500, Ready=0, Restarts=4)
+	metrics := []MetricRecord{
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.cpu", Value: 0.2, Unit: "cores", ObservedAt: now.Add(-30 * time.Minute)},
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.cpu", Value: 0.4, Unit: "cores", ObservedAt: now.Add(-20 * time.Minute)},
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.cpu", Value: 0.8, Unit: "cores", ObservedAt: now.Add(-10 * time.Minute)},
+
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.memory", Value: 100, Unit: "bytes", ObservedAt: now.Add(-30 * time.Minute)},
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.memory", Value: 500, Unit: "bytes", ObservedAt: now.Add(-10 * time.Minute)},
+
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.ready", Value: 1, Unit: "bool", ObservedAt: now.Add(-30 * time.Minute)},
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.ready", Value: 0, Unit: "bool", ObservedAt: now.Add(-10 * time.Minute)},
+
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.restart_count", Value: 1, Unit: "count", ObservedAt: now.Add(-30 * time.Minute)},
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-1", Name: "pod.restart_count", Value: 4, Unit: "count", ObservedAt: now.Add(-10 * time.Minute)},
+
+		// Pod 2 single sample (CPU=0.3, Memory=300, Ready=1, Restarts=2)
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-2", Name: "pod.cpu", Value: 0.3, Unit: "cores", ObservedAt: now.Add(-10 * time.Minute)},
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-2", Name: "pod.memory", Value: 300, Unit: "bytes", ObservedAt: now.Add(-10 * time.Minute)},
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-2", Name: "pod.ready", Value: 1, Unit: "bool", ObservedAt: now.Add(-10 * time.Minute)},
+		{ProjectID: "proj-1", NodeID: "node-1", ServiceID: "web", PodID: "pod-2", Name: "pod.restart_count", Value: 2, Unit: "count", ObservedAt: now.Add(-10 * time.Minute)},
+	}
+
+	for _, m := range metrics {
+		if err := store.InsertMetric(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := &agentv1.TelemetryQueryRequest{
+		ProjectID:       "proj-1",
+		SinceUnix:       now.Add(-1 * time.Hour).Unix(),
+		IncludeSummary:  true,
+		IncludeServices: true,
+	}
+
+	resp, err := BuildQueryResponse(context.Background(), store, req, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(resp.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(resp.Services))
+	}
+	svc := resp.Services[0]
+	if svc.ServiceID != "web" {
+		t.Fatalf("unexpected service id: %s", svc.ServiceID)
+	}
+	// CPU must be 0.8 + 0.3 = 1.1 (never 0.2 + 0.4 + 0.8 + 0.3 = 1.7)
+	if svc.CPUCores < 1.09 || svc.CPUCores > 1.11 {
+		t.Fatalf("CPU was summed historically! expected ~1.1, got %f", svc.CPUCores)
+	}
+	// Memory must be 500 + 300 = 800 (never 100 + 500 + 300 = 900)
+	if svc.MemoryBytes != 800 {
+		t.Fatalf("Memory was summed historically! expected 800, got %f", svc.MemoryBytes)
+	}
+	// Restarts must be 4 + 2 = 6 (never 1 + 4 + 2 = 7)
+	if svc.RestartCount != 6 {
+		t.Fatalf("Restarts were summed historically! expected 6, got %d", svc.RestartCount)
+	}
+	// Pod count 2, ready pods 1 (pod-1 ready=0, pod-2 ready=1)
+	if svc.PodCount != 2 || svc.ReadyPods != 1 {
+		t.Fatalf("expected 2 pods with 1 ready, got pods=%d ready=%d", svc.PodCount, svc.ReadyPods)
+	}
+	// Health must be degraded
+	if svc.Health != "degraded" {
+		t.Fatalf("expected degraded health, got %s", svc.Health)
+	}
+	// MetricCount in summary counts all 13 metric entries inserted
+	if resp.Summary.MetricCount != 13 {
+		t.Fatalf("expected 13 total metric samples counted, got %d", resp.Summary.MetricCount)
+	}
+}
+
+func TestBoundedTelemetryPagedLogsAndCursor(t *testing.T) {
+	store, err := OpenSQLiteStore(t.TempDir() + "/telemetry.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+
+	for i := 1; i <= 5; i++ {
+		log := LogRecord{
+			ProjectID:   "proj-1",
+			NodeID:      "node-1",
+			ServiceID:   "api",
+			Namespace:   "default",
+			Level:       "info",
+			Message:     fmt.Sprintf("log line %d with token=secret-token-%d", i, i),
+			ObservedAt:  now.Add(time.Duration(i) * time.Minute),
+			Fingerprint: fmt.Sprintf("fp-%d", i),
+		}
+		if err := store.InsertLog(context.Background(), log); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Page 1: limit 2
+	reqPage1 := &agentv1.TelemetryQueryRequest{
+		ProjectID:   "proj-1",
+		SinceUnix:   now.Unix(),
+		IncludeLogs: true,
+		Limit:       2,
+	}
+	resp1, err := BuildQueryResponse(context.Background(), store, reqPage1, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp1.Logs) != 2 || resp1.NextCursor == "" {
+		t.Fatalf("page 1 failed: len=%d cursor=%q", len(resp1.Logs), resp1.NextCursor)
+	}
+	if strings.Contains(resp1.Logs[0].Message, "secret-token-1") {
+		t.Fatalf("secret not redacted in page 1: %s", resp1.Logs[0].Message)
+	}
+
+	// Page 2: with cursor from page 1, limit 2
+	reqPage2 := &agentv1.TelemetryQueryRequest{
+		ProjectID:   "proj-1",
+		SinceUnix:   now.Unix(),
+		Cursor:      resp1.NextCursor,
+		IncludeLogs: true,
+		Limit:       2,
+	}
+	resp2, err := BuildQueryResponse(context.Background(), store, reqPage2, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp2.Logs) != 2 || resp2.NextCursor == "" {
+		t.Fatalf("page 2 failed: len=%d cursor=%q", len(resp2.Logs), resp2.NextCursor)
+	}
+	if resp2.Logs[0].Fingerprint != "fp-3" || resp2.Logs[1].Fingerprint != "fp-4" {
+		t.Fatalf("unexpected logs on page 2: %+v", resp2.Logs)
+	}
+
+	// Page 3: with cursor from page 2, limit 2 (only 1 log remaining -> NextCursor must be empty)
+	reqPage3 := &agentv1.TelemetryQueryRequest{
+		ProjectID:   "proj-1",
+		SinceUnix:   now.Unix(),
+		Cursor:      resp2.NextCursor,
+		IncludeLogs: true,
+		Limit:       2,
+	}
+	resp3, err := BuildQueryResponse(context.Background(), store, reqPage3, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp3.Logs) != 1 || resp3.NextCursor != "" {
+		t.Fatalf("page 3 failed: len=%d cursor=%q (expected empty cursor on last page)", len(resp3.Logs), resp3.NextCursor)
+	}
+	if resp3.Logs[0].Fingerprint != "fp-5" {
+		t.Fatalf("unexpected log on page 3: %+v", resp3.Logs[0])
+	}
+}
+
+func TestBoundedTelemetryCancellation(t *testing.T) {
+	store, err := OpenSQLiteStore(t.TempDir() + "/telemetry.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	now := time.Now().UTC()
+	_, err = store.QueryBoundedTelemetry(ctx, "proj-1", "", now.Add(-time.Hour), now, true, true, true, 100, "")
+	if err == nil {
+		t.Fatal("expected error on canceled context")
+	}
+	if !strings.Contains(err.Error(), "canceled") && !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("expected context canceled error, got: %v", err)
 	}
 }

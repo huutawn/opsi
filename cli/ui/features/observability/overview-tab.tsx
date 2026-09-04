@@ -5,7 +5,7 @@ import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import { routeHref } from "@/features/console/navigation";
 import type { ConsoleController } from "@/features/console/types";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
-import { SourceBadge, formatObserved } from "@/features/observability/shared";
+import { PartialCoverageBanner, SourceBadge, TimeWindowSelector, formatObserved } from "@/features/observability/shared";
 
 export function OverviewTab({
   console,
@@ -91,7 +91,11 @@ export function OverviewTab({
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="text-xs text-on-surface-variant font-code-md">Window: Last 1h</span>
+          <TimeWindowSelector
+            disabled={sources.telemetry === "loading"}
+            onChange={(win) => console.navigate({ window: win })}
+            value={console.route.window || "1h"}
+          />
           <Button
             disabled={sources.telemetry === "loading"}
             onClick={() => void model.load()}
@@ -104,6 +108,11 @@ export function OverviewTab({
           </Button>
         </div>
       </div>
+
+      <PartialCoverageBanner
+        coverage={model.data.summary?.coverage}
+        sourceName="Telemetry"
+      />
 
       {model.data.error ? (
         <div className="bg-error-container/20 border border-error/30 p-4 rounded-xl text-error text-xs flex items-center justify-between gap-4" role="alert">

@@ -3,11 +3,24 @@ package commands
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,9 +28,9 @@ import (
 	"github.com/opsi-dev/opsi/cli/internal/keychain"
 	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 )
-
 func TestIncidentHelpContainsOnlyActiveCommands(t *testing.T) {
 	if incidentEvidenceOperationTimeout != 30*time.Second {
 		t.Fatal("incident evidence operation timeout changed")
@@ -45,17 +58,44 @@ func TestIncidentHelpContainsOnlyActiveCommands(t *testing.T) {
 
 func TestIncidentEvidenceCommandUsesSelectedAgentAndDoesNotLeakPAT(t *testing.T) {
 	service := &commandIncidentServer{t: t}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := grpc.NewServer()
-	agentv1.RegisterIncidentServiceServer(server, service)
-	go func() { _ = server.Serve(listener) }()
-	defer server.Stop()
+	agentAddr, pin, stop := startTLSIncidentAgent(t, service)
+	defer stop()
+	host, portStr, _ := net.SplitHostPort(agentAddr)
+	port, _ := strconv.Atoi(portStr)
+
+	nodeCount := 1
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		nodes := []map[string]any{
+			{
+				"id":                    "node-1",
+				"agent_id":              "agent-1",
+				"agent_endpoint":        host,
+				"agent_port":            port,
+				"agent_tls_server_name": "127.0.0.1",
+				"agent_cert_sha256":     pin,
+				"status":                "ready",
+			},
+		}
+		if nodeCount > 1 {
+			nodes = append(nodes, map[string]any{
+				"id":                    "node-2",
+				"agent_id":              "agent-2",
+				"agent_endpoint":        host,
+				"agent_port":            port,
+				"agent_tls_server_name": "127.0.0.1",
+				"agent_cert_sha256":     pin,
+				"status":                "ready",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"nodes": nodes})
+	}))
+	defer cloud.Close()
 
 	configPath := filepath.Join(t.TempDir(), "cli.yaml")
-	if err := os.WriteFile(configPath, []byte("agent_addr: "+listener.Addr().String()+"\ncloud_url: http://unused.invalid\n"), 0o600); err != nil {
+	// Stale local AgentAddr and stale pin in config to prove Cloud discovery authority
+	staleConfig := fmt.Sprintf("agent_addr: 127.0.0.1:9\ncloud_url: %s\ntls:\n  pinned_server_cert_sha256: %s\n", cloud.URL, strings.Repeat("0", 64))
+	if err := os.WriteFile(configPath, []byte(staleConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store := keychain.NewFakeStore()
@@ -74,6 +114,26 @@ func TestIncidentEvidenceCommandUsesSelectedAgentAndDoesNotLeakPAT(t *testing.T)
 		t.Fatalf("authorization=%q request=%+v output=%q", service.authorization, service.evidenceRequest, out.String())
 	}
 
+	// Ambiguous target rejection when multiple agents exist without --node-id
+	nodeCount = 2
+	ambigCmd := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return store, nil }})
+	ambigCmd.SetOut(&out)
+	ambigCmd.SetErr(&out)
+	ambigCmd.SetArgs([]string{"--config", configPath, "incident", "evidence", "--project-id", "project-1", "--incident-id", "inc-1"})
+	if err := ambigCmd.Execute(); err == nil || !strings.Contains(err.Error(), "node-id is required") {
+		t.Fatalf("expected node-id required error on multiple agents, got: %v", err)
+	}
+
+	// Succeeds when --node-id is specified
+	scopedCmd := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return store, nil }})
+	out.Reset()
+	scopedCmd.SetOut(&out)
+	scopedCmd.SetErr(&out)
+	scopedCmd.SetArgs([]string{"--config", configPath, "incident", "evidence", "--project-id", "project-1", "--incident-id", "inc-1", "--node-id", "node-1", "--json"})
+	if err := scopedCmd.Execute(); err != nil {
+		t.Fatalf("scoped evidence failed: %v", err)
+	}
+
 	missing := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return store, nil }})
 	missing.SetOut(&out)
 	missing.SetErr(&out)
@@ -81,19 +141,8 @@ func TestIncidentEvidenceCommandUsesSelectedAgentAndDoesNotLeakPAT(t *testing.T)
 	if err := missing.Execute(); err == nil || !strings.Contains(err.Error(), "selected CLI config") {
 		t.Fatalf("missing selected config error=%v", err)
 	}
-	loopbackFallbackPath := filepath.Join(t.TempDir(), "missing-agent.yaml")
-	if err := os.WriteFile(loopbackFallbackPath, []byte("cloud_url: http://unused.invalid\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fallback := NewRootCommand(Options{KeychainFactory: func() (keychain.Store, error) { return store, nil }})
-	fallback.SetOut(&out)
-	fallback.SetErr(&out)
-	fallback.SetArgs([]string{"--config", loopbackFallbackPath, "incident", "evidence", "--project-id", "project-1", "--incident-id", "inc-1"})
-	if err := fallback.Execute(); err == nil || !strings.Contains(err.Error(), "explicitly set agent_addr") {
-		t.Fatalf("implicit loopback fallback error=%v", err)
-	}
 
-	err = incidentEvidenceCLIError(errors.New("connect agent 127.0.0.1:1 pin-canary evidence-pat-canary raw-kubernetes-canary"))
+	err := incidentEvidenceCLIError(errors.New("connect agent 127.0.0.1:1 pin-canary evidence-pat-canary raw-kubernetes-canary"))
 	if err == nil || !strings.Contains(err.Error(), "INCIDENT_EVIDENCE_AGENT_UNAVAILABLE") || strings.Contains(err.Error(), "127.0.0.1:1") || strings.Contains(err.Error(), "pin-canary") || strings.Contains(err.Error(), "evidence-pat-canary") || strings.Contains(err.Error(), "raw-kubernetes-canary") {
 		t.Fatalf("unsanitized unavailable Agent error=%v", err)
 	}
@@ -101,17 +150,31 @@ func TestIncidentEvidenceCommandUsesSelectedAgentAndDoesNotLeakPAT(t *testing.T)
 
 func TestIncidentCommandsUseBearerMetadataWithoutCallerAuthority(t *testing.T) {
 	service := &commandIncidentServer{t: t}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := grpc.NewServer()
-	agentv1.RegisterIncidentServiceServer(server, service)
-	go func() { _ = server.Serve(listener) }()
-	defer server.Stop()
+	agentAddr, pin, stop := startTLSIncidentAgent(t, service)
+	defer stop()
+	host, portStr, _ := net.SplitHostPort(agentAddr)
+	port, _ := strconv.Atoi(portStr)
+
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"nodes": []map[string]any{
+				{
+					"id":                    "node-1",
+					"agent_id":              "agent-1",
+					"agent_endpoint":        host,
+					"agent_port":            port,
+					"agent_tls_server_name": "127.0.0.1",
+					"agent_cert_sha256":     pin,
+					"status":                "ready",
+				},
+			},
+		})
+	}))
+	defer cloud.Close()
 
 	configPath := filepath.Join(t.TempDir(), "cli.yaml")
-	if err := os.WriteFile(configPath, []byte("agent_addr: "+listener.Addr().String()+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("cloud_url: "+cloud.URL+"\nagent_addr: 127.0.0.1:9\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store := keychain.NewFakeStore()
@@ -129,7 +192,6 @@ func TestIncidentCommandsUseBearerMetadataWithoutCallerAuthority(t *testing.T) {
 	if service.authorization != "Bearer incident-pat-canary" || strings.Contains(service.serializedRequest, "incident-pat-canary") || strings.Contains(out.String(), "incident-pat-canary") {
 		t.Fatalf("authorization=%q request=%s output=%q", service.authorization, service.serializedRequest, out.String())
 	}
-
 	help := NewRootCommand(Options{})
 	out.Reset()
 	help.SetOut(&out)
@@ -171,4 +233,35 @@ func (s *commandIncidentServer) ListIncidents(ctx context.Context, req *agentv1.
 	}
 	s.serializedRequest = string(data)
 	return &agentv1.IncidentListResponse{}, nil
+}
+
+func startTLSIncidentAgent(t *testing.T, service agentv1.IncidentServiceServer) (string, string, func()) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "agent.test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Minute),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := tls.Certificate{Certificate: [][]byte{certificateDER}, PrivateKey: privateKey}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13})))
+	agentv1.RegisterIncidentServiceServer(server, service)
+	go func() { _ = server.Serve(listener) }()
+	fingerprint := sha256.Sum256(certificateDER)
+	return listener.Addr().String(), hex.EncodeToString(fingerprint[:]), server.Stop
 }

@@ -5,7 +5,7 @@ import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { safeLogMessage } from "@/features/observability/data";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
-import { formatObserved } from "@/features/observability/shared";
+import { TimeWindowSelector, formatObserved } from "@/features/observability/shared";
 
 export function LogsTab({ console, model }: { console: ConsoleController; model: ObservabilityModel }) {
   const service = console.route.service || "";
@@ -46,7 +46,12 @@ export function LogsTab({ console, model }: { console: ConsoleController; model:
             Bounded diagnostic logs stream with level filters and search.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <TimeWindowSelector
+            disabled={model.data.logs.source === "loading"}
+            onChange={(win) => console.navigate({ window: win, cursor: "" })}
+            value={console.route.window || "1h"}
+          />
           <Button
             aria-pressed={paused}
             onClick={() => setPaused((value) => !value)}

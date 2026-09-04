@@ -852,6 +852,7 @@ export type IncidentListResult = {
   source: "agent";
   payload_policy: string;
   incidents: IncidentResponse[];
+  coverage?: TelemetryCoverage;
 };
 
 export type IncidentEvidence = {

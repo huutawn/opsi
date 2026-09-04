@@ -29,8 +29,12 @@ func (m *mockNodeLister) ListNodes(_ context.Context, _ string) ([]cloudclient.N
 }
 
 type mockTelemetryClient struct {
-	statusFunc func(ctx context.Context) (*agentv1.StatusResponse, error)
-	queryFunc  func(ctx context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error)
+	statusFunc          func(ctx context.Context) (*agentv1.StatusResponse, error)
+	queryFunc           func(ctx context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error)
+	listIncidentsFunc   func(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error)
+	getIncidentFunc     func(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error)
+	getEvidenceFunc     func(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error)
+	resolveIncidentFunc func(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error)
 }
 
 func (m *mockTelemetryClient) Status(ctx context.Context) (*agentv1.StatusResponse, error) {
@@ -53,6 +57,37 @@ func (m *mockTelemetryClient) QueryTelemetry(ctx context.Context, req *agentv1.T
 			Health:      "healthy",
 		},
 	}, nil
+}
+
+func (m *mockTelemetryClient) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+	if m.listIncidentsFunc != nil {
+		return m.listIncidentsFunc(ctx, req)
+	}
+	return &agentv1.IncidentListResponse{Incidents: []agentv1.IncidentResponse{}}, nil
+}
+
+func (m *mockTelemetryClient) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
+	if m.getIncidentFunc != nil {
+		return m.getIncidentFunc(ctx, req)
+	}
+	return &agentv1.IncidentResponse{IncidentID: req.IncidentID, ProjectID: req.ProjectID, Status: "open"}, nil
+}
+
+func (m *mockTelemetryClient) GetIncidentEvidence(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+	if m.getEvidenceFunc != nil {
+		return m.getEvidenceFunc(ctx, req)
+	}
+	return &agentv1.IncidentEvidence{
+		SchemaVersion: "opsi.incident_evidence/v1",
+		Identity:      agentv1.IncidentEvidenceIdentity{IncidentID: req.IncidentID, ProjectID: req.ProjectID},
+	}, nil
+}
+
+func (m *mockTelemetryClient) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error) {
+	if m.resolveIncidentFunc != nil {
+		return m.resolveIncidentFunc(ctx, req)
+	}
+	return &agentv1.IncidentResponse{IncidentID: req.IncidentID, ProjectID: req.ProjectID, Status: "resolved"}, nil
 }
 
 func TestResolverDiscoveryFiltersInvalidNodesAndBuildsTLSPinning(t *testing.T) {
@@ -425,5 +460,210 @@ func TestResolverBoundedFanOut(t *testing.T) {
 	}
 	if maxActive.Load() > 3 {
 		t.Fatalf("concurrency exceeded limit 3: max was %d", maxActive.Load())
+	}
+}
+
+func TestResolverIncidentsAggregationAndCoverage(t *testing.T) {
+	const validPin = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	nodes := []cloudclient.Node{
+		{
+			ID:                 "node-1",
+			AgentID:            "agent-1",
+			AgentEndpoint:      "203.0.113.10",
+			AgentPort:          9443,
+			AgentTLSServerName: "node1.test",
+			AgentCertSHA256:    validPin,
+			Status:             "healthy",
+		},
+		{
+			ID:                 "node-2",
+			AgentID:            "agent-2",
+			AgentEndpoint:      "203.0.113.11",
+			AgentPort:          9443,
+			AgentTLSServerName: "node2.test",
+			AgentCertSHA256:    validPin,
+			Status:             "ready",
+		},
+	}
+
+	// 1. Successful aggregation from both agents
+	successFactory := func(cfg config.Config) TelemetryClient {
+		if strings.HasPrefix(cfg.AgentAddr, "203.0.113.10") {
+			return &mockTelemetryClient{
+				listIncidentsFunc: func(_ context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+					return &agentv1.IncidentListResponse{
+						Incidents: []agentv1.IncidentResponse{
+							{IncidentID: "inc-node1-1", ProjectID: req.ProjectID, CreatedAtUnix: 100},
+						},
+					}, nil
+				},
+			}
+		}
+		return &mockTelemetryClient{
+			listIncidentsFunc: func(_ context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+				return &agentv1.IncidentListResponse{
+					Incidents: []agentv1.IncidentResponse{
+						{IncidentID: "inc-node2-1", ProjectID: req.ProjectID, CreatedAtUnix: 200},
+					},
+				}, nil
+			},
+		}
+	}
+
+	resolver := NewAgentTargetResolver(AgentTargetResolverOptions{
+		CloudClient:   &mockNodeLister{nodes: nodes},
+		ClientFactory: successFactory,
+	})
+
+	listResp, coverage, err := resolver.ListIncidents(context.Background(), &agentv1.IncidentListRequest{ProjectID: "project-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if coverage.Status != CoverageConnected || coverage.SuccessfulAgents != 2 || coverage.FailedAgents != 0 {
+		t.Fatalf("unexpected coverage: %+v", coverage)
+	}
+	if len(listResp.Incidents) != 2 {
+		t.Fatalf("expected 2 incidents, got %d", len(listResp.Incidents))
+	}
+	// Sorted desc by CreatedAtUnix: inc-node2-1 (200), then inc-node1-1 (100)
+	if listResp.Incidents[0].IncidentID != "inc-node2-1" || listResp.Incidents[0].NodeID != "node-2" {
+		t.Fatalf("unexpected first incident: %+v", listResp.Incidents[0])
+	}
+	if listResp.Incidents[1].IncidentID != "inc-node1-1" || listResp.Incidents[1].NodeID != "node-1" {
+		t.Fatalf("unexpected second incident: %+v", listResp.Incidents[1])
+	}
+
+	// 2. Partial node failure (one agent fails with secret token)
+	partialFactory := func(cfg config.Config) TelemetryClient {
+		if strings.HasPrefix(cfg.AgentAddr, "203.0.113.10") {
+			return &mockTelemetryClient{
+				listIncidentsFunc: func(_ context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+					return &agentv1.IncidentListResponse{
+						Incidents: []agentv1.IncidentResponse{
+							{IncidentID: "inc-node1-1", ProjectID: req.ProjectID, CreatedAtUnix: 100},
+						},
+					}, nil
+				},
+			}
+		}
+		return &mockTelemetryClient{
+			listIncidentsFunc: func(_ context.Context, _ *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+				return nil, errors.New("timeout connecting to agent bearer secret-pat-token-canary-1234567890abcdef")
+			},
+		}
+	}
+
+	partialResolver := NewAgentTargetResolver(AgentTargetResolverOptions{
+		CloudClient:   &mockNodeLister{nodes: nodes},
+		ClientFactory: partialFactory,
+	})
+
+	partialResp, partialCov, err := partialResolver.ListIncidents(context.Background(), &agentv1.IncidentListRequest{ProjectID: "project-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if partialCov.Status != CoveragePartial || partialCov.SuccessfulAgents != 1 || partialCov.FailedAgents != 1 {
+		t.Fatalf("unexpected partial coverage: %+v", partialCov)
+	}
+	if len(partialResp.Incidents) != 1 || partialResp.Incidents[0].IncidentID != "inc-node1-1" {
+		t.Fatalf("unexpected partial incidents: %+v", partialResp.Incidents)
+	}
+	if len(partialCov.Errors) != 1 || strings.Contains(partialCov.Errors[0].MessageRedacted, "secret-pat-token-canary") {
+		t.Fatalf("leaked secret or missing diagnostic error: %+v", partialCov.Errors)
+	}
+
+	// 3. All-node failure returns TelemetryUnavailableError with coverage
+	allFailFactory := func(_ config.Config) TelemetryClient {
+		return &mockTelemetryClient{
+			listIncidentsFunc: func(_ context.Context, _ *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error) {
+				return nil, errors.New("connection refused")
+			},
+		}
+	}
+
+	allFailResolver := NewAgentTargetResolver(AgentTargetResolverOptions{
+		CloudClient:   &mockNodeLister{nodes: nodes},
+		ClientFactory: allFailFactory,
+	})
+
+	_, allFailCov, err := allFailResolver.ListIncidents(context.Background(), &agentv1.IncidentListRequest{ProjectID: "project-1"})
+	if err == nil {
+		t.Fatal("expected error on all-node failure")
+	}
+	var unavail *TelemetryUnavailableError
+	if !errors.As(err, &unavail) {
+		t.Fatalf("expected TelemetryUnavailableError, got %T: %v", err, err)
+	}
+	if allFailCov.Status != CoverageUnavailable || allFailCov.FailedAgents != 2 {
+		t.Fatalf("unexpected all fail coverage: %+v", allFailCov)
+	}
+
+	// 4. Ambiguous target rejected when multiple agents exist without node_id
+	_, err = resolver.GetIncident(context.Background(), &agentv1.IncidentGetRequest{ProjectID: "project-1", IncidentID: "inc-1"}, "")
+	if err == nil {
+		t.Fatal("expected error for ambiguous target")
+	}
+	var ambigErr *AmbiguousTargetError
+	if !errors.As(err, &ambigErr) || ambigErr.Count != 2 {
+		t.Fatalf("expected AmbiguousTargetError, got: %v", err)
+	}
+
+	// 5. Node-scoped GetIncident and GetIncidentEvidence route to correct agent
+	var calledGetNode1, calledGetNode2 atomic.Bool
+	scopedFactory := func(cfg config.Config) TelemetryClient {
+		if strings.HasPrefix(cfg.AgentAddr, "203.0.113.10") {
+			return &mockTelemetryClient{
+				getIncidentFunc: func(_ context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
+					calledGetNode1.Store(true)
+					return &agentv1.IncidentResponse{IncidentID: req.IncidentID, ProjectID: req.ProjectID, NodeID: "node-1"}, nil
+				},
+				getEvidenceFunc: func(_ context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error) {
+					return &agentv1.IncidentEvidence{
+						SchemaVersion: "opsi.incident_evidence/v1",
+						Identity:      agentv1.IncidentEvidenceIdentity{IncidentID: req.IncidentID, ProjectID: req.ProjectID, NodeID: "node-1"},
+					}, nil
+				},
+			}
+		}
+		return &mockTelemetryClient{
+			getIncidentFunc: func(_ context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error) {
+				calledGetNode2.Store(true)
+				return &agentv1.IncidentResponse{IncidentID: req.IncidentID, ProjectID: req.ProjectID, NodeID: "node-2"}, nil
+			},
+		}
+	}
+
+	scopedResolver := NewAgentTargetResolver(AgentTargetResolverOptions{
+		CloudClient:   &mockNodeLister{nodes: nodes},
+		ClientFactory: scopedFactory,
+	})
+
+	incResp, err := scopedResolver.GetIncident(context.Background(), &agentv1.IncidentGetRequest{ProjectID: "project-1", IncidentID: "inc-1"}, "node-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if incResp.NodeID != "node-2" || !calledGetNode2.Load() || calledGetNode1.Load() {
+		t.Fatalf("node-2 scoping failed: resp=%+v calledNode1=%v calledNode2=%v", incResp, calledGetNode1.Load(), calledGetNode2.Load())
+	}
+
+	evidenceResp, err := scopedResolver.GetIncidentEvidence(context.Background(), &agentv1.IncidentGetRequest{ProjectID: "project-1", IncidentID: "inc-1"}, "node-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if evidenceResp.Identity.NodeID != "node-1" {
+		t.Fatalf("node-1 evidence scoping failed: resp=%+v", evidenceResp)
+	}
+
+	// 6. Single agent project succeeds without node_id
+	singleNodeResolver := NewAgentTargetResolver(AgentTargetResolverOptions{
+		CloudClient:   &mockNodeLister{nodes: nodes[:1]},
+		ClientFactory: scopedFactory,
+	})
+	singleResp, err := singleNodeResolver.GetIncident(context.Background(), &agentv1.IncidentGetRequest{ProjectID: "project-1", IncidentID: "inc-1"}, "")
+	if err != nil {
+		t.Fatalf("single agent resolution should succeed without node_id: %v", err)
+	}
+	if singleResp.NodeID != "node-1" {
+		t.Fatalf("expected node-1, got %+v", singleResp)
 	}
 }

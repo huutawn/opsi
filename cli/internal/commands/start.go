@@ -322,7 +322,7 @@ func newStartServer(uiDir, devUI string, cfg config.Config, factory func() (keyc
 		authFlow.setSession(identity)
 		writeLocalJSON(w, http.StatusOK, map[string]any{
 			"authenticated": true, "token_status": tokenState, "cloud_connected": cloudState,
-			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
+			"agent_connected": probeAgent(r.Context(), cfg, factory, identity.ProjectID, agentResolver),
 			"org_id":          identity.OrgID, "project_id": identity.ProjectID, "role": identity.Role,
 		})
 	})
@@ -350,7 +350,7 @@ func newStartServer(uiDir, devUI string, cfg config.Config, factory func() (keyc
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"authenticated":   authenticated,
 			"cloud_connected": cloudState,
-			"agent_connected": probeAgent(r.Context(), cfg, factory, agentResolver),
+			"agent_connected": probeAgent(r.Context(), cfg, factory, projectID, agentResolver),
 			"token_status":    tokenState,
 			"user_id":         identity.UserID,
 			"org_id":          identity.OrgID,
@@ -868,21 +868,34 @@ func logoutLocalSession(w http.ResponseWriter, r *http.Request, cfg config.Confi
 	writeLocalJSON(w, http.StatusOK, map[string]any{"authenticated": false, "revoked": true})
 }
 
-func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) string {
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+func probeAgent(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), projectID string, resolver ...agentConfigResolver) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "unknown"
+	}
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	conn, err := targetResolver.CheckConnection(ctx, projectID)
 	if err != nil {
 		return "failed"
 	}
-	if strings.TrimSpace(agentCfg.AgentAddr) == "" {
-		return "not connected"
+	if conn.Status == agentclient.CoverageConnected || conn.Status == agentclient.CoveragePartial {
+		return "ok"
 	}
-	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
-	defer cancel()
-	ctx = agentclient.WithPAT(ctx, optionalPAT(factory))
-	if _, err := agentclient.New(agentCfg).Status(ctx); err != nil {
-		return "failed"
-	}
-	return "ok"
+	return "failed"
 }
 
 func localPATStatus(ctx context.Context, cfg config.Config, factory func() (keychain.Store, error), projectID string) (bool, string, string, localSessionIdentity) {
@@ -1362,39 +1375,74 @@ func rejectCallerAuthorityQuery(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func callLocalIncidentListAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentListRequest, resolver ...agentConfigResolver) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+
+	resp, coverage, err := targetResolver.ListIncidents(ctx, req)
 	if err != nil {
-		writeLocalAgentIncidentError(w, r, err)
-		return
-	}
-	resp, err := agentclient.New(agentCfg).ListIncidents(ctx, req)
-	if err != nil {
+		var unavail *agentclient.TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			writeLocalErrorWithCoverage(w, r, http.StatusBadGateway, "AGENT_INCIDENTS_UNAVAILABLE", "Agent incident operation failed", unavail.Coverage)
+			return
+		}
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{"source": "agent", "payload_policy": "incident records contain factual Agent runtime state only", "incidents": resp.Incidents})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"source":         "agent",
+		"payload_policy": "incident records contain factual Agent runtime state only",
+		"incidents":      resp.Incidents,
+		"coverage":       coverage,
+	})
 }
 
 func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest, resolver ...agentConfigResolver) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+
+	resp, err := targetResolver.GetIncident(ctx, req, nodeID)
 	if err != nil {
-		writeLocalAgentIncidentError(w, r, err)
-		return
-	}
-	resp, err := agentclient.New(agentCfg).GetIncident(ctx, req)
-	if err != nil {
+		var ambig *agentclient.AmbiguousTargetError
+		if errors.As(err, &ambig) {
+			writeLocalError(w, r, http.StatusBadRequest, "NODE_ID_REQUIRED", ambig.Error())
+			return
+		}
+		var unavail *agentclient.TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			writeLocalErrorWithCoverage(w, r, http.StatusBadGateway, "AGENT_INCIDENTS_UNAVAILABLE", "Agent incident operation failed", unavail.Coverage)
+			return
+		}
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
@@ -1404,21 +1452,40 @@ func callLocalIncidentGetAgent(w http.ResponseWriter, r *http.Request, cfg confi
 }
 
 func callLocalIncidentEvidenceAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentGetRequest, resolver ...agentConfigResolver) {
-	ctx, cancel := context.WithTimeout(r.Context(), incidentEvidenceOperationTimeout)
-	defer cancel()
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
 	pat, err := resolvePAT("", factory)
 	if err != nil {
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
-	ctx = agentclient.WithPAT(ctx, pat)
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
-	if err != nil {
-		writeLocalAgentIncidentError(w, r, err)
-		return
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
 	}
-	response, err := agentclient.New(agentCfg).GetIncidentEvidence(ctx, req)
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), incidentEvidenceOperationTimeout)
+	defer cancel()
+
+	response, err := targetResolver.GetIncidentEvidence(ctx, req, nodeID)
 	if err != nil {
+		var ambig *agentclient.AmbiguousTargetError
+		if errors.As(err, &ambig) {
+			writeLocalError(w, r, http.StatusBadRequest, "NODE_ID_REQUIRED", ambig.Error())
+			return
+		}
+		var unavail *agentclient.TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			writeLocalErrorWithCoverage(w, r, http.StatusBadGateway, "AGENT_INCIDENTS_UNAVAILABLE", "Agent incident operation failed", unavail.Coverage)
+			return
+		}
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
@@ -1433,18 +1500,31 @@ func callLocalIncidentEvidenceAgent(w http.ResponseWriter, r *http.Request, cfg 
 }
 
 func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), req *agentv1.IncidentResolveRequest, resolver ...agentConfigResolver) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	pat := optionalPAT(factory)
+	var cloudClient agentclient.NodeLister
+	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
+		cloudClient = client
+	}
+	targetResolver := agentclient.NewAgentTargetResolver(agentclient.AgentTargetResolverOptions{
+		CloudClient: cloudClient,
+		BaseConfig:  cfg,
+		PAT:         pat,
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if pat := optionalPAT(factory); pat != "" {
-		ctx = agentclient.WithPAT(ctx, pat)
-	}
-	agentCfg, err := resolveAgentSnapshot(cfg, resolver...)
+
+	resp, err := targetResolver.ResolveIncident(ctx, req, nodeID)
 	if err != nil {
-		writeLocalAgentIncidentError(w, r, err)
-		return
-	}
-	resp, err := agentclient.New(agentCfg).ResolveIncident(ctx, req)
-	if err != nil {
+		var ambig *agentclient.AmbiguousTargetError
+		if errors.As(err, &ambig) {
+			writeLocalError(w, r, http.StatusBadRequest, "NODE_ID_REQUIRED", ambig.Error())
+			return
+		}
 		writeLocalAgentIncidentError(w, r, err)
 		return
 	}
@@ -1457,7 +1537,6 @@ func callLocalIncidentResolveAgent(w http.ResponseWriter, r *http.Request, cfg c
 		"incident":       resp,
 	})
 }
-
 func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err error) {
 	statusCode := http.StatusBadGateway
 	code := "AGENT_INCIDENT_OPERATION_FAILED"
@@ -1488,7 +1567,7 @@ func writeLocalAgentIncidentError(w http.ResponseWriter, r *http.Request, err er
 	writeLocalError(w, r, statusCode, code, "Agent incident operation failed")
 }
 
-func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), _ ...agentConfigResolver) bool {
+func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, factory func() (keychain.Store, error), resolver ...agentConfigResolver) bool {
 	req, view, ok := localTelemetryRequest(w, r)
 	if !ok {
 		return false
@@ -1503,6 +1582,9 @@ func localTelemetry(w http.ResponseWriter, r *http.Request, cfg config.Config, f
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("content-type", "application/json")
 
+	if agentCfg, err := resolveAgentSnapshot(cfg, resolver...); err == nil {
+		cfg = agentCfg
+	}
 	pat := optionalPAT(factory)
 	var cloudClient agentclient.NodeLister
 	if client, err := cloudclient.New(cfg.CloudURL, pat, "opsi-local-ui", http.DefaultClient); err == nil && client != nil {
@@ -1593,6 +1675,20 @@ func localTelemetryRequest(w http.ResponseWriter, r *http.Request) (*agentv1.Tel
 	}
 	query := r.URL.Query()
 	sinceUnix, _ := strconv.ParseInt(query.Get("since_unix"), 10, 64)
+	if sinceUnix <= 0 {
+		window := strings.ToLower(strings.TrimSpace(query.Get("window")))
+		now := time.Now().UTC()
+		switch window {
+		case "24h":
+			sinceUnix = now.Add(-24 * time.Hour).Unix()
+		case "6h":
+			sinceUnix = now.Add(-6 * time.Hour).Unix()
+		case "1h":
+			sinceUnix = now.Add(-1 * time.Hour).Unix()
+		default:
+			sinceUnix = now.Add(-1 * time.Hour).Unix()
+		}
+	}
 	limit, _ := strconv.ParseInt(query.Get("limit"), 10, 32)
 	req := &agentv1.TelemetryQueryRequest{ProjectID: projectID, SinceUnix: sinceUnix, Cursor: query.Get("cursor"), Limit: int32(limit)}
 	switch {

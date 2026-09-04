@@ -3,10 +3,10 @@
 import { Button, Empty, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
-import { Fact, formatObserved } from "@/features/observability/shared";
-
+import { Fact, PartialCoverageBanner, formatObserved } from "@/features/observability/shared";
 export function IncidentsTab({ console, model }: { console: ConsoleController; model: ObservabilityModel }) {
   const selectedID = console.route.incident || "";
+  const selectedNode = console.route.node || "";
   const selected = model.data.selectedIncident;
   const evidence = model.data.evidence;
 
@@ -23,19 +23,22 @@ export function IncidentsTab({ console, model }: { console: ConsoleController; m
             {model.data.incidents.length}
           </span>
         </div>
+        <PartialCoverageBanner
+          coverage={model.data.sourceDetails.incidents?.coverage}
+          sourceName="Incident"
+        />
 
         {model.data.sources.incidents === "unavailable" ? (
           <div className="p-3 bg-status-warning/10 border border-status-warning/30 rounded-xl text-status-warning text-xs">
             Incident source unavailable. No empty count is inferred.
           </div>
         ) : null}
-
         {model.data.incidents.length ? (
           <ul className="space-y-2 max-h-[600px] overflow-y-auto">
             {model.data.incidents.map((incident) => {
-              const isSelected = selectedID === incident.incident_id;
+              const isSelected = selectedID === incident.incident_id && (!selectedNode || selectedNode === incident.node_id);
               return (
-                <li key={incident.incident_id}>
+                <li key={`${incident.node_id || "unscoped"}-${incident.incident_id}`}>
                   <button
                     aria-pressed={isSelected}
                     className={`w-full p-3 rounded-xl border text-left transition-all cursor-pointer flex items-start justify-between gap-2 ${
@@ -43,7 +46,7 @@ export function IncidentsTab({ console, model }: { console: ConsoleController; m
                         ? "bg-primary-container/80 border-primary shadow-sm"
                         : "bg-surface-container border-outline-variant/20 hover:bg-surface-container-high"
                     }`}
-                    onClick={() => console.navigate({ incident: incident.incident_id })}
+                    onClick={() => console.navigate({ incident: incident.incident_id, node: incident.node_id })}
                     type="button"
                   >
                     <div className="space-y-1 min-w-0">

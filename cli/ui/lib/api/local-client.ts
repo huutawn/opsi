@@ -738,17 +738,23 @@ export class LocalClient {
   projectAgentConnection(projectID: string) {
     return this.call<ProjectAgentConnection>(`/api/local/projects/${encodeURIComponent(projectID)}/agent-connection`);
   }
-  telemetrySummary(projectID: string, sinceUnix = 0) {
+  telemetrySummary(projectID: string, sinceUnix = 0, window = "") {
+    const query = new URLSearchParams();
+    if (sinceUnix > 0) query.set("since_unix", String(sinceUnix));
+    if (window) query.set("window", window);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
     return this.call<TelemetrySummary>(
-      `/api/local/projects/${projectID}/telemetry/summary?since_unix=${encodeURIComponent(String(sinceUnix))}`,
+      `/api/local/projects/${projectID}/telemetry/summary${suffix}`,
     );
   }
 
-  logs(projectID: string, params: { serviceID?: string; cursor?: string; limit?: number } = {}) {
+  logs(projectID: string, params: { serviceID?: string; cursor?: string; limit?: number; sinceUnix?: number; window?: string } = {}) {
     const query = new URLSearchParams();
     if (params.serviceID) query.set("service_id", params.serviceID);
     if (params.cursor) query.set("cursor", params.cursor);
     if (params.limit) query.set("limit", String(params.limit));
+    if (params.sinceUnix && params.sinceUnix > 0) query.set("since_unix", String(params.sinceUnix));
+    if (params.window) query.set("window", params.window);
     const suffix = query.toString() ? `?${query.toString()}` : "";
     return this.call<TelemetryQueryResponse>(`/api/local/projects/${projectID}/logs${suffix}`);
   }
@@ -794,12 +800,14 @@ export class LocalClient {
 	return this.call<IncidentListResult>(`/api/local/projects/${projectID}/incidents${suffix}`);
   }
 
-  incident(projectID: string, incidentID: string) {
-	return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}`);
+  incident(projectID: string, incidentID: string, nodeID?: string) {
+    const query = nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : "";
+    return this.call<IncidentResult>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}${query}`);
   }
 
-  incidentEvidence(projectID: string, incidentID: string) {
-	return this.call<IncidentEvidence>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/evidence`);
+  incidentEvidence(projectID: string, incidentID: string, nodeID?: string) {
+    const query = nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : "";
+    return this.call<IncidentEvidence>(`/api/local/projects/${projectID}/incidents/${encodeURIComponent(incidentID)}/evidence${query}`);
   }
 
   async resources(projectID: string, environmentID?: string) {
@@ -1062,6 +1070,7 @@ export class LocalClient {
         requestID: String(payload.request_id ?? res.headers.get("X-Request-ID") ?? ""),
         nextAction: String(payload.next_action ?? "Retry after checking Local backend connectivity."),
         retryable: Boolean(payload.retryable),
+        coverage: (data as Record<string, unknown>).coverage,
       });
       throw error;
     }

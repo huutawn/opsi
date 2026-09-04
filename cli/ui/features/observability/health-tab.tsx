@@ -4,10 +4,10 @@ import { Button, Empty, Icon, StatusBadge } from "@/components/ui/primitives";
 import type { ConsoleController } from "@/features/console/types";
 import { overallHealth, type SourceState } from "@/features/observability/data";
 import type { ObservabilityModel } from "@/features/observability/observability-view";
-import { SourceBadge, formatObserved } from "@/features/observability/shared";
+import { PartialCoverageBanner, SourceBadge, formatObserved } from "@/features/observability/shared";
 
 export function HealthTab({ console, model }: { console: ConsoleController; model: ObservabilityModel }) {
-  const agentAvailable = console.session?.agent_connected === "ok";
+  const agentAvailable = console.session?.agent_connected === "ok" || model.data.sources.telemetry === "fresh" || model.data.sources.telemetry === "partial";
   const health = overallHealth(model.data, console.state.services.length, agentAvailable);
   const support = console.state.support;
   const serviceIDs = new Set(console.state.services.map((service) => service.id));
@@ -54,6 +54,15 @@ export function HealthTab({ console, model }: { console: ConsoleController; mode
           <b className="text-on-surface font-code-md text-xs">{formatObserved(model.data.summary?.end_unix)}</b>
         </div>
       </div>
+
+      <PartialCoverageBanner
+        coverage={model.data.summary?.coverage}
+        sourceName="Telemetry"
+      />
+      <PartialCoverageBanner
+        coverage={model.data.sourceDetails.incidents?.coverage}
+        sourceName="Incident"
+      />
 
       <div className="bg-surface-container-low border border-outline-variant/20 rounded-2xl overflow-hidden shadow-sm">
         <div className="p-4 border-b border-outline-variant/20">
@@ -149,7 +158,7 @@ export function HealthTab({ console, model }: { console: ConsoleController; mode
                 <li className="py-2.5 flex items-center justify-between gap-3" key={incident.incident_id}>
                   <button
                     className="flex items-center justify-between w-full text-left hover:text-primary transition-colors cursor-pointer"
-                    onClick={() => console.navigate({ tab: "incidents", incident: incident.incident_id })}
+                    onClick={() => console.navigate({ tab: "incidents", incident: incident.incident_id, node: incident.node_id })}
                     type="button"
                   >
                     <div className="flex items-center gap-2">

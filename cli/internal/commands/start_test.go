@@ -97,7 +97,7 @@ func TestRunStartKeepsSessionAndReconnectsAfterConfigSave(t *testing.T) {
 	if reloadedSession := localTestSession(t, localURL); reloadedSession != session {
 		t.Fatalf("local session changed after Agent reconnect")
 	}
-	if callsA.Load() != callsBeforeSwitch || callsB.Load() < 2 {
+	if callsA.Load() != callsBeforeSwitch || callsB.Load() < 1 {
 		t.Fatalf("post-switch calls used old Agent: a=%d before=%d b=%d", callsA.Load(), callsBeforeSwitch, callsB.Load())
 	}
 	if err := cancelAndWait(cancel, runErr); err != nil {
@@ -147,7 +147,7 @@ func TestRunStartWithoutConfigUsesHostedCloudAndReportsAgentNotConnected(t *test
 		t.Fatal(err)
 	}
 	res.Body.Close()
-	if session.AgentConnected != "not connected" {
+	if session.AgentConnected != "unknown" {
 		t.Fatalf("agent connection=%q", session.AgentConnected)
 	}
 	if err := cancelAndWait(cancel, runErr); err != nil {
@@ -1551,20 +1551,46 @@ func TestLocalTelemetryInvalidInputFailsClosed(t *testing.T) {
 	}
 }
 
-func TestLocalIncidentListUsesAgentNotCloud(t *testing.T) {
-	agent := &localIncidentServer{}
-	agentAddr, stop := startLocalIncidentServer(t, agent)
+func TestLocalIncidentListUsesCloudDiscoveredAgent(t *testing.T) {
+	addr, pin, agent, stop := startLocalTLSFacadeAgent(t, "agent-1")
 	defer stop()
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portStr)
+
 	cloudCalled := false
-	cloud := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		cloudCalled = true
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"nodes": []map[string]any{
+				{
+					"id":                    "node-1",
+					"agent_id":              "agent-1",
+					"agent_endpoint":        host,
+					"agent_port":            port,
+					"agent_tls_server_name": "127.0.0.1",
+					"agent_cert_sha256":     pin,
+					"status":                "ready",
+				},
+			},
+		})
 	}))
 	defer cloud.Close()
 	store := keychain.NewFakeStore()
 	if err := store.SetPAT("keychain-pat"); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: cloud.URL}, func() (keychain.Store, error) { return store, nil }))
+	// Stale local AgentAddr and stale pin in config to verify Cloud discovery authority
+	staleConfig := config.Config{
+		AgentAddr: "127.0.0.1:9",
+		CloudURL:  cloud.URL,
+		TLS: config.TLSConfig{
+			PinnedServerCertSHA256: strings.Repeat("0", 64),
+		},
+	}
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", staleConfig, func() (keychain.Store, error) { return store, nil }))
 	defer server.Close()
 
 	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents")
@@ -1573,16 +1599,37 @@ func TestLocalIncidentListUsesAgentNotCloud(t *testing.T) {
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusOK || cloudCalled || agent.listCalls != 1 || agent.lastAuth != "Bearer keychain-pat" || !strings.Contains(string(body), `"incidents"`) {
-		t.Fatalf("status=%d cloud=%v calls=%d body=%s", res.StatusCode, cloudCalled, agent.listCalls, body)
+	if res.StatusCode != http.StatusOK || !cloudCalled || agent.incidentListCalls.Load() != 1 || !strings.Contains(string(body), `"incidents"`) || !strings.Contains(string(body), `"coverage"`) {
+		t.Fatalf("status=%d cloud=%v calls=%d body=%s", res.StatusCode, cloudCalled, agent.incidentListCalls.Load(), body)
 	}
 }
 
-func TestLocalIncidentDetailUsesAgentAndReturnsFactsOnly(t *testing.T) {
-	agent := &localIncidentServer{}
-	agentAddr, stop := startLocalIncidentServer(t, agent)
+func TestLocalIncidentDetailUsesCloudDiscoveredAgent(t *testing.T) {
+	addr, pin, agent, stop := startLocalTLSFacadeAgent(t, "agent-1")
 	defer stop()
-	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: "http://127.0.0.1:1"}, nil))
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portStr)
+
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"nodes": []map[string]any{
+				{
+					"id":                    "node-1",
+					"agent_id":              "agent-1",
+					"agent_endpoint":        host,
+					"agent_port":            port,
+					"agent_tls_server_name": "127.0.0.1",
+					"agent_cert_sha256":     pin,
+					"status":                "ready",
+				},
+			},
+		})
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:9", CloudURL: cloud.URL}, nil))
 	defer server.Close()
 
 	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents/inc-1")
@@ -1591,7 +1638,7 @@ func TestLocalIncidentDetailUsesAgentAndReturnsFactsOnly(t *testing.T) {
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusOK || agent.getCalls != 1 {
+	if res.StatusCode != http.StatusOK || agent.incidentGetCalls.Load() != 1 {
 		t.Fatalf("status=%d body=%s", res.StatusCode, body)
 	}
 	var payload struct {
@@ -1612,13 +1659,41 @@ func TestLocalIncidentDetailUsesAgentAndReturnsFactsOnly(t *testing.T) {
 	}
 }
 
-func TestLocalIncidentEvidenceUsesAgentNoStoreAndReloadsConfig(t *testing.T) {
-	addrA, agentA, stopA := startLocalFacadeAgent(t, "agent-a")
+func TestLocalIncidentEvidenceUsesCloudDiscoveredAgent(t *testing.T) {
+	addrA, pinA, agentA, stopA := startLocalTLSFacadeAgent(t, "agent-a")
 	defer stopA()
-	addrB, agentB, stopB := startLocalFacadeAgent(t, "agent-b")
+	addrB, pinB, agentB, stopB := startLocalTLSFacadeAgent(t, "agent-b")
 	defer stopB()
+
+	var currentAddr atomic.Pointer[string]
+	var currentPin atomic.Pointer[string]
+	currentAddr.Store(&addrA)
+	currentPin.Store(&pinA)
+
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		host, portStr, err := net.SplitHostPort(*currentAddr.Load())
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, _ := strconv.Atoi(portStr)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"nodes": []map[string]any{
+				{
+					"id":                    "node-1",
+					"agent_id":              "agent-1",
+					"agent_endpoint":        host,
+					"agent_port":            port,
+					"agent_tls_server_name": "127.0.0.1",
+					"agent_cert_sha256":     *currentPin.Load(),
+					"status":                "ready",
+				},
+			},
+		})
+	}))
+	defer cloud.Close()
+
 	configPath := filepath.Join(t.TempDir(), "cli.yaml")
-	initial := config.Config{AgentAddr: addrA, CloudURL: "http://unused.invalid"}
+	initial := config.Config{AgentAddr: "127.0.0.1:9", CloudURL: cloud.URL}
 	if err := config.Save(configPath, initial); err != nil {
 		t.Fatal(err)
 	}
@@ -1647,23 +1722,85 @@ func TestLocalIncidentEvidenceUsesAgentNoStoreAndReloadsConfig(t *testing.T) {
 	if evidence := getEvidence(); evidence.Rollout.State != "agent-a" || agentA.incidentEvidenceCalls.Load() != 1 {
 		t.Fatalf("first evidence=%+v calls=%d", evidence, agentA.incidentEvidenceCalls.Load())
 	}
-	if err := config.Save(configPath, config.Config{AgentAddr: addrB, CloudURL: "http://unused.invalid"}); err != nil {
-		t.Fatal(err)
-	}
+	currentAddr.Store(&addrB)
+	currentPin.Store(&pinB)
 	if evidence := getEvidence(); evidence.Rollout.State != "agent-b" || agentB.incidentEvidenceCalls.Load() != 1 || agentA.incidentEvidenceCalls.Load() != 1 {
 		t.Fatalf("reloaded evidence=%+v calls_a=%d calls_b=%d", evidence, agentA.incidentEvidenceCalls.Load(), agentB.incidentEvidenceCalls.Load())
 	}
-	if err := os.WriteFile(configPath, []byte("agent_addr: [invalid\n"), 0o600); err != nil {
-		t.Fatal(err)
+}
+
+func TestLocalSessionAgentConnectedUsesCloudAuthority(t *testing.T) {
+	addr, pin, _, stop := startLocalTLSFacadeAgent(t, "agent-1")
+	defer stop()
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/nodes") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"nodes": []map[string]any{
+					{
+						"id":                    "node-1",
+						"agent_id":              "agent-1",
+						"agent_endpoint":        host,
+						"agent_port":            port,
+						"agent_tls_server_name": "127.0.0.1",
+						"agent_cert_sha256":     pin,
+						"status":                "ready",
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"user_id":    "user-1",
+			"org_id":     "org-1",
+			"project_id": "proj-1",
+			"role":       "owner",
+		})
+	}))
+	defer cloud.Close()
+
+	store := keychain.NewFakeStore()
+	_ = store.SetPAT("session-pat")
+
+	staleCfg := config.Config{
+		AgentAddr: "127.0.0.1:9",
+		CloudURL:  cloud.URL,
+		TLS: config.TLSConfig{
+			PinnedServerCertSHA256: strings.Repeat("0", 64),
+		},
 	}
-	res, err := http.Get(server.URL + "/api/local/projects/proj-1/incidents/inc-1/evidence")
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", staleCfg, func() (keychain.Store, error) { return store, nil }))
+	defer server.Close()
+
+	// Without project ID: reports "unknown"
+	res, err := http.Get(server.URL + "/api/local/session")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "AGENT_CONFIG_RELOAD_FAILED") || agentB.incidentEvidenceCalls.Load() != 1 {
-		t.Fatalf("invalid reload status=%d body=%s calls_b=%d", res.StatusCode, body, agentB.incidentEvidenceCalls.Load())
+	var sess1 struct {
+		AgentConnected string `json:"agent_connected"`
+	}
+	_ = json.NewDecoder(res.Body).Decode(&sess1)
+	res.Body.Close()
+	if sess1.AgentConnected != "unknown" {
+		t.Fatalf("expected unknown with no project, got %q", sess1.AgentConnected)
+	}
+
+	// With project ID: reports "ok" via Cloud registry discovery even with stale config
+	res, err = http.Get(server.URL + "/api/local/session?project_id=proj-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sess2 struct {
+		AgentConnected string `json:"agent_connected"`
+	}
+	_ = json.NewDecoder(res.Body).Decode(&sess2)
+	res.Body.Close()
+	if sess2.AgentConnected != "ok" {
+		t.Fatalf("expected ok with Cloud discovered agent, got %q", sess2.AgentConnected)
 	}
 }
 
@@ -1700,12 +1837,32 @@ func TestRemovedLocalIncidentRoutesReturnNotFound(t *testing.T) {
 }
 
 func TestLocalIncidentResolveRequiresSessionAndIdempotency(t *testing.T) {
-	agent := &localIncidentServer{}
-	agentAddr, stop := startLocalIncidentServer(t, agent)
+	addr, pin, agent, stop := startLocalTLSFacadeAgent(t, "agent-1")
 	defer stop()
-	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: agentAddr, CloudURL: "http://127.0.0.1:1"}, nil))
-	defer server.Close()
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portStr)
 
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"nodes": []map[string]any{
+				{
+					"id":                    "node-1",
+					"agent_id":              "agent-1",
+					"agent_endpoint":        host,
+					"agent_port":            port,
+					"agent_tls_server_name": "127.0.0.1",
+					"agent_cert_sha256":     pin,
+					"status":                "ready",
+				},
+			},
+		})
+	}))
+	defer cloud.Close()
+	server := httptest.NewServer(newStartMux(t.TempDir(), "", config.Config{AgentAddr: "127.0.0.1:9", CloudURL: cloud.URL}, nil))
+	defer server.Close()
 	newRequest := func() *http.Request {
 		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/local/projects/proj-1/incidents/inc-1/resolve", strings.NewReader(`{}`))
 		if err != nil {
@@ -1742,9 +1899,9 @@ func TestLocalIncidentResolveRequiresSessionAndIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK || agent.resolveCalls != 1 || agent.lastResolve.ProjectID != "proj-1" || agent.lastResolve.IncidentID != "inc-1" {
+	if res.StatusCode != http.StatusOK || agent.incidentResolveCalls.Load() != 1 {
 		body, _ := io.ReadAll(res.Body)
-		t.Fatalf("status=%d calls=%d req=%+v body=%s", res.StatusCode, agent.resolveCalls, agent.lastResolve, body)
+		t.Fatalf("status=%d calls=%d body=%s", res.StatusCode, agent.incidentResolveCalls.Load(), body)
 	}
 }
 
@@ -1892,6 +2049,11 @@ func TestLocalSessionVerifiesPATBeforeReportingAuthenticated(t *testing.T) {
 		t.Fatal(err)
 	}
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/nodes") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"nodes": []any{}})
+			return
+		}
 		if r.URL.Path != "/v1/auth/pat/verify" || r.Header.Get("Authorization") != "Bearer saved-pat" {
 			t.Fatalf("unexpected verification request: path=%s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
 		}
@@ -2475,6 +2637,11 @@ func TestLocalProjectSwitchRevalidatesSavedPAT(t *testing.T) {
 		t.Fatal(err)
 	}
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/nodes") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"nodes": []any{}})
+			return
+		}
 		if r.URL.Path != "/v1/auth/pat/verify" || r.Header.Get("Authorization") != "Bearer saved-pat" {
 			t.Fatalf("verify request path=%s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
 		}

@@ -3,6 +3,7 @@ package agentclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"regexp"
@@ -93,6 +94,20 @@ type NodeLister interface {
 type TelemetryClient interface {
 	Status(ctx context.Context) (*agentv1.StatusResponse, error)
 	QueryTelemetry(ctx context.Context, req *agentv1.TelemetryQueryRequest) (*agentv1.TelemetryQueryResponse, error)
+	ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, error)
+	GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentResponse, error)
+	GetIncidentEvidence(ctx context.Context, req *agentv1.IncidentGetRequest) (*agentv1.IncidentEvidence, error)
+	ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest) (*agentv1.IncidentResponse, error)
+}
+
+// AmbiguousTargetError indicates multiple agents exist in a project and node_id is required.
+type AmbiguousTargetError struct {
+	ProjectID string
+	Count     int
+}
+
+func (e *AmbiguousTargetError) Error() string {
+	return fmt.Sprintf("ambiguous incident target: project %q has %d agents; specify node_id", e.ProjectID, e.Count)
 }
 
 // Target represents a discovered, valid observable Agent target.
@@ -152,7 +167,7 @@ func NewAgentTargetResolver(opts AgentTargetResolverOptions) *AgentTargetResolve
 	}
 	queryTimeout := opts.QueryTimeout
 	if queryTimeout <= 0 {
-		queryTimeout = 2 * time.Second
+		queryTimeout = 5 * time.Second
 	}
 	factory := opts.ClientFactory
 	if factory == nil {
@@ -574,6 +589,260 @@ func (r *AgentTargetResolver) QueryTelemetry(ctx context.Context, req *agentv1.T
 
 	merged := mergeTelemetryResponses(req.ProjectID, successfulResponses)
 	return merged, coverage, nil
+}
+
+// ListIncidents aggregates incidents concurrently from all observable project agents with coverage.
+func (r *AgentTargetResolver) ListIncidents(ctx context.Context, req *agentv1.IncidentListRequest) (*agentv1.IncidentListResponse, *TelemetryCoverage, error) {
+	observedAt := time.Now().UTC()
+	targets, preDialErrors, err := r.ResolveTargets(ctx, req.ProjectID)
+	if err != nil {
+		var unavail *TelemetryUnavailableError
+		if errors.As(err, &unavail) {
+			return nil, &unavail.Coverage, unavail
+		}
+		cov := TelemetryCoverage{
+			Status:     CoverageUnavailable,
+			ObservedAt: observedAt,
+			Errors: []AgentDiagnosticError{{
+				Code:            DiagCloudUnavailable,
+				MessageRedacted: redactSecrets(err.Error()),
+				ActionableCause: "Failed to resolve project agents from Cloud registry.",
+			}},
+		}
+		return nil, &cov, &TelemetryUnavailableError{Coverage: cov, Message: err.Error()}
+	}
+
+	if len(targets) == 0 {
+		cov := TelemetryCoverage{
+			Status:     CoverageUnavailable,
+			ObservedAt: observedAt,
+			Errors: []AgentDiagnosticError{{
+				Code:            DiagNoObservableAgents,
+				MessageRedacted: "no observable agents registered in project",
+				ActionableCause: "Ensure the project has healthy servers with active agents registered in Cloud.",
+			}},
+		}
+		return nil, &cov, &TelemetryUnavailableError{Coverage: cov, Message: "no observable agents registered in project"}
+	}
+
+	type listResult struct {
+		target   Target
+		response *agentv1.IncidentListResponse
+		diagErr  *AgentDiagnosticError
+	}
+
+	results := make([]listResult, len(targets))
+	sem := make(chan struct{}, r.concurrency)
+	preDialByNode := preDialErrorByNode(preDialErrors)
+	var wg sync.WaitGroup
+
+	for i, target := range targets {
+		wg.Add(1)
+		go func(idx int, tgt Target) {
+			defer wg.Done()
+			if diagnostic, invalid := preDialByNode[tgt.NodeID]; invalid {
+				results[idx] = listResult{target: tgt, diagErr: &diagnostic}
+				return
+			}
+			if !acquireAgentSlot(ctx, sem) {
+				diagnostic := r.classifyError(tgt, context.DeadlineExceeded)
+				results[idx] = listResult{target: tgt, diagErr: &diagnostic}
+				return
+			}
+			defer func() { <-sem }()
+
+			callCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+			defer cancel()
+			if r.pat != "" {
+				callCtx = WithPAT(callCtx, r.pat)
+			}
+
+			client := r.clientFactory(tgt.Config)
+			resp, queryErr := client.ListIncidents(callCtx, req)
+			if queryErr != nil {
+				diag := r.classifyError(tgt, queryErr)
+				results[idx] = listResult{target: tgt, diagErr: &diag}
+			} else {
+				if resp != nil {
+					for j := range resp.Incidents {
+						if resp.Incidents[j].NodeID == "" {
+							resp.Incidents[j].NodeID = tgt.NodeID
+						}
+					}
+				}
+				results[idx] = listResult{target: tgt, response: resp}
+			}
+		}(i, target)
+	}
+	wg.Wait()
+
+	var successful, failed int
+	var errorsList []AgentDiagnosticError
+	var aggregatedIncidents []agentv1.IncidentResponse
+
+	for _, res := range results {
+		if res.diagErr != nil {
+			failed++
+			errorsList = append(errorsList, *res.diagErr)
+		} else if res.response != nil {
+			successful++
+			aggregatedIncidents = append(aggregatedIncidents, res.response.Incidents...)
+		}
+	}
+
+	if successful == 0 {
+		cov := TelemetryCoverage{
+			Status:           CoverageUnavailable,
+			ExpectedAgents:   len(targets),
+			SuccessfulAgents: 0,
+			FailedAgents:     failed,
+			Errors:           errorsList,
+			ObservedAt:       observedAt,
+		}
+		return nil, &cov, &TelemetryUnavailableError{Coverage: cov, Message: "all project agents failed to respond to incident list"}
+	}
+
+	status := CoverageConnected
+	if successful < len(targets) {
+		status = CoveragePartial
+	}
+
+	coverage := &TelemetryCoverage{
+		Status:           status,
+		ExpectedAgents:   len(targets),
+		SuccessfulAgents: successful,
+		FailedAgents:     failed,
+		Errors:           errorsList,
+		ObservedAt:       observedAt,
+	}
+
+	sort.Slice(aggregatedIncidents, func(i, j int) bool {
+		if aggregatedIncidents[i].CreatedAtUnix != aggregatedIncidents[j].CreatedAtUnix {
+			return aggregatedIncidents[i].CreatedAtUnix > aggregatedIncidents[j].CreatedAtUnix
+		}
+		return aggregatedIncidents[i].IncidentID < aggregatedIncidents[j].IncidentID
+	})
+
+	if req.Limit > 0 && int(req.Limit) < len(aggregatedIncidents) {
+		aggregatedIncidents = aggregatedIncidents[:req.Limit]
+	}
+
+	return &agentv1.IncidentListResponse{Incidents: aggregatedIncidents}, coverage, nil
+}
+
+// ResolveTargetForNode finds the observable target matching nodeID or the single observable target in projectID.
+// Rejects ambiguous requests when multiple agents exist without a node_id.
+func (r *AgentTargetResolver) ResolveTargetForNode(ctx context.Context, projectID, nodeID string) (*Target, error) {
+	targets, preDialErrors, err := r.ResolveTargets(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 {
+		return nil, &TelemetryUnavailableError{
+			Coverage: TelemetryCoverage{
+				Status:     CoverageUnavailable,
+				ObservedAt: time.Now().UTC(),
+				Errors: []AgentDiagnosticError{{
+					Code:            DiagNoObservableAgents,
+					MessageRedacted: "no observable agents registered in project",
+					ActionableCause: "Ensure the project has healthy servers with active agents registered in Cloud.",
+				}},
+			},
+			Message: "no observable agents registered in project",
+		}
+	}
+
+	nodeID = strings.TrimSpace(nodeID)
+	preDialByNode := preDialErrorByNode(preDialErrors)
+
+	if nodeID != "" {
+		for _, tgt := range targets {
+			if tgt.NodeID == nodeID {
+				if diag, invalid := preDialByNode[tgt.NodeID]; invalid {
+					return nil, fmt.Errorf("node %s pre-dial error: %s", tgt.NodeID, diag.ActionableCause)
+				}
+				targetCopy := tgt
+				return &targetCopy, nil
+			}
+		}
+		return nil, fmt.Errorf("node %q not found or not observable in project %q", nodeID, projectID)
+	}
+
+	if len(targets) == 1 {
+		if diag, invalid := preDialByNode[targets[0].NodeID]; invalid {
+			return nil, fmt.Errorf("node %s pre-dial error: %s", targets[0].NodeID, diag.ActionableCause)
+		}
+		targetCopy := targets[0]
+		return &targetCopy, nil
+	}
+
+	return nil, &AmbiguousTargetError{ProjectID: projectID, Count: len(targets)}
+}
+
+// GetIncident fetches incident details from the targeted agent.
+func (r *AgentTargetResolver) GetIncident(ctx context.Context, req *agentv1.IncidentGetRequest, nodeID string) (*agentv1.IncidentResponse, error) {
+	target, err := r.ResolveTargetForNode(ctx, req.ProjectID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+	if r.pat != "" {
+		callCtx = WithPAT(callCtx, r.pat)
+	}
+	client := r.clientFactory(target.Config)
+	resp, err := client.GetIncident(callCtx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil && resp.NodeID == "" {
+		resp.NodeID = target.NodeID
+	}
+	return resp, nil
+}
+
+// GetIncidentEvidence fetches bounded incident evidence from the targeted agent.
+func (r *AgentTargetResolver) GetIncidentEvidence(ctx context.Context, req *agentv1.IncidentGetRequest, nodeID string) (*agentv1.IncidentEvidence, error) {
+	target, err := r.ResolveTargetForNode(ctx, req.ProjectID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if r.pat != "" {
+		callCtx = WithPAT(callCtx, r.pat)
+	}
+	client := r.clientFactory(target.Config)
+	resp, err := client.GetIncidentEvidence(callCtx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil && resp.Identity.NodeID == "" {
+		resp.Identity.NodeID = target.NodeID
+	}
+	return resp, nil
+}
+
+// ResolveIncident resolves an incident on the targeted agent.
+func (r *AgentTargetResolver) ResolveIncident(ctx context.Context, req *agentv1.IncidentResolveRequest, nodeID string) (*agentv1.IncidentResponse, error) {
+	target, err := r.ResolveTargetForNode(ctx, req.ProjectID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+	if r.pat != "" {
+		callCtx = WithPAT(callCtx, r.pat)
+	}
+	client := r.clientFactory(target.Config)
+	resp, err := client.ResolveIncident(callCtx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil && resp.NodeID == "" {
+		resp.NodeID = target.NodeID
+	}
+	return resp, nil
 }
 
 func (r *AgentTargetResolver) classifyError(target Target, err error) AgentDiagnosticError {

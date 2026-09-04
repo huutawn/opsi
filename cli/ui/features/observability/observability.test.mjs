@@ -29,3 +29,41 @@ test("missing counters, service identity, CLI handoff, and evidence fail closed"
   assert.match(data, /\^\[a-f0-9\]\{64\}\$/);
   for (const bound of ["MAX_EVIDENCE_COVERAGE", "MAX_EVIDENCE_TIMELINE", "MAX_EVIDENCE_PODS"]) assert.match(data, new RegExp(bound));
 });
+
+test("observability supports 1h/6h/24h time-window selector, node-scoped incidents, and partial coverage diagnostics", async () => {
+  const [data, overview, metrics, logs, incidents, health, shared] = await Promise.all([
+    readFile(new URL("./data.ts", import.meta.url), "utf8"),
+    readFile(new URL("./overview-tab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./metrics-tab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./logs-tab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./incidents-tab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./health-tab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./shared.tsx", import.meta.url), "utf8"),
+  ]);
+
+  // TimeWindowSelector
+  assert.match(shared, /TimeWindowSelector/);
+  assert.match(shared, /"1h" \| "6h" \| "24h"/);
+  assert.match(overview, /TimeWindowSelector/);
+  assert.doesNotMatch(overview, /Window: Last 1h/);
+  assert.match(metrics, /TimeWindowSelector/);
+  assert.match(logs, /TimeWindowSelector/);
+
+  // Window parameter handling in data.ts
+  assert.match(data, /console\.route\.window \|\| "1h"/);
+  assert.match(data, /windowParam === "24h" \? 86400 : windowParam === "6h" \? 21600 : 3600/);
+  assert.match(data, /client\.telemetrySummary\(projectID, sinceUnix, windowParam\)/);
+
+  // Partial coverage diagnostics
+  assert.match(shared, /PartialCoverageBanner/);
+  assert.match(overview, /PartialCoverageBanner/);
+  assert.match(metrics, /PartialCoverageBanner/);
+  assert.match(incidents, /PartialCoverageBanner/);
+  assert.match(health, /PartialCoverageBanner/);
+
+  // Node-scoped incident navigation
+  assert.match(incidents, /node: incident\.node_id/);
+  assert.match(health, /node: incident\.node_id/);
+  assert.match(data, /client\.incident\(projectID, incidentID, nodeID\)/);
+  assert.match(data, /client\.incidentEvidence\(projectID, incidentID, nodeID\)/);
+});

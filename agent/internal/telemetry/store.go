@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/opsi-dev/opsi/agent/internal/secret"
+	agentv1 "github.com/opsi-dev/opsi/contracts/go/agentv1"
 	_ "modernc.org/sqlite"
 )
 
@@ -24,6 +26,7 @@ type Store interface {
 	InsertUptimeCheck(ctx context.Context, record UptimeCheckRecord) error
 	UptimePercent(ctx context.Context, projectID, serviceID string, since time.Time) (float64, error)
 	SyncRecords(ctx context.Context, projectID string, since time.Time, until time.Time, resourceIDs []string) ([]SyncRecord, error)
+	QueryBoundedTelemetry(ctx context.Context, projectID, serviceID string, since, until time.Time, includeSummary, includeServices, includeLogs bool, limit int, cursor string) (*agentv1.TelemetryQueryResponse, error)
 	Retain(ctx context.Context, now time.Time) error
 	Close() error
 }
@@ -778,6 +781,327 @@ ON CONFLICT(project_id, node_id, service_id, pod_id, name, bucket_start_unix, bu
 }
 
 func (s *SQLiteStore) Close() error { return s.db.Close() }
+
+func (s *SQLiteStore) QueryBoundedTelemetry(ctx context.Context, projectID, serviceID string, since, until time.Time, includeSummary, includeServices, includeLogs bool, limit int, cursor string) (*agentv1.TelemetryQueryResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if projectID == "" {
+		return nil, errors.New("project_id is required")
+	}
+	if until.IsZero() {
+		until = time.Now().UTC()
+	}
+
+	resp := &agentv1.TelemetryQueryResponse{
+		ProjectID:     projectID,
+		Source:        "agent",
+		PayloadPolicy: "raw logs and raw metric streams remain Agent-local; browser responses are redacted summaries/windows",
+	}
+
+	type svcStats struct {
+		id        string
+		pods      map[string]bool
+		readyPods map[string]bool
+		cpu       float64
+		memory    float64
+		restarts  int32
+		errors    int32
+		lastSeen  int64
+	}
+
+	servicesMap := make(map[string]*svcStats)
+	getService := func(id string) *svcStats {
+		if id == "" {
+			id = "unscoped"
+		}
+		if servicesMap[id] == nil {
+			servicesMap[id] = &svcStats{
+				id:        id,
+				pods:      make(map[string]bool),
+				readyPods: make(map[string]bool),
+			}
+		}
+		return servicesMap[id]
+	}
+
+	var totalMetricCount int32
+	var totalLogCount int32
+	var totalErrorCount int32
+
+	if includeSummary || includeServices {
+		// 1. Metric count
+		metricCountQuery := "SELECT COUNT(*) FROM metrics WHERE project_id = ? AND observed_at_unix >= ? AND observed_at_unix <= ?"
+		args := []any{projectID, since.Unix(), until.Unix()}
+		if serviceID != "" {
+			metricCountQuery += " AND service_id = ?"
+			args = append(args, serviceID)
+		}
+		var count int64
+		if err := s.db.QueryRowContext(ctx, metricCountQuery, args...).Scan(&count); err != nil {
+			return nil, fmt.Errorf("count metrics: %w", err)
+		}
+		totalMetricCount = int32(count)
+
+		// 2. Latest sample per (service_id, pod_id, name) in window
+		latestMetricQuery := `
+SELECT service_id, pod_id, name, value, observed_at_unix
+FROM (
+    SELECT service_id, pod_id, name, value, observed_at_unix,
+           ROW_NUMBER() OVER (
+               PARTITION BY service_id, pod_id, name
+               ORDER BY observed_at_unix DESC, id DESC
+           ) AS rn
+    FROM metrics
+    WHERE project_id = ? AND observed_at_unix >= ? AND observed_at_unix <= ?`
+		metricArgs := []any{projectID, since.Unix(), until.Unix()}
+		if serviceID != "" {
+			latestMetricQuery += " AND service_id = ?"
+			metricArgs = append(metricArgs, serviceID)
+		}
+		latestMetricQuery += `
+) WHERE rn = 1`
+
+		rows, err := s.db.QueryContext(ctx, latestMetricQuery, metricArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("query latest metrics: %w", err)
+		}
+		for rows.Next() {
+			var sid, pid, name string
+			var val float64
+			var observed int64
+			if err := rows.Scan(&sid, &pid, &name, &val, &observed); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			svc := getService(sid)
+			if pid != "" {
+				svc.pods[pid] = true
+			}
+			if observed > svc.lastSeen {
+				svc.lastSeen = observed
+			}
+			switch name {
+			case "pod.cpu":
+				svc.cpu += val
+			case "pod.memory":
+				svc.memory += val
+			case "pod.ready":
+				if val > 0 && pid != "" {
+					svc.readyPods[pid] = true
+				}
+			case "pod.restart_count":
+				svc.restarts += int32(val)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+
+		// 3. Log counts and error counts by service
+		logCountsQuery := `
+SELECT service_id, COUNT(*), COUNT(CASE WHEN level = 'error' THEN 1 END), MAX(observed_at_unix)
+FROM logs
+WHERE project_id = ? AND observed_at_unix >= ? AND observed_at_unix <= ?`
+		logArgs := []any{projectID, since.Unix(), until.Unix()}
+		if serviceID != "" {
+			logCountsQuery += " AND service_id = ?"
+			logArgs = append(logArgs, serviceID)
+		}
+		logCountsQuery += " GROUP BY service_id"
+
+		logRows, err := s.db.QueryContext(ctx, logCountsQuery, logArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("query service logs: %w", err)
+		}
+		for logRows.Next() {
+			var sid string
+			var lCount, eCount int64
+			var maxObs sql.NullInt64
+			if err := logRows.Scan(&sid, &lCount, &eCount, &maxObs); err != nil {
+				logRows.Close()
+				return nil, err
+			}
+			svc := getService(sid)
+			svc.errors += int32(eCount)
+			if maxObs.Valid && maxObs.Int64 > svc.lastSeen {
+				svc.lastSeen = maxObs.Int64
+			}
+			totalLogCount += int32(lCount)
+			totalErrorCount += int32(eCount)
+		}
+		if err := logRows.Err(); err != nil {
+			logRows.Close()
+			return nil, err
+		}
+		logRows.Close()
+
+		// 4. Incidents count by service
+		incidentCountsQuery := `
+SELECT service_id, COUNT(*)
+FROM incidents
+WHERE project_id = ? AND status != 'resolved' AND ((created_at_unix >= ? AND created_at_unix <= ?) OR (resolved_at_unix = 0) OR (resolved_at_unix >= ?))`
+		incArgs := []any{projectID, since.Unix(), until.Unix(), since.Unix()}
+		if serviceID != "" {
+			incidentCountsQuery += " AND service_id = ?"
+			incArgs = append(incArgs, serviceID)
+		}
+		incidentCountsQuery += " GROUP BY service_id"
+
+		incRows, err := s.db.QueryContext(ctx, incidentCountsQuery, incArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("query service incidents: %w", err)
+		}
+		for incRows.Next() {
+			var sid string
+			var iCount int64
+			if err := incRows.Scan(&sid, &iCount); err != nil {
+				incRows.Close()
+				return nil, err
+			}
+			svc := getService(sid)
+			svc.errors += int32(iCount)
+			totalErrorCount += int32(iCount)
+		}
+		if err := incRows.Err(); err != nil {
+			incRows.Close()
+			return nil, err
+		}
+		incRows.Close()
+
+		// Build service statuses
+		var servicesList []agentv1.TelemetryServiceStatus
+		for _, s := range servicesMap {
+			health := "unknown"
+			switch {
+			case s.errors > 0 || (len(s.pods) > 0 && len(s.readyPods) < len(s.pods)):
+				health = "degraded"
+			case len(s.pods) > 0:
+				health = "healthy"
+			}
+			servicesList = append(servicesList, agentv1.TelemetryServiceStatus{
+				ServiceID:        s.id,
+				Health:           health,
+				PodCount:         int32(len(s.pods)),
+				ReadyPods:        int32(len(s.readyPods)),
+				CPUCores:         s.cpu,
+				MemoryBytes:      s.memory,
+				RestartCount:     s.restarts,
+				RecentErrorCount: s.errors,
+				LastSeenUnix:     s.lastSeen,
+			})
+		}
+		sort.Slice(servicesList, func(i, j int) bool {
+			return servicesList[i].ServiceID < servicesList[j].ServiceID
+		})
+
+		if includeServices {
+			resp.Services = servicesList
+		}
+
+		if includeSummary {
+			health := "unknown"
+			if len(servicesList) > 0 {
+				health = "healthy"
+				for _, svc := range servicesList {
+					if svc.Health != "healthy" {
+						health = "degraded"
+						break
+					}
+				}
+			}
+			resp.Summary = &agentv1.TelemetryRuntimeSummary{
+				SinceUnix:    since.Unix(),
+				EndUnix:      until.Unix(),
+				MetricCount:  totalMetricCount,
+				LogCount:     totalLogCount,
+				ErrorCount:   totalErrorCount,
+				ServiceCount: int32(len(servicesList)),
+				Health:       health,
+			}
+		}
+	}
+
+	if includeLogs {
+		if limit <= 0 {
+			limit = 100
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		logQuery := `
+SELECT service_id, pod_id, namespace, level, message, fingerprint, observed_at_unix
+FROM logs
+WHERE project_id = ?`
+		logArgs := []any{projectID}
+
+		if cursor != "" {
+			if cursorTime, err := time.Parse(time.RFC3339Nano, cursor); err == nil {
+				logQuery += " AND observed_at_unix > ? AND observed_at_unix <= ?"
+				logArgs = append(logArgs, cursorTime.Unix(), until.Unix())
+			} else {
+				logQuery += " AND observed_at_unix >= ? AND observed_at_unix <= ?"
+				logArgs = append(logArgs, since.Unix(), until.Unix())
+			}
+		} else {
+			logQuery += " AND observed_at_unix >= ? AND observed_at_unix <= ?"
+			logArgs = append(logArgs, since.Unix(), until.Unix())
+		}
+
+		if serviceID != "" {
+			logQuery += " AND service_id = ?"
+			logArgs = append(logArgs, serviceID)
+		}
+
+		logQuery += " ORDER BY observed_at_unix ASC, id ASC LIMIT ?"
+		logArgs = append(logArgs, limit+1)
+
+		rows, err := s.db.QueryContext(ctx, logQuery, logArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("query logs: %w", err)
+		}
+		defer rows.Close()
+
+		var entries []agentv1.TelemetryLogEntry
+		var lastObserved time.Time
+		count := 0
+		for rows.Next() {
+			count++
+			var sid, pid, ns, lvl, msg, fp string
+			var obs int64
+			if err := rows.Scan(&sid, &pid, &ns, &lvl, &msg, &fp, &obs); err != nil {
+				return nil, err
+			}
+			obsTime := time.Unix(obs, 0).UTC()
+			if count <= limit {
+				entries = append(entries, agentv1.TelemetryLogEntry{
+					ServiceID:    sid,
+					PodID:        pid,
+					Namespace:    ns,
+					Level:        lvl,
+					Message:      RedactSensitiveText(msg),
+					Fingerprint:  fp,
+					ObservedUnix: obs,
+				})
+				lastObserved = obsTime
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		resp.Logs = entries
+		if count > limit && !lastObserved.IsZero() {
+			resp.NextCursor = lastObserved.Format(time.RFC3339Nano)
+		} else {
+			resp.NextCursor = ""
+		}
+	}
+
+	return resp, nil
+}
 
 func resourceAllowed(resources map[string]bool, nodeID, serviceID, podID string) bool {
 	if len(resources) == 0 {

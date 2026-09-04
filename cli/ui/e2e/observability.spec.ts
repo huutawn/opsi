@@ -364,6 +364,92 @@ test("Badge, header, and KPI card states remain unified across transitions", asy
   await expect(strip.getByText("Servers")).toBeVisible();
 });
 
+test("Time window selector switches window and persists in URL parameter", async ({ page }) => {
+  await page.goto("/?project=proj-1&view=observability");
+
+  const windowGroup = page.getByRole("radiogroup", { name: "Time window" });
+  await expect(windowGroup).toBeVisible();
+  await expect(windowGroup.getByRole("radio", { name: "Last 1h" })).toHaveAttribute("aria-checked", "true");
+
+  await windowGroup.getByRole("radio", { name: "Last 6h" }).click();
+  await expect(page).toHaveURL(/window=6h/);
+  await expect(windowGroup.getByRole("radio", { name: "Last 6h" })).toHaveAttribute("aria-checked", "true");
+
+  await page.reload();
+  await expect(page).toHaveURL(/window=6h/);
+  await expect(windowGroup.getByRole("radio", { name: "Last 6h" })).toHaveAttribute("aria-checked", "true");
+
+  await windowGroup.getByRole("radio", { name: "Last 24h" }).click();
+  await expect(page).toHaveURL(/window=24h/);
+  await expect(windowGroup.getByRole("radio", { name: "Last 24h" })).toHaveAttribute("aria-checked", "true");
+});
+
+test("Incident list identifies incident by node_id and incident_id in route navigation", async ({ page }) => {
+  await page.route("**/api/local/projects/proj-1/incidents*", (route) => {
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        source: "agent",
+        payload_policy: "redacted",
+        incidents: [
+          {
+            incident_id: "inc-101",
+            project_id: "proj-1",
+            node_id: "node-prod-1",
+            service_id: "svc-web",
+            status: "detecting",
+            severity: "P1",
+            created_at_unix: 1700000000,
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.goto("/?project=proj-1&view=observability&tab=incidents");
+
+  const incidentItem = page.getByRole("button", { name: /inc-101/ });
+  await expect(incidentItem).toBeVisible();
+  await incidentItem.click();
+
+  await expect(page).toHaveURL(/incident=inc-101/);
+  await expect(page).toHaveURL(/node=node-prod-1/);
+});
+
+test("Partial incident coverage renders node-attributed diagnostics", async ({ page }) => {
+  await page.route("**/api/local/projects/proj-1/incidents*", (route) => {
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        source: "agent",
+        payload_policy: "redacted",
+        incidents: [],
+        coverage: {
+          status: "partial",
+          expected_agents: 2,
+          successful_agents: 1,
+          failed_agents: 1,
+          errors: [
+            {
+              node_id: "node-fail-2",
+              code: "AGENT_TIMEOUT",
+              message_redacted: "agent dial timeout",
+              actionable_cause: "Agent on node-fail-2 timed out. Verify VPS port 9443 is open.",
+            },
+          ],
+        },
+      }),
+    });
+  });
+
+  await page.goto("/?project=proj-1&view=observability&tab=incidents");
+
+  const banner = page.getByTestId("partial-coverage-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Degraded Incident Coverage (1/2 agents)");
+  await expect(banner).toContainText("[node-fail-2]");
+  await expect(banner).toContainText("Agent on node-fail-2 timed out");
+});
 // Mock Fixture
 async function mockObservabilityAPI(page: Page) {
   page.on("pageerror", (err) => process.stderr.write(`PAGE ERROR: ${err.stack || err}\n`));
@@ -555,7 +641,30 @@ async function respond(route: Route) {
   } else if (path.endsWith("/audit")) {
     body = { events: [] };
   } else if (path.endsWith("/incidents")) {
-    body = { incidents: [] };
+    body = { source: "agent", payload_policy: "redacted", incidents: [] };
+  } else if (path.includes("/incidents/") && path.endsWith("/evidence")) {
+    body = {
+      schema_version: "opsi.incident_evidence/v1",
+      identity: { incident_id: "inc-101", project_id: "proj-1", status: "open", service_id: "svc-web", node_id: "node-prod-1" },
+      generated_at_unix: 1700000000,
+      observation_window: { start_unix: 1700000000, end_unix: 1700003600 },
+      deployment: { desired_digest: "sha256:aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000" },
+      rollout: { state: "healthy" },
+      coverage: [{ source: "agent", status: "available", item_count: 1, truncated: false }],
+      content_sha256: "a".repeat(64),
+    };
+  } else if (path.includes("/incidents/")) {
+    body = {
+      incident: {
+        incident_id: "inc-101",
+        project_id: "proj-1",
+        node_id: "node-prod-1",
+        service_id: "svc-web",
+        status: "open",
+        severity: "P1",
+        created_at_unix: 1700000000,
+      },
+    };
   } else if (path.endsWith("/topology/facts")) {
     body = {
       project_id: "proj-1",
