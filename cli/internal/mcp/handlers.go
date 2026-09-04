@@ -1221,8 +1221,10 @@ func (s *Server) handleSourceSearch(ctx context.Context, _ *Server, args map[str
 }
 
 type DomainError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	NextAction string `json:"next_action,omitempty"`
 }
 
 func (e *DomainError) Error() string {
@@ -1234,14 +1236,46 @@ func mapAPIError(err error) error {
 	if errors.As(err, &apiErr) {
 		switch apiErr.Status {
 		case 401:
-			return &DomainError{Code: ErrCodeAuthRequired, Message: "Cloud authentication required or PAT invalid"}
+			return &DomainError{
+				Code:       ErrCodeAuthRequired,
+				Message:    "Cloud authentication required or PAT invalid",
+				Retryable:  false,
+				NextAction: "Run 'opsi login' outside MCP to authenticate.",
+			}
 		case 403:
-			return &DomainError{Code: ErrCodeForbidden, Message: "permission denied for requested resource"}
+			return &DomainError{
+				Code:       ErrCodeForbidden,
+				Message:    "permission denied for requested resource",
+				Retryable:  false,
+				NextAction: "Check your user role or project permissions.",
+			}
 		case 404:
-			return &DomainError{Code: ErrCodeNotFound, Message: "requested resource not found"}
+			return &DomainError{
+				Code:       ErrCodeNotFound,
+				Message:    "requested resource not found",
+				Retryable:  false,
+				NextAction: "Verify that the requested resource exists.",
+			}
+		case 429:
+			return &DomainError{
+				Code:       ErrCodeAuthorityUnavailable,
+				Message:    "Cloud request rate limit exceeded",
+				Retryable:  true,
+				NextAction: "Wait a moment before retrying.",
+			}
 		default:
-			return &DomainError{Code: ErrCodeAuthorityUnavailable, Message: apiErr.Message}
+			return &DomainError{
+				Code:       ErrCodeAuthorityUnavailable,
+				Message:    "Cloud authority is currently unavailable",
+				Retryable:  true,
+				NextAction: "Verify network connectivity or check Cloud service status.",
+			}
 		}
 	}
-	return &DomainError{Code: ErrCodeAuthorityUnavailable, Message: err.Error()}
+	return &DomainError{
+		Code:       ErrCodeAuthorityUnavailable,
+		Message:    "Cloud authority is currently unavailable",
+		Retryable:  true,
+		NextAction: "Verify network connectivity or check Cloud service status.",
+	}
 }

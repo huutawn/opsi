@@ -345,8 +345,9 @@ type CallToolParams struct {
 }
 
 type CallToolResult struct {
-	Content []ContentItem `json:"content"`
-	IsError bool          `json:"isError,omitempty"`
+	Content           []ContentItem  `json:"content"`
+	StructuredContent *ErrorResponse `json:"structuredContent,omitempty"`
+	IsError           bool           `json:"isError,omitempty"`
 }
 
 type ContentItem struct {
@@ -377,8 +378,10 @@ type ResourceContent struct {
 }
 
 type ErrorResponse struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable"`
+	NextAction string `json:"next_action,omitempty"`
 }
 
 // Source DTOs

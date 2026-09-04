@@ -65,11 +65,13 @@ export type DetectedBinding = { from: string; to: string; kind: string; path?: s
 export type AnalysisIssue = { code: string; message: string; path?: string; resolution?: string; blocking: boolean };
 export type AnalysisScope = { application_roots: string[]; exclude_paths: string[] };
 export type EvidenceCoverage = { candidates_found: number; candidates_selected: number; files_inspected: number; bytes_inspected: number };
+export type ApplicationEnvironmentReview = { application_source_key: string; no_environment_required: boolean };
 export type DeploymentPlan = {
-  schema_version: "opsi.deployment_plan/v2"; hash: string;
+  schema_version: "opsi.deployment_plan/v3"; hash: string;
   source: { repository_id: number; installation_id: number; repository: string; selected_ref: string; commit_sha: string };
   applications: DetectedApplication[]; resources: DetectedResource[]; dependencies: DetectedDependency[]; bindings: DetectedBinding[];
   secrets: Array<{ name: string; application_key: string; environment_name: string; generated: boolean; secret_ref?: string; revision?: number; display: string; confidence: string; reason: string; evidence: RepositoryEvidence[] }>;
+  application_environment_reviews?: ApplicationEnvironmentReview[];
   issues: AnalysisIssue[];
   analysis_scope: AnalysisScope; analysis_scope_hash: string; evidence_coverage: EvidenceCoverage; truncation_reason?: string;
   target: { environment_id: string; runtime_id?: string; node_id?: string; hostname?: string; exposure: string; public_routes?: "automatic" | "manual"; cpu_milli?: number; memory_bytes?: number; cpu_limit_milli?: number; memory_limit_bytes?: number };
@@ -78,7 +80,7 @@ export type DeploymentPlan = {
 };
 export type DeploymentRunState = "analyzing" | "awaiting_input" | "awaiting_approval" | "provisioning" | "building" | "preflighting" | "awaiting_warning_ack" | "deploying" | "verifying" | "succeeded" | "stale" | "failed" | "rolling_back" | "cleaning_up" | "rolled_back" | "cancelled";
 export type DeploymentRun = {
-  schema_version: "opsi.deployment_run/v2"; id: string; project_id: string; created_by: string; state: DeploymentRunState;
+  schema_version: "opsi.deployment_run/v3"; id: string; project_id: string; created_by: string; state: DeploymentRunState;
   plan: DeploymentPlan; analysis: { authority?: string; issues?: AnalysisIssue[]; scope?: AnalysisScope; scope_hash?: string; evidence_coverage?: EvidenceCoverage; files_inspected?: number; bytes_inspected?: number; truncated?: boolean; truncation_reason?: string };
   approval?: { actor: string; plan_hash: string; approved_at: string };
   warning_acknowledgement?: { actor: string; preflight_hash: string; acknowledged_at: string };

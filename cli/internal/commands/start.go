@@ -153,6 +153,11 @@ func newStartServer(uiDir, devUI string, cfg config.Config, factory func() (keyc
 	opsiBinary, _ := os.Executable()
 	assistantManager := assistant.NewManager(assistant.NewCodexProvider(assistant.CodexOptions{OpsiBinary: opsiBinary, ConfigPath: configPath, RepoRoot: repoRoot}))
 	assistantManager.SetRepositoryRoot(repoRoot)
+	if historyStore, err := assistant.NewHistoryStore("", configPath); err == nil && historyStore != nil {
+		assistantManager.SetHistoryStore(historyStore)
+	} else if err != nil {
+		assistantManager.SetHistoryError(err)
+	}
 	localSession := newLocalSessionToken()
 	authFlow := &localAuthFlow{
 		states:                  map[string]localAuthPending{},

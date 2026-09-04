@@ -189,7 +189,7 @@ func (s postgresManagedResourceCredentialVault) GetWorkloadSecret(ctx context.Co
 }
 
 func (s postgresManagedResourceCredentialVault) UpsertWorkloadSecret(ctx context.Context, spec resourcev1.WorkloadSecretUpsert) (resourcev1.WorkloadSecretMetadata, bool, error) {
-	if spec.CredentialID == "" || spec.ProjectID == "" || spec.ServiceID == "" || spec.LogicalName == "" || spec.IdempotencyKey == "" || spec.Value == "" || len(spec.Value) > 8192 || strings.ContainsAny(spec.Value, "\x00\r\n") {
+	if spec.CredentialID == "" || spec.ProjectID == "" || spec.ServiceID == "" || resourcev1.ValidateWorkloadSecretLogicalName(spec.LogicalName) != nil || spec.IdempotencyKey == "" || spec.Value == "" || len(spec.Value) > 8192 || strings.ContainsAny(spec.Value, "\x00\r\n") {
 		return resourcev1.WorkloadSecretMetadata{}, false, errors.New("workload secret upsert is invalid")
 	}
 	credential := resourcev1.ManagedResourceCredential{CredentialID: spec.CredentialID, Purpose: resourcev1.CredentialPurposeWorkloadSecret, OwnerID: spec.ServiceID, ResourceID: spec.ProjectID, Username: "value", Password: spec.Value}

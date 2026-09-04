@@ -56,3 +56,13 @@ func TestPlannedWorkloadSecretBindsWithoutChangingOpaqueReferenceOrRevision(t *t
 		t.Fatal("planned scope remained after binding")
 	}
 }
+
+func TestWorkloadSecretLogicalNameIsBounded(t *testing.T) {
+	authority := NewMemoryCredentialAuthority()
+	for _, name := range []string{"", " leading", "trailing ", "line\nbreak", string(make([]byte, 129))} {
+		spec := resourcev1.WorkloadSecretUpsert{CredentialID: "wsecret-invalid", ProjectID: "project-1", ServiceID: "service-1", LogicalName: name, Value: "value", IdempotencyKey: "invalid-name"}
+		if _, _, err := authority.UpsertWorkloadSecret(context.Background(), spec); err == nil {
+			t.Fatalf("logical name %q should be rejected", name)
+		}
+	}
+}

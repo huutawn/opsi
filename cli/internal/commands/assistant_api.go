@@ -23,16 +23,72 @@ func handleLocalAssistantRoutes(w http.ResponseWriter, r *http.Request, manager 
 		ctx, cancel := contextWithTimeout(r, 5*time.Second)
 		defer cancel()
 		w.Header().Set("Cache-Control", "no-store")
-		writeLocalJSON(w, http.StatusOK, map[string]any{"providers": manager.ProviderStatuses(ctx), "mcp_surface": "mcp-04"})
+		writeLocalJSON(w, http.StatusOK, map[string]any{
+			"providers":         manager.ProviderStatuses(ctx),
+			"mcp_surface":       "mcp-04",
+			"history_available": manager.HistoryAvailable(),
+		})
 		return true
 	}
-	if len(parts) < 6 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "assistant" || parts[5] != "turns" {
+	if len(parts) < 6 || parts[0] != "api" || parts[1] != "local" || parts[2] != "projects" || parts[4] != "assistant" {
+		return false
+	}
+	resource := parts[5]
+	if resource != "turns" && resource != "conversations" {
 		return false
 	}
 	projectID, err := url.PathUnescape(parts[3])
 	if err != nil || strings.TrimSpace(projectID) == "" {
 		writeLocalError(w, r, http.StatusBadRequest, "PROJECT_ID_REQUIRED", "project_id is required")
 		return true
+	}
+	w.Header().Set("Cache-Control", "no-store")
+
+	if resource == "conversations" {
+		if len(parts) == 6 {
+			if r.Method != http.MethodGet {
+				writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+				return true
+			}
+			providerID := r.URL.Query().Get("provider_id")
+			conversations := manager.ListConversations(projectID, providerID)
+			writeLocalJSON(w, http.StatusOK, map[string]any{"conversations": conversations})
+			return true
+		}
+		if len(parts) == 7 {
+			conversationID, convErr := url.PathUnescape(parts[6])
+			if convErr != nil || strings.TrimSpace(conversationID) == "" {
+				writeLocalError(w, r, http.StatusBadRequest, "CONVERSATION_ID_REQUIRED", "conversation_id is required")
+				return true
+			}
+			if r.Method == http.MethodGet {
+				conv, ok := manager.GetConversation(projectID, conversationID)
+				if !ok {
+					writeLocalError(w, r, http.StatusNotFound, "CONVERSATION_NOT_FOUND", "conversation was not found")
+					return true
+				}
+				writeLocalJSON(w, http.StatusOK, conv)
+				return true
+			}
+			if r.Method == http.MethodDelete {
+				if !requireLocalSession(w, r, localSession) {
+					return true
+				}
+				ok, err := manager.DeleteConversation(projectID, conversationID)
+				if err != nil {
+					writeLocalError(w, r, http.StatusConflict, "CONVERSATION_DELETE_REJECTED", err.Error())
+					return true
+				}
+				if !ok {
+					writeLocalError(w, r, http.StatusNotFound, "CONVERSATION_NOT_FOUND", "conversation was not found")
+					return true
+				}
+				writeLocalJSON(w, http.StatusOK, map[string]any{"deleted": true, "conversation_id": conversationID})
+				return true
+			}
+			writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+			return true
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if len(parts) == 10 && parts[6] != "" && parts[7] == "source-patches" && parts[8] != "" && parts[9] == "apply" {
@@ -76,6 +132,34 @@ func handleLocalAssistantRoutes(w http.ResponseWriter, r *http.Request, manager 
 			return true
 		}
 		writeLocalJSON(w, http.StatusOK, receipt)
+		return true
+	}
+	if len(parts) == 8 && parts[7] == "retry" {
+		if r.Method != http.MethodPost {
+			writeLocalError(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed")
+			return true
+		}
+		if !requireLocalSession(w, r, localSession) || !requireLocalIdempotencyKey(w, r) {
+			return true
+		}
+		turnID, turnErr := url.PathUnescape(parts[6])
+		if turnErr != nil || strings.TrimSpace(turnID) == "" {
+			writeLocalError(w, r, http.StatusBadRequest, "TURN_ID_REQUIRED", "turn_id is required")
+			return true
+		}
+		newTurn, err := manager.RetryTurn(projectID, turnID)
+		if err != nil {
+			code := "ASSISTANT_TURN_REJECTED"
+			if aErr, ok := err.(*assistant.AssistantError); ok && aErr.Code != "" {
+				code = aErr.Code
+			} else if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				writeLocalError(w, r, http.StatusNotFound, "ASSISTANT_TURN_NOT_FOUND", err.Error())
+				return true
+			}
+			writeLocalError(w, r, http.StatusConflict, code, err.Error())
+			return true
+		}
+		writeLocalJSON(w, http.StatusAccepted, newTurn)
 		return true
 	}
 	if len(parts) == 6 {

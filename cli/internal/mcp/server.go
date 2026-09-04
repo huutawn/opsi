@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,7 +86,12 @@ func (s *Server) logf(format string, args ...any) {
 func (s *Server) getCloudClient(ctx context.Context) (*cloudclient.Client, error) {
 	cfg, err := config.LoadSelected(s.ConfigPath)
 	if err != nil {
-		return nil, &DomainError{Code: ErrCodeAuthorityUnavailable, Message: fmt.Sprintf("failed to load CLI config: %v", err)}
+		return nil, &DomainError{
+			Code:       ErrCodeAuthorityUnavailable,
+			Message:    "failed to load CLI config",
+			Retryable:  false,
+			NextAction: "Verify that the CLI configuration file exists and is valid.",
+		}
 	}
 
 	pat := ""
@@ -98,12 +104,22 @@ func (s *Server) getCloudClient(ctx context.Context) (*cloudclient.Client, error
 	}
 
 	if strings.TrimSpace(pat) == "" {
-		return nil, &DomainError{Code: ErrCodeAuthRequired, Message: "Opsi local session unauthenticated; run 'opsi login' outside MCP to authenticate"}
+		return nil, &DomainError{
+			Code:       ErrCodeAuthRequired,
+			Message:    "Opsi local session unauthenticated; run 'opsi login' outside MCP to authenticate",
+			Retryable:  false,
+			NextAction: "Run 'opsi login' outside MCP to authenticate.",
+		}
 	}
 
 	client, err := cloudclient.New(cfg.CloudURL, pat, s.Version, s.HTTPClient)
 	if err != nil {
-		return nil, &DomainError{Code: ErrCodeAuthorityUnavailable, Message: fmt.Sprintf("failed to initialize Cloud client: %v", err)}
+		return nil, &DomainError{
+			Code:       ErrCodeAuthorityUnavailable,
+			Message:    "failed to initialize Cloud client",
+			Retryable:  false,
+			NextAction: "Verify Cloud URL configuration in your CLI config.",
+		}
 	}
 	return client, nil
 }
@@ -194,32 +210,13 @@ func (s *Server) HandleMessage(ctx context.Context, reqBytes []byte) (*JSONRPCRe
 
 		handler, ok := s.handlers[params.Name]
 		if !ok {
-			return &JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: CallToolResult{
-					Content: []ContentItem{
-						{
-							Type: "text",
-							Text: fmt.Sprintf(`{"code":"%s","message":"unknown tool %q"}`, ErrCodeNotFound, params.Name),
-						},
-					},
-					IsError: true,
-				},
-			}, nil
-		}
-
-		output, err := handler(ctx, s, params.Arguments)
-		if err != nil {
-			var dErr *DomainError
-			errCode := ErrCodeAuthorityUnavailable
-			errMsg := err.Error()
-			if errors.As(err, &dErr) {
-				errCode = dErr.Code
-				errMsg = dErr.Message
+			structured := &ErrorResponse{
+				Code:       ErrCodeNotFound,
+				Message:    fmt.Sprintf("unknown tool %q", sanitizeDiagnostic(params.Name)),
+				Retryable:  false,
+				NextAction: "Call tools/list to see available Opsi tools.",
 			}
-
-			errPayload, _ := json.Marshal(ErrorResponse{Code: errCode, Message: errMsg})
+			errPayload, _ := json.Marshal(structured)
 			return &JSONRPCResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
@@ -230,8 +227,18 @@ func (s *Server) HandleMessage(ctx context.Context, reqBytes []byte) (*JSONRPCRe
 							Text: string(errPayload),
 						},
 					},
-					IsError: true,
+					StructuredContent: structured,
+					IsError:           true,
 				},
+			}, nil
+		}
+
+		output, err := handler(ctx, s, params.Arguments)
+		if err != nil {
+			return &JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  s.formatToolError(err),
 			}, nil
 		}
 
@@ -347,6 +354,7 @@ func (s *Server) handleNotification(_ context.Context, req JSONRPCRequest) {
 		s.logf("Ignored notification %q", req.Method)
 	}
 }
+
 // ServeStdio starts the stdio JSON-RPC loop.
 func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.logf("Starting Opsi MCP Server (version %s) on stdio", s.Version)
@@ -418,4 +426,92 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 		_, _ = fmt.Fprintf(out, "%s\n", string(respBytes))
 		s.writeMu.Unlock()
 	}
+}
+
+func (s *Server) formatToolError(err error) CallToolResult {
+	var dErr *DomainError
+	code := ErrCodeAuthorityUnavailable
+	message := "tool execution failed"
+	retryable := false
+	nextAction := ""
+
+	if errors.As(err, &dErr) {
+		code = dErr.Code
+		message = dErr.Message
+		retryable = dErr.Retryable
+		nextAction = dErr.NextAction
+	} else if err != nil {
+		message = err.Error()
+	}
+
+	message = sanitizeDiagnostic(message)
+	if nextAction == "" {
+		nextAction = defaultNextAction(code)
+	}
+
+	structured := &ErrorResponse{
+		Code:       code,
+		Message:    message,
+		Retryable:  retryable,
+		NextAction: nextAction,
+	}
+
+	errPayload, _ := json.Marshal(structured)
+	return CallToolResult{
+		Content: []ContentItem{
+			{
+				Type: "text",
+				Text: string(errPayload),
+			},
+		},
+		StructuredContent: structured,
+		IsError:           true,
+	}
+}
+
+func defaultNextAction(code string) string {
+	switch code {
+	case ErrCodeAuthRequired:
+		return "Run 'opsi login' outside MCP to authenticate."
+	case ErrCodeForbidden:
+		return "Check your user role or project permissions."
+	case ErrCodeNotFound:
+		return "Verify that the requested resource exists."
+	case ErrCodeAmbiguousProject:
+		return "Specify project_id explicitly in tool arguments."
+	case ErrCodeAuthorityUnavailable:
+		return "Verify network connectivity or check Cloud service status."
+	case ErrCodeLimitExceeded:
+		return "Narrow query parameters or reduce batch size."
+	case ErrCodeInvalidArgument:
+		return "Check tool arguments and try again."
+	default:
+		return "Check tool parameters and project state."
+	}
+}
+
+var (
+	patRegex     = regexp.MustCompile(`(?i)\bopsi_pat_[a-zA-Z0-9_-]+`)
+	tokenRegex   = regexp.MustCompile(`(?i)\b(?:opsi_(?:pat|agent_token)|ghp_[a-zA-Z0-9]+|github_pat_[a-zA-Z0-9_]+)\b`)
+	bearerRegex  = regexp.MustCompile(`(?i)Bearer\s+[a-zA-Z0-9_.\-]+`)
+	authHdrRegex = regexp.MustCompile(`(?i)(?:authorization|proxy-authorization):\s*[^\r\n]+`)
+	headerRegex  = regexp.MustCompile(`(?i)(?:[A-Za-z0-9_-]+-Token|[A-Za-z0-9_-]+-Key):\s*[^\r\n]+`)
+	credURIRegex = regexp.MustCompile(`([a-zA-Z0-9+.-]+://)([^/\s:@]*):([^/\s:@]+)@([^\s"'\` + "`" + `]+)`)
+	credEnvRegex = regexp.MustCompile(`(?i)(password|secret|token|api_key|pat)\s*[:=]\s*["']?([^\s"',;]+)["']?`)
+	privKeyRegex = regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----`)
+)
+
+func sanitizeDiagnostic(input string) string {
+	if input == "" {
+		return ""
+	}
+	out := privKeyRegex.ReplaceAllString(input, "[REDACTED_PRIVATE_KEY]")
+	out = authHdrRegex.ReplaceAllString(out, "Authorization: [REDACTED]")
+	out = headerRegex.ReplaceAllString(out, "Header: [REDACTED]")
+	out = bearerRegex.ReplaceAllString(out, "Bearer [REDACTED]")
+	out = patRegex.ReplaceAllString(out, "[REDACTED_PAT]")
+	out = tokenRegex.ReplaceAllString(out, "[REDACTED_TOKEN]")
+	out = credURIRegex.ReplaceAllString(out, "$1$2:[REDACTED]@$4")
+	out = credEnvRegex.ReplaceAllString(out, "$1=[REDACTED]")
+	return strings.TrimSpace(out)
 }

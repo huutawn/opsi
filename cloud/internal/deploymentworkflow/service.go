@@ -69,9 +69,13 @@ func (s Service) SetAnalysis(ctx context.Context, projectID, runID string, analy
 	run.Plan.TruncationReason = analysis.TruncationReason
 	run.Plan.Authority = authority
 	run.Plan.Target = target
+	run.Plan.Issues = reconcileDraftIssues(run.Plan)
 	run.State = StateAwaitingApproval
-	if analysis.NeedsInput() {
-		run.State = StateAwaitingInput
+	for _, issue := range run.Plan.Issues {
+		if issue.Blocking {
+			run.State = StateAwaitingInput
+			break
+		}
 	}
 	run.Approval = nil
 	run.WarningAcknowledgement = nil
@@ -186,12 +190,24 @@ func reconcileDraftIssues(draft Plan) []repositoryanalysis.Issue {
 		"EXPLICIT_COMPOSE_PORT_CONFLICT":        true,
 	}
 	var issues []repositoryanalysis.Issue
-	if len(draft.Issues) > 0 {
-		issues = make([]repositoryanalysis.Issue, 0, len(draft.Issues))
-	}
 	for _, issue := range draft.Issues {
+		if issue.Code == "APPLICATION_ENVIRONMENT_REVIEW_REQUIRED" {
+			continue
+		}
 		if !resolved[issue.Code] {
 			issues = append(issues, issue)
+		}
+	}
+	reviewsBySource := applicationNoEnvironmentReviews(draft)
+	for _, app := range draft.Applications {
+		if !applicationHasRuntimeKeys(draft, app) && !reviewsBySource[app.SourceKey] {
+			issues = append(issues, repositoryanalysis.Issue{
+				Code:       "APPLICATION_ENVIRONMENT_REVIEW_REQUIRED",
+				Message:    "Application " + app.Key + " requires environment variables, secrets, or confirmation.",
+				Path:       "applications[" + app.SourceKey + "].runtime_configuration",
+				Resolution: "Add environment variables, attach secrets, or confirm that no environment is required.",
+				Blocking:   true,
+			})
 		}
 	}
 	return issues

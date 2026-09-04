@@ -20,7 +20,7 @@ func fixture(t *testing.T) (Service, Run, AuthorityRevisions) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	analysis := repositoryanalysis.Result{SchemaVersion: repositoryanalysis.SchemaVersion, RepositoryID: 1, Repository: "owner/repo", SelectedRef: "main", CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Applications: []repositoryanalysis.Application{{SourceKey: "api", Key: "api", Name: "api", Root: ".", Port: 8080, Build: repositoryanalysis.Build{Context: ".", DockerfilePath: "Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"}}}}
+	analysis := repositoryanalysis.Result{SchemaVersion: repositoryanalysis.SchemaVersion, RepositoryID: 1, Repository: "owner/repo", SelectedRef: "main", CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Applications: []repositoryanalysis.Application{{SourceKey: "api", Key: "api", Name: "api", Root: ".", Port: 8080, Environment: map[string]string{"PORT": "8080"}, Build: repositoryanalysis.Build{Context: ".", DockerfilePath: "Dockerfile", Strategy: "dockerfile", Platform: "linux/amd64"}}}}
 	authority := AuthorityRevisions{SourceCommitSHA: analysis.CommitSHA, TopologyRevision: 3, TopologyHash: "topology"}
 	run, err = service.SetAnalysis(context.Background(), run.ProjectID, run.ID, analysis, authority, run.Plan.Target)
 	if err != nil {
@@ -614,6 +614,7 @@ func TestApplicationCapacityValidation(t *testing.T) {
 		t.Fatal("expected error for negative replicas")
 	}
 }
+
 func errorCode(err error) string {
 	if value, ok := err.(Error); ok {
 		return value.Code

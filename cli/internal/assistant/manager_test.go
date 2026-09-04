@@ -24,14 +24,37 @@ func (p *fakeProvider) ID() string { return "fake" }
 func (p *fakeProvider) Status(context.Context) ProviderStatus {
 	return ProviderStatus{ID: p.ID(), Name: "Fake", Available: true, Authenticated: true}
 }
-func (p *fakeProvider) Run(_ context.Context, request RunRequest) (RunResult, error) {
+func (p *fakeProvider) Run(ctx context.Context, request RunRequest) (RunResult, error) {
 	if p.block != nil {
-		<-p.block
+		select {
+		case <-p.block:
+		case <-ctx.Done():
+			return RunResult{}, ctx.Err()
+		}
 	}
-	if p.result.ThreadID == "" {
-		p.result.ThreadID = request.ThreadID
+	result := p.result
+	if result.ThreadID == "" {
+		result.ThreadID = request.ThreadID
 	}
-	return p.result, p.err
+	return result, p.err
+}
+
+func TestManagerCloseCancelsAndWaitsForRunningTurns(t *testing.T) {
+	manager := NewManager(&fakeProvider{block: make(chan struct{})})
+	turn, err := manager.StartTurn("proj-1", "fake", "chat-close", "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closedTurn, ok := manager.Turn("proj-1", turn.ID)
+	if !ok || closedTurn.State != "failed" || closedTurn.ErrorCode != ErrAssistantCanceled {
+		t.Fatalf("running turn was not canceled before close returned: %+v", closedTurn)
+	}
+	if _, err := manager.StartTurn("proj-1", "fake", "chat-after-close", "review"); err == nil {
+		t.Fatal("closed manager accepted a new turn")
+	}
 }
 
 func TestManagerRunsTurnsAndScopesLookupToProject(t *testing.T) {

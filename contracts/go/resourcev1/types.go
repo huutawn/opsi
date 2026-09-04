@@ -250,6 +250,16 @@ type WorkloadSecretUpsert struct {
 	IdempotencyKey string
 }
 
+// ValidateWorkloadSecretLogicalName keeps vault keys bounded and safe to use
+// in audit metadata. It deliberately does not constrain names to a vendor
+// specific slug format.
+func ValidateWorkloadSecretLogicalName(name string) error {
+	if name == "" || name != strings.TrimSpace(name) || len(name) > 128 || strings.ContainsAny(name, "\x00\r\n") {
+		return errors.New("workload secret logical name is invalid")
+	}
+	return nil
+}
+
 func (c ManagedResourceCredential) ValidateWorkloadSecret(projectID, serviceID string) error {
 	if err := c.Validate(); err != nil || c.Purpose != CredentialPurposeWorkloadSecret || c.ResourceID != projectID || c.OwnerID != serviceID {
 		return errors.New("workload secret credential is invalid")

@@ -56,9 +56,20 @@ func MigrateRepositoryDeploymentWorkflow(ctx context.Context, db *sql.DB) error 
 		`CREATE INDEX IF NOT EXISTS deployment_run_events_timeline_idx ON deployment_run_events(run_id,created_at,id)`,
 		`UPDATE deployment_runs
 		 SET state='stale',
-		     run_data=(run_data || '{"state":"stale","approval":null,"warning_acknowledgement":null}'::jsonb),
+		     run_data=(run_data || jsonb_build_object(
+		       'state', 'stale',
+		       'approval', NULL,
+		       'warning_acknowledgement', NULL,
+		       'failure', jsonb_build_object(
+		         'step', state,
+		         'code', CASE WHEN run_data #>> '{plan,schema_version}'='opsi.deployment_plan/v1' THEN 'DEPLOYMENT_PLAN_V1_STALE' ELSE 'DEPLOYMENT_PLAN_V2_STALE' END,
+		         'message', CASE WHEN run_data #>> '{plan,schema_version}'='opsi.deployment_plan/v1' THEN 'This run used deployment plan v1 and must be analyzed and reviewed again.' ELSE 'This run used deployment plan v2 and must be analyzed and reviewed again.' END,
+		         'next_action', 'Analyze and review the repository again.',
+		         'retryable', false
+		       )
+		     )),
 		     updated_at=NOW()
-		 WHERE run_data #>> '{plan,schema_version}'='opsi.deployment_plan/v1'
+		 WHERE run_data #>> '{plan,schema_version}' IN ('opsi.deployment_plan/v1', 'opsi.deployment_plan/v2')
 		   AND state NOT IN ('succeeded','stale','failed','rolled_back','cancelled')`,
 	}
 	for _, statement := range statements {

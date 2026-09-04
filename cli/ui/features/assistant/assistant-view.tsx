@@ -1,33 +1,20 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Button, Icon, PageHeader, StatusBadge, Textarea } from "@/components/ui/primitives";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Icon, PageHeader, StatusBadge } from "@/components/ui/primitives";
+import { AssistantConversationPanel, type ChatMessage, type ReviewState } from "./assistant-conversation-panel";
 import type { ConsoleController } from "@/features/console/types";
 import {
   LocalAPIError,
   LocalClient,
   type AssistantConfigurationProposal,
-  type AssistantGrounding,
+  type AssistantConversationSummary,
   type AssistantProvider,
   type AssistantSourcePatchProposal,
   type AssistantTurn,
 } from "@/lib/api/local-client";
-import type { ProposalReview, ServiceConfigurationChange, ServiceConfigurationDraft } from "@/lib/contracts/registry";
+import type { ServiceConfigurationDraft } from "@/lib/contracts/registry";
 import { useI18n } from "@/lib/i18n";
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  grounding?: AssistantGrounding;
-  configurationProposals?: AssistantConfigurationProposal[];
-  sourcePatchProposals?: AssistantSourcePatchProposal[];
-};
-
-type ReviewState = {
-  review: ProposalReview;
-  changes?: ServiceConfigurationChange[];
-};
 
 export function AssistantView({ console }: { console: ConsoleController }) {
   const { t } = useI18n();
@@ -35,8 +22,11 @@ export function AssistantView({ console }: { console: ConsoleController }) {
   const projectID = console.state.project?.id ?? console.route.projectID;
   const [providers, setProviders] = useState<AssistantProvider[]>([]);
   const [surface, setSurface] = useState("");
+  const [historyAvailable, setHistoryAvailable] = useState(true);
   const [providerID, setProviderID] = useState("codex");
   const [conversationID, setConversationID] = useState("");
+  const [conversations, setConversations] = useState<AssistantConversationSummary[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState("");
   const [turn, setTurn] = useState<AssistantTurn | null>(null);
@@ -44,6 +34,7 @@ export function AssistantView({ console }: { console: ConsoleController }) {
   const [reviews, setReviews] = useState<Record<string, ReviewState>>({});
   const [reviewBusy, setReviewBusy] = useState("");
   const [patchBusy, setPatchBusy] = useState("");
+  const interactionEpoch = useRef(0);
 
   const starters = useMemo(
     () => [
@@ -60,36 +51,136 @@ export function AssistantView({ console }: { console: ConsoleController }) {
       if (!active) return;
       setProviders(result.providers);
       setSurface(result.mcp_surface);
+      setHistoryAvailable(result.history_available !== false);
       const ready = result.providers.find((item) => item.available && item.authenticated);
       if (ready) setProviderID(ready.id);
     }).catch((cause) => active && setFailure(errorMessage(cause, t)));
     return () => { active = false; };
   }, [client, t]);
 
+  const refreshConversations = useCallback(() => {
+    if (!projectID) return;
+    client.assistantConversations(projectID, providerID)
+      .then((res) => setConversations(res?.conversations ?? []))
+      .catch((cause) => setFailure(errorMessage(cause, t)));
+  }, [client, projectID, providerID, t]);
+
+  const loadConversation = useCallback(async (id: string, liveTurn?: AssistantTurn) => {
+    if (!projectID) return;
+    try {
+      const detail = await client.assistantConversation(projectID, id);
+      setConversationID(detail.id);
+      const runningMessage = [...(detail.messages ?? [])].reverse().find((message) => message.role === "assistant" && message.state === "running");
+      const loadedMessages: ChatMessage[] = (detail.messages ?? []).filter((message) => message !== runningMessage).map((m) => ({
+        id: m.id,
+        turnId: m.turn_id,
+        role: m.role,
+        text: m.text,
+        redacted: m.redacted,
+        grounding: m.grounding,
+        configurationProposals: liveTurn?.id === m.turn_id ? liveTurn.configuration_proposals : undefined,
+        sourcePatchProposals: liveTurn?.id === m.turn_id ? liveTurn.source_patch_proposals : undefined,
+        progress: m.progress,
+        errorCode: m.error_code,
+        diagnosticCode: m.diagnostic_code,
+        error: m.error,
+        nextAction: m.next_action,
+        state: (m.state as "running" | "succeeded" | "failed") || (m.error_code ? "failed" : "succeeded"),
+      }));
+      if (liveTurn && !loadedMessages.some((message) => message.turnId === liveTurn.id && message.role === "assistant")) {
+        const liveMessage: ChatMessage = {
+          id: `msg-${liveTurn.id}-assistant`,
+          turnId: liveTurn.id,
+          role: "assistant",
+          text: liveTurn.response || liveTurn.error || t("assistant.no_response", "No response."),
+          state: liveTurn.state,
+          errorCode: liveTurn.error_code,
+          diagnosticCode: liveTurn.diagnostic_code,
+          error: liveTurn.error,
+          nextAction: liveTurn.next_action,
+          progress: liveTurn.progress,
+          grounding: liveTurn.grounding,
+          configurationProposals: liveTurn.configuration_proposals,
+          sourcePatchProposals: liveTurn.source_patch_proposals,
+        };
+        setMessages((current) => loadedMessages.length > 0 ? [...loadedMessages, liveMessage] : [...current.filter((message) => message.turnId !== liveTurn.id), liveMessage]);
+      } else {
+        setMessages(loadedMessages);
+      }
+      setTurn(runningMessage ? {
+        id: runningMessage.turn_id,
+        conversation_id: detail.id,
+        provider_id: detail.provider_id,
+        project_id: detail.project_id,
+        state: "running",
+        progress: runningMessage.progress,
+        started_at: runningMessage.created_at,
+      } : null);
+    } catch (cause) {
+      setFailure(errorMessage(cause, t));
+    }
+  }, [client, projectID, t]);
+
+  // Restore the most recent local conversation whenever project/provider changes.
   useEffect(() => {
-    if (!turn || turn.state !== "running" || !projectID) return;
+    if (!projectID) return;
+    let active = true;
+    const restoreEpoch = interactionEpoch.current;
+    client.assistantConversations(projectID, providerID)
+      .then((res) => {
+        if (!active || restoreEpoch !== interactionEpoch.current) return;
+        const convList = res?.conversations ?? [];
+        setConversations(convList);
+        if (convList.length > 0) void loadConversation(convList[0].id);
+        else {
+          setConversationID("");
+          setMessages([]);
+          setTurn(null);
+        }
+      })
+      .catch((cause) => active && setFailure(errorMessage(cause, t)));
+    return () => { active = false; };
+  }, [client, loadConversation, projectID, providerID, t]);
+
+  function startNewChat() {
+    interactionEpoch.current += 1;
+    setConversationID("");
+    setMessages([]);
+    setTurn(null);
+    setFailure("");
+    setShowHistory(false);
+  }
+
+  async function deleteChat(id: string) {
+    if (!projectID) return;
+    if (!window.confirm(t("assistant.confirm_delete_chat", "Delete this local chat history? This cannot be undone."))) return;
+    try {
+      await client.deleteAssistantConversation(projectID, id);
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      if (conversationID === id) {
+        startNewChat();
+      }
+    } catch (cause) {
+      setFailure(errorMessage(cause, t));
+    }
+  }
+
+  useEffect(() => {
+    const activeTurnID = turn?.state === "running" ? turn.id : "";
+    if (!activeTurnID || !projectID) return;
     let active = true;
     const timer = window.setInterval(() => {
-      client.assistantTurn(projectID, turn.id).then((next) => {
+      client.assistantTurn(projectID, activeTurnID).then((next) => {
         if (!active) return;
         setTurn(next);
         if (next.state === "succeeded") {
-          setMessages((current) => [
-            ...current,
-            {
-              id: next.id,
-              role: "assistant",
-              text: next.response || t("assistant.no_response", "No response."),
-              grounding: next.grounding,
-              configurationProposals: next.configuration_proposals,
-              sourcePatchProposals: next.source_patch_proposals,
-            },
-          ]);
           window.clearInterval(timer);
+          refreshConversations();
+          void loadConversation(next.conversation_id, next);
         } else if (next.state === "failed") {
-          const errText = next.error || "The AI agent turn failed.";
-          setFailure(next.error_code ? `[${next.error_code}] ${errText}` : errText);
           window.clearInterval(timer);
+          refreshConversations();
+          void loadConversation(next.conversation_id, next);
         }
       }).catch((cause) => {
         if (active) setFailure(errorMessage(cause, t));
@@ -97,7 +188,7 @@ export function AssistantView({ console }: { console: ConsoleController }) {
       });
     }, 1000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [client, projectID, turn, t]);
+  }, [client, loadConversation, projectID, refreshConversations, turn?.id, turn?.state, t]);
 
   const provider = providers.find((item) => item.id === providerID);
   const providerReady = Boolean(provider?.available && provider.authenticated);
@@ -110,6 +201,7 @@ export function AssistantView({ console }: { console: ConsoleController }) {
     event.preventDefault();
     const text = prompt.trim();
     if (!text || !projectID || turn?.state === "running") return;
+    interactionEpoch.current += 1;
     setFailure("");
     setPrompt("");
     setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", text }]);
@@ -121,6 +213,21 @@ export function AssistantView({ console }: { console: ConsoleController }) {
       );
       setConversationID(next.conversation_id);
       setTurn(next);
+      refreshConversations();
+    } catch (cause) {
+      setFailure(errorMessage(cause, t));
+    }
+  }
+
+  async function retryTurn(turnID: string) {
+    if (!projectID || turn?.state === "running") return;
+    interactionEpoch.current += 1;
+    setFailure("");
+    try {
+      const next = await client.retryAssistantTurn(projectID, turnID, crypto.randomUUID());
+      setConversationID(next.conversation_id);
+      setTurn(next);
+      refreshConversations();
     } catch (cause) {
       setFailure(errorMessage(cause, t));
     }
@@ -204,6 +311,8 @@ export function AssistantView({ console }: { console: ConsoleController }) {
     }
   }
 
+  const activeConv = conversations.find((c) => c.id === conversationID);
+
   return (
     <main className="mx-auto max-w-7xl space-y-6 p-4 lg:p-margin-desktop">
       <PageHeader
@@ -277,100 +386,47 @@ export function AssistantView({ console }: { console: ConsoleController }) {
 
       {failure && (
         <div className="border border-error/40 bg-error-container/10 p-4 text-sm text-error" role="alert">
-          <strong>Assistant action failed:</strong> {failure}
+          <strong>{t("assistant.action_failed", "Assistant action failed")}:</strong> {failure}
+        </div>
+      )}
+      {!historyAvailable && (
+        <div className="border border-status-warning/40 bg-status-warning/10 p-4 text-sm text-on-surface" role="alert">
+          {t("assistant.history_unavailable", "Local chat history is unavailable. Repair the history file and restart Opsi before chatting.")}
         </div>
       )}
 
-      <div className="grid min-h-[560px] gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <section aria-labelledby="assistant-chat-title" className="flex min-h-[560px] flex-col border border-outline-variant/30 bg-surface-container-low">
-          <div className="border-b border-outline-variant/30 p-4">
-            <h2 className="font-semibold" id="assistant-chat-title">Project chat</h2>
-            <p className="mt-1 text-xs text-on-surface-variant">
-              Conversation history is owned by {provider?.name || "the selected agent"}; Opsi keeps only the active local projection.
-            </p>
-          </div>
-          <div aria-live="polite" className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
-            {messages.length === 0 && (
-              <div className="mx-auto max-w-xl py-12 text-center">
-                <Icon className="mx-auto h-10 w-10 text-primary" name="hub" />
-                <h3 className="mt-4 text-lg font-semibold">{t("assistant.starters_title", "Ask from current Opsi facts")}</h3>
-                <p className="mt-2 text-sm text-on-surface-variant">
-                  Review architecture, deployment readiness, FE/BE routing, dependencies, and safe configuration variables.
-                </p>
-                <div className="mt-6 grid gap-2 text-left">
-                  {starters.map((item) => (
-                    <button
-                      className="min-h-11 border border-outline-variant/30 bg-surface-container p-3 text-left text-sm hover:border-primary/50"
-                      key={item}
-                      onClick={() => setPrompt(item)}
-                      type="button"
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            {messages.map((message) => (
-              <article
-                className={message.role === "user" ? "ml-auto max-w-2xl bg-primary/10 p-4" : "mr-auto max-w-3xl border-l-2 border-primary bg-surface-container p-4"}
-                key={message.id}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs font-medium uppercase tracking-wider text-on-surface-variant">
-                    {message.role === "user" ? "You" : provider?.name || "Agent"}
-                  </p>
-                  {message.role === "assistant" && message.grounding && message.grounding.status === "verified" && (
-                    <span className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-                      <Icon className="h-3 w-3" name="check" />
-                      Grounded by {message.grounding.successful_tool_calls} Opsi MCP {message.grounding.successful_tool_calls === 1 ? "call" : "calls"}
-                    </span>
-                  )}
-                </div>
-                <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{message.text}</p>
-                {message.configurationProposals?.map((proposal) => (
-                  <ProposalCard
-                    canMutate={canMutate}
-                    key={`${message.id}-${proposal.application_id}`}
-                    onAction={reviewAction}
-                    onCreate={createReview}
-                    proposal={proposal}
-                    review={reviews[proposal.application_id]}
-                    working={reviewBusy === proposal.application_id}
-                  />
-                ))}
-                {message.sourcePatchProposals?.map((proposal) => (
-                  <SourcePatchCard canMutate={canMutate} key={`${message.id}-${proposal.proposal_hash}`} onApply={() => applySourcePatch(message.id, proposal)} proposal={proposal} working={patchBusy === proposal.proposal_hash} />
-                ))}
-              </article>
-            ))}
-            {turn?.state === "running" && (
-              <div className="mr-auto flex items-center gap-2 border-l-2 border-status-progress bg-surface-container p-4 text-sm text-on-surface-variant" role="status">
-                <Icon className="animate-spin" name="sync" />
-                {t("assistant.thinking", "Agent is thinking…")}
-              </div>
-            )}
-          </div>
-          <form className="border-t border-outline-variant/30 bg-surface-container p-4" onSubmit={submit}>
-            <label className="sr-only" htmlFor="assistant-prompt">Message AI Assistant</label>
-            <Textarea
-              disabled={!overallReady || turn?.state === "running"}
-              id="assistant-prompt"
-              maxLength={16 * 1024}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder={overallReady ? t("assistant.prompt_placeholder", "Ask for a project review or configuration recommendation…") : "Connect and authenticate a local AI agent and Opsi Cloud session first."}
-              rows={3}
-              value={prompt}
-            />
-            <div className="mt-3 flex items-center justify-between gap-3">
-              <p className="text-xs text-on-surface-variant">Read-only MCP · no deploy, shell, or automatic Apply</p>
-              <Button disabled={!overallReady || !prompt.trim() || turn?.state === "running"} type="submit">
-                <Icon name="arrow_forward" />
-                {t("assistant.send", "Send")}
-              </Button>
-            </div>
-          </form>
-        </section>
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <AssistantConversationPanel
+          activeConv={activeConv}
+          canMutate={canMutate}
+          conversationID={conversationID}
+          conversations={conversations}
+          historyAvailable={historyAvailable}
+          messages={messages}
+          onApplySourcePatch={applySourcePatch}
+          onCreateReview={createReview}
+          onDeleteConversation={deleteChat}
+          onNewChat={startNewChat}
+          onPromptChange={setPrompt}
+          onRetryTurn={retryTurn}
+          onReviewAction={reviewAction}
+          onSelectConversation={(id) => {
+            loadConversation(id);
+            setShowHistory(false);
+          }}
+          onSelectStarter={setPrompt}
+          onSubmit={submit}
+          onToggleHistory={() => setShowHistory((prev) => !prev)}
+          overallReady={overallReady}
+          patchBusy={patchBusy}
+          prompt={prompt}
+          provider={provider}
+          reviewBusy={reviewBusy}
+          reviews={reviews}
+          showHistory={showHistory}
+          starters={starters}
+          turn={turn}
+        />
 
         <aside className="space-y-4">
           <section className="border border-outline-variant/30 bg-surface-container p-5">
@@ -396,102 +452,6 @@ export function AssistantView({ console }: { console: ConsoleController }) {
   );
 }
 
-function ProposalCard({
-  canMutate,
-  onAction,
-  onCreate,
-  proposal,
-  review,
-  working,
-}: {
-  canMutate: boolean;
-  onAction: (applicationID: string, action: "approve" | "reject" | "apply") => void;
-  onCreate: (proposal: AssistantConfigurationProposal) => void;
-  proposal: AssistantConfigurationProposal;
-  review?: ReviewState;
-  working: boolean;
-}) {
-  const { t } = useI18n();
-  return (
-    <section aria-label={`Configuration proposal for ${proposal.application_name}`} className="mt-4 border border-secondary/40 bg-secondary/5 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-wider text-secondary">{t("assistant.configuration_proposals", "Configuration proposal")}</p>
-          <h3 className="mt-1 font-semibold">{proposal.application_name}</h3>
-        </div>
-        <StatusBadge
-          className="!text-on-surface"
-          label={review ? review.review.status.replaceAll("_", " ") : t("assistant.agent_draft_validated", "Agent draft (validated)")}
-          status={review?.review.status === "applied" ? "ready" : review?.review.status === "stale" || review?.review.status === "rejected" ? "failed" : "pending"}
-        />
-      </div>
-      <p className="mt-3 text-sm text-on-surface-variant">{proposal.rationale}</p>
-      {review && (
-        <ul className="mt-3 space-y-1 text-xs text-on-surface-variant">
-          {review.changes?.map((change, index) => (
-            <li key={`${change.name}-${index}`}>
-              <code>{change.action} {change.kind} {change.name}</code>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        {!review && canMutate && (
-          <Button disabled={working} onClick={() => onCreate(proposal)} variant="secondary">
-            <Icon name="rate_review" />
-            {t("assistant.create_review", "Create review")}
-          </Button>
-        )}
-        {!review && !canMutate && (
-          <p className="text-xs text-on-surface-variant">{t("assistant.read_only_access", "View-only role: ask a developer or owner to create review.")}</p>
-        )}
-        {review && review.review.status === "review_required" && canMutate && (
-          <>
-            <Button disabled={working} onClick={() => onAction(proposal.application_id, "approve")} variant="primary">
-              <Icon name="check" />
-              {t("assistant.approve", "Approve")}
-            </Button>
-            <Button disabled={working} onClick={() => onAction(proposal.application_id, "reject")} variant="secondary">
-              <Icon name="close" />
-              {t("assistant.reject", "Reject")}
-            </Button>
-          </>
-        )}
-        {review && review.review.status === "approved" && canMutate && (
-          <Button disabled={working} onClick={() => onAction(proposal.application_id, "apply")} variant="primary">
-            <Icon name="done_all" />
-            {t("assistant.apply", "Apply configuration")}
-          </Button>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function SourcePatchCard({ canMutate, onApply, proposal, working }: { canMutate: boolean; onApply: () => void; proposal: AssistantSourcePatchProposal; working: boolean }) {
-  const { t } = useI18n();
-  const files = proposal.proposal.files || [];
-  return (
-    <section aria-label="Validated local source patch" className="mt-4 border border-status-warning/40 bg-status-warning/5 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-wider text-status-warning">{t("assistant.source_patch_proposals", "Validated source patch")}</p>
-          <h3 className="mt-1 font-semibold">Local worktree only</h3>
-        </div>
-        <StatusBadge className="!text-on-surface" label={proposal.validation_status.replaceAll("_", " ")} status={proposal.validation_status === "VALID" ? "ready" : "pending"} />
-      </div>
-      <p className="mt-3 text-xs text-on-surface-variant">Commit <code>{proposal.source_commit}</code> · {proposal.application_root || "."}</p>
-      {proposal.proposal.rationale?.inference && <p className="mt-2 text-sm text-on-surface-variant">{proposal.proposal.rationale.inference}</p>}
-      <div className="mt-3 space-y-3">
-        {files.map((file) => <details className="border border-outline-variant/20 p-2" key={file.path}><summary className="cursor-pointer text-sm font-medium">{file.path}</summary><pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-on-surface-variant">{file.unified_diff}</pre></details>)}
-      </div>
-      <p className="mt-3 text-xs text-status-warning">Not built or tested. Applying does not stage, commit, push, or create a pull request.</p>
-      <div className="mt-4">
-        {canMutate ? <Button disabled={working} onClick={onApply} variant="secondary"><Icon name="edit_note" />{t("assistant.apply_patch", "Apply to local worktree")}</Button> : <p className="text-xs text-on-surface-variant">{t("assistant.read_only_access", "View-only role: ask a developer or owner to apply this local patch.")}</p>}
-      </div>
-    </section>
-  );
-}
 
 function errorMessage(cause: unknown, t?: (key: string, fb?: string) => string) {
   if (cause instanceof LocalAPIError || cause instanceof Error) {

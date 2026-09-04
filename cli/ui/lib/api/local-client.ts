@@ -164,13 +164,74 @@ export type AssistantSourcePatchProposal = {
 };
 export type SourcePatchApplyReceipt = { status: string; reused?: boolean; proposal_hash: string; source_commit: string; changed_files: string[]; journal_id?: string; applied_at: string };
 
-export type AssistantTurn = {
-  id: string; conversation_id: string; provider_id: string; project_id: string;
-  state: "running" | "succeeded" | "failed"; response?: string; error?: string;
-  error_code?: string; grounding?: AssistantGrounding;
-  configuration_proposals?: AssistantConfigurationProposal[]; source_patch_proposals?: AssistantSourcePatchProposal[]; started_at: string; finished_at?: string;
+export type AssistantProgressEvent = {
+  sequence: number;
+  timestamp: string;
+  phase: string;
+  tool?: string;
+  code?: string;
+  summary: string;
 };
 
+export type AssistantTurn = {
+  id: string;
+  conversation_id: string;
+  provider_id: string;
+  project_id: string;
+  state: "running" | "succeeded" | "failed";
+  response?: string;
+  error?: string;
+  error_code?: string;
+  diagnostic_code?: string;
+  retryable?: boolean;
+  next_action?: string;
+  progress?: AssistantProgressEvent[];
+  history_error?: string;
+  grounding?: AssistantGrounding;
+  configuration_proposals?: AssistantConfigurationProposal[];
+  source_patch_proposals?: AssistantSourcePatchProposal[];
+  started_at: string;
+  finished_at?: string;
+};
+
+export type AssistantConversationSummary = {
+  id: string;
+  project_id: string;
+  provider_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  last_turn_state?: string;
+};
+
+export type AssistantStoredMessage = {
+  id: string;
+  turn_id: string;
+  role: "user" | "assistant";
+  text: string;
+  redacted?: boolean;
+  grounding?: AssistantGrounding;
+  configuration_proposals?: AssistantConfigurationProposal[];
+  source_patch_proposals?: AssistantSourcePatchProposal[];
+  progress?: AssistantProgressEvent[];
+  error_code?: string;
+  diagnostic_code?: string;
+  error?: string;
+  next_action?: string;
+  state?: string;
+  created_at: string;
+};
+
+export type AssistantConversationDetail = {
+  id: string;
+  project_id: string;
+  provider_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: AssistantStoredMessage[];
+};
 export class LocalClient {
   private localSession = "";
 
@@ -240,7 +301,7 @@ export class LocalClient {
   }
 
   assistantProviders() {
-    return this.call<{ providers: AssistantProvider[]; mcp_surface: string }>("/api/local/ai/providers");
+    return this.call<{ providers: AssistantProvider[]; mcp_surface: string; history_available: boolean }>("/api/local/ai/providers");
   }
 
   startAssistantTurn(projectID: string, body: { provider_id?: string; conversation_id?: string; prompt: string }, idempotencyKey?: string) {
@@ -251,6 +312,26 @@ export class LocalClient {
 
   assistantTurn(projectID: string, turnID: string) {
     return this.call<AssistantTurn>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns/${encodeURIComponent(turnID)}`);
+  }
+  retryAssistantTurn(projectID: string, turnID: string, idempotencyKey?: string) {
+    return this.call<AssistantTurn>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/turns/${encodeURIComponent(turnID)}/retry`, {
+      method: "POST", write: true, idempotencyKey,
+    });
+  }
+
+  assistantConversations(projectID: string, providerID?: string) {
+    const query = providerID ? `?provider_id=${encodeURIComponent(providerID)}` : "";
+    return this.call<{ conversations: AssistantConversationSummary[] }>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/conversations${query}`);
+  }
+
+  assistantConversation(projectID: string, conversationID: string) {
+    return this.call<AssistantConversationDetail>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/conversations/${encodeURIComponent(conversationID)}`);
+  }
+
+  deleteAssistantConversation(projectID: string, conversationID: string) {
+    return this.call<{ deleted: boolean; conversation_id: string }>(`/api/local/projects/${encodeURIComponent(projectID)}/assistant/conversations/${encodeURIComponent(conversationID)}`, {
+      method: "DELETE", write: true,
+    });
   }
 
   applyAssistantSourcePatch(projectID: string, turnID: string, proposalHash: string, expectedSourceCommit: string, idempotencyKey?: string) {
@@ -1027,7 +1108,11 @@ function normalizeDeploymentRun(run: DeploymentRun): DeploymentRun {
   run.plan.dependencies ??= [];
   run.plan.bindings ??= [];
   run.plan.secrets ??= [];
+  run.plan.application_environment_reviews ??= [];
   run.plan.issues ??= [];
+  for (const app of run.plan.applications) {
+    app.environment ??= {};
+  }
   run.plan.analysis_scope ??= { application_roots: [], exclude_paths: [] };
   run.plan.analysis_scope.application_roots ??= [];
   run.plan.analysis_scope.exclude_paths ??= [];

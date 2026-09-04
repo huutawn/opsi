@@ -891,6 +891,7 @@ func TestDeploymentPlanUpdateRequiresExactRevisionAndReplaysSemantically(t *test
 		CommitSHA:     strings.Repeat("a", 40),
 		Applications: []repositoryanalysis.Application{{
 			SourceKey: "api", Key: "repo-api", Name: "api", Root: ".", Port: 8080,
+			Environment: map[string]string{"PORT": "8080"},
 			Build: repositoryanalysis.Build{Context: ".", Strategy: "dockerfile", DockerfilePath: "Dockerfile", Platform: "linux/amd64"},
 		}},
 	}
@@ -971,6 +972,7 @@ func TestResourceRecommendationEndpoint(t *testing.T) {
 		CommitSHA:     strings.Repeat("a", 40),
 		Applications: []repositoryanalysis.Application{{
 			SourceKey: "web", Key: "web", Name: "web", Root: ".", Port: 8080,
+			Environment: map[string]string{"PORT": "8080"},
 			Capacity: repositoryanalysis.Capacity{Replicas: 1, CPUMilli: 100, MemoryBytes: 128 << 20},
 			Build:    repositoryanalysis.Build{Context: ".", Strategy: "dockerfile", DockerfilePath: "Dockerfile", Platform: "linux/amd64"},
 		}},

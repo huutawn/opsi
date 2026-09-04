@@ -91,7 +91,7 @@ func (a *MemoryCredentialAuthority) GetWorkloadSecret(_ context.Context, project
 func (a *MemoryCredentialAuthority) UpsertWorkloadSecret(_ context.Context, spec resourcev1.WorkloadSecretUpsert) (resourcev1.WorkloadSecretMetadata, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if spec.CredentialID == "" || spec.ProjectID == "" || spec.ServiceID == "" || spec.LogicalName == "" || spec.IdempotencyKey == "" || spec.Value == "" || len(spec.Value) > 8192 || strings.ContainsAny(spec.Value, "\x00\r\n") {
+	if spec.CredentialID == "" || spec.ProjectID == "" || spec.ServiceID == "" || resourcev1.ValidateWorkloadSecretLogicalName(spec.LogicalName) != nil || spec.IdempotencyKey == "" || spec.Value == "" || len(spec.Value) > 8192 || strings.ContainsAny(spec.Value, "\x00\r\n") {
 		return resourcev1.WorkloadSecretMetadata{}, false, errors.New("workload secret upsert is invalid")
 	}
 	payload := sha256.Sum256([]byte(spec.ProjectID + "\x00" + spec.ServiceID + "\x00" + spec.LogicalName + "\x00" + spec.Value))
